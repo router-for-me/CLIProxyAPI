@@ -46,7 +46,7 @@ func TestResponsesToolsFullSearchLoop(t *testing.T) {
 
 	turn1 := "{\"model\": \"gpt-5.6-sol\", \"tools\": [{\"type\": \"tool_search\"}, {\"type\": \"namespace\", \"name\": \"fs\", \"tools\": [{\"type\": \"function\", \"name\": \"read\", \"defer_loading\": true, \"parameters\": {\"type\": \"object\"}}]}], \"input\": [{\"type\": \"message\", \"role\": \"user\", \"content\": \"read the file\"}]}"
 	req1 := loopTurn("gpt-5.6-sol", turn1)
-	exec.response = []byte("{\"output\": [{\"type\": \"function_call\", \"name\": \"tool_search\", \"call_id\": \"cs_1\", \"arguments\": \"{\\\"query\\\":\\\"read file\\\"}\"}]}")
+	exec.response = []byte("{\"output\": [{\"type\": \"function_call\", \"id\": \"fc_call_search_1\", \"name\": \"tool_search\", \"call_id\": \"cs_1\", \"arguments\": \"{\\\"query\\\":\\\"read file\\\"}\"}]}")
 	resp1, err := mgr.Execute(ctx, []string{"codex"}, req1.request, req1.opts)
 	if err != nil {
 		t.Fatalf("turn1: %v", err)
@@ -55,8 +55,18 @@ func TestResponsesToolsFullSearchLoop(t *testing.T) {
 	if !strings.Contains(string(resp1.Payload), "tool_search_call") {
 		t.Fatalf("turn1 not restored: %s", resp1.Payload)
 	}
+	// The client stores the restored item verbatim, so turn2 replays the id
+	// the proxy actually emitted rather than a hand-written one.
+	var decoded1 map[string]any
+	if err := json.Unmarshal(resp1.Payload, &decoded1); err != nil {
+		t.Fatalf("turn1 decode: %v", err)
+	}
+	restoredID, _ := decoded1["output"].([]any)[0].(map[string]any)["id"].(string)
+	if !strings.HasPrefix(restoredID, "tsc_") {
+		t.Fatalf("turn1 id = %q, want the tool_search_call namespace", restoredID)
+	}
 
-	turn2 := "{\"model\": \"gpt-5.6-sol\", \"tools\": [{\"type\": \"tool_search\"}], \"input\": [{\"type\": \"tool_search_call\", \"call_id\": \"cs_1\", \"arguments\": {\"query\": \"read file\"}}, {\"type\": \"tool_search_output\", \"call_id\": \"cs_1\", \"tools\": [{\"type\": \"function\", \"name\": \"read\", \"namespace\": \"fs\", \"parameters\": {\"type\": \"object\"}}]}]}"
+	turn2 := "{\"model\": \"gpt-5.6-sol\", \"tools\": [{\"type\": \"tool_search\"}], \"input\": [{\"type\": \"tool_search_call\", \"id\": \"" + restoredID + "\", \"call_id\": \"cs_1\", \"arguments\": {\"query\": \"read file\"}}, {\"type\": \"tool_search_output\", \"id\": \"tso_out_1\", \"call_id\": \"cs_1\", \"tools\": [{\"type\": \"function\", \"name\": \"read\", \"namespace\": \"fs\", \"parameters\": {\"type\": \"object\"}}]}]}"
 	req2 := loopTurn("gpt-5.6-sol", turn2)
 	exec.response = []byte("{\"output\": [{\"type\": \"function_call\", \"name\": \"fs__read\", \"call_id\": \"call_2\", \"arguments\": \" {}\"}]}")
 	resp2, err := mgr.Execute(ctx, []string{"codex"}, req2.request, req2.opts)

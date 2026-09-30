@@ -98,7 +98,7 @@ func TestPrepareBridgesCustomToolsDiscoveredByClientSearch(t *testing.T) {
 	}
 
 	restored, err := prepared.Attempt.RewriteResponse([]byte(fmt.Sprintf(
-		`{"output":[{"type":"function_call","name":%q,"call_id":"patch_1","arguments":"{\"input\":\"exact patch\"}"}]}`,
+		`{"output":[{"type":"function_call","id":"fc_fixture_discovered","name":%q,"call_id":"patch_1","arguments":"{\"input\":\"exact patch\"}"}]}`,
 		customAlias,
 	)))
 	if err != nil {
@@ -159,7 +159,7 @@ func TestPrepareBridgesNamespacedDiscoveredCustomOnce(t *testing.T) {
 		t.Fatalf("alias %q resolves to %v, %v", alias, identity, ok)
 	}
 	restored, err := prepared.Attempt.RewriteResponse([]byte(fmt.Sprintf(
-		`{"output":[{"type":"function_call","name":%q,"call_id":"patch_ns_1","arguments":"{\"input\":\"exact patch\"}"}]}`,
+		`{"output":[{"type":"function_call","id":"fc_fixture_namespaced","name":%q,"call_id":"patch_ns_1","arguments":"{\"input\":\"exact patch\"}"}]}`,
 		alias,
 	)))
 	if err != nil {
@@ -405,7 +405,7 @@ func TestAttemptRestoresOnlySyntheticSearchNulls(t *testing.T) {
 		t.Fatalf("prepare: %v", err)
 	}
 	defer prepared.Attempt.Close()
-	response, err := prepared.Attempt.RewriteResponse([]byte(`{"output":[{"type":"function_call","name":"tool_search","call_id":"search_1","arguments":"{\"query\":\"x\",\"limit\":null,\"cursor\":null}"}]}`))
+	response, err := prepared.Attempt.RewriteResponse([]byte(`{"output":[{"type":"function_call","id":"fc_fixture_nulls","name":"tool_search","call_id":"search_1","arguments":"{\"query\":\"x\",\"limit\":null,\"cursor\":null}"}]}`))
 	if err != nil {
 		t.Fatalf("rewrite response: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestAttemptRestoresNestedSyntheticSearchNulls(t *testing.T) {
 	}
 	defer prepared.Attempt.Close()
 
-	response, err := prepared.Attempt.RewriteResponse([]byte(`{"output":[{"type":"function_call","name":"tool_search","call_id":"search_1","arguments":"{\"filter\":{\"limit\":null}}"}]}`))
+	response, err := prepared.Attempt.RewriteResponse([]byte(`{"output":[{"type":"function_call","id":"fc_fixture_nested","name":"tool_search","call_id":"search_1","arguments":"{\"filter\":{\"limit\":null}}"}]}`))
 	if err != nil {
 		t.Fatalf("rewrite response: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestAttemptDoesNotRestoreSyntheticNullWithoutSchemaCompletion(t *testing.T)
 	}
 	defer prepared.Attempt.Close()
 
-	response, err := prepared.Attempt.RewriteResponse([]byte(`{"output":[{"type":"function_call","name":"tool_search","call_id":"search_1","arguments":"{\"limit\":null}"}]}`))
+	response, err := prepared.Attempt.RewriteResponse([]byte(`{"output":[{"type":"function_call","id":"fc_fixture_no_completion","name":"tool_search","call_id":"search_1","arguments":"{\"limit\":null}"}]}`))
 	if err != nil {
 		t.Fatalf("rewrite response: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestAttemptPreservesNullAcceptedByUnconstrainedSchema(t *testing.T) {
 	}
 	defer prepared.Attempt.Close()
 
-	response, err := prepared.Attempt.RewriteResponse([]byte(`{"output":[{"type":"function_call","name":"tool_search","call_id":"search_1","arguments":"{\"opaque\":null}"}]}`))
+	response, err := prepared.Attempt.RewriteResponse([]byte(`{"output":[{"type":"function_call","id":"fc_fixture_opaque","name":"tool_search","call_id":"search_1","arguments":"{\"opaque\":null}"}]}`))
 	if err != nil {
 		t.Fatalf("rewrite response: %v", err)
 	}

@@ -37,6 +37,14 @@ type Prepared struct {
 // network or tool execution. Unchanged requests return the original slice
 // with no state.
 func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (Prepared, error) {
+	// Replayed tool items are repaired before anything else looks at the
+	// request. The migration is pure id bookkeeping, so it must not depend on
+	// whether this route builds an attempt, and it must not re-encode the body.
+	repaired, _, root, err := repairInputItemIDs(body)
+	if err != nil {
+		return Prepared{}, err
+	}
+	body = repaired
 	contract := ParseContract(body)
 	customDeclarations := hasCustomDeclarations(body)
 	customHistory := hasCustomHistory(body)
@@ -59,13 +67,15 @@ func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (
 		return Prepared{}, unprocessableError(ReasonUnsupportedProtocol, fmt.Errorf("custom tools are rejected for this route"))
 	}
 
-	value, ok := decodeValue(body)
-	if !ok {
-		return Prepared{}, syntaxError(fmt.Errorf("request body is not valid JSON"))
-	}
-	root, ok := value.(map[string]any)
-	if !ok {
-		return Prepared{Body: body}, nil
+	if root == nil {
+		value, ok := decodeValue(body)
+		if !ok {
+			return Prepared{}, syntaxError(fmt.Errorf("request body is not valid JSON"))
+		}
+		root, ok = value.(map[string]any)
+		if !ok {
+			return Prepared{Body: body}, nil
+		}
 	}
 	if needsCustomHistory {
 		if err := validateCustomHistory(root); err != nil {
@@ -88,6 +98,11 @@ func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (
 	if !needsSearch && !needsCustom && !needsSchema {
 		return Prepared{Body: body}, nil
 	}
+
+	// The adapters below change item types, and a type change moves an id.
+	// The identities the client actually sent are captured first, so the
+	// final body can be checked against the owners it must still describe.
+	originalOwners, originalInputLength := snapshotInputItemOwners(root)
 
 	lease, err := limiter.Acquire(ContractSize(contract))
 	if err != nil {
@@ -205,6 +220,9 @@ func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (
 		attempt.Close()
 		return Prepared{Body: body}, nil
 	}
+	if err := checkAdaptedInputItemIDs(originalOwners, originalInputLength, root); err != nil {
+		return Prepared{}, err
+	}
 	activeBytes, err := ActiveToolArraysBytes(root)
 	if err != nil {
 		return Prepared{}, upstreamError(ReasonUpstreamContract, err)
@@ -241,6 +259,69 @@ func hasOpaqueResponseHistory(root map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// snapshotInputItemOwners records the identity every input item had before the
+// adapters ran, together with the item count the adapters must preserve. The
+// snapshot is local to this pure computation: nothing about it outlives the
+// request, and a retry rebuilds it from the client contract.
+func snapshotInputItemOwners(root map[string]any) (map[int]ItemIDOwner, int) {
+	input, _ := root["input"].([]any)
+	owners := make(map[int]ItemIDOwner, len(input))
+	for index, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, isText := item["id"].(string)
+		if !isText || id == "" {
+			continue
+		}
+		owners[index] = ItemIDOwner{
+			WireID:   id,
+			WireType: strings.TrimSpace(stringField(item, "type")),
+			CallID:   strings.TrimSpace(stringField(item, "call_id")),
+		}
+	}
+	return owners, len(input)
+}
+
+// checkAdaptedInputItemIDs refuses a rewritten body in which two items would
+// reach the upstream under one id. The registry is the last correctness gate:
+// an id migration can move two different items onto the same target, and a low
+// digest collision probability is not a guarantee.
+func checkAdaptedInputItemIDs(owners map[int]ItemIDOwner, originalLength int, root map[string]any) error {
+	input, _ := root["input"].([]any)
+	if len(input) != originalLength {
+		// Owners are addressed by input index, so a reordering would silently
+		// reattach each identity to the wrong item.
+		return unprocessableError(ReasonAmbiguousIdentity,
+			fmt.Errorf("adaptation changed the number of input items"))
+	}
+	var registry ItemIDRegistry
+	for index, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, isText := item["id"].(string)
+		if !isText || id == "" {
+			continue
+		}
+		owner, known := owners[index]
+		if !known {
+			owner = ItemIDOwner{
+				WireID:   id,
+				WireType: strings.TrimSpace(stringField(item, "type")),
+				CallID:   strings.TrimSpace(stringField(item, "call_id")),
+			}
+		}
+		if err := registry.Register(id, owner); err != nil {
+			return unprocessableError(ReasonAmbiguousIdentity,
+				fmt.Errorf("input item %d would share one item id with another item", index))
+		}
+	}
+	return nil
 }
 
 // RewriteResponse restores client tool semantics in one non-streaming

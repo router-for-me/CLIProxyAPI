@@ -258,13 +258,17 @@ func TestAttemptResponseRestore(t *testing.T) {
 		t.Fatalf("prepare: %v", err)
 	}
 	defer prepared.Attempt.Close()
-	resp := "{\"output\": [{\"type\": \"function_call\", \"name\": \"tool_search\", \"call_id\": \"c1\", \"arguments\": " + "{\"query\":\"x\"}" + "}]}"
+	resp := "{\"output\": [{\"type\": \"function_call\", \"id\": \"" + poisonedSearchCallID +
+		"\", \"name\": \"tool_search\", \"call_id\": \"c1\", \"arguments\": " + "{\"query\":\"x\"}" + "}]}"
 	restored, err := prepared.Attempt.RewriteResponse([]byte(resp))
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	if !strings.Contains(string(restored), "tool_search_call") {
 		t.Fatalf("search call not restored: %s", restored)
+	}
+	if !strings.Contains(string(restored), repairedSearchCallID) {
+		t.Fatalf("search call id not migrated: %s", restored)
 	}
 }
 

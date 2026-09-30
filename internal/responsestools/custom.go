@@ -536,14 +536,18 @@ func rewriteCustomHistoryItem(item map[string]any, bridge *CustomBridge) (bool, 
 		if err != nil {
 			return false, unprocessableError(ReasonInvalidCustomInput, err)
 		}
-		item["type"] = "function_call"
+		if _, err := ReidentifyItem(item, "function_call"); err != nil {
+			return false, unprocessableError(ReasonHistoryLink, err)
+		}
 		item["name"] = alias
 		item["arguments"] = string(arguments)
 		delete(item, "input")
 		delete(item, "namespace")
 		return true, nil
 	case "custom_tool_call_output":
-		item["type"] = "function_call_output"
+		if _, err := ReidentifyItem(item, "function_call_output"); err != nil {
+			return false, unprocessableError(ReasonHistoryLink, err)
+		}
 		return true, nil
 	default:
 		return false, nil
@@ -617,22 +621,42 @@ func UnpackCustomArguments(arguments string) (string, error) {
 // RestoreCustomResponseItem converts one upstream function item back to its
 // custom identity when the alias belongs to this bridge.
 func (b *CustomBridge) RestoreCustomResponseItem(item map[string]any) bool {
+	changed, _ := b.RestoreCustomResponseItemChecked(item)
+	return changed
+}
+
+// RestoreCustomResponseItemChecked is the production form: it propagates a
+// malformed custom payload or an unmigratable id instead of leaving the caller
+// with a half-rewritten item. On error nothing on the item has changed.
+func (b *CustomBridge) RestoreCustomResponseItemChecked(item map[string]any) (bool, error) {
 	if b == nil || stringField(item, "type") != "function_call" {
-		return false
+		return false, nil
 	}
 	identity, ok := b.ResolveWireAlias(stringField(item, "name"))
 	if !ok || identity.Kind != ToolKindCustom {
-		return false
+		return false, nil
 	}
+	return b.restoreCustomResponseItemChecked(item, identity)
+}
+
+// restoreCustomResponseItemChecked performs the conversion for an alias this
+// bridge already resolved. Every failure is an upstream contract violation: the
+// upstream answered a bridged alias with a payload the client cannot execute.
+func (b *CustomBridge) restoreCustomResponseItemChecked(item map[string]any, identity ToolIdentity) (bool, error) {
 	arguments, okArgs := item["arguments"].(string)
 	if !okArgs {
-		return false
+		return false, upstreamError(ReasonUpstreamContract, fmt.Errorf("custom function_call arguments are not a string"))
 	}
 	input, err := UnpackCustomArguments(arguments)
 	if err != nil {
-		return false
+		return false, upstreamError(ReasonUpstreamContract, fmt.Errorf("invalid custom function_call arguments: %w", err))
 	}
-	item["type"] = "custom_tool_call"
+	if err := requireBridgedItemID(item); err != nil {
+		return false, err
+	}
+	if _, err := ReidentifyItem(item, "custom_tool_call"); err != nil {
+		return false, upstreamError(ReasonUpstreamContract, err)
+	}
 	item["name"] = identity.Name
 	if identity.Namespace != "" {
 		item["namespace"] = identity.Namespace
@@ -641,7 +665,7 @@ func (b *CustomBridge) RestoreCustomResponseItem(item map[string]any) bool {
 	}
 	item["input"] = input
 	delete(item, "arguments")
-	return true
+	return true, nil
 }
 
 func jsonMarshal(value any) ([]byte, error) {

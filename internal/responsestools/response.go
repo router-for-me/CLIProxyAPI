@@ -48,6 +48,7 @@ func rewriteResponseLocation(value any, contract *ToolContract, bridge *CustomBr
 }
 
 func rewriteResponseItems(items []any, contract *ToolContract, bridge *CustomBridge) (bool, error) {
+	owners := snapshotResponseItemOwners(items)
 	changed := false
 	for _, rawItem := range items {
 		if item, ok := rawItem.(map[string]any); ok {
@@ -60,7 +61,66 @@ func rewriteResponseItems(items []any, contract *ToolContract, bridge *CustomBri
 			}
 		}
 	}
+	if changed {
+		if err := checkRewrittenResponseItemIDs(items, owners); err != nil {
+			return changed, err
+		}
+	}
 	return changed, nil
+}
+
+// snapshotResponseItemOwners records what every output item was before the
+// rewrite, so the converted ids can be checked against the items they still
+// have to describe.
+func snapshotResponseItemOwners(items []any) map[int]ItemIDOwner {
+	owners := make(map[int]ItemIDOwner, len(items))
+	for index, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, isText := item["id"].(string)
+		if !isText || id == "" {
+			continue
+		}
+		owners[index] = ItemIDOwner{
+			WireID:   id,
+			WireType: strings.TrimSpace(stringField(item, "type")),
+			CallID:   strings.TrimSpace(stringField(item, "call_id")),
+		}
+	}
+	return owners
+}
+
+// checkRewrittenResponseItemIDs refuses a rewritten output in which two items
+// would reach the client under one id. Items the rewrite left alone are
+// registered too, so a migrated id cannot land on an id the client already
+// knows.
+func checkRewrittenResponseItemIDs(items []any, owners map[int]ItemIDOwner) error {
+	var registry ItemIDRegistry
+	for index, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, isText := item["id"].(string)
+		if !isText || id == "" {
+			continue
+		}
+		owner, known := owners[index]
+		if !known {
+			owner = ItemIDOwner{
+				WireID:   id,
+				WireType: strings.TrimSpace(stringField(item, "type")),
+				CallID:   strings.TrimSpace(stringField(item, "call_id")),
+			}
+		}
+		if err := registry.Register(id, owner); err != nil {
+			return upstreamError(ReasonUpstreamContract, fmt.Errorf(
+				"response output item %d would share one client item id with another item", index))
+		}
+	}
+	return nil
 }
 
 func rewriteResponseItem(item map[string]any, contract *ToolContract, bridge *CustomBridge) bool {
@@ -70,7 +130,9 @@ func rewriteResponseItem(item map[string]any, contract *ToolContract, bridge *Cu
 
 func rewriteResponseItemChecked(item map[string]any, contract *ToolContract, bridge *CustomBridge) (bool, error) {
 	if isOrdinaryToolSearchCall(item, contract) {
-		rewriteToolSearchItem(item)
+		if err := rewriteToolSearchItemChecked(item); err != nil {
+			return false, err
+		}
 		restoreSyntheticSearchNulls(item, contract)
 		return true, nil
 	}
@@ -80,27 +142,10 @@ func rewriteResponseItemChecked(item map[string]any, contract *ToolContract, bri
 	if bridge != nil && stringField(item, "type") == "function_call" {
 		identity, isCustomAlias := bridge.ResolveWireAlias(stringField(item, "name"))
 		if isCustomAlias && identity.Kind == ToolKindCustom {
-			arguments, ok := item["arguments"].(string)
-			if !ok {
-				return false, upstreamError(ReasonUpstreamContract, fmt.Errorf("custom function_call arguments are not a string"))
-			}
-			input, err := UnpackCustomArguments(arguments)
-			if err != nil {
-				return false, upstreamError(ReasonUpstreamContract, fmt.Errorf("invalid custom function_call arguments: %w", err))
-			}
-			item["type"] = "custom_tool_call"
-			item["name"] = identity.Name
-			if identity.Namespace != "" {
-				item["namespace"] = identity.Namespace
-			} else {
-				delete(item, "namespace")
-			}
-			item["input"] = input
-			delete(item, "arguments")
-			return true, nil
+			return bridge.restoreCustomResponseItemChecked(item, identity)
 		}
 	}
-	return restoreFunctionCallIdentity(item, contract), nil
+	return RestoreFunctionCallIdentityChecked(item, contract)
 }
 
 func restoreSyntheticSearchNulls(item map[string]any, contract *ToolContract) bool {
@@ -176,8 +221,17 @@ func isOrdinaryToolSearchCall(item map[string]any, contract *ToolContract) bool 
 	return ok && name == expected
 }
 
-func rewriteToolSearchItem(item map[string]any) {
-	item["type"] = "tool_search_call"
+// rewriteToolSearchItemChecked turns one bridged function call back into the
+// client search item. The upstream minted the id in the function_call
+// namespace and the client stores it as given, so it has to leave in the
+// namespace the new type requires.
+func rewriteToolSearchItemChecked(item map[string]any) error {
+	if err := requireBridgedItemID(item); err != nil {
+		return err
+	}
+	if _, err := ReidentifyItem(item, "tool_search_call"); err != nil {
+		return upstreamError(ReasonUpstreamContract, err)
+	}
 	item["execution"] = "client"
 	delete(item, "name")
 	delete(item, "namespace")
@@ -187,51 +241,73 @@ func rewriteToolSearchItem(item map[string]any) {
 		trimmed := bytes.TrimSpace([]byte(arguments))
 		if len(trimmed) == 0 {
 			item["arguments"] = map[string]any{}
-			return
+			return nil
 		}
 		var decoded any
 		if err := json.Unmarshal(trimmed, &decoded); err != nil {
-			return
+			return nil
 		}
 		item["arguments"] = decoded
 	case nil:
 		item["arguments"] = map[string]any{}
 	}
+	return nil
+}
+
+// requireBridgedItemID rejects a bridged response item that carries no usable
+// id. The proxy cannot mint a replacement: any id it invented would be a new
+// identity the client stores and replays on the next turn.
+func requireBridgedItemID(item map[string]any) error {
+	rawID, exists := item["id"]
+	if !exists {
+		return upstreamError(ReasonUpstreamContract, fmt.Errorf("bridged output item has no id"))
+	}
+	if id, isText := rawID.(string); !isText || strings.TrimSpace(id) == "" {
+		return upstreamError(ReasonUpstreamContract, fmt.Errorf("bridged output item has an empty id"))
+	}
+	return nil
 }
 
 // RestoreFunctionCallIdentity maps one upstream function call back to its
-// canonical namespaced identity. Eager tools, unknown calls, and ambiguous
-// names are left untouched: only explicitly deferred or discovered identities
-// restore.
-func restoreFunctionCallIdentity(item map[string]any, contract *ToolContract) bool {
-	return RestoreFunctionCallIdentity(item, contract)
+// canonical namespaced identity where a failure and a no-op are equivalent.
+// Production paths use the checked form so an unbridgeable kind change fails
+// instead of silently disappearing.
+func RestoreFunctionCallIdentity(item map[string]any, contract *ToolContract) bool {
+	changed, _ := RestoreFunctionCallIdentityChecked(item, contract)
+	return changed
 }
 
-// RestoreFunctionCallIdentity is the exported form used by the attempt and
-// stream paths.
-func RestoreFunctionCallIdentity(item map[string]any, contract *ToolContract) bool {
+// RestoreFunctionCallIdentityChecked restores the name and namespace of one
+// upstream function call. It deliberately does not change the item type: a
+// name that resolves to a custom identity has no bridge to justify turning a
+// function call into a custom call, and silently doing so would hand the
+// client a protocol the upstream never produced.
+func RestoreFunctionCallIdentityChecked(item map[string]any, contract *ToolContract) (bool, error) {
 	itemType := stringField(item, "type")
 	if (itemType != "function_call" && itemType != "custom_tool_call") || contract == nil {
-		return false
+		return false, nil
 	}
 	if strings.TrimSpace(stringField(item, "namespace")) != "" {
-		return false
+		return false, nil
 	}
 	name := strings.TrimSpace(stringField(item, "name"))
 	identity, ok := contract.Resolve(name)
 	if !ok {
-		return false
+		return false, nil
+	}
+	wantType := "function_call"
+	if identity.Kind == ToolKindCustom {
+		wantType = "custom_tool_call"
+	}
+	if wantType != itemType {
+		return false, upstreamError(ReasonUpstreamContract,
+			fmt.Errorf("output item resolved to %q without an explicit custom bridge", wantType))
 	}
 	item["name"] = identity.Name
 	if identity.Namespace != "" {
 		item["namespace"] = identity.Namespace
 	}
-	if identity.Kind == ToolKindCustom {
-		item["type"] = "custom_tool_call"
-	} else {
-		item["type"] = "function_call"
-	}
-	return true
+	return true, nil
 }
 
 // ValidateToolSearchCall asserts the client-visible shape of a restored

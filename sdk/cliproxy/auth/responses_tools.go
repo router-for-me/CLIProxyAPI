@@ -154,7 +154,10 @@ func (m *Manager) prepareResponsesToolsAttempt(route responsestools.Route, paylo
 		return outPayload, nil, nil, errPrepare
 	}
 	if prepared.Attempt == nil {
-		return outPayload, nil, nil, nil
+		// The pass-through path can still carry a repaired payload: item ids
+		// replayed from an earlier bridged turn are normalized without
+		// engaging the bridge.
+		return prepared.Body, nil, nil, nil
 	}
 	guard := &WireContract{
 		ActiveToolBytes:    responsestools.ActiveToolArraysBytesOf(prepared.Body),

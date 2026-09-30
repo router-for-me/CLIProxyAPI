@@ -201,6 +201,73 @@ affected, and the convention policy stops applying on the next request. When
 changing route rules, wait for active requests to drain so no request changes
 protocol semantics mid-flight.
 
+## Item identity and history repair
+
+A Responses item id carries the namespace of the item type that minted it.
+The bridge changes item types, so it changes ids with them: a client stores an
+output item exactly as the proxy emitted it and replays it verbatim on the next
+turn, where a strict upstream rejects an id from the wrong namespace.
+
+| Item type | Id prefix |
+|---|---|
+| `function_call` | `fc_` |
+| `function_call_output` | `fco_` |
+| `custom_tool_call` | `ctc_` |
+| `custom_tool_call_output` | `ctco_` |
+| `tool_search_call` | `tsc_` |
+| `tool_search_output` | `tso_` |
+
+Only these six types participate. `message`, `reasoning`, and every other item
+keep the identity the upstream gave them. An explicit type conversion is
+allowed in one direction only, and each pair is reversible:
+
+- `function_call` ↔ `custom_tool_call`
+- `function_call` ↔ `tool_search_call`
+- `function_call_output` ↔ `custom_tool_call_output`
+- `function_call_output` ↔ `tool_search_output`
+
+Before a request is adapted, a replayed `input[]` item whose type and id
+prefix form one of those pairs is migrated in place. The repair changes the id
+value only: the request is not re-encoded, and no other byte moves. It runs
+before the route policy is consulted, so a full polluted history is recovered
+on a native route without declaring a tool and without building an attempt.
+
+What the repair deliberately does not do:
+
+- It does not guess. Server-executed search, an id in no known namespace, a
+  missing or non-string id, and every non-tool item are left alone.
+- It does not invent a request id. An input item may omit its optional id.
+- It does not resolve opaque history. When a repair is needed and the request
+  carries `previous_response_id`, `previous_item_id`, or an `item_reference`,
+  the request is refused with 422 `opaque_history`; the parent link is never
+  dropped to make the repair pass. Opaque history that needs no repair is not
+  affected.
+- It does not reuse an id. When a migration would give two items the same
+  client-visible id, the request is refused with 422 `ambiguous_identity`
+  rather than renamed or resolved by arrival order.
+
+On the response side the same conversion runs in the other direction. A
+bridged item that arrives without a usable id is an upstream contract violation
+and fails with 502 `upstream_contract`: any id the proxy minted would be a new
+identity the client would store and replay. Restoring a tool name never changes
+the item type, because a name that resolves to a custom tool is not evidence
+that the upstream produced a custom call.
+
+In a stream, the client-visible type and id are computed once, when the item is
+first tracked, and every later reference reuses them: the `added` item, the
+argument delta and done events, `output_item.done`, and the terminal
+`response.completed` output all name the same id. The upstream id stays the
+tracking key, so the existing `call_id` and `output_index` consistency checks
+keep comparing what the upstream actually sent.
+
+Native WebSocket duplex connections repair every successor `response.create`,
+`response.append`, and `response.steer` frame, not only the first request: those
+frames never pass through the Manager. A frame that cannot be repaired is
+answered with a local error frame carrying the same status and reason code and
+is not forwarded, and it never becomes pending or steering state. Once the
+connection is established, that status lives inside the error frame; no HTTP
+status is rewritten.
+
 ## Budgets
 
 | Setting | Meaning |

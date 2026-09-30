@@ -18,7 +18,10 @@ func RewriteRequest(value any, policy RoutePolicy, contract *ToolContract, limit
 			return false, err
 		}
 	}
-	changed := rewriteRequestValue(value, contract)
+	changed, err := rewriteRequestValue(value, contract)
+	if err != nil {
+		return false, err
+	}
 	if root, ok := value.(map[string]any); ok && contract != nil && contract.ClientSearch {
 		policyChanged, err := applyDeferredToolPolicy(root, contract, limits)
 		if err != nil {
@@ -89,7 +92,7 @@ func validateClientSearchRequest(root map[string]any, contract *ToolContract) er
 	return nil
 }
 
-func rewriteRequestValue(value any, contract *ToolContract) bool {
+func rewriteRequestValue(value any, contract *ToolContract) (bool, error) {
 	switch typed := value.(type) {
 	case map[string]any:
 		changed := rewriteToolList(typed["tools"], contract)
@@ -108,11 +111,19 @@ func rewriteRequestValue(value any, contract *ToolContract) bool {
 						changed = true
 					}
 				case "tool_search_call":
-					if rewriteToolSearchCallForRequest(item, contract) {
+					itemChanged, err := rewriteToolSearchCallForRequest(item, contract)
+					if err != nil {
+						return false, err
+					}
+					if itemChanged {
 						changed = true
 					}
 				case "tool_search_output":
-					if rewriteToolSearchOutputForRequest(item, contract) {
+					itemChanged, err := rewriteToolSearchOutputForRequest(item, contract)
+					if err != nil {
+						return false, err
+					}
+					if itemChanged {
 						changed = true
 					}
 				case "function_call", "custom_tool_call":
@@ -122,17 +133,21 @@ func rewriteRequestValue(value any, contract *ToolContract) bool {
 				}
 			}
 		}
-		return changed
+		return changed, nil
 	case []any:
 		changed := false
 		for _, child := range typed {
-			if rewriteRequestValue(child, contract) {
+			childChanged, err := rewriteRequestValue(child, contract)
+			if err != nil {
+				return false, err
+			}
+			if childChanged {
 				changed = true
 			}
 		}
-		return changed
+		return changed, nil
 	default:
-		return false
+		return false, nil
 	}
 }
 
@@ -244,39 +259,49 @@ func rewriteToolSearchDeclaration(tool map[string]any, contract *ToolContract) b
 	return true
 }
 
-func rewriteToolSearchCallForRequest(item map[string]any, contract *ToolContract) bool {
+// rewriteToolSearchCallForRequest turns one replayed client search call back
+// into the ordinary function item the bridged upstream expects. The type change
+// and the id namespace move together, so the call keeps replaying as one
+// identity instead of a function call carrying a search id.
+func rewriteToolSearchCallForRequest(item map[string]any, contract *ToolContract) (bool, error) {
 	if IsServerExecutedItem(item) || stringField(item, "call_id") == "" {
-		return false
+		return false, nil
 	}
 	arguments, ok := JSONArgumentsString(item["arguments"])
 	if !ok {
-		return false
+		return false, nil
 	}
-	item["type"] = "function_call"
+	if _, err := ReidentifyItem(item, "function_call"); err != nil {
+		return false, unprocessableError(ReasonHistoryLink, err)
+	}
 	item["name"] = ToolSearchName
 	if contract != nil && contract.SearchAlias != "" {
 		item["name"] = contract.SearchAlias
 	}
 	item["arguments"] = arguments
 	delete(item, "execution")
-	return true
+	return true, nil
 }
 
-func rewriteToolSearchOutputForRequest(item map[string]any, contract *ToolContract) bool {
+// rewriteToolSearchOutputForRequest converts the matching discovery result into
+// the function output the upstream reads, moving its id with its type.
+func rewriteToolSearchOutputForRequest(item map[string]any, contract *ToolContract) (bool, error) {
 	if IsServerExecutedItem(item) || stringField(item, "call_id") == "" {
-		return false
+		return false, nil
 	}
 	manifest := CompactToolSearchManifest(item["tools"], contract)
 	encoded, err := json.Marshal(map[string]any{"tools": manifest})
 	if err != nil {
-		return false
+		return false, nil
 	}
-	item["type"] = "function_call_output"
+	if _, err := ReidentifyItem(item, "function_call_output"); err != nil {
+		return false, unprocessableError(ReasonHistoryLink, err)
+	}
 	item["output"] = string(encoded)
 	delete(item, "execution")
 	delete(item, "status")
 	delete(item, "tools")
-	return true
+	return true, nil
 }
 
 // rewriteActivatedToolCallForRequest aligns replayed tool history with the

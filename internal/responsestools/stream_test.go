@@ -136,6 +136,237 @@ func TestStreamSearchNoFabricatedDelta(t *testing.T) {
 	}
 }
 
+// Two bridged items are interleaved on purpose: with a single item a stream
+// that derived the client identity from the already rewritten type would still
+// look consistent.
+func TestStreamBridgedIDsAcrossInterleavedEvents(t *testing.T) {
+	feed := streamTestFeed(t)
+	alias, _ := feed.bridge.Alias(ToolIdentity{Namespace: "", Name: "apply_patch", Kind: ToolKindCustom})
+	events := []map[string]any{
+		{"type": eventOutputItemAdded, "output_index": 0, "item": map[string]any{
+			"type": "function_call", "id": "fc_s", "name": ToolSearchName, "call_id": "call_s", "output_index": 0}},
+		{"type": eventOutputItemAdded, "output_index": 1, "item": map[string]any{
+			"type": "function_call", "id": "fc_c", "name": alias, "call_id": "call_c", "output_index": 1}},
+		{"type": eventFunctionCallArgsDelta, "item_id": "fc_s", "call_id": "call_s", "output_index": 0, "delta": `{"query":`},
+		{"type": eventFunctionCallArgsDelta, "item_id": "fc_c", "call_id": "call_c", "output_index": 1, "delta": `{"input":"hel`},
+		{"type": eventFunctionCallArgsDelta, "item_id": "fc_c", "call_id": "call_c", "output_index": 1, "delta": `lo"}`},
+		{"type": eventFunctionCallArgsDelta, "item_id": "fc_s", "call_id": "call_s", "output_index": 0, "delta": `"x"}`},
+		{"type": eventFunctionCallArgsDone, "item_id": "fc_c", "call_id": "call_c", "output_index": 1, "arguments": `{"input":"hello"}`},
+		{"type": eventFunctionCallArgsDone, "item_id": "fc_s", "call_id": "call_s", "output_index": 0, "arguments": `{"query":"x"}`},
+		{"type": eventOutputItemDone, "output_index": 1, "item": map[string]any{
+			"type": "function_call", "id": "fc_c", "name": alias, "call_id": "call_c", "output_index": 1, "arguments": `{"input":"hello"}`}},
+		{"type": eventOutputItemDone, "output_index": 0, "item": map[string]any{
+			"type": "function_call", "id": "fc_s", "name": ToolSearchName, "call_id": "call_s", "output_index": 0, "arguments": `{"query":"x"}`}},
+		{"type": eventResponseCompleted, "response": map[string]any{
+			"id": "resp_1",
+			"output": []any{
+				map[string]any{"type": "function_call", "id": "fc_s", "name": ToolSearchName,
+					"call_id": "call_s", "output_index": 0, "arguments": `{"query":"x"}`},
+				map[string]any{"type": "function_call", "id": "fc_c", "name": alias,
+					"call_id": "call_c", "output_index": 1, "arguments": `{"input":"hello"}`},
+			},
+		}},
+	}
+	want := map[string]streamIdentity{
+		"tsc_s": {callID: "call_s", outputIndex: 0},
+		"ctc_c": {callID: "call_c", outputIndex: 1},
+	}
+	seen := map[string]int{}
+	sequences := make([]float64, 0, 8)
+	for _, event := range events {
+		emitted, err := feed.Feed(frameJSON(t, event))
+		if err != nil {
+			t.Fatalf("feed %v: %v", event["type"], err)
+		}
+		for _, frame := range emitted {
+			payload := decodeStreamPayload(t, frame)
+			if number, ok := payload["sequence_number"]; ok {
+				sequences = append(sequences, number.(float64))
+			}
+			collectStreamItemIdentities(t, payload, want, seen)
+		}
+	}
+	if _, err := feed.Finish(); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	// The search item has no delta events of its own, so it is named three
+	// times; the custom item is named by the added frame, its input delta and
+	// done events, the terminal item, and the completed output.
+	for clientID, minimum := range map[string]int{"tsc_s": 3, "ctc_c": 5} {
+		if seen[clientID] < minimum {
+			t.Fatalf("%s was referenced %d times, want at least %d: added, delta, done and completed must all agree",
+				clientID, seen[clientID], minimum)
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("expected exactly the two client identities, saw %v", seen)
+	}
+	for index := 1; index < len(sequences); index++ {
+		if sequences[index] <= sequences[index-1] {
+			t.Fatalf("sequence numbers are not increasing: %v", sequences)
+		}
+	}
+	// The upstream ids stay the tracking keys, so the consistency checks keep
+	// comparing what the upstream actually sent.
+	if got := feed.SortedCallIDs(); len(got) != 2 || got[0] != "fc_c" || got[1] != "fc_s" {
+		t.Fatalf("wire tracking keys = %v", got)
+	}
+}
+
+type streamIdentity struct {
+	callID      string
+	outputIndex int
+}
+
+func decodeStreamPayload(t *testing.T, frame []byte) map[string]any {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(frame, &payload); err != nil {
+		t.Fatalf("emitted frame is not valid JSON: %s", frame)
+	}
+	return payload
+}
+
+// collectStreamItemIdentities records every client-visible reference to a
+// tracked item in a frame, so the test asserts the whole frame rather than one
+// field.
+func collectStreamItemIdentities(t *testing.T, payload map[string]any, want map[string]streamIdentity, seen map[string]int) {
+	t.Helper()
+	check := func(id any, callID any, outputIndex any) {
+		clientID, isText := id.(string)
+		if !isText {
+			return
+		}
+		expected, tracked := want[clientID]
+		if !tracked {
+			t.Fatalf("frame references unknown client id %q: %v", clientID, payload)
+		}
+		seen[clientID]++
+		if callID != nil && callID != expected.callID {
+			t.Fatalf("%s carried call_id %v, want %q", clientID, callID, expected.callID)
+		}
+		if outputIndex != nil {
+			index, isNumber := outputIndex.(float64)
+			if !isNumber || int(index) != expected.outputIndex {
+				t.Fatalf("%s carried output_index %v, want %d", clientID, outputIndex, expected.outputIndex)
+			}
+		}
+	}
+	if item, ok := payload["item"].(map[string]any); ok {
+		check(item["id"], item["call_id"], item["output_index"])
+	}
+	check(payload["item_id"], payload["call_id"], payload["output_index"])
+	if response, ok := payload["response"].(map[string]any); ok {
+		if output, isList := response["output"].([]any); isList {
+			for _, rawItem := range output {
+				if item, isItem := rawItem.(map[string]any); isItem {
+					check(item["id"], item["call_id"], item["output_index"])
+				}
+			}
+		}
+	}
+}
+
+// Two different upstream items must not reach the client under one id.
+func TestStreamRejectsClientIDCollision(t *testing.T) {
+	feed := streamTestFeed(t)
+	if _, err := feed.Feed(frameJSON(t, map[string]any{
+		"type": eventOutputItemAdded, "output_index": 0,
+		"item": map[string]any{"type": "function_call", "id": "fc_x", "name": ToolSearchName,
+			"call_id": "call_1", "output_index": 0},
+	})); err != nil {
+		t.Fatalf("first item: %v", err)
+	}
+	emitted, err := feed.Feed(frameJSON(t, map[string]any{
+		"type": eventOutputItemAdded, "output_index": 1,
+		"item": map[string]any{"type": "function_call", "id": "tsc_x", "name": ToolSearchName,
+			"call_id": "call_2", "output_index": 1},
+	}))
+	assertUpstreamContractError(t, err)
+	if len(emitted) != 0 {
+		t.Fatalf("a colliding item must not be announced: %s", emitted)
+	}
+	if len(feed.calls) != 1 {
+		t.Fatalf("the rejected item was tracked anyway: %d", len(feed.calls))
+	}
+}
+
+// A terminal response can complete an item the stream never announced. The
+// 补齐 path must reuse the same mapping rather than derive a second one.
+func TestStreamCompletedOnlyUsesSameIDMapping(t *testing.T) {
+	feed := streamTestFeed(t)
+	emitted, err := feed.Feed(frameJSON(t, map[string]any{
+		"type": eventResponseCompleted,
+		"response": map[string]any{
+			"id":   "resp_1",
+			"type": "response",
+			"output": []any{
+				map[string]any{"type": "function_call", "id": "fc_s", "name": ToolSearchName,
+					"call_id": "call_s", "arguments": `{"query":"x"}`},
+			},
+		},
+	}))
+	// The item was never tracked, so the terminal array is restored as an ordinary
+	// passthrough instead of inventing a client identity for it.
+	if err != nil {
+		t.Fatalf("completed without a tracked item: %v", err)
+	}
+	if len(emitted) == 0 {
+		t.Fatalf("expected the completed frame to be emitted")
+	}
+	if !strings.Contains(string(emitted[len(emitted)-1]), `"id":"tsc_s"`) {
+		t.Fatalf("terminal search item was not migrated: %s", emitted[len(emitted)-1])
+	}
+}
+
+// The client identity is retained state, so it is charged to the lease before
+// the frame that announces it is emitted.
+func TestStreamClientIDStateRespectsLease(t *testing.T) {
+	limits := DefaultLimits()
+	limiter := NewLimiter(limits)
+	lease, err := limiter.Acquire(0)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer lease.Close()
+	feed := NewStreamFeed(bridgedSearchTestContract(), nil, lease, limits)
+	if _, err := feed.Feed(frameJSON(t, map[string]any{
+		"type": eventOutputItemAdded,
+		"item": map[string]any{"type": "function_call", "id": poisonedSearchCallID, "name": ToolSearchName},
+	})); err != nil {
+		t.Fatalf("added: %v", err)
+	}
+	tracked := feed.calls[poisonedSearchCallID]
+	if tracked == nil || tracked.clientID != repairedSearchCallID {
+		t.Fatalf("tracked = %+v", tracked)
+	}
+	if got := lease.Bytes(); got != trackedCallStateBytes(tracked) {
+		t.Fatalf("lease holds %d bytes, want the full tracked state %d", got, trackedCallStateBytes(tracked))
+	}
+	lease.Close()
+	if attempts, bytesUsed := limiter.Usage(); attempts != 0 || bytesUsed != 0 {
+		t.Fatalf("close left attempts=%d bytes=%d", attempts, bytesUsed)
+	}
+}
+
+// Without a custom bridge there is no evidence that a function call is really
+// a custom call, so the proxy refuses instead of announcing one protocol and
+// streaming another.
+func TestStreamRejectsUnbridgedCustomIdentity(t *testing.T) {
+	contract := NewToolContract()
+	identity := ToolIdentity{Name: "apply_patch", Kind: ToolKindCustom}
+	contract.IDByAlias[identity.Name] = identity
+	feed := NewStreamFeed(contract, nil, &Lease{}, DefaultLimits())
+	emitted, err := feed.Feed(frameJSON(t, map[string]any{
+		"type": eventOutputItemAdded,
+		"item": map[string]any{"type": "function_call", "id": "fc_x", "name": "apply_patch", "arguments": "{}"},
+	}))
+	assertUpstreamContractError(t, err)
+	if len(emitted) != 0 {
+		t.Fatalf("a mixed protocol was announced: %s", emitted)
+	}
+}
+
 func TestStreamRejectsTerminalItemIdentityChanges(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -782,7 +1013,7 @@ func TestStreamFailedIsTerminalNotExecutable(t *testing.T) {
 
 func TestStreamFeedChargesTrackedItemStateBeforeInsert(t *testing.T) {
 	limits := DefaultLimits()
-	limits.MaxAttemptBytes = 256
+	limits.MaxAttemptBytes = 2 * (trackedCallStateOverhead + len("item_a") + len("ordinary"))
 	limiter := NewLimiter(limits)
 	lease, err := limiter.Acquire(0)
 	if err != nil {
@@ -818,20 +1049,35 @@ func TestStreamFeedChargesTrackedItemStateBeforeInsert(t *testing.T) {
 }
 
 func TestStreamFeedChargesLateCallIDBeforeRetainingIt(t *testing.T) {
+	contract := bridgedSearchTestContract()
+	added := frameJSON(t, map[string]any{
+		"type": eventOutputItemAdded,
+		"item": map[string]any{"type": "function_call", "id": "item_x", "name": ToolSearchName},
+	})
+	// Measure the retained state of one tracked item first, so the budget
+	// below leaves room for exactly that item and nothing more: the late
+	// call_id is what must be refused.
+	probeLimits := DefaultLimits()
+	probeLease, err := NewLimiter(probeLimits).Acquire(0)
+	if err != nil {
+		t.Fatalf("probe acquire: %v", err)
+	}
+	defer probeLease.Close()
+	probe := NewStreamFeed(contract, nil, probeLease, probeLimits)
+	if _, err := probe.Feed(added); err != nil {
+		t.Fatalf("probe added: %v", err)
+	}
+
 	limits := DefaultLimits()
-	limits.MaxAttemptBytes = 146
+	limits.MaxAttemptBytes = trackedCallStateBytes(probe.calls["item_x"]) + 1
 	limiter := NewLimiter(limits)
 	lease, err := limiter.Acquire(0)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	defer lease.Close()
-	contract := bridgedSearchTestContract()
 	feed := NewStreamFeed(contract, nil, lease, limits)
-	if _, err := feed.Feed(frameJSON(t, map[string]any{
-		"type": eventOutputItemAdded,
-		"item": map[string]any{"type": "function_call", "id": "item_x", "name": ToolSearchName},
-	})); err != nil {
+	if _, err := feed.Feed(added); err != nil {
 		t.Fatalf("added: %v", err)
 	}
 	reserved := lease.Bytes()

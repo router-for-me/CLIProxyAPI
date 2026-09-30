@@ -184,7 +184,9 @@ func ConvertCustomHistory(value any) (bool, error) {
 					if err != nil {
 						return false, unprocessableError(ReasonInvalidCustomInput, err)
 					}
-					item["type"] = "function_call"
+					if _, err := ReidentifyItem(item, "function_call"); err != nil {
+						return false, unprocessableError(ReasonHistoryLink, err)
+					}
 					item["arguments"] = string(arguments)
 					delete(item, "input")
 					if namespace := stringField(item, "namespace"); namespace != "" {
@@ -193,7 +195,9 @@ func ConvertCustomHistory(value any) (bool, error) {
 					}
 					changed = true
 				case "custom_tool_call_output":
-					item["type"] = "function_call_output"
+					if _, err := ReidentifyItem(item, "function_call_output"); err != nil {
+						return false, unprocessableError(ReasonHistoryLink, err)
+					}
 					changed = true
 				}
 			}

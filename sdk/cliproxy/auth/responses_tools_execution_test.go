@@ -22,9 +22,12 @@ type fakeResponsesExecutor struct {
 	provider   string
 	toFormat   sdktranslator.Format
 	wire       [][]byte
+	originals  [][]byte
+	execCalls  int
+	countCalls int
+	streamCall int
 	response   []byte
 	err        error
-	countCalls int
 	wireGuard  *cliproxyexecutor.WireContract
 }
 
@@ -75,8 +78,10 @@ func TestCollectResponsesToolsWireRequirementsQualifiesPrefixedToolNames(t *test
 
 func (f *fakeResponsesExecutor) Identifier() string { return f.provider }
 
-func (f *fakeResponsesExecutor) Execute(ctx context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (f *fakeResponsesExecutor) Execute(ctx context.Context, _ *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	f.execCalls++
 	f.wire = append(f.wire, req.Payload)
+	f.originals = append(f.originals, opts.OriginalRequest)
 	f.wireGuard = cliproxyexecutor.WireContractFromContext(ctx)
 	if f.err != nil {
 		return cliproxyexecutor.Response{}, f.err
@@ -85,6 +90,7 @@ func (f *fakeResponsesExecutor) Execute(ctx context.Context, _ *Auth, req clipro
 }
 
 func (f *fakeResponsesExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	f.streamCall++
 	resp, err := f.Execute(ctx, auth, req, opts)
 	if err != nil {
 		return nil, err
@@ -99,9 +105,10 @@ func (f *fakeResponsesExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, e
 	return auth, nil
 }
 
-func (f *fakeResponsesExecutor) CountTokens(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (f *fakeResponsesExecutor) CountTokens(_ context.Context, _ *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	f.countCalls++
 	f.wire = append(f.wire, req.Payload)
+	f.originals = append(f.originals, opts.OriginalRequest)
 	return cliproxyexecutor.Response{Payload: []byte("{\"tokens\":1}")}, nil
 }
 
@@ -164,7 +171,7 @@ func TestResponsesToolsExecuteBridgesSearch(t *testing.T) {
 		SourceFormat:    sdktranslator.FormatCodex,
 		OriginalRequest: []byte(body),
 	}
-	exec.response = []byte("{\"output\": [{\"type\": \"function_call\", \"name\": \"tool_search\", \"call_id\": \"c1\", \"arguments\": \"{\\\"query\\\":\\\"x\\\"}\"}]}")
+	exec.response = []byte("{\"output\": [{\"type\": \"function_call\", \"id\": \"fc_call_bridge_1\", \"name\": \"tool_search\", \"call_id\": \"c1\", \"arguments\": \"{\\\"query\\\":\\\"x\\\"}\"}]}")
 	resp, err := mgr.Execute(context.Background(), []string{"codex"}, req, opts)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -548,5 +555,143 @@ func TestAdaptResponsesToolsStreamStillRejectsTruncatedTail(t *testing.T) {
 	}
 	if !sawError {
 		t.Fatal("truncated tail was accepted as success")
+	}
+}
+
+// A replayed native history is repaired before it is sent, on every entry
+// point, and the repaired body is what the executor actually receives. A nil
+// attempt does not mean the request was left alone.
+func TestResponsesToolsNativeRepairAllEntryPoints(t *testing.T) {
+	const polluted = `{"tools":[{"type":"tool_search","execution":"client"}],"input":[` +
+		`{"type":"tool_search_call","id":"fc_call_function_olq4gx3ow6cs_1","call_id":"c1","arguments":{},"execution":"client"},` +
+		`{"type":"tool_search_output","id":"tso_out_1","call_id":"c1","execution":"client","tools":[]}]}`
+	const repaired = "tsc_call_function_olq4gx3ow6cs_1"
+
+	for _, testCase := range []struct {
+		name   string
+		invoke func(*Manager, cliproxyexecutor.Request, cliproxyexecutor.Options) error
+		calls  func(*fakeResponsesExecutor) int
+	}{
+		{
+			name: "execute",
+			invoke: func(mgr *Manager, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, err := mgr.Execute(context.Background(), []string{"codex"}, req, opts)
+				return err
+			},
+			calls: func(exec *fakeResponsesExecutor) int { return exec.execCalls },
+		},
+		{
+			name: "count",
+			invoke: func(mgr *Manager, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, err := mgr.ExecuteCount(context.Background(), []string{"codex"}, req, opts)
+				return err
+			},
+			calls: func(exec *fakeResponsesExecutor) int { return exec.countCalls },
+		},
+		{
+			name: "stream",
+			invoke: func(mgr *Manager, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				result, err := mgr.ExecuteStream(context.Background(), []string{"codex"}, req, opts)
+				if err != nil {
+					return err
+				}
+				for range result.Chunks {
+				}
+				return nil
+			},
+			calls: func(exec *fakeResponsesExecutor) int { return exec.streamCall },
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			mgr := responsesToolsTestManagerWithClientSearch("native")
+			responsesToolsTestAuth(t, mgr)
+			exec := &fakeResponsesExecutor{
+				provider: "codex", toFormat: sdktranslator.FormatCodex,
+				response: []byte(`{"output":[]}`),
+			}
+			mgr.RegisterExecutor(exec)
+			req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(polluted)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex, OriginalRequest: []byte(polluted)}
+
+			if err := testCase.invoke(mgr, req, opts); err != nil {
+				t.Fatalf("%s: %v", testCase.name, err)
+			}
+			if got := testCase.calls(exec); got != 1 {
+				t.Fatalf("%s reached the executor %d times, want 1", testCase.name, got)
+			}
+			if len(exec.wire) != 1 || !strings.Contains(string(exec.wire[0]), repaired) {
+				t.Fatalf("%s did not send the repaired body: %s", testCase.name, exec.wire)
+			}
+			// Both body views stay in step, so a translator that reads the
+			// original request sees the same repaired history.
+			if len(exec.originals) != 1 || !strings.Contains(string(exec.originals[0]), repaired) {
+				t.Fatalf("%s original request was not repaired: %s", testCase.name, exec.originals)
+			}
+			if strings.Contains(string(exec.wire[0]), "fc_call_function_olq4gx3ow6cs_1") {
+				t.Fatalf("%s still carries the polluted id: %s", testCase.name, exec.wire[0])
+			}
+			// A pass-through repair builds no attempt, so there is no wire
+			// contract to hand the executor.
+			if exec.wireGuard != nil {
+				t.Fatalf("%s received a wire contract for a pass-through repair: %+v", testCase.name, exec.wireGuard)
+			}
+		})
+	}
+}
+
+// A request the repair refuses must never reach the upstream, and it must not
+// be retried, rotated, or cooled down: the failure belongs to this request.
+func TestResponsesToolsRepairErrorStopsWithoutRotation(t *testing.T) {
+	const polluted = `{"previous_response_id":"resp_1","tools":[{"type":"tool_search","execution":"client"}],"input":[` +
+		`{"type":"tool_search_call","id":"fc_call_function_olq4gx3ow6cs_1","call_id":"c1","arguments":{},"execution":"client"}]}`
+	mgr := responsesToolsTestManagerWithClientSearch("native")
+	responsesToolsTestAuth(t, mgr)
+	exec := &fakeResponsesExecutor{provider: "codex", toFormat: sdktranslator.FormatCodex, response: []byte(`{"output":[]}`)}
+	mgr.RegisterExecutor(exec)
+	req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(polluted)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex, OriginalRequest: []byte(polluted)}
+
+	_, err := mgr.Execute(context.Background(), []string{"codex"}, req, opts)
+	if err == nil {
+		t.Fatal("expected the opaque repair refusal to surface")
+	}
+	if !responsestools.IsRequestScopedError(err) {
+		t.Fatalf("error must stay request scoped: %v", err)
+	}
+	if exec.execCalls != 0 || len(exec.wire) != 0 {
+		t.Fatalf("the refused request reached the executor: %d calls", exec.execCalls)
+	}
+}
+
+// With the feature switched off the request keeps its original bytes and
+// slices, so the emergency gate really is a passthrough.
+func TestResponsesToolsRepairIsSkippedWhenDisabled(t *testing.T) {
+	const polluted = `{"tools":[{"type":"tool_search","execution":"client"}],"input":[` +
+		`{"type":"tool_search_call","id":"fc_call_function_olq4gx3ow6cs_1","call_id":"c1","arguments":{},"execution":"client"}]}`
+	cfg := &internalconfig.Config{}
+	enabled := false
+	cfg.ResponsesTools.Enabled = &enabled
+	cfg.ResponsesTools.Routes = []internalconfig.ResponsesToolsRoute{{
+		Match: internalconfig.ResponsesToolsMatch{
+			Provider: "codex", AuthKind: "oauth",
+			UpstreamModel: "gpt-5.6-sol", UpstreamFormat: "codex",
+		},
+		ClientSearch: "native", CustomTools: "inherit", CustomGrammar: "describe",
+	}}
+	cfg.NormalizeResponsesToolsConfig()
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	responsesToolsTestAuth(t, mgr)
+	exec := &fakeResponsesExecutor{provider: "codex", toFormat: sdktranslator.FormatCodex, response: []byte(`{"output":[]}`)}
+	mgr.RegisterExecutor(exec)
+	payload := []byte(polluted)
+	req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex, OriginalRequest: payload}
+
+	if _, err := mgr.Execute(context.Background(), []string{"codex"}, req, opts); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(exec.wire) != 1 || string(exec.wire[0]) != polluted {
+		t.Fatalf("disabled feature must stay a passthrough: %s", exec.wire[0])
 	}
 }

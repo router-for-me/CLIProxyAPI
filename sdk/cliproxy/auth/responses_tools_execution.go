@@ -78,6 +78,9 @@ func (m *Manager) responsesToolsCallToFormat(
 		return cliproxyexecutor.Response{}, errPrepare
 	}
 	if attempt == nil {
+		if req, opts, repaired := repairedResponsesToolsRequest(execReq, execOpts, payload, wireBody); repaired {
+			return call(execCtx, req, opts)
+		}
 		resp, err := call(execCtx, execReq, execOpts)
 		return resp, err
 	}
@@ -115,6 +118,26 @@ func (m *Manager) responsesToolsCallToFormat(
 	return resp, nil
 }
 
+// repairedResponsesToolsRequest reports whether preparation changed a request
+// that no attempt owns. Item id repair is the only pass-through rewrite, so
+// an unchanged payload keeps the original request and its original slices.
+func repairedResponsesToolsRequest(
+	execReq cliproxyexecutor.Request,
+	execOpts cliproxyexecutor.Options,
+	payload, wireBody []byte,
+) (cliproxyexecutor.Request, cliproxyexecutor.Options, bool) {
+	if len(wireBody) == 0 || bytes.Equal(wireBody, payload) {
+		return execReq, execOpts, false
+	}
+	repaired := execReq
+	repaired.Payload = wireBody
+	repairedOpts := execOpts
+	if len(execOpts.OriginalRequest) > 0 {
+		repairedOpts.OriginalRequest = wireBody
+	}
+	return repaired, repairedOpts, true
+}
+
 // responsesToolsCountCall applies request preparation and declaration budget
 // to token counting without building response stream state. Executors that
 // cannot count keep their original error behavior; counts are never faked.
@@ -142,6 +165,9 @@ func (m *Manager) responsesToolsCountCall(
 		return cliproxyexecutor.Response{}, errPrepare
 	}
 	if attempt == nil {
+		if req, opts, repaired := repairedResponsesToolsRequest(execReq, execOpts, payload, wireBody); repaired {
+			return call(execCtx, req, opts)
+		}
 		return call(execCtx, execReq, execOpts)
 	}
 	defer attempt.Close()
@@ -190,6 +216,10 @@ func (m *Manager) responsesToolsStreamCall(
 		return nil, false, errPrepare
 	}
 	if attempt == nil {
+		if req, opts, repaired := repairedResponsesToolsRequest(execReq, execOpts, payload, wireBody); repaired {
+			result, err := call(parentCtx, req, opts)
+			return result, false, err
+		}
 		result, err := call(parentCtx, execReq, execOpts)
 		return result, false, err
 	}

@@ -772,7 +772,22 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
+	// A successor frame on a duplex connection never passes through the
+	// manager, so the replayed history is repaired here as well. Only a
+	// Responses-shaped client body carries input items the repair may touch.
 	originalPayload := originalPayloadSource
+	if helps.IsResponsesFamilyFormat(from) {
+		repaired, errRepair := helps.RepairResponsesToolItemIDs(e.cfg, originalPayloadSource)
+		if errRepair != nil {
+			return nil, errRepair
+		}
+		originalPayload = repaired
+		if repairedPayload, errPayload := helps.RepairResponsesToolItemIDs(e.cfg, req.Payload); errPayload != nil {
+			return nil, errPayload
+		} else {
+			req.Payload = repairedPayload
+		}
+	}
 	isCompat := e.resolveCodexModelIsCompat(auth, req, baseModel)
 	originalTranslated, body, updatesChanged := translateCodexRequestPairWithUpdateIntent(from, to, baseModel, originalPayload, req.Payload, true, isCompat)
 
@@ -808,6 +823,12 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, opts.Headers)
 	if errPromptCache != nil {
 		return nil, errPromptCache
+	}
+	// The rules above can reintroduce a known mismatch, so the final wire body
+	// is checked once more. A healthy body is unchanged by the second pass.
+	body, err = helps.RepairResponsesToolItemIDs(e.cfg, body)
+	if err != nil {
+		return nil, err
 	}
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, preserveNativeOutput, opts.Headers)
 	applyCodexRoutingHint(ctx, wsHeaders, auth, baseModel, body, opts.Headers)

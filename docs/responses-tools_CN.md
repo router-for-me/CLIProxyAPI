@@ -170,6 +170,61 @@ provider 到格式的映射是固定的：
 在下一次请求起停止生效。修改路由规则时，等待活跃请求排空后再切换，避免
 单个请求中途更换协议语义。
 
+## item 身份与历史修补
+
+Responses 的 item id 带有生成它的 item 类型的命名空间。桥接会改变 item 类型，
+id 必须随之改变：客户端原样保存代理发出的 output item，并在下一轮原样重放，
+严格的上游会拒绝命名空间不符的 id。
+
+| item 类型 | id 前缀 |
+|---|---|
+| `function_call` | `fc_` |
+| `function_call_output` | `fco_` |
+| `custom_tool_call` | `ctc_` |
+| `custom_tool_call_output` | `ctco_` |
+| `tool_search_call` | `tsc_` |
+| `tool_search_output` | `tso_` |
+
+只有这六类参与。`message`、`reasoning` 及其他 item 保留上游给出的身份。显式
+类型转换只允许以下方向，且每一对都可逆：
+
+- `function_call` ↔ `custom_tool_call`
+- `function_call` ↔ `tool_search_call`
+- `function_call_output` ↔ `custom_tool_call_output`
+- `function_call_output` ↔ `tool_search_output`
+
+请求适配之前，若重放的 `input[]` item 的类型与 id 前缀构成上述配对，就地迁移
+该 id。修补只改 id 的值：不重新编码整个请求，其他字节不变。修补在路由策略判断
+之前执行，因此完整的污染历史在原生路由上无需声明工具、也无需建立 attempt 即可
+恢复。
+
+修补明确不做的事：
+
+- 不猜测。服务端执行的 search、不属于任何已知命名空间的 id、缺失或非字符串
+  id，以及所有非工具 item 一律不动。
+- 不补造请求 id。input item 的可选 id 可以缺省。
+- 不解析 opaque 历史。需要修补且请求带 `previous_response_id`、
+  `previous_item_id` 或 `item_reference` 时返回 422 `opaque_history`；绝不为
+  让修补通过而删除父引用。无需修补的 opaque 历史不受影响。
+- 不复用 id。当迁移会让两个 item 拥有同一客户端可见 id 时返回 422
+  `ambiguous_identity`，不随机改名，也不按出现顺序决定身份。
+
+响应侧执行方向相反的同一套转换。桥接 item 缺少可用 id 属于上游协议错误，
+返回 502 `upstream_contract`：代理凭空生成的 id 会被客户端保存并在下一轮重放。
+恢复工具名称不改变 item 类型——名称解析到 custom 工具并不构成上游产生了
+custom 调用的证据。
+
+流式中，客户端可见的类型与 id 在 item 首次被跟踪时计算一次，之后所有引用复用
+同一值：`added` item、参数 delta 与 done、`output_item.done` 以及终态
+`response.completed` 的 output 都指向同一个 id。上游 id 仍是跟踪键，因此既有的
+`call_id` 与 `output_index` 一致性校验仍然比较上游真实发送的内容。
+
+原生 WebSocket duplex 连接会修补每一个后续的 `response.create`、
+`response.append` 和 `response.steer` 帧，而不只是首个请求：这些帧不经过
+Manager。无法修补的帧以携带相同状态码与 reason 的本地 error frame 应答，不
+向上游发送，也不会进入 pending 或 steering 状态。连接建立后，该状态码存在于
+error frame 内部，不改写 HTTP 状态。
+
 ## 预算
 
 | 配置 | 含义 |

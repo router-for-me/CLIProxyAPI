@@ -41,6 +41,8 @@ type trackedCall struct {
 	kind        callKind
 	identity    ToolIdentity
 	itemID      string
+	clientType  string
+	clientID    string
 	outputIndex *int
 	callID      string
 	alias       string
@@ -53,13 +55,47 @@ type trackedCall struct {
 	searchArgs  any
 }
 
-const trackedCallStateOverhead = 128
+const trackedCallStateOverhead = 192
 
 func trackedCallStateBytes(tracked *trackedCall) int {
 	if tracked == nil {
 		return 0
 	}
-	return trackedCallStateOverhead + len(tracked.itemID) + len(tracked.alias) + len(tracked.callID)
+	return trackedCallStateOverhead + len(tracked.itemID) + len(tracked.alias) +
+		len(tracked.callID) + len(tracked.clientID) + len(tracked.clientType)
+}
+
+// clientItemID is the id the client sees for one tracked item. It is computed
+// once, when the item is first tracked, and reused by every later reference:
+// recomputing it from a type that has already been rewritten is how a stream
+// ends up announcing one identity and then streaming another.
+func clientItemID(tracked *trackedCall) string {
+	if tracked == nil {
+		return ""
+	}
+	return tracked.clientID
+}
+
+// clientIdentityFor computes the client-visible type and id of one tracked
+// item. Bridged items change type on the way out, so their id has to move with
+// it; ordinary items keep the identity the upstream gave them.
+func clientIdentityFor(kind callKind, wireType, itemID string) (string, string, error) {
+	switch kind {
+	case callKindSearch:
+		clientID, err := ConvertedItemID(wireType, "tool_search_call", itemID)
+		if err != nil {
+			return "", "", err
+		}
+		return "tool_search_call", clientID, nil
+	case callKindCustom:
+		clientID, err := ConvertedItemID(wireType, "custom_tool_call", itemID)
+		if err != nil {
+			return "", "", err
+		}
+		return "custom_tool_call", clientID, nil
+	default:
+		return wireType, itemID, nil
+	}
 }
 
 // StreamFeed adapts one upstream event stream for a bridge attempt. Feed
@@ -73,6 +109,7 @@ type StreamFeed struct {
 	lease     *Lease
 	limits    Limits
 	calls     map[string]*trackedCall
+	ids       ItemIDRegistry
 	sseBuffer []byte
 	sseBytes  int
 	sequence  int
@@ -359,6 +396,12 @@ func (f *StreamFeed) track(item map[string]any) (*trackedCall, error) {
 		return nil, upstreamError(ReasonUpstreamContract, fmt.Errorf("bridged output item %s has unexpected type %q", itemID, wireType))
 	}
 	tracked := &trackedCall{kind: kind, identity: identity, itemID: itemID, alias: name, wireType: wireType}
+	clientType, clientID, err := clientIdentityFor(kind, wireType, itemID)
+	if err != nil {
+		return nil, upstreamError(ReasonUpstreamContract, err)
+	}
+	tracked.clientType = clientType
+	tracked.clientID = clientID
 	if index, ok := item["output_index"]; ok {
 		number, okNumber := toInt(index)
 		if !okNumber {
@@ -381,6 +424,14 @@ func (f *StreamFeed) track(item map[string]any) (*trackedCall, error) {
 	}
 	if err := f.lease.Grow(trackedCallStateBytes(tracked)); err != nil {
 		return nil, err
+	}
+	if err := f.ids.Register(tracked.clientID, ItemIDOwner{
+		WireID:   tracked.itemID,
+		WireType: tracked.wireType,
+		CallID:   tracked.callID,
+	}); err != nil {
+		f.lease.Shrink(trackedCallStateBytes(tracked))
+		return nil, upstreamError(ReasonUpstreamContract, err)
 	}
 	f.calls[itemID] = tracked
 	return tracked, nil
@@ -487,8 +538,8 @@ func (f *StreamFeed) addItem(payload map[string]any) ([][]byte, error) {
 	if tracked.kind == callKindOrdinary {
 		restored := cloneMap(payload)
 		restoredItem := cloneMap(item)
-		if f.contract != nil {
-			RestoreFunctionCallIdentity(restoredItem, f.contract)
+		if _, err := RestoreFunctionCallIdentityChecked(restoredItem, f.contract); err != nil {
+			return nil, err
 		}
 		restoreSyntheticSearchNulls(restoredItem, f.contract)
 		restored["item"] = restoredItem
@@ -498,14 +549,16 @@ func (f *StreamFeed) addItem(payload map[string]any) ([][]byte, error) {
 	restoredItem := cloneMap(item)
 	switch tracked.kind {
 	case callKindSearch:
-		restoredItem["type"] = "tool_search_call"
+		restoredItem["type"] = tracked.clientType
 		restoredItem["execution"] = "client"
 		restoredItem["status"] = "in_progress"
 		restoredItem["arguments"] = map[string]any{}
+		restoredItem["id"] = clientItemID(tracked)
 		delete(restoredItem, "name")
 		delete(restoredItem, "namespace")
 	case callKindCustom:
-		restoredItem["type"] = "custom_tool_call"
+		restoredItem["type"] = tracked.clientType
+		restoredItem["id"] = clientItemID(tracked)
 		restoredItem["name"] = tracked.identity.Name
 		if tracked.identity.Namespace != "" {
 			restoredItem["namespace"] = tracked.identity.Namespace
@@ -627,12 +680,12 @@ func (f *StreamFeed) emitArgsDone(tracked *trackedCall) ([][]byte, error) {
 		}
 		delta := cloneMap(map[string]any{
 			"type":    eventCustomInputDelta,
-			"item_id": tracked.itemID,
+			"item_id": clientItemID(tracked),
 			"delta":   input,
 		})
 		done := cloneMap(map[string]any{
 			"type":    eventCustomInputDone,
-			"item_id": tracked.itemID,
+			"item_id": clientItemID(tracked),
 			"input":   input,
 		})
 		f.copyOutputIndex(tracked, delta)
@@ -724,9 +777,10 @@ func (f *StreamFeed) emitItemDone(tracked *trackedCall, item, payload map[string
 	restoredItem := cloneMap(item)
 	switch tracked.kind {
 	case callKindSearch:
-		restoredItem["type"] = "tool_search_call"
+		restoredItem["type"] = tracked.clientType
 		restoredItem["execution"] = "client"
 		restoredItem["status"] = "completed"
+		restoredItem["id"] = clientItemID(tracked)
 		if tracked.searchArgs != nil {
 			restoredItem["arguments"] = tracked.searchArgs
 		}
@@ -737,7 +791,8 @@ func (f *StreamFeed) emitItemDone(tracked *trackedCall, item, payload map[string
 		if err != nil {
 			return nil, err
 		}
-		restoredItem["type"] = "custom_tool_call"
+		restoredItem["type"] = tracked.clientType
+		restoredItem["id"] = clientItemID(tracked)
 		restoredItem["name"] = tracked.identity.Name
 		if tracked.identity.Namespace != "" {
 			restoredItem["namespace"] = tracked.identity.Namespace
@@ -747,8 +802,8 @@ func (f *StreamFeed) emitItemDone(tracked *trackedCall, item, payload map[string
 		restoredItem["input"] = input
 		delete(restoredItem, "arguments")
 	case callKindOrdinary:
-		if f.contract != nil {
-			RestoreFunctionCallIdentity(restoredItem, f.contract)
+		if _, err := RestoreFunctionCallIdentityChecked(restoredItem, f.contract); err != nil {
+			return nil, err
 		}
 		restoreSyntheticSearchNulls(restoredItem, f.contract)
 	}
@@ -824,11 +879,49 @@ func (f *StreamFeed) complete(payload map[string]any) ([][]byte, error) {
 			return nil, upstreamError(ReasonUpstreamContract, fmt.Errorf("response completed with unfinished call %s", tracked.itemID))
 		}
 	}
+	wireIDs := make([]string, len(output))
+	for index, rawItem := range output {
+		if item, ok := rawItem.(map[string]any); ok {
+			wireIDs[index] = stringField(item, "id")
+		}
+	}
 	if _, err := RewriteResponseBodyChecked(payload, f.contract, f.bridge); err != nil {
+		return nil, err
+	}
+	if err := f.verifyCompletedIdentities(output, wireIDs); err != nil {
 		return nil, err
 	}
 	out = append(out, f.encodeOutput(payload))
 	return out, nil
+}
+
+// verifyCompletedIdentities confirms that the rewritten terminal output names
+// every tracked item the way the added and delta events already did. The
+// terminal array is rewritten from the upstream item, so this is where a second,
+// independent identity decision would show up.
+func (f *StreamFeed) verifyCompletedIdentities(items []any, wireIDs []string) error {
+	for index, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		if index >= len(wireIDs) {
+			continue
+		}
+		tracked := f.calls[wireIDs[index]]
+		if tracked == nil {
+			continue
+		}
+		if id := stringField(item, "id"); id != tracked.clientID {
+			return upstreamError(ReasonUpstreamContract,
+				fmt.Errorf("response completed changed the client id of output item %s", tracked.itemID))
+		}
+		if itemType := stringField(item, "type"); itemType != tracked.clientType {
+			return upstreamError(ReasonUpstreamContract,
+				fmt.Errorf("response completed changed the client type of output item %s", tracked.itemID))
+		}
+	}
+	return nil
 }
 
 // Finish validates the tail of the stream: buffered fragments without any
