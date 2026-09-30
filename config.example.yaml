@@ -489,6 +489,16 @@ nonstream-keepalive-interval: 0
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
 
+# Neuralwatt (OpenAI-compatible, static bearer key).
+# service-tier: default (standard) | flex (discounted, may be capacity-shed).
+# neuralwatt-api-key:
+#   - api-key: "sk-neuralwatt-..."
+#     base-url: "https://api.neuralwatt.com/v1"
+#     service-tier: "default" # optional: default (standard) | flex (discounted, may be capacity-shed)
+#     models:
+#       - name: "deepseek-v4-pro"
+#         alias: "deepseek-v4-pro"
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
