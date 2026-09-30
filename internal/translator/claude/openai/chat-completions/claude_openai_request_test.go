@@ -7,6 +7,26 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToClaude_ThinkingSummaryVisibility(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		wanted string
+	}{
+		{name: "effort only leaves display unspecified", input: `{"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, wanted: ""},
+		{name: "explicit include enables summary", input: `{"reasoning_effort":"high","include_reasoning":true,"messages":[{"role":"user","content":"hi"}]}`, wanted: "summarized"},
+		{name: "explicit exclude omits summary", input: `{"reasoning_effort":"high","reasoning":{"exclude":true},"messages":[{"role":"user","content":"hi"}]}`, wanted: "omitted"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-opus-5-5", []byte(test.input), false)
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.wanted {
+				t.Fatalf("thinking.display = %q, want %q; body=%s", got, test.wanted, out)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIRequestToClaudeWithCompat_GroupsAssistantThinkingTextAndTools(t *testing.T) {
 	inputJSON := []byte(`{
 		"messages":[
@@ -975,6 +995,49 @@ func TestConvertOpenAIRequestToClaude_ResponseFormatAbsentOrTextNoOp(t *testing.
 	}
 }
 
+// Anthropic only accepts cache_control on the tool_result block itself, never
+// inside tool_result.content. A part-level marker on an OpenAI tool message
+// must be hoisted to the block, while ordinary message parts keep theirs.
+func TestConvertOpenAIRequestToClaude_ToolResultPartCacheControlHoisted(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"Use calc for 2+2.","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calc","arguments":"{\"expr\":\"2+2\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"4","cache_control":{"type":"ephemeral"}}]}
+		],
+		"tools":[{"type":"function","function":{"name":"calc","description":"calc","parameters":{"type":"object","properties":{"expr":{"type":"string"}},"required":["expr"]}}}]
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", len(messages), string(out))
+	}
+
+	// Ordinary user content parts keep their part-level cache_control.
+	firstText := messages[0].Get("content.0")
+	if got := firstText.Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("user text part cache_control.type = %q, want ephemeral (must not be stripped). Output: %s", got, string(out))
+	}
+
+	// The tool_result block carries the hoisted marker.
+	toolResult := messages[2].Get("content.0")
+	if got := toolResult.Get("type").String(); got != "tool_result" {
+		t.Fatalf("messages[2].content[0].type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := toolResult.Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool_result block cache_control.type = %q, want ephemeral (hoisted from the part). Output: %s", got, string(out))
+	}
+
+	// ... and the inner content parts carry no cache_control.
+	innerParts := toolResult.Get("content").Array()
+	for i, part := range innerParts {
+		if part.Get("cache_control").Exists() {
+			t.Fatalf("tool_result.content[%d] must not carry cache_control. Output: %s", i, string(out))
+		}
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_ToolChoice(t *testing.T) {
 	t.Run("none produces type none", func(t *testing.T) {
 		inputJSON := `{
@@ -1285,4 +1348,87 @@ func TestConvertOpenAIRequestToClaude_ToolStrict(t *testing.T) {
 			t.Fatalf("expected tools.0.strict to be omitted when not provided, got %s", result)
 		}
 	})
+}
+
+func TestConvertOpenAIRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchema(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": "calling tool",
+				"tool_calls": [
+					{
+						"id": "call_1",
+						"type": "function",
+						"function": {
+							"name": "mcp.server.special:get_time",
+							"arguments": "{}"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_1",
+				"content": "12:00 PM"
+			},
+			{
+				"role": "user",
+				"content": "continue"
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "mcp.server.special:get_time",
+					"description": "Get current time"
+				}
+			},
+			{
+				"type": "function",
+				"function": {
+					"name": "clean_tool",
+					"description": "Parameterless clean tool"
+				}
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"function": {
+				"name": "mcp.server.special:get_time"
+			}
+		}
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+
+	// 1. Tool name in declarations must be sanitized
+	tool0Name := gjson.GetBytes(result, "tools.0.name").String()
+	if tool0Name != "mcp_server_special_get_time" {
+		t.Fatalf("tools.0.name = %q, want mcp_server_special_get_time. Output: %s", tool0Name, result)
+	}
+
+	// 2. Parameterless tool must have a fallback input_schema object
+	tool0Schema := gjson.GetBytes(result, "tools.0.input_schema")
+	if !tool0Schema.Exists() || tool0Schema.Get("type").String() != "object" {
+		t.Fatalf("tools.0.input_schema = %s, want object schema. Output: %s", tool0Schema, result)
+	}
+	tool1Schema := gjson.GetBytes(result, "tools.1.input_schema")
+	if !tool1Schema.Exists() || tool1Schema.Get("type").String() != "object" {
+		t.Fatalf("tools.1.input_schema = %s, want object schema. Output: %s", tool1Schema, result)
+	}
+
+	// 3. Historical tool_use name in assistant turn must be sanitized
+	toolUseName := gjson.GetBytes(result, "messages.0.content.1.name").String()
+	if toolUseName != "mcp_server_special_get_time" {
+		t.Fatalf("messages.0.content.1.name = %q, want mcp_server_special_get_time. Output: %s", toolUseName, result)
+	}
+
+	// 4. Tool choice function name must be sanitized
+	toolChoiceName := gjson.GetBytes(result, "tool_choice.name").String()
+	if toolChoiceName != "mcp_server_special_get_time" {
+		t.Fatalf("tool_choice.name = %q, want mcp_server_special_get_time. Output: %s", toolChoiceName, result)
+	}
 }

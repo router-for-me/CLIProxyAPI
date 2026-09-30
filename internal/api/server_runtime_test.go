@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
-	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 )
 
 func TestHostRuntimeControlRegistersAuthenticatedManagementRoutes(t *testing.T) {

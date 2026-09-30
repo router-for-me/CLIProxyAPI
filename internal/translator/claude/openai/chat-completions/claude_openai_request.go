@@ -8,10 +8,10 @@ package chat_completions
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -229,7 +229,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 							function := toolCall.Get("function")
 							toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 							toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-							toolUse, _ = sjson.SetBytes(toolUse, "name", function.Get("name").String())
+							toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(function.Get("name").String()))
 
 							// Parse arguments for the tool call
 							if args := function.Get("arguments"); args.Exists() {
@@ -287,7 +287,10 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				} else {
 					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 				}
-				msg = common.AttachMessageCacheControl(msg, targetMsg)
+				// Anthropic rejects cache_control inside tool_result.content, so
+				// part-level or message-level cache_control is hoisted onto the
+				// tool_result block itself.
+				msg = common.AttachToolMessageCacheControl(msg, targetMsg)
 				messageAccumulator.Append(msg)
 			}
 			return true
@@ -332,6 +335,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			}
 			if fnName != "" {
 				allowedToolNames[fnName] = struct{}{}
+				allowedToolNames[util.SanitizeClaudeFunctionName(fnName)] = struct{}{}
 			}
 		}
 		modeVal := strings.ToLower(strings.TrimSpace(toolChoice.Get("allowed_tools.mode").String()))
@@ -349,13 +353,16 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
 				fnName := function.Get("name").String()
+				sanitizedFnName := util.SanitizeClaudeFunctionName(fnName)
 				if isAllowedTools {
 					if _, ok := allowedToolNames[fnName]; !ok {
-						return true
+						if _, okSanitized := allowedToolNames[sanitizedFnName]; !okSanitized {
+							return true
+						}
 					}
 				}
 				anthropicTool := []byte(`{"name":"","description":""}`)
-				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", fnName)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", sanitizedFnName)
 				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", function.Get("description").String())
 
 				// Convert parameters schema for the tool
@@ -363,6 +370,8 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(parameters.Raw)))
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(parameters.Raw)))
+				} else {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", util.NormalizeClaudeToolInputSchema(nil))
 				}
 				anthropicTool = common.AttachCacheControl(anthropicTool, tool)
 				if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {
@@ -429,7 +438,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				}
 				if functionName != "" {
 					toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", util.SanitizeClaudeFunctionName(functionName))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 				} else {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
@@ -449,19 +458,18 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		}
 	}
 
-	return out
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai", modelName)
 }
 
-func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
-	var claudePart []byte
+func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {
 	switch part.Get("type").String() {
 	case "text":
 		textPart := []byte(`{"type":"text","text":""}`)
 		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-		claudePart = textPart
+		return textPart
 
 	case "image_url":
-		claudePart = []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
+		return []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
 
 	case "file":
 		fileData := part.Get("file.file_data").String()
@@ -474,11 +482,15 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 				docPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 				docPart, _ = sjson.SetBytes(docPart, "source.media_type", mediaType)
 				docPart, _ = sjson.SetBytes(docPart, "source.data", data)
-				claudePart = docPart
+				return docPart
 			}
 		}
 	}
+	return nil
+}
 
+func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
+	claudePart := convertOpenAIContentPartToClaudePartRaw(part)
 	if len(claudePart) == 0 {
 		return ""
 	}
@@ -532,9 +544,8 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 				return true
 			}
 
-			claudePart := convertOpenAIContentPartToClaudePart(part)
-			if claudePart != "" {
-				claudeParts = append(claudeParts, []byte(claudePart))
+			if claudePart := convertOpenAIContentPartToClaudePartRaw(part); len(claudePart) > 0 {
+				claudeParts = append(claudeParts, claudePart)
 			}
 			return true
 		})
@@ -547,9 +558,8 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	}
 
 	if content.IsObject() {
-		claudePart := convertOpenAIContentPartToClaudePart(content)
-		if claudePart != "" {
-			return string(common.JoinRawArray([][]byte{[]byte(claudePart)})), true
+		if claudePart := convertOpenAIContentPartToClaudePartRaw(content); len(claudePart) > 0 {
+			return string(common.JoinRawArray([][]byte{claudePart})), true
 		}
 		return content.Raw, false
 	}

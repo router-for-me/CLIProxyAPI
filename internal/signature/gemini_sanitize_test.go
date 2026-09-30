@@ -200,6 +200,116 @@ func TestSanitizeGeminiRequestThoughtSignaturesLogsBypassReplacement(t *testing.
 	assertSignatureDebugDoesNotLeak(t, hook, sig)
 }
 
+func TestSanitizeGeminiRequestThoughtSignaturesSuppressesRepeatedLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"contents":[
+		{"role":"model","parts":[{"text":"a","thoughtSignature":"invalid_sig_1"}]},
+		{"role":"model","parts":[{"text":"b","thoughtSignature":"invalid_sig_2"}]},
+		{"role":"model","parts":[{"text":"c","thoughtSignature":"invalid_sig_3"}]}
+	]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	for i := 0; i < 3; i++ {
+		path := fmt.Sprintf("contents.%d.parts.0.thoughtSignature", i)
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("expected part %d signature to be dropped, got: %s", i, string(out))
+		}
+	}
+
+	detailCount := 0
+	suppressedCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if entry.Message == "gemini request: sanitized thoughtSignature before upstream" {
+			if entry.Data["action"] == "drop_signature" &&
+				entry.Data["reason"] == "non-function model parts do not synthesize Gemini bypass signatures" {
+				detailCount++
+			}
+		}
+		if entry.Message == "gemini request: suppressed repeated thoughtSignature sanitizations in same request" {
+			if entry.Data["action"] == "drop_signature" &&
+				entry.Data["reason"] == "non-function model parts do not synthesize Gemini bypass signatures" &&
+				entry.Data["suppressed_count"] == 2 &&
+				entry.Data["total_count"] == 3 {
+				suppressedCount++
+			}
+		}
+	}
+
+	if detailCount != 1 {
+		t.Fatalf("expected 1 detailed debug log entry for repeated drops, got %d", detailCount)
+	}
+	if suppressedCount != 1 {
+		t.Fatalf("expected 1 aggregated suppression debug log entry, got %d", suppressedCount)
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesDistinguishesDetectedProviders(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"contents":[
+		{"role":"model","parts":[{"text":"a","thoughtSignature":"sealed.v1.demo_signature_1"}]},
+		{"role":"model","parts":[{"text":"b","thoughtSignature":"sealed.v1.demo_signature_2"}]},
+		{"role":"model","parts":[{"text":"c","thoughtSignature":"invalid_sig_unknown_1"}]},
+		{"role":"model","parts":[{"text":"d","thoughtSignature":"invalid_sig_unknown_2"}]}
+	]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	for i := 0; i < 4; i++ {
+		path := fmt.Sprintf("contents.%d.parts.0.thoughtSignature", i)
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("expected part %d signature to be dropped, got: %s", i, string(out))
+		}
+	}
+
+	sweDetail := 0
+	unknownDetail := 0
+	sweSuppressed := 0
+	unknownSuppressed := 0
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if entry.Message == "gemini request: sanitized thoughtSignature before upstream" {
+			switch entry.Data["detected_provider"] {
+			case string(SignatureProviderSWE):
+				sweDetail++
+			case string(SignatureProviderUnknown):
+				unknownDetail++
+			}
+		}
+		if entry.Message == "gemini request: suppressed repeated thoughtSignature sanitizations in same request" {
+			switch entry.Data["detected_provider"] {
+			case string(SignatureProviderSWE):
+				if entry.Data["suppressed_count"] == 1 && entry.Data["total_count"] == 2 {
+					sweSuppressed++
+				}
+			case string(SignatureProviderUnknown):
+				if entry.Data["suppressed_count"] == 1 && entry.Data["total_count"] == 2 {
+					unknownSuppressed++
+				}
+			}
+		}
+	}
+
+	if sweDetail != 1 {
+		t.Fatalf("expected 1 SWE detailed log, got %d", sweDetail)
+	}
+	if unknownDetail != 1 {
+		t.Fatalf("expected 1 unknown detailed log, got %d", unknownDetail)
+	}
+	if sweSuppressed != 1 {
+		t.Fatalf("expected 1 SWE suppression summary, got %d", sweSuppressed)
+	}
+	if unknownSuppressed != 1 {
+		t.Fatalf("expected 1 unknown suppression summary, got %d", unknownSuppressed)
+	}
+}
+
 func TestSanitizeGeminiRequestThoughtSignaturesPreservesField2WrappedUUIDFunctionCall(t *testing.T) {
 	sig := testGemini3ThoughtSignature([]byte("e24830a7-5cd6-42fe-998b-ee539e72b9c3"))
 	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"` + sig + `"}]}]}}`)

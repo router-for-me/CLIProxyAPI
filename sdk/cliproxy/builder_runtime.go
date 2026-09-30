@@ -1,9 +1,9 @@
 package cliproxy
 
 import (
-	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 )
 
 // WithEphemeralAPIKey registers a runtime-only API key for public API requests.

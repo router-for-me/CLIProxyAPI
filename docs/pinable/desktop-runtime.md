@@ -185,3 +185,25 @@ Use exactly the Go version declared in go.mod. Native macOS is required for sign
 The optional safe `--version` label defaults to source timestamp plus SHA. No pip
 modules, Node, Docker, GoReleaser or zip/unzip executables are required by these
 packaging tools. Do not commit generated runtimes.
+
+## Upstream v8 compatibility (2026-09-30)
+
+The synchronized source uses `github.com/router-for-me/CLIProxyAPI/v8` and Go
+1.26.0. This is an SDK import-path change, not a Desktop host-contract bump:
+`--version`, `--parent-pid`, the runtime-only API key and the authenticated
+`/v0/management/runtime-info` / `runtime-shutdown` endpoints retain contract `1`.
+Upstream now deprecates general v0 management development in favor of
+`/v8/management`; the existing v0 routes remain available for compatibility.
+
+Legacy configuration files can still be read without rewriting their layout.
+A successful v8 configuration write migrates the file to the new layout; the
+client-key field is `/v8/management/config/access/api-keys`. Do not confuse it
+with the upstream provider groups under `/v8/management/config/api-keys`.
+The native smoke suite verifies both the legacy atomic key rotation and a v8
+management key rotation, including rejection of the replaced key, survival of
+the ephemeral key without persistence, and continued v0 runtime control.
+
+A source sync generates Actions artifacts through the existing workflow. It
+does not by itself publish a new Release, replace Latest, or update Desktop's
+component lock. Approve the new source and binary hashes before changing that
+lock; retain the signing and plugin limitations described above.

@@ -532,6 +532,67 @@ type SchedulerPickResponse struct {
 	DelegateBuiltin string
 	// Handled reports whether the plugin made a scheduling decision.
 	Handled bool
+	// Reject indicates that the scheduler explicitly rejected candidate selection.
+	// When Reject is true and Handled is true, candidate selection terminates with an error
+	// instead of falling back to built-in schedulers.
+	Reject bool
+	// RejectReason is an optional human-readable reason for why candidate selection was rejected.
+	RejectReason string
+	// RejectCode is an optional machine-readable error code for the rejection (defaults to "auth_unavailable").
+	RejectCode string
+}
+
+// UnmarshalJSON supports both Go struct field names and snake_case field names.
+func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
+	type rawResponse struct {
+		AuthID          *string `json:"AuthID"`
+		AltAuthID       *string `json:"auth_id"`
+		DelegateBuiltin *string `json:"DelegateBuiltin"`
+		AltDelegate     *string `json:"delegate_builtin"`
+		Handled         *bool   `json:"Handled"`
+		AltHandled      *bool   `json:"handled"`
+		Reject          *bool   `json:"Reject"`
+		AltReject       *bool   `json:"reject"`
+		RejectReason    *string `json:"RejectReason"`
+		AltRejectReason *string `json:"reject_reason"`
+		RejectCode      *string `json:"RejectCode"`
+		AltRejectCode   *string `json:"reject_code"`
+	}
+	var raw rawResponse
+	if errUnmarshal := json.Unmarshal(data, &raw); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	if raw.AuthID != nil {
+		r.AuthID = *raw.AuthID
+	} else if raw.AltAuthID != nil {
+		r.AuthID = *raw.AltAuthID
+	}
+	if raw.DelegateBuiltin != nil {
+		r.DelegateBuiltin = *raw.DelegateBuiltin
+	} else if raw.AltDelegate != nil {
+		r.DelegateBuiltin = *raw.AltDelegate
+	}
+	if raw.Handled != nil {
+		r.Handled = *raw.Handled
+	} else if raw.AltHandled != nil {
+		r.Handled = *raw.AltHandled
+	}
+	if raw.Reject != nil {
+		r.Reject = *raw.Reject
+	} else if raw.AltReject != nil {
+		r.Reject = *raw.AltReject
+	}
+	if raw.RejectReason != nil {
+		r.RejectReason = *raw.RejectReason
+	} else if raw.AltRejectReason != nil {
+		r.RejectReason = *raw.AltRejectReason
+	}
+	if raw.RejectCode != nil {
+		r.RejectCode = *raw.RejectCode
+	} else if raw.AltRejectCode != nil {
+		r.RejectCode = *raw.AltRejectCode
+	}
+	return nil
 }
 
 // ModelRouteRequest describes the original request context offered to a model router plugin.
@@ -629,6 +690,9 @@ type HostModelExecutionRequest struct {
 	ForcedProvider string `json:"forced_provider,omitempty"`
 	// AuthID optionally locks execution to an exact credential ID.
 	AuthID string `json:"auth_id,omitempty"`
+	// ProxyURL optionally overrides the outbound proxy for this model execution only.
+	// Supported schemes are http, https, socks5, and socks5h.
+	ProxyURL string `json:"proxy_url,omitempty"`
 }
 
 // HostModelExecutionResponse describes a non-streaming host model execution response.
@@ -1065,7 +1129,7 @@ type RequestInterceptRequest struct {
 	Stream bool
 	// Headers contains the current upstream request headers.
 	Headers http.Header
-	// Body contains the current request payload.
+	// Body contains the current request payload. Treat it as read-only; modifications must be returned in RequestInterceptResponse.Body.
 	Body []byte
 	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
 	Metadata map[string]any
@@ -1402,6 +1466,10 @@ type ManagementResponse struct {
 
 // UsageRecord describes request usage and billing metadata.
 type UsageRecord struct {
+	// RequestID uniquely identifies this specific model execution instance (UUID v4).
+	RequestID string
+	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
+	TraceID string
 	// Provider identifies the upstream provider.
 	Provider string
 	// BaseURL is the upstream base URL configured for the request/credential when available.
@@ -1430,9 +1498,15 @@ type UsageRecord struct {
 	ReasoningEffort string
 	// ServiceTier records the requested or reported service tier.
 	ServiceTier string
+	// ResponseServiceTier stores the final tier reported by the upstream response.
+	ResponseServiceTier string
+	// ResponseModel stores the model name reported by the upstream response, empty when unknown.
+	ResponseModel string
 	// Generate reports whether the client requested actual generation.
 	// The host normalizes omitted usage.Record values to true before delivery.
 	Generate bool
+	// Stream reports whether the request was executed in streaming mode.
+	Stream bool
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.

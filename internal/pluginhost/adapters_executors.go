@@ -11,13 +11,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type executorManager interface {
@@ -926,9 +926,20 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	if len(data.Metadata) == 0 && auth != nil {
 		data.Metadata = cloneAnyMap(auth.Metadata)
 	}
-	if len(data.Attributes) == 0 && auth != nil {
-		data.Attributes = cloneStringMap(auth.Attributes)
+	if len(data.Attributes) == 0 {
+		if auth != nil {
+			data.Attributes = cloneStringMap(auth.Attributes)
+		}
+	} else if auth != nil {
+		attributes := cloneStringMap(data.Attributes)
+		for key, value := range auth.Attributes {
+			if _, exists := attributes[key]; !exists {
+				attributes[key] = value
+			}
+		}
+		data.Attributes = attributes
 	}
+	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}
@@ -938,7 +949,11 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	if !pluginResp.NextRefreshAfter.IsZero() {
 		data.NextRefreshAfter = pluginResp.NextRefreshAfter
 	}
-	next := a.host.AuthDataToCoreAuth(data, "", data.FileName)
+	path := ""
+	if auth != nil && auth.Attributes != nil {
+		path = auth.Attributes[coreauth.AttributePath]
+	}
+	next := a.host.AuthDataToCoreAuth(data, path, data.FileName)
 	if next == nil {
 		return nil, fmt.Errorf("plugin executor %s refresh returned invalid auth data", a.Identifier())
 	}
@@ -1040,7 +1055,7 @@ func buildExecutorRequest(host *Host, provider string, auth *coreauth.Auth, req 
 		StorageJSON:     storageJSONFromAuth(auth),
 		AuthMetadata:    cloneAnyMap(authMetadata(auth)),
 		AuthAttributes:  authAttributes(auth),
-		HTTPClient:      host.newHTTPClient(auth, provider),
+		HTTPClient:      host.newHTTPClientWithProxy(auth, opts.ProxyURL, provider),
 	}
 }
 

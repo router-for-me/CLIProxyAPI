@@ -20,9 +20,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 import runtime
 
 
-def request(port, path, key="", method="GET"):
+def request(port, path, key="", method="GET", data: bytes | None = None):
     headers = {"Authorization": "Bearer " + key} if key else {}
-    data = b"" if method == "POST" else None
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    elif method == "POST":
+        data = b""
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers, data=data, method=method)
     client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
@@ -91,6 +94,7 @@ def smoke(artifact_dir: Path):
             ephemeral_key = secrets.token_hex(24)
             configured_key = secrets.token_hex(24)
             reloaded_key = secrets.token_hex(24)
+            v8_key = secrets.token_hex(24)
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
                 port = sock.getsockname()[1]
@@ -148,6 +152,32 @@ def smoke(artifact_dir: Path):
                                         "old configuration key still accepted")
                         runtime.require(request(port, "/v1/models", ephemeral_key)[0] == 200,
                                         "ephemeral key lost during reload")
+                        # v8 configuration writes migrate the layout. The supervising
+                        # Desktop must keep its v0 control contract and runtime-only key.
+                        before_v8_read = cfg.read_bytes()
+                        v8_path = "/v8/management/config/access/api-keys"
+                        code, body = request(port, v8_path, management_key)
+                        runtime.require(code == 200 and json.loads(body) == [reloaded_key],
+                                        "v8 view did not expose the legacy configuration key")
+                        runtime.require(cfg.read_bytes() == before_v8_read,
+                                        "v8 read unexpectedly migrated persisted configuration")
+                        for key in ("", ephemeral_key):
+                            runtime.require(request(port, v8_path, key)[0] in (401, 403),
+                                            "v8 management authentication was bypassed")
+                        code, body = request(port, v8_path, management_key, "PUT",
+                                             json.dumps([v8_key]).encode())
+                        runtime.require(code == 200 and json.loads(body).get("config-version") == 8,
+                                        "v8 configuration mutation failed")
+                        wait_until(lambda: request(port, "/v1/models", v8_key)[0] == 200,
+                                   process, "v8 configuration reload")
+                        runtime.require(request(port, "/v1/models", reloaded_key)[0] in (401, 403),
+                                        "pre-v8 configuration key still accepted")
+                        runtime.require(request(port, "/v1/models", ephemeral_key)[0] == 200,
+                                        "ephemeral key lost during v8 layout migration")
+                        code, body = request(port, "/v0/management/runtime-info", management_key)
+                        runtime.require(code == 200 and json.loads(body).get("contract_version") == "1",
+                                        "v0 host control lost after v8 configuration migration")
+                        checks.append("v8 config migration preserves v0 host control and ephemeral authentication")
                         for path in case.rglob("*"):
                             if path.is_file() and path.name != "process.log":
                                 runtime.require(ephemeral_key.encode() not in path.read_bytes(),
@@ -164,7 +194,7 @@ def smoke(artifact_dir: Path):
                 log = case / "process.log"
                 if log.exists():
                     text = log.read_text(errors="replace")[-16000:]
-                    for secret in (management_key, ephemeral_key, configured_key, reloaded_key):
+                    for secret in (management_key, ephemeral_key, configured_key, reloaded_key, v8_key):
                         text = text.replace(secret, "[REDACTED]")
                     print(text, file=sys.stderr)
                 raise

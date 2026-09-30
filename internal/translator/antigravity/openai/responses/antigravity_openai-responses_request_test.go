@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -591,17 +591,26 @@ func TestConvertOpenAIResponsesRequestToAntigravity_ReasoningSummaries(t *testin
 		{
 			name:       "explicit summary preserved without overriding",
 			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","summary":"auto"},"input":"hello"}`,
-			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity leaves explicit summary to ApplySummaryConfig downstream
+			wantExists: true,
+			wantVal:    true,
 		},
 		{
 			name:       "explicit null summary preserved without enabling",
 			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","summary":null},"input":"hello"}`,
-			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity does not enable includeThoughts on null summary
+			wantExists: true,
+			wantVal:    false,
+		},
+		{
+			name:       "explicit none summary disables includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","summary":"none"},"input":"hello"}`,
+			wantExists: true,
+			wantVal:    false,
 		},
 		{
 			name:       "explicit generate_summary preserved",
 			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","generate_summary":"detailed"},"input":"hello"}`,
-			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity leaves explicit summary to ApplySummaryConfig downstream
+			wantExists: true,
+			wantVal:    true,
 		},
 	}
 

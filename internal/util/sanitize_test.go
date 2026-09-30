@@ -6,6 +6,43 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestSanitizeClaudeFunctionName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"Normal", "valid_name", "valid_name"},
+		{"With Dots", "name.with.dots", "name_with_dots"},
+		{"With Colons", "name:with:colons", "name_with_colons"},
+		{"With Dashes", "name-with-dashes", "name-with-dashes"},
+		{"MCP Tool with Dots and Colons", "mcp.server.special:get_time", "mcp_server_special_get_time"},
+		{"With Slashes", "server/action", "server_action"},
+		{"Invalid Characters", "name!with@invalid#chars", "name_with_invalid_chars"},
+		{"Spaces", "name with spaces", "name_with_spaces"},
+		{"Non-ASCII", "name_with_你好_chars", "name_with____chars"},
+		{"Empty", "", ""},
+		{"Single character valid", "a", "a"},
+		{"Single character invalid", "@", "_"},
+		{"Starts with digit", "123name", "123name"},
+		{"Starts with dash", "-name", "-name"},
+		{"Exactly 64 chars", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact"},
+		{"Too long (65 chars)", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charactX", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SanitizeClaudeFunctionName(tt.input)
+			if got != tt.expected {
+				t.Errorf("SanitizeClaudeFunctionName(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+			if len(got) > 64 {
+				t.Errorf("SanitizeClaudeFunctionName(%q) result too long: %d", tt.input, len(got))
+			}
+		})
+	}
+}
+
 func TestSanitizeFunctionName(t *testing.T) {
 	tests := []struct {
 		name     string
