@@ -137,18 +137,18 @@ if docker ps -a --format '{{.Names}}' | grep -Fxq '${CONTAINER_NAME}'; then
     fi
 fi
 
-docker run -d \
-    --name '${CONTAINER_NAME}' \
-    --restart unless-stopped \
-    --platform linux/amd64 \
-    -p '${HTTP_PORT}:8317' \
-    -p '${SSH_PORT}:22' \
-    ${CALLBACK_PORT_ARGS} \
-    -v '${REMOTE_APP_DIR}:/app' \
-    -v '${REMOTE_DATA_DIR}:/data' \
-    -e APP_USER='${APP_USER}' \
-    -e APP_PASSWORD='${APP_PASSWORD}' \
-    -e ROOT_PASSWORD='${ROOT_PASSWORD}' \
+docker run -d \\
+    --name '${CONTAINER_NAME}' \\
+    --restart unless-stopped \\
+    --platform linux/amd64 \\
+    -p '${HTTP_PORT}:8317' \\
+    -p '${SSH_PORT}:22' \\
+    ${CALLBACK_PORT_ARGS} \\
+    -v '${REMOTE_APP_DIR}:/app' \\
+    -v '${REMOTE_DATA_DIR}:/data' \\
+    -e APP_USER='${APP_USER}' \\
+    -e APP_PASSWORD='${APP_PASSWORD}' \\
+    -e ROOT_PASSWORD='${ROOT_PASSWORD}' \\
     '${IMAGE_NAME}' >/dev/null
 
 docker ps --filter 'name=^/${CONTAINER_NAME}$'
