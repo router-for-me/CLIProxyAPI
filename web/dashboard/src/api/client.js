@@ -832,6 +832,9 @@ export async function runLiteLLMSyncNixLLM({
 
 // --- Models Catalog + Pricing -----------------------------------------------
 
+// listModelsCatalog lists catalog rows. When distinctIds=true the backend
+// returns one row per model id; in that mode each row additionally carries
+// `provider_count` (the number of catalog rows sharing the model id).
 export async function listModelsCatalog({
   page = 1,
   pageSize = 25,
