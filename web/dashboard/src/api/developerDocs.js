@@ -853,7 +853,7 @@ export const sections = [
         examplePayload: null,
         exampleCurl: `curl -s "${'{API_BASE}'}/usage-stats/totals?from=2026-07-22T00:00:00Z&to=2026-07-22T23:59:59Z&provider=openai" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
         responses: [
-          { status: 200, label: 'OK', body: `{"totals":{"request_count":1024,"failed_count":12,"total_tokens":450000,"cost_usd":12.34},"failure_rate":0.012}` },
+          { status: 200, label: 'OK', body: `{"totals":{"request_count":1024,"failed_count":12,"total_tokens":450000,"cost_usd":12.34},"failure_rate":1.158,"success_count":1024,"total_attempts":1036}` },
         ],
       },
       {

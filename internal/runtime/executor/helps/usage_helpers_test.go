@@ -564,6 +564,63 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestUsageReporterTrackHTTPClientCapturesEndpoint(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "claude", "claude-opus-4-6", nil)
+	client := reporter.TrackHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Request:    req,
+			}, nil
+		}),
+	})
+	req, errNewRequest := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", strings.NewReader("{}"))
+	if errNewRequest != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", errNewRequest)
+	}
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		t.Fatalf("Do() error = %v", errDo)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatalf("response body close error = %v", errClose)
+	}
+	if got := reporter.endpoint; got != "https://api.anthropic.com/v1/messages?beta=true" {
+		t.Fatalf("endpoint = %q, want the concrete upstream URL", got)
+	}
+	// A pre-set endpoint must win over a later round-tripper capture.
+	pre := NewUsageReporter(context.Background(), "openai-compat", "gpt-5.4", nil)
+	pre.SetEndpoint("https://preset.invalid/keep")
+	preClient := pre.TrackHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Request:    req,
+			}, nil
+		}),
+	})
+	second, errReq2 := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://other.invalid/x", strings.NewReader("{}"))
+	if errReq2 != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", errReq2)
+	}
+	resp2, errDo2 := preClient.Do(second)
+	if errDo2 != nil {
+		t.Fatalf("Do() error = %v", errDo2)
+	}
+	if errClose := resp2.Body.Close(); errClose != nil {
+		t.Fatalf("response body close error = %v", errClose)
+	}
+	if got := pre.endpoint; got != "https://preset.invalid/keep" {
+		t.Fatalf("endpoint = %q, want the pre-set value to win", got)
+	}
+}
+
 func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 	delay := 40 * time.Millisecond
 	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)

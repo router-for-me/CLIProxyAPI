@@ -77,10 +77,14 @@ type UsageErrorRow struct {
 	// the management layer's FillOfficialProvider. Empty when no catalog row
 	// matches (file-only deployments, unknown model) — callers should fall back
 	// to Provider. Never persisted in usage_errors itself.
-	OfficialProvider    string  `json:"official_provider,omitempty"`
-	ExecutorType        string  `json:"executor_type,omitempty"`
-	Model               string  `json:"model"`
-	Alias               string  `json:"alias,omitempty"`
+	OfficialProvider string `json:"official_provider,omitempty"`
+	ExecutorType     string `json:"executor_type,omitempty"`
+	Model            string `json:"model"`
+	Alias            string `json:"alias,omitempty"`
+	// ServedModel is the model the upstream response reported serving. It
+	// differs from Model when the provider silently substituted a different
+	// model; empty when the upstream did not report one.
+	ServedModel         string  `json:"served_model,omitempty"`
 	RouteModel          string  `json:"route_model,omitempty"`
 	Endpoint            string  `json:"endpoint,omitempty"`
 	ClientIP            string  `json:"client_ip,omitempty"`
@@ -149,6 +153,7 @@ const errorRowSelectColumns = `
 	e.id, e.request_id, COALESCE(e.api_key_id, ''),
 	COALESCE(NULLIF(k.key_alias, ''), NULLIF(lk.key_alias, ''), lk.name, k.name, '') AS key_alias,
 	e.provider, e.executor_type, e.model, e.alias, e.route_model, e.endpoint,
+	e.served_model,
 	e.client_ip, e.forwarded_for,
 	e.auth_type,
 	e.source, e.reasoning_effort, e.service_tier, e.response_service_tier,
@@ -183,10 +188,11 @@ func scanErrorRow(scanner interface {
 	Scan(dest ...any) error
 }) (UsageErrorRow, error) {
 	var r UsageErrorRow
-	var routeModel, clientIP, forwardedFor sql.NullString
+	var routeModel, servedModel, clientIP, forwardedFor sql.NullString
 	if err := scanner.Scan(
 		&r.ID, &r.RequestID, &r.APIKeyID, &r.KeyAlias,
 		&r.Provider, &r.ExecutorType, &r.Model, &r.Alias, &routeModel, &r.Endpoint,
+		&servedModel,
 		&clientIP, &forwardedFor,
 		&r.AuthType,
 		&r.Source, &r.ReasoningEffort, &r.ServiceTier, &r.ResponseServiceTier,
@@ -199,6 +205,9 @@ func scanErrorRow(scanner interface {
 	}
 	if routeModel.Valid {
 		r.RouteModel = routeModel.String
+	}
+	if servedModel.Valid {
+		r.ServedModel = servedModel.String
 	}
 	if clientIP.Valid {
 		r.ClientIP = clientIP.String

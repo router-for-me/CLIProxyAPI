@@ -38,21 +38,26 @@ func (h *Handler) GetInternalUserTotals(c *gin.Context) {
 		return
 	}
 	// failed_count is sourced from usage_errors (failed attempts no longer
-	// live in usage_events).
+	// live in usage_events). request_count counts only successes, so the
+	// failure rate is computed over total attempts (successes + failures) to
+	// stay meaningful under credential failover.
 	failedCount, err := usage.SelectErrorCount(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
 	totals.FailedCount = failedCount
+	totalAttempts := totals.RequestCount + totals.FailedCount
 	var failureRate float64
-	if totals.RequestCount > 0 {
-		failureRate = float64(totals.FailedCount) / float64(totals.RequestCount) * 100
+	if totalAttempts > 0 {
+		failureRate = float64(totals.FailedCount) / float64(totalAttempts) * 100
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"totals":       totals,
-		"failure_rate": failureRate,
-		"user_id":      userID,
+		"totals":         totals,
+		"failure_rate":   failureRate,
+		"success_count":  totals.RequestCount,
+		"total_attempts": totalAttempts,
+		"user_id":        userID,
 	})
 }
 

@@ -436,6 +436,12 @@ func TestUpstreamProviderClaudeAPIKeyTwoEntriesRequestResponse(t *testing.T) {
 	if !strings.Contains(encoded, `"provider_key":"claude:42"`) {
 		t.Fatalf("response missing compound provider_key: %s", encoded)
 	}
+	// executor_key drops the rowID so it matches the bare executor channel
+	// that executors stamp into usage_events.provider and upstream_sync_log
+	// (the Logs tab filters by this value).
+	if !strings.Contains(encoded, `"executor_key":"claude"`) {
+		t.Fatalf("response missing bare executor_key: %s", encoded)
+	}
 	if !strings.Contains(encoded, `"weight":7`) || !strings.Contains(encoded, `"weight":9`) {
 		t.Fatalf("response missing weight fields: %s", encoded)
 	}

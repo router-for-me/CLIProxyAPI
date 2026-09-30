@@ -13,7 +13,7 @@ import {
   PRESETS, presetToRange, toUTC, toUTCFromTZ, EVENTS_PAGE_SIZE,
   TIMEZONES, loadTimezone, saveTimezone, formatInTZ, tzAbbreviation,
   TokenBreakdownCard, ChartSkeleton,
-  FilterSelect, DetailRow,
+  FilterSelect, DetailRow, CopyButton, FailoverHistory,
 } from './usageShared.jsx';
 
 // ErrorsPage renders the failed-attempt stream (usage_errors table) as a
@@ -77,9 +77,11 @@ export default function ErrorsPage() {
   // from the same totals endpoint that Usage Stats uses, scoped to the same
   // filter so the two pages agree on what "this window" means.
   const totals = useAsync(() => getUsageTotals(baseFilter), [JSON.stringify(baseFilter)]);
+  // List filter dropdowns by time window only — see RecentEventsPage for why
+  // scoping by the active filter would collapse the menus on refresh.
   const filterOptions = useAsync(
-    () => getUsageFilterOptions(baseFilter),
-    [JSON.stringify({ from: baseFilter.from, to: baseFilter.to })],
+    () => getUsageFilterOptions({ from: baseFilter.from, to: baseFilter.to }),
+    [baseFilter.from, baseFilter.to],
   );
 
   const [errorsPage, setErrorsPage] = useState(1);
@@ -118,6 +120,7 @@ export default function ErrorsPage() {
 
   const failedCount = totals.data?.totals?.failed_count || 0;
   const failureRate = totals.data?.failure_rate ?? 0;
+  const totalAttempts = totals.data?.total_attempts ?? 0;
   const totalErrors = errors.data?.total || 0;
 
   return (
@@ -183,7 +186,7 @@ export default function ErrorsPage() {
             </select>
           </label>
         </div>
-        <div className="grid grid--4">
+        <div className="grid grid--3">
           <div className="form__row" style={{ marginBottom: 0 }}>
             <label className="form__label">API Key</label>
             <FilterSelect
@@ -213,18 +216,6 @@ export default function ErrorsPage() {
               onChange={(v) => updateFilter({ model: v })}
               anyLabel="any model"
             />
-          </div>
-          <div className="form__row" style={{ marginBottom: 0 }}>
-            <label className="form__label">Interval</label>
-            <select
-              value={rangeParams.interval}
-              onChange={(e) => updateFilter({ interval: e.target.value })}
-              disabled={!filter.useCustomRange}
-            >
-              <option value="minute">minute</option>
-              <option value="hour">hour</option>
-              <option value="day">day</option>
-            </select>
           </div>
         </div>
         <div className="form__row" style={{ marginBottom: 0, marginTop: 8 }}>
@@ -256,17 +247,19 @@ export default function ErrorsPage() {
         <div className="stat-card">
           <div className="stat-card__label">Errors in Window</div>
           <div className="stat-card__value">{totalErrors.toLocaleString()}</div>
-          <div className="stat-card__hint">across the current page filter</div>
+          <div className="stat-card__hint">failed attempts matching the current filter</div>
         </div>
         <div className="stat-card">
-          <div className="stat-card__label">Failed Requests</div>
+          <div className="stat-card__label">Failed Attempts</div>
           <div className="stat-card__value">{failedCount.toLocaleString()}</div>
-          <div className="stat-card__hint">recorded in usage_events for this window</div>
+          <div className="stat-card__hint">
+            {totalAttempts > 0 ? `of ${totalAttempts.toLocaleString()} total attempts` : 'in this window'}
+          </div>
         </div>
         <div className="stat-card">
           <div className="stat-card__label">Failure Rate</div>
           <div className="stat-card__value">{failureRate.toFixed(1)}%</div>
-          <div className="stat-card__hint">failed / total requests</div>
+          <div className="stat-card__hint">failed attempts / total attempts</div>
         </div>
       </div>
 
@@ -406,44 +399,83 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick, timezone 
 function ErrorDetailModal({ id, timezone, onClose }) {
   const detail = useAsync(() => getUsageError(id), [id]);
   const e = detail.data?.error_event;
+  const substituted = Boolean(e?.served_model && e?.model && e.served_model !== e.model);
   return (
     <Modal title={`Error #${id}`} onClose={onClose} size="lg">
       {detail.loading && <Spinner label="Loading…" />}
       {detail.error && <ErrorBanner error={detail.error} />}
       {!detail.loading && !detail.error && e && (
-        <div className="grid grid--2" style={{ gap: '6px 24px' }}>
-          <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
-          <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
-          <DetailRow label="Request ID" value={e.request_id || '—'} mono />
-          <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
-          <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
-          <DetailRow label="Provider Official" value={e.official_provider || e.provider || '—'} />
-          <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
-          <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
-          <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
-          <DetailRow label="Route Model" value={e.route_model || '—'} mono />
-          <DetailRow label="Executor" value={e.executor_type || '—'} />
-          <DetailRow label="Auth Type" value={e.auth_type || '—'} />
-          <DetailRow label="Source" value={e.source || '—'} />
-          <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
-          <DetailRow label="Service Tier" value={e.service_tier || '—'} />
-          <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
-          <TokenBreakdownCard e={e} />
-          <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
-          <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
-          <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
-          <DetailRow label="Status Code" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
-          <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
-          <DetailRow label="Target URL" value={e.endpoint || '—'} mono />
-          <DetailRow label="Client IP" value={e.client_ip || '—'} mono />
-          <DetailRow label="Forwarded For" value={e.forwarded_for || '—'} mono />
+        <>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
+            <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
+          </div>
+
+          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Routing</div>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <div className="detail-row">
+              <div className="detail-row__label">Request ID</div>
+              <div className="detail-row__value mono">
+                {e.request_id || '—'}
+                <CopyButton value={e.request_id} label="request id" />
+              </div>
+            </div>
+            <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
+            <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
+            <DetailRow label="Provider Official" value={e.official_provider || e.provider || '—'} />
+            <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
+            <DetailRow label="Route Model" value={e.route_model || '—'} mono />
+            <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
+            <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
+            <div className="detail-row">
+              <div className="detail-row__label">Model (served)</div>
+              <div className="detail-row__value mono">
+                {e.served_model || '—'}
+                {substituted && <span className="badge badge--warn" title="Upstream served a different model than requested">substituted</span>}
+              </div>
+            </div>
+            <DetailRow label="Executor" value={e.executor_type || '—'} />
+            <DetailRow label="Auth Type" value={e.auth_type || '—'} />
+            <DetailRow label="Source" value={e.source || '—'} />
+            <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
+            <DetailRow label="Service Tier" value={e.service_tier || '—'} />
+            <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
+            <DetailRow label="Target URL" value={e.endpoint || '—'} mono />
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <TokenBreakdownCard e={e} />
+          </div>
+
+          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Timing & cost</div>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
+            <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
+            <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
+            <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
+          </div>
+
+          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Client</div>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <DetailRow label="Client IP" value={e.client_ip || '—'} mono />
+            <DetailRow label="Forwarded For" value={e.forwarded_for || '—'} mono />
+            <DetailRow label="Status Code" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
+          </div>
+
           <div className="detail-row__block">
             <div className="detail-row__block-label">Error message</div>
             <div className="mono" style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: 4 }}>
               {e.error_message || '—'}
             </div>
           </div>
-        </div>
+
+          <FailoverHistory
+            requestId={e.request_id}
+            currentId={e.id}
+            currentKind="error"
+            timezone={timezone}
+          />
+        </>
       )}
       {!detail.loading && !detail.error && !e && <EmptyState title="Error not found" />}
     </Modal>

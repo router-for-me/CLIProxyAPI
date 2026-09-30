@@ -3073,6 +3073,74 @@ tr:focus-within .row-actions {
   color: var(--text-dim);
   margin-bottom: 6px;
 }
+/* Inline copy affordance next to detail values (e.g. Request ID). */
+.detail-row__copy {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 18px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.detail-row__copy:hover { color: var(--text); border-color: var(--accent); }
+.detail-row__copy:active { transform: translateY(1px); }
+
+/* Failover history timeline (event/error detail modals). */
+.failover {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.failover__item {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.failover__item--current { border-color: var(--warning, #fbbf24); }
+.failover__item--success { border-color: var(--success, #34d399); background: transparent; }
+.failover__index {
+  flex: 0 0 20px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.failover__body { flex: 1 1 auto; min-width: 0; }
+.failover__line { display: flex; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.failover__status {
+  margin-left: 8px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  font-size: 11px;
+}
+.failover__error {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Small warning badge (e.g. model substitution). */
+.badge--warn {
+  margin-left: 6px;
+  background: var(--warning, #fbbf24);
+  color: #1a1a1a;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  vertical-align: middle;
+}
 
 /* =========================================================================
    Developer / API Docs page

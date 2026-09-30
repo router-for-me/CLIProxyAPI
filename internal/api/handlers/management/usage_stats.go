@@ -243,22 +243,27 @@ func (h *Handler) GetUsageTotals(c *gin.Context) {
 		return
 	}
 	// failed_count is sourced from usage_errors (failed attempts are no longer
-	// stored in usage_events), keeping the dashboard's failure_rate tile
-	// meaningful as "errors / successful requests".
+	// stored in usage_events). request_count counts only SUCCESSFUL requests,
+	// so the failure rate must be computed over total attempts
+	// (successes + failed attempts) rather than successes alone — otherwise a
+	// request that failed over across several credentials before succeeding
+	// would push the rate above 100%.
 	failedCount, err := usage.SelectErrorCount(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
 	totals.FailedCount = failedCount
-	// Compute derived metrics for the dashboard.
+	totalAttempts := totals.RequestCount + totals.FailedCount
 	var failureRate float64
-	if totals.RequestCount > 0 {
-		failureRate = float64(totals.FailedCount) / float64(totals.RequestCount) * 100
+	if totalAttempts > 0 {
+		failureRate = float64(totals.FailedCount) / float64(totalAttempts) * 100
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"totals":       totals,
-		"failure_rate": failureRate,
+		"totals":         totals,
+		"failure_rate":   failureRate,
+		"success_count":  totals.RequestCount,
+		"total_attempts": totalAttempts,
 	})
 }
 

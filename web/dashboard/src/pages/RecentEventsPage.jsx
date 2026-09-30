@@ -81,9 +81,12 @@ export default function RecentEventsPage() {
   // Same totals endpoint Usage Stats uses, scoped to the same filter so the
   // two pages agree on what "this window" means.
   const totals = useAsync(() => getUsageTotals(baseFilter), [JSON.stringify(baseFilter)]);
+  // Filter dropdowns are listed with only the time window (never the currently
+  // selected api_key/provider/model): scoping them by the active filter would
+  // collapse each menu to the one already-selected value after any refresh.
   const filterOptions = useAsync(
-    () => getUsageFilterOptions(baseFilter),
-    [JSON.stringify({ from: baseFilter.from, to: baseFilter.to })],
+    () => getUsageFilterOptions({ from: baseFilter.from, to: baseFilter.to }),
+    [baseFilter.from, baseFilter.to],
   );
 
   const [eventsPage, setEventsPage] = useState(1);
@@ -124,6 +127,7 @@ export default function RecentEventsPage() {
 
   const eventCount = totals.data?.totals?.request_count || 0;
   const failedCount = totals.data?.totals?.failed_count || 0;
+  const totalAttempts = totals.data?.total_attempts ?? (eventCount + failedCount);
   const failureRate = totals.data?.failure_rate ?? 0;
 
   return (
@@ -189,7 +193,7 @@ export default function RecentEventsPage() {
             </select>
           </label>
         </div>
-        <div className="grid grid--4">
+        <div className="grid grid--3">
           <div className="form__row" style={{ marginBottom: 0 }}>
             <label className="form__label">API Key</label>
             <FilterSelect
@@ -219,18 +223,6 @@ export default function RecentEventsPage() {
               onChange={(v) => updateFilter({ model: v })}
               anyLabel="any model"
             />
-          </div>
-          <div className="form__row" style={{ marginBottom: 0 }}>
-            <label className="form__label">Interval</label>
-            <select
-              value={rangeParams.interval}
-              onChange={(e) => updateFilter({ interval: e.target.value })}
-              disabled={!filter.useCustomRange}
-            >
-              <option value="minute">minute</option>
-              <option value="hour">hour</option>
-              <option value="day">day</option>
-            </select>
           </div>
         </div>
         <div className="form__row" style={{ marginBottom: 0, marginTop: 8 }}>
@@ -262,12 +254,14 @@ export default function RecentEventsPage() {
         <div className="stat-card">
           <div className="stat-card__label">Requests in Window</div>
           <div className="stat-card__value">{eventCount.toLocaleString()}</div>
-          <div className="stat-card__hint">across the current window filter</div>
+          <div className="stat-card__hint">successful requests in this window</div>
         </div>
         <div className="stat-card">
-          <div className="stat-card__label">Failed</div>
+          <div className="stat-card__label">Failed Attempts</div>
           <div className="stat-card__value">{failedCount.toLocaleString()}</div>
-          <div className="stat-card__hint">{failureRate.toFixed(1)}% of window</div>
+          <div className="stat-card__hint">
+            {failureRate.toFixed(1)}% of {totalAttempts.toLocaleString()} attempts
+          </div>
         </div>
         <div className="stat-card">
           <div className="stat-card__label">Total Cost</div>

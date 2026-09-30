@@ -25,9 +25,19 @@ import (
 // upstream provider so an operator can pin a model to a provider even when
 // no live auth has registered for it yet (the in-memory registry would
 // otherwise hide such providers — see GetModelProviders).
+//
+// ExecutorKey is the bare executor/channel identifier (rowID dropped) — the
+// value executors stamp into usage_events.provider and the auth manager
+// stamps into upstream_sync_log.provider. The dashboard's per-provider Logs
+// tab filters the Recent Events / Sync events views by this key so they
+// actually match rows (the compound ProviderKey never appears in those
+// columns). Model-health registry keys may be entry-scoped compound keys
+// ("claude:42:key-7"), so the Logs tab matches those by ProviderKey/exact or
+// ExecutorKey prefix.
 type UpstreamProviderResponse struct {
 	store.UpstreamProvider
 	ProviderKey string `json:"provider_key"`
+	ExecutorKey string `json:"executor_key"`
 }
 
 // toUpstreamProviderResponse wraps a store row with its computed provider key.
@@ -35,6 +45,7 @@ func toUpstreamProviderResponse(p store.UpstreamProvider) UpstreamProviderRespon
 	return UpstreamProviderResponse{
 		UpstreamProvider: p,
 		ProviderKey:      util.UpstreamProviderKey(p.ProviderType, p.Name, p.ID),
+		ExecutorKey:      util.UpstreamProviderKey(p.ProviderType, p.Name, 0),
 	}
 }
 

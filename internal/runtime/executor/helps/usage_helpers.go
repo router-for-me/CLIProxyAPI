@@ -162,6 +162,13 @@ func (r *UsageReporter) SetEndpoint(endpoint string) {
 	if r == nil {
 		return
 	}
+	// First non-empty value wins. The tracked HTTP round-tripper records the
+	// concrete upstream URL on the first request; callers that pre-set the
+	// endpoint (e.g. the OpenAI-compatible executor) therefore keep their
+	// value, and later redirects/retries never overwrite the primary target.
+	if r.endpoint != "" {
+		return
+	}
 	r.endpoint = strings.TrimSpace(endpoint)
 }
 
@@ -552,6 +559,13 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req != nil && req.URL != nil {
+		// Record the concrete upstream URL this attempt actually hit, so the
+		// failed-attempt detail (usage_errors.endpoint) can show a Target URL
+		// for every executor — not just the OpenAI-compatible one that calls
+		// SetEndpoint explicitly. First non-empty wins (see SetEndpoint).
+		t.reporter.SetEndpoint(req.URL.String())
+	}
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
 	if errRoundTrip != nil {

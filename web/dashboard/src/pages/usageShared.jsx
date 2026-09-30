@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { getUsageEvent } from '../api/client.js';
+import React, { useMemo, useState } from 'react';
+import { getUsageEvent, getUsageErrors } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import {
   Spinner, ErrorBanner, EmptyState, Modal,
@@ -546,6 +546,123 @@ export function DetailRow({ label, value, mono }) {
   );
 }
 
+// CopyButton copies `value` to the clipboard and shows a transient "copied"
+// confirmation. Falls back to the legacy execCommand path when the async
+// Clipboard API is unavailable (http origins / older browsers). Renders
+// nothing when value is empty so it can be dropped inline without guarding
+// at every call site.
+export function CopyButton({ value, label = 'Copy' }) {
+  const [copied, setCopied] = useState(false);
+  if (!value) return null;
+  function copy() {
+    const done = () => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(String(value)).then(done).catch(() => { /* ignore */ });
+        return;
+      }
+    } catch { /* fall through to execCommand */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = String(value);
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      done();
+    } catch { /* ignore */ }
+  }
+  return (
+    <button
+      type="button"
+      className="detail-row__copy"
+      onClick={copy}
+      title={`Copy ${label}`}
+      aria-label={`Copy ${label}`}
+    >
+      {copied ? '✓ copied' : '⧉'}
+    </button>
+  );
+}
+
+// FailoverHistory renders the failed attempts that preceded the currently-viewed
+// usage row, correlated by request_id. A request that fails over across N
+// credentials produces N usage_errors rows sharing one request_id plus (on
+// eventual success) one usage_events row — this timeline surfaces those hidden
+// retries so an operator can see the full routing path. Renders nothing when
+// no request_id is available or no matching failed attempts exist. `currentKind`
+// is 'event' (the current row is the successful attempt) or 'error' (the current
+// row is one of the failures).
+export function FailoverHistory({ requestId, currentId, currentKind, timezone }) {
+  const attempts = useAsync(
+    () => (requestId ? getUsageErrors({ request_id: requestId, page_size: 50 }) : Promise.resolve(null)),
+    [requestId],
+  );
+  const rows = attempts.data?.errors || [];
+  // Nothing to show: no request id, or this request never failed over.
+  if (!requestId || attempts.error || (!attempts.loading && rows.length === 0)) {
+    return null;
+  }
+  // Newest-first from the API; the attempts happened oldest→newest, so flip.
+  const ordered = [...rows].sort((a, b) => new Date(a.requested_at) - new Date(b.requested_at));
+  const total = ordered.length + (currentKind === 'event' ? 1 : 0);
+  const succeeded = currentKind === 'event';
+
+  return (
+    <div className="detail-row__block">
+      <div className="detail-row__block-label">
+        Failover history
+        <span className="dim" style={{ fontSize: 11, marginLeft: 8 }}>
+          {ordered.length} failed attempt{ordered.length === 1 ? '' : 's'}
+          {succeeded ? ' → succeeded' : ` · attempt ${ordered.length} of ${total}`}
+        </span>
+      </div>
+      {attempts.loading && <Spinner label="Loading attempts…" />}
+      {!attempts.loading && (
+        <ol className="failover">
+          {ordered.map((a, i) => {
+            const isCurrent = currentKind === 'error' && Number(a.id) === Number(currentId);
+            return (
+              <li key={String(a.id)} className={`failover__item${isCurrent ? ' failover__item--current' : ''}`}>
+                <span className="failover__index">{i + 1}</span>
+                <div className="failover__body">
+                  <div className="failover__line">
+                    <span className="mono">{a.official_provider || a.provider || '—'}</span>
+                    <span className="mono dim" style={{ marginLeft: 8 }}>{a.alias || a.model || '—'}</span>
+                    <span className="failover__status">{a.fail_status_code || '—'}</span>
+                    {a.latency_ms ? (
+                      <span className="dim mono" style={{ marginLeft: 8 }}>{a.latency_ms} ms</span>
+                    ) : null}
+                    <span className="dim mono" style={{ marginLeft: 8 }}>
+                      {a.requested_at ? formatInTZ(a.requested_at, timezone) : ''}
+                    </span>
+                  </div>
+                  {a.error_message && (
+                    <div className="failover__error mono" title={a.error_message}>{a.error_message}</div>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+          {succeeded && (
+            <li className="failover__item failover__item--success">
+              <span className="failover__index">✓</span>
+              <div className="failover__body">
+                <div className="failover__line dim">routed to a healthy credential</div>
+              </div>
+            </li>
+          )}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 // UsageToolbar renders the shared preset + custom-range + filter select bar.
 // Lifted so the Events and Errors pages stay visually consistent. The caller
 // owns the filter state and the change handlers; this component is presentational.
@@ -751,45 +868,86 @@ export function EventsTableBody({ events, page, pageSize, onPage, onRowClick, ti
 export function EventDetailModal({ id, timezone, onClose }) {
   const detail = useAsync(() => getUsageEvent(id), [id]);
   const e = detail.data?.event;
+  // A silent upstream substitution is when the served model differs from the
+  // resolved model. Surface it explicitly rather than burying it in a field.
+  const substituted = Boolean(e?.served_model && e?.model && e.served_model !== e.model);
   return (
     <Modal title={`Event #${id}`} onClose={onClose} size="lg">
       {detail.loading && <Spinner label="Loading…" />}
       {detail.error && <ErrorBanner error={detail.error} />}
       {!detail.loading && !detail.error && e && (
-        <div className="grid grid--2" style={{ gap: '6px 24px' }}>
-          <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
-          <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
-          <DetailRow label="Request ID" value={e.request_id || '—'} mono />
-          <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
-          <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
-          <DetailRow label="Provider Official" value={e.official_provider || e.provider || '—'} />
-          <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
-          <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
-          <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
-          <DetailRow label="Executor" value={e.executor_type || '—'} />
-          <DetailRow label="Auth Type" value={e.auth_type || '—'} />
-          <DetailRow label="Source" value={e.source || '—'} />
-          <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
-          <DetailRow label="Service Tier" value={e.service_tier || '—'} />
-          <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
-          <TokenBreakdownCard e={e} />
-          <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
-          {Number(e.discount_pct || 0) > 0 && (
-            <DetailRow
-              label="Discount"
-              value={`${e.discount_pct}% (was $${(e.original_cost_usd || 0).toFixed(4)})`}
-              mono
-            />
-          )}
-          <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
-          <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
-          <DetailRow label="Failed" value={e.failed ? 'yes' : 'no'} mono />
-          <DetailRow label="Fail Status" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
-          <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
-          <DetailRow label="Endpoint" value={e.endpoint || '—'} mono />
-          <DetailRow label="Client IP" value={e.client_ip || '—'} mono />
-          <DetailRow label="Forwarded For" value={e.forwarded_for || '—'} mono />
-        </div>
+        <>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
+            <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
+          </div>
+
+          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Routing</div>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <div className="detail-row">
+              <div className="detail-row__label">Request ID</div>
+              <div className="detail-row__value mono">
+                {e.request_id || '—'}
+                <CopyButton value={e.request_id} label="request id" />
+              </div>
+            </div>
+            <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
+            <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
+            <DetailRow label="Provider Official" value={e.official_provider || e.provider || '—'} />
+            <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
+            <DetailRow label="Route Model" value={e.route_model || '—'} mono />
+            <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
+            <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
+            <div className="detail-row">
+              <div className="detail-row__label">Model (served)</div>
+              <div className="detail-row__value mono">
+                {e.served_model || '—'}
+                {substituted && <span className="badge badge--warn" title="Upstream served a different model than requested">substituted</span>}
+              </div>
+            </div>
+            <DetailRow label="Executor" value={e.executor_type || '—'} />
+            <DetailRow label="Auth Type" value={e.auth_type || '—'} />
+            <DetailRow label="Source" value={e.source || '—'} />
+            <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
+            <DetailRow label="Service Tier" value={e.service_tier || '—'} />
+            <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
+            <DetailRow label="Endpoint" value={e.endpoint || '—'} mono />
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <TokenBreakdownCard e={e} />
+          </div>
+
+          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Timing & cost</div>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
+            {Number(e.discount_pct || 0) > 0 && (
+              <DetailRow
+                label="Discount"
+                value={`${e.discount_pct}% (was $${(e.original_cost_usd || 0).toFixed(4)})`}
+                mono
+              />
+            )}
+            <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
+            <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
+          </div>
+
+          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Client</div>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <DetailRow label="Client IP" value={e.client_ip || '—'} mono />
+            <DetailRow label="Forwarded For" value={e.forwarded_for || '—'} mono />
+            <DetailRow label="Failed" value={e.failed ? 'yes' : 'no'} mono />
+            <DetailRow label="Fail Status" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
+            <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
+          </div>
+
+          <FailoverHistory
+            requestId={e.request_id}
+            currentId={e.id}
+            currentKind="event"
+            timezone={timezone}
+          />
+        </>
       )}
       {!detail.loading && !detail.error && !e && <EmptyState title="Event not found" />}
     </Modal>

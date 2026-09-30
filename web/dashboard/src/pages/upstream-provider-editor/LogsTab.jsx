@@ -37,6 +37,7 @@ import {
 } from '../../api/client.js';
 import { useAsync } from '../../hooks/useAsync.js';
 import { ErrorBanner } from '../../components/Primitives.jsx';
+import { useEditorState } from './useEditorState.jsx';
 
 // Maximum rows embedded per sub-section. The plan asks for `limit: 50`;
 // getUpstreamSyncLog + getModelHealthLog take `page_size`, getUsageEvents
@@ -241,13 +242,38 @@ function rowToHealthEvent(row) {
 
 // --- Sub-sections ----------------------------------------------------------
 
-function SyncEventsSection({ providerId }) {
+// useProviderKeys resolves the two provider identifiers the backend uses so
+// the embedded Logs sections can filter by the value that actually appears in
+// each data source. The bare `executor_key` (e.g. "claude", "openai-compatible-opencode")
+// is what executors stamp into usage_events.provider and the auth manager
+// stamps into upstream_sync_log.provider; `provider_key` (e.g. "claude:42") is
+// the compound routing/registry key model-health rows may carry. Falls back to
+// the raw route id so the sections still narrow server-side when the provider
+// row has not loaded yet.
+function useProviderKeys(fallbackId) {
+  const { initial } = useEditorState();
+  return useMemo(() => {
+    const executorKey = initial?.executor_key || '';
+    const providerKey = initial?.provider_key || '';
+    return {
+      executorKey,
+      providerKey,
+      // Server-side filters: prefer the derived keys, else the raw id.
+      eventProvider: executorKey || fallbackId,
+      syncProvider: executorKey || fallbackId,
+      // Model-health is matched client-side against any of these.
+      healthKeys: [executorKey, providerKey].filter(Boolean),
+    };
+  }, [initial, fallbackId]);
+}
+
+function SyncEventsSection({ providerFilter }) {
   const [expanded, setExpanded] = useState(true);
   const listParams = useMemo(
-    () => ({ provider: providerId, page: 1, page_size: LOGS_LIMIT }),
-    [providerId],
+    () => ({ provider: providerFilter, page: 1, page_size: LOGS_LIMIT }),
+    [providerFilter],
   );
-  const asyncReq = useAsync(() => getUpstreamSyncLog(listParams), [providerId]);
+  const asyncReq = useAsync(() => getUpstreamSyncLog(listParams), [providerFilter]);
   const rows = useMemo(
     () => (asyncReq.data?.events || []).map(rowToSyncEvent),
     [asyncReq.data],
@@ -278,13 +304,13 @@ function SyncEventsSection({ providerId }) {
   );
 }
 
-function RecentEventsSection({ providerId }) {
+function RecentEventsSection({ providerFilter }) {
   const [expanded, setExpanded] = useState(true);
   const listParams = useMemo(
-    () => ({ provider: providerId, page: 1, page_size: LOGS_LIMIT }),
-    [providerId],
+    () => ({ provider: providerFilter, page: 1, page_size: LOGS_LIMIT }),
+    [providerFilter],
   );
-  const asyncReq = useAsync(() => getUsageEvents(listParams), [providerId]);
+  const asyncReq = useAsync(() => getUsageEvents(listParams), [providerFilter]);
   const rows = useMemo(
     () => (asyncReq.data?.events || []).map(rowToUsageEvent),
     [asyncReq.data],
@@ -316,12 +342,13 @@ function RecentEventsSection({ providerId }) {
   );
 }
 
-function ModelHealthSection({ providerId }) {
+function ModelHealthSection({ providerId, healthKeys }) {
   // /model-health/log is keyed on model_id, not provider. The plan instructs
   // to fetch a recent page and client-side filter rows by provider so this
   // section still surfaces the per-provider slice when the operator expects
-  // it. `providerId` is matched against the row's `provider` field; rows
-  // whose provider differs (or is blank) are dropped from the visible set.
+  // it. Registry keys may be entry-scoped compound keys
+  // ("<provider>:<id>:key-<entry>"), so a row matches when its `provider`
+  // equals any derived key exactly or starts with "<executor_key>:".
   const [expanded, setExpanded] = useState(true);
   const listParams = useMemo(
     () => ({ page: 1, page_size: LOGS_LIMIT * 2 }),
@@ -330,11 +357,21 @@ function ModelHealthSection({ providerId }) {
   const asyncReq = useAsync(() => getModelHealthLog(listParams), []);
   const rows = useMemo(() => {
     const all = Array.isArray(asyncReq.data?.events) ? asyncReq.data.events : [];
+    const keys = healthKeys && healthKeys.length ? healthKeys : (providerId ? [providerId] : []);
+    if (keys.length === 0) return [];
+    const matches = (rowProvider) => {
+      if (rowProvider == null || rowProvider === '') return false;
+      const rp = String(rowProvider).toLowerCase();
+      return keys.some((k) => {
+        const key = String(k).toLowerCase();
+        return rp === key || rp.startsWith(`${key}:`);
+      });
+    };
     return all
-      .filter((row) => row && (row.provider == null || row.provider === '' || row.provider === providerId))
+      .filter((row) => row && matches(row.provider))
       .slice(0, LOGS_LIMIT)
       .map(rowToHealthEvent);
-  }, [asyncReq.data, providerId]);
+  }, [asyncReq.data, providerId, healthKeys]);
   return (
     <Collapsible
       title="Model health"
@@ -366,6 +403,7 @@ function ModelHealthSection({ providerId }) {
 
 export function LogsTab() {
   const { id } = useParams();
+  const { executorKey, eventProvider, syncProvider, healthKeys } = useProviderKeys(id);
   return (
     <section>
       <div className="form-section">
@@ -382,10 +420,11 @@ export function LogsTab() {
       {/* id stays stable across renders; useParams already returns a string.
           The three sections re-fire their fetches when id changes (passed
           as the useAsync dep), so navigating to a different provider's
-          editor refreshes the embedded tables. */}
-      <SyncEventsSection providerId={id} />
-      <RecentEventsSection providerId={id} />
-      <ModelHealthSection providerId={id} />
+          editor refreshes the embedded tables. Filters use the provider's
+          derived executor/channel key so rows actually match. */}
+      <SyncEventsSection providerFilter={syncProvider} />
+      <RecentEventsSection providerFilter={eventProvider} />
+      <ModelHealthSection providerId={id} healthKeys={executorKey ? healthKeys : []} />
     </section>
   );
 }
