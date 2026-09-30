@@ -1,7 +1,6 @@
 package helps
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 
@@ -42,16 +41,6 @@ func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header,
 // handles it, covering executors that translate to codex themselves.
 func RewriteCodexMultiAgentV2InputForCompat(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) []byte {
 	return multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg, true)
-}
-
-// OptimizeCodexMultiAgentV2ForExecutor applies the full multi-agent v2 input
-// rewrite for an executor that translates to codex itself, where the
-// target-protocol translator does not run it. Compatibility mode is explicit
-// because the segment these executors serve carries no is-compat flag, and
-// without it the rewrite leaves author/recipient on converted messages.
-func OptimizeCodexMultiAgentV2ForExecutor(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) ([]byte, bool) {
-	updated := multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg, true)
-	return updated, !bytes.Equal(updated, payload)
 }
 
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent

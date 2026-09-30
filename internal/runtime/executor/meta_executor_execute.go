@@ -22,13 +22,12 @@ import (
 )
 
 type metaPreparedRequest struct {
-	baseModel             string
-	from                  sdktranslator.Format
-	responseFormat        sdktranslator.Format
-	to                    sdktranslator.Format
-	originalPayload       []byte
-	body                  []byte
-	optimizedMultiAgentV2 bool
+	baseModel       string
+	from            sdktranslator.Format
+	responseFormat  sdktranslator.Format
+	to              sdktranslator.Format
+	originalPayload []byte
+	body            []byte
 }
 
 func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*metaPreparedRequest, error) {
@@ -67,16 +66,18 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 	body = helps.RewriteCodexOrphanDelegationInput(ctx, opts.Headers, body, e.cfg)
-	body, optimizedMultiAgentV2 := helps.OptimizeCodexMultiAgentV2ForExecutor(ctx, opts.Headers, body, e.cfg)
+	body = helps.RewriteCodexMultiAgentV2InputForCompat(ctx, opts.Headers, body, e.cfg)
+	if errGuard := helps.ValidateOutboundToolContract(ctx, body, helps.WireContractByteLimit(ctx)); errGuard != nil {
+		return nil, errGuard
+	}
 
 	return &metaPreparedRequest{
-		baseModel:             baseModel,
-		from:                  from,
-		responseFormat:        responseFormat,
-		to:                    to,
-		originalPayload:       originalPayload,
-		body:                  body,
-		optimizedMultiAgentV2: optimizedMultiAgentV2,
+		baseModel:       baseModel,
+		from:            from,
+		responseFormat:  responseFormat,
+		to:              to,
+		originalPayload: originalPayload,
+		body:            body,
 	}, nil
 }
 

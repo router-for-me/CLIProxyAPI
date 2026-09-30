@@ -9,7 +9,7 @@ import (
 )
 
 // ActiveToolArraysBytes measures the serialized size of every tool array the
-// upstream will receive: top-level tools plus additional_tools inputs. The
+// upstream will receive: top-level tools plus declaration-bearing inputs. The
 // budget covers retained declarations, not Go heap.
 func ActiveToolArraysBytes(root map[string]any) (int, error) {
 	total := 0
@@ -26,7 +26,7 @@ func ActiveToolArraysBytes(root map[string]any) (int, error) {
 	}
 	for _, rawItem := range input {
 		item, okItem := rawItem.(map[string]any)
-		if !okItem || stringField(item, "type") != "additional_tools" {
+		if !okItem || !IsToolDeclarationInput(item) {
 			continue
 		}
 		tools, exists := item["tools"]

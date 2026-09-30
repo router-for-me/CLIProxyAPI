@@ -229,28 +229,27 @@ func rewriteToolSearchItemChecked(item map[string]any) error {
 	if err := requireBridgedItemID(item); err != nil {
 		return err
 	}
+	arguments := item["arguments"]
+	switch encoded := arguments.(type) {
+	case string:
+		trimmed := bytes.TrimSpace([]byte(encoded))
+		if len(trimmed) == 0 {
+			arguments = map[string]any{}
+		} else {
+			if err := json.Unmarshal(trimmed, &arguments); err != nil {
+				return upstreamError(ReasonUpstreamContract, fmt.Errorf("search arguments are not valid JSON"))
+			}
+		}
+	case nil:
+		arguments = map[string]any{}
+	}
 	if _, err := ReidentifyItem(item, "tool_search_call"); err != nil {
 		return upstreamError(ReasonUpstreamContract, err)
 	}
+	item["arguments"] = arguments
 	item["execution"] = "client"
 	delete(item, "name")
 	delete(item, "namespace")
-
-	switch arguments := item["arguments"].(type) {
-	case string:
-		trimmed := bytes.TrimSpace([]byte(arguments))
-		if len(trimmed) == 0 {
-			item["arguments"] = map[string]any{}
-			return nil
-		}
-		var decoded any
-		if err := json.Unmarshal(trimmed, &decoded); err != nil {
-			return nil
-		}
-		item["arguments"] = decoded
-	case nil:
-		item["arguments"] = map[string]any{}
-	}
 	return nil
 }
 

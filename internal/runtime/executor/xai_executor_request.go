@@ -144,6 +144,9 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	if sessionID != "" {
 		body = helps.SetStringIfDifferent(body, "prompt_cache_key", sessionID)
 	}
+	if errGuard := helps.ValidateOutboundToolContract(ctx, body, helps.WireContractByteLimit(ctx)); errGuard != nil {
+		return nil, errGuard
+	}
 
 	return &xaiPreparedRequest{
 		baseModel:             baseModel,

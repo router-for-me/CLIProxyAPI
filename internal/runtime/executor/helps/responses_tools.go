@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/responsestools"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -168,7 +169,7 @@ func collectOutboundToolNames(root map[string]any) map[string]struct{} {
 		if input, ok := toolRoot["input"].([]any); ok {
 			for _, rawItem := range input {
 				item, okItem := rawItem.(map[string]any)
-				if okItem && item["type"] == "additional_tools" {
+				if okItem && responsestools.IsToolDeclarationInput(item) {
 					collectOutboundToolArray(item["tools"], "", out)
 				}
 			}
@@ -241,7 +242,7 @@ func containsOutboundToolSearchDeclaration(root map[string]any) bool {
 		if input, ok := toolRoot["input"].([]any); ok {
 			for _, rawItem := range input {
 				item, okItem := rawItem.(map[string]any)
-				if okItem && item["type"] == "additional_tools" && hasType(item["tools"]) {
+				if okItem && responsestools.IsToolDeclarationInput(item) && hasType(item["tools"]) {
 					return true
 				}
 			}
@@ -515,7 +516,7 @@ func outboundToolArraysBytesFromRoot(root map[string]any) int {
 		}
 		if input, ok := toolRoot["input"].([]any); ok {
 			for _, rawItem := range input {
-				if item, okItem := rawItem.(map[string]any); okItem && item["type"] == "additional_tools" {
+				if item, okItem := rawItem.(map[string]any); okItem && responsestools.IsToolDeclarationInput(item) {
 					if tools, exists := item["tools"]; exists {
 						if encoded, err := json.Marshal(tools); err == nil {
 							total += len(encoded)

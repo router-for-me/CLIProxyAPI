@@ -18,6 +18,17 @@ const (
 	DeferredToolsKey = "codex_deferred_tools"
 )
 
+// IsToolDeclarationInput identifies the protocol input containers whose tools
+// arrays are declarations. Business payloads are never declaration scopes.
+func IsToolDeclarationInput(item map[string]any) bool {
+	switch stringField(item, "type") {
+	case "additional_tools", "tool_search_output":
+		return true
+	default:
+		return false
+	}
+}
+
 // searchAliasOwner reserves the bridge's search entry point while activation
 // aliases are minted. It is deliberately not a zero ToolIdentity: the
 // top-level escape hatch that lets an eager function keep its own name must

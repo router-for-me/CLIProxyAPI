@@ -137,7 +137,7 @@ func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (
 		if input, okInput := root["input"].([]any); okInput {
 			for _, rawItem := range input {
 				item, okItem := rawItem.(map[string]any)
-				if !okItem || stringField(item, "type") != "additional_tools" {
+				if !okItem || !IsToolDeclarationInput(item) {
 					continue
 				}
 				tools, okTools := item["tools"].([]any)
@@ -168,7 +168,7 @@ func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (
 		}
 		if input, okInput := root["input"].([]any); okInput {
 			for _, rawItem := range input {
-				if item, okItem := rawItem.(map[string]any); okItem && stringField(item, "type") == "additional_tools" {
+				if item, okItem := rawItem.(map[string]any); okItem && IsToolDeclarationInput(item) {
 					if tools, okTools := item["tools"].([]any); okTools {
 						schemaChanged, synthetic, seen, schemaErr := CompleteToolSearchSchemasWithSyntheticNulls(tools)
 						if schemaErr != nil {
@@ -630,7 +630,7 @@ func declaredFunctionNames(body []byte) map[string]struct{} {
 		if input, okInput := root["input"].([]any); okInput {
 			for _, rawItem := range input {
 				item, okItem := rawItem.(map[string]any)
-				if okItem && stringField(item, "type") == "additional_tools" {
+				if okItem && IsToolDeclarationInput(item) {
 					collectTools(item["tools"])
 				}
 			}

@@ -29,7 +29,7 @@ func StripCustomDeclarations(value any) (bool, error) {
 		if input, ok := typed["input"].([]any); ok {
 			for _, rawItem := range input {
 				item, okItem := rawItem.(map[string]any)
-				if !okItem || stringField(item, "type") != "additional_tools" {
+				if !okItem || !IsToolDeclarationInput(item) {
 					continue
 				}
 				if tools, okTools := item["tools"].([]any); okTools {
@@ -147,7 +147,7 @@ func collectCustomNames(value any, namespace string, names map[string]struct{}) 
 		}
 		if input, ok := typed["input"].([]any); ok {
 			for _, rawItem := range input {
-				if item, okItem := rawItem.(map[string]any); okItem && stringField(item, "type") == "additional_tools" {
+				if item, okItem := rawItem.(map[string]any); okItem && IsToolDeclarationInput(item) {
 					collectCustomNames(item, namespace, names)
 				}
 			}

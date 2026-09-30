@@ -294,7 +294,7 @@ func collectResponsesToolsWireRequirements(body []byte, wire *WireContract) erro
 	if input, ok := root["input"].([]any); ok {
 		for _, rawItem := range input {
 			item, ok := rawItem.(map[string]any)
-			if ok && responsesToolsStringField(item, "type") == "additional_tools" {
+			if ok && responsestools.IsToolDeclarationInput(item) {
 				collectTools(item["tools"], "")
 			}
 		}

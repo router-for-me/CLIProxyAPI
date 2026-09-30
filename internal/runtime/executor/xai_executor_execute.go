@@ -165,6 +165,9 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if previousResponseID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousResponseID != "" {
 		prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", previousResponseID)
 	}
+	if errGuard := helps.ValidateOutboundToolContract(ctx, prepared.body, helps.WireContractByteLimit(ctx)); errGuard != nil {
+		return nil, nil, nil, errGuard
+	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)

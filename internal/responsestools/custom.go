@@ -88,8 +88,7 @@ func collectReservedFunctionNames(value any, reserved map[string]struct{}) {
 			if input, ok := typed["input"].([]any); ok {
 				for _, rawItem := range input {
 					item, okItem := rawItem.(map[string]any)
-					if okItem && (stringField(item, "type") == "additional_tools" ||
-						stringField(item, "type") == "tool_search_output") {
+					if okItem && IsToolDeclarationInput(item) {
 						visit(item)
 					}
 				}
@@ -142,8 +141,7 @@ func collectCustomDeclarations(value any, inheritedNamespace string, bridge *Cus
 		if input, ok := typed["input"].([]any); ok {
 			for _, rawItem := range input {
 				item, ok := rawItem.(map[string]any)
-				if !ok || (stringField(item, "type") != "additional_tools" &&
-					stringField(item, "type") != "tool_search_output") {
+				if !ok || !IsToolDeclarationInput(item) {
 					continue
 				}
 				collectCustomDeclarations(item, inheritedNamespace, bridge)
@@ -284,7 +282,7 @@ func rewriteCustomDeclarationsValue(value any, bridge *CustomBridge) (bool, erro
 					continue
 				}
 				switch stringField(item, "type") {
-				case "additional_tools":
+				case "additional_tools", "tool_search_output":
 					if tools, okTools := item["tools"].([]any); okTools {
 						wrapped, toolChanged, err := wrapCustomToolArray(tools, bridge)
 						if err != nil {
@@ -419,6 +417,9 @@ func wrapCustomDeclarationInNamespace(tool map[string]any, inheritedNamespace st
 			"required":             []any{CustomFunctionParameter},
 			"additionalProperties": false,
 		},
+	}
+	if deferred, exists := tool["defer_loading"]; exists {
+		wrapped["defer_loading"] = deferred
 	}
 	return wrapped, nil
 }

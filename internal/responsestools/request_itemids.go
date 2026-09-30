@@ -17,8 +17,8 @@ type inputIDChange struct {
 }
 
 // itemIDPrefixLiterals lists every known namespace prefix as it can appear
-// inside a raw request body. A body without any of them cannot carry a
-// migrated id, so the whole repair stays a substring test.
+// inside an unescaped raw request body. Unicode escapes fall back to parsing
+// because they may encode a prefix without containing its literal bytes.
 var itemIDPrefixLiterals = []string{
 	itemIDFunctionCallOutput,
 	itemIDCustomToolCallOutput,
@@ -119,7 +119,7 @@ func mayCarryMigratedItemID(body []byte) bool {
 			return true
 		}
 	}
-	return false
+	return bytes.Contains(body, []byte(`\u`))
 }
 
 // planInputItemIDChanges proposes one migration per direct input item whose

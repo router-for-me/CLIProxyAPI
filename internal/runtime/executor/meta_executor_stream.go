@@ -115,7 +115,6 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				}
 				return
 			}
-			eventData = helps.RestoreCodexMultiAgentV2Response(eventData, prepared.optimizedMultiAgentV2)
 			eventType := gjson.GetBytes(eventData, "type").String()
 			switch eventType {
 			case "response.output_item.done":

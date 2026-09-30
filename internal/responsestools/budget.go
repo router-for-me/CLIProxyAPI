@@ -73,6 +73,9 @@ func (l *Limiter) Acquire(initialBytes int) (*Lease, error) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if initialBytes > l.limits.MaxAttemptBytes {
+		return nil, budgetError(ReasonAttemptBudget, errAttemptBudgetExceeded())
+	}
 	if l.attempts+1 > l.limits.MaxActiveAttempts {
 		return nil, capacityError(errSharedCapacityFull())
 	}
