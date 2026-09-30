@@ -6,6 +6,7 @@ import DecisionDistributionTab from './DecisionDistributionTab.jsx';
 import JevTab from './JevTab.jsx';
 import SimulationTab from './SimulationTab.jsx';
 import ReplayTab from './ReplayTab.jsx';
+import { buildStatsParams } from './statsParams.js';
 import { loadTimezone } from '../../pages/usageShared.jsx';
 
 // Time window options offered on this page (subset of the Usage Stats presets).
@@ -57,18 +58,6 @@ function useRange(initialDays = 7) {
     setCustomTo,
     useCustomRange,
     setUseCustomRange,
-  };
-}
-
-// buildStatsParams assembles the shared query params for the stats endpoints.
-// router_id is the requestable model id (stats keying), api_key_id narrows by
-// key, from/to bound the window in RFC3339 UTC.
-function buildStatsParams(router, apiKeyId, range) {
-  return {
-    router_id: router?.model_id || undefined,
-    api_key_id: apiKeyId || undefined,
-    from: range.from,
-    to: range.to,
   };
 }
 
