@@ -3,7 +3,7 @@ package signature
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -25,9 +25,11 @@ func GeminiReplaySignatureOrBypass(rawSignature string, blockKind SignatureBlock
 
 // SanitizeGeminiRequestThoughtSignatures applies Gemini replay policy to a
 // Gemini-shaped request. Existing provider signatures stay on their original
-// model parts. Only a missing or incompatible first functionCall gets the bypass
-// sentinel; unsigned sibling calls remain unsigned, matching native Gemini
-// parallel-call history. functionResponse parts never carry signatures.
+// model parts. Server-side tool blocks (toolCall and toolResponse) are echoed back
+// untouched per the Gemini API contract. Only a missing or incompatible first
+// functionCall gets the bypass sentinel; unsigned sibling calls remain unsigned,
+// matching native Gemini parallel-call history. functionResponse parts never carry
+// signatures.
 func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string) []byte {
 	contentsPath = strings.TrimSpace(contentsPath)
 	if contentsPath == "" {
@@ -41,6 +43,26 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 
 	contentsChanged := false
 	contentItems := make([][]byte, 0, int(contents.Get("#").Int()))
+	type sanitizeLogKey struct {
+		action           SignatureCompatibilityAction
+		reason           string
+		blockKind        SignatureBlockKind
+		detectedProvider SignatureProvider
+	}
+	sanitizeCounts := make(map[sanitizeLogKey]int)
+	logSanitize := func(contentIndex, partIndex int, decision SignatureCompatibilityDecision, rawSig string, hasSig bool) {
+		key := sanitizeLogKey{
+			action:           decision.Action,
+			reason:           decision.Reason,
+			blockKind:        decision.BlockKind,
+			detectedProvider: decision.DetectedProvider,
+		}
+		if sanitizeCounts[key] == 0 {
+			logGeminiThoughtSignatureSanitize(contentsPath, contentIndex, partIndex, decision, rawSig, hasSig)
+		}
+		sanitizeCounts[key]++
+	}
+
 	contents.ForEach(func(contentIdx, content gjson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
@@ -59,17 +81,22 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 				if hasSignature {
 					partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
 					partsChanged = true
-					logGeminiThoughtSignatureSanitize(contentsPath, int(contentIdx.Int()), int(partIdx.Int()), SignatureCompatibilityDecision{
-						TargetProvider: SignatureProviderGemini,
-						BlockKind:      SignatureBlockKindGeminiModelPart,
-						Action:         SignatureActionDropSignature,
-						Reason:         "functionResponse parts cannot replay thought signatures",
+					logSanitize(int(contentIdx.Int()), int(partIdx.Int()), SignatureCompatibilityDecision{
+						TargetProvider:   SignatureProviderGemini,
+						DetectedProvider: DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindGeminiModelPart),
+						BlockKind:        SignatureBlockKindGeminiModelPart,
+						Action:           SignatureActionDropSignature,
+						Reason:           "functionResponse parts cannot replay thought signatures",
 					}, rawSignature, true)
 				}
 				partItems = append(partItems, partJSON)
 				return true
 			}
 			if !isModelTurn {
+				partItems = append(partItems, partJSON)
+				return true
+			}
+			if part.Get("toolCall").Exists() || part.Get("tool_call").Exists() || part.Get("toolResponse").Exists() || part.Get("tool_response").Exists() {
 				partItems = append(partItems, partJSON)
 				return true
 			}
@@ -119,7 +146,7 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 			if partChanged {
 				partsChanged = true
 				if decision.Action != SignatureActionPreserve {
-					logGeminiThoughtSignatureSanitize(contentsPath, int(contentIdx.Int()), int(partIdx.Int()), decision, rawSignature, hasSignature)
+					logSanitize(int(contentIdx.Int()), int(partIdx.Int()), decision, rawSignature, hasSignature)
 				}
 			}
 			partItems = append(partItems, partJSON)
@@ -134,6 +161,22 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 		contentItems = append(contentItems, contentJSON)
 		return true
 	})
+
+	for key, count := range sanitizeCounts {
+		if count > 1 {
+			log.WithFields(log.Fields{
+				"component":         "signature_sanitizer",
+				"target_provider":   string(SignatureProviderGemini),
+				"action":            string(key.action),
+				"reason":            key.reason,
+				"block_kind":        string(key.blockKind),
+				"detected_provider": string(key.detectedProvider),
+				"contents_path":     contentsPath,
+				"suppressed_count":  count - 1,
+				"total_count":       count,
+			}).Debug("gemini request: suppressed repeated thoughtSignature sanitizations in same request")
+		}
+	}
 
 	if !contentsChanged {
 		return payload
@@ -161,6 +204,9 @@ func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result) bool {
 				return !needsSanitize
 			}
 			if !isModelTurn {
+				return true
+			}
+			if part.Get("toolCall").Exists() || part.Get("tool_call").Exists() || part.Get("toolResponse").Exists() || part.Get("tool_response").Exists() {
 				return true
 			}
 			hasFunctionCall := part.Get("functionCall").Exists()

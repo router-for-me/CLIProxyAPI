@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -198,3 +199,115 @@ func TestOrderedRequestConnTracksOnlyWrittenChunkBytesAfterPartialError(t *testi
 		t.Fatalf("wire bytes differ after chunk retry\n got: %q\nwant: %q", got, want)
 	}
 }
+
+func TestOrderedRequestConnRewritesExactHeaderCasing(t *testing.T) {
+	t.Parallel()
+
+	underlying := &bytes.Buffer{}
+	mockConn := &mockBufferConn{Buffer: underlying}
+	conn := NewOrderedRequestConn(mockConn, func(_, _ string) []string {
+		return []string{"x-custom-header", "Sec-CH-UA-Platform", "Host"}
+	})
+
+	input := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\nX-Custom-Header: value1\r\nSEC-CH-UA-PLATFORM: macos\r\n\r\n")
+	if _, errWrite := conn.Write(input); errWrite != nil {
+		t.Fatalf("write error: %v", errWrite)
+	}
+
+	want := "GET /test HTTP/1.1\r\nx-custom-header: value1\r\nSec-CH-UA-Platform: macos\r\nHost: example.com\r\n\r\n"
+	if got := underlying.String(); got != want {
+		t.Fatalf("wire bytes differ\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestOrderedRequestConnBypassesNonHTTPHandshakeBytes(t *testing.T) {
+	t.Parallel()
+
+	underlying := &bytes.Buffer{}
+	mockConn := &mockBufferConn{Buffer: underlying}
+	conn := NewOrderedRequestConn(mockConn, func(_, _ string) []string {
+		return []string{"User-Agent", "Host"}
+	})
+
+	// Simulate SOCKS5 handshake bytes before HTTP request
+	socksGreeting := []byte{0x05, 0x01, 0x00}
+	if n, errWrite := conn.Write(socksGreeting); errWrite != nil || n != len(socksGreeting) {
+		t.Fatalf("write socks greeting: %d, %v", n, errWrite)
+	}
+	if !bytes.Equal(underlying.Bytes(), socksGreeting) {
+		t.Fatalf("socks bytes not passed through immediately: got %v", underlying.Bytes())
+	}
+
+	// Now send the HTTP request
+	httpRequest := []byte("GET / HTTP/1.1\r\nHost: target.com\r\nUser-Agent: curl/8.0\r\n\r\n")
+	if n, errWrite := conn.Write(httpRequest); errWrite != nil || n != len(httpRequest) {
+		t.Fatalf("write http request: %d, %v", n, errWrite)
+	}
+
+	want := append(socksGreeting, []byte("GET / HTTP/1.1\r\nUser-Agent: curl/8.0\r\nHost: target.com\r\n\r\n")...)
+	if got := underlying.Bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("wire bytes differ:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestOrderedRequestConnSupportsCustomAndLowercaseHTTPMethods(t *testing.T) {
+	t.Parallel()
+
+	underlying := &bytes.Buffer{}
+	mockConn := &mockBufferConn{Buffer: underlying}
+	conn := NewOrderedRequestConn(mockConn, func(_, _ string) []string {
+		return []string{"Man", "Host"}
+	})
+
+	// Test M-SEARCH (UPnP/SSDP method with hyphen)
+	input := []byte("M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\n\r\n")
+	if _, errWrite := conn.Write(input); errWrite != nil {
+		t.Fatalf("write error: %v", errWrite)
+	}
+
+	want := "M-SEARCH * HTTP/1.1\r\nMan: \"ssdp:discover\"\r\nHost: 239.255.255.250:1900\r\n\r\n"
+	if got := underlying.String(); got != want {
+		t.Fatalf("wire bytes differ:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestOrderedRequestConnSupportsLongAndChunkedHTTPMethods(t *testing.T) {
+	t.Parallel()
+
+	underlying := &bytes.Buffer{}
+	mockConn := &mockBufferConn{Buffer: underlying}
+	conn := NewOrderedRequestConn(mockConn, func(_, _ string) []string {
+		return []string{"x-b", "x-a"}
+	})
+
+	longMethod := strings.Repeat("M", 70)
+	requestText := longMethod + " /resource HTTP/1.1\r\nHost: example.com\r\nx-a: 1\r\nx-b: 2\r\n\r\n"
+	input := []byte(requestText)
+
+	// Write in small chunks to test fragmented method recognition
+	for i := 0; i < len(input); i += 10 {
+		end := i + 10
+		if end > len(input) {
+			end = len(input)
+		}
+		if _, errWrite := conn.Write(input[i:end]); errWrite != nil {
+			t.Fatalf("write chunk error: %v", errWrite)
+		}
+	}
+
+	want := longMethod + " /resource HTTP/1.1\r\nx-b: 2\r\nx-a: 1\r\nHost: example.com\r\n\r\n"
+	if got := underlying.String(); got != want {
+		t.Fatalf("wire bytes differ for long method:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+type mockBufferConn struct {
+	*bytes.Buffer
+}
+
+func (*mockBufferConn) Close() error                     { return nil }
+func (*mockBufferConn) LocalAddr() net.Addr              { return nil }
+func (*mockBufferConn) RemoteAddr() net.Addr             { return nil }
+func (*mockBufferConn) SetDeadline(time.Time) error      { return nil }
+func (*mockBufferConn) SetReadDeadline(time.Time) error  { return nil }
+func (*mockBufferConn) SetWriteDeadline(time.Time) error { return nil }

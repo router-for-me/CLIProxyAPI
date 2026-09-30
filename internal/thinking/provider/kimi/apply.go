@@ -8,8 +8,8 @@ package kimi
 import (
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -31,7 +31,11 @@ func NewApplier() *Applier {
 }
 
 func init() {
-	thinking.RegisterProvider("kimi", NewApplier())
+	applier := NewApplier()
+	thinking.RegisterProvider("kimi", applier)
+	thinking.RegisterProvider("kimi-ai", applier)
+	thinking.RegisterProvider("kimi.ai", applier)
+	thinking.RegisterProvider("kimi.com", applier)
 }
 
 // Apply applies thinking configuration to Kimi request body.

@@ -7,13 +7,14 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	requestRetry := 0
+	disableCooling := true
 	h := NewHandlerWithoutConfigFilePath(&config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{
 			{
@@ -26,7 +27,7 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 					{Name: "mimo-v2.5", Alias: ""},
 				},
 				SupportPromptCacheKey: true,
-				DisableCooling:        true,
+				DisableCooling:        &disableCooling,
 				RequestRetry:          &requestRetry,
 			},
 		},

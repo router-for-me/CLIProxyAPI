@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/antigravity"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/antigravity"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -23,7 +23,7 @@ func TestSummaryIntentTranslation(t *testing.T) {
 		want       string
 		wantExists bool
 	}{
-		{name: "Chat effort enables Claude summary", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatClaude, body: `{"model":"claude-opus-5","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, path: "thinking.display", want: "summarized", wantExists: true},
+		{name: "Chat effort leaves Claude display unspecified", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatClaude, body: `{"model":"claude-opus-5","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, path: "thinking.display"},
 		// Anthropic rejects display next to a disabled thinking block, so a "none"
 		// effort must leave the field off rather than write "omitted".
 		{name: "Chat none leaves disabled Claude thinking without display", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatClaude, body: `{"model":"claude-opus-5","reasoning_effort":"none","messages":[{"role":"user","content":"hi"}]}`, path: "thinking.display"},
@@ -57,8 +57,10 @@ func TestSummaryIntentTranslation(t *testing.T) {
 		{name: "Google Chat extension overrides Gemini summary", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatGemini, body: `{"model":"gemini-3.6-flash","reasoning_effort":"high","extra_body":{"google":{"thinking_config":{"include_thoughts":false}}},"messages":[{"role":"user","content":"hi"}]}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "false", wantExists: true},
 		{name: "Responses effort alone leaves Gemini summary absent", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatGemini, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high"},"input":"hi"}`, path: "generationConfig.thinkingConfig.includeThoughts"},
 		{name: "Responses detailed summary enables Gemini summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatGemini, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","summary":"detailed"},"input":"hi"}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
-		{name: "Responses effort alone leaves Antigravity summary absent", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts"},
+		{name: "Responses effort enables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
 		{name: "Responses summary enables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","summary":"auto"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
+		{name: "Responses generate_summary enables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","generate_summary":"detailed"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
+		{name: "Responses null summary disables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","summary":null},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "false", wantExists: true},
 		{name: "Chat effort enables Interactions summary", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatInteractions, body: `{"model":"gemini-3.6-flash","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, path: "generation_config.thinking_summaries", want: "auto", wantExists: true},
 		{name: "Responses concise summary maps to Interactions auto", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatInteractions, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","summary":"concise"},"input":"hi"}`, path: "generation_config.thinking_summaries", want: "auto", wantExists: true},
 		{name: "Native Claude summarized enables Gemini summary", from: sdktranslator.FormatClaude, to: sdktranslator.FormatGemini, body: `{"model":"claude-opus-5","thinking":{"type":"adaptive","display":"summarized"},"messages":[{"role":"user","content":"hi"}]}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
@@ -130,7 +132,7 @@ func TestSummaryIntentFinalPipeline(t *testing.T) {
 		{name: "Interactions compatibility summary activates valid Claude thinking", from: sdktranslator.FormatInteractions, to: sdktranslator.FormatClaude, model: "claude-sonnet-4-6-model", body: `{"model":"claude-sonnet-4-6-model","reasoning":{"summary":"auto"},"input":"hi"}`, path: "thinking.display", want: "summarized", wantExists: true},
 		{name: "Claude suffix none removes otherwise enabled display", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatClaude, model: "claude-sonnet-4-6-model(none)", body: `{"model":"claude-sonnet-4-6-model(none)","reasoning":{"summary":"auto"},"input":"hi"}`, path: "thinking.display"},
 		{name: "Claude suffix preserves explicit disabled summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatClaude, model: "claude-sonnet-4-6-model(high)", body: `{"model":"claude-sonnet-4-6-model(high)","reasoning":{"summary":null},"input":"hi"}`, path: "thinking.display", want: "omitted", wantExists: true},
-		{name: "Responses effort alone stays omitted on Antigravity", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, model: "antigravity-budget-model", body: `{"model":"antigravity-budget-model","reasoning":{"effort":"medium"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts"},
+		{name: "Responses effort enables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, model: "antigravity-budget-model", body: `{"model":"antigravity-budget-model","reasoning":{"effort":"medium"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
 		{name: "Responses summary reaches Antigravity", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, model: "antigravity-budget-model", body: `{"model":"antigravity-budget-model","reasoning":{"effort":"medium","summary":"auto"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
 		{name: "Responses null summary alone hides default Gemini thoughts", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatGemini, model: "gemini-mixed-model", body: `{"model":"gemini-mixed-model","reasoning":{"summary":null},"input":"hi"}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "false", wantExists: true},
 		{name: "Google Chat extension false survives Gemini applier", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatGemini, model: "gemini-mixed-model", body: `{"model":"gemini-mixed-model","reasoning_effort":"high","extra_body":{"google":{"thinking_config":{"include_thoughts":false}}},"messages":[{"role":"user","content":"hi"}]}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "false", wantExists: true},

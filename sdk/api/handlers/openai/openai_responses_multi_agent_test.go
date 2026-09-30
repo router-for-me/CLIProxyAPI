@@ -11,12 +11,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/tidwall/gjson"
 )
 
@@ -195,5 +195,118 @@ func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundarySkipsOtherClients(t *te
 	}
 	if _, exists := ginContext.Get(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey); exists {
 		t.Fatal("other client unexpectedly received prepared marker")
+	}
+}
+
+func TestV8OAuthPreparationWaitsForCredential(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		CodexOptimizeMultiAgentV2:          true,
+		CodexOrphanDelegationCompatibility: true,
+		OAuthOnlyFields:                    map[string]bool{"codex.optimize-multi-agent-v2": true, "codex.orphan-delegation-compatibility": true},
+	}, nil)
+	handler := NewOpenAIResponsesAPIHandler(base)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
+	request.Header.Set("X-Openai-Subagent", "collab_spawn")
+	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginContext.Request = request
+	payload := []byte(`{"input":[{"type":"function_call_output","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>task</codex_delegation>"}],"tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}]}`)
+	got := handler.prepareCodexMultiAgentV2Tools(ginContext, payload)
+	got = handler.prepareCodexOrphanDelegation(ginContext, got)
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("OAuth-only preparation ran before credential selection: %s", got)
+	}
+	if _, exists := ginContext.Get(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey); exists {
+		t.Fatal("deferred request received prepared marker")
+	}
+}
+
+func newResponsesOrphanDelegationTestHandler(t *testing.T, executor *responsesMultiAgentCaptureExecutor) (*OpenAIResponsesAPIHandler, string) {
+	t.Helper()
+
+	modelID := "responses-orphan-test-model"
+	authID := "responses-orphan-test-auth"
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, ProxyURL: "direct"}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOrphanDelegationCompatibility: true}, manager)
+	return NewOpenAIResponsesAPIHandler(base), modelID
+}
+
+func TestResponsesOrphanCodexDelegationCompatibility(t *testing.T) {
+	t.Parallel()
+
+	executor := &responsesMultiAgentCaptureExecutor{}
+	handler, modelID := newResponsesOrphanDelegationTestHandler(t, executor)
+
+	router := gin.New()
+	router.POST("/v1/responses", handler.Responses)
+
+	payload := fmt.Sprintf(`{
+		"model": %q,
+		"stream": false,
+		"input": [
+			{
+				"type": "function_call_output",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "<codex_delegation>msg</codex_delegation>"
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "continue"}]
+			}
+		]
+	}`, modelID)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
+	request.Header.Set("X-Openai-Subagent", "collab_spawn")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 1 {
+		t.Fatalf("captured payload count = %d, want 1", len(payloads))
+	}
+	captured := payloads[0]
+	parsed := gjson.ParseBytes(captured)
+	if itemType := parsed.Get("input.0.type").String(); itemType != "message" {
+		t.Fatalf("input.0.type = %q, want message; captured=%s", itemType, captured)
+	}
+	if role := parsed.Get("input.0.role").String(); role != "user" {
+		t.Fatalf("input.0.role = %q, want user", role)
+	}
+	wantText := "Tool output from codex_app__create_thread:\n<codex_delegation>msg</codex_delegation>"
+	if text := parsed.Get("input.0.content.0.text").String(); text != wantText {
+		t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+	}
+
+	// Without X-Openai-Subagent header, payload should remain function_call_output
+	requestNoHeader := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
+	recorderNoHeader := httptest.NewRecorder()
+	router.ServeHTTP(recorderNoHeader, requestNoHeader)
+	if recorderNoHeader.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorderNoHeader.Code, recorderNoHeader.Body.String())
+	}
+	payloads = executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("captured payload count = %d, want 2", len(payloads))
+	}
+	capturedNoHeader := payloads[1]
+	parsedNoHeader := gjson.ParseBytes(capturedNoHeader)
+	if itemType := parsedNoHeader.Get("input.0.type").String(); itemType != "function_call_output" {
+		t.Fatalf("input.0.type = %q, want function_call_output without header; captured=%s", itemType, capturedNoHeader)
 	}
 }

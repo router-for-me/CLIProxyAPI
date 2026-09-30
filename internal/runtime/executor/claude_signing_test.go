@@ -127,32 +127,43 @@ func TestFinalizeAnthropicMessagesBodyCCH_AddsMissingBillingBlock(t *testing.T) 
 func TestClaudeCCHSigningEnabled(t *testing.T) {
 	t.Parallel()
 
+	const (
+		anthropicOrigin = "https://api.anthropic.com/v1/messages?beta=true"
+		gatewayOrigin   = "https://gateway.example/v1/messages?beta=true"
+	)
+
 	tests := []struct {
-		name     string
-		apiKey   string
-		kind     claudeCCHUpstreamKind
-		endpoint string
-		want     bool
+		name           string
+		apiKey         string
+		kind           claudeCCHUpstreamKind
+		cliFingerprint bool
+		origin         string
+		want           bool
 	}{
-		{name: "official messages API key", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, endpoint: "https://api.anthropic.com/v1/messages?beta=true", want: true},
-		{name: "official count tokens API key", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, endpoint: "https://api.anthropic.com/v1/messages/count_tokens?beta=true", want: true},
-		{name: "official explicit default port", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, endpoint: "https://api.anthropic.com:443/v1/messages", want: true},
-		{name: "custom gateway API key", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, endpoint: "https://gateway.example/v1/messages", want: false},
-		{name: "loopback API key", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, endpoint: "http://127.0.0.1:8317/v1/messages", want: false},
-		{name: "custom gateway OAuth", apiKey: "sk-ant-oat-custom", kind: claudeCCHUpstreamAnthropic, endpoint: "https://gateway.example/v1/messages", want: true},
-		{name: "loopback OAuth", apiKey: "sk-ant-oat-loopback", kind: claudeCCHUpstreamAnthropic, endpoint: "http://127.0.0.1:8317/v1/messages", want: true},
-		{name: "other provider OAuth", apiKey: "sk-ant-oat-other", kind: claudeCCHUpstreamOther, endpoint: "https://gateway.example/anything", want: true},
-		{name: "lookalike host", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, endpoint: "https://api.anthropic.com.example/v1/messages", want: false},
-		{name: "wrong port", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, endpoint: "https://api.anthropic.com:8443/v1/messages", want: false},
-		{name: "wrong endpoint", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, endpoint: "https://api.anthropic.com/v1/complete", want: false},
-		{name: "vertex provider API key", apiKey: "key-123", kind: claudeCCHUpstreamVertex, endpoint: "https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/l/publishers/anthropic/models/m:streamRawPredict", want: true},
-		{name: "other provider API key", apiKey: "key-123", kind: claudeCCHUpstreamOther, endpoint: "https://api.anthropic.com/v1/messages", want: false},
+		{name: "official API key default", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, origin: anthropicOrigin, want: false},
+		{name: "official API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: anthropicOrigin, want: true},
+		{name: "Kimi API key default", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, origin: "https://api.kimi.com/v1/messages", want: false},
+		// Native emits cch only for firstParty on api.anthropic.com or for vertex, so an
+		// opted-in key on any other gateway keeps a cache-stable billing header.
+		{name: "Kimi API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: "https://api.kimi.com/v1/messages", want: false},
+		{name: "gateway API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: gatewayOrigin, want: false},
+		{name: "anthropic host over http opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: "http://api.anthropic.com/v1/messages", want: false},
+		{name: "anthropic host explicit 443 opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: "https://api.anthropic.com:443/v1/messages", want: true},
+		{name: "anthropic lookalike host opt-in", apiKey: "key-123", kind: claudeCCHUpstreamAnthropic, cliFingerprint: true, origin: "https://api.anthropic.com.evil.example/v1/messages", want: false},
+		// A real OAuth credential signs on every upstream: CPA is the hop that has to
+		// regenerate the cch a downstream Claude Code could not produce.
+		{name: "Claude OAuth", apiKey: "sk-ant-oat-custom", kind: claudeCCHUpstreamAnthropic, origin: anthropicOrigin, want: true},
+		{name: "Claude OAuth custom gateway", apiKey: "sk-ant-oat-custom", kind: claudeCCHUpstreamAnthropic, origin: gatewayOrigin, want: true},
+		{name: "other provider Claude OAuth", apiKey: "sk-ant-oat-other", kind: claudeCCHUpstreamOther, origin: gatewayOrigin, want: true},
+		{name: "Vertex provider API key", apiKey: "key-123", kind: claudeCCHUpstreamVertex, origin: "https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/l/publishers/anthropic/models/m:streamRawPredict", want: true},
+		{name: "other provider API key", apiKey: "key-123", kind: claudeCCHUpstreamOther, origin: gatewayOrigin, want: false},
+		{name: "other provider API key opt-in", apiKey: "key-123", kind: claudeCCHUpstreamOther, cliFingerprint: true, origin: gatewayOrigin, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := claudeCCHSigningEnabled(tt.apiKey, tt.kind, tt.endpoint); got != tt.want {
+			if got := claudeCCHSigningEnabled(tt.apiKey, tt.kind, tt.cliFingerprint, tt.origin); got != tt.want {
 				t.Fatalf("claudeCCHSigningEnabled() = %t, want %t", got, tt.want)
 			}
 		})

@@ -104,6 +104,54 @@ plugins:
 
 `auth_id` 会在 `delegate` 为空时选择匹配候选。`delegate` 支持 `""`、`fill-first` 和 `round-robin`；其他非空值会让本插件不处理本次调度。`deny` 会返回调度错误。
 
+## 插件执行器错误处理与 HTTP 状态码
+
+当插件执行器（Executor）遇到上游调用失败（如因凭据无效返回 `401 Unauthorized`、因模型权限或配额限制返回 `403 Forbidden`，或因限流返回 `429 Too Many Requests`）时，应在错误信封中设置 HTTP 状态码：
+
+- 在 JSON RPC 错误信封中，设置 `error` 对象内的 `http_status` 字段（对应 `pluginabi.Error.HTTPStatus`）。
+- 若省略 `http_status` 或设置为 `0`，CPA 会默认将错误降级为 HTTP `500 Internal Server Error`（`server_error` / `internal_server_error`），导致客户端将其误判为网关故障并进行退避重试。
+- 显式设置 `http_status` 后，CPA 会将状态码正确映射为结构化的客户端错误响应：
+  - `401` -> HTTP 401，`type: "authentication_error"`，`code: "invalid_api_key"`
+  - `403` -> HTTP 403，`type: "permission_error"`，`code: "insufficient_quota"`
+  - `429` -> HTTP 429，`type: "rate_limit_error"`，`code: "rate_limit_exceeded"`
+  - `404` -> HTTP 404，`type: "invalid_request_error"`，`code: "model_not_found"`
+  - `>=500` -> HTTP 5xx，`type: "server_error"`，`code: "internal_server_error"`
+- **注意**：非流式执行（`executor.execute`）和流式执行（`executor.execute_stream`）两处报错路径均需要设置 `http_status`，以保证异常分类行为一致。
+- 原生动态库插件通过 C ABI 交换序列化的 JSON 缓冲区通信，因此状态码必须编码到序列化的 JSON 信封中（例如使用 `pluginabi.NewErrorEnvelope` 或自定义带 `http_status` 字段的信封结构体）。Go 语言原生的 error 对象无法跨越 C ABI 边界传递。
+
+Go 语言编写的插件可导入 `github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi` 并直接使用 `pluginabi.NewErrorEnvelope(code, message, httpStatus)`：
+
+```go
+// 推荐方式：直接使用 sdk/pluginabi 构造错误信封
+rawEnvelope, errMarshal := pluginabi.NewErrorEnvelope("insufficient_quota", "plan limit reached", http.StatusForbidden)
+```
+
+也可以在自定义信封结构体中声明 `HTTPStatus` 字段（`json:"http_status,omitempty"`）：
+
+```go
+type envelopeError struct {
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+func errorEnvelope(code, message string, httpStatus ...int) []byte {
+	status := 0
+	if len(httpStatus) > 0 {
+		status = httpStatus[0]
+	}
+	raw, _ := json.Marshal(envelope{
+		OK: false,
+		Error: &envelopeError{
+			Code:       code,
+			Message:    message,
+			HTTPStatus: status,
+		},
+	})
+	return raw
+}
+```
+
 ## 构建全部示例
 
 ```bash

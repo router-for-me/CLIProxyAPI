@@ -200,6 +200,116 @@ func TestSanitizeGeminiRequestThoughtSignaturesLogsBypassReplacement(t *testing.
 	assertSignatureDebugDoesNotLeak(t, hook, sig)
 }
 
+func TestSanitizeGeminiRequestThoughtSignaturesSuppressesRepeatedLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"contents":[
+		{"role":"model","parts":[{"text":"a","thoughtSignature":"invalid_sig_1"}]},
+		{"role":"model","parts":[{"text":"b","thoughtSignature":"invalid_sig_2"}]},
+		{"role":"model","parts":[{"text":"c","thoughtSignature":"invalid_sig_3"}]}
+	]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	for i := 0; i < 3; i++ {
+		path := fmt.Sprintf("contents.%d.parts.0.thoughtSignature", i)
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("expected part %d signature to be dropped, got: %s", i, string(out))
+		}
+	}
+
+	detailCount := 0
+	suppressedCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if entry.Message == "gemini request: sanitized thoughtSignature before upstream" {
+			if entry.Data["action"] == "drop_signature" &&
+				entry.Data["reason"] == "non-function model parts do not synthesize Gemini bypass signatures" {
+				detailCount++
+			}
+		}
+		if entry.Message == "gemini request: suppressed repeated thoughtSignature sanitizations in same request" {
+			if entry.Data["action"] == "drop_signature" &&
+				entry.Data["reason"] == "non-function model parts do not synthesize Gemini bypass signatures" &&
+				entry.Data["suppressed_count"] == 2 &&
+				entry.Data["total_count"] == 3 {
+				suppressedCount++
+			}
+		}
+	}
+
+	if detailCount != 1 {
+		t.Fatalf("expected 1 detailed debug log entry for repeated drops, got %d", detailCount)
+	}
+	if suppressedCount != 1 {
+		t.Fatalf("expected 1 aggregated suppression debug log entry, got %d", suppressedCount)
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesDistinguishesDetectedProviders(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"contents":[
+		{"role":"model","parts":[{"text":"a","thoughtSignature":"sealed.v1.demo_signature_1"}]},
+		{"role":"model","parts":[{"text":"b","thoughtSignature":"sealed.v1.demo_signature_2"}]},
+		{"role":"model","parts":[{"text":"c","thoughtSignature":"invalid_sig_unknown_1"}]},
+		{"role":"model","parts":[{"text":"d","thoughtSignature":"invalid_sig_unknown_2"}]}
+	]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	for i := 0; i < 4; i++ {
+		path := fmt.Sprintf("contents.%d.parts.0.thoughtSignature", i)
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("expected part %d signature to be dropped, got: %s", i, string(out))
+		}
+	}
+
+	sweDetail := 0
+	unknownDetail := 0
+	sweSuppressed := 0
+	unknownSuppressed := 0
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if entry.Message == "gemini request: sanitized thoughtSignature before upstream" {
+			switch entry.Data["detected_provider"] {
+			case string(SignatureProviderSWE):
+				sweDetail++
+			case string(SignatureProviderUnknown):
+				unknownDetail++
+			}
+		}
+		if entry.Message == "gemini request: suppressed repeated thoughtSignature sanitizations in same request" {
+			switch entry.Data["detected_provider"] {
+			case string(SignatureProviderSWE):
+				if entry.Data["suppressed_count"] == 1 && entry.Data["total_count"] == 2 {
+					sweSuppressed++
+				}
+			case string(SignatureProviderUnknown):
+				if entry.Data["suppressed_count"] == 1 && entry.Data["total_count"] == 2 {
+					unknownSuppressed++
+				}
+			}
+		}
+	}
+
+	if sweDetail != 1 {
+		t.Fatalf("expected 1 SWE detailed log, got %d", sweDetail)
+	}
+	if unknownDetail != 1 {
+		t.Fatalf("expected 1 unknown detailed log, got %d", unknownDetail)
+	}
+	if sweSuppressed != 1 {
+		t.Fatalf("expected 1 SWE suppression summary, got %d", sweSuppressed)
+	}
+	if unknownSuppressed != 1 {
+		t.Fatalf("expected 1 unknown suppression summary, got %d", unknownSuppressed)
+	}
+}
+
 func TestSanitizeGeminiRequestThoughtSignaturesPreservesField2WrappedUUIDFunctionCall(t *testing.T) {
 	sig := testGemini3ThoughtSignature([]byte("e24830a7-5cd6-42fe-998b-ee539e72b9c3"))
 	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"` + sig + `"}]}]}}`)
@@ -259,5 +369,93 @@ func TestSanitizeGeminiRequestThoughtSignaturesRemovesFunctionResponseSignature(
 	}
 	if gjson.GetBytes(out, "contents.0.parts.0.functionResponse.thoughtSignature").Exists() {
 		t.Fatalf("functionResponse nested thoughtSignature should be removed. Output: %s", string(out))
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_PreservesToolCallAndResponseSignatures(t *testing.T) {
+	const liveCapturedToolCallSig = "ErUDCrIDCAISrQMBEU0yD9ECvDhSY1DQJNUGafArdfd2mDfO8VQq7XjLx/91zESuo0QPSdkRFWkLeVIocSQmQULonYMOJcs6XDLV2LTRC9myb3MCCP9CUoWbEeqhAvXKTScyS3nwBDDVJYuDDbY3YvR4V86T/DnU3qufpaVZ3wQOiJVyBVZ515dYTN+XGq7SuUc3RpfAqVU06jgxaCM0WKV4Df5mGMJWb25e/aFG2Jc7upSqpf3n6aElj+4c/eWr4GdKd0TUIElXBZ0HEN/vNcWzD3F0S4MeVbk1LDakL6HG6oyaSS2gocxYNYxqm9mdMHaXYa4mIYqWqmqBEnbgcHp8H4fgqBxc3Cx8C3otV8IarO5OALaVDA3NaXB1zjLet1587kEpkCNr9OvrYOES2nCl/i4EgbPK01nlXo+Wwm5jsZU5nEG4/Z0bErzqC5TKwOsqpJ7afL2sPWI0IGrXhXL+QCumWCS5iUtwybSkL7CYSk9GC+iY+ev6FAmC4V5JEc4OaWOc9+m/29LniN/iPTSxtUQSZT94pUa3/irIIdH7ReAS3cpeM6OTvumR1PwNxXx3XM1mEGc="
+	sigModel := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
+
+	input := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"toolCall":{"toolType":"GOOGLE_SEARCH_WEB","id":"1"},"thoughtSignature":"` + liveCapturedToolCallSig + `"},{"toolResponse":{"toolType":"GOOGLE_SEARCH_WEB","id":"1"},"thoughtSignature":"` + liveCapturedToolCallSig + `"},{"functionCall":{"name":"f","args":{}},"thoughtSignature":"` + sigModel + `"}]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if got := gjson.GetBytes(out, "contents.1.parts.0.thoughtSignature").String(); got != liveCapturedToolCallSig {
+		t.Fatalf("toolCall thoughtSignature = %q, want %q. Output: %s", got, liveCapturedToolCallSig, string(out))
+	}
+	if got := gjson.GetBytes(out, "contents.1.parts.1.thoughtSignature").String(); got != liveCapturedToolCallSig {
+		t.Fatalf("toolResponse thoughtSignature = %q, want %q. Output: %s", got, liveCapturedToolCallSig, string(out))
+	}
+	if got := gjson.GetBytes(out, "contents.1.parts.2.thoughtSignature").String(); got != sigModel {
+		t.Fatalf("functionCall thoughtSignature = %q, want %q. Output: %s", got, sigModel, string(out))
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_SkipsToolCallAndToolResponseParts(t *testing.T) {
+	// Server-side tool blocks (toolCall and toolResponse) carry their own signatures/envelopes
+	// that must be echoed back to the API untouched.
+	const arbitrarySig = "arbitrary_opaque_tool_sig_value"
+	input := []byte(`{"contents":[{"role":"model","parts":[
+		{"toolCall":{"toolType":"GOOGLE_SEARCH_WEB","args":{}},"thoughtSignature":"` + arbitrarySig + `"},
+		{"toolResponse":{"toolType":"GOOGLE_SEARCH_WEB","response":{}},"thoughtSignature":"` + arbitrarySig + `"}
+	]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if got := gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != arbitrarySig {
+		t.Fatalf("toolCall thoughtSignature = %q, want preserved %q", got, arbitrarySig)
+	}
+	if got := gjson.GetBytes(out, "contents.0.parts.1.thoughtSignature").String(); got != arbitrarySig {
+		t.Fatalf("toolResponse thoughtSignature = %q, want preserved %q", got, arbitrarySig)
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_SkipsSnakeCaseToolCallAndResponseParts(t *testing.T) {
+	// Defensively ensure snake_case tool_call and tool_response variants are also skipped
+	const arbitrarySig = "arbitrary_snake_tool_sig"
+	input := []byte(`{"contents":[{"role":"model","parts":[
+		{"tool_call":{"tool_type":"GOOGLE_SEARCH_WEB","args":{}},"thought_signature":"` + arbitrarySig + `"},
+		{"tool_response":{"tool_type":"GOOGLE_SEARCH_WEB","response":{}},"thought_signature":"` + arbitrarySig + `"}
+	]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if got := gjson.GetBytes(out, "contents.0.parts.0.thought_signature").String(); got != arbitrarySig {
+		t.Fatalf("tool_call thought_signature = %q, want preserved %q", got, arbitrarySig)
+	}
+	if got := gjson.GetBytes(out, "contents.0.parts.1.thought_signature").String(); got != arbitrarySig {
+		t.Fatalf("tool_response thought_signature = %q, want preserved %q", got, arbitrarySig)
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_DropsForeignSignatureOnTextPart(t *testing.T) {
+	// An arbitrary unknown or foreign signature on a model text part must be dropped
+	// to prevent upstream Gemini 400 "Corrupted thought signature" errors.
+	const foreignSig = "claude_or_invalid_signature"
+	input := []byte(`{"contents":[{"role":"model","parts":[{"text":"answer","thoughtSignature":"` + foreignSig + `"}]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").Exists() {
+		t.Fatalf("expected foreign signature on text part to be dropped, got %s", string(out))
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_MixedToolCallAndUnsignedFunctionCall(t *testing.T) {
+	// In a mixed turn with toolCall and unsigned functionCall, the toolCall signature
+	// must be preserved, and the first functionCall must receive the bypass sentinel.
+	const toolSig = "ErUDCrIDCAISrQMBEU0yD9ECvDhSY1DQJNUGafArdfd2mDfO8VQq7XjLx/91zESuo0QPSdkRFWkLeVIocSQmQULonYMOJcs6XDLV2LTRC9myb3MCCP9CUoWbEeqhAvXKTScyS3nwBDDVJYuDDbY3YvR4V86T/DnU3qufpaVZ3wQOiJVyBVZ515dYTN+XGq7SuUc3RpfAqVU06jgxaCM0WKV4Df5mGMJWb25e/aFG2Jc7upSqpf3n6aElj+4c/eWr4GdKd0TUIElXBZ0HEN/vNcWzD3F0S4MeVbk1LDakL6HG6oyaSS2gocxYNYxqm9mdMHaXYa4mIYqWqmqBEnbgcHp8H4fgqBxc3Cx8C3otV8IarO5OALaVDA3NaXB1zjLet1587kEpkCNr9OvrYOES2nCl/i4EgbPK01nlXo+Wwm5jsZU5nEG4/Z0bErzqC5TKwOsqpJ7afL2sPWI0IGrXhXL+QCumWCS5iUtwybSkL7CYSk9GC+iY+ev6FAmC4V5JEc4OaWOc9+m/29LniN/iPTSxtUQSZT94pUa3/irIIdH7ReAS3cpeM6OTvumR1PwNxXx3XM1mEGc="
+	input := []byte(`{"contents":[{"role":"model","parts":[
+		{"toolCall":{"toolType":"GOOGLE_SEARCH_WEB","id":"1"},"thoughtSignature":"` + toolSig + `"},
+		{"functionCall":{"name":"my_func","args":{}}}
+	]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if got := gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != toolSig {
+		t.Fatalf("toolCall signature = %q, want preserved %q", got, toolSig)
+	}
+	if got := gjson.GetBytes(out, "contents.0.parts.1.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("functionCall signature = %q, want bypass %q. Output: %s", got, GeminiSkipThoughtSignatureValidator, string(out))
 	}
 }

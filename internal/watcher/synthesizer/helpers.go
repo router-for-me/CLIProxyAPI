@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // StableIDGenerator generates stable, deterministic IDs for auth entries.
@@ -110,6 +110,44 @@ func addRequestRetryToMetadata(requestRetry *int, metadata map[string]any) {
 		return
 	}
 	metadata["request_retry"] = *requestRetry
+}
+
+// addRequestScopedErrorsToMetadata copies per-credential request-scoped error rules into metadata.
+func addRequestScopedErrorsToMetadata(rules []config.RequestScopedErrorRule, metadata map[string]any) {
+	if len(rules) == 0 || metadata == nil {
+		return
+	}
+	metadata["request_scoped_errors"] = rules
+}
+
+func fingerprintProfileFromMetadata(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	for _, key := range []string{"fingerprint_profile", "fingerprint-profile"} {
+		raw, _ := metadata[key].(string)
+		if profile := strings.ToLower(strings.TrimSpace(raw)); profile != "" {
+			return profile
+		}
+	}
+	return ""
+}
+
+// applyFingerprintProfileAttribute copies fingerprint-profile from an OAuth JSON
+// file (Kimi, Claude, etc.) onto auth attributes so Claude Messages opt-in works
+// the same way as claude-api-key config.
+func applyFingerprintProfileAttribute(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil {
+		return
+	}
+	profile := fingerprintProfileFromMetadata(metadata)
+	if profile == "" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["fingerprint_profile"] = profile
 }
 
 // addConfigHeadersToAttrs adds header configuration to auth attributes.

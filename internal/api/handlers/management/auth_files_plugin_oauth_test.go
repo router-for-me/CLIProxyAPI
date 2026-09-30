@@ -3,19 +3,22 @@ package management
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestPluginLoginPollAuthsExpandsMultipleAuths(t *testing.T) {
@@ -257,3 +260,152 @@ func (s *pluginLoginRollbackStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *pluginLoginRollbackStore) SetBaseDir(string) {}
+
+type testAuthProvider struct {
+	identifier string
+	startLogin func(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error)
+	pollLogin  func(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error)
+}
+
+func (p *testAuthProvider) Identifier() string {
+	return p.identifier
+}
+
+func (p *testAuthProvider) ParseAuth(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+	return pluginapi.AuthParseResponse{}, nil
+}
+
+func (p *testAuthProvider) StartLogin(ctx context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+	if p.startLogin != nil {
+		return p.startLogin(ctx, req)
+	}
+	return pluginapi.AuthLoginStartResponse{}, nil
+}
+
+func (p *testAuthProvider) PollLogin(ctx context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+	if p.pollLogin != nil {
+		return p.pollLogin(ctx, req)
+	}
+	return pluginapi.AuthLoginPollResponse{}, nil
+}
+
+func (p *testAuthProvider) RefreshAuth(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+	return pluginapi.AuthRefreshResponse{}, nil
+}
+
+func TestServePluginAuthURLPassesQueryParamsAsMetadata(t *testing.T) {
+	host := pluginhost.New()
+	var capturedReq pluginapi.AuthLoginStartRequest
+	callCount := 0
+	provider := &testAuthProvider{
+		identifier: "custom-sso",
+		startLogin: func(ctx context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+			callCount++
+			capturedReq = req
+			return pluginapi.AuthLoginStartResponse{
+				Provider:  req.Provider,
+				URL:       "https://login.example.com",
+				State:     fmt.Sprintf("state-1234567890-%d", callCount),
+				ExpiresAt: time.Now().Add(time.Hour),
+			}, nil
+		},
+	}
+	host.RegisterPluginForTest("custom-sso-plugin", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			AuthProvider: provider,
+		},
+	})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir(), Port: 8080}, nil)
+	h.SetPluginHost(host)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/custom-sso-auth-url?idc_region=eu-west-1&idc_start_url=https%3A%2F%2Fsso.example.com&scopes=read&scopes=write", nil)
+	ctx.Request = req
+
+	handled := h.ServePluginAuthURL(ctx)
+	if !handled {
+		t.Fatal("ServePluginAuthURL returned false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ServePluginAuthURL status = %d, want %d body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	if capturedReq.Metadata == nil {
+		t.Fatal("capturedReq.Metadata is nil, want query parameters as metadata")
+	}
+	if got := capturedReq.Metadata["idc_region"]; got != "eu-west-1" {
+		t.Fatalf("capturedReq.Metadata[idc_region] = %#v, want eu-west-1", got)
+	}
+	if got := capturedReq.Metadata["idc_start_url"]; got != "https://sso.example.com" {
+		t.Fatalf("capturedReq.Metadata[idc_start_url] = %#v, want https://sso.example.com", got)
+	}
+	if gotScopes, ok := capturedReq.Metadata["scopes"].([]string); !ok || len(gotScopes) != 2 || gotScopes[0] != "read" || gotScopes[1] != "write" {
+		t.Fatalf("capturedReq.Metadata[scopes] = %#v, want [read write]", capturedReq.Metadata["scopes"])
+	}
+
+	// Verify no query parameters passes nil metadata
+	capturedReq = pluginapi.AuthLoginStartRequest{}
+	recNoQuery := httptest.NewRecorder()
+	ctxNoQuery, _ := gin.CreateTestContext(recNoQuery)
+	reqNoQuery := httptest.NewRequest(http.MethodGet, "/v0/management/custom-sso-auth-url", nil)
+	ctxNoQuery.Request = reqNoQuery
+
+	handledNoQuery := h.ServePluginAuthURL(ctxNoQuery)
+	if !handledNoQuery {
+		t.Fatal("ServePluginAuthURL without query returned false, want true")
+	}
+	if recNoQuery.Code != http.StatusOK {
+		t.Fatalf("ServePluginAuthURL status = %d, want %d body = %s", recNoQuery.Code, http.StatusOK, recNoQuery.Body.String())
+	}
+	if capturedReq.Metadata != nil {
+		t.Fatalf("capturedReq.Metadata = %#v, want nil for request without query", capturedReq.Metadata)
+	}
+}
+
+func TestV8PluginOAuthUsesIndependentCallback(t *testing.T) {
+	host := pluginhost.New()
+	var captured pluginapi.AuthLoginStartRequest
+	callCount := 0
+	host.RegisterPluginForTest("v8-login-plugin", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{AuthProvider: &testAuthProvider{
+			identifier: "custom-sso",
+			startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+				captured = req
+				callCount++
+				state := fmt.Sprintf("state-v8-1234567890-%d", callCount)
+				t.Cleanup(func() { CancelOAuthSession(state) })
+				return pluginapi.AuthLoginStartResponse{Provider: req.Provider, URL: "https://login.example.com", State: state, ExpiresAt: time.Now().Add(time.Hour)}, nil
+			},
+		}},
+	})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir(), Port: 8317}, nil)
+	h.SetPluginHost(host)
+	router := gin.New()
+	router.GET("/v8/management/oauth/auth-url", h.StartOAuthV8)
+	for _, tc := range []struct {
+		query    string
+		metadata map[string]any
+	}{
+		{"provider=custom-sso&region=eu&scopes=read&scopes=write", map[string]any{"region": "eu", "scopes": []string{"read", "write"}}},
+		{"provider=%20CUSTOM-SSO%20", nil},
+	} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?"+tc.query, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		if captured.BaseURL != "http://127.0.0.1:8317/v8/management/oauth/callback" || captured.Provider != "custom-sso" || !reflect.DeepEqual(captured.Metadata, tc.metadata) {
+			t.Fatalf("incorrect v8 login request: %#v", captured)
+		}
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?provider=unknown", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown provider status=%d", response.Code)
+	}
+	if callCount != 2 {
+		t.Fatalf("plugin login calls=%d, want 2", callCount)
+	}
+}

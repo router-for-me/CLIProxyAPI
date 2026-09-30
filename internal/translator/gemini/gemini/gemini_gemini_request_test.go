@@ -253,3 +253,20 @@ func TestBackfillEmptyFunctionResponseNames_MultipleGroups(t *testing.T) {
 		t.Errorf("Expected second group name 'Grep', got '%s'", name1)
 	}
 }
+
+func TestConvertGeminiRequestToGemini_FunctionResponseWithInvalidRoleNormalizesToUser(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "reminder"}]},
+			{"role": "invalid", "parts": [{"functionResponse": {"name": "lookup", "response": {}}}]}
+		]
+	}`)
+	out := ConvertGeminiRequestToGemini("gemini-3-flash", inputJSON, false)
+	contents := gjson.GetBytes(out, "contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("expected 2 contents, got %d", len(contents))
+	}
+	if got := contents[1].Get("role").String(); got != "user" {
+		t.Fatalf("functionResponse invalid role should normalize to user, got %q", got)
+	}
+}

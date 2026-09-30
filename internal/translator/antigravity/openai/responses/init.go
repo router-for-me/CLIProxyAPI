@@ -1,9 +1,10 @@
 package responses
 
 import (
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/translator"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func init() {
@@ -15,5 +16,10 @@ func init() {
 			Stream:    ConvertAntigravityResponseToOpenAIResponses,
 			NonStream: ConvertAntigravityResponseToOpenAIResponsesNonStream,
 		},
+	)
+	sdktranslator.RegisterRequestEnvelope(
+		sdktranslator.FormatOpenAIResponse,
+		sdktranslator.FormatAntigravity,
+		ConvertOpenAIResponsesRequestEnvelopeToAntigravity,
 	)
 }

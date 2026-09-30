@@ -9,9 +9,10 @@ import (
 	"reflect"
 	"strings"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -72,6 +73,20 @@ func (h *Host) callStreamChunkInterceptor(ctx context.Context, record capability
 	return resp, true
 }
 
+func (h *Host) callWebSocketResponseObserver(ctx context.Context, record capabilityRecord, observer pluginapi.WebSocketResponseObserver, event pluginapi.WebSocketResponseEvent) {
+	if h == nil || observer == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.id, "WebSocketResponseObserver.ObserveWebSocketResponseEvent", recovered)
+		}
+	}()
+	if errObserve := observer.ObserveWebSocketResponseEvent(ctx, event); errObserve != nil {
+		log.Warnf("pluginhost: websocket response observer %s failed: %v", record.id, errObserve)
+	}
+}
+
 func (h *Host) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
 	return h.InterceptRequestBeforeAuthExcept(ctx, req, "")
 }
@@ -95,9 +110,11 @@ func (h *Host) InterceptRequestAfterAuthExcept(ctx context.Context, req pluginap
 func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, method string, invoke func(pluginapi.RequestInterceptor, context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error), skipPluginID string) pluginapi.RequestInterceptResponse {
 	current := pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
-		Body:    bytes.Clone(req.Body),
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
+	currentBase := req.Body
+	bodyModified := false
+
 	for _, record := range h.activeRecords() {
 		interceptor := record.plugin.Capabilities.RequestInterceptor
 		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
@@ -105,14 +122,28 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 		}
 		nextReq := req
 		nextReq.Headers = cloneHeader(current.Headers)
-		nextReq.Body = bytes.Clone(current.Body)
+		if len(currentBase) > 0 {
+			nextReq.Body = bytes.Clone(currentBase)
+		} else {
+			nextReq.Body = nil
+		}
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
+		if current.Path != "" {
+			if nextReq.Metadata == nil {
+				nextReq.Metadata = make(map[string]any, 1)
+			}
+			nextReq.Metadata[coreexecutor.RequestPathMetadataKey] = current.Path
+		}
 		if resp, ok := h.callRequestInterceptor(ctx, record, method, func(callCtx context.Context, callReq pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 			return invoke(interceptor, callCtx, callReq)
 		}, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
 			if len(resp.Body) > 0 {
-				current.Body = bytes.Clone(resp.Body)
+				currentBase = bytes.Clone(resp.Body)
+				bodyModified = true
+			}
+			if strings.TrimSpace(resp.Path) != "" {
+				current.Path = strings.TrimSpace(resp.Path)
 			}
 			if resp.Terminate {
 				current.Terminate = true
@@ -123,12 +154,56 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			}
 		}
 	}
+	if bodyModified {
+		current.Body = currentBase
+	}
 	return current
 }
 
 // CompleteRequest schedules terminal notifications without blocking response delivery.
 func (h *Host) CompleteRequest(ctx context.Context, completion pluginapi.RequestCompletion) {
 	h.CompleteRequestExcept(ctx, completion, "")
+}
+
+func (h *Host) HasWebSocketResponseObservers() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) {
+			continue
+		}
+		if record.plugin.Capabilities.WebSocketResponseObserver != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) ObserveWebSocketResponseEvent(ctx context.Context, event pluginapi.WebSocketResponseEvent) {
+	h.ObserveWebSocketResponseEventExcept(ctx, event, "")
+}
+
+func (h *Host) ObserveWebSocketResponseEventExcept(ctx context.Context, event pluginapi.WebSocketResponseEvent, skipPluginID string) {
+	if h == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
+	for _, record := range h.activeRecords() {
+		observer := record.plugin.Capabilities.WebSocketResponseObserver
+		if h.isPluginFused(record.id) || observer == nil || record.id == skipPluginID || !h.recordCurrent(record) {
+			continue
+		}
+		next := event
+		next.Payload = bytes.Clone(event.Payload)
+		next.Metadata = cloneInterceptorMetadata(event.Metadata)
+		h.callWebSocketResponseObserver(ctx, record, observer, next)
+	}
 }
 
 // CompleteRequestExcept notifies lifecycle plugins except the plugin that initiated a nested host execution.
@@ -222,7 +297,13 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 			nextReq.RequestBody = bytes.Clone(req.RequestBody)
 		}
 		nextReq.Body = bytes.Clone(current.Body)
-		nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
+		// Schema v5+ omits HistoryChunks on payload chunks to avoid cloning and re-encoding
+		// recent chunk windows across cgo/JSON for every frame. Legacy plugins still receive them.
+		if req.ChunkIndex != pluginapi.StreamChunkHeaderInitIndex && streamChunkOmitsHistory(record.plugin.SchemaVersion) {
+			nextReq.HistoryChunks = nil
+		} else {
+			nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
+		}
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
 		if resp, ok := h.callStreamChunkInterceptor(ctx, record, interceptor, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
@@ -272,6 +353,28 @@ func (h *Host) StreamChunkPayloadIncludesRequestBody() bool {
 
 func streamChunkOmitsRequestBodies(schemaVersion uint32) bool {
 	return schemaVersion >= pluginabi.SchemaVersionStreamChunkOmitRequestBody
+}
+
+// StreamChunkPayloadIncludesHistory reports whether any active stream chunk
+// interceptor still requires HistoryChunks on payload chunks
+// (schema_version < SchemaVersionStreamChunkOmitHistory).
+func (h *Host) StreamChunkPayloadIncludesHistory() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.StreamChunkInterceptor == nil {
+			continue
+		}
+		if !streamChunkOmitsHistory(record.plugin.SchemaVersion) {
+			return true
+		}
+	}
+	return false
+}
+
+func streamChunkOmitsHistory(schemaVersion uint32) bool {
+	return schemaVersion >= pluginabi.SchemaVersionStreamChunkOmitHistory
 }
 
 func (h *Host) HasRequestInterceptors() bool {

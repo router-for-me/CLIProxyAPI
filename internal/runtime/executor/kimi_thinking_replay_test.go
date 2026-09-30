@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -32,6 +32,10 @@ func TestKimiThinkingReplayModelFamily(t *testing.T) {
 		{model: "kimi-k3-256k(high)", want: "k3"},
 		{model: "kimi-k2.7-code", want: "kimi-for-coding"},
 		{model: "kimi-k2.7-code-highspeed", want: "kimi-for-coding-highspeed"},
+		{model: "kimi-k2.8", want: "kimi-for-coding"},
+		{model: "kimi-k2.8-code", want: "kimi-for-coding"},
+		{model: "kimi-k2.8(max)", want: "kimi-for-coding"},
+		{model: "kimi-k2.8-code[1m](high)", want: "kimi-for-coding"},
 		{model: "kimi-for-coding", want: "kimi-for-coding"},
 		{model: "kimi-for-coding-highspeed(high)", want: "kimi-for-coding-highspeed"},
 	}

@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type retryAfterProvider interface {
@@ -216,12 +216,16 @@ func TestClaudeExecutor_RateLimit_CountTokensHonorsRateLimitReset(t *testing.T) 
 	}
 
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-	_, err := executor.countTokensUpstream(context.Background(), auth, cliproxyexecutor.Request{
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+	_, err := executor.countTokensUpstream(ctx, auth, cliproxyexecutor.Request{
 		Model:   "claude-3-5-sonnet-20241022",
 		Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 	if err == nil {
 		t.Fatal("expected error from CountTokens, got nil")
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatal("CountTokens() did not mark the HTTP request as an upstream attempt")
 	}
 
 	var rap retryAfterProvider

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -27,6 +27,27 @@ func TestParseConfigBytes_AntigravitySensitiveWords(t *testing.T) {
 	want := []string{"API", "proxy"}
 	if !reflect.DeepEqual(cfg.Antigravity.SensitiveWords, want) {
 		t.Fatalf("Antigravity.SensitiveWords = %#v, want %#v", cfg.Antigravity.SensitiveWords, want)
+	}
+}
+
+func TestParseConfigBytes_AntigravityConnectionPool(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`antigravity:
+  connection-pool:
+    enabled: false
+    idle-conn-timeout: "15s"
+    max-idle-conns-per-host: 4
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if cfg.Antigravity.ConnectionPool.Enabled == nil || *cfg.Antigravity.ConnectionPool.Enabled != false {
+		t.Fatalf("Enabled = %v, want false", cfg.Antigravity.ConnectionPool.Enabled)
+	}
+	if cfg.Antigravity.ConnectionPool.IdleConnTimeout != "15s" {
+		t.Fatalf("IdleConnTimeout = %q, want 15s", cfg.Antigravity.ConnectionPool.IdleConnTimeout)
+	}
+	if cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost == nil || *cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != 4 {
+		t.Fatalf("MaxIdleConnsPerHost = %v, want 4", cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost)
 	}
 }
 

@@ -56,6 +56,29 @@ func claudeCodeHeader(ctx context.Context, headers http.Header, name string) str
 	return ""
 }
 
+// HeaderValueCaseInsensitive returns the first non-empty header value matching name case-insensitively.
+func HeaderValueCaseInsensitive(headers http.Header, name string) string {
+	return headerValueCaseInsensitive(headers, name)
+}
+
+// HeaderValuesCaseInsensitive returns all non-empty header values matching name case-insensitively.
+func HeaderValuesCaseInsensitive(headers http.Header, name string) []string {
+	if headers == nil {
+		return nil
+	}
+	var result []string
+	for key, values := range headers {
+		if strings.EqualFold(key, name) {
+			for _, value := range values {
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					result = append(result, trimmed)
+				}
+			}
+		}
+	}
+	return result
+}
+
 func headerValueCaseInsensitive(headers http.Header, name string) string {
 	if headers == nil {
 		return ""

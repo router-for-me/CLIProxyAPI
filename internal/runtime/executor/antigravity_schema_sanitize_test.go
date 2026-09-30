@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	antigravitychat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/openai/chat-completions"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	antigravitychat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/openai/chat-completions"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 )
 
@@ -222,10 +222,7 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 	for _, useAntigravitySchema := range []bool{false, true} {
 		for name, schema := range shapes {
 			doc := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parameters":` + schema + `}]}]}}`
-			whole := util.CleanJSONSchemaForGemini(doc)
-			if useAntigravitySchema {
-				whole = util.CleanJSONSchemaForAntigravity(doc)
-			}
+			whole := util.CleanJSONSchemaForAntigravityTool(doc, useAntigravitySchema)
 			want := gjson.Get(whole, schemaPath).Raw
 			got := gjson.Get(sanitizeAntigravityRequestSchemas(doc, useAntigravitySchema), schemaPath).Raw
 			if want != got {
@@ -274,7 +271,7 @@ func TestSanitizeAntigravityRequestSchemasKeepsResponseSchemasPlaceholderFree(t 
 	}
 }
 
-func TestSanitizeAntigravityRequestSchemasPreservesResponseUnionAndEnumType(t *testing.T) {
+func TestSanitizeAntigravityRequestSchemasProjectsUnionsAndPreservesEnumTypes(t *testing.T) {
 	payload := `{"request":{
 		"tools":[{"functionDeclarations":[{"name":"tool","parameters":{"type":"object","properties":{
 			"choice":{"anyOf":[{"type":"string"},{"type":"null"}]},
@@ -291,9 +288,9 @@ func TestSanitizeAntigravityRequestSchemasPreservesResponseUnionAndEnumType(t *t
 
 	got := sanitizeAntigravityRequestSchemas(payload, true)
 	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
-	union := responseSchema.Get("properties.action.anyOf")
-	if !union.IsArray() || len(union.Array()) != 2 || union.Get("1.type").String() != "null" {
-		t.Errorf("response anyOf union was flattened: %s", responseSchema.Raw)
+	action := responseSchema.Get("properties.action")
+	if action.Get("anyOf").Exists() || action.Get("type").String() != "object" || !action.Get("nullable").Bool() {
+		t.Errorf("response anyOf was not projected to nullable object: %s", responseSchema.Raw)
 	}
 	conviction := responseSchema.Get("properties.conviction")
 	if gotType := conviction.Get("type").String(); gotType != "number" {
@@ -309,8 +306,35 @@ func TestSanitizeAntigravityRequestSchemasPreservesResponseUnionAndEnumType(t *t
 	if toolSchema.Get("properties.choice.anyOf").Exists() {
 		t.Errorf("tool anyOf union was not flattened: %s", toolSchema.Raw)
 	}
-	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "string" {
-		t.Errorf("tool enum type = %q, want string: %s", gotType, toolSchema.Raw)
+	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "number" {
+		t.Errorf("tool enum type = %q, want number: %s", gotType, toolSchema.Raw)
+	}
+}
+
+func TestSanitizeAntigravityToolSchemasKeepNativeTypeAndNullableOnBothPaths(t *testing.T) {
+	payload := `{"request":{"tools":[{"functionDeclarations":[{"name":"tool","parameters":{
+		"type":"object",
+		"properties":{
+			"level":{"type":"number","enum":[1,2]},
+			"note":{"type":["string","null"]}
+		},
+		"required":["level","note"]
+	}}]}]}}`
+
+	for _, requirePlaceholder := range []bool{false, true} {
+		got := sanitizeAntigravityRequestSchemas(payload, requirePlaceholder)
+		schema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+		if schema.Get("properties.level.type").String() != "number" {
+			t.Fatalf("placeholder=%v changed numeric tool argument type: %s", requirePlaceholder, schema.Raw)
+		}
+		for _, member := range schema.Get("properties.level.enum").Array() {
+			if member.Type != gjson.String {
+				t.Fatalf("placeholder=%v left non-string proto enum: %s", requirePlaceholder, schema.Raw)
+			}
+		}
+		if !schema.Get("properties.note.nullable").Bool() || schema.Get("required.1").String() != "note" {
+			t.Fatalf("placeholder=%v lost native nullable/required semantics: %s", requirePlaceholder, schema.Raw)
+		}
 	}
 }
 
@@ -565,6 +589,101 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 					t.Errorf("functionCall argument named propertyNames was rewritten: %s", args.Raw)
 				}
 			})
+		}
+	}
+}
+
+// TestSanitizeAntigravityRequestSchemasStripsEncryptedMetadata covers Codex client tool parameters
+// that carry "encrypted": true or "encrypted": false markers.
+func TestSanitizeAntigravityRequestSchemasStripsEncryptedMetadata(t *testing.T) {
+	encryptedSchema := `{"type":"object","properties":{"key":{"type":"string","encrypted":true},"timeout":{"type":"integer","encrypted":false}},"required":["key"]}`
+
+	for _, declContainer := range []string{"functionDeclarations", "function_declarations"} {
+		payload := `{"request":{"tools":[{"` + declContainer + `":[{"name":"test_tool","parameters":` + encryptedSchema + `}]}]}}`
+
+		for _, useAntigravitySchema := range []bool{false, true} {
+			got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
+			if strings.Contains(got, `"encrypted"`) {
+				t.Errorf("declContainer=%s antigravity=%v: 'encrypted' marker survived sanitization: %s", declContainer, useAntigravitySchema, got)
+			}
+			schema := gjson.Get(got, "request.tools.0."+declContainer+".0.parameters")
+			if !schema.Get("properties.key.type").Exists() || schema.Get("properties.key.type").String() != "string" {
+				t.Errorf("declContainer=%s antigravity=%v: key property was corrupted: %s", declContainer, useAntigravitySchema, schema.Raw)
+			}
+		}
+	}
+}
+
+func TestSanitizeAntigravityRequestSchemasNormalizesTrueBooleanSubschemas(t *testing.T) {
+	// Issue #3551: RevenueCat MCP and other MCP tools declare boolean `true` subschemas in properties.
+	// Upstream Antigravity rejects boolean `true` in Schema objects with HTTP 400.
+	payload := `{"request":{
+		"tools":[{"functionDeclarations":[{
+			"name":"mcp__revenuecat_create_product_store_state_plan",
+			"parametersJsonSchema":{
+				"type":"object",
+				"properties":{
+					"screenshot_id":true,
+					"filename":true,
+					"file_size":true,
+					"source_file_checksum":true,
+					"disabled":false,
+					"metadata":{
+						"type":"object",
+						"properties":{
+							"nested_flag":true
+						}
+					},
+					"tags":{
+						"type":"array",
+						"items":true
+					},
+					"variants":{
+						"anyOf":[true,{"type":"string"}]
+					},
+					"large_int":9007199254740993
+				},
+				"additionalProperties":true
+			}
+		}]}]
+	}}`
+
+	for _, useAntigravitySchema := range []bool{false, true} {
+		got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
+		decl := gjson.Get(got, "request.tools.0.functionDeclarations.0")
+		params := decl.Get("parameters")
+		if !params.Exists() {
+			t.Fatalf("parameters missing in sanitized declaration: %s", decl.Raw)
+		}
+
+		for _, prop := range []string{"screenshot_id", "filename", "file_size", "source_file_checksum"} {
+			val := params.Get("properties." + prop)
+			if !val.Exists() {
+				t.Errorf("useAntigravitySchema=%v: property %s missing: %s", useAntigravitySchema, prop, params.Raw)
+			}
+			if val.Type != gjson.JSON || val.Raw != "{}" {
+				t.Errorf("useAntigravitySchema=%v: property %s should be {}, got %s", useAntigravitySchema, prop, val.Raw)
+			}
+		}
+
+		// Check false is preserved
+		if val := params.Get("properties.disabled"); val.Type != gjson.False {
+			t.Errorf("useAntigravitySchema=%v: disabled should be false, got %s", useAntigravitySchema, val.Raw)
+		}
+
+		// Check nested property
+		if val := params.Get("properties.metadata.properties.nested_flag"); val.Type != gjson.JSON || val.Raw != "{}" {
+			t.Errorf("useAntigravitySchema=%v: nested_flag should be {}, got %s", useAntigravitySchema, val.Raw)
+		}
+
+		// Check items: true -> items: {}
+		if val := params.Get("properties.tags.items"); val.Type != gjson.JSON || val.Raw != "{}" {
+			t.Errorf("useAntigravitySchema=%v: tags.items should be {}, got %s", useAntigravitySchema, val.Raw)
+		}
+
+		// Check large int preserved without float conversion
+		if val := params.Get("properties.large_int"); val.Raw != "9007199254740993" {
+			t.Errorf("useAntigravitySchema=%v: large_int corrupted, got %s", useAntigravitySchema, val.Raw)
 		}
 	}
 }

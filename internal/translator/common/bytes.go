@@ -1,6 +1,8 @@
 package common
 
 import (
+	"bytes"
+	"encoding/json"
 	"strconv"
 
 	"github.com/tidwall/gjson"
@@ -73,14 +75,16 @@ func SetRawArrayItems(data []byte, path string, items [][]byte) []byte {
 	return data
 }
 
+// SSEEventData builds one complete SSE frame. Each frame carries its own
+// blank-line terminator so concatenated frames stay separable downstream.
 func SSEEventData(event string, payload []byte) []byte {
-	out := make([]byte, 0, len(event)+len(payload)+14)
+	out := make([]byte, 0, len(event)+len(payload)+16)
 	out = append(out, "event: "...)
 	out = append(out, event...)
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
-	return out
+	return append(out, '\n', '\n')
 }
 
 func AppendSSEEventString(out []byte, event, payload string, trailingNewlines int) []byte {
@@ -105,4 +109,19 @@ func AppendSSEEventBytes(out []byte, event string, payload []byte, trailingNewli
 		out = append(out, '\n')
 	}
 	return out
+}
+
+// SetStringWithoutHTMLEscape sets a string field in a JSON payload without escaping
+// HTML characters (<, >, &). Standard sjson.Set/SetBytes delegates string values
+// containing quotes or special characters to encoding/json.Marshal, which unconditionally
+// escapes <, >, & to \u003c, \u003e, \u0026.
+func SetStringWithoutHTMLEscape(data []byte, path, value string) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	if errEncode := enc.Encode(value); errEncode != nil {
+		return sjson.SetBytes(data, path, value)
+	}
+	raw := bytes.TrimRight(buf.Bytes(), "\n")
+	return sjson.SetRawBytes(data, path, raw)
 }

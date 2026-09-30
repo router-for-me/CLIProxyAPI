@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestExtractAccessToken(t *testing.T) {
@@ -146,6 +146,66 @@ func TestFileTokenStoreSaveExistingMetadataSetsFileAttributes(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreNormalizesLegacyCredentialMetadata(t *testing.T) {
+	t.Run("save", func(t *testing.T) {
+		baseDir := t.TempDir()
+		store := NewFileTokenStore()
+		store.SetBaseDir(baseDir)
+		auth := &cliproxyauth.Auth{
+			ID:       "legacy-save.json",
+			FileName: "legacy-save.json",
+			Metadata: map[string]any{
+				"type":            "codex",
+				"request-retry":   2,
+				"request_retry":   0,
+				"disable-cooling": true,
+			},
+		}
+
+		path, errSave := store.Save(context.Background(), auth)
+		if errSave != nil {
+			t.Fatalf("Save() error = %v", errSave)
+		}
+		persisted, errRead := os.ReadFile(path)
+		if errRead != nil {
+			t.Fatalf("read saved auth file: %v", errRead)
+		}
+		want := []byte(`{"type":"codex","request_retry":0,"disable_cooling":true,"disabled":false}`)
+		if !jsonEqual(persisted, want) {
+			t.Fatalf("saved auth file = %s, want JSON equal to %s", persisted, want)
+		}
+	})
+
+	t.Run("list", func(t *testing.T) {
+		baseDir := t.TempDir()
+		path := filepath.Join(baseDir, "legacy-list.json")
+		if errWrite := os.WriteFile(path, []byte(`{"type":"codex","request-retry":2,"disable-cooling":true}`), 0o600); errWrite != nil {
+			t.Fatalf("write legacy auth file: %v", errWrite)
+		}
+		store := NewFileTokenStore()
+		store.SetBaseDir(baseDir)
+
+		auths, errList := store.List(context.Background())
+		if errList != nil {
+			t.Fatalf("List() error = %v", errList)
+		}
+		if len(auths) != 1 {
+			t.Fatalf("List() len = %d, want 1", len(auths))
+		}
+		if got := auths[0].Metadata["request_retry"]; got != float64(2) {
+			t.Fatalf("listed request_retry = %#v, want 2", got)
+		}
+		if got := auths[0].Metadata["disable_cooling"]; got != true {
+			t.Fatalf("listed disable_cooling = %#v, want true", got)
+		}
+		for _, legacy := range []string{"request-retry", "disable-cooling"} {
+			if _, exists := auths[0].Metadata[legacy]; exists {
+				t.Fatalf("listed metadata retained %q: %#v", legacy, auths[0].Metadata)
+			}
+		}
+	})
+}
+
 func TestFileTokenStoreSaveRejectsInvalidWeight(t *testing.T) {
 	baseDir := t.TempDir()
 	store := NewFileTokenStore()
@@ -268,6 +328,54 @@ func TestFileTokenStoreListExpandsPluginMultiAuths(t *testing.T) {
 	}
 	if gotProject := auths[1].Metadata["project_id"]; gotProject != "project-a" {
 		t.Fatalf("project_id = %#v, want project-a", gotProject)
+	}
+}
+
+func TestFileTokenStoreListAppliesSourcePriorityToPluginAuths(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		raw          string
+		want         string
+		wantMetadata any
+	}{
+		{name: "number", raw: `{"type":"plugin","priority":1}`, want: "1", wantMetadata: float64(1)},
+		{name: "string", raw: `{"type":"plugin","priority":" 2 "}`, want: "2", wantMetadata: " 2 "},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			baseDir := t.TempDir()
+			path := filepath.Join(baseDir, "plugin.json")
+			if errWrite := os.WriteFile(path, []byte(testCase.raw), 0o600); errWrite != nil {
+				t.Fatalf("write auth file: %v", errWrite)
+			}
+			RegisterPluginAuthParser(fileStoreMultiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
+				return []*cliproxyauth.Auth{
+					{ID: "first", Provider: "plugin", Metadata: map[string]any{"project_id": "first"}},
+					{ID: "second", Provider: "plugin", Metadata: map[string]any{"project_id": "second"}},
+				}, true, nil
+			}))
+			t.Cleanup(func() { RegisterPluginAuthParser(nil) })
+
+			store := NewFileTokenStore()
+			store.SetBaseDir(baseDir)
+			auths, errList := store.List(context.Background())
+			if errList != nil {
+				t.Fatalf("List() error = %v", errList)
+			}
+			if len(auths) != 2 {
+				t.Fatalf("List() len = %d, want 2", len(auths))
+			}
+			for _, auth := range auths {
+				if got := auth.Attributes["priority"]; got != testCase.want {
+					t.Errorf("auth %s priority attribute = %q, want %q", auth.ID, got, testCase.want)
+				}
+				if got := auth.Attributes[cliproxyauth.AttributeFilePriority]; got != "true" {
+					t.Errorf("auth %s file priority marker = %q, want true", auth.ID, got)
+				}
+				if got := auth.Metadata["priority"]; got != testCase.wantMetadata {
+					t.Errorf("auth %s priority metadata = %v, want %v", auth.ID, got, testCase.wantMetadata)
+				}
+			}
+		})
 	}
 }
 

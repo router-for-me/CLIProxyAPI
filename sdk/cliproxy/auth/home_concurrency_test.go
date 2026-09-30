@@ -13,9 +13,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type fixtureHomeDispatcher struct {
@@ -391,6 +391,25 @@ func TestHomeNoCandidateErrorsMapToServiceUnavailable(t *testing.T) {
 			var authErr *Error
 			if !errors.As(errDispatch, &authErr) || authErr.Code != code || authErr.HTTPStatus != http.StatusServiceUnavailable {
 				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want 503", code, errDispatch)
+			}
+		})
+	}
+}
+
+func TestHomeUserBillingAndPeriodLimitErrors(t *testing.T) {
+	tests := []struct {
+		code       string
+		wantStatus int
+	}{
+		{code: "user_credits_insufficient", wantStatus: http.StatusPaymentRequired},
+		{code: "user_period_limit_exceeded", wantStatus: http.StatusTooManyRequests},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			errDispatch := decodeHomeDispatchError([]byte(fmt.Sprintf(`{"error":{"type":%q,"message":"limit hit"}}`, tt.code)))
+			var authErr *Error
+			if !errors.As(errDispatch, &authErr) || authErr.Code != tt.code || authErr.HTTPStatus != tt.wantStatus {
+				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want %d", tt.code, errDispatch, tt.wantStatus)
 			}
 		})
 	}
