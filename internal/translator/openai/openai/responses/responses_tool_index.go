@@ -22,6 +22,7 @@ type responsesToolIndex struct {
 	byRaw        map[string]string
 	byLocal      map[string]string // Empty means multiple distinct emitted tools.
 	custom       map[string]struct{}
+	localShell   map[string]struct{}
 }
 
 func newResponsesToolIndex(root gjson.Result) *responsesToolIndex {
@@ -31,6 +32,7 @@ func newResponsesToolIndex(root gjson.Result) *responsesToolIndex {
 		byRaw:      make(map[string]string),
 		byLocal:    make(map[string]string),
 		custom:     make(map[string]struct{}),
+		localShell: make(map[string]struct{}),
 	}
 	walkResponsesToolDeclarations(root, func(d responsesToolDeclaration) bool {
 		idx.declarations = append(idx.declarations, d)
@@ -53,6 +55,9 @@ func newResponsesToolIndex(root gjson.Result) *responsesToolIndex {
 		}
 		if d.custom {
 			idx.custom[d.chatName] = struct{}{}
+		}
+		if d.localShell {
+			idx.localShell[d.chatName] = struct{}{}
 		}
 		return true
 	})
@@ -118,6 +123,9 @@ func (idx *responsesToolIndex) chatTools() [][]byte {
 		convert := convertResponsesFunctionToolToOpenAIChat
 		if d.custom {
 			convert = convertResponsesCustomToolToOpenAIChat
+		}
+		if d.localShell {
+			convert = convertResponsesLocalShellToolToOpenAIChat
 		}
 		if tool, ok := convert(d.tool, d.chatName); ok {
 			merged = append(merged, tool)
