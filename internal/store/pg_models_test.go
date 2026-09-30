@@ -233,3 +233,26 @@ func TestModelsStoreDistinctPagedFilterPricedAndExclude(t *testing.T) {
 		}
 	}
 }
+
+func TestModelsStoreProviderCountsByIDs(t *testing.T) {
+	st := newTestPostgresStore(t, "models_pcount_test")
+	ctx := cancelableTestCtx(t)
+	ms := NewModelsStore(st)
+	if err := ms.UpsertModels(ctx, []StoredModel{
+		{ID: "a", Provider: "p1", Object: "model", OwnedBy: "p1", Type: "t"},
+		{ID: "a", Provider: "p2", Object: "model", OwnedBy: "p2", Type: "t"},
+		{ID: "b", Provider: "p1", Object: "model", OwnedBy: "p1", Type: "t"},
+	}); err != nil {
+		t.Fatalf("UpsertModels: %v", err)
+	}
+	counts, err := ms.ProviderCountsByIDs(ctx, []string{"a", "b", "missing"})
+	if err != nil {
+		t.Fatalf("ProviderCountsByIDs: %v", err)
+	}
+	if counts["a"] != 2 || counts["b"] != 1 {
+		t.Fatalf("counts = %v; want a=2 b=1", counts)
+	}
+	if _, ok := counts["missing"]; ok {
+		t.Fatalf("unexpected count for missing id: %v", counts)
+	}
+}
