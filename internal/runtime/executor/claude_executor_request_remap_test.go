@@ -2,10 +2,13 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -529,7 +532,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 
 	for _, name := range native {
 		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, name))
-		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap, claudeMCPAliasOptions{})
 		if err != nil {
 			t.Fatalf("caller MCP tool %q failed to restore: %v", name, err)
 		}
@@ -538,7 +541,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 		}
 
 		line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, name))
-		restoredLine, errLine := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+		restoredLine, errLine := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap, claudeMCPAliasOptions{})
 		if errLine != nil {
 			t.Fatalf("caller MCP tool %q failed to restore from stream: %v", name, errLine)
 		}
@@ -552,7 +555,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 	toolPart := strings.SplitN(alias, "__", 3)[2]
 	for _, drifted := range []string{alias, "mcp__" + server + "__" + server + "__" + toolPart, "mcp__" + server + "__abandon_read_file"} {
 		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, drifted))
-		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap, claudeMCPAliasOptions{})
 		if err != nil {
 			t.Fatalf("proxied alias %q failed to restore: %v", drifted, err)
 		}
@@ -939,7 +942,7 @@ func TestReverseRemapOAuthToolNamesRestoresHybridPassthroughMCPTools(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			// Non-stream response
 			resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, tc.hybridName))
-			restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+			restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap, claudeMCPAliasOptions{})
 			if err != nil {
 				t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v, want %q", err, tc.wantName)
 			}
@@ -949,7 +952,7 @@ func TestReverseRemapOAuthToolNamesRestoresHybridPassthroughMCPTools(t *testing.
 
 			// Streaming response
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, tc.hybridName))
-			restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+			restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap, claudeMCPAliasOptions{})
 			if errStream != nil {
 				t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, tc.wantName)
 			}
@@ -970,7 +973,7 @@ func TestReverseRemapOAuthToolNamesHybridPassthroughPrecedenceAndAmbiguity(t *te
 		}
 		// mcp__<virtual>__Bash is a semantic suffix match for Bash, should restore to Bash, NOT mcp__shell__Bash
 		resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, virtual+"Bash"))
-		restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap, claudeMCPAliasOptions{})
 		if err != nil {
 			t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v", err)
 		}
@@ -987,7 +990,7 @@ func TestReverseRemapOAuthToolNamesHybridPassthroughPrecedenceAndAmbiguity(t *te
 		}
 		// mcp__<virtual>__query matches both srv1 and srv2, cannot disambiguate
 		resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, virtual+"query"))
-		_, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+		_, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap, claudeMCPAliasOptions{})
 		if err == nil {
 			t.Fatal("restoreClaudeOAuthToolNamesFromResponse() expected error for ambiguous passthrough, got nil")
 		}
@@ -1012,7 +1015,7 @@ func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
 
 	// 1. Non-stream response
 	resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, undeclaredToolName))
-	restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+	restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap, claudeMCPAliasOptions{})
 	if err != nil {
 		t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v, want fail-open nil", err)
 	}
@@ -1022,11 +1025,291 @@ func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
 
 	// 2. Stream SSE line
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, undeclaredToolName))
-	restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+	restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap, claudeMCPAliasOptions{})
 	if errStream != nil {
 		t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
 	}
 	if !bytes.Equal(restoredLine, line) {
 		t.Fatalf("restoredLine = %s, want %s forwarded unchanged", string(restoredLine), string(line))
+	}
+}
+
+// claudeRoundTrip drives one caller's restore and replay through the entry points
+// the executor uses: a stream or non-stream restore and a batched or legacy remap.
+type claudeRoundTrip struct {
+	t       *testing.T
+	opts    claudeMCPAliasOptions
+	tools   string
+	reverse map[string]string
+	stream  bool
+	batched bool
+}
+
+// newClaudeRoundTrip builds a caller with its own API key secret; an empty secret
+// is a keyless caller, resolved as for a request without an API key.
+func newClaudeRoundTrip(t *testing.T, secret, tools string, stream, batched bool) claudeRoundTrip {
+	opts := claudeMCPAliasOptions{secret: secret, keyed: true}
+	if secret == "" {
+		opts = resolveClaudeMCPAliasOptions(context.Background())
+	}
+	_, reverse := remapOAuthToolNamesWithOptions([]byte(`{"tools":`+tools+`,"messages":[{"role":"user","content":"hi"}]}`), opts)
+	return claudeRoundTrip{t: t, opts: opts, tools: tools, reverse: reverse, stream: stream, batched: batched}
+}
+
+// alias returns the upstream alias the caller's tool set gives original.
+func (rt claudeRoundTrip) alias(original string) string {
+	rt.t.Helper()
+	for alias, name := range rt.reverse {
+		if name == original && alias != original {
+			return alias
+		}
+	}
+	rt.t.Fatalf("%s was not aliased", original)
+	return ""
+}
+
+// restore returns the name the client receives for a produced tool_use name.
+func (rt claudeRoundTrip) restore(id, produced string) string {
+	rt.t.Helper()
+	if rt.stream {
+		line := []byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"` + id + `","name":"` + produced + `","input":{}}}`)
+		out, err := restoreClaudeOAuthToolNamesFromStreamLine(line, rt.reverse, rt.opts)
+		if err != nil {
+			rt.t.Fatalf("stream restore of %q: %v", produced, err)
+		}
+		return gjson.GetBytes(helps.JSONPayload(out), "content_block.name").String()
+	}
+	resp := []byte(`{"content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"tool_use","id":"` + id + `","name":"` + produced + `","input":{}}]}`)
+	out, err := restoreClaudeOAuthToolNamesFromResponse(resp, rt.reverse, rt.opts)
+	if err != nil {
+		rt.t.Fatalf("restore of %q: %v", produced, err)
+	}
+	return gjson.GetBytes(out, "content.1.name").String()
+}
+
+// replay returns the name the request-side remap writes for a history tool_use
+// the client sent back as name.
+func (rt claudeRoundTrip) replay(id, name string) string {
+	body := []byte(`{"tools":` + rt.tools + `,"messages":[{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"tool_use","id":"` + id + `","name":"` + name + `","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + id + `","content":"ok"}]}]}`)
+	var out []byte
+	if rt.batched {
+		out, _, _ = remapOAuthToolNamesWithBatchedEdits(body, rt.opts)
+	} else {
+		out, _ = remapOAuthToolNamesWithOptionsLegacy(body, rt.opts)
+	}
+	return gjson.GetBytes(out, "messages.1.content.1.name").String()
+}
+
+// forEachClaudeRoundTripPath runs fn on every restore/replay pairing; path makes
+// tool_use ids unique per pairing.
+func forEachClaudeRoundTripPath(t *testing.T, fn func(t *testing.T, path string, stream, batched bool)) {
+	for _, stream := range []bool{false, true} {
+		for _, batched := range []bool{false, true} {
+			path := fmt.Sprintf("stream_%t_batched_%t", stream, batched)
+			t.Run(path, func(t *testing.T) { fn(t, path, stream, batched) })
+		}
+	}
+}
+
+// claudeRepeatedServerPrefix is a drifted emission of alias with its virtual server
+// repeated n extra times, which the restore strips.
+func claudeRepeatedServerPrefix(alias string, n int) string {
+	return "mcp__" + strings.Repeat(claudeMCPAliasServer(alias)+"__", n) + strings.TrimPrefix(alias, "mcp__")
+}
+
+const claudeRoundTripTools = `[{"name":"Bash","input_schema":{"type":"object"}},{"name":"mcp__own__tool","input_schema":{"type":"object"}}]`
+
+// TestClaudeOAuthToolNameRoundTripKeepsProducedName checks that a tool name the
+// model writes comes back unchanged on the next request: restore it for the
+// client, replay the client's history, and compare, so the replayed latest
+// assistant turn (which carries signed thinking) equals the model's original
+// response.
+func TestClaudeOAuthToolNameRoundTripKeepsProducedName(t *testing.T) {
+	forEachClaudeRoundTripPath(t, func(t *testing.T, path string, stream, batched bool) {
+		rt := newClaudeRoundTrip(t, "round-trip-caller", claudeRoundTripTools, stream, batched)
+		canonical := rt.alias("Bash")
+		for label, produced := range map[string]string{
+			"canonical":       canonical,
+			"repeated_prefix": claudeRepeatedServerPrefix(canonical, 1),
+			"bare_name":       "Bash",
+		} {
+			id := "toolu_" + label + "_" + path
+			if got := rt.restore(id, produced); got != "Bash" {
+				t.Fatalf("%s: client got %q, want Bash", label, got)
+			}
+			if got := rt.replay(id, "Bash"); got != produced {
+				t.Errorf("%s: replayed %q, want the produced %q", label, got, produced)
+			}
+		}
+	})
+}
+
+// TestClaudeProducedToolNameRecords checks how records are scoped to a caller,
+// replaced, and dropped across restores and replays.
+func TestClaudeProducedToolNameRecords(t *testing.T) {
+	forEachClaudeRoundTripPath(t, func(t *testing.T, path string, stream, batched bool) {
+		a := newClaudeRoundTrip(t, "records-caller-a", claudeRoundTripTools, stream, batched)
+		b := newClaudeRoundTrip(t, "records-caller-b", claudeRoundTripTools, stream, batched)
+		canonical := a.alias("Bash")
+		drifted := claudeRepeatedServerPrefix(canonical, 1)
+
+		// Records belong to one caller: another caller reusing the id, even for a
+		// caller-owned MCP tool whose replayed name is the same for everyone, neither
+		// reads nor replaces them.
+		id := "toolu_shared_" + path
+		hybridA := "mcp__" + claudeMCPAliasServer(canonical) + "__own__tool"
+		hybridB := "mcp__" + claudeMCPAliasServer(b.alias("Bash")) + "__own__tool"
+		if got := b.restore(id, hybridB); got != "mcp__own__tool" {
+			t.Fatalf("caller B: client got %q, want mcp__own__tool", got)
+		}
+		if got := a.replay(id, "mcp__own__tool"); got != "mcp__own__tool" {
+			t.Errorf("caller A replayed %q: it read caller B's record", got)
+		}
+		a.restore(id, hybridA)
+		if got := b.replay(id, "mcp__own__tool"); got != hybridB {
+			t.Errorf("caller B replayed %q after caller A reused the id, want its own %q", got, hybridB)
+		}
+		if got := a.replay(id, "mcp__own__tool"); got != hybridA {
+			t.Errorf("caller A replayed %q, want its own %q", got, hybridA)
+		}
+
+		// A canonical restore of a reused id drops the older record.
+		id = "toolu_reused_" + path
+		a.restore(id, drifted)
+		a.restore(id, canonical)
+		if got := a.replay(id, "Bash"); got != canonical {
+			t.Errorf("replayed %q after a canonical restore of the same id, want %q", got, canonical)
+		}
+
+		// A later drifted restore of a reused id replaces the record.
+		id = "toolu_replaced_" + path
+		a.restore(id, drifted)
+		redrifted := claudeRepeatedServerPrefix(canonical, 2)
+		a.restore(id, redrifted)
+		if got := a.replay(id, "Bash"); got != redrifted {
+			t.Errorf("replayed %q after a second drifted restore of the same id, want %q", got, redrifted)
+		}
+
+		// The record does not depend on what the remap would write now: here Bash is
+		// no longer declared when the turn is replayed.
+		id = "toolu_tools_changed_" + path
+		a.restore(id, drifted)
+		later := newClaudeRoundTrip(t, "records-caller-a", `[{"name":"Read","input_schema":{"type":"object"}}]`, stream, batched)
+		if got := later.replay(id, "Bash"); got != drifted {
+			t.Errorf("replayed %q after the tool set changed, want the produced %q", got, drifted)
+		}
+
+		// A name over the byte bound is still restored but not kept, and it drops the
+		// older record for the id: the replay falls back to the canonical alias.
+		id = "toolu_oversized_" + path
+		a.restore(id, drifted)
+		oversized := claudeRepeatedServerPrefix(canonical, claudeProducedToolRecordMaxBytes/len(claudeMCPAliasServer(canonical)))
+		if got := a.restore(id, oversized); got != "Bash" {
+			t.Fatalf("oversized: client got %q, want Bash", got)
+		}
+		if got := a.replay(id, "Bash"); got != canonical {
+			t.Errorf("replayed %d bytes, want the canonical %q: records over %d bytes must not be kept", len(got), canonical, claudeProducedToolRecordMaxBytes)
+		}
+
+		// A later response without aliases, here for an MCP-only tool set, still
+		// drops the record for an id it reuses.
+		id = "toolu_no_aliases_" + path
+		a.restore(id, hybridA)
+		mcpOnly := newClaudeRoundTrip(t, "records-caller-a", `[{"name":"mcp__own__tool","input_schema":{"type":"object"}}]`, stream, batched)
+		if len(mcpOnly.reverse) != 0 {
+			t.Fatalf("control: the MCP-only tool set has %d aliases, want none", len(mcpOnly.reverse))
+		}
+		mcpOnly.restore(id, "mcp__own__tool")
+		if got := a.replay(id, "mcp__own__tool"); got != "mcp__own__tool" {
+			t.Errorf("replayed %q after a response without aliases reused the id, want mcp__own__tool", got)
+		}
+
+		// Keyless callers share one alias secret, so they get no records.
+		keyless := newClaudeRoundTrip(t, "", claudeRoundTripTools, stream, batched)
+		keylessCanonical := keyless.alias("Bash")
+		id = "toolu_keyless_" + path
+		keyless.restore(id, claudeRepeatedServerPrefix(keylessCanonical, 1))
+		if got := keyless.replay(id, "Bash"); got != keylessCanonical {
+			t.Errorf("keyless caller replayed %q, want the canonical %q", got, keylessCanonical)
+		}
+	})
+}
+
+// TestClaudeProducedToolNameRecordsConcurrentCallers checks that callers who
+// restore and replay one tool_use id concurrently each get their own name.
+func TestClaudeProducedToolNameRecordsConcurrentCallers(t *testing.T) {
+	callers := make([]claudeRoundTrip, 8)
+	want := make([]string, len(callers))
+	got := make([]string, len(callers))
+	for i := range callers {
+		callers[i] = newClaudeRoundTrip(t, fmt.Sprint("concurrent-caller-", i), claudeRoundTripTools, i%2 == 0, i/2%2 == 0)
+		want[i] = "mcp__" + claudeMCPAliasServer(callers[i].alias("Bash")) + "__own__tool"
+	}
+	var wg sync.WaitGroup
+	for i, rt := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rt.restore("toolu_concurrent", want[i])
+			got[i] = rt.replay("toolu_concurrent", "mcp__own__tool")
+		}()
+	}
+	wg.Wait()
+	for i := range callers {
+		if got[i] != want[i] {
+			t.Errorf("caller %d replayed %q, want its own %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestClaudeProducedToolNameRecordEviction checks that a replayed record survives
+// newer records and that an evicted one falls back to the canonical alias.
+func TestClaudeProducedToolNameRecordEviction(t *testing.T) {
+	rt := newClaudeRoundTrip(t, "eviction-caller", claudeRoundTripTools, true, true)
+	canonical := rt.alias("Bash")
+	drifted := claudeRepeatedServerPrefix(canonical, 1)
+	fill := func(tag string, n int) {
+		for i := range n {
+			claudeProducedToolNames.GetOrAdd(claudeProducedToolKey{id: fmt.Sprint(tag, i)}, func() claudeProducedToolRecord { return claudeProducedToolRecord{} })
+		}
+	}
+	rt.restore("toolu_evict", drifted)
+	for _, tag := range []string{"a", "b"} {
+		fill(tag, claudeProducedToolNamesMax-1)
+		if got := rt.replay("toolu_evict", "Bash"); got != drifted {
+			t.Fatalf("replayed %q: a record used within the last %d records was evicted", got, claudeProducedToolNamesMax)
+		}
+	}
+	fill("c", claudeProducedToolNamesMax)
+	if got := rt.replay("toolu_evict", "Bash"); got != canonical {
+		t.Fatalf("replayed %q after eviction, want the canonical fallback %q", got, canonical)
+	}
+}
+
+// TestClaudeProducedToolNamesDoNotPinResponses checks that records hold owned
+// copies, not the response buffers their names came from.
+func TestClaudeProducedToolNamesDoNotPinResponses(t *testing.T) {
+	rt := newClaudeRoundTrip(t, "memory-caller", claudeRoundTripTools, false, true)
+	drifted := claudeRepeatedServerPrefix(rt.alias("Bash"), 1)
+	const responses, pad = 16, 1 << 20
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for i := range responses {
+		resp := []byte(`{"content":[{"type":"text","text":"` + strings.Repeat("x", pad) + `"},` +
+			`{"type":"tool_use","id":"` + fmt.Sprint("toolu_pin_", i) + `","name":"` + drifted + `","input":{}}]}`)
+		if _, err := restoreClaudeOAuthToolNamesFromResponse(resp, rt.reverse, rt.opts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if grown := int64(after.HeapAlloc) - int64(before.HeapAlloc); grown > responses*pad/2 {
+		t.Fatalf("%d records kept %d heap bytes alive: stored names must not pin response buffers", responses, grown)
+	}
+	if got := rt.replay("toolu_pin_0", "Bash"); got != drifted {
+		t.Fatalf("control: replayed %q, want the recorded %q", got, drifted)
 	}
 }

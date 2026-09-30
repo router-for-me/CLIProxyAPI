@@ -7663,8 +7663,8 @@ func TestPrepareClaudeOAuthToolNamesForUpstream_PreservesMCPConvention(t *testin
 }
 
 func TestResolveClaudeMCPAliasOptions(t *testing.T) {
-	if options := resolveClaudeMCPAliasOptions(context.Background()); options.secret == "" {
-		t.Fatal("default caller alias secret is empty")
+	if options := resolveClaudeMCPAliasOptions(context.Background()); options.secret == "" || options.keyed {
+		t.Fatalf("keyless caller: secret empty = %t, keyed = %t; want the default secret, not keyed", options.secret == "", options.keyed)
 	}
 
 	gin.SetMode(gin.TestMode)
@@ -7676,11 +7676,76 @@ func TestResolveClaudeMCPAliasOptions(t *testing.T) {
 	if firstSecret == "" || secondSecret != firstSecret {
 		t.Fatalf("caller alias secret is unstable: %q != %q", firstSecret, secondSecret)
 	}
+	if !resolveClaudeMCPAliasOptions(callerCtx).keyed {
+		t.Fatal("a caller with its own API key is not keyed")
+	}
 	otherGinCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	otherGinCtx.Set("userApiKey", "downstream-caller-two")
 	otherCtx := context.WithValue(context.Background(), "gin", otherGinCtx)
 	if otherSecret := resolveClaudeMCPAliasOptions(otherCtx).secret; otherSecret == firstSecret {
 		t.Fatalf("different downstream callers shared alias secret %q", firstSecret)
+	}
+}
+
+// TestClaudeExecutorUncloakedResponseDropsProducedToolNameRecord checks that an
+// uncloaked response of a keyed caller, which has no aliases to restore, still
+// drops an older produced tool-name record for a tool_use id it reuses.
+func TestClaudeExecutorUncloakedResponseDropsProducedToolNameRecord(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Set("userApiKey", "uncloaked-caller")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	caller := resolveClaudeMCPAliasOptions(ctx)
+	_, reverseMap := remapOAuthToolNamesWithOptions([]byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`), caller)
+	alias := ""
+	for upstream, original := range reverseMap {
+		if original == "Bash" {
+			alias = upstream
+		}
+	}
+	for _, stream := range []bool{false, true} {
+		id := fmt.Sprintf("toolu_uncloaked_%t", stream)
+		drifted := `{"content":[{"type":"tool_use","id":"` + id + `","name":"` + claudeRepeatedServerPrefix(alias, 1) + `","input":{}}]}`
+		if _, err := restoreClaudeOAuthToolNamesFromResponse([]byte(drifted), reverseMap, caller); err != nil {
+			t.Fatal(err)
+		}
+		key := claudeProducedToolKeyFor(caller, id)
+		if _, ok := claudeProducedToolNames.Get(key); !ok {
+			t.Fatal("control: the cloaked restore stored no record")
+		}
+		toolUse := `{"type":"tool_use","id":"` + id + `","name":"Bash","input":{}}`
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("event: content_block_start\n" +
+					`data: {"type":"content_block_start","index":0,"content_block":` + toolUse + `}` + "\n\n" +
+					"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5","content":[` + toolUse + `],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`))
+		}))
+		exec := NewClaudeExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "base_url": server.URL}}
+		req := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(fmt.Sprintf(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}],"stream":%t}`, stream))}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude}
+		if stream {
+			result, err := exec.ExecuteStream(ctx, auth, req, opts)
+			if err != nil {
+				t.Fatalf("ExecuteStream() error = %v", err)
+			}
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream chunk error = %v", chunk.Err)
+				}
+			}
+		} else if _, err := exec.Execute(ctx, auth, req, opts); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		server.Close()
+		if record, ok := claudeProducedToolNames.Get(key); ok {
+			t.Errorf("stream=%t: the uncloaked response reusing the id kept the record %q", stream, record.produced)
+		}
 	}
 }
 

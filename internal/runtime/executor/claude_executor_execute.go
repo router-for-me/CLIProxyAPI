@@ -17,6 +17,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// Execute performs a non-streaming request to the Claude API.
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if opts.Alt == "responses/compact" {
@@ -260,8 +261,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	bodyForTranslation := body
 	bodyForUpstream := body
 	var oauthToolNamesReverseMap map[string]string
+	// Resolved for every request: an uncloaked response must still drop older
+	// produced tool-name records for its tool_use ids.
+	mcpAliases := resolveClaudeMCPAliasOptions(ctx)
 	if fp.MCPAlias && cloaked {
-		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, mcpAliases)
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
@@ -398,7 +401,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		for i, line := range lines {
 			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)
-			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap, mcpAliases)
 			if errRestore != nil {
 				errRestore = fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore)
 				helps.RecordAPIResponseError(ctx, e.cfg, errRestore)
@@ -414,7 +417,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		reporter.ObserveResponseModel(data)
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 		var errRestore error
-		data, errRestore = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)
+		data, errRestore = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap, mcpAliases)
 		if errRestore != nil {
 			errRestore = fmt.Errorf("restore Claude OAuth tool name from response: %w", errRestore)
 			helps.RecordAPIResponseError(ctx, e.cfg, errRestore)
