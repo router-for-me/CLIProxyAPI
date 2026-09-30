@@ -242,6 +242,7 @@ func TestModelsStoreProviderCountsByIDs(t *testing.T) {
 		{ID: "a", Provider: "p1", Object: "model", OwnedBy: "p1", Type: "t"},
 		{ID: "a", Provider: "p2", Object: "model", OwnedBy: "p2", Type: "t"},
 		{ID: "b", Provider: "p1", Object: "model", OwnedBy: "p1", Type: "t"},
+		{ID: "Llama-3.3-70B", Provider: "p1", Object: "model", OwnedBy: "p1", Type: "t"},
 	}); err != nil {
 		t.Fatalf("UpsertModels: %v", err)
 	}
@@ -254,5 +255,23 @@ func TestModelsStoreProviderCountsByIDs(t *testing.T) {
 	}
 	if _, ok := counts["missing"]; ok {
 		t.Fatalf("unexpected count for missing id: %v", counts)
+	}
+
+	// Mixed-case id: the query is case-insensitive and keys are lowercased.
+	mixedCase, err := ms.ProviderCountsByIDs(ctx, []string{"Llama-3.3-70B"})
+	if err != nil {
+		t.Fatalf("ProviderCountsByIDs mixed-case: %v", err)
+	}
+	if mixedCase["llama-3.3-70b"] != 1 {
+		t.Fatalf("mixed-case counts = %v; want llama-3.3-70b=1", mixedCase)
+	}
+
+	// nil input returns a non-nil empty map with no error.
+	empty, err := ms.ProviderCountsByIDs(ctx, nil)
+	if err != nil {
+		t.Fatalf("ProviderCountsByIDs(nil): %v", err)
+	}
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("ProviderCountsByIDs(nil) = %v; want non-nil empty map", empty)
 	}
 }

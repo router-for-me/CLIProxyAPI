@@ -474,7 +474,7 @@ function ModelRow({ model, liveIDs, onOpen, onGlobalEdit }) {
       <td className="mono">{formatTokens(model.context_length)}</td>
       <td className="mono">{formatTokens(model.max_completion_tokens)}</td>
       <td><InlinePricing model={model} /></td>
-      <td onClick={(e) => e.stopPropagation()}>
+      <td onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         <div className="row-actions">
           <button
             className="row-actions__btn row-actions__btn--primary"

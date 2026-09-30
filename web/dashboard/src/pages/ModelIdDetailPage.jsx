@@ -1,19 +1,35 @@
 import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getGlobalModel, getModelProviders } from '../api/client.js';
+import { getGlobalModel, getModelProviders, deleteModelEntry } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, EmptyState } from '../components/Primitives.jsx';
 import GlobalModelModal from '../components/GlobalModelModal.jsx';
 
 // ModelIdDetailPage — read-only view of one Global Model ID. Lists every
 // upstream provider serving the model (catalog rows sharing the id) and the
-// canonical attributes/pricing/routing. Editing is delegated to the existing
-// GlobalModelModal via the "Edit" button.
+// canonical attributes/pricing/routing. Attribute/pricing/routing editing is
+// delegated to the existing GlobalModelModal via the "Edit" button. The only
+// write affordance on this otherwise read-only page is the per-provider Delete
+// in the Upstream Providers table (two-step confirm), which removes a single
+// (id, provider) catalog row.
 export default function ModelIdDetailPage() {
   const { id } = useParams();
   const { data, error, loading, reload } = useAsync(() => getGlobalModel(id), [id]);
   const { data: liveData } = useAsync(() => getModelProviders(id), [id]);
   const [showEdit, setShowEdit] = useState(false);
+  const [confirmKey, setConfirmKey] = useState(null);
+  const [deleteError, setDeleteError] = useState('');
+
+  async function handleDelete(provider) {
+    setDeleteError('');
+    try {
+      await deleteModelEntry(id, provider);
+      setConfirmKey(null);
+      reload();
+    } catch (err) {
+      setDeleteError(err.message || 'Delete failed');
+    }
+  }
 
   if (loading) return <Spinner label="Loading model…" />;
   if (error) return <ErrorBanner error={error} onRetry={reload} />;
@@ -48,6 +64,7 @@ export default function ModelIdDetailPage() {
 
       <div className="card">
         <h2 className="card__title">Upstream providers</h2>
+        {deleteError && <div className="error-banner">{deleteError}</div>}
         {rows.length === 0 ? (
           <EmptyState title="No providers" hint="No catalog rows share this model id." />
         ) : (
@@ -55,28 +72,54 @@ export default function ModelIdDetailPage() {
             <thead>
               <tr>
                 <th>Provider</th><th>Official provider</th><th>Display name</th>
-                <th>Type</th><th>User-defined</th><th>Updated</th>
+                <th>Type</th><th>User-defined</th><th>Updated</th><th></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
-                <tr key={`${r.provider}|${i}`}>
-                  <td>
-                    <span className="row gap-sm">
-                      <span
-                        className={`live-dot ${providerIsLive(r) ? 'live-dot--on' : 'live-dot--off'}`}
-                        title={providerIsLive(r) ? 'Live in registry' : 'Not live right now'}
-                      />
-                      <span className="mono">{r.provider}</span>
-                    </span>
-                  </td>
-                  <td><span className="badge badge--info">{r.official_provider || '—'}</span></td>
-                  <td>{r.display_name || '—'}</td>
-                  <td>{r.type || '—'}</td>
-                  <td>{r.user_defined ? 'yes' : 'no'}</td>
-                  <td className="dim">{r.updated_at ? new Date(r.updated_at).toLocaleString() : '—'}</td>
-                </tr>
-              ))}
+              {rows.map((r, i) => {
+                const rowKey = `${r.provider}|${i}`;
+                const live = providerIsLive(r);
+                return (
+                  <tr key={rowKey}>
+                    <td>
+                      <span className="row gap-sm">
+                        <span
+                          className={`live-dot ${live ? 'live-dot--on' : 'live-dot--off'}`}
+                          title={live ? 'Live in registry' : 'Not live right now'}
+                        />
+                        <span className="mono">{r.provider}</span>
+                      </span>
+                    </td>
+                    <td><span className="badge badge--info">{r.official_provider || '—'}</span></td>
+                    <td>{r.display_name || '—'}</td>
+                    <td>{r.type || '—'}</td>
+                    <td>{r.user_defined ? 'yes' : 'no'}</td>
+                    <td className="dim">{r.updated_at ? new Date(r.updated_at).toLocaleString() : '—'}</td>
+                    <td>
+                      <div className="row-actions">
+                        {confirmKey === rowKey ? (
+                          <>
+                            <button
+                              className="row-actions__btn row-actions__btn--danger"
+                              onClick={() => handleDelete(r.provider)}
+                            >Confirm</button>
+                            <button
+                              className="row-actions__btn"
+                              onClick={() => setConfirmKey(null)}
+                            >Cancel</button>
+                          </>
+                        ) : (
+                          <button
+                            className="row-actions__btn row-actions__btn--danger"
+                            onClick={() => setConfirmKey(rowKey)}
+                            title="Delete this provider's catalog row for this model id"
+                          >Delete</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -133,8 +176,8 @@ export default function ModelIdDetailPage() {
               Strategy: {data.routing.strategy || 'default'} · {data.routing.providers.length} pinned provider(s)
             </div>
             <div className="row gap-sm" style={{ flexWrap: 'wrap' }}>
-              {data.routing.providers.map((p) => (
-                <span key={p} className="badge badge--muted mono">{p}</span>
+              {data.routing.providers.map((p, i) => (
+                <span key={`${p}|${i}`} className="badge badge--muted mono">{p}</span>
               ))}
             </div>
           </div>
@@ -164,7 +207,8 @@ function DetailField({ label, value }) {
 }
 
 function fmtInt(n) {
-  return n ? Number(n).toLocaleString() : '—';
+  if (n == null || n === '') return '—';
+  return Number(n).toLocaleString();
 }
 
 function fmtUSD(v) {

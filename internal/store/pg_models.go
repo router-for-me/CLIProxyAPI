@@ -1232,13 +1232,19 @@ func (s *ModelsStore) ProviderCountsByIDs(ctx context.Context, ids []string) (ma
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: models store not initialized")
 	}
-	if len(ids) == 0 {
+	lowered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s := strings.TrimSpace(id); s != "" {
+			lowered = append(lowered, strings.ToLower(s))
+		}
+	}
+	if len(lowered) == 0 {
 		return out, nil
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(
 		`SELECT LOWER(id), COUNT(*) FROM %s WHERE LOWER(id) = ANY($1::text[]) GROUP BY LOWER(id)`,
 		s.modelsTable,
-	), pqStringArray(ids))
+	), pqStringArray(lowered))
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: provider counts: %w", err)
 	}

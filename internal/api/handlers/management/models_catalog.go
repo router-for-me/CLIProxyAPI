@@ -131,7 +131,7 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 	// In distinct (one-row-per-model-id) mode, attach how many upstream
 	// providers serve each returned model id so the dashboard can show the
 	// count without a per-row lookup.
-	if distinctIDs && err == nil {
+	if distinctIDs {
 		ids := make([]string, 0, len(stored))
 		for i := range stored {
 			if id := strings.TrimSpace(stored[i].ID); id != "" {
