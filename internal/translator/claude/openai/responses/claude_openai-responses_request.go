@@ -53,6 +53,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	out, _ = sjson.SetBytes(out, "max_tokens", defaultClaudeResponsesMaxTokensForModel(modelName))
 
 	root := gjson.ParseBytes(rawJSON)
+	toolNames := buildClaudeToolNames(root)
 
 	// Convert OpenAI Responses reasoning.effort to Claude thinking config.
 	if v := root.Get("reasoning.effort"); v.Exists() {
@@ -463,7 +464,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 			toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 			toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
-			toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(name))
+			toolUse, _ = sjson.SetBytes(toolUse, "name", toolNames.claudeName(name))
 			if isCustomToolCall {
 				toolUse, _ = sjson.SetBytes(toolUse, "input.input", item.Get("input").String())
 			} else {
@@ -563,14 +564,12 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		if !ok || winner.order != descriptor.order {
 			continue
 		}
-		tJSON, ok := convertResponsesToolDescriptorToClaude(descriptor)
+		tJSON, ok := convertResponsesToolDescriptorToClaude(descriptor, toolNames.claudeName(descriptor.name))
 		if !ok {
 			continue
 		}
-		toolName := gjson.GetBytes(tJSON, "name").String()
-		if toolName != "" {
-			includedToolNames[toolName] = struct{}{}
-		}
+		// Key by the Responses identity; tool_choice resolves identities.
+		includedToolNames[descriptor.name] = struct{}{}
 		toolItems = append(toolItems, tJSON)
 	}
 	toolNameMap = responsesToolNameMap(root, includedToolNames)
@@ -612,12 +611,15 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if namespaceName != "" {
 					fn = qualifyResponsesNamespaceToolName(namespaceName, fn)
 				}
-				if mappedName := toolNameMap[fn]; mappedName != "" {
-					fn = mappedName
+				// An exact declared identity wins over a namespace child alias.
+				if _, exact := includedToolNames[fn]; !exact {
+					if mappedName := toolNameMap[fn]; mappedName != "" {
+						fn = mappedName
+					}
 				}
 				if _, ok := includedToolNames[fn]; ok {
 					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", util.SanitizeClaudeFunctionName(fn))
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", toolNames.claudeName(fn))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 				}
 			}
@@ -1255,16 +1257,12 @@ func isOpenAIResponsesApplyPatchCustomTool(toolType string, tool gjson.Result) b
 	return toolType == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch"
 }
 
-func convertResponsesToolDescriptorToClaude(descriptor responsesToolDescriptor) ([]byte, bool) {
-	overrideName := ""
-	if !descriptor.direct {
-		overrideName = descriptor.name
-	}
+func convertResponsesToolDescriptorToClaude(descriptor responsesToolDescriptor, claudeName string) ([]byte, bool) {
 	switch descriptor.toolType {
 	case "function":
-		return convertResponsesFunctionToolToClaude(descriptor.tool, overrideName)
+		return convertResponsesFunctionToolToClaude(descriptor.tool, claudeName)
 	case "custom":
-		return convertResponsesCustomToolToClaude(descriptor.tool, overrideName)
+		return convertResponsesCustomToolToClaude(descriptor.tool, claudeName)
 	case "web_search":
 		return convertResponsesWebSearchToolToClaude(descriptor.tool)
 	default:
@@ -1532,17 +1530,14 @@ func unwrapCustomToolInput(arguments string) string {
 	return arguments
 }
 
-func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string) ([]byte, bool) {
-	name := strings.TrimSpace(overrideName)
-	if name == "" {
-		name = responsesToolName(tool)
-	}
-	if name == "" {
+// claudeName is the final Claude tool name from buildClaudeToolNames.
+func convertResponsesFunctionToolToClaude(tool gjson.Result, claudeName string) ([]byte, bool) {
+	if claudeName == "" {
 		return nil, false
 	}
 
 	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", util.SanitizeClaudeFunctionName(name))
+	tJSON, _ = sjson.SetBytes(tJSON, "name", claudeName)
 	if d := responsesToolDescription(tool); d != "" {
 		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
 	}
@@ -1554,17 +1549,14 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 	return tJSON, true
 }
 
-func convertResponsesCustomToolToClaude(tool gjson.Result, overrideName string) ([]byte, bool) {
-	name := strings.TrimSpace(overrideName)
-	if name == "" {
-		name = responsesToolName(tool)
-	}
-	if name == "" {
+// claudeName is the final Claude tool name from buildClaudeToolNames.
+func convertResponsesCustomToolToClaude(tool gjson.Result, claudeName string) ([]byte, bool) {
+	if claudeName == "" {
 		return nil, false
 	}
 
 	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", util.SanitizeClaudeFunctionName(name))
+	tJSON, _ = sjson.SetBytes(tJSON, "name", claudeName)
 	if description := responsesToolDescription(tool); description != "" {
 		tJSON, _ = sjson.SetBytes(tJSON, "description", description)
 	}

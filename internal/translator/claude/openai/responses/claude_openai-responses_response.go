@@ -54,6 +54,8 @@ type claudeToResponsesState struct {
 	WebSearchByToolID map[string]*claudeResponsesWebSearchItem
 	WebSearchItems    []*claudeResponsesWebSearchItem
 	StopReason        string
+	// ToolNames maps Claude tool names back to Responses identities.
+	ToolNames claudeToolNames
 	// usage aggregation
 	Usage claudeResponsesUsageTokens
 }
@@ -459,6 +461,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			FuncOutputIndices:  make(map[int]int),
 			WebSearchByBlock:   make(map[int]*claudeResponsesWebSearchItem),
 			WebSearchByToolID:  make(map[string]*claudeResponsesWebSearchItem),
+			ToolNames:          buildClaudeToolNames(gjson.ParseBytes(pickRequestJSON(originalRequestRawJSON, requestRawJSON))),
 		}
 	}
 	st := (*param).(*claudeToResponsesState)
@@ -589,7 +592,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		} else if typ == "tool_use" {
 			st.InFuncBlock = true
 			st.CurrentFCID = cb.Get("id").String()
-			name := cb.Get("name").String()
+			name := st.ToolNames.identity(cb.Get("name").String())
 			_, isCustomTool := customToolNames[name]
 			if st.FuncCustom == nil {
 				st.FuncCustom = make(map[int]bool)
@@ -982,6 +985,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	customToolNames := responsesCustomToolNames(reqBytes)
+	toolNames := buildClaudeToolNames(gjson.ParseBytes(reqBytes))
 
 	// Base OpenAI Responses (non-stream) object
 	out := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null,"output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{},"total_tokens":0}}`)
@@ -1069,8 +1073,9 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				}
 				activeMessageItem = item
 			case "tool_use":
+				toolName := toolNames.identity(cb.Get("name").String())
 				itemType := "function_call"
-				if _, isCustomTool := customToolNames[cb.Get("name").String()]; isCustomTool {
+				if _, isCustomTool := customToolNames[toolName]; isCustomTool {
 					itemType = "custom_tool_call"
 				}
 				item := newOutputItem(itemType, idx)
@@ -1080,7 +1085,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				} else {
 					item.id = fmt.Sprintf("fc_%s", item.callID)
 				}
-				item.name = cb.Get("name").String()
+				item.name = toolName
 			case "server_tool_use":
 				name := cb.Get("name").String()
 				if name != claudeWebSearchToolName {
