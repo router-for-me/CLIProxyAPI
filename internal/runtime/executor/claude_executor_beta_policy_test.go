@@ -523,3 +523,20 @@ func TestApplyClaudeHeaders_StructuredHelperBetaOrderPreservedWithAdvisor(t *tes
 		t.Fatalf("helper Anthropic-Beta =\n got:  %q\n want: %q", got, helperBeta)
 	}
 }
+
+func TestApplyClaudeHeaders_GatewayHelperGetsOAuthBetaFirst(t *testing.T) {
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", "interleaved-thinking-2025-05-14,structured-outputs-2025-12-15")
+
+	body := []byte(`{"model":"claude-haiku-4-5-20251001","tools":[]}`)
+	want := "oauth-2025-04-20,interleaved-thinking-2025-05-14,structured-outputs-2025-12-15"
+
+	req := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeadersWithNativeProfile(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, false, nil,
+		body, nil, incoming, true, true); err != nil {
+		t.Fatalf("applyClaudeHeadersWithNativeProfile() error = %v", err)
+	}
+	if got := req.Header.Get("Anthropic-Beta"); got != want {
+		t.Fatalf("gateway helper Anthropic-Beta =\n got:  %q\n want: %q", got, want)
+	}
+}
