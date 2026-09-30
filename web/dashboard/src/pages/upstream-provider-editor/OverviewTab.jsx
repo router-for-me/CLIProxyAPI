@@ -66,7 +66,8 @@ const MODELS_TAB = true;
 // is the only consumer after the create-flow split.
 const FETCHABLE_TYPES = new Set([
   'gemini-api-key', 'interactions-api-key', 'codex-api-key', 'xai-api-key',
-  'meta-api-key', 'claude-api-key', 'vertex-api-key', 'openai-compatibility',
+  'meta-api-key', 'neuralwatt-api-key', 'claude-api-key', 'vertex-api-key',
+  'openai-compatibility',
 ]);
 
 export default function OverviewTab() {

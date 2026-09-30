@@ -120,6 +120,13 @@ type Record struct {
 	// kept separately so multi-hop proxy chains remain auditable even when
 	// gin collapses the chained addresses into a single ClientIP.
 	ForwardedFor string
+	// EnergyJoules is the upstream-reported energy consumption for this
+	// request, when the provider measures it. Zero means unmeasured.
+	EnergyJoules float64
+	// ProviderMetadata carries provider-specific billing/attribution data
+	// (e.g. Neuralwatt cost, cache savings, grid/carbon attribution) keyed by
+	// provider. Persisted to usage_events.provider_metadata.
+	ProviderMetadata map[string]any
 }
 
 // Failure holds HTTP failure metadata for an upstream request attempt.

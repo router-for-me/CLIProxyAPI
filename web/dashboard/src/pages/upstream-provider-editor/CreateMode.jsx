@@ -71,7 +71,8 @@ import OpenCodeGoActions from './OpenCodeGoPanel.jsx';
 // api_key the operator can probe, or an auth-file the registry tracks).
 const FETCHABLE_TYPES = new Set([
   'gemini-api-key', 'interactions-api-key', 'codex-api-key', 'xai-api-key',
-  'meta-api-key', 'claude-api-key', 'vertex-api-key', 'openai-compatibility',
+  'meta-api-key', 'neuralwatt-api-key', 'claude-api-key', 'vertex-api-key',
+  'openai-compatibility',
 ]);
 
 // resolveEditorMode classifies the :id route param. 'new' means create;

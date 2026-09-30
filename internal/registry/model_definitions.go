@@ -30,6 +30,7 @@ type staticModelsJSON struct {
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
 	Meta        []*ModelInfo `json:"meta"`
+	Neuralwatt  []*ModelInfo `json:"neuralwatt"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -115,6 +116,11 @@ func GetXAIModels() []*ModelInfo {
 // GetMetaModels returns the standard Meta model definitions.
 func GetMetaModels() []*ModelInfo {
 	return WithMetaBuiltins(cloneModelInfos(getModels().Meta))
+}
+
+// GetNeuralwattModels returns the standard Neuralwatt model definitions.
+func GetNeuralwattModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Neuralwatt)
 }
 
 // WithMetaBuiltins injects hard-coded Meta model definitions that should
@@ -325,6 +331,8 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - kimi
 //   - antigravity
 //   - xai
+//   - meta
+//   - neuralwatt
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -346,6 +354,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetXAIModels()
 	case "meta", "muse", "muse-code":
 		return GetMetaModels()
+	case "neuralwatt":
+		return GetNeuralwattModels()
 	default:
 		return nil
 	}
@@ -369,6 +379,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Antigravity,
 		data.XAI,
 		data.Meta,
+		data.Neuralwatt,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

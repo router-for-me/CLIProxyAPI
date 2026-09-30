@@ -91,13 +91,23 @@ type UsageEvent struct {
 	// so the read-side never re-derives it (which would drift if the pricing
 	// row changed between flush and read). Equals CostUSD when no discount was
 	// applied. Persisted column.
-	OriginalCostUSD float64   `json:"original_cost_usd,omitempty"`
-	LatencyMs       int64     `json:"latency_ms,omitempty"`
-	TTFTMs          int64     `json:"ttft_ms,omitempty"`
-	Failed          bool      `json:"failed"`
-	FailStatusCode  int       `json:"fail_status_code,omitempty"`
-	Generate        bool      `json:"generate,omitempty"`
-	RequestedAt     time.Time `json:"requested_at"`
+	OriginalCostUSD float64 `json:"original_cost_usd,omitempty"`
+	// EnergyJoules is the upstream-reported energy consumption for the
+	// request, when measured. nil for providers that do not report it (and
+	// for unmeasured responses) — persisted as SQL NULL rather than a
+	// misleading 0.
+	EnergyJoules *float64 `json:"energy_joules,omitempty"`
+	// ProviderMetadata carries provider-specific billing/attribution data as
+	// a JSON object keyed by provider name (e.g.
+	// {"neuralwatt": {"request_cost_usd": 0.0034}}). Persisted as a NOT NULL
+	// jsonb column defaulting to '{}' so readers can rely on a stable shape.
+	ProviderMetadata map[string]any `json:"provider_metadata,omitempty"`
+	LatencyMs        int64          `json:"latency_ms,omitempty"`
+	TTFTMs           int64          `json:"ttft_ms,omitempty"`
+	Failed           bool           `json:"failed"`
+	FailStatusCode   int            `json:"fail_status_code,omitempty"`
+	Generate         bool           `json:"generate,omitempty"`
+	RequestedAt      time.Time      `json:"requested_at"`
 }
 
 // Pricing captures per-model unit prices in USD per 1,000,000 tokens. A zero
@@ -567,9 +577,9 @@ const usageEventColumnList = `
 	response_service_tier, tier, router_id, scored_tier, effective_tier, mapping_tier, decision_cause,
 	profile_version, profile_hash, auto_router_decision, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
-	ttft_ms, failed, fail_status_code, generate, requested_at
+	ttft_ms, failed, fail_status_code, generate, requested_at, energy_joules, provider_metadata
 `
-const usageEventColumnCount = 41
+const usageEventColumnCount = 43
 
 // InsertEvent records a single usage event. The api_key_principal field is
 // sealed at rest via the configured Sealer before being bound. When the
@@ -591,7 +601,7 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41)
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
@@ -605,6 +615,7 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
 		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.OriginalCostUSD, e.LatencyMs, e.TTFTMs,
 		e.Failed, e.FailStatusCode, e.Generate, e.RequestedAt,
+		nullableFloat64Ptr(e.EnergyJoules), providerMetadataJSONB(e.ProviderMetadata),
 	)
 	if err != nil {
 		return fmt.Errorf("postgres store: insert usage event: %w", err)
@@ -663,7 +674,8 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 			nullableInt64(ev.ProfileVersion), nullableString(ev.ProfileHash), nullableJSONB(ev.AutoRouterDecision),
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
-			ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt)
+			ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt,
+			nullableFloat64Ptr(ev.EnergyJoules), providerMetadataJSONB(ev.ProviderMetadata))
 	}
 	if _, err := s.db.ExecContext(ctx, b.String(), args...); err != nil {
 		return fmt.Errorf("postgres store: batch insert usage events: %w", err)
@@ -734,7 +746,8 @@ func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageE
 				nullableInt64(ev.ProfileVersion), nullableString(ev.ProfileHash), nullableJSONB(ev.AutoRouterDecision),
 				ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 				ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
-				ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt)
+				ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt,
+				nullableFloat64Ptr(ev.EnergyJoules), providerMetadataJSONB(ev.ProviderMetadata))
 		}
 		b.WriteString(" ON CONFLICT (request_id) WHERE request_id IS NOT NULL AND request_id <> '' DO NOTHING")
 		res, err := s.db.ExecContext(ctx, b.String(), args...)
@@ -1414,6 +1427,20 @@ func nullableJSONB(raw []byte) any {
 		return nil
 	}
 	return string(raw)
+}
+
+// providerMetadataJSONB marshals provider metadata for the NOT NULL jsonb
+// column; an absent map binds the column default shape ('{}') instead of nil.
+func providerMetadataJSONB(md map[string]any) any {
+	if len(md) == 0 {
+		return []byte("{}")
+	}
+	raw, err := json.Marshal(md)
+	if err != nil {
+		log.WithError(err).Warn("postgres store: marshal provider metadata failed; persisting empty object")
+		return []byte("{}")
+	}
+	return raw
 }
 
 // UsageTimeSeriesPoint is one bucket in a time-series query.

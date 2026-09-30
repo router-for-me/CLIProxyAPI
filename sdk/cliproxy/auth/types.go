@@ -409,6 +409,8 @@ func (a *Auth) indexSeed() string {
 			apiPrefix = "xai-api-key"
 		case strings.EqualFold(provider, "meta"):
 			apiPrefix = "meta-api-key"
+		case strings.EqualFold(provider, "neuralwatt"):
+			apiPrefix = "neuralwatt-api-key"
 		case strings.EqualFold(provider, "claude"):
 			apiPrefix = "claude-api-key"
 		}

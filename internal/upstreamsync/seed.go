@@ -55,6 +55,11 @@ func SeedFromArtifacts(ctx context.Context, st store.UpstreamProviderStore, cfg 
 			log.WithError(err).Warn("upstreamsync: seed meta-api-key row failed")
 		}
 	}
+	for _, k := range cfg.NeuralwattKey {
+		if _, err := st.Create(ctx, providerFromCodexKey(k, TypeNeuralwattAPIKey)); err != nil {
+			log.WithError(err).Warn("upstreamsync: seed neuralwatt-api-key row failed")
+		}
+	}
 	for _, k := range cfg.ClaudeKey {
 		if _, err := st.Create(ctx, providerFromClaudeKey(k)); err != nil {
 			log.WithError(err).Warn("upstreamsync: seed claude-api-key row failed")
@@ -170,6 +175,13 @@ func providerFromCodexKey(k config.CodexKey, providerType string) store.Upstream
 	}
 	if k.DisableCooling {
 		setExtra(&p, "disable_cooling", true)
+	}
+	if k.ServiceTier != "" {
+		// Neuralwatt is the only consumer (config.CodexKey.ServiceTier doc),
+		// but the field is on the shared CodexKey shape, so we round-trip it
+		// through extra_config for every Codex-style provider. Empty values
+		// are skipped so the field stays absent on rows that never set it.
+		setExtra(&p, "service_tier", k.ServiceTier)
 	}
 	for _, m := range k.Models {
 		p.Models = append(p.Models, store.UpstreamProviderModel{

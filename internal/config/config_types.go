@@ -652,6 +652,11 @@ type CodexKey struct {
 	// AlphaSearch allows this Codex API key to serve the Alpha Search endpoint.
 	AlphaSearch bool `yaml:"alpha-search,omitempty" json:"alpha-search,omitempty"`
 
+	// ServiceTier selects the upstream billing tier for providers that expose
+	// one. Only Neuralwatt reads it ("default" | "flex"); empty leaves the
+	// provider default and every other Codex-style provider ignores it.
+	ServiceTier string `yaml:"service-tier,omitempty" json:"service-tier,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
@@ -735,6 +740,12 @@ type MetaKey = CodexKey
 
 // MetaModel uses the Codex model mapping structure for Meta models.
 type MetaModel = CodexModel
+
+// NeuralwattKey uses the Codex API key structure for native Neuralwatt execution.
+type NeuralwattKey = CodexKey
+
+// NeuralwattModel uses the Codex model mapping structure for Neuralwatt models.
+type NeuralwattModel = CodexModel
 
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.

@@ -1,6 +1,8 @@
 package store
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -600,5 +602,80 @@ func TestUsageStoreImportLiteLLMErrorsInBatchDupes(t *testing.T) {
 	}
 	if imported != 2 {
 		t.Fatalf("imported = %d; want 2 (in-batch dupes collapsed)", imported)
+	}
+}
+
+// TestInsertEventPersistsEnergyAndProviderMetadata guards the Neuralwatt
+// billing columns: InsertEvent must round-trip EnergyJoules (NULL when
+// unmeasured) and ProviderMetadata (empty jsonb object when absent). The
+// read paths project neither column yet, so the assertions query the raw
+// columns directly.
+func TestInsertEventPersistsEnergyAndProviderMetadata(t *testing.T) {
+	store := newTestPostgresStore(t, "usage_energy_metadata")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	joules := 42.5
+	withMeta := UsageEvent{
+		RequestID:    "neu-with-meta",
+		Provider:     "neuralwatt",
+		Model:        "neuralwatt-deepseek-v4-pro",
+		InputTokens:  10,
+		OutputTokens: 5,
+		TotalTokens:  15,
+		EnergyJoules: &joules,
+		ProviderMetadata: map[string]any{
+			"neuralwatt": map[string]any{"request_cost_usd": 0.0034},
+		},
+		RequestedAt: now(),
+	}
+	if err := us.InsertEvent(ctx, withMeta); err != nil {
+		t.Fatalf("InsertEvent (with metadata): %v", err)
+	}
+	withoutMeta := UsageEvent{
+		RequestID:   "neu-without-meta",
+		Provider:    "neuralwatt",
+		Model:       "neuralwatt-deepseek-v4-pro",
+		InputTokens: 1,
+		RequestedAt: now(),
+	}
+	if err := us.InsertEvent(ctx, withoutMeta); err != nil {
+		t.Fatalf("InsertEvent (without metadata): %v", err)
+	}
+
+	var energy *float64
+	var metadata []byte
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT energy_joules, provider_metadata FROM `+store.UsageEventsTable()+` WHERE request_id = $1`,
+		"neu-with-meta",
+	).Scan(&energy, &metadata); err != nil {
+		t.Fatalf("select with-meta row: %v", err)
+	}
+	if energy == nil || !approxEqual(*energy, 42.5) {
+		t.Fatalf("energy_joules = %v; want 42.5", energy)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(metadata, &parsed); err != nil {
+		t.Fatalf("provider_metadata not valid JSON: %v (%s)", err, metadata)
+	}
+	nw, ok := parsed["neuralwatt"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider_metadata missing neuralwatt object: %s", metadata)
+	}
+	if cost, ok := nw["request_cost_usd"].(float64); !ok || !approxEqual(cost, 0.0034) {
+		t.Fatalf("provider_metadata.neuralwatt.request_cost_usd = %v; want 0.0034 (%s)", nw["request_cost_usd"], metadata)
+	}
+
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT energy_joules, provider_metadata FROM `+store.UsageEventsTable()+` WHERE request_id = $1`,
+		"neu-without-meta",
+	).Scan(&energy, &metadata); err != nil {
+		t.Fatalf("select without-meta row: %v", err)
+	}
+	if energy != nil {
+		t.Fatalf("energy_joules = %v; want NULL for unmeasured event", *energy)
+	}
+	if strings.TrimSpace(string(metadata)) != "{}" {
+		t.Fatalf("provider_metadata = %s; want {} for event without metadata", metadata)
 	}
 }

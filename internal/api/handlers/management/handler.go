@@ -1147,6 +1147,7 @@ func (h *Handler) applyUpstreamProviders(ctx context.Context) {
 		h.cfg.OpenAICompatibility = merged.OpenAICompatibility
 		h.cfg.OpenCodeGo = merged.OpenCodeGo
 		h.cfg.VertexCompatAPIKey = merged.VertexCompatAPIKey
+		h.cfg.NeuralwattKey = merged.NeuralwattKey
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()

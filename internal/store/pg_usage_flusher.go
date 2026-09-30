@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -378,6 +379,8 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		CostUSD:             cost,
 		DiscountPct:         discountPct,
 		OriginalCostUSD:     originalCost,
+		EnergyJoules:        energyJoulesPtr(record.EnergyJoules),
+		ProviderMetadata:    maps.Clone(record.ProviderMetadata),
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
 		Failed:              false, // success path; failed attempts go to usage_errors
@@ -525,6 +528,17 @@ func generateEnabled(flag *bool) bool {
 		return true
 	}
 	return *flag
+}
+
+// energyJoulesPtr returns nil for an unmeasured (zero) reading so the column
+// stores SQL NULL rather than a misleading zero. Kept private to the flusher
+// so the per-event call path stays a one-liner and the "unmeasured = NULL"
+// invariant is documented at the single point that decides it.
+func energyJoulesPtr(joules float64) *float64 {
+	if joules == 0 {
+		return nil
+	}
+	return &joules
 }
 
 // Compile-time assertion that UsageFlusher satisfies the usage.Plugin contract.

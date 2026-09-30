@@ -3953,5 +3953,26 @@
         "text"
       ]
     }
+  ],
+  "neuralwatt": [
+    {
+      "id": "neuralwatt-deepseek-v4-pro",
+      "object": "model",
+      "created": 1784592000,
+      "owned_by": "neuralwatt",
+      "type": "neuralwatt",
+      "display_name": "DeepSeek V4 Pro",
+      "name": "neuralwatt-deepseek-v4-pro",
+      "version": "neuralwatt-deepseek-v4-pro",
+      "description": "DeepSeek V4 Pro served by Neuralwatt (OpenAI-compatible).",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    }
   ]
 }

@@ -62,6 +62,7 @@ func ApplyArtifacts(ctx context.Context, st store.UpstreamProviderStore, cfg *co
 	merged.OpenAICompatibility = rendered.OpenAICompatibility
 	merged.OpenCodeGo = rendered.OpenCodeGo
 	merged.VertexCompatAPIKey = rendered.VertexCompatAPIKey
+	merged.NeuralwattKey = rendered.NeuralwattKey
 
 	// Phase 5: this SaveConfigPreserveComments write to the legacy spool
 	// becomes a no-op. Phase 3 keeps it so the on-disk config.yaml stays

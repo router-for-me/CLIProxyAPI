@@ -519,6 +519,35 @@ func TestParseInteractionsStreamUsageOfficialMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildRecordCarriesProviderUsageMetadata(t *testing.T) {
+	ctx := EnsureProviderUsageMetadata(context.Background())
+	SetProviderEnergyJoules(ctx, 42.5)
+	SetProviderUsageMetadata(ctx, "neuralwatt", map[string]any{"request_cost_usd": 0.0034})
+
+	reporter := NewUsageReporter(ctx, "neuralwatt", "neuralwatt-deepseek-v4-pro", nil)
+	record := reporter.buildRecord(ctx, usage.Detail{}, false)
+
+	if record.EnergyJoules != 42.5 {
+		t.Fatalf("EnergyJoules = %v, want 42.5", record.EnergyJoules)
+	}
+	if record.ProviderMetadata["neuralwatt"] == nil {
+		t.Fatalf("ProviderMetadata missing neuralwatt: %+v", record.ProviderMetadata)
+	}
+}
+
+func TestBuildRecordProviderMetadataAbsentWhenContextUnset(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(context.Background(), usage.Detail{}, false)
+
+	if record.EnergyJoules != 0 {
+		t.Fatalf("EnergyJoules = %v, want 0 when no metadata captured", record.EnergyJoules)
+	}
+	if record.ProviderMetadata != nil {
+		t.Fatalf("ProviderMetadata = %+v, want nil when no metadata captured", record.ProviderMetadata)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
@@ -526,7 +555,7 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		requestedAt: time.Now().Add(-1500 * time.Millisecond),
 	}
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
 	if record.Latency < time.Second {
 		t.Fatalf("latency = %v, want >= 1s", record.Latency)
 	}
@@ -574,7 +603,7 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	ctx := usage.WithRequestedModelAlias(context.Background(), "client-gpt")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
 	if record.Model != "gpt-5.4" {
 		t.Fatalf("model = %q, want %q", record.Model, "gpt-5.4")
 	}
@@ -586,7 +615,7 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 func TestNewExecutorUsageReporterIncludesExecutorType(t *testing.T) {
 	reporter := NewExecutorUsageReporter(context.Background(), &TestUsageExecutor{}, "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
 	if record.Provider != "test-provider" {
 		t.Fatalf("provider = %q, want %q", record.Provider, "test-provider")
 	}
@@ -599,7 +628,7 @@ func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	ctx := usage.WithReasoningEffort(context.Background(), "medium")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
 	if record.ReasoningEffort != "medium" {
 		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "medium")
 	}
@@ -609,7 +638,7 @@ func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "auto")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
 	if record.ServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
 	}
@@ -622,7 +651,7 @@ func TestUsageReporterBuildRecordIncludesAutoRouterTier(t *testing.T) {
 	ctx := usage.WithRouterTier(context.Background(), "complex", "router:smart")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
 	if record.Tier != "complex" {
 		t.Fatalf("tier = %q, want %q", record.Tier, "complex")
 	}
@@ -634,7 +663,7 @@ func TestUsageReporterBuildRecordIncludesAutoRouterTier(t *testing.T) {
 func TestUsageReporterBuildRecordDefaultsAutoRouterTierEmpty(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
 	if record.Tier != "" {
 		t.Fatalf("tier = %q, want empty for non-routed request", record.Tier)
 	}
@@ -646,7 +675,7 @@ func TestUsageReporterBuildRecordDefaultsAutoRouterTierEmpty(t *testing.T) {
 func TestUsageReporterBuildRecordDefaultsGenerateTrue(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
 	if !usage.GenerateEnabled(record.Generate) {
 		t.Fatalf("generate = %v, want true", usage.GenerateEnabled(record.Generate))
 	}
@@ -656,7 +685,7 @@ func TestUsageReporterBuildRecordIncludesGenerateFalse(t *testing.T) {
 	ctx := usage.WithGenerate(context.Background(), false)
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
 	if usage.GenerateEnabled(record.Generate) {
 		t.Fatalf("generate = %v, want false", usage.GenerateEnabled(record.Generate))
 	}
@@ -668,7 +697,7 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *
 
 	reporter.SetTranslatedReasoningEffort([]byte(`{"service_tier":"priority"}`), "openai")
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
 	if record.ServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
 	}
@@ -681,13 +710,13 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 		requestedAt: time.Now(),
 	}
 
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{}); ok {
+	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{}); ok {
 		t.Fatalf("expected all-zero token usage to be skipped")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
+	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
 		t.Fatalf("expected non-zero input token usage to be recorded")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
+	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
 	}
 }

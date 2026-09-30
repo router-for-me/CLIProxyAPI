@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
@@ -57,6 +60,62 @@ func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {
 	}
 	if !foundPreviewAlias {
 		t.Fatalf("expected xAI builtin compatibility alias %s", xaiBuiltinVideo15PreviewID)
+	}
+}
+
+func TestGetNeuralwattModels(t *testing.T) {
+	models := GetNeuralwattModels()
+	if len(models) == 0 {
+		t.Fatal("GetNeuralwattModels returned 0 models")
+	}
+	for i, model := range models {
+		if model == nil {
+			t.Fatalf("GetNeuralwattModels[%d] = nil", i)
+		}
+		if strings.TrimSpace(model.ID) == "" {
+			t.Fatalf("GetNeuralwattModels[%d].ID is empty", i)
+		}
+		if strings.TrimSpace(model.Type) != "neuralwatt" {
+			t.Fatalf("GetNeuralwattModels[%d].Type = %q, want %q", i, model.Type, "neuralwatt")
+		}
+		if strings.TrimSpace(model.OwnedBy) == "" {
+			t.Fatalf("GetNeuralwattModels[%d].OwnedBy is empty", i)
+		}
+	}
+}
+
+func TestGetModelsByTypeNeuralwatt(t *testing.T) {
+	direct := GetNeuralwattModels()
+	byType := GetStaticModelDefinitionsByChannel("neuralwatt")
+	if len(byType) != len(direct) {
+		t.Fatalf("GetStaticModelDefinitionsByChannel(%q) = %d; GetNeuralwattModels = %d", "neuralwatt", len(byType), len(direct))
+	}
+	for i := range byType {
+		if byType[i] == nil || direct[i] == nil {
+			t.Fatalf("idx %d: nil model (byType=%v direct=%v)", i, byType[i], direct[i])
+		}
+		if byType[i].ID != direct[i].ID {
+			t.Fatalf("idx %d: byType.ID = %q, want %q", i, byType[i].ID, direct[i].ID)
+		}
+	}
+}
+
+func TestLookupStaticModelInfoNeuralwatt(t *testing.T) {
+	models := GetNeuralwattModels()
+	if len(models) == 0 {
+		t.Fatal("GetNeuralwattModels returned 0 models")
+	}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		got := LookupStaticModelInfo(model.ID)
+		if got == nil {
+			t.Fatalf("LookupStaticModelInfo(%q) = nil", model.ID)
+		}
+		if got.ID != model.ID {
+			t.Fatalf("LookupStaticModelInfo(%q).ID = %q, want %q", model.ID, got.ID, model.ID)
+		}
 	}
 }
 

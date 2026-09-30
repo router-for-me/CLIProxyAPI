@@ -122,6 +122,11 @@ type Config struct {
 	// MetaKey defines Meta API key configurations using the same structure as Codex API keys.
 	MetaKey []MetaKey `yaml:"meta-api-key" json:"meta-api-key"`
 
+	// NeuralwattKey defines Neuralwatt API key configurations using the same
+	// structure as Codex API keys. Neuralwatt is OpenAI-compatible and
+	// authenticates with a static bearer key.
+	NeuralwattKey []NeuralwattKey `yaml:"neuralwatt-api-key" json:"neuralwatt-api-key"`
+
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 

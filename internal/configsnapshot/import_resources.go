@@ -26,6 +26,7 @@ const (
 	ptCodexAPIKey         = "codex-api-key"
 	ptXAIAPIKey           = "xai-api-key"
 	ptMetaAPIKey          = "meta-api-key"
+	ptNeuralwattAPIKey    = "neuralwatt-api-key"
 	ptClaudeAPIKey        = "claude-api-key"
 	ptOpenAICompatibility = "openai-compatibility"
 	ptOpenCodeGo          = "opencode-go"
@@ -86,6 +87,9 @@ func BuildResourcePlan(cfg *config.Config) (*NormalizedResourcePlan, error) {
 	)
 	appendProviders(&plan.Providers, &plan.Report,
 		convertMetaKeys(cfg.MetaKey)...,
+	)
+	appendProviders(&plan.Providers, &plan.Report,
+		convertNeuralwattKeys(cfg.NeuralwattKey)...,
 	)
 	appendProviders(&plan.Providers, &plan.Report,
 		convertVertexCompatKeys(cfg.VertexCompatAPIKey)...,
@@ -155,6 +159,8 @@ func sectionPrefix(providerType string) string {
 		return "xai-"
 	case ptMetaAPIKey:
 		return "meta-"
+	case ptNeuralwattAPIKey:
+		return "neuralwatt-"
 	case ptVertexAPIKey:
 		return "vertex-"
 	default:
@@ -381,6 +387,51 @@ func convertMetaKeys(in []config.CodexKey) []store.UpstreamProvider {
 			p.ExtraConfig = extra
 		}
 		p.Name = fmt.Sprintf("meta-%d", i+1)
+		out = append(out, p)
+	}
+	return out
+}
+
+// convertNeuralwattKeys converts Config.NeuralwattKey (CodexKey alias) into
+// neuralwatt providers.
+func convertNeuralwattKeys(in []config.CodexKey) []store.UpstreamProvider {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]store.UpstreamProvider, 0, len(in))
+	for i, k := range in {
+		p := store.UpstreamProvider{
+			ProviderType:   ptNeuralwattAPIKey,
+			Priority:       k.Priority,
+			Prefix:         k.Prefix,
+			APIKey:         k.APIKey,
+			BaseURL:        k.BaseURL,
+			ProxyURL:       k.ProxyURL,
+			Websockets:     k.Websockets,
+			Models:         convertCodexModels(k.Models),
+			Headers:        copyHeaders(k.Headers),
+			ExcludedModels: append([]string(nil), k.ExcludedModels...),
+		}
+		extra := map[string]any{}
+		if k.Weight != nil {
+			extra[ecWeight] = *k.Weight
+		}
+		if k.DisableCooling {
+			extra[ecDisableCooling] = true
+		}
+		if k.ServiceTier != "" {
+			// The render-side helper codexKeyFromProvider reads the raw
+			// "service_tier" key, so the planner writes the same key for
+			// a planner→render round-trip. (Pre-existing planners use the
+			// namespaced "nixllm.yaml.*" form; we deliberately match the
+			// render contract here so PG re-imports do not silently drop
+			// Neuralwatt's billing-tier selection.)
+			extra["service_tier"] = k.ServiceTier
+		}
+		if len(extra) > 0 {
+			p.ExtraConfig = extra
+		}
+		p.Name = fmt.Sprintf("neuralwatt-%d", i+1)
 		out = append(out, p)
 	}
 	return out

@@ -18,6 +18,7 @@ export const API_KEY_TYPES = [
   { value: 'codex-api-key', label: 'Codex (API Key)', simple: 'codex' },
   { value: 'xai-api-key', label: 'xAI (API Key)', simple: 'xai' },
   { value: 'meta-api-key', label: 'Meta (API Key)', simple: 'meta' },
+  { value: 'neuralwatt-api-key', label: 'Neuralwatt (API Key)', simple: 'neuralwatt' },
   { value: 'claude-api-key', label: 'Claude (API Key)', simple: 'claude' },
   { value: 'vertex-api-key', label: 'Vertex (API Key)', simple: 'vertex' },
   { value: 'openai-compatibility', label: 'OpenAI Compatibility', simple: 'openai' },
@@ -229,6 +230,21 @@ export function buildSchemas() {
         hint: 'Use the Responses API websocket transport for this entry.' },
     ], [], [identifierField]),
     'meta-api-key': apiKeyBase([], [], [identifierField]),
+    // Neuralwatt mirrors meta-api-key (same Codex-style shape) but injects
+    // a service_tier Behavior select. The field name is snake_case to
+    // match the editor's extra_config round-trip path
+    // (extra_config.service_tier in the upstream store); the YAML tag on
+    // config.CodexKey is `service-tier` but the JSON path that the form
+    // layer (form.js) carries through is `service_tier`.
+    'neuralwatt-api-key': apiKeyBase([
+      { name: 'service_tier', label: 'Service tier', type: 'select',
+        options: [
+          { value: '', label: 'unset (provider default)' },
+          { value: 'default', label: 'default (standard)' },
+          { value: 'flex', label: 'flex (discounted, may be capacity-shed)' },
+        ],
+        hint: 'default: standard tier. flex: discounted tier that may be capacity-shed under load. Leave blank for the provider default.' },
+    ], [], [identifierField]),
     'claude-api-key': {
       sections: [
         { title: 'Identity', fields: [
