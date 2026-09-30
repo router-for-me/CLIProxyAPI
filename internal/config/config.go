@@ -79,6 +79,10 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
+	// CooldownStatusCode overrides the HTTP status returned to clients when a cooled-down model is requested.
+	// 0 keeps the legacy 429 response. Values in 400-599 are honored as-is; anything else falls back to 429.
+	CooldownStatusCode int `yaml:"cooldown-status-code" json:"cooldown-status-code"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh and manual refresh-all worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
