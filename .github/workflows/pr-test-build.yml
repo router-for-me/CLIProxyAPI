@@ -2,6 +2,9 @@ name: pr-test-build
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -19,6 +22,18 @@ jobs:
           cache: true
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -count=1
       - name: Build
         run: |
           go build -o test-output ./cmd/server

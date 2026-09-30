@@ -2,12 +2,18 @@ name: release
 
 on:
   push:
-    # run only against tags
+    # Only version tags of the form vX.Y.Z produce a release.
+    # Upstream tags must never be pushed to this fork: a wildcard trigger
+    # would publish a spurious release for every imported upstream tag.
     tags:
-      - '*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   GH_REPO: ${{ github.repository }}
