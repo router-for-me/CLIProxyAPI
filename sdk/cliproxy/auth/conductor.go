@@ -7,9 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -28,6 +28,12 @@ type ProviderExecutor interface {
 	// HttpRequest injects provider credentials into the supplied HTTP request and executes it.
 	// Callers must close the response body when non-nil.
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
+}
+
+// APIKeyConfigExecutor provides an execution-local view without OAuth-only
+// configuration. The registered executor and its shared session state stay intact.
+type APIKeyConfigExecutor interface {
+	ForAPIKey() ProviderExecutor
 }
 
 // RequestAuthPreparer lets an executor update missing auth metadata immediately

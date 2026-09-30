@@ -30,13 +30,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -359,7 +360,7 @@ func parseSingleModelConfig(b []byte) rawDevinModel {
 	return m
 }
 
-func vendorName(id uint64) string {
+func vendorName(id uint64, uid string) string {
 	switch id {
 	case 1:
 		return "cognition"
@@ -378,6 +379,9 @@ func vendorName(id uint64) string {
 	case 11:
 		return "nvidia"
 	default:
+		if strings.Contains(strings.ToLower(uid), "grok") {
+			return "xai"
+		}
 		return "devin"
 	}
 }
@@ -393,7 +397,7 @@ func formatRawModels(raw []rawDevinModel) []devinModelJSON {
 			ID:                        r.UID,
 			Object:                    "model",
 			Type:                      "devin",
-			OwnedBy:                   vendorName(r.VendorID),
+			OwnedBy:                   vendorName(r.VendorID, r.UID),
 			DisplayName:               r.Label,
 			ContextLength:             r.ContextLength,
 			MaxCompletionTokens:       64000,
@@ -402,6 +406,90 @@ func formatRawModels(raw []rawDevinModel) []devinModelJSON {
 		})
 	}
 	return res
+}
+
+var devinCompoundSuffixes = []struct {
+	suffix string
+	effort string
+	readd  string
+}{
+	{suffix: "-low-fast", effort: "low"},
+	{suffix: "-medium-fast", effort: "medium"},
+	{suffix: "-high-fast", effort: "high"},
+	{suffix: "-xhigh-fast", effort: "xhigh"},
+	{suffix: "-max-fast", effort: "max"},
+	{suffix: "-none-fast", effort: "none"},
+	{suffix: "-low-priority", effort: "low"},
+	{suffix: "-medium-priority", effort: "medium"},
+	{suffix: "-high-priority", effort: "high"},
+	{suffix: "-xhigh-priority", effort: "xhigh"},
+	{suffix: "-max-priority", effort: "max"},
+	{suffix: "-none-priority", effort: "none"},
+	{suffix: "-thinking-1m", effort: "", readd: "-1m"},
+	{suffix: "-thinking", effort: ""},
+	{suffix: "-max-1m", effort: "max", readd: "-1m"},
+	{suffix: "-none-1m", effort: "none", readd: "-1m"},
+}
+
+var devinSimpleEffortSuffixes = []struct {
+	suffix string
+	effort string
+}{
+	{suffix: "-none", effort: "none"},
+	{suffix: "-minimal", effort: "minimal"},
+	{suffix: "-low", effort: "low"},
+	{suffix: "-medium", effort: "medium"},
+	{suffix: "-high", effort: "high"},
+	{suffix: "-xhigh", effort: "xhigh"},
+	{suffix: "-max", effort: "max"},
+}
+
+func splitDevinUID(uid string) (string, string) {
+	if uid == "swe-1-6-slow" {
+		return uid, ""
+	}
+	if uid == "swe-1-6-fast" {
+		return "swe-1-6", ""
+	}
+
+	upper := strings.ToUpper(uid)
+	for _, s := range []struct {
+		suffix string
+		effort string
+	}{
+		{"_NONE", "none"},
+		{"_MINIMAL", "minimal"},
+		{"_LOW", "low"},
+		{"_MEDIUM", "medium"},
+		{"_HIGH", "high"},
+		{"_XHIGH", "xhigh"},
+		{"_MAX", "max"},
+		{"_THINKING", "high"},
+	} {
+		if strings.HasSuffix(upper, s.suffix) {
+			base := uid[:len(uid)-len(s.suffix)]
+			return base, s.effort
+		}
+	}
+
+	for _, s := range devinCompoundSuffixes {
+		if strings.HasSuffix(uid, s.suffix) {
+			base := uid[:len(uid)-len(s.suffix)]
+			if s.readd != "" {
+				base += s.readd
+			}
+			return base, s.effort
+		}
+	}
+
+	for _, s := range devinSimpleEffortSuffixes {
+		if strings.HasSuffix(uid, s.suffix) {
+			base := uid[:len(uid)-len(s.suffix)]
+			return base, s.effort
+		}
+	}
+
+	return uid, ""
 }
 
 func aggregateModels(raw []rawDevinModel) []devinModelJSON {
@@ -414,43 +502,51 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 		levels        map[string]struct{}
 	}
 
-	knownSuffixes := []string{"-minimal", "-low", "-medium", "-high", "-xhigh", "-max", "-none", "-priority"}
 	grouped := make(map[string]*aggEntry)
 	var order []string
 
 	for _, r := range raw {
-		base := r.UID
-		level := ""
-
-		for _, s := range knownSuffixes {
-			if strings.HasSuffix(base, s) {
-				level = strings.TrimPrefix(s, "-")
-				base = strings.TrimSuffix(base, s)
-				break
-			}
+		base, level := splitDevinUID(r.UID)
+		if base == "" {
+			base = r.UID
 		}
+		isBase := (base == r.UID)
 
 		entry, exists := grouped[base]
 		if !exists {
+			initialLevels := make(map[string]struct{})
+			if mInfo := registry.LookupDevinModel(base); mInfo != nil && mInfo.Thinking != nil {
+				for _, l := range mInfo.Thinking.Levels {
+					if l != "" && l != "priority" {
+						initialLevels[l] = struct{}{}
+					}
+				}
+			}
 			entry = &aggEntry{
 				baseID:        base,
 				displayName:   cleanDisplayName(r.Label),
 				vendorID:      r.VendorID,
 				contextLength: r.ContextLength,
 				multimodal:    r.Multimodal,
-				levels:        make(map[string]struct{}),
+				levels:        initialLevels,
 			}
 			grouped[base] = entry
 			order = append(order, base)
 		}
 
+		if isBase {
+			entry.displayName = cleanDisplayName(r.Label)
+			if r.VendorID != 0 {
+				entry.vendorID = r.VendorID
+			}
+		}
 		if r.Multimodal {
 			entry.multimodal = true
 		}
 		if r.ContextLength > entry.contextLength {
 			entry.contextLength = r.ContextLength
 		}
-		if level != "" {
+		if level != "" && level != "priority" {
 			entry.levels[level] = struct{}{}
 		}
 	}
@@ -479,7 +575,7 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 			ID:                        entry.baseID,
 			Object:                    "model",
 			Type:                      "devin",
-			OwnedBy:                   vendorName(entry.vendorID),
+			OwnedBy:                   vendorName(entry.vendorID, entry.baseID),
 			DisplayName:               entry.displayName,
 			ContextLength:             entry.contextLength,
 			MaxCompletionTokens:       64000,
@@ -492,23 +588,45 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 	return res
 }
 
+var devinDisplayNameSuffixes = []string{
+	" Low Fast", " Medium Fast", " High Fast", " XHigh Fast", " Max Fast",
+	" Low Thinking Fast", " Medium Thinking Fast", " High Thinking Fast",
+	" XHigh Thinking Fast", " Max Thinking Fast", " No Thinking Fast",
+	" Low Thinking", " Medium Thinking", " High Thinking", " XHigh Thinking",
+	" Max Thinking", " No Thinking",
+	" Low", " Medium", " High", " XHigh", " Max", " None", " Minimal",
+	" Thinking", " Fast",
+}
+
 func cleanDisplayName(label string) string {
-	clean := label
-	for _, s := range []string{" Low", " Medium", " High", " XHigh", " Max", " Minimal", " None", " Priority"} {
-		clean = strings.TrimSuffix(clean, s)
+	trimmed := strings.TrimSpace(label)
+	for {
+		changed := false
+		for _, s := range devinDisplayNameSuffixes {
+			if strings.HasSuffix(strings.ToLower(trimmed), strings.ToLower(s)) {
+				trimmed = strings.TrimSpace(trimmed[:len(trimmed)-len(s)])
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			break
+		}
 	}
-	return clean
+	return trimmed
 }
 
 func sortLevels(levels []string) {
 	rank := map[string]int{
-		"none":    0,
-		"minimal": 1,
-		"low":     2,
-		"medium":  3,
-		"high":    4,
-		"xhigh":   5,
-		"max":     6,
+		"none":     0,
+		"minimal":  1,
+		"low":      2,
+		"medium":   3,
+		"high":     4,
+		"xhigh":    5,
+		"max":      6,
+		"fast":     7,
+		"priority": 8,
 	}
 	sort.Slice(levels, func(i, j int) bool {
 		rI, okI := rank[levels[i]]
@@ -519,6 +637,9 @@ func sortLevels(levels []string) {
 		if !okJ {
 			rJ = 99
 		}
-		return rI < rJ
+		if rI != rJ {
+			return rI < rJ
+		}
+		return levels[i] < levels[j]
 	})
 }

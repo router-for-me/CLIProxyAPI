@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 )
 
 func TestBuilderRegistersEphemeralAPIKeyWithAccessManager(t *testing.T) {

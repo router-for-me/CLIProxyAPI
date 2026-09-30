@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestStreamRewriter_RewriteChunk_KimiMessagesDataPrefixWithoutSpace(t *testing.T) {
@@ -303,5 +303,33 @@ func TestRewriteForceMappedStreamChunk_CodexDataLinesWithoutNewlines_FinishParse
 	}
 	if !found {
 		t.Fatalf("missing response.completed; types=%v", types)
+	}
+}
+
+func TestStreamRewriter_LoggedOnceAndRewrittenChunksCount(t *testing.T) {
+	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "gemini-3.8-flash"})
+	chunks := [][]byte{
+		[]byte("data: {\"modelVersion\":\"gemini-3.8-flash-high\",\"text\":\"part 1\"}\n\n"),
+		[]byte("data: {\"modelVersion\":\"gemini-3.8-flash-high\",\"text\":\"part 2\"}\n\n"),
+		[]byte("data: {\"modelVersion\":\"gemini-3.8-flash-high\",\"text\":\"part 3\"}\n\n"),
+		[]byte("data: [DONE]\n\n"),
+	}
+
+	for _, c := range chunks {
+		out := rewriter.RewriteChunk(c)
+		if len(out) == 0 {
+			t.Fatalf("unexpected empty chunk output")
+		}
+	}
+	finishForceMappedStreamChunks(rewriter)
+
+	if rewriter.rewrittenChunks != 3 {
+		t.Fatalf("expected 3 rewritten chunks, got %d", rewriter.rewrittenChunks)
+	}
+	if !rewriter.loggedPaths["modelVersion"] {
+		t.Fatalf("expected modelVersion to be tracked in loggedPaths")
+	}
+	if !rewriter.loggedFinished {
+		t.Fatalf("expected loggedFinished to be true after [DONE] and finish")
 	}
 }

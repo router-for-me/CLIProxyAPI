@@ -2,15 +2,16 @@ package synthesizer
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestNewFileSynthesizer(t *testing.T) {
@@ -381,6 +382,50 @@ func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	}
 	if gotProject := auths[1].Metadata["project_id"]; gotProject != "project-a" {
 		t.Fatalf("project_id = %#v, want project-a", gotProject)
+	}
+}
+
+func TestSynthesizeAuthFileAppliesSourcePriorityToPluginAuths(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		raw          string
+		want         string
+		wantMetadata any
+	}{
+		{name: "number", raw: `{"type":"plugin","priority":1}`, want: "1", wantMetadata: float64(1)},
+		{name: "string", raw: `{"type":"plugin","priority":" 2 "}`, want: "2", wantMetadata: " 2 "},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fullPath := filepath.Join(t.TempDir(), "plugin.json")
+			ctx := &SynthesisContext{
+				Config:  &config.Config{},
+				AuthDir: filepath.Dir(fullPath),
+				PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+					return []*coreauth.Auth{
+						{ID: "first", Provider: "plugin", Metadata: map[string]any{"project_id": "first"}},
+						{ID: "second", Provider: "plugin", Metadata: map[string]any{"project_id": "second"}},
+					}, true, nil
+				}),
+			}
+			auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(testCase.raw))
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+			}
+			if len(auths) != 2 {
+				t.Fatalf("SynthesizeAuthFile() len = %d, want 2", len(auths))
+			}
+			for _, auth := range auths {
+				if got := auth.Attributes["priority"]; got != testCase.want {
+					t.Errorf("auth %s priority attribute = %q, want %q", auth.ID, got, testCase.want)
+				}
+				if got := auth.Attributes[coreauth.AttributeFilePriority]; got != "true" {
+					t.Errorf("auth %s file priority marker = %q, want true", auth.ID, got)
+				}
+				if got := auth.Metadata["priority"]; got != testCase.wantMetadata {
+					t.Errorf("auth %s priority metadata = %v, want %v", auth.ID, got, testCase.wantMetadata)
+				}
+			}
+		})
 	}
 }
 
@@ -978,6 +1023,87 @@ func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
 			}
 			if ok {
 				t.Fatalf("expected note attribute to be absent, got %q", value)
+			}
+		})
+	}
+}
+
+func makeTestCodexJWT(planType string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	authInfo := map[string]any{
+		"chatgpt_account_id": "acc-123",
+	}
+	if planType != "" {
+		authInfo["chatgpt_plan_type"] = planType
+	}
+	claimsMap := map[string]any{
+		"email":                       "user@example.com",
+		"https://api.openai.com/auth": authInfo,
+	}
+	payloadBytes, _ := json.Marshal(claimsMap)
+	claims := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	return header + "." + claims + "."
+}
+
+func TestSynthesizeAuthFile_CodexPlanType(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileJSON map[string]any
+		wantPlan string
+	}{
+		{
+			name: "explicit plan_type in metadata",
+			fileJSON: map[string]any{
+				"type":      "codex",
+				"plan_type": "pro",
+			},
+			wantPlan: "pro",
+		},
+		{
+			name: "id_token with plan_type",
+			fileJSON: map[string]any{
+				"type":     "codex",
+				"id_token": makeTestCodexJWT("team"),
+			},
+			wantPlan: "team",
+		},
+		{
+			name: "id_token without plan_type defaults to free",
+			fileJSON: map[string]any{
+				"type":     "codex",
+				"id_token": makeTestCodexJWT(""),
+			},
+			wantPlan: "free",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			filePath := filepath.Join(tempDir, "codex.json")
+			data, errMarshal := json.Marshal(tt.fileJSON)
+			if errMarshal != nil {
+				t.Fatalf("marshal error: %v", errMarshal)
+			}
+			if errWrite := os.WriteFile(filePath, data, 0600); errWrite != nil {
+				t.Fatalf("write error: %v", errWrite)
+			}
+
+			auths, errSynthesize := SynthesizeAuthFile(&SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}, filePath, data)
+
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+			if got := auths[0].Attributes["plan_type"]; got != tt.wantPlan {
+				t.Fatalf("plan_type attribute = %q, want %q", got, tt.wantPlan)
 			}
 		})
 	}

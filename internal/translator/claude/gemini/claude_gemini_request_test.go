@@ -7,6 +7,25 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertGeminiRequestToClaude_ThinkingSummaryVisibility(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		wanted string
+	}{
+		{name: "include thoughts", input: `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, wanted: "summarized"},
+		{name: "exclude thoughts", input: `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":false}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, wanted: "omitted"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := ConvertGeminiRequestToClaude("claude-opus-5-5", []byte(test.input), false)
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.wanted {
+				t.Fatalf("thinking.display = %q, want %q; body=%s", got, test.wanted, out)
+			}
+		})
+	}
+}
+
 func TestConvertGeminiRequestToClaude_PreservesCustomToolIDs(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -315,5 +334,76 @@ func TestConvertGeminiRequestToClaude_DefaultRoleDifferentContentProducesDiffere
 	}
 	if idA == idB {
 		t.Fatalf("different prompt texts without role produced identical metadata.user_id: %q", idA)
+	}
+}
+
+func TestConvertGeminiRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchema(t *testing.T) {
+	inputJSON := `{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{
+						"functionCall": {
+							"name": "mcp.server:get_data",
+							"args": {}
+						}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{
+						"functionResponse": {
+							"name": "mcp.server:get_data",
+							"response": {"result": "ok"}
+						}
+					}
+				]
+			}
+		],
+		"tools": [
+			{
+				"functionDeclarations": [
+					{
+						"name": "mcp.server:get_data",
+						"description": "parameterless mcp tool"
+					}
+				]
+			}
+		],
+		"toolConfig": {
+			"functionCallingConfig": {
+				"mode": "ANY",
+				"allowedFunctionNames": ["mcp.server:get_data"]
+			}
+		}
+	}`
+
+	result := ConvertGeminiRequestToClaude("claude-test", []byte(inputJSON), false)
+
+	// 1. Tool declaration name sanitized
+	toolName := gjson.GetBytes(result, "tools.0.name").String()
+	if toolName != "mcp_server_get_data" {
+		t.Fatalf("tools.0.name = %q, want mcp_server_get_data. Output: %s", toolName, result)
+	}
+
+	// 2. Fallback input_schema
+	schema := gjson.GetBytes(result, "tools.0.input_schema")
+	if !schema.Exists() || schema.Get("type").String() != "object" {
+		t.Fatalf("tools.0.input_schema = %s, want object schema. Output: %s", schema, result)
+	}
+
+	// 3. Historical tool_use in model/assistant turn sanitized
+	toolUseName := gjson.GetBytes(result, "messages.0.content.0.name").String()
+	if toolUseName != "mcp_server_get_data" {
+		t.Fatalf("messages.0.content.0.name = %q, want mcp_server_get_data. Output: %s", toolUseName, result)
+	}
+
+	// 4. Tool choice name sanitized
+	toolChoiceName := gjson.GetBytes(result, "tool_choice.name").String()
+	if toolChoiceName != "mcp_server_get_data" {
+		t.Fatalf("tool_choice.name = %q, want mcp_server_get_data. Output: %s", toolChoiceName, result)
 	}
 }

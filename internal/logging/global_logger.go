@@ -11,19 +11,39 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var (
 	setupOnce      sync.Once
-	writerMu       sync.Mutex
+	writerMu       sync.RWMutex
+	consoleMu      sync.Mutex
 	logWriter      *lumberjack.Logger
 	ginInfoWriter  *io.PipeWriter
 	ginErrorWriter *io.PipeWriter
+	consoleWriter  io.Writer = os.Stderr
 )
+
+func init() {
+	config.SetV8MigrationWarnFunc(logV8MigrationWarning)
+}
+
+func logV8MigrationWarning(section, msg string) {
+	writerMu.RLock()
+	defer writerMu.RUnlock()
+
+	log.Warn(msg)
+	if logWriter != nil {
+		consoleMu.Lock()
+		if consoleWriter != nil {
+			_, _ = fmt.Fprintf(consoleWriter, "WARNING: %s\n", msg)
+		}
+		consoleMu.Unlock()
+	}
+}
 
 // LogFormatter defines a custom log format for logrus.
 // This formatter adds timestamp, level, request ID, and source location to each log entry.
@@ -77,7 +97,7 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 
 	reqID := "--------"
 	if id, ok := entry.Data["request_id"].(string); ok && id != "" {
-		reqID = id
+		reqID = ShortRequestID(id)
 	}
 
 	level := entry.Level.String()

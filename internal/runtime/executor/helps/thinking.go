@@ -3,8 +3,8 @@ package helps
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // ApplyThinkingWithSourcePayload preserves summary visibility from the original
@@ -35,8 +35,8 @@ func translatedRequestSummaryConfig(body, currentSourcePayload, originalSourcePa
 		return targetSummary
 	}
 
-	currentSummary := thinking.ExtractSummaryConfig(currentSourcePayload, fromFormat)
-	originalSummary := thinking.ExtractSummaryConfig(originalSourcePayload, fromFormat)
+	currentSummary := thinking.ExtractTranslatedSummaryConfig(currentSourcePayload, fromFormat, toFormat)
+	originalSummary := thinking.ExtractTranslatedSummaryConfig(originalSourcePayload, fromFormat, toFormat)
 	if currentSummary.Mode == thinking.SummaryUnspecified {
 		return originalSummary
 	}

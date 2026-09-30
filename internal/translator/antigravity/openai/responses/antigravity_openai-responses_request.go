@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -194,15 +194,16 @@ func enableAntigravityResponsesThinkingSummary(inputRawJSON, translated []byte) 
 	if effortVal == "" || effortVal == "none" {
 		return translated
 	}
-	for _, path := range []string{"reasoning.summary", "reasoning.generate_summary"} {
-		if value := gjson.GetBytes(inputRawJSON, path); value.Raw != "" {
-			return translated
+	summaryConfig := thinking.ExtractSummaryConfig(inputRawJSON, "openai-response")
+	if summaryConfig.Mode == thinking.SummaryUnspecified {
+		// When effort is set but summary visibility is omitted, enable summaries
+		// by default so Antigravity emits visible thought parts (#5508).
+		summaryConfig = thinking.SummaryConfig{
+			Mode:   thinking.SummaryEnabled,
+			Detail: "auto",
 		}
 	}
-	return thinking.ApplySummaryConfig(translated, "antigravity", thinking.SummaryConfig{
-		Mode:   thinking.SummaryEnabled,
-		Detail: "auto",
-	})
+	return thinking.ApplySummaryConfig(translated, "antigravity", summaryConfig)
 }
 
 type antigravityClaudeReasoningSignature struct {

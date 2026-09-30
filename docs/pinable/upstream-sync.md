@@ -2,6 +2,14 @@
 
 ## Baseline and invariant
 
+The 2026-09-30 synchronization targets upstream
+`a270e7b9e57aaecd8f82555f44c2108518ad2330` from fork main
+`2eb057869ca11301edf1768e6ff68d8f95521e10`: 116 upstream commits since
+`a5ab69521f7b4e0f244836d0419da8fcd89408ea`, retaining all 25 fork-only commits.
+This upstream changes the Go module path from `/v7` to `/v8`; the toolchain
+remains Go 1.26.0. Consumers compiling against the SDK must use the v8 imports.
+The Desktop runtime host contract remains version `1`.
+
 The 2026-09-21 synchronization integrates `router-for-me/CLIProxyAPI` at
 `a5ab69521f7b4e0f244836d0419da8fcd89408ea` with the fork main previously at
 `390fab7820295761d3e0991dfc1fdf8121dc9927`. Their merge base is the prior
@@ -33,6 +41,22 @@ on the next sync. Never resolve all conflicts with blanket `ours` or `theirs`.
   provider login modes, plugin hooks, and `discoveryManager` initialization.
 
 ## Conflict reduction
+
+The 2026-09-30 merge has four import-block conflicts:
+`internal/access/config_access/provider.go`, `internal/api/server_options.go`,
+`internal/api/server_reload.go`, and `internal/cmd/run.go`. Keep all upstream
+v8 imports plus the host-only imports; do not replace either implementation.
+Migrate the seven fork-only Go files that Git cannot update because they are
+absent upstream. The Interactions-to-Gemini import guard now recognizes any
+numbered module version, with positive/negative cases, so a future major-module
+rename cannot silently disable that architecture check.
+
+The six-platform packaged-executable smoke test now also reads the v8 client-key
+view without changing the file, rejects unauthenticated/ephemeral management
+access, rotates the persisted client key through the v8 API, and checks that the
+old key is rejected while the runtime-only key and v0 host control remain valid.
+The original atomic-file-replacement, parent-exit, and loopback-shutdown probes
+are retained, not replaced by the v8 checks.
 
 The first synchronization conflicted in `cmd/server/main.go`,
 `cmd/server/main_test.go`, and `sdk/cliproxy/builder.go`. Host version detection,
