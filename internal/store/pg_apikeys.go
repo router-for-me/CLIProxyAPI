@@ -1318,7 +1318,7 @@ func assertRowsAffected(res sql.Result, id, label string) error {
 // Empty values are ignored (unfiltered). SortBy is one of "created_at"
 // (default), "name", "last_used_at", "user_alias". SortOrder is "desc"
 // (default) or "asc". Search is a case-insensitive substring match on name,
-// key_alias, or key_prefix.
+// key_alias, key_prefix, id, or the owning user's alias/email.
 type APIKeyListFilter struct {
 	Status    string
 	UserID    string
@@ -1360,13 +1360,14 @@ func (s *APIKeyStore) ListPagedFiltered(ctx context.Context, page, pageSize int,
 	}
 	if f.Search != "" {
 		like := "%" + f.Search + "%"
-		// Bind three separate positional placeholders (one per column) so the
-		// LIKE pattern is matched against name, key_alias, and key_prefix.
-		args = append(args, like, like, like)
+		// Bind one placeholder per searchable column so the LIKE pattern is
+		// matched against name, key_alias, key_prefix, id, and the owning
+		// user's alias/email (mirrors the dashboard's keyword search).
+		args = append(args, like, like, like, like, like, like)
 		n := len(args)
 		where = append(where, fmt.Sprintf(
-			"(LOWER(k.name) LIKE LOWER($%d) OR LOWER(k.key_alias) LIKE LOWER($%d) OR LOWER(k.key_prefix) LIKE LOWER($%d))",
-			n-2, n-1, n,
+			"(LOWER(k.name) LIKE LOWER($%d) OR LOWER(k.key_alias) LIKE LOWER($%d) OR LOWER(k.key_prefix) LIKE LOWER($%d) OR LOWER(k.id) LIKE LOWER($%d) OR LOWER(u.user_alias) LIKE LOWER($%d) OR LOWER(u.user_email) LIKE LOWER($%d))",
+			n-5, n-4, n-3, n-2, n-1, n,
 		))
 	}
 	whereClause := ""
@@ -1375,7 +1376,8 @@ func (s *APIKeyStore) ListPagedFiltered(ctx context.Context, page, pageSize int,
 	}
 
 	var total int64
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s k%s`, s.apiKeysTable, whereClause)
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s k LEFT JOIN %s u ON u.id = k.user_id%s`,
+		s.apiKeysTable, s.internalUsersTable, whereClause)
 	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("postgres store: count api keys (filtered): %w", err)
 	}

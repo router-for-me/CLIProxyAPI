@@ -63,26 +63,41 @@ export default function ApiKeysPage() {
   const [showImport, setShowImport] = useState(false);
   const [actionLoading, setActionLoading] = useState({});
 
+  // Debounce the free-text search so typing 8 chars doesn't fire 8 queries.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Reset to the first page whenever the effective search term changes.
+  useEffect(() => {
+    setPage(1);
+    setSelectedIds([]);
+  }, [debouncedSearch]);
+
   const [sortBy, sortOrder] = useMemo(() => {
     const parts = sortOption.split(':');
     return [parts[0] || 'created_at', parts[1] || 'desc'];
   }, [sortOption]);
 
   const { data, error, loading, reload } = useAsync(
-    () => listAPIKeys({ page, pageSize, status, sortBy, sortOrder }),
-    [page, pageSize, status, sortBy, sortOrder],
+    () => listAPIKeys({ page, pageSize, status, search: debouncedSearch, sortBy, sortOrder }),
+    [page, pageSize, status, debouncedSearch, sortBy, sortOrder],
   );
 
   const keys = data?.api_keys || [];
   const total = data?.total ?? 0;
   const totalPages = data?.total_pages ?? 0;
 
-  // Filter within page by keyword search
+  // Instant feedback filter over the rows already fetched for this page. The
+  // same keyword is also sent server-side (debounced) so matches beyond the
+  // current page are returned; this pass keeps typing responsive in between.
   const filteredKeys = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return keys;
     return keys.filter((k) => {
-      const hay = [k.name, k.key_prefix, k.user_alias, k.user_email, k.id]
+      const hay = [k.name, k.key_alias, k.key_prefix, k.user_alias, k.user_email, k.id]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();

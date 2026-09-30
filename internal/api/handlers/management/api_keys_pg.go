@@ -126,7 +126,7 @@ type pgPagedKeysResponse struct {
 //   - page_size  (default 25, max 200)
 //   - status     (optional, e.g. "active")
 //   - user_id    (optional, filter to keys owned by this internal user)
-//   - search     (optional, case-insensitive substring on name/alias/prefix)
+//   - search     (optional, case-insensitive substring on name/alias/prefix/id/owner)
 //   - sort_by    "created_at" (default) | "name" | "last_used_at" | "user_alias"
 //   - sort_order "desc" (default) | "asc"
 //
