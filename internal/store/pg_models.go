@@ -421,7 +421,7 @@ type ModelsListFilter struct {
 	ExcludeIDFilter  []string // exclude these model IDs (stale scope)
 	Query            string   // free-text ILIKE %q% against id/name/display_name/provider
 	Priced           *bool    // nil = no pricing filter; true = has non-zero pricing; false = unpriced
-	PricingTable     string   // required when Priced != nil
+	PricingTable     string   // required when Priced != nil; when empty, Priced is a no-op
 }
 
 // modelsPricingPredicate builds the SQL predicate for the Priced filter.

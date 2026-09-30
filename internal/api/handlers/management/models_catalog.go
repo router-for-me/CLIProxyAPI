@@ -82,6 +82,7 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 		if len(idFilter) == 0 {
 			c.JSON(http.StatusOK, pgModelsCatalogResponse{
 				Models: []any{}, Page: page, PageSize: pageSize, Total: 0, TotalPages: 0,
+				LiveIDs: map[string]bool{},
 			})
 			return
 		}

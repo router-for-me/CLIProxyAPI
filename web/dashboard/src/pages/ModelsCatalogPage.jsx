@@ -274,11 +274,11 @@ export default function ModelsCatalogPage() {
 
       <SyncStatusPill status={syncStatus} loading={initialSyncRunning} />
 
-      {/* Header stat cards — clickable to flip the stale filter / scope. */}
+      {/* Header stat cards — clickable to set the scope filter. */}
       <StatsGrid summary={summary} scope={scope} onStatClick={handleStatClick} />
 
       <div className="card">
-        {/* Toolbar: search + provider dropdowns + stale filter + density + autorefresh */}
+        {/* Toolbar: search + provider dropdowns + scope filter + density + autorefresh */}
         <div className="catalog-toolbar">
           <input
             type="text"
