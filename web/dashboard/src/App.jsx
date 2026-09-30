@@ -338,7 +338,7 @@ export default function App() {
           coreVersion={versionInfo?.['running-core-version'] || 'unknown'}
           updateAvailable={nixllmUpdateAvailable}
         />
-        <main className="main">
+        <main className={`main${location.pathname.startsWith('/playground') ? ' main--flush' : ''}`}>
           <Routes>
             <Route path="/login" element={<Navigate to="/" replace />} />
             <Route path="/" element={<DashboardPage />} />

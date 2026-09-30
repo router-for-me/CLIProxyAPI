@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reducer, initialState, openStream } from './usePlaygroundChat.js';
+import { reducer, initialState, openStream, historyPrefixForRetry, mergeUsage } from './usePlaygroundChat.js';
 
 const baseParams = { temperature: 0.5, stream: true };
 
@@ -196,3 +196,105 @@ test('SEND stamps reqId on the assistant message', () => {
   const asst = next.messages[next.messages.length - 1];
   assert.equal(asst.reqId, 'r-42');
 });
+
+// CLEAR / RETRY / helpers.
+
+test('CLEAR resets the conversation and in-flight state', () => {
+  let s = reducer(initialState, { type: 'SEND', id: 'r1', userText: 'hi', model: 'm', protocol: 'openai-compat', params: {} });
+  s = reducer(s, { type: 'TOKEN', id: 'r1', token: 'x' });
+  const cleared = reducer(s, { type: 'CLEAR' });
+  assert.deepEqual(cleared.messages, []);
+  assert.equal(cleared.inFlight, null);
+  assert.equal(cleared.error, null);
+});
+
+test('historyPrefixForRetry returns the prompt and truncated prefix', () => {
+  const messages = [
+    { id: 'u1', role: 'user', content: 'first' },
+    { id: 'a1', role: 'assistant', content: 'answer 1' },
+    { id: 'u2', role: 'user', content: 'second' },
+    { id: 'a2', role: 'assistant', content: 'answer 2' },
+  ];
+  const info = historyPrefixForRetry(messages, 'a2');
+  assert.equal(info.userText, 'second');
+  assert.deepEqual(info.prefix.map((m) => m.id), ['u1', 'a1']);
+  assert.equal(historyPrefixForRetry(messages, 'nope'), null);
+  // An assistant message with no preceding user (malformed) yields null.
+  assert.equal(historyPrefixForRetry([{ id: 'a0', role: 'assistant', content: 'x' }], 'a0'), null);
+});
+
+test('RETRY replaces the target assistant message and drops the tail', () => {
+  const messages = [
+    { id: 'u1', role: 'user', content: 'first' },
+    { id: 'a1', role: 'assistant', content: 'answer 1' },
+    { id: 'u2', role: 'user', content: 'second' },
+    { id: 'a2', role: 'assistant', content: 'answer 2' },
+  ];
+  const next = reducer({ ...initialState, messages }, {
+    type: 'RETRY',
+    id: 'r-new',
+    assistantId: 'a1',
+    userText: 'first',
+    model: 'm',
+    protocol: 'openai-compat',
+    params: {},
+    outgoing: { model: 'm' },
+  });
+  // u1 + fresh assistant only; u2/a2 are discarded.
+  assert.equal(next.messages.length, 2);
+  assert.equal(next.messages[0].role, 'user');
+  assert.equal(next.messages[0].content, 'first');
+  assert.equal(next.messages[1].role, 'assistant');
+  assert.equal(next.messages[1].streaming, true);
+  assert.equal(next.messages[1].reqId, 'r-new');
+  assert.equal(next.inFlight, 'r-new');
+});
+
+test('RETRY is a no-op for an unknown message', () => {
+  const s = { ...initialState, messages: [{ id: 'u1', role: 'user', content: 'x' }] };
+  assert.equal(reducer(s, { type: 'RETRY', id: 'r', assistantId: 'missing' }), s);
+});
+
+test('mergeUsage folds partial usage across chunks', () => {
+  const start = mergeUsage(null, { prompt_tokens: 10 });
+  const after = mergeUsage(start, { completion_tokens: 5 });
+  assert.equal(after.prompt_tokens, 10);
+  assert.equal(after.completion_tokens, 5);
+  assert.equal(after.total_tokens, 15);
+  // Absent fields never clobber existing values.
+  assert.equal(mergeUsage(start, { completion_tokens: 2 }).prompt_tokens, 10);
+  assert.equal(mergeUsage(start, null), start);
+});
+
+test('openStream flushes a trailing partial block and surfaces headers', async () => {
+  const events = [];
+  let doneArg = null;
+  const sseBody = 'data: one';
+  const fakeBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(sseBody));
+      controller.close();
+    },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    body: fakeBody,
+    headers: { entries: () => [['x-test', 'yes']][Symbol.iterator]() },
+  });
+  try {
+    await openStream({
+      url: '/v1/chat/completions',
+      init: {},
+      onChunk: (e) => events.push(e),
+      onDone: (arg) => { doneArg = arg; },
+      onError: (e) => events.push(`ERR:${e.message}`),
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(events, ['data: one']);
+  assert.deepEqual(doneArg.headers, { 'x-test': 'yes' });
+});
+

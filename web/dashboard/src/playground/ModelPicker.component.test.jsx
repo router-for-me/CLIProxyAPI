@@ -17,5 +17,6 @@ import ModelPicker from './ModelPicker.jsx';
 test('ModelPicker renders a single search input (no tab strip)', () => {
   const html = renderToStaticMarkup(<ModelPicker value="" onChange={() => {}} />);
   assert.match(html, /<input[^>]*type="text"/);
+  assert.match(html, /Search providers, models, aliases/);
   assert.doesNotMatch(html, /role="tab"/);
 });

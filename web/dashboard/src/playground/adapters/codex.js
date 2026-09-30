@@ -25,7 +25,17 @@ export const codexAdapter = {
     if (!payload) return { token: '', done: false };
     try {
       const json = JSON.parse(payload);
-      if (json?.type === 'response.completed') return { token: '', done: true };
+      if (json?.type === 'response.completed') {
+        const u = json?.response?.usage;
+        const usage = u
+          ? {
+              ...(Number.isFinite(Number(u.input_tokens)) ? { prompt_tokens: Number(u.input_tokens) } : {}),
+              ...(Number.isFinite(Number(u.output_tokens)) ? { completion_tokens: Number(u.output_tokens) } : {}),
+              ...(Number.isFinite(Number(u.total_tokens)) ? { total_tokens: Number(u.total_tokens) } : {}),
+            }
+          : null;
+        return { token: '', done: true, ...(usage && Object.keys(usage).length ? { usage } : {}) };
+      }
       if (json?.type === 'response.output_text.delta') {
         return { token: json.delta ?? '', done: false };
       }
@@ -33,6 +43,26 @@ export const codexAdapter = {
     } catch {
       return { token: '', done: false };
     }
+  },
+
+  // Non-streaming Responses API response.
+  parseResponse(json) {
+    let text = json?.output_text;
+    if (!text && Array.isArray(json?.output)) {
+      text = json.output
+        .flatMap((item) => item?.content || [])
+        .map((c) => c?.text || '')
+        .join('');
+    }
+    const u = json?.usage;
+    const usage = u
+      ? {
+          ...(Number.isFinite(Number(u.input_tokens)) ? { prompt_tokens: Number(u.input_tokens) } : {}),
+          ...(Number.isFinite(Number(u.output_tokens)) ? { completion_tokens: Number(u.output_tokens) } : {}),
+          ...(Number.isFinite(Number(u.total_tokens)) ? { total_tokens: Number(u.total_tokens) } : {}),
+        }
+      : null;
+    return { text: text || '', usage: usage && Object.keys(usage).length ? usage : null };
   },
 
   buildErrorPayload(err) {

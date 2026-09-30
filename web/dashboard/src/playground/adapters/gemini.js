@@ -45,10 +45,34 @@ export const geminiAdapter = {
       const json = JSON.parse(payload);
       const text = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
       const finish = json?.candidates?.[0]?.finishReason;
-      return { token: text || '', done: !!finish };
+      // Gemini reports a single usageMetadata block on the final chunk.
+      const meta = json?.usageMetadata;
+      const usage = meta
+        ? {
+            ...(Number.isFinite(Number(meta.promptTokenCount)) ? { prompt_tokens: Number(meta.promptTokenCount) } : {}),
+            ...(Number.isFinite(Number(meta.candidatesTokenCount)) ? { completion_tokens: Number(meta.candidatesTokenCount) } : {}),
+            ...(Number.isFinite(Number(meta.totalTokenCount)) ? { total_tokens: Number(meta.totalTokenCount) } : {}),
+          }
+        : null;
+      return { token: text || '', done: !!finish, ...(usage && Object.keys(usage).length ? { usage } : {}) };
     } catch {
       return { token: '', done: false };
     }
+  },
+
+  // Non-streaming generateContent response.
+  parseResponse(json) {
+    const parts = json?.candidates?.[0]?.content?.parts || [];
+    const text = parts.map((p) => p?.text || '').join('');
+    const meta = json?.usageMetadata;
+    const usage = meta
+      ? {
+          ...(Number.isFinite(Number(meta.promptTokenCount)) ? { prompt_tokens: Number(meta.promptTokenCount) } : {}),
+          ...(Number.isFinite(Number(meta.candidatesTokenCount)) ? { completion_tokens: Number(meta.candidatesTokenCount) } : {}),
+          ...(Number.isFinite(Number(meta.totalTokenCount)) ? { total_tokens: Number(meta.totalTokenCount) } : {}),
+        }
+      : null;
+    return { text, usage: usage && Object.keys(usage).length ? usage : null };
   },
 
   buildErrorPayload(err) {

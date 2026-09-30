@@ -40,14 +40,25 @@ export const claudeAdapter = {
     if (!dataMatch) return { token: '', done: false };
     try {
       const json = JSON.parse(dataMatch[1]);
+      // Usage arrives split across frames: input tokens on message_start,
+      // output tokens on message_delta. mergeUsage in the chat layer folds
+      // these partials together.
+      const usage = claudeUsage(json);
       if (eventMatch?.[1] === 'content_block_delta') {
-        return { token: json?.delta?.text ?? '', done: false };
+        return { token: json?.delta?.text ?? '', done: false, ...(usage ? { usage } : {}) };
       }
-      if (json?.type === 'message_stop') return { token: '', done: true };
-      return { token: '', done: false };
+      if (json?.type === 'message_stop') return { token: '', done: true, ...(usage ? { usage } : {}) };
+      return { token: '', done: false, ...(usage ? { usage } : {}) };
     } catch {
       return { token: '', done: false };
     }
+  },
+
+  // Non-streaming Messages response.
+  parseResponse(json) {
+    const blocks = json?.content || [];
+    const text = blocks.map((b) => (typeof b?.text === 'string' ? b.text : '')).join('');
+    return { text, usage: claudeUsage(json) };
   },
 
   buildErrorPayload(err) {
@@ -57,3 +68,14 @@ export const claudeAdapter = {
     return { message: String(err), type: 'network' };
   },
 };
+
+// claudeUsage extracts the canonical usage fields from any Claude frame that
+// carries them (message_start → input, message_delta → output).
+function claudeUsage(json) {
+  const u = json?.usage || json?.message?.usage;
+  if (!u || typeof u !== 'object') return null;
+  const out = {};
+  if (Number.isFinite(Number(u.input_tokens))) out.prompt_tokens = Number(u.input_tokens);
+  if (Number.isFinite(Number(u.output_tokens))) out.completion_tokens = Number(u.output_tokens);
+  return Object.keys(out).length ? out : null;
+}
