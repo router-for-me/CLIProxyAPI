@@ -676,12 +676,59 @@ type pricingSuggestionRow struct {
 //
 // The call is read-only: no model_pricing row is written. Apply the picks
 // with sync-pricing-apply.
+//
+// Optional body: { "model_id": "..." } scopes the preview to a single model id
+// (used by the model detail page). An absent or empty body keeps the original
+// full-catalog behavior, and a malformed body is ignored (treated as
+// unscoped) to stay backward compatible with callers that POST no body.
 func (h *Handler) SyncPricingPreview(c *gin.Context) {
 	_, usage, models, _, ok := h.requirePG(c)
 	if !ok {
 		return
 	}
 	ctx := c.Request.Context()
+
+	// Scoped path: one row for the requested model id.
+	var body struct {
+		ModelID string `json:"model_id"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	if modelID := strings.TrimSpace(body.ModelID); modelID != "" {
+		scoped, err := models.SelectByIDAllProviders(ctx, modelID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+				"type":    "internal_error",
+				"message": "failed to load model: " + err.Error(),
+			}})
+			return
+		}
+		rows := make([]pricingSuggestionRow, 0, 1)
+		if len(scoped) > 0 {
+			id := scoped[0].ID
+			ids := []string{id}
+			matches := pricingsource.MatchAll(ids)
+			currentByID, err := loadCurrentPricing(ctx, usage, ids)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+					"type":    "internal_error",
+					"message": "failed to load current pricing: " + err.Error(),
+				}})
+				return
+			}
+			rows = append(rows, pricingSuggestionRow{
+				ModelID:          id,
+				Provider:         scoped[0].Provider,
+				OfficialProvider: scoped[0].OfficialProvider,
+				CurrentPricing:   currentByID[id],
+				Suggestions:      toPricingSuggestions(matches[id]),
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"rows":    rows,
+			"sources": pricingsource.Sources(),
+		})
+		return
+	}
 
 	// Stream-fetch the whole catalog. Catalog size is bounded by the embedded
 	// / synced set, so pulling into memory is acceptable; for very large

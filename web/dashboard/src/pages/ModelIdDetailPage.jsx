@@ -4,6 +4,7 @@ import { getGlobalModel, getModelProviders, deleteModelEntry } from '../api/clie
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, EmptyState } from '../components/Primitives.jsx';
 import GlobalModelModal from '../components/GlobalModelModal.jsx';
+import ModelPricingSourcesSection from '../components/ModelPricingSourcesSection.jsx';
 
 // ModelIdDetailPage — read-only view of one Global Model ID. Lists every
 // upstream provider serving the model (catalog rows sharing the id) and the
@@ -167,6 +168,8 @@ export default function ModelIdDetailPage() {
           <div className="muted">No pricing set. Use Edit to set pricing for this model.</div>
         )}
       </div>
+
+      <ModelPricingSourcesSection modelId={id} onApplied={reload} />
 
       <div className="card">
         <h2 className="card__title">Routing (global per model id)</h2>
