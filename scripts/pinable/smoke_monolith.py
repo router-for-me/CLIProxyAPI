@@ -147,7 +147,11 @@ def smoke(report):
                         assert run('docker','exec',name,'cat',f'/data/{folder}/.monolith-ci-marker').stdout.strip() == 'persistent-ci-marker'
                     checks.append('config-and-data-survive-second-release')
                 previous_release = current
+            previous_http_port = http_port
             run('docker','restart',name,timeout=90)
+            # Query the active mapping again: the fixture requests an ephemeral host port.
+            http_port = run('docker','port',name,'8317/tcp').stdout.strip().rsplit(':',1)[1]
+            result['restart_http_ports'] = {'before':previous_http_port, 'after':http_port}
             wait_for(lambda: request('/healthz')[0] == 200, 'container restart')
             assert request('/v1/models',key2)[0] == 200
             assert run('docker','exec',name,'cat','/data/config.yaml').stdout == snapshot
