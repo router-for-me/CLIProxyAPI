@@ -15,11 +15,33 @@ import ModelEntryModal from '../components/ModelEntryModal.jsx';
 import GlobalModelModal from '../components/GlobalModelModal.jsx';
 
 const DEFAULT_PAGE_SIZE = 25;
-// Suppress the redundant sync if the last sync happened within this window.
-const SYNC_SUPPRESS_WINDOW_MS = 30 * 1000;
 const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
 const DENSITY_STORAGE = 'nixllm.dashboard.modelsDensity';
 const AUTOREFRESH_STORAGE = 'nixllm.dashboard.modelsAutorefresh';
+
+// Empty-state copy per active scope.
+const EMPTY_COPY = {
+  live: {
+    title: 'No live models available',
+    hint: 'The in-memory registry has no live clients. Start a provider client, or switch to another scope to browse the persisted catalog.',
+  },
+  stale: {
+    title: 'No stale models',
+    hint: 'Every persisted catalog row is currently live in the registry.',
+  },
+  priced: {
+    title: 'No priced models',
+    hint: 'No catalog rows have non-zero pricing yet. Use "Sync pricing…" or set pricing inline.',
+  },
+  unpriced: {
+    title: 'No unpriced models',
+    hint: 'Every catalog row has pricing set.',
+  },
+  all: {
+    title: 'Catalog is empty',
+    hint: "Click 'Sync now' to mirror /v1/models into PostgreSQL, or start the server with PGSTORE_DSN configured.",
+  },
+};
 
 const SORT_COLUMNS = [
   { key: 'id', label: 'Model ID' },
@@ -40,18 +62,16 @@ const SORT_COLUMNS = [
 //     pipeline, and upserts the returned list into models_catalog.
 //   - The page then renders the paginated catalog directly from PG.
 //
-// "Show available only" controls the `available_only` query flag sent to
-// ListModelsCatalog: when checked, the server filters down to the IDs the
-// in-memory registry reports as live right now. So the toggle is a live
-// filter, not just a sync trigger. The auto-sync on mount (silent) keeps
-// models_catalog fresh so the filtered view reflects current availability.
+// "scope" is the single server-side catalog filter (live | stale | all |
+// priced | unpriced), selected from the stat cards. The auto-sync on mount
+// (silent) keeps models_catalog fresh so the filtered view reflects current
+// availability.
 export default function ModelsCatalogPage() {
   const [page, setPage] = useState(1);
   const [provider, setProvider] = useState('');
   const [officialProvider, setOfficialProvider] = useState('');
-  const [availableOnly, setAvailableOnly] = useState(true);
-  const [staleFilter, setStaleFilter] = useState('live'); // 'live' | 'stale' | 'all'
-  const [distinctIds, setDistinctIds] = useState(false); // one row per model id (Global Models view)
+  const [scope, setScope] = useState('live'); // live | stale | all | priced | unpriced
+  const [groupById, setGroupById] = useState(false); // distinct_ids
   const [query, setQuery] = useState('');
   const [sortKey, setSortKey] = useState('id');
   const [sortAsc, setSortAsc] = useState(true);
@@ -76,21 +96,14 @@ export default function ModelsCatalogPage() {
   // localStorage (same mechanism as FetchModelsInline) and passed through the
   // caller_key body field on every sync.
   const [showSyncKey, setShowSyncKey] = useState(false);
-  // lastSyncTsRef tracks the time of the most recent successful or attempted
-  // sync so the availableOnly toggle can suppress redundant re-syncs.
-  const lastSyncTsRef = useRef(0);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef(null);
   // Debounce the free-text search so typing 8 chars doesn't fire 8 queries.
   const [debouncedQuery, setDebouncedQuery] = useState('');
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query.trim()), 250);
     return () => clearTimeout(t);
   }, [query]);
-
-  // staleFilter maps onto availableOnly + client post-filter:
-  //   'live'  → availableOnly=true
-  //   'stale' → availableOnly=false + hide rows whose id is in live_ids
-  //   'all'   → availableOnly=false
-  const effectiveAvailableOnly = staleFilter === 'live';
 
   const sortParam = useMemo(() => {
     return (sortAsc ? '' : '-') + sortKey;
@@ -101,9 +114,9 @@ export default function ModelsCatalogPage() {
   } = useAsync(
     () => listModelsCatalog({
       page, pageSize: DEFAULT_PAGE_SIZE, provider, officialProvider,
-      availableOnly: effectiveAvailableOnly, distinctIds, q: debouncedQuery, sort: sortParam,
+      scope, distinctIds: groupById, q: debouncedQuery, sort: sortParam,
     }),
-    [page, provider, officialProvider, effectiveAvailableOnly, distinctIds, debouncedQuery, sortParam],
+    [page, provider, officialProvider, scope, groupById, debouncedQuery, sortParam],
   );
   const { data: statusData, reload: reloadStatus } = useAsync(() => getModelsCatalogSyncStatus(), []);
   const { data: summaryData, reload: reloadSummary } = useAsync(() => getModelsCatalogSummary(), []);
@@ -117,7 +130,7 @@ export default function ModelsCatalogPage() {
 
   // runSync fires the in-process /v1/models -> models_catalog sync.
   // When silent=true the spinner does not show (used for the initial
-  // background sync on mount and the suppressed availableOnly re-sync).
+  // background sync on mount).
   // callerKey, when supplied, is used for THIS sync (e.g. just typed in the
   // sync-key modal even if the operator chose not to remember it); otherwise
   // the operator-stored key is used so PG-only deployments can sync even
@@ -129,7 +142,6 @@ export default function ModelsCatalogPage() {
     try {
       const key = callerKey || getStoredCallerKey();
       const result = await syncModelsFromV1(key);
-      lastSyncTsRef.current = Date.now();
       const n = result?.synced ?? 0;
       setSyncMessage(`Synced ${n} models from /v1/models`);
       reload();
@@ -152,30 +164,30 @@ export default function ModelsCatalogPage() {
     runSync(true);
   }, [initialSyncDone, runSync]);
 
-  // When the staleFilter flips to "live", re-sync first if the last sync is
-  // older than SYNC_SUPPRESS_WINDOW_MS so the filtered view reflects current
-  // availability. 'stale' and 'all' do not need a fresh sync — they read the
-  // persisted catalog as-is.
+  // Close the "More ▾" overflow menu on outside click / Escape.
   useEffect(() => {
-    if (staleFilter !== 'live') return;
-    const since = Date.now() - lastSyncTsRef.current;
-    if (since < SYNC_SUPPRESS_WINDOW_MS) return;
-    runSync(true);
-  }, [staleFilter, runSync]);
+    if (!moreOpen) return undefined;
+    function onDocClick(e) {
+      if (moreRef.current && !moreRef.current.contains(e.target)) {
+        setMoreOpen(false);
+      }
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') setMoreOpen(false);
+    }
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [moreOpen]);
 
   // Auto-refresh: re-fetch catalog + sync status every 60s while visible.
   useAutoRefresh(() => { reload(); refreshSyncStatus(); }, AUTO_REFRESH_INTERVAL_MS, autoRefresh);
 
-  const models = useMemo(() => {
-    const rows = data?.models || [];
-    if (staleFilter !== 'stale') return rows;
-    // Client-side "stale only" filter: rows whose id is NOT in live_ids.
-    const liveIDs = data?.live_ids || {};
-    return rows.filter((m) => !liveIDs[String(m.id || '').toLowerCase()]);
-  }, [data, staleFilter]);
-  const total = (staleFilter === 'stale')
-    ? models.length // client-filtered; use the post-filter count for the pager label
-    : (data?.total ?? 0);
+  const models = data?.models || [];
+  const total = data?.total ?? 0;
   const totalPages = data?.total_pages ?? 0;
   const liveIDs = data?.live_ids || {};
   const initialSyncRunning = initialSyncDone && !syncStatus?.last_synced_at && !syncError;
@@ -200,10 +212,6 @@ export default function ModelsCatalogPage() {
       setSortAsc(true);
     }
   }
-  function toggleStaleFilter(next) {
-    setStaleFilter(next);
-    setPage(1);
-  }
   function handleDensityChange(next) {
     setDensity(next);
     writeDensity(next);
@@ -211,11 +219,8 @@ export default function ModelsCatalogPage() {
   function handleToggleAutoRefresh() {
     setAutoRefresh((v) => { const nv = !v; writeAutoRefresh(nv); return nv; });
   }
-  function handleStatClick(preset) {
-    // quick-preset switching on the staleFilter
-    if (preset === 'live') setStaleFilter('live');
-    else if (preset === 'stale') setStaleFilter('stale');
-    else if (preset === 'priced' || preset === 'unpriced' || preset === 'all') setStaleFilter('all');
+  function handleStatClick(nextScope) {
+    setScope(nextScope);
     setPage(1);
   }
 
@@ -235,29 +240,42 @@ export default function ModelsCatalogPage() {
           <button className="primary" onClick={() => runSync(false)} disabled={manualSyncing}>
             {manualSyncing ? 'Syncing…' : 'Sync now'}
           </button>
-          <button
-            onClick={() => setShowSyncKey(true)}
-            title="Optionally set a plaintext caller key to probe /v1/models as. Needed on PG-first deployments where client keys are stored hashed."
-          >
-            Set sync key…
-          </button>
-          <button onClick={() => setShowPricingSync(true)}>Sync pricing…</button>
-          <button onClick={() => setShowPricingSources(true)}>Pricing sources…</button>
-          <button
-            className={distinctIds ? 'primary' : ''}
-            onClick={() => { setDistinctIds((v) => !v); setPage(1); }}
-            title="Show one row per model id and enable Global edit per model"
-          >
-            {distinctIds ? 'Global Models (per ID) ✓' : 'Global Models (per ID)'}
-          </button>
           <button onClick={() => setShowCreateModel(true)}>+ Add model</button>
+          <div className={`model-routes__bulk ${moreOpen ? 'model-routes__bulk--open' : ''}`} ref={moreRef}>
+            <button
+              type="button"
+              className="model-routes__bulkbtn"
+              onClick={() => setMoreOpen((v) => !v)}
+              aria-expanded={moreOpen}
+            >
+              More ▾
+            </button>
+            {moreOpen && (
+              <div className="model-routes__bulkmenu" role="menu">
+                <button type="button" role="menuitem" onClick={() => { setShowPricingSync(true); setMoreOpen(false); }}>
+                  Sync pricing…
+                </button>
+                <button type="button" role="menuitem" onClick={() => { setShowPricingSources(true); setMoreOpen(false); }}>
+                  Pricing sources…
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setShowSyncKey(true); setMoreOpen(false); }}
+                  title="Optionally set a plaintext caller key to probe /v1/models as. Needed on PG-first deployments where client keys are stored hashed."
+                >
+                  Set sync key…
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       <SyncStatusPill status={syncStatus} loading={initialSyncRunning} />
 
       {/* Header stat cards — clickable to flip the stale filter / scope. */}
-      <StatsGrid summary={summary} staleFilter={staleFilter} onStatClick={handleStatClick} />
+      <StatsGrid summary={summary} scope={scope} onStatClick={handleStatClick} />
 
       <div className="card">
         {/* Toolbar: search + provider dropdowns + stale filter + density + autorefresh */}
@@ -283,20 +301,15 @@ export default function ModelsCatalogPage() {
           </select>
           <div className="seg-group">
             <button
-              className={`seg-btn ${staleFilter === 'live' ? 'seg-btn--active' : ''}`}
-              onClick={() => toggleStaleFilter('live')}
-              title="Only models the in-memory registry reports as live right now"
-            >Live only</button>
+              className={`seg-btn ${!groupById ? 'seg-btn--active' : ''}`}
+              onClick={() => { setGroupById(false); setPage(1); }}
+              title="One row per (model ID, provider)"
+            >By provider</button>
             <button
-              className={`seg-btn ${staleFilter === 'stale' ? 'seg-btn--active' : ''}`}
-              onClick={() => toggleStaleFilter('stale')}
-              title="Models in the catalog but not live in the registry"
-            >Stale only</button>
-            <button
-              className={`seg-btn ${staleFilter === 'all' ? 'seg-btn--active' : ''}`}
-              onClick={() => toggleStaleFilter('all')}
-              title="Full persisted catalog regardless of live status"
-            >All</button>
+              className={`seg-btn ${groupById ? 'seg-btn--active' : ''}`}
+              onClick={() => { setGroupById(true); setPage(1); }}
+              title="One row per model ID"
+            >By model ID</button>
           </div>
           <div className="seg-group">
             <button
@@ -366,22 +379,7 @@ export default function ModelsCatalogPage() {
           </table>
         )}
         {!loading && !error && models.length === 0 && (
-          <EmptyState
-            title={
-              staleFilter === 'stale'
-                ? 'No stale models'
-                : effectiveAvailableOnly
-                  ? 'No live models available'
-                  : 'Catalog is empty'
-            }
-            hint={
-              staleFilter === 'stale'
-                ? 'Every persisted catalog row is currently live in the registry.'
-                : effectiveAvailableOnly
-                  ? 'The in-memory registry has no live clients. Start a provider client, or switch to "All" to browse the full persisted catalog.'
-                  : "Click 'Sync now' to mirror /v1/models into PostgreSQL, or start the server with PGSTORE_DSN configured."
-            }
-          />
+          <EmptyState title={EMPTY_COPY[scope].title} hint={EMPTY_COPY[scope].hint} />
         )}
         {!loading && !error && models.length > 0 && (
           <>
@@ -405,13 +403,13 @@ export default function ModelsCatalogPage() {
                 </tr>
               </thead>
               <tbody>
-                {models.map((m, i) => (
+                {models.map((m) => (
                   <ModelRow
-                    key={`${m.id}|${m.provider}|${i}`}
+                    key={`${m.id}|${m.provider}`}
                     model={m}
                     liveIDs={liveIDs}
                     density={density}
-                    isGlobal={distinctIds}
+                    isGlobal={groupById}
                     expanded={expandedId === `${m.id}|${m.provider}`}
                     onToggleExpand={() => setExpandedId((cur) =>
                       cur === `${m.id}|${m.provider}` ? null : `${m.id}|${m.provider}`,
@@ -422,17 +420,15 @@ export default function ModelsCatalogPage() {
                 ))}
               </tbody>
             </table>
-            {staleFilter !== 'stale' && (
-              <div style={{ padding: '0 16px 16px' }}>
-                <Pager
-                  page={page}
-                  totalPages={totalPages}
-                  total={total}
-                  pageSize={DEFAULT_PAGE_SIZE}
-                  onPageChange={handlePageChange}
-                />
-              </div>
-            )}
+            <div style={{ padding: '0 16px 16px' }}>
+              <Pager
+                page={page}
+                totalPages={totalPages}
+                total={total}
+                pageSize={DEFAULT_PAGE_SIZE}
+                onPageChange={handlePageChange}
+              />
+            </div>
           </>
         )}
       </div>
@@ -670,15 +666,15 @@ function PricingModal({ modelId, onClose }) {
 }
 
 // StatsGrid renders the 5 header stat cards sourced from /models-catalog/summary.
-// Cards are clickable to flip the stale filter / scope as a quick preset.
-function StatsGrid({ summary, staleFilter, onStatClick }) {
+// Clicking a card sets the active scope directly.
+function StatsGrid({ summary, scope, onStatClick }) {
   if (!summary) return null;
   const cards = [
-    { key: 'total', label: 'Total', value: summary.total ?? 0, hint: 'persisted catalog rows', preset: 'all', active: staleFilter === 'all' },
-    { key: 'live', label: 'Live', value: summary.live ?? 0, hint: 'in registry right now', preset: 'live', active: staleFilter === 'live' },
-    { key: 'stale', label: 'Stale', value: summary.stale ?? 0, hint: 'persisted but not live', preset: 'stale', active: staleFilter === 'stale' },
-    { key: 'priced', label: 'Priced', value: summary.priced ?? 0, hint: 'has non-zero pricing', preset: 'priced', active: false },
-    { key: 'unpriced', label: 'Unpriced', value: summary.unpriced ?? 0, hint: 'no pricing set', preset: 'unpriced', active: false },
+    { key: 'all', label: 'All', value: summary.total ?? 0, hint: 'persisted catalog rows', active: scope === 'all' },
+    { key: 'live', label: 'Live', value: summary.live ?? 0, hint: 'in registry right now', active: scope === 'live' },
+    { key: 'stale', label: 'Stale', value: summary.stale ?? 0, hint: 'persisted but not live', active: scope === 'stale' },
+    { key: 'priced', label: 'Priced', value: summary.priced ?? 0, hint: 'has non-zero pricing', active: scope === 'priced' },
+    { key: 'unpriced', label: 'Unpriced', value: summary.unpriced ?? 0, hint: 'no pricing set', active: scope === 'unpriced' },
   ];
   return (
     <div className="stats-grid">
@@ -688,8 +684,8 @@ function StatsGrid({ summary, staleFilter, onStatClick }) {
           className={`stat-card ${c.active ? 'stat-card--active' : ''}`}
           role="button"
           tabIndex={0}
-          onClick={() => onStatClick(c.preset)}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onStatClick(c.preset); } }}
+          onClick={() => onStatClick(c.key)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onStatClick(c.key); } }}
         >
           <div className="stat-card__value">{c.value.toLocaleString()}</div>
           <div className="stat-card__label">{c.label}</div>
