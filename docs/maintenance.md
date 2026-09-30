@@ -17,12 +17,23 @@ operations; a request to review them does not authorize publishing or deployment
 ## Release a version
 
 1. Merge the reviewed task branch into our `main`. Resolve compatibility changes
-   and choose our semantic version: patch for compatible fixes, minor for compatible
-   additions, major for breaking changes. Write user-facing impact and migration
-   notes; generated commit summaries alone do not explain compatibility.
-2. Run `ops/upstream-intake/verify-absorb.sh` on the candidate. For protocol
+   and choose our semantic version: patch for compatible fixes, minor for
+   compatible additions, major for breaking changes.
+2. Copy `docs/releases/RELEASE_TEMPLATE.md` to `docs/releases/vX.Y.Z.md` and
+   write the release from the user's perspective. Explain the compatibility or
+   migration impact, validation actually performed, known limitations, and the
+   exact upstream release aligned with this version. Use `none (fork-only
+   release)` when no upstream intake is included. Validate it locally:
+
+   ```bash
+   python3 ops/release-notes/validate.py validate v1.2.3 docs/releases/v1.2.3.md
+   ```
+
+   Commit the curated note before tagging. Generated commit summaries do not
+   explain compatibility and are not a substitute for this file.
+3. Run `ops/upstream-intake/verify-absorb.sh` on the candidate. For protocol
    changes, include the relevant client replay evidence and its coverage limits.
-3. Confirm a clean checkout, exact release commit, `origin/main` ancestry, and
+4. Confirm a clean checkout, exact release commit, `origin/main` ancestry, and
    absence of the proposed tag both locally and remotely. Read-only checks:
 
    ```bash
@@ -33,7 +44,7 @@ operations; a request to review them does not authorize publishing or deployment
    git ls-remote --tags origin refs/tags/v1.2.3
    ```
 
-4. When release execution is authorized, create an annotated tag and push only
+5. When release execution is authorized, create an annotated tag and push only
    its ref. Replace `v1.2.3` with the reviewed version:
 
    ```bash
@@ -43,12 +54,13 @@ operations; a request to review them does not authorize publishing or deployment
 
    Never push `--tags`, `--mirror` or upstream refs. Do not move a published tag.
 
-5. `release.yaml` validates stable tag syntax and ancestry on `main`, runs the
-   full regression gate, creates a draft, and builds ten platform archives from
-   the tagged source. One final job verifies the complete archive set, downloads
-   the uploaded assets and checks their hashes, uploads `checksums.txt`, then
+6. `release.yaml` validates stable tag syntax, ancestry on `main`, the curated
+   release note and its upstream-alignment statement, then runs the full
+   regression gate. It creates a draft and builds ten platform archives from the
+   tagged source. One final job verifies the complete archive set, downloads the
+   uploaded assets and checks their hashes, uploads `checksums.txt`, then
    publishes the draft. A failed build leaves the release unpublished.
-6. Verify workflow success and the public assets before updating the tap.
+7. Verify workflow success and the public assets before updating the tap.
    Manual workflow dispatch accepts an existing tag and resumes an incomplete
    draft; published releases are refused. Fix a published regression with a new
    version rather than replacing its binaries.

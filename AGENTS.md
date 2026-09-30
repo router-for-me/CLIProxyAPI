@@ -20,8 +20,9 @@ and do not wait for upstream review before shipping our own work.
   tags here would publish spurious releases from our fork.
 - **Our releases carry our own `vX.Y.Z` tags**, decoupled from upstream numbering.
   Push only the specific release ref, never `--tags` or `--mirror`. Release CI
-  validates the tag and main ancestry, runs the regression gate, builds a draft,
-  and publishes only after all archives and checksums are verified.
+  requires a curated `docs/releases/<tag>.md`, validates its upstream-alignment
+  statement, checks the tag and main ancestry, runs the regression gate, builds a
+  draft, and publishes only after all archives and checksums are verified.
 - **Module path stays upstream.** `go.mod` keeps
   `module github.com/router-for-me/CLIProxyAPI/v8` so upstream releases can be ported
   without rewriting imports across the tree. Do not rename it.

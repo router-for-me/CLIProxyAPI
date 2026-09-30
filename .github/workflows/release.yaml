@@ -27,6 +27,7 @@ env:
   # Tag to publish. On a tag push this is the pushed tag; on workflow_dispatch
   # it comes from the required input, because github.ref_name would be a branch.
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_NOTES_FILE: docs/releases/${{ inputs.tag || github.ref_name }}.md
 
 jobs:
   validate:
@@ -44,6 +45,9 @@ jobs:
           git show-ref --verify "refs/tags/$RELEASE_TAG"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "refs/tags/$RELEASE_TAG^{commit}" origin/main
+      - name: Validate curated release notes
+        shell: bash
+        run: python3 ops/release-notes/validate.py validate "$RELEASE_TAG" "$RELEASE_NOTES_FILE"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -79,64 +83,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          release_notes_file="$(mktemp)"
-          generated_notes_file="$(mktemp)"
-          changelog_entries_file="$(mktemp)"
-          changelog_notes_file="$(mktemp)"
           updated_notes_file="$(mktemp)"
-          trap 'rm -f "$release_notes_file" "$generated_notes_file" "$changelog_entries_file" "$changelog_notes_file" "$updated_notes_file"' EXIT
-
-          cat > "$release_notes_file" <<'EOF'
-          <!-- cliproxyapi-linux-release-assets:start -->
-          ## Linux release assets
-
-          - `CLIProxyAPI_<version>_linux_<arch>.tar.gz` is the default Linux build. It supports dynamic library plugins and is built against a GLIBC 2.17 baseline.
-          - `CLIProxyAPI_<version>_linux_<arch>_no-plugin.tar.gz` is the portable Linux build for musl-based or older systems such as OpenWrt. It does not support dynamic library plugins.
-
-          ## FreeBSD release assets
-
-          - `CLIProxyAPI_<version>_freebsd_aarch64_no-plugin.tar.gz` is the FreeBSD arm64 build. It is built without CGO and does not support dynamic library plugins.
-
-          <!-- cliproxyapi-linux-release-assets:end -->
-          EOF
+          trap 'rm -f "$updated_notes_file"' EXIT
 
           git fetch --force --tags
           previous_tag=""
           if previous_tag_value="$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" 2>/dev/null)"; then
             previous_tag="$previous_tag_value"
-            changelog_range="${previous_tag}..${RELEASE_TAG}"
-          else
-            changelog_range="$RELEASE_TAG"
           fi
 
-          git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
-            grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
-
-          gh api "repos/${GH_REPO}/releases/generate-notes" \
-            -f tag_name="$RELEASE_TAG" \
-            --jq .body > "$generated_notes_file"
-          if [[ ! -s "$generated_notes_file" ]]; then
-            if [[ -n "$previous_tag" ]]; then
-              printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$previous_tag" "$RELEASE_TAG" > "$generated_notes_file"
-            else
-              printf '**Full Changelog**: https://github.com/%s/commits/%s\n' "$GH_REPO" "$RELEASE_TAG" > "$generated_notes_file"
-            fi
+          render_args=(--repository "$GH_REPO" --output "$updated_notes_file")
+          if [[ -n "$previous_tag" ]]; then
+            render_args+=(--previous-tag "$previous_tag")
           fi
-
-          {
-            if [[ -s "$changelog_entries_file" ]]; then
-              printf '## Changelog\n\n'
-              cat "$changelog_entries_file"
-              printf '\n\n'
-            fi
-            cat "$generated_notes_file"
-          } > "$changelog_notes_file"
-
-          {
-            cat "$release_notes_file"
-            printf '\n'
-            cat "$changelog_notes_file"
-          } > "$updated_notes_file"
+          python3 ops/release-notes/validate.py render "$RELEASE_TAG" \
+            "$RELEASE_NOTES_FILE" "${render_args[@]}"
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$updated_notes_file"

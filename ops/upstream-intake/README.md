@@ -40,7 +40,11 @@ individual commits. This is our fork policy, not a universal release rule.
 6. Update [absorbed.md](absorbed.md) with upstream/local SHAs, skipped work and
    reasons, baseline/candidate gate evidence and replay limits. Mark absorption
    complete only after the selected changes reach our `main` with a passing gate.
-7. Release through [docs/maintenance.md](../../docs/maintenance.md) when requested.
+7. When releasing, use the assessed candidate as the `Upstream release` and the
+   prior accepted baseline as `Previous baseline` in
+   `docs/releases/<tag>.md`. Ported and skipped work must agree with
+   [absorbed.md](absorbed.md); do not claim alignment to a merely fetched tag.
+8. Release through [docs/maintenance.md](../../docs/maintenance.md) when requested.
    Assessment or absorption alone does not authorize publishing or deployment.
 
 ## Regression gate

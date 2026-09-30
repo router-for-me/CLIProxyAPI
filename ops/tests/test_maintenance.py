@@ -3,6 +3,7 @@
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,52 @@ spec = importlib.util.spec_from_file_location(
 )
 formula = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(formula)
+release_notes_spec = importlib.util.spec_from_file_location(
+    "release_notes", ROOT / "ops/release-notes/validate.py",
+)
+release_notes = importlib.util.module_from_spec(release_notes_spec)
+release_notes_spec.loader.exec_module(release_notes)
+
+
+class ReadmeTests(unittest.TestCase):
+    files = {
+        "README.md": [
+            "## Project Status", "## Capabilities", "## Quick Start",
+            "## Configuration", "## Development", "## Maintenance and Releases",
+            "## Documentation", "## License", "## Acknowledgements",
+        ],
+        "README_CN.md": [
+            "## 项目状态", "## 核心能力", "## 快速开始", "## 配置",
+            "## 开发", "## 维护与发布", "## 文档", "## 许可证", "## 致谢",
+        ],
+        "README_JA.md": [
+            "## プロジェクト状況", "## 主な機能", "## クイックスタート",
+            "## 設定", "## 開発", "## 保守とリリース", "## ドキュメント",
+            "## ライセンス", "## 謝辞",
+        ],
+    }
+    commercial = re.compile(
+        r"sponsor|赞助|スポンサー|aff=|invitecode|promo code|优惠码|"
+        r"返佣|API relay service|中转服务商|who is with us|更多选择|more choices",
+        re.IGNORECASE,
+    )
+
+    def test_readmes_use_open_source_structure(self):
+        for name, headings in self.files.items():
+            with self.subTest(readme=name):
+                text = (ROOT / name).read_text()
+                for heading in headings:
+                    self.assertIn(heading, text)
+                self.assertIsNone(self.commercial.search(text))
+
+    def test_readme_local_links_resolve(self):
+        for name in self.files:
+            readme = ROOT / name
+            for target in re.findall(r"\]\(([^)]+)\)", readme.read_text()):
+                if re.match(r"[a-z]+://", target) or target.startswith("#"):
+                    continue
+                path = target.split("#", 1)[0]
+                self.assertTrue((readme.parent / path).exists(), f"{name}: {target}")
 
 
 class FormulaTests(unittest.TestCase):
@@ -47,6 +94,134 @@ class FormulaTests(unittest.TestCase):
             with self.subTest(tag=tag, manifest=manifest[:30]):
                 with self.assertRaises(ValueError):
                     formula.render(tag, manifest, self.template)
+
+
+class ReleaseNoteTests(unittest.TestCase):
+    aligned = """# v1.2.3 - 2026-10-01
+
+## Summary
+
+- Align the fork with the reviewed upstream release and harden release tooling.
+
+## Upstream alignment
+
+- Upstream release: `v8.0.6`
+- Previous baseline: `v8.0.4`
+- Intake record: [absorbed.md](../../ops/upstream-intake/absorbed.md)
+- Ported: protocol compatibility and security fixes
+- Skipped: upstream CI and dependency churn
+
+## Breaking changes
+
+- None.
+
+## Added
+
+- Release-note validation in CI.
+
+## Changed
+
+- Release bodies now use curated notes.
+
+## Fixed
+
+- Missing assets no longer publish a draft release.
+
+## Security
+
+- None.
+
+## Validation
+
+- Full regression gate and release workflow.
+
+## Known issues
+
+- None.
+"""
+
+    def test_valid_aligned_release_note(self):
+        self.assertEqual(release_notes.validate_note("v1.2.3", self.aligned), [])
+
+    def test_valid_fork_only_release_note(self):
+        note = self.aligned.replace("`v8.0.6`", "none (fork-only release)")
+        note = note.replace("`v8.0.4`", "none")
+        note = note.replace(
+            "- Ported: protocol compatibility and security fixes",
+            "- Ported: none; fork-specific maintenance only",
+        )
+        self.assertEqual(release_notes.validate_note("v1.2.3", note), [])
+
+    def test_invalid_release_notes_are_rejected(self):
+        cases = {
+            "wrong heading": self.aligned.replace("# v1.2.3", "# 1.2.3"),
+            "missing section": self.aligned.replace("## Security\n\n- None.\n", ""),
+            "placeholder": self.aligned.replace("protocol compatibility", "<describe>"),
+            "invalid upstream": self.aligned.replace("`v8.0.6`", "`upstream-latest`"),
+            "missing intake": self.aligned.replace(
+                "- Intake record: [absorbed.md](../../ops/upstream-intake/absorbed.md)",
+                "- Intake record: not recorded",
+            ),
+            "duplicate alignment field": self.aligned.replace(
+                "- Previous baseline: `v8.0.4`",
+                "- Previous baseline: `v8.0.4`\n- Previous baseline: `v8.0.5`",
+            ),
+            "manual generated sections": self.aligned + (
+                "\n## Release assets\n\n- Duplicate section.\n"
+                "\n## Full changelog\n\n- Duplicate section.\n"
+            ),
+            "empty section": re.sub(
+                r"## Fixed\n\n.*?(?=\n## )", "## Fixed\n\n", self.aligned,
+                flags=re.DOTALL,
+            ),
+            "invalid tag": self.aligned.replace("v1.2.3", "v1.2", 1),
+        }
+        for name, note in cases.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(release_notes.validate_note("v1.2.3", note), [])
+
+    def test_template_contains_required_alignment_fields(self):
+        template = (ROOT / "docs/releases/RELEASE_TEMPLATE.md").read_text()
+        for heading in ["## Summary", "## Upstream alignment", "## Breaking changes",
+                        "## Added", "## Changed", "## Fixed", "## Security",
+                        "## Validation", "## Known issues"]:
+            self.assertIn(heading, template)
+        for field in ["Upstream release:", "Previous baseline:", "Intake record:",
+                      "Ported:", "Skipped:"]:
+            self.assertIn(field, template)
+
+    def test_rendered_release_note_keeps_curated_content_first(self):
+        rendered = release_notes.render_note(
+            "v1.2.3", self.aligned, "v1.2.2", "hrygo/CLIProxyAPI",
+        )
+        self.assertLess(rendered.index("## Summary"), rendered.index("## Release assets"))
+        self.assertLess(rendered.index("## Release assets"), rendered.index("## Full changelog"))
+        self.assertIn(
+            "https://github.com/hrygo/CLIProxyAPI/compare/v1.2.2...v1.2.3",
+            rendered,
+        )
+        self.assertIn("CLIProxyAPI_<version>_linux_<arch>_no-plugin.tar.gz", rendered)
+
+    def test_first_release_uses_commit_history_link(self):
+        note = self.aligned.replace("# v1.2.3", "# v1.0.0", 1)
+        rendered = release_notes.render_note(
+            "v1.0.0", note, None, "hrygo/CLIProxyAPI",
+        )
+        self.assertIn("https://github.com/hrygo/CLIProxyAPI/commits/v1.0.0", rendered)
+
+    def test_workflow_requires_and_renders_curated_notes(self):
+        workflow = (ROOT / ".github/workflows/release.yaml").read_text()
+        self.assertIn(
+            'python3 ops/release-notes/validate.py validate '
+            '"$RELEASE_TAG" "$RELEASE_NOTES_FILE"',
+            workflow,
+        )
+        self.assertRegex(
+            workflow,
+            r'python3 ops/release-notes/validate\.py render "\$RELEASE_TAG" \\\n'
+            r'\s+"\$RELEASE_NOTES_FILE"',
+        )
+        self.assertNotIn("releases/generate-notes", workflow)
 
 
 class IntakeTests(unittest.TestCase):

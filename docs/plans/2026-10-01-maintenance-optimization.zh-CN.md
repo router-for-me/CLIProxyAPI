@@ -10,12 +10,12 @@
 | --- | --- | --- |
 | `AGENTS.md` | 全文语义审阅 | 消除 translator 规则矛盾；按改动风险验证；修正实际 `/v8` module path；统一维护入口 |
 | 项目技能 | 全文语义审阅、清单和 YAML 校验 | 改名 `cliproxyapi-fork-maintenance`；精确覆盖本 fork 的摄入、发布、安装/回退及流程修复；按任务加载手册 |
-| `README.md` / `README_CN.md` / `README_JA.md` | 安装、维护、贡献段落语义审阅，全部 Markdown 本地引用检查 | 增加 fork 身份与一致安装入口；标注上游资料；PR 指向自有 `main` |
+| `README.md` / `README_CN.md` / `README_JA.md` | 三语全文语义审阅，全部 Markdown 本地引用检查 | 按开源项目结构重写；移除赞助、联盟、中转广告与生态推广；保留能力、安装、配置、开发、维护和上游致谢 |
 | README 提供商、赞助与生态介绍 | 保留内容，静态引用检查 | 未重新核验第三方产品、模型营销描述和外部 URL 的全部内容 |
 | 中文迁移 runbook、`ops/` 流程 | 全文语义审阅 | 移除待迁移旧状态、固定 UID、`--tags` 和 `brew rollback`；改为权威流程导航 |
 | 摄入脚本 | 实现审阅、隔离临时仓库测试 | 显式基线、稳定版本与发布时间验证、`--no-tags` 隔离、祖先关系检查 |
 | 回归脚本 | 实现审阅、故障注入与完整实跑 | gofmt 错误传播、只检查 tracked Go、独立临时构建目录、纳入维护工具测试 |
-| 两个 workflow | diff 与相关执行路径审阅、actionlint、离线发布失败路径测试 | 主干/tag 校验；草稿后发布；取消并发 checksum 写入；完整制品和远端哈希核验；固定 action SHA、最小权限 |
+| 两个 workflow | diff 与相关执行路径审阅、actionlint、离线发布失败路径测试 | 主干/tag 校验；人工发布说明必须声明上游对齐；草稿后发布；取消并发 checksum 写入；完整制品和远端哈希核验；固定 action SHA、最小权限 |
 | Homebrew 公式及渲染器 | 实现审阅、Ruby/风格检查、输入故障测试 | 四平台同步更新；配置路径使用 `etc`；增加版本横幅测试；回退使用预先测试的版本化公式 |
 | 主干 CI 格式兼容性 | 首次 `main` CI 日志、Go 1.26.0/1.26.4/1.27.1 复现、故障注入 | 修正三处既有格式；PR CI 与 Release 统一 Go 1.26.4；关卡使用活动工具链的 `gofmt` |
 
