@@ -319,6 +319,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			if len(bufferedChunks) == 0 && len(initialChunks) == 0 {
+				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
+				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
+				reporter.PublishFailure(ctx, emptyErr)
+				closedCh := make(chan cliproxyexecutor.StreamChunk)
+				close(closedCh)
+				return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: closedCh}, nil
+			}
 			streamErr := newCodexIncompleteStreamError()
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
@@ -350,6 +358,17 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
 
+	emittedCount := 0
+	for _, chunk := range bufferedChunks {
+		if len(chunk) > 0 {
+			emittedCount++
+		}
+	}
+	for _, chunk := range initialChunks {
+		if len(chunk) > 0 {
+			emittedCount++
+		}
+	}
 	go func() {
 		defer close(out)
 		defer func() {
@@ -430,6 +449,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					if len(chunks[i]) > 0 {
+						emittedCount++
+					}
 				case <-ctx.Done():
 					return
 				}
@@ -443,6 +465,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		}
+		if emittedCount == 0 {
+			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
+			helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
+			reporter.PublishFailure(ctx, emptyErr)
+			return
 		}
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
