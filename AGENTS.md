@@ -25,7 +25,8 @@ and do not wait for upstream review before shipping our own work.
   `module github.com/router-for-me/CLIProxyAPI` so upstream releases can be ported
   without rewriting imports across the tree. Do not rename it.
 - **Installation consumes our release artifacts** through the Homebrew tap
-  `hrygo/homebrew-cliproxyapi` (`brew install hrygo/tap/cli-proxy-api`), which
+  `hrygo/homebrew-cliproxyapi`, tapped as `hrygo/cliproxyapi`
+  (`brew install hrygo/cliproxyapi/cli-proxy-api`), which
   pins the release tarball's `sha256`. Do not build a binary by hand and `mv` it
   over a Homebrew-managed path; that leaves a stale regular file outside Cellar
   management and defeats `brew upgrade` / `brew rollback`.
@@ -39,7 +40,7 @@ pull requests and pushes to `main`, and gates on `gofmt`, `go vet ./...`,
 `go test ./... -count=1`, and a server build.
 
 Upstream-only workflows were removed and must not be reintroduced:
-`docker-image.yml` (pushed to a third-party Docker Hub org), 
+`docker-image.yml` (pushed to a third-party Docker Hub org),
 `auto-retarget-main-pr-to-dev.yml`, `agents-md-guard.yml` (auto-closed PRs touching
 `AGENTS.md`), and `pr-path-guard.yml` (blocked `internal/translator/` changes, a
 restriction that no longer applies now that we own this fork).

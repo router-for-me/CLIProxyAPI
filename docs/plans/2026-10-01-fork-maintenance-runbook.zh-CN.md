@@ -69,12 +69,14 @@ git push origin main --tags   # 仅推我们自己的 tag
 
 ## 安装（Homebrew tap）
 
-tap 仓库为 `hrygo/homebrew-cliproxyapi`，公式 `cli-proxy-api.rb` 指向本 fork 的
-release tarball 并锁 `sha256`。
+tap 仓库为 `hrygo/homebrew-cliproxyapi`，短名 `hrygo/cliproxyapi`（不是
+`hrygo/tap`，后者会解析到 `hrygo/homebrew-tap`），公式 `cli-proxy-api.rb` 指向
+本 fork 的 release tarball 并锁 `sha256`。公式把归档内的 `cli-proxy-api` 装成
+`cliproxyapi`，以保持既有 launchd agent 的路径不变。
 
 ```bash
-brew tap hrygo/tap                 # 映射到 hrygo/homebrew-cliproxyapi
-brew install hrygo/tap/cli-proxy-api
+brew tap hrygo/cliproxyapi
+brew install hrygo/cliproxyapi/cli-proxy-api
 brew upgrade cli-proxy-api
 brew rollback cli-proxy-api        # 回退上一版本
 ```
@@ -89,7 +91,7 @@ Homebrew 判定为陈旧版本。
 
 ```bash
 cp -p /opt/homebrew/bin/cliproxyapi ~/cliproxyapi.manual.bak   # 备份手工二进制
-brew install hrygo/tap/cli-proxy-api                            # 装 tap 版本
+brew install hrygo/cliproxyapi/cli-proxy-api                     # 装 tap 版本
 launchctl kickstart -k gui/501/com.hrygo.cliproxyapi             # 重载新二进制
 /opt/homebrew/bin/cliproxyapi -version                          # 核对版本与 commit
 ```
@@ -100,8 +102,12 @@ launchctl kickstart -k gui/501/com.hrygo.cliproxyapi             # 重载新二�
 ## 版本核对
 
 ```bash
-/opt/homebrew/bin/cliproxyapi -version   # 期望 Version=<release_version> Commit=<short sha>
+/opt/homebrew/bin/cliproxyapi -h 2>&1 | head -1
+# 期望 CLIProxyAPI Version: 1.0.0, Commit: <short sha>, BuiltAt: <RFC3339>
 ```
+
+该二进制没有 `-version` 标志，任何调用都会先打印版本横幅再输出 usage；用 `-h`
+即可读到横幅，不要把 usage 里的报错当成失败。
 
 ## fork 工作流清理
 

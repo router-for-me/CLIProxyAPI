@@ -25,7 +25,9 @@ class CliProxyApi < Formula
   end
 
   def install
-    bin.install "cli-proxy-api"
+    # The upstream release archive names the binary cli-proxy-api. Install it
+    # as cliproxyapi so the existing launchd agent path keeps working.
+    bin.install "cli-proxy-api" => "cliproxyapi"
     pkgshare.install "config.example.yaml"
   end
 
@@ -33,6 +35,9 @@ class CliProxyApi < Formula
     <<~EOS
       Configuration is not managed by Homebrew. Pass your own config path:
         cliproxyapi -config /opt/homebrew/etc/cliproxyapi.conf
+
+      This service is managed by launchd, not `brew services`:
+        launchctl kickstart -k gui/$(id -u)/com.hrygo.cliproxyapi
     EOS
   end
 end
