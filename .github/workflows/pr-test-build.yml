@@ -13,6 +13,12 @@ concurrency:
   group: pr-test-build-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Keep PR checks on the same toolchain that release builds use. Formatting
+  # output can differ between Go releases and must not depend on go.mod's
+  # minimum version alone.
+  GO_VERSION: '1.26.4'
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -22,7 +28,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
       - name: Check maintenance tooling
         run: python3 ops/tests/test_maintenance.py

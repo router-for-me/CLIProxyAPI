@@ -40,9 +40,11 @@ and do not wait for upstream review before shipping our own work.
 
 ### CI
 
-Only `release.yaml` and `pr-test-build.yml` are kept. `pr-test-build.yml` runs on
-pull requests and pushes to `main`, and gates on `gofmt`, `go vet ./...`,
-`go test ./... -count=1`, and a server build.
+Only `release.yaml` and `pr-test-build.yml` are kept. Both use Go `1.26.4`.
+`pr-test-build.yml` runs on pull requests and pushes to `main`, and gates on
+`gofmt`, `go vet ./...`, `go test ./... -count=1`, and a server build. Run the
+maintenance gate with the same Go release; `gofmt` output can differ between
+Go versions.
 
 Upstream-only workflows were removed and must not be reintroduced:
 `docker-image.yml` (pushed to a third-party Docker Hub org),

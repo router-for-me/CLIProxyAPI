@@ -126,16 +126,25 @@ class IntakeTests(unittest.TestCase):
         source = self.local / "fixture.go"
         source.write_text("package fixture\n")
         self.git(self.local, "add", source.name)
-        for name, body in [
-            ("gofmt", "echo 'formatter failed' >&2\nexit 7\n"),
-            ("go", "exit 0\n"),
-        ]:
-            executable = self.bin / name
-            executable.write_text("#!/bin/sh\n" + body)
-            executable.chmod(0o755)
+        fake_goroot = self.base / "fake-goroot"
+        fake_gofmt = fake_goroot / "bin" / "gofmt"
+        fake_gofmt.parent.mkdir(parents=True)
+        fake_gofmt.write_text("#!/bin/sh\necho 'formatter failed' >&2\nexit 7\n")
+        fake_gofmt.chmod(0o755)
+        fake_go = self.bin / "go"
+        fake_go.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = env ] && [ \"$2\" = GOROOT ]; then\n"
+            "  printf '%s\\n' \"$FAKE_GOROOT\"\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        fake_go.chmod(0o755)
         result = subprocess.run(
             ["bash", str(ROOT / "ops/upstream-intake/verify-absorb.sh")],
-            cwd=self.local, env=self.env, text=True, capture_output=True,
+            cwd=self.local,
+            env=dict(self.env, FAKE_GOROOT=str(fake_goroot)),
+            text=True, capture_output=True,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("FAIL: gofmt", result.stdout)

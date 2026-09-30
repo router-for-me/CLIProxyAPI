@@ -17,6 +17,7 @@
 | 回归脚本 | 实现审阅、故障注入与完整实跑 | gofmt 错误传播、只检查 tracked Go、独立临时构建目录、纳入维护工具测试 |
 | 两个 workflow | diff 与相关执行路径审阅、actionlint、离线发布失败路径测试 | 主干/tag 校验；草稿后发布；取消并发 checksum 写入；完整制品和远端哈希核验；固定 action SHA、最小权限 |
 | Homebrew 公式及渲染器 | 实现审阅、Ruby/风格检查、输入故障测试 | 四平台同步更新；配置路径使用 `etc`；增加版本横幅测试；回退使用预先测试的版本化公式 |
+| 主干 CI 格式兼容性 | 首次 `main` CI 日志、Go 1.26.0/1.26.4/1.27.1 复现、故障注入 | 修正三处既有格式；PR CI 与 Release 统一 Go 1.26.4；关卡使用活动工具链的 `gofmt` |
 
 清单扫描发现本仓库一个 `AGENTS.md` 和一个项目 `SKILL.md`；扫描排除 `.git/`
 及用户的 `.omo/`。清单本身是静态证据，语义审阅和脚本实测单独列出。
@@ -43,8 +44,9 @@
   隔离、非法参数与年龄门槛、未发布/未来发布时间、逆向基线、formatter
   执行失败，以及完整/缺失/损坏制品的发布行为。
 - 完整回归关卡通过：维护工具测试、gofmt、go vet、responses-tools 不变量、
-  全量 Go 测试、关键包 race 与 server build。本机 Go 为 `1.27.1`；
-  Release CI 的工具链仍为既有 `1.26.4`，并对校验和构建使用相同版本。
+  全量 Go 测试、关键包 race 与 server build。首次主干 CI 随后暴露
+  Go 1.27.1 与 1.26.x 的 `gofmt` 结果差异；三个既有文件已按发布工具链
+  Go 1.26.4 格式化，PR CI 与 Release 现统一使用 1.26.4。
 - `actionlint v1.7.12`、Bash 语法、Ruby 语法、技能 YAML 校验通过。
   Homebrew style 使用原样公式的临时 `Formula/` 副本通过；直接把 `ops/`
   副本当普通 Ruby 文件检查会套用非公式规则，不代表 tap 公式结果。

@@ -36,8 +36,16 @@ stage() {
 }
 
 check_gofmt() {
-  # Inspect tracked source only; propagate formatter failures.
-  unformatted="$(git ls-files -z '*.go' | xargs -0 gofmt -l)" || return 1
+  # Use the formatter shipped with the active Go toolchain. A separately
+  # installed gofmt on PATH may be a different version and disagree on source
+  # that CI will reject. Inspect tracked source only and propagate failures.
+  local gofmt_bin
+  gofmt_bin="$(go env GOROOT)/bin/gofmt"
+  [ -x "$gofmt_bin" ] || {
+    printf 'gofmt not found in active Go toolchain: %s\n' "$gofmt_bin"
+    return 1
+  }
+  unformatted="$(git ls-files -z '*.go' | xargs -0 "$gofmt_bin" -l)" || return 1
   if [ -n "$unformatted" ]; then
     printf 'these files need gofmt:\n%s\n' "$unformatted"
     return 1

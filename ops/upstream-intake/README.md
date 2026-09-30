@@ -46,7 +46,8 @@ individual commits. This is our fork policy, not a universal release rule.
 ## Regression gate
 
 The gate requires Python 3 and checks the offline maintenance fixtures, tracked
-Go formatting, `go vet ./...`, focused responses-tools
+Go formatting with `gofmt` from the active `go env GOROOT` toolchain,
+`go vet ./...`, focused responses-tools
 invariants, all unit/integration tests, race-sensitive packages and a server build
 in a unique temporary directory. Formatter failures propagate; the gate neither
 formats files nor reads unrelated untracked source. It records all failed stages
