@@ -5,6 +5,8 @@ import {
   expandAllProvidersToChoices,
   mergeLiveWithChoices,
 } from './modelRouteProvider.js';
+import { ROUTE_STRATEGY_OPTIONS, WEIGHTED_ROUTE_OPTION, activeStrategyOption } from './routingStrategies.js';
+import StrategyPicker from './StrategyPicker.jsx';
 
 // ModelRouteConfigSection — shared per-model routing configuration UI.
 //
@@ -20,37 +22,6 @@ import {
 //   route     — current route entry { providers, strategy, priorities }.
 //   onChange  — called with a fresh partial route entry on every change:
 //               { providers, strategy, priorities }.
-const STRATEGY_OPTIONS = [
-  {
-    value: '',
-    label: 'Default',
-    short: 'round-robin',
-    blurb: 'Rotate across all pinned providers. Inherits the global routing strategy.',
-  },
-  {
-    value: 'priority',
-    label: 'Priority',
-    short: 'priority',
-    blurb: 'Stay on the highest-priority provider until exhausted, then descend. Best for response quality.',
-  },
-  {
-    value: 'failover',
-    label: 'Failover',
-    short: 'failover',
-    blurb: "Start at the highest-priority provider; the conductor switches providers on upstream errors. Best for zero downtime.",
-  },
-];
-
-// WEIGHTED_STRATEGY_OPTION is appended to the strategy picker only when the
-// caller passes allowWeighted. The backend's per-target tier routing rejects
-// "weighted", so regular tier editors must not surface it; the vision bridge
-// route (the only consumer today) accepts it as a per-request load spread.
-const WEIGHTED_STRATEGY_OPTION = {
-  value: 'weighted',
-  label: 'Weighted',
-  short: 'weighted',
-  blurb: "Pick one provider per request, weighted by each provider's priority. Spreads load across providers.",
-};
 
 // Rank marker glyphs (avoid emoji-width issues; using circled digits).
 const RANK_GLYPHS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
@@ -93,6 +64,18 @@ function upstreamTypeLabel(providerType) {
 function capitalize(s) {
   if (!s) return '';
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// nextPriority returns a sensible default priority for a newly assigned
+// provider: ten above the current maximum (floor 10), so pins stay ordered and
+// never display 0. Mirrors the backend pin's MAX + 1 intent with a readable
+// step.
+function nextPriority(priorities) {
+  const max = (priorities || []).reduce(
+    (m, p) => Math.max(m, Number(p && p.priority) || 0),
+    0,
+  );
+  return max + 10;
 }
 
 // computeRanks returns, for each selected provider, its rank (0-indexed)
@@ -199,12 +182,32 @@ export default function ModelRouteConfigSection({ model, route, onChange, allowW
     for (const entry of upstreamByKey.values()) {
       upstreamByKeyForMerge.set(entry.key, entry);
     }
-    return mergeLiveWithChoices(liveProviders || [], configured, upstreamByKeyForMerge);
-  }, [liveProviders, upstreamByKey]);
+    const merged = mergeLiveWithChoices(liveProviders || [], configured, upstreamByKeyForMerge);
+    // A pinned provider that is neither live nor configured — e.g. its row was
+    // disabled or deleted — still needs a row so the operator can unpin it.
+    const seen = new Set(merged.map((c) => c.key));
+    for (const key of selected) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push({ key, label: key, providerType: '', level: 'provider', identity: '', count: 0, orphan: true });
+    }
+    return merged;
+  }, [liveProviders, upstreamByKey, selected]);
+
+  const liveLoaded = liveProviders !== null;
+
+  // Only providers that are live OR already pinned are shown. Non-live
+  // configured providers are hidden to keep the panel focused; a pinned row
+  // that is no longer live stays visible so it can be unpinned.
+  const visibleChoices = useMemo(() => {
+    if (!liveLoaded) return [];
+    return choices.filter((c) => providerKeyIsLive(c.key, liveProviders) || selected.includes(c.key));
+  }, [choices, liveProviders, liveLoaded, selected]);
+
+  const hiddenCount = liveLoaded ? choices.length - visibleChoices.length : 0;
 
   // True while either provider list is still loading.
   const loading = liveProviders === null && allProviderKeys === null;
-  const liveLoaded = liveProviders !== null;
   const catalogEmpty = allProviderKeys !== null && allProviderKeys.length === 0;
   const liveLoadedAndEmpty = liveLoaded && liveProviders.length === 0;
 
@@ -231,11 +234,10 @@ export default function ModelRouteConfigSection({ model, route, onChange, allowW
       return false;
     })();
 
-  const activeOption =
-    (allowWeighted ? [WEIGHTED_STRATEGY_OPTION, ...STRATEGY_OPTIONS] : STRATEGY_OPTIONS).find((o) => o.value === strategy) ||
-    STRATEGY_OPTIONS[0];
-
-  const strategyOptions = allowWeighted ? [WEIGHTED_STRATEGY_OPTION, ...STRATEGY_OPTIONS] : STRATEGY_OPTIONS;
+  const strategyOptions = allowWeighted
+    ? [WEIGHTED_ROUTE_OPTION, ...ROUTE_STRATEGY_OPTIONS]
+    : ROUTE_STRATEGY_OPTIONS;
+  const activeOption = activeStrategyOption(strategyOptions, strategy);
 
   function emit(mutator) {
     const next = {
@@ -255,6 +257,12 @@ export default function ModelRouteConfigSection({ model, route, onChange, allowW
         next.priorities = next.priorities.filter((p) => p.provider !== provider);
       } else {
         next.providers.push(provider);
+        // Seed a priority so a freshly pinned provider is never stuck at 0 and
+        // sits above existing pins (MAX + 10, matching the backend pin). Only
+        // meaningful under an active strategy; priorityFor ignores it otherwise.
+        if (strategyActive && !next.priorities.some((p) => p && p.provider === provider)) {
+          next.priorities.push({ provider, priority: nextPriority(next.priorities) });
+        }
       }
     });
   }
@@ -271,7 +279,17 @@ export default function ModelRouteConfigSection({ model, route, onChange, allowW
   function setStrategy(value) {
     emit((next) => {
       next.strategy = value;
-      if (!value) next.priorities = [];
+      if (!value) {
+        next.priorities = [];
+        return;
+      }
+      // Switching into an active strategy: assign a default priority (10, 20,
+      // …) to every pinned provider that lacks one, so the try-order is
+      // explicit and never displays 0.
+      for (const p of next.providers) {
+        if (next.priorities.some((x) => x && x.provider === p)) continue;
+        next.priorities.push({ provider: p, priority: nextPriority(next.priorities) });
+      }
     });
   }
 
@@ -314,19 +332,28 @@ export default function ModelRouteConfigSection({ model, route, onChange, allowW
             {loading && (
               <tr><td colSpan={strategyActive ? 5 : 3} className="muted">Loading providers…</td></tr>
             )}
-            {!loading && choices.length === 0 && liveLoadedAndEmpty && catalogEmpty && (
+            {!loading && visibleChoices.length === 0 && liveLoadedAndEmpty && catalogEmpty && (
               <tr><td colSpan={strategyActive ? 5 : 3} className="muted">
                 No live providers serve this model, and no upstream providers are configured.
               </td></tr>
             )}
-            {!loading && choices.length === 0 && liveLoadedAndEmpty && !catalogEmpty && (
+            {!loading && visibleChoices.length === 0 && liveLoadedAndEmpty && !catalogEmpty && (
               <tr><td colSpan={strategyActive ? 5 : 3} className="muted">
-                No live providers serve this model; pin to a configured upstream below.
+                No live providers serve this model right now. {hiddenCount} configured
+                upstream{hiddenCount === 1 ? '' : 's'} hidden until {hiddenCount === 1 ? 'it' : 'they'} come online.
               </td></tr>
             )}
-            {choices.map((choice) => {
+            {!loading && visibleChoices.length === 0 && !liveLoadedAndEmpty && (
+              <tr><td colSpan={strategyActive ? 5 : 3} className="muted">
+                No live providers serve this model.
+              </td></tr>
+            )}
+            {visibleChoices.map((choice) => {
               const on = selected.includes(choice.key);
               const isLive = liveLoaded && providerKeyIsLive(choice.key, liveProviders);
+              // removed = pinned key absent from the configured catalog, i.e.
+              // its upstream row was deleted or disabled.
+              const removed = !!choice.orphan;
               const priority = on ? priorityFor(choice.key) : 0;
               const rank = on ? ranks[choice.key] : -1;
               // The display label prefers the upstream row's stored identity
@@ -337,12 +364,18 @@ export default function ModelRouteConfigSection({ model, route, onChange, allowW
               const typeText = upstreamTypeLabel(choice.providerType);
               const countSuffix = choice.count > 1 ? ` ×${choice.count}` : '';
               const levelTag = choice.level === 'entry' ? 'Entry pin' : 'Provider pool';
+              const statusLabel = isLive ? 'live' : (removed ? 'removed' : 'config');
+              const statusTitle = isLive
+                ? 'Live provider (currently serving this model)'
+                : (removed
+                  ? 'Pinned provider is no longer live or configured (disabled/removed). Unpin to clean up.'
+                  : 'Configured upstream (no live auth right now)');
               return (
                 <tr
                   key={choice.key}
                   className={`row-link ${on ? 'row--selected' : ''}`}
                   onClick={() => toggleProvider(choice.key)}
-                  title={`${levelTag}: ${choice.key}${typeText ? ` · ${typeText}` : ''}${countSuffix}\n${isLive ? 'Live provider (currently serving this model)' : 'Configured upstream (no live auth right now)'}${on && strategyActive ? `\nRank ${rank + 1} · priority ${priority}` : ''}`}
+                  title={`${levelTag}: ${choice.key}${typeText ? ` · ${typeText}` : ''}${countSuffix}\n${statusTitle}${on && strategyActive ? `\nRank ${rank + 1} · priority ${priority}` : ''}`}
                 >
                   <td>
                     <div className="cell-stack">
@@ -354,7 +387,7 @@ export default function ModelRouteConfigSection({ model, route, onChange, allowW
                   </td>
                   <td>
                     <span className={`live-dot ${isLive ? 'live-dot--on' : 'live-dot--off'}`} aria-hidden="true" />
-                    <span className="muted">{isLive ? 'live' : 'config'}</span>
+                    <span className="muted">{statusLabel}</span>
                   </td>
                   {strategyActive && (
                     <td className="sgl-num">
@@ -397,25 +430,20 @@ export default function ModelRouteConfigSection({ model, route, onChange, allowW
         </table>
       </div>
 
-      <div className="model-routes__strategy">
-        <div className="seg" role="group" aria-label={`Routing strategy for ${model}`}>
-          {strategyOptions.map((opt) => {
-            const active = (strategy || '') === opt.value;
-            return (
-              <button
-                key={opt.value || 'default'}
-                type="button"
-                className={`seg__btn ${active ? 'seg__btn--active' : ''}`}
-                onClick={() => setStrategy(opt.value)}
-                title={opt.blurb}
-                aria-pressed={active}
-              >
-                {opt.label}
-              </button>
-            );
-          })}
+      {hiddenCount > 0 && (
+        <div className="model-routes__hidden muted">
+          {hiddenCount} non-live provider{hiddenCount === 1 ? '' : 's'} hidden.
         </div>
-        <div className="model-routes__strategyblurb muted">{activeOption.blurb}</div>
+      )}
+
+      <div className="model-routes__strategy">
+        <StrategyPicker
+          options={strategyOptions}
+          value={strategy}
+          onChange={setStrategy}
+          ariaLabel={`Routing strategy for ${model}`}
+          showBlurb
+        />
       </div>
     </div>
   );

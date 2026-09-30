@@ -1661,8 +1661,15 @@ ul.list-bare li { padding: 4px 0; }
  * the table; the table provides its own row chrome, so it has no outer
  * border and fills the providers grid area. One row per provider; pinned
  * rows reuse .row--selected for the accent tint and .row-link for the
- * whole-row click affordance (.row-actions__btn is the keyboard path). */
-.model-routes__tablewrap { overflow-x: auto; grid-area: providers; }
+ * whole-row click affordance (.row-actions__btn is the keyboard path).
+ * A capped max-height keeps a model with many providers from stretching the
+ * card indefinitely; rows beyond the cap scroll instead. */
+.model-routes__tablewrap {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 260px;
+  grid-area: providers;
+}
 .model-routes__table {
   width: 100%;
   border: none;
@@ -1691,6 +1698,9 @@ ul.list-bare li { padding: 4px 0; }
 /* Toggle column — right-aligned, narrow. */
 .model-routes__col-toggle { width: 1%; white-space: nowrap; padding-right: 4px; }
 .model-routes__table .row-actions__btn { padding: 3px 10px; font-size: 11px; }
+
+/* Footnote shown when non-live configured providers are filtered out. */
+.model-routes__hidden { font-size: 11px; }
 
 /* Compact priority input (Priority column). Standalone, non-chip. */
 .prio-input {

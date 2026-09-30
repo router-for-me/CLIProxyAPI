@@ -1159,6 +1159,23 @@ export async function putAlertSettings(body) {
   });
 }
 
+// --- Global routing strategy -------------------------------------------------
+//
+// The top-level credential selector applied when no per-pool or per-model rule
+// overrides it. Returns { strategy } with one of: round-robin,
+// weighted-round-robin, fill-first, power-of-two-choices, least-used.
+export async function getRoutingStrategy() {
+  return fetchJSON('/routing/strategy');
+}
+
+// Persist the global routing strategy. The endpoint expects { value }.
+export async function putRoutingStrategy(value) {
+  return fetchJSON('/routing/strategy', {
+    method: 'PUT',
+    body: JSON.stringify({ value: value || '' }),
+  });
+}
+
 // --- Jev AI classifier settings ---------------------------------------------
 //
 // The Jev AI gate classifies each auto-routed request before the heuristic

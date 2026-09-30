@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import ModelMultiSelect from './ModelMultiSelect.jsx';
 import ModelRoutesEditor from './ModelRoutesEditor.jsx';
+import { dedupeStrings, routeToWire } from './modelRoute.js';
 import { listModelGroups, getModelGroup } from '../api/client.js';
 
 // PolicyForm — reusable form for editing a Policy object.
@@ -75,26 +76,15 @@ export function formToPolicy(form, apiKeyId) {
     // entity fields so the persisted policy reflects the dashboard's intent
     // (the enforcement path overrides these anyway, but keeping them empty
     // avoids confusion when reading the row directly).
-    allowed_models: form.model_group_id ? [] : dedupe(listFromField(form.allowed_models)),
-    blocked_models: form.model_group_id ? [] : dedupe(listFromField(form.blocked_models)),
+    allowed_models: form.model_group_id ? [] : dedupeStrings(form.allowed_models),
+    blocked_models: form.model_group_id ? [] : dedupeStrings(form.blocked_models),
     model_routes: form.model_group_id
       ? []
       : (Array.isArray(form.model_routes) ? form.model_routes : [])
           .filter((r) => r && r.model && !r.model.endsWith('*') && form.allowed_models.includes(r.model) && Array.isArray(r.providers) && r.providers.length > 0)
-          .map((r) => {
-            const out = { model: r.model, providers: dedupe(r.providers) };
-            const strategy = String(r.strategy || '').trim();
-            if (strategy === 'priority' || strategy === 'failover') {
-              out.strategy = strategy;
-              const priorities = (Array.isArray(r.priorities) ? r.priorities : [])
-                .filter((pr) => pr && pr.provider && out.providers.includes(pr.provider))
-                .map((pr) => ({ provider: pr.provider, priority: Number(pr.priority) || 0 }));
-              if (priorities.length > 0) out.priorities = priorities;
-            }
-            return out;
-          }),
-    allowed_ips: dedupe(listFromField(form.allowed_ips)),
-    blocked_ips: dedupe(listFromField(form.blocked_ips)),
+          .map((r) => routeToWire(r)),
+    allowed_ips: dedupeStrings(form.allowed_ips),
+    blocked_ips: dedupeStrings(form.blocked_ips),
   };
   return policy;
 }
@@ -105,16 +95,6 @@ function numOrNull(s) {
   return Number.isFinite(n) ? n : null;
 }
 function floatOrNull(s) { return numOrNull(s); }
-// Accept either an array of strings or a newline-joined textarea string so
-// the helper stays resilient if a caller ever hands it raw text.
-function listFromField(v) {
-  if (Array.isArray(v)) return v.map((s) => String(s).trim()).filter(Boolean);
-  if (typeof v === 'string') return v.split('\n').map((l) => l.trim()).filter(Boolean);
-  return [];
-}
-function dedupe(arr) {
-  return Array.from(new Set(arr));
-}
 
 export default function PolicyForm({ initial, onChange }) {
   const [form, setForm] = useState(() => policyToForm(initial));

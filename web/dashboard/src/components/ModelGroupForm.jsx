@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import ModelMultiSelect from './ModelMultiSelect.jsx';
 import ModelRouteEntryModal from './ModelRouteEntryModal.jsx';
+import { dedupeStrings, routeToWire, routeHasConfig } from './modelRoute.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { listModelsCatalog } from '../api/client.js';
 import { fmtRate, pricingHasRates, TOKEN_SEGMENTS } from '../pages/usageShared.jsx';
@@ -86,28 +87,18 @@ export function formToGroup(form) {
     name: (form.name || '').trim(),
     description: (form.description || '').trim(),
     discount_pct: discountPctToNum(form.discount_pct),
-    allowed_models: dedupe(listFromField(form.allowed_models)),
-    blocked_models: dedupe(listFromField(form.blocked_models)),
+    allowed_models: dedupeStrings(form.allowed_models),
+    blocked_models: dedupeStrings(form.blocked_models),
     model_routes: (Array.isArray(form.model_routes) ? form.model_routes : [])
       .filter((r) => {
         if (!r || !r.model || r.model.endsWith('*')) return false;
         if (!form.allowed_models.includes(r.model)) return false;
         // Keep rows that pin providers, set a strategy, or carry caps/discounts.
-        const hasProviders = Array.isArray(r.providers) && r.providers.length > 0;
-        const hasStrategy = r.strategy === 'priority' || r.strategy === 'failover';
         const hasCaps = numToStr(r.rpm) !== '' || numToStr(r.max_budget) !== '' || discountPctToStr(r.discount) !== '';
-        return hasProviders || hasStrategy || hasCaps;
+        return routeHasConfig(r, { hasExtras: hasCaps });
       })
       .map((r) => {
-        const out = { model: r.model, providers: dedupe(r.providers || []) };
-        const strategy = String(r.strategy || '').trim();
-        if (strategy === 'priority' || strategy === 'failover') {
-          out.strategy = strategy;
-          const priorities = (Array.isArray(r.priorities) ? r.priorities : [])
-            .filter((pr) => pr && pr.provider && out.providers.includes(pr.provider))
-            .map((pr) => ({ provider: pr.provider, priority: Number(pr.priority) || 0 }));
-          if (priorities.length > 0) out.priorities = priorities;
-        }
+        const out = routeToWire(r);
         const rpm = Number(r.rpm);
         if (Number.isFinite(rpm) && rpm > 0) out.rpm_limit = Math.trunc(rpm);
         const budget = Number(r.max_budget);
@@ -131,12 +122,6 @@ function discountPctToNum(v) {
   return n;
 }
 
-function listFromField(v) {
-  if (Array.isArray(v)) return v.map((s) => String(s).trim()).filter(Boolean);
-  if (typeof v === 'string') return v.split('\n').map((l) => l.trim()).filter(Boolean);
-  return [];
-}
-function dedupe(arr) { return Array.from(new Set(arr)); }
 function parseMetadata(s) {
   if (!s || s.trim() === '' || s.trim() === '{}') return {};
   try {

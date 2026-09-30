@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import ModelIdCombobox from './ModelIdCombobox.jsx';
 import ModelRouteConfigSection from './ModelRouteConfigSection.jsx';
+import StrategyPicker from './StrategyPicker.jsx';
+import { TARGET_STRATEGY_OPTIONS } from './routingStrategies.js';
 
 // The four complexity tiers the router scores requests into, in ascending
 // difficulty. Each maps to one or more concrete upstream models configured by
@@ -39,20 +41,7 @@ const TIERS = [
 // TARGET_STRATEGIES drives the per-tier segmented control that decides how the
 // tier's multiple target models are picked per request. A single target always
 // applies; the control only appears once a second target is added.
-const TARGET_STRATEGIES = [
-  {
-    value: '',
-    label: 'Weighted',
-    short: 'weighted',
-    blurb: 'Pick a target model at random, weighted by each model’s weight (higher weight = more requests).',
-  },
-  {
-    value: 'priority',
-    label: 'Priority',
-    short: 'priority',
-    blurb: 'Always pick the highest-weight target model; ties resolve to the first listed. No randomness.',
-  },
-];
+const TARGET_STRATEGIES = TARGET_STRATEGY_OPTIONS;
 
 var routerShape = (tier) => ({
   tier,
@@ -734,7 +723,6 @@ export default function AutoRouterForm({ initial, onChange }) {
             const multi = filledTargets.length > 1;
             const primaryModel = filledTargets[0]?.model || '';
             const targetStrategy = (m.target_strategy || '').trim() === 'priority' ? 'priority' : '';
-            const activeStrategy = TARGET_STRATEGIES.find((o) => o.value === targetStrategy) || TARGET_STRATEGIES[0];
             const hasDefaultRoute = tierRoute.providers.length > 0
               || tierRoute.strategy !== ''
               || tierRoute.priorities.length > 0;
@@ -892,24 +880,13 @@ export default function AutoRouterForm({ initial, onChange }) {
                   >+ Add target</button>
                   {multi && (
                     <div className="ar-targets__strategy">
-                      <div className="seg" role="group" aria-label={`Target selection strategy for ${m.tier} tier`}>
-                        {TARGET_STRATEGIES.map((opt) => {
-                          const active = (targetStrategy || '') === opt.value;
-                          return (
-                            <button
-                              key={opt.value || 'weighted'}
-                              type="button"
-                              className={`seg__btn ${active ? 'seg__btn--active' : ''}`}
-                              onClick={() => setMapping(i, 'target_strategy', opt.value)}
-                              title={opt.blurb}
-                              aria-pressed={active}
-                            >
-                              {opt.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="model-routes__strategyblurb muted">{activeStrategy.blurb}</div>
+                      <StrategyPicker
+                        options={TARGET_STRATEGIES}
+                        value={targetStrategy}
+                        onChange={(v) => setMapping(i, 'target_strategy', v)}
+                        ariaLabel={`Target selection strategy for ${m.tier} tier`}
+                        showBlurb
+                      />
                     </div>
                   )}
                 </div>

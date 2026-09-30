@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import ModelGroupForm, { formToGroup } from '../components/ModelGroupForm.jsx';
+import RoutingSummaryCard from '../components/RoutingSummaryCard.jsx';
 import { Modal, Spinner, ErrorBanner } from '../components/Primitives.jsx';
 import { useAsync } from '../hooks/useAsync.js';
 import { useToast } from '../components/Toast.jsx';
@@ -80,6 +81,8 @@ export default function ModelGroupDetailPage() {
         <h2 className="card__title">Group</h2>
         <ModelGroupForm initial={group} onChange={setForm} />
       </div>
+
+      <RoutingSummaryCard routes={group.model_routes} />
 
       <div className="card">
         <div className="card__header row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>

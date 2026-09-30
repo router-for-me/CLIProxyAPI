@@ -2,6 +2,8 @@
 // Upstream provider editor — schema layer
 // ============================================================================
 
+import { POOL_STRATEGY_OPTIONS, POOL_STRATEGY_HINT } from '../../components/routingStrategies.js';
+
 // The declarative provider-type catalog and the per-type form schemas for
 // the upstream provider editor. Extracted from UpstreamProvidersPage.jsx
 // (provider-editor-page plan, Task 1) as the single source of truth for the
@@ -93,19 +95,12 @@ export const WIRE_FORMAT_OPTIONS = [
 export const URL_RE = /^(https?:\/\/|socks5h?:\/\/|direct|none)/i;
 
 // ROUTING_STRATEGY_OPTIONS mirrors the backend's canonical pool strategies.
-// 'failover' and 'priority' are Model-Routes-compatible aliases the backend
-// canonicalizes on save; the hint documents the aliasing so the operator is
-// not surprised by the round-trip value.
-export const ROUTING_STRATEGY_OPTIONS = [
-  { value: '', label: 'Default (global)' },
-  { value: 'round-robin', label: 'Round-robin' },
-  { value: 'weighted-round-robin', label: 'Weighted round-robin' },
-  { value: 'fill-first', label: 'Fill-first (priority)' },
-  { value: 'power-of-two-choices', label: 'Power of two choices' },
-  { value: 'least-used', label: 'Least used' },
-  { value: 'failover', label: 'Failover' },
-];
-export const ROUTING_STRATEGY_HINT = 'Empty = follow the global routing strategy. Any value enables aggressive in-pool failover: on any entry error the next entry is tried first; errors surface only after the whole pool is exhausted. Fill-first ≈ priority, failover ≈ round-robin within a priority tier. Power of two choices and least used currently fall back to the deterministic fill-first behavior until the in-flight-aware scheduler (Task 10) lands.';
+// Sourced from the shared routingStrategies module so the editor cannot drift
+// from the global strategy selector. 'failover'/'priority' are
+// Model-Routes-compatible aliases the backend canonicalizes on save; the hint
+// documents the aliasing so the operator is not surprised by the round-trip.
+export const ROUTING_STRATEGY_OPTIONS = POOL_STRATEGY_OPTIONS;
+export const ROUTING_STRATEGY_HINT = POOL_STRATEGY_HINT;
 
 // MAX_ENTRY_WEIGHT matches config.MaxCredentialWeight (1,000,000). The
 // scheduler normalizes anything above that out, but the editor must

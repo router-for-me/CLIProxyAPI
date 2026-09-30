@@ -7,6 +7,7 @@ import {
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, StatusBadge, Modal, RoleBadge } from '../components/Primitives.jsx';
 import PolicyForm, { formToPolicy } from '../components/PolicyForm.jsx';
+import RoutingSummaryCard from '../components/RoutingSummaryCard.jsx';
 import CopyButton from '../components/CopyButton.jsx';
 import { useToast } from '../components/Toast.jsx';
 
@@ -29,6 +30,12 @@ export default function ApiKeyDetailPage() {
         <PolicyCard apiKeyId={data.id} policy={data.policy} onUpdated={reload} />
         <UsageWindowsCard apiKeyId={data.id} />
       </div>
+      {data.policy && (
+        <RoutingSummaryCard
+          routes={data.policy.model_routes}
+          modelGroupId={data.policy.model_group_id || ''}
+        />
+      )}
     </>
   );
 }
