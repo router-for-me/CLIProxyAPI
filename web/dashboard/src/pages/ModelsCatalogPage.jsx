@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   listModelsCatalog, getModelsCatalogSummary, getModelsCatalogDistinct,
   getModelPricing, putModelPricing,
@@ -45,7 +46,7 @@ const EMPTY_COPY = {
 
 const SORT_COLUMNS = [
   { key: 'id', label: 'Model ID' },
-  { key: 'provider', label: 'Upstream Provider' },
+  { key: 'provider_count', label: 'Upstream providers', sortable: false },
   { key: 'official_provider', label: 'Provider' },
   { key: 'context_length', label: 'Context' },
   { key: 'max_completion_tokens', label: 'Max output' },
@@ -67,11 +68,11 @@ const SORT_COLUMNS = [
 // (silent) keeps models_catalog fresh so the filtered view reflects current
 // availability.
 export default function ModelsCatalogPage() {
+  const navigate = useNavigate();
   const [page, setPage] = useState(1);
   const [provider, setProvider] = useState('');
   const [officialProvider, setOfficialProvider] = useState('');
   const [scope, setScope] = useState('live'); // live | stale | all | priced | unpriced
-  const [groupById, setGroupById] = useState(false); // distinct_ids
   const [query, setQuery] = useState('');
   const [sortKey, setSortKey] = useState('id');
   const [sortAsc, setSortAsc] = useState(true);
@@ -82,12 +83,10 @@ export default function ModelsCatalogPage() {
   const [initialSyncDone, setInitialSyncDone] = useState(false);
   const [showPricingSync, setShowPricingSync] = useState(false);
   const [showPricingSources, setShowPricingSources] = useState(false);
-  const [editingModel, setEditingModel] = useState(null); // null | {mode, initial}
   const [showCreateModel, setShowCreateModel] = useState(false);
   const [globalModelId, setGlobalModelId] = useState(null); // null | model id for GlobalModelModal
   const [syncStatus, setSyncStatus] = useState(null);
   const [summary, setSummary] = useState(null);
-  const [expandedId, setExpandedId] = useState(null);
   const [density, setDensity] = useState(() => readDensity());
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
   // Sync caller key: PG-first deployments keep client keys hashed in the
@@ -114,9 +113,9 @@ export default function ModelsCatalogPage() {
   } = useAsync(
     () => listModelsCatalog({
       page, pageSize: DEFAULT_PAGE_SIZE, provider, officialProvider,
-      scope, distinctIds: groupById, q: debouncedQuery, sort: sortParam,
+      scope, distinctIds: true, q: debouncedQuery, sort: sortParam,
     }),
-    [page, provider, officialProvider, scope, groupById, debouncedQuery, sortParam],
+    [page, provider, officialProvider, scope, debouncedQuery, sortParam],
   );
   const { data: statusData, reload: reloadStatus } = useAsync(() => getModelsCatalogSyncStatus(), []);
   const { data: summaryData, reload: reloadSummary } = useAsync(() => getModelsCatalogSummary(), []);
@@ -301,18 +300,6 @@ export default function ModelsCatalogPage() {
           </select>
           <div className="seg-group">
             <button
-              className={`seg-btn ${!groupById ? 'seg-btn--active' : ''}`}
-              onClick={() => { setGroupById(false); setPage(1); }}
-              title="One row per (model ID, provider)"
-            >By provider</button>
-            <button
-              className={`seg-btn ${groupById ? 'seg-btn--active' : ''}`}
-              onClick={() => { setGroupById(true); setPage(1); }}
-              title="One row per model ID"
-            >By model ID</button>
-          </div>
-          <div className="seg-group">
-            <button
               className={`seg-btn ${density === 'compact' ? 'seg-btn--active' : ''}`}
               onClick={() => handleDensityChange('compact')}
             >Compact</button>
@@ -387,16 +374,20 @@ export default function ModelsCatalogPage() {
               <thead>
                 <tr>
                   {SORT_COLUMNS.map((c) => (
-                    <th
-                      key={c.key}
-                      className={`th-sortable ${sortKey === c.key ? 'th-sort--active' : ''}`}
-                      onClick={() => handleSortChange(c.key)}
-                    >
-                      {c.label}
-                      <span className="th-sort__icon">
-                        {sortKey === c.key ? (sortAsc ? '▲' : '▼') : '↕'}
-                      </span>
-                    </th>
+                    c.sortable === false ? (
+                      <th key={c.key}>{c.label}</th>
+                    ) : (
+                      <th
+                        key={c.key}
+                        className={`th-sortable ${sortKey === c.key ? 'th-sort--active' : ''}`}
+                        onClick={() => handleSortChange(c.key)}
+                      >
+                        {c.label}
+                        <span className="th-sort__icon">
+                          {sortKey === c.key ? (sortAsc ? '▲' : '▼') : '↕'}
+                        </span>
+                      </th>
+                    )
                   ))}
                   <th>Pricing</th>
                   <th></th>
@@ -405,16 +396,10 @@ export default function ModelsCatalogPage() {
               <tbody>
                 {models.map((m) => (
                   <ModelRow
-                    key={`${m.id}|${m.provider}`}
+                    key={m.id}
                     model={m}
                     liveIDs={liveIDs}
-                    density={density}
-                    isGlobal={groupById}
-                    expanded={expandedId === `${m.id}|${m.provider}`}
-                    onToggleExpand={() => setExpandedId((cur) =>
-                      cur === `${m.id}|${m.provider}` ? null : `${m.id}|${m.provider}`,
-                    )}
-                    onEdit={() => setEditingModel({ mode: 'edit', initial: m })}
+                    onOpen={() => navigate(`/models/${encodeURIComponent(m.id)}`)}
                     onGlobalEdit={(mid) => setGlobalModelId(mid)}
                   />
                 ))}
@@ -453,15 +438,6 @@ export default function ModelsCatalogPage() {
           onSaved={() => { setShowCreateModel(false); reload(); reloadSummary(); }}
         />
       )}
-      {editingModel && (
-        <ModelEntryModal
-          mode="edit"
-          initial={editingModel.initial}
-          onClose={() => setEditingModel(null)}
-          onSaved={() => { setEditingModel(null); reload(); reloadSummary(); }}
-          onDeleted={() => { setEditingModel(null); reload(); reloadSummary(); }}
-        />
-      )}
       {globalModelId && (
         <GlobalModelModal
           modelId={globalModelId}
@@ -473,80 +449,42 @@ export default function ModelsCatalogPage() {
   );
 }
 
-function ModelRow({ model, liveIDs, density, isGlobal, expanded, onToggleExpand, onEdit, onGlobalEdit }) {
+function ModelRow({ model, liveIDs, onOpen, onGlobalEdit }) {
   const isLive = liveIDs ? !!liveIDs[String(model.id || '').toLowerCase()] : true;
+  const providerCount = model.provider_count ?? 0;
   return (
-    <>
-      <tr
-        className={expanded ? 'mc-row--expanded' : ''}
-        onClick={onToggleExpand}
-        aria-expanded={expanded}
-        tabIndex={0}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleExpand(); } }}
-        title={expanded ? 'Collapse details' : 'Expand details'}
-      >
-        <td>
-          <div className="mono mc-model-id">
-            <ExpandChevron expanded={expanded} />
-            <LiveBadge live={isLive} />
-            <span>{model.id}</span>
-          </div>
-          {model.user_defined && (
-            <span className="badge badge--muted" style={{ marginTop: 2 }}>user-defined</span>
-          )}
-        </td>
-        <td><span className="badge badge--muted">{model.provider}</span></td>
-        <td><span className="badge badge--info">{model.official_provider || '—'}</span></td>
-        <td className="mono">{formatTokens(model.context_length)}</td>
-        <td className="mono">{formatTokens(model.max_completion_tokens)}</td>
-        <td><InlinePricing model={model} /></td>
-        <td onClick={(e) => e.stopPropagation()}>
-          <div className="row-actions">
-            <button
-              className="row-actions__btn row-actions__btn--primary"
-              onClick={onEdit}
-              title="Edit this model's catalog entry"
-            >Edit</button>
-            {isGlobal && (
-              <button
-                className="row-actions__btn"
-                onClick={() => onGlobalEdit?.(model.id)}
-                title="Edit pricing / fields for every row with this model ID"
-              >Global edit</button>
-            )}
-            <PricingButton modelId={model.id} />
-          </div>
-        </td>
-      </tr>
-      {expanded && (
-        <tr className="row-expanded">
-          <td colSpan={7}>
-            <div className="row-expanded__grid">
-              <ExpandedField label="Display name" value={model.display_name || '—'} />
-              <ExpandedField label="Type" value={model.type || '—'} />
-              <ExpandedField label="Name" value={model.name || '—'} />
-              <ExpandedField label="Version" value={model.version || '—'} />
-              <ExpandedField label="Object" value={model.object || '—'} />
-              <ExpandedField label="Input token limit" value={model.input_token_limit ? model.input_token_limit.toLocaleString() : '—'} />
-              <ExpandedField label="Output token limit" value={model.output_token_limit ? model.output_token_limit.toLocaleString() : '—'} />
-              <ExpandedField label="Supports web search" value={model.supports_web_search ? 'yes' : 'no'} />
-              <ExpandedField label="Input modalities" value={(model.input_modalities || []).join(', ') || '—'} />
-              <ExpandedField label="Output modalities" value={(model.output_modalities || []).join(', ') || '—'} />
-              <ExpandedField label="Updated" value={model.updated_at ? new Date(model.updated_at).toLocaleString() : '—'} />
-            </div>
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
-function ExpandedField({ label, value }) {
-  return (
-    <div className="row-expanded__field">
-      <div className="row-expanded__label">{label}</div>
-      <div className="row-expanded__value">{value}</div>
-    </div>
+    <tr
+      style={{ cursor: 'pointer' }}
+      onClick={onOpen}
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(); } }}
+      title="Open model detail"
+    >
+      <td>
+        <div className="mono mc-model-id">
+          <LiveBadge live={isLive} />
+          <span>{model.id}</span>
+        </div>
+        {model.user_defined && (
+          <span className="badge badge--muted" style={{ marginTop: 2 }}>user-defined</span>
+        )}
+      </td>
+      <td className="mono">{providerCount}</td>
+      <td><span className="badge badge--info">{model.official_provider || '—'}</span></td>
+      <td className="mono">{formatTokens(model.context_length)}</td>
+      <td className="mono">{formatTokens(model.max_completion_tokens)}</td>
+      <td><InlinePricing model={model} /></td>
+      <td onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+        <div className="row-actions">
+          <button
+            className="row-actions__btn row-actions__btn--primary"
+            onClick={() => onGlobalEdit?.(model.id)}
+            title="Edit attributes, routing and pricing for every provider with this model ID"
+          >Edit</button>
+          <PricingButton modelId={model.id} />
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -704,26 +642,6 @@ function LiveBadge({ live }) {
     return <span className="live-dot live-dot--on" title="Live in registry" aria-label="live" />;
   }
   return <span className="live-dot live-dot--off" title="Not in current registry" aria-label="stale" />;
-}
-
-// ExpandChevron renders a small chevron affording that a catalog row is
-// expandable. Rotates 90° when the row is expanded so the affordance gives
-// continuous feedback.
-function ExpandChevron({ expanded }) {
-  return (
-    <svg
-      className={`mc-expand-chevron${expanded ? ' mc-expand-chevron--open' : ''}`}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M6 3.5l4 4.5-4 4.5" />
-    </svg>
-  );
 }
 
 // formatRelativeTime renders a short "2m ago" / "just now" string from an

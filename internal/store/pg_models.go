@@ -48,6 +48,11 @@ type StoredModel struct {
 	// render an inline "$I / $O" summary per row without a per-row GET
 	// /pricing call. Nil/zero when no pricing is set.
 	Pricing *Pricing `json:"pricing,omitempty"`
+	// ProviderCount is the number of catalog rows sharing this model id.
+	// Attached by the management ListModelsCatalog handler in distinct mode so
+	// the dashboard can show how many upstream providers serve the model.
+	// Omitted everywhere else.
+	ProviderCount int `json:"provider_count,omitempty"`
 }
 
 // ModelsStore wraps the database handle for model catalog persistence.
@@ -1214,6 +1219,45 @@ func (s *ModelsStore) SelectByIDAllProviders(ctx context.Context, id string) ([]
 			_ = json.Unmarshal(override, &m.OverrideHeader)
 		}
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ProviderCountsByIDs returns, for each supplied model id (case-insensitive),
+// the number of catalog rows that share it. Keys in the returned map are
+// lowercased ids; ids with no rows are omitted. Used by the dashboard's
+// per-model-id catalog listing to show the upstream provider count.
+func (s *ModelsStore) ProviderCountsByIDs(ctx context.Context, ids []string) (map[string]int, error) {
+	out := make(map[string]int)
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: models store not initialized")
+	}
+	lowered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s := strings.TrimSpace(id); s != "" {
+			lowered = append(lowered, strings.ToLower(s))
+		}
+	}
+	if len(lowered) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(
+		`SELECT LOWER(id), COUNT(*) FROM %s WHERE LOWER(id) = ANY($1::text[]) GROUP BY LOWER(id)`,
+		s.modelsTable,
+	), pqStringArray(lowered))
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: provider counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id string
+			n  int
+		)
+		if err = rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("postgres store: scan provider count: %w", err)
+		}
+		out[id] = n
 	}
 	return out, rows.Err()
 }

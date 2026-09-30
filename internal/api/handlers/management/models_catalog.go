@@ -128,6 +128,25 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// In distinct (one-row-per-model-id) mode, attach how many upstream
+	// providers serve each returned model id so the dashboard can show the
+	// count without a per-row lookup.
+	if distinctIDs {
+		ids := make([]string, 0, len(stored))
+		for i := range stored {
+			if id := strings.TrimSpace(stored[i].ID); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		counts, cErr := models.ProviderCountsByIDs(c.Request.Context(), ids)
+		if cErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": cErr.Error()}})
+			return
+		}
+		for i := range stored {
+			stored[i].ProviderCount = counts[strings.ToLower(strings.TrimSpace(stored[i].ID))]
+		}
+	}
 	// Pull pricing rows for the current page's model ids so the dashboard
 	// can render an inline "$I / $O" summary per row without a per-row
 	// GET /pricing call.
