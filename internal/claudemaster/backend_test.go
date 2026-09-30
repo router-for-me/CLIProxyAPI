@@ -32,7 +32,7 @@ func TestPrepareBackendRequest(t *testing.T) {
 	}
 	request.Header.Set("Anthropic-Version", "2023-06-01")
 	request.Header.Set("Anthropic-Beta", "test-beta")
-	request.Header.Set("User-Agent", "claude-cli/2.1.269 (external, cli)")
+	request.Header.Set("User-Agent", "claude-cli/2.1.285 (external, cli)")
 	clean, model, err := prepareBackendRequest(request, BackendOptions{Model: "selected-model"})
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestPrepareBackendRequest(t *testing.T) {
 			t.Fatalf("master header survived: %s", key)
 		}
 	}
-	if request.Header.Get("Anthropic-Version") != "2023-06-01" || request.Header.Get("User-Agent") != "claude-cli/2.1.269 (external, cli)" || request.URL.RawQuery != "" || request.Host != "" {
+	if request.Header.Get("Anthropic-Version") != "2023-06-01" || request.Header.Get("User-Agent") != "claude-cli/2.1.285 (external, cli)" || request.URL.RawQuery != "" || request.Host != "" {
 		t.Fatal("safe protocol header or URL sanitization incorrect")
 	}
 	bodyAgain, err := io.ReadAll(request.Body)
@@ -273,6 +273,9 @@ func TestNewBackendSeriesUsesDistinctRuntimeIDsAndUnregistersOnClose(t *testing.
 		Credentials: []BackendCredential{
 			{AuthDir: first.AuthDir, Provider: first.Provider, AuthID: first.AuthID},
 			{AuthDir: second.AuthDir, Provider: second.Provider, AuthID: second.AuthID},
+		},
+		QuotaRequest: func(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"seven_day":{"utilization":0,"resets_at":"2099-01-01T00:00:00Z"}}`))}, nil
 		},
 	})
 	if err != nil {

@@ -46,7 +46,7 @@ func TestProxyLegacyRemoteControlBoundary(t *testing.T) {
 		bridge := headers.Clone()
 		bridge.Del("X-Organization-Uuid")
 		bridge.Set("Anthropic-Beta", "environments-2025-11-01")
-		bridge.Set("X-Environment-Runner-Version", "2.1.269")
+		bridge.Set("X-Environment-Runner-Version", "2.1.285")
 		resp, _ := proxyTestRequest(t, client, "POST", "/v1/sessions/session_native/"+action, `{}`, bridge)
 		if resp.StatusCode != 204 {
 			t.Errorf("native bridge %s was blocked: %d", action, resp.StatusCode)
@@ -74,7 +74,7 @@ func TestProxyLegacyRemoteControlBoundary(t *testing.T) {
 	bridge := headers.Clone()
 	bridge.Del("X-Organization-Uuid")
 	bridge.Set("Anthropic-Beta", "environments-2025-11-01")
-	bridge.Set("X-Environment-Runner-Version", "2.1.269")
+	bridge.Set("X-Environment-Runner-Version", "2.1.285")
 	for _, path := range []string{"/v1/sessions", "/v1/sessions/session_native/unarchive"} {
 		resp, _ := proxyTestRequest(t, client, "POST", path, creation, bridge.Clone())
 		if resp.StatusCode != 403 {

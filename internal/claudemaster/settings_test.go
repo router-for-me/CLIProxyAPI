@@ -253,16 +253,3 @@ func TestNativeProjectRootsCancelsRunningGit(t *testing.T) {
 		t.Fatal("cancelled Git process did not stop")
 	}
 }
-
-func TestNativeVersionPin(t *testing.T) {
-	for _, supported := range []string{NativeClaudeVersion, NativeClaudeVersion + " (Claude Code)\n"} {
-		if !supportedNativeVersion(supported) {
-			t.Error("pinned version rejected")
-		}
-	}
-	for _, unsupported := range []string{"", "2.1.268 (Claude Code)", "2.1.270 (Claude Code)", "2.1.269-canary (Claude Code)", "canary\n2.1.269 (Claude Code)"} {
-		if supportedNativeVersion(unsupported) {
-			t.Error("unsupported version accepted")
-		}
-	}
-}

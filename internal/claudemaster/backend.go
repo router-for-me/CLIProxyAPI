@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -49,18 +50,19 @@ type BackendOptions struct {
 }
 
 // BackendCredential identifies one independently authenticated profile in an
-// explicitly ordered inference series. Credential values remain in AuthDir.
+// inference pool. Credential values remain in AuthDir.
 type BackendCredential struct {
 	AuthDir  string
 	Provider string
 	AuthID   string
 }
 
-// BackendSeriesOptions drains Claude Credentials in order. The native request
-// chooses the model. A series advances only after a structured provider result
-// confirms that the active subscription is drained.
+// BackendSeriesOptions groups Claude subscriptions for quota-aware selection.
+// The native request chooses the model. Credentials remain ordered as the
+// deterministic fallback when weekly usage is unavailable.
 type BackendSeriesOptions struct {
-	Credentials []BackendCredential
+	Credentials  []BackendCredential
+	QuotaRequest ClaudeQuotaRequestFunc
 }
 
 // Backend embeds only inference and credential refresh. It has no listener,
@@ -69,21 +71,22 @@ type BackendSeriesOptions struct {
 // Stop accepting requests and join HTTP handlers before calling Close; the
 // launcher does this by closing and joining its proxy first.
 type Backend struct {
-	handler http.Handler
-	manager *coreauth.Manager
-	store   backendCredentialStore
-	authIDs []string
-	cancel  context.CancelFunc
-	once    sync.Once
+	handler        http.Handler
+	manager        *coreauth.Manager
+	store          backendCredentialStore
+	authIDs        []string
+	seriesSelector *backendSeriesSelector
+	cancel         context.CancelFunc
+	once           sync.Once
 }
 
 // NewBackend loads one profile, then starts its account-local refresh loop.
 func NewBackend(ctx context.Context, opts BackendOptions) (*Backend, error) {
-	return newBackend(ctx, []BackendCredential{{AuthDir: opts.AuthDir, Provider: opts.Provider, AuthID: opts.AuthID}}, opts.Model, opts.UseRequestModel, true)
+	return newBackend(ctx, []BackendCredential{{AuthDir: opts.AuthDir, Provider: opts.Provider, AuthID: opts.AuthID}}, opts.Model, opts.UseRequestModel, true, nil)
 }
 
-// NewBackendSeries loads an explicitly ordered set of profiles. The caller
-// must hold every profile lock until Close completes.
+// NewBackendSeries loads a quota-aware set of profiles. The caller must hold
+// every profile lock until Close completes.
 func NewBackendSeries(ctx context.Context, opts BackendSeriesOptions) (*Backend, error) {
 	if len(opts.Credentials) < 2 {
 		return nil, errors.New("ordered inference requires at least two profiles")
@@ -91,10 +94,10 @@ func NewBackendSeries(ctx context.Context, opts BackendSeriesOptions) (*Backend,
 	if opts.Credentials[0].Provider != "claude" {
 		return nil, errors.New("ordered inference currently supports Claude profiles only")
 	}
-	return newBackend(ctx, opts.Credentials, "", true, false)
+	return newBackend(ctx, opts.Credentials, "", true, false, opts.QuotaRequest)
 }
 
-func newBackend(ctx context.Context, credentials []BackendCredential, modelName string, useRequestModel, pinSingle bool) (*Backend, error) {
+func newBackend(ctx context.Context, credentials []BackendCredential, modelName string, useRequestModel, pinSingle bool, quotaRequest ClaudeQuotaRequestFunc) (*Backend, error) {
 	if ctx == nil {
 		return nil, errors.New("backend requires a context")
 	}
@@ -182,16 +185,23 @@ func newBackend(ctx context.Context, credentials []BackendCredential, modelName 
 			for _, authID := range registered {
 				registry.GetGlobalRegistry().UnregisterClient(authID)
 			}
+			if seriesSelector != nil {
+				seriesSelector.Stop()
+			}
 			store.seal()
 			return nil, errors.New("cannot register the selected inference credentials")
 		}
 	}
+	if seriesSelector != nil {
+		loadBackendWeeklyQuotas(ctx, manager, seriesSelector, authIDs, quotaRequest)
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	backend := &Backend{
-		manager: manager,
-		store:   store,
-		authIDs: authIDs,
-		cancel:  cancel,
+		manager:        manager,
+		store:          store,
+		authIDs:        authIDs,
+		seriesSelector: seriesSelector,
+		cancel:         cancel,
 	}
 	backend.handler = newBackendHandler(runCtx, BackendOptions{
 		Provider: provider, AuthID: pinnedAuthID, Model: modelName,
@@ -210,6 +220,12 @@ func (b *Backend) Close() error {
 	b.once.Do(func() {
 		b.cancel()
 		b.manager.StopAutoRefreshAndWait()
+		// StopAutoRefreshAndWait also stops a stoppable selector. Keep the
+		// explicit call so this backend still owns the cache lifecycle if the
+		// manager shutdown implementation changes; Stop is idempotent.
+		if b.seriesSelector != nil {
+			b.seriesSelector.Stop()
+		}
 		// A canceled stream's detached result observer can finish after its
 		// HTTP handler. It must not rewrite old credentials after another
 		// process obtains the profile lock. Account refresh itself is joined
@@ -228,9 +244,6 @@ func backendConfig(authDir string) *config.Config {
 		AuthDir: authDir, CommercialMode: true, MaxRetryCredentials: 1,
 		DisableClaudeCloakMode: true, AuthAutoRefreshWorkers: 1,
 	}
-	// Native request detection compares the client version against this
-	// baseline. Keep it aligned with the launcher version we already verified.
-	cfg.ClaudeHeaderDefaults.UserAgent = "claude-cli/" + NativeClaudeVersion + " (external, cli)"
 	cfg.SDKConfig.DisableImageGeneration = config.DisableImageGenerationPassthrough
 	// The native adapter applies its own narrow response-header boundary below.
 	cfg.SDKConfig.PassthroughHeaders = true
@@ -508,33 +521,295 @@ type backendSelector struct {
 	provider string
 }
 
-// backendSeriesSelector exposes only the current profile and advances its
-// process-local cursor after a confirmed shared subscription quota rejection.
-// The cursor never wraps and stale concurrent results cannot skip profiles.
+const backendWeeklyReserve = 0.10
+
+type backendWeeklyQuota struct {
+	known    bool
+	used     float64
+	resetsAt time.Time
+}
+
+type backendSeriesCandidate struct {
+	auth  *coreauth.Auth
+	quota backendWeeklyQuota
+	order int
+}
+
+// backendSeriesSelector drains the account whose weekly allocation resets
+// first. It keeps the last ten percent of an account for opaque continuations
+// whenever another account still has quota.
 type backendSeriesSelector struct {
 	mu       sync.Mutex
 	authIDs  []string
 	provider string
-	active   int
+	quota    map[string]backendWeeklyQuota
+	blocked  map[string]map[string]struct{}
+	sessions *coreauth.SessionCache
+	now      func() time.Time
+	stopped  bool
 }
 
 func (s *backendSeriesSelector) Pick(ctx context.Context, provider, model string, opts coreexecutor.Options, auths []*coreauth.Auth) (*coreauth.Auth, error) {
 	if provider != s.provider && provider != "mixed" {
 		return nil, errors.New("inference provider differs from the ordered profiles")
 	}
+	sessionID, parentSessionID := backendSeriesSessionIDs(opts)
+	affinity := analyzeNativeRequestAffinity(opts.OriginalRequest)
+	switchable := affinity.validJSON && !affinity.requiresAccount
+
 	s.mu.Lock()
-	if s.active >= len(s.authIDs) {
-		s.mu.Unlock()
-		return nil, errors.New("ordered inference subscriptions are exhausted; no fallback is configured")
+	defer s.mu.Unlock()
+	if s.stopped {
+		return nil, errors.New("ordered inference selector is stopped")
 	}
-	authID := s.authIDs[s.active]
-	s.mu.Unlock()
-	for _, auth := range auths {
-		if auth != nil && auth.ID == authID && auth.Provider == s.provider {
-			return (&coreauth.FillFirstSelector{}).Pick(ctx, s.provider, backendAvailabilityModel(model, opts), opts, []*coreauth.Auth{auth})
+	s.initializeLocked()
+	excludedAuthID := ""
+	if sessionID != "" {
+		boundID, boundFound := s.sessions.GetAndRefresh(sessionID)
+		inheritedParent := false
+		if !boundFound && parentSessionID != "" {
+			boundID, boundFound = s.sessions.GetAndRefresh(parentSessionID)
+			inheritedParent = boundFound
+		}
+		// A self-contained child starts its own binding. It inherits the parent
+		// only when its first payload carries state that cannot cross accounts.
+		if boundFound && !(inheritedParent && switchable) {
+			if bound := backendSeriesAuthByID(auths, s.provider, boundID); bound != nil {
+				if !switchable || !s.shouldMoveCleanWorkLocked(boundID, auths) {
+					picked, err := s.pickAuthLocked(ctx, model, opts, bound)
+					if err == nil && inheritedParent && picked != nil {
+						s.sessions.Set(sessionID, picked.ID)
+					}
+					return picked, err
+				}
+				selected := s.preferredAvailableAuthLocked(auths, boundID)
+				if selected == nil {
+					return s.pickAuthLocked(ctx, model, opts, bound)
+				}
+				picked, err := s.pickAuthLocked(ctx, model, opts, selected)
+				if err != nil {
+					return nil, err
+				}
+				s.sessions.Set(sessionID, picked.ID)
+				return picked, nil
+			} else {
+				if !switchable {
+					return nil, errors.New("the current Claude continuation account is unavailable; refusing to move opaque conversation state")
+				}
+				// Manager-side model cooldowns and request-scoped failures also
+				// remove an auth from this candidate slice. They must not rotate a
+				// subscription; only the weekly reserve policy may move clean work.
+				if s.nonQuotaBlockedLocked(boundID, backendAvailabilityModel(model, opts)) {
+					return nil, errors.New("the current Claude subscription is unavailable; no quota handoff is permitted")
+				}
+			}
+			excludedAuthID = boundID
 		}
 	}
-	return nil, errors.New("active ordered inference account is unavailable; no fallback is configured")
+
+	selected := s.preferredAuthLocked(auths, excludedAuthID)
+	if selected == nil {
+		return nil, errors.New("ordered inference subscriptions are exhausted; no fallback is configured")
+	}
+	picked, err := s.pickAuthLocked(ctx, model, opts, selected)
+	if err != nil {
+		return nil, err
+	}
+	if sessionID != "" && picked != nil {
+		s.sessions.Set(sessionID, picked.ID)
+	}
+	return picked, nil
+}
+
+func backendSeriesSessionIDs(opts coreexecutor.Options) (sessionID, parentSessionID string) {
+	sessionID = coreauth.CanonicalSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if ok && info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
+		parentSessionID = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
+	} else if opts.Metadata != nil {
+		if parent, okParent := opts.Metadata[coreexecutor.ParentSessionIDMetadataKey].(string); okParent {
+			parentSessionID = cliproxysession.BoundSessionIdentity(strings.TrimSpace(parent))
+		}
+	}
+	if parentSessionID == sessionID {
+		parentSessionID = ""
+	}
+	return sessionID, parentSessionID
+}
+
+func (s *backendSeriesSelector) initializeLocked() {
+	if s.quota == nil {
+		s.quota = make(map[string]backendWeeklyQuota, len(s.authIDs))
+	}
+	if s.blocked == nil {
+		s.blocked = make(map[string]map[string]struct{}, len(s.authIDs))
+	}
+	if s.sessions == nil {
+		s.sessions = coreauth.NewSessionCacheWithCapacity(30*24*time.Hour, 4096)
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+}
+
+func (s *backendSeriesSelector) Stop() {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return
+	}
+	s.stopped = true
+	cache := s.sessions
+	s.sessions = nil
+	s.mu.Unlock()
+	if cache != nil {
+		cache.Stop()
+	}
+}
+
+func (s *backendSeriesSelector) pickAuthLocked(ctx context.Context, model string, opts coreexecutor.Options, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return (&coreauth.FillFirstSelector{}).Pick(ctx, s.provider, backendAvailabilityModel(model, opts), opts, []*coreauth.Auth{auth})
+}
+
+func backendSeriesAuthByID(auths []*coreauth.Auth, provider, authID string) *coreauth.Auth {
+	for _, auth := range auths {
+		if auth != nil && auth.ID == authID && auth.Provider == provider {
+			return auth
+		}
+	}
+	return nil
+}
+
+func (s *backendSeriesSelector) shouldMoveCleanWorkLocked(boundID string, auths []*coreauth.Auth) bool {
+	quota := s.currentQuotaLocked(boundID)
+	if !quota.known || quota.used < 1-backendWeeklyReserve {
+		return false
+	}
+	for _, auth := range auths {
+		if auth == nil || auth.Provider != s.provider || auth.ID == boundID {
+			continue
+		}
+		other := s.currentQuotaLocked(auth.ID)
+		if !other.known || other.used < 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *backendSeriesSelector) preferredAuthLocked(auths []*coreauth.Auth, excludedAuthID string) *coreauth.Auth {
+	// Rank against the complete configured series. If the quota-preferred account
+	// is absent from auths because of a request/model/auth failure, return nil
+	// instead of rotating subscriptions for a non-weekly-quota condition.
+	return s.preferredAuthWithAvailabilityLocked(auths, excludedAuthID, false)
+}
+
+func (s *backendSeriesSelector) preferredAvailableAuthLocked(auths []*coreauth.Auth, excludedAuthID string) *coreauth.Auth {
+	return s.preferredAuthWithAvailabilityLocked(auths, excludedAuthID, true)
+}
+
+func (s *backendSeriesSelector) preferredAuthWithAvailabilityLocked(auths []*coreauth.Auth, excludedAuthID string, availableOnly bool) *coreauth.Auth {
+	available := make([]backendSeriesCandidate, 0, len(s.authIDs))
+	for order, authID := range s.authIDs {
+		if authID == excludedAuthID {
+			continue
+		}
+		if availableOnly && backendSeriesAuthByID(auths, s.provider, authID) == nil {
+			continue
+		}
+		available = append(available, backendSeriesCandidate{auth: &coreauth.Auth{ID: authID, Provider: s.provider}, quota: s.currentQuotaLocked(authID), order: order})
+	}
+	if len(available) == 0 {
+		return nil
+	}
+
+	choose := func(allowReserve bool) *coreauth.Auth {
+		var best *backendSeriesCandidate
+		for i := range available {
+			item := &available[i]
+			if item.quota.known {
+				if item.quota.used >= 1 {
+					continue
+				}
+				if !allowReserve && item.quota.used >= 1-backendWeeklyReserve {
+					continue
+				}
+			}
+			if best == nil || backendQuotaBefore(*item, *best) {
+				best = item
+			}
+		}
+		if best == nil {
+			return nil
+		}
+		return backendSeriesAuthByID(auths, s.provider, best.auth.ID)
+	}
+	if selected := choose(false); selected != nil {
+		return selected
+	}
+	return choose(true)
+}
+
+func backendQuotaBefore(a, b backendSeriesCandidate) bool {
+	if a.quota.known != b.quota.known {
+		return a.quota.known
+	}
+	if a.quota.known && !a.quota.resetsAt.Equal(b.quota.resetsAt) {
+		if a.quota.resetsAt.IsZero() {
+			return false
+		}
+		if b.quota.resetsAt.IsZero() {
+			return true
+		}
+		return a.quota.resetsAt.Before(b.quota.resetsAt)
+	}
+	return a.order < b.order
+}
+
+func (s *backendSeriesSelector) currentQuotaLocked(authID string) backendWeeklyQuota {
+	quota := s.quota[authID]
+	if quota.known && !quota.resetsAt.IsZero() {
+		now := s.now()
+		for !now.Before(quota.resetsAt) {
+			quota.resetsAt = quota.resetsAt.Add(7 * 24 * time.Hour)
+			quota.used = 0
+		}
+		s.quota[authID] = quota
+	}
+	return quota
+}
+
+func (s *backendSeriesSelector) observeQuota(authID string, quota backendWeeklyQuota) {
+	if strings.TrimSpace(authID) == "" || !quota.known {
+		return
+	}
+	if quota.used < 0 {
+		quota.used = 0
+	} else if quota.used > 1 {
+		quota.used = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return
+	}
+	s.initializeLocked()
+	existing := s.currentQuotaLocked(authID)
+	if existing.known {
+		switch {
+		case quota.resetsAt.IsZero() && !existing.resetsAt.IsZero():
+			if quota.used > existing.used {
+				existing.used = quota.used
+				s.quota[authID] = existing
+			}
+			return
+		case !quota.resetsAt.IsZero() && !existing.resetsAt.IsZero() && quota.resetsAt.Before(existing.resetsAt):
+			return
+		case quota.resetsAt.Equal(existing.resetsAt) && quota.used < existing.used:
+			return
+		}
+	}
+	s.quota[authID] = quota
 }
 
 func backendAvailabilityModel(selectionModel string, opts coreexecutor.Options) string {
@@ -546,21 +821,78 @@ func backendAvailabilityModel(selectionModel string, opts coreexecutor.Options) 
 	return selectionModel
 }
 
+func backendBlockedModelKey(model string) string {
+	parsed := thinking.ParseSuffix(strings.TrimSpace(model))
+	if parsed.ModelName != "" {
+		return strings.TrimSpace(parsed.ModelName)
+	}
+	return strings.TrimSpace(model)
+}
+
+func (s *backendSeriesSelector) nonQuotaBlockedLocked(authID, model string) bool {
+	models := s.blocked[authID]
+	if len(models) == 0 {
+		return false
+	}
+	_, globallyBlocked := models[""]
+	_, modelBlocked := models[backendBlockedModelKey(model)]
+	return globallyBlocked || modelBlocked
+}
+
+func (s *backendSeriesSelector) setNonQuotaBlockedLocked(authID, model string, blocked bool) {
+	if strings.TrimSpace(authID) == "" {
+		return
+	}
+	model = backendBlockedModelKey(model)
+	if !blocked {
+		if models := s.blocked[authID]; models != nil {
+			delete(models, model)
+			if len(models) == 0 {
+				delete(s.blocked, authID)
+			}
+		}
+		return
+	}
+	models := s.blocked[authID]
+	if models == nil {
+		models = make(map[string]struct{})
+		s.blocked[authID] = models
+	}
+	models[model] = struct{}{}
+}
+
 func (s *backendSeriesSelector) OnResult(result coreauth.Result) {
-	if result.Success || result.Error == nil || result.Error.HTTPStatus != http.StatusTooManyRequests ||
-		!result.CredentialScope || result.Error.Code == coreauth.ErrorCodeRequestScoped ||
-		result.Error.Code == coreauth.ErrorCodeForceCooldown {
+	if strings.TrimSpace(result.AuthID) == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active < len(s.authIDs) && result.AuthID == s.authIDs[s.active] {
-		s.active++
+	if s.stopped {
+		return
 	}
+	s.initializeLocked()
+	if result.Success {
+		s.setNonQuotaBlockedLocked(result.AuthID, result.Model, false)
+		return
+	}
+	if result.Error == nil {
+		return
+	}
+	credentialQuota := result.Error.HTTPStatus == http.StatusTooManyRequests && result.CredentialScope &&
+		result.Error.Code != coreauth.ErrorCodeRequestScoped && result.Error.Code != coreauth.ErrorCodeForceCooldown
+	if !credentialQuota {
+		s.setNonQuotaBlockedLocked(result.AuthID, result.Model, true)
+		return
+	}
+	s.setNonQuotaBlockedLocked(result.AuthID, result.Model, false)
+	quota := s.currentQuotaLocked(result.AuthID)
+	quota.known = true
+	quota.used = 1
+	s.quota[result.AuthID] = quota
 }
 
 func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSelector) {
-	manager.SetResultPolicy(coreauth.ResultPolicyFunc(func(_ context.Context, result coreauth.Result) coreauth.Result {
+	manager.SetResultPolicy(coreauth.ResultPolicyFunc(func(ctx context.Context, result coreauth.Result) coreauth.Result {
 		if metadata := result.Options.Metadata; metadata != nil {
 			if requestedModel, ok := metadata[coreexecutor.RequestedModelMetadataKey].(string); ok && strings.TrimSpace(requestedModel) != "" {
 				result.Model = requestedModel
@@ -571,6 +903,11 @@ func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSe
 		// Advancing here prevents a concurrent pick from observing the old
 		// cursor after the active credential has already become unavailable.
 		if selector != nil {
+			if !result.SkipQuotaObservation {
+				if quota, ok := parseBackendWeeklyQuotaHeaders(internallogging.GetResponseHeaders(ctx)); ok {
+					selector.observeQuota(result.AuthID, quota)
+				}
+			}
 			selector.OnResult(result)
 		}
 		return result
@@ -579,6 +916,42 @@ func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSe
 
 func setBackendSeriesResultPolicy(manager *coreauth.Manager, selector *backendSeriesSelector) {
 	setBackendResultPolicy(manager, selector)
+}
+
+func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, selector *backendSeriesSelector, authIDs []string, quotaRequest ClaudeQuotaRequestFunc) {
+	if ctx == nil || manager == nil || selector == nil {
+		return
+	}
+	if quotaRequest == nil {
+		quotaRequest = manager.HttpRequest
+	}
+	var group sync.WaitGroup
+	for _, authID := range authIDs {
+		authID := authID
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			auth, ok := manager.GetByID(authID)
+			if !ok || auth == nil || auth.AuthKind() != coreauth.AuthKindOAuth {
+				return
+			}
+			quotaCtx, cancel := context.WithTimeout(ctx, claudeQuotaDefaultTimeout)
+			defer cancel()
+			if !auth.HasValidAccessToken(time.Now()) {
+				refreshed, errRefresh := manager.ForceRefreshAuth(quotaCtx, authID)
+				if errRefresh != nil || refreshed == nil {
+					return
+				}
+				auth = refreshed
+			}
+			quota, known, errQuota := FetchClaudeWeeklyQuota(quotaCtx, auth, claudeQuotaDefaultTimeout, quotaRequest)
+			if errQuota != nil || !known {
+				return
+			}
+			selector.observeQuota(authID, backendWeeklyQuota{known: true, used: quota.UsedFraction, resetsAt: quota.ResetsAt})
+		}()
+	}
+	group.Wait()
 }
 
 func (s *backendSelector) Pick(ctx context.Context, provider, model string, opts coreexecutor.Options, auths []*coreauth.Auth) (*coreauth.Auth, error) {
@@ -746,6 +1119,7 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 		ctx, cancel := context.WithCancel(c.Request.Context())
 		stop := context.AfterFunc(lifetime, cancel)
 		defer func() { stop(); cancel() }()
+		ctx = internallogging.WithResponseHeadersHolder(ctx)
 		if lifetime.Err() != nil || ctx.Err() != nil {
 			observeBackendStage(ctx, BackendErrorClosed)
 			backendError(c.Writer, http.StatusServiceUnavailable, "inference backend is closed")
@@ -768,8 +1142,8 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 			if opts.UseRequestModel {
 				response, errMsg := base.CountProtocolWithAuthManager(ctx, backendProtocolRequest(model, raw, false))
 				observeBackendError(ctx, errMsg)
-				writeBackendProtocolHeaders(c.Writer.Header(), response.Headers)
-				writeBackendResult(c.Writer, response.Body, errMsg)
+				writeBackendNativeHeaders(c.Writer.Header(), response.Headers)
+				writeBackendNativeResult(c.Writer, response.Body, errMsg)
 				return
 			}
 			payload, headers, errMsg := base.ExecuteCountWithAuthManager(ctx, "claude", model, raw, "")
@@ -789,8 +1163,8 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 		if opts.UseRequestModel {
 			response, errMsg := base.ExecuteProtocolWithAuthManager(ctx, backendProtocolRequest(model, raw, false))
 			observeBackendError(ctx, errMsg)
-			writeBackendProtocolHeaders(c.Writer.Header(), response.Headers)
-			writeBackendResult(c.Writer, response.Body, errMsg)
+			writeBackendNativeHeaders(c.Writer.Header(), response.Headers)
+			writeBackendNativeResult(c.Writer, response.Body, errMsg)
 			return
 		}
 		payload, headers, errMsg := base.ExecuteWithAuthManager(ctx, "claude", model, raw, "")
@@ -914,7 +1288,17 @@ func writeBackendResult(w http.ResponseWriter, payload []byte, errMsg *interface
 		}
 		payload = decoded
 	}
-	w.Header().Set("Content-Type", "application/json")
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	_, _ = w.Write(payload)
+}
+
+func writeBackendNativeResult(w http.ResponseWriter, payload []byte, errMsg *interfaces.ErrorMessage) {
+	if errMsg != nil {
+		writeBackendNativeUpstreamError(w, errMsg)
+		return
+	}
 	_, _ = w.Write(payload)
 }
 
@@ -946,9 +1330,6 @@ func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *han
 			observeBackendError(ctx, errMsg)
 			if !started {
 				writeBackendUpstreamError(w, errMsg)
-			} else {
-				_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Configured inference failed; no fallback to the native master was attempted\"}}\n\n")
-				flusher.Flush()
 			}
 			return
 		case chunk, open := <-data:
@@ -961,8 +1342,12 @@ func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *han
 			}
 			if !started {
 				writeBackendProtocolHeaders(w.Header(), headers)
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.Header().Set("Cache-Control", "no-cache")
+				if w.Header().Get("Content-Type") == "" {
+					w.Header().Set("Content-Type", "text/event-stream")
+				}
+				if w.Header().Get("Cache-Control") == "" {
+					w.Header().Set("Cache-Control", "no-cache")
+				}
 				started = true
 			}
 			if _, err := w.Write(chunk); err != nil {
@@ -981,7 +1366,7 @@ func streamBackendProtocolResponse(ctx context.Context, w http.ResponseWriter, f
 	stream, errMsg := base.ExecuteProtocolStreamWithAuthManager(ctx, backendProtocolRequest(model, raw, true))
 	if errMsg != nil {
 		observeBackendError(ctx, errMsg)
-		writeBackendUpstreamError(w, errMsg)
+		writeBackendNativeUpstreamError(w, errMsg)
 		return
 	}
 	started := false
@@ -997,35 +1382,45 @@ func streamBackendProtocolResponse(ctx context.Context, w http.ResponseWriter, f
 				}
 				return
 			}
+			if len(chunk.Payload) > 0 {
+				if !started {
+					writeBackendNativeHeaders(w.Header(), stream.Headers)
+					if w.Header().Get("Content-Type") == "" {
+						w.Header().Set("Content-Type", "text/event-stream")
+					}
+					if w.Header().Get("Cache-Control") == "" {
+						w.Header().Set("Cache-Control", "no-cache")
+					}
+					started = true
+				}
+				if _, err := w.Write(chunk.Payload); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
 			if chunk.Err != nil {
 				streamErr := &interfaces.ErrorMessage{StatusCode: chunk.Err.StatusCode, Error: chunk.Err, Addon: chunk.Err.Headers}
 				observeBackendError(ctx, streamErr)
 				if !started {
-					writeBackendUpstreamError(w, streamErr)
-				} else {
-					_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Configured inference failed; no fallback to the native master was attempted\"}}\n\n")
-					flusher.Flush()
+					writeBackendNativeUpstreamError(w, streamErr)
 				}
 				return
 			}
-			if len(chunk.Payload) == 0 {
-				continue
-			}
-			if !started {
-				writeBackendProtocolHeaders(w.Header(), stream.Headers)
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.Header().Set("Cache-Control", "no-cache")
-				started = true
-			}
-			if _, err := w.Write(chunk.Payload); err != nil {
-				return
-			}
-			flusher.Flush()
 		}
 	}
 }
 
 func writeBackendUpstreamError(w http.ResponseWriter, errMsg *interfaces.ErrorMessage) {
+	if status, headers, body, ok := backendDirectErrorResponse(errMsg); ok {
+		writeBackendProtocolHeaders(w.Header(), headers)
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
+	if errMsg == nil {
+		backendError(w, http.StatusBadGateway, "Configured inference failed; no fallback to the native master was attempted")
+		return
+	}
 	writeBackendProtocolHeaders(w.Header(), errMsg.Addon)
 	status := errMsg.StatusCode
 	if status < 400 || status > 599 {
@@ -1034,8 +1429,117 @@ func writeBackendUpstreamError(w http.ResponseWriter, errMsg *interfaces.ErrorMe
 	backendError(w, status, "Configured inference failed; no fallback to the native master was attempted")
 }
 
-// Native uses these headers for retries and usage reporting. Authentication,
-// cookies, account identifiers, framing and compression are never forwarded.
+func writeBackendNativeUpstreamError(w http.ResponseWriter, errMsg *interfaces.ErrorMessage) {
+	if status, headers, body, ok := backendDirectErrorResponse(errMsg); ok {
+		writeBackendNativeHeaders(w.Header(), headers)
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
+	if errMsg == nil {
+		backendError(w, http.StatusBadGateway, "Configured inference failed; no fallback to the native master was attempted")
+		return
+	}
+	writeBackendNativeHeaders(w.Header(), errMsg.Addon)
+	status := errMsg.StatusCode
+	if status < 400 || status > 599 {
+		status = http.StatusBadGateway
+	}
+	backendError(w, status, "Configured inference failed; no fallback to the native master was attempted")
+}
+
+func backendDirectErrorResponse(errMsg *interfaces.ErrorMessage) (int, http.Header, []byte, bool) {
+	if errMsg == nil {
+		return 0, nil, nil, false
+	}
+	if errMsg.DirectResponse || errMsg.Body != nil || errMsg.Headers != nil {
+		return backendDirectErrorStatus(errMsg.StatusCode), errMsg.Headers, errMsg.Body, true
+	}
+
+	var terminated *coreexecutor.RequestTerminatedError
+	if errors.As(errMsg.Error, &terminated) && terminated != nil {
+		return backendDirectErrorStatus(terminated.StatusCode()), terminated.ResponseHeaders(), terminated.ResponseBody(), true
+	}
+
+	type directResponseError interface {
+		DirectResponse() bool
+		ResponseBody() []byte
+	}
+	var direct directResponseError
+	if !errors.As(errMsg.Error, &direct) || direct == nil || !direct.DirectResponse() {
+		return 0, nil, nil, false
+	}
+	status := errMsg.StatusCode
+	var statusProvider interface{ StatusCode() int }
+	if errors.As(errMsg.Error, &statusProvider) && statusProvider != nil {
+		status = statusProvider.StatusCode()
+	}
+	var headers http.Header
+	var headersProvider interface{ ResponseHeaders() http.Header }
+	if errors.As(errMsg.Error, &headersProvider) && headersProvider != nil {
+		headers = headersProvider.ResponseHeaders()
+	}
+	return backendDirectErrorStatus(status), headers, direct.ResponseBody(), true
+}
+
+func backendDirectErrorStatus(status int) int {
+	if status < 100 || status > 599 {
+		return http.StatusBadGateway
+	}
+	return status
+}
+
+// Native Claude responses are relayed as raw representation bytes. Preserve
+// every end-to-end upstream header, including representation framing, while
+// removing only hop-by-hop fields and headers nominated by Connection.
+func writeBackendNativeHeaders(dst, src http.Header) {
+	if src == nil {
+		return
+	}
+	connectionScoped := make(map[string]struct{})
+	for _, value := range src.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if name := http.CanonicalHeaderKey(strings.TrimSpace(token)); name != "" {
+				connectionScoped[name] = struct{}{}
+			}
+		}
+	}
+	for key := range connectionScoped {
+		dst.Del(key)
+	}
+	for _, key := range []string{
+		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Proxy-Connection",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade",
+	} {
+		dst.Del(key)
+	}
+	for key, values := range src {
+		canonical := http.CanonicalHeaderKey(key)
+		if backendNativeResponseHeaderBlocked(canonical) {
+			continue
+		}
+		if _, blocked := connectionScoped[canonical]; blocked {
+			continue
+		}
+		dst.Del(canonical)
+		for _, value := range values {
+			dst.Add(canonical, value)
+		}
+	}
+}
+
+func backendNativeResponseHeaderBlocked(key string) bool {
+	switch key {
+	case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Proxy-Connection",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade":
+		return true
+	default:
+		return false
+	}
+}
+
+// The non-native backend path receives decoded bodies and keeps its existing
+// narrow protocol boundary.
 func writeBackendProtocolHeaders(dst, src http.Header) {
 	filtered := handlers.FilterUpstreamHeaders(src)
 	retryAfter := filtered.Get("Retry-After")
