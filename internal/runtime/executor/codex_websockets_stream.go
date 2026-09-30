@@ -782,11 +782,11 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 			return nil, errRepair
 		}
 		originalPayload = repaired
-		if repairedPayload, errPayload := helps.RepairResponsesToolItemIDs(e.cfg, req.Payload); errPayload != nil {
+		repairedPayload, errPayload := helps.RepairResponsesToolItemIDs(e.cfg, req.Payload)
+		if errPayload != nil {
 			return nil, errPayload
-		} else {
-			req.Payload = repairedPayload
 		}
+		req.Payload = repairedPayload
 	}
 	isCompat := e.resolveCodexModelIsCompat(auth, req, baseModel)
 	originalTranslated, body, updatesChanged := translateCodexRequestPairWithUpdateIntent(from, to, baseModel, originalPayload, req.Payload, true, isCompat)

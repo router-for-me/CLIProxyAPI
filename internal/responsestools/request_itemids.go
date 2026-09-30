@@ -13,7 +13,6 @@ import (
 // inputIDChange is one planned id migration inside the top-level input array.
 type inputIDChange struct {
 	Index int
-	OldID string
 	NewID string
 }
 
@@ -123,7 +122,7 @@ func mayCarryMigratedItemID(body []byte) bool {
 	return false
 }
 
-// planInputItemChanges proposes one migration per direct input item whose
+// planInputItemIDChanges proposes one migration per direct input item whose
 // current type and known id prefix form an allowed pair. Server-executed search,
 // unknown ids, absent or non-string ids, and non-tool items are left alone: the
 // proxy has no evidence that it owns those identities.
@@ -153,7 +152,7 @@ func planInputItemIDChanges(input []any) []inputIDChange {
 		if err != nil {
 			continue
 		}
-		changes = append(changes, inputIDChange{Index: index, OldID: id, NewID: converted})
+		changes = append(changes, inputIDChange{Index: index, NewID: converted})
 	}
 	return changes
 }
