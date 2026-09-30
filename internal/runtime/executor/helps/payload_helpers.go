@@ -36,13 +36,9 @@ func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor
 	return out
 }
 
-func isCodexTargetExecutor(targetExecutor, protocol string) bool {
+func isCodexTargetExecutor(targetExecutor string) bool {
 	te := strings.ToLower(strings.TrimSpace(targetExecutor))
-	if te == "codex" || te == "codex-websockets" || te == "codex_websockets" {
-		return true
-	}
-	p := strings.ToLower(strings.TrimSpace(protocol))
-	return p == "codex" || p == "codex-websockets"
+	return te == "codex" || te == "codex-websockets" || te == "codex_websockets"
 }
 
 // ApplyPayloadConfigWithTrackedPaths applies payload config and reports which
@@ -60,7 +56,7 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 	if len(payload) == 0 {
 		return payload, touched
 	}
-	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor, protocol) {
+	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
 		payload = NormalizeCodexToolIntegerTypes(payload, headers)
 	}
 	if cfg == nil {
