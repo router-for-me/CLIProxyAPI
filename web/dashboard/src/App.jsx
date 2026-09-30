@@ -20,6 +20,7 @@ import AutoRoutersPage from './pages/AutoRoutersPage.jsx';
 import AutoRouterPage from './pages/AutoRouterPage.jsx';
 import AutoRouterAnalysisPage from './pages/AutoRouterAnalysisPage.jsx';
 import ModelsCatalogPage from './pages/ModelsCatalogPage.jsx';
+import ModelIdDetailPage from './pages/ModelIdDetailPage.jsx';
 import ErrorMessagesPage from './pages/ErrorMessagesPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
 import BrandingPage from './pages/BrandingPage.jsx';
@@ -360,6 +361,7 @@ export default function App() {
             <Route path="/auto-routers/new" element={<AutoRouterPage />} />
             <Route path="/auto-routers/:id" element={<AutoRouterPage />} />
             <Route path="/models" element={<ModelsCatalogPage />} />
+            <Route path="/models/:id" element={<ModelIdDetailPage />} />
             <Route path="/error-messages" element={<ErrorMessagesPage />} />
             <Route path="/api-tokens" element={<ApiTokensPage />} />
             <Route path="/api-tokens/:id" element={<ApiTokenDetailPage />} />
