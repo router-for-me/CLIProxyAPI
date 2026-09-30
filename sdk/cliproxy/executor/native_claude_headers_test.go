@@ -17,12 +17,25 @@ func TestNativeClaudeProtocolHeadersBoundary(t *testing.T) {
 		"X-Stainless-Async": {"async"}, "X-Client-Request-Id": {"per-request-correlation"},
 		"X-Claude-Code-Session-Id": {"11111111-2222-4333-8444-555555555555"},
 		"X-Claude-Code-Agent-Id":   {"tool-agent"}, "X-Claude-Code-Parent-Agent-Id": {"parent-agent"},
+		"X-Claude-Code-Prompt-Id":     {"22222222-3333-4444-8555-666666666666"},
+		"X-Claude-Code-Request-Class": {"user"}, "X-Claude-Code-Agent-Type": {"custom"},
+		"X-Claude-Code-Future-Hint":         {"future-native-value"},
 		"X-Claude-Remote-Container-Id":      {"remote-container"},
 		"X-Claude-Remote-Session-Id":        {"remote-session"},
 		"X-Anthropic-Additional-Protection": {"true"},
+		"X-Custom-Identity":                 {"future-end-to-end-value"},
+		"X-Future-Native-Protocol":          {"future-value-a", "future-value-b"},
+		"X-Stainless-Future-Protocol":       {"future-sdk-value"},
 	}
 	src := safe.Clone()
-	for _, name := range []string{"Authorization", "Cookie", "X-Api-Key", "Proxy-Authorization", "X-Organization-Uuid", "X-Account-Id", "X-Forwarded-For", "X-Unknown", "X-Stainless-Future-Secret", "X-Trusted-Device-Token", "Content-Length"} {
+	for _, name := range []string{
+		"Authorization", "Anthropic-Organization-Id", "Anthropic-User-Profile-Id", "Anthropic-Workspace-Id",
+		"Cookie", "Cookie2", "X-Api-Key", "Proxy-Authorization", "X-Claude-Code-Ide-Authorization",
+		"Forwarded", "Via", "X-Forwarded-For", "X-Forwarded-Proto", "X-Real-Ip",
+		"X-Organization-Uuid", "X-Account-Id", "X-Trusted-Device-Token",
+		"Connection", "Content-Length", "Keep-Alive", "Proxy-Authenticate",
+		"Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+	} {
 		src.Set(name, "private-canary")
 	}
 	if got := NativeClaudeProtocolHeaders(src); !reflect.DeepEqual(got, safe) {
@@ -46,7 +59,7 @@ func TestNativeClaudeProtocolHeadersBoundary(t *testing.T) {
 
 func TestNativeClaudeHeadersExcludeConnectionTokensCaseInsensitively(t *testing.T) {
 	header := http.Header{
-		"connection": {" x-app, X-STAINLESS-LANG "}, "x-app": {"secret"},
+		"connection": {" x-app, X-STAINLESS-LANG ,, "}, "x-app": {"secret"},
 		"X-Stainless-Lang": {"secret"}, "anthropic-beta": {"a", "b"},
 	}
 	if got := NativeClaudeProtocolHeaders(header); !reflect.DeepEqual(got, http.Header{"Anthropic-Beta": {"a", "b"}}) {

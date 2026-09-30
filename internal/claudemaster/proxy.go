@@ -549,7 +549,7 @@ func proxyControlPath(method, path string) bool {
 	return false
 }
 
-// Native Claude Code 2.1.269 uses these exact control-plane routes to acquire,
+// Audited native Claude Code releases use these exact control-plane routes to acquire,
 // acknowledge, renew, stop, and reconnect bridge work. Do not permit the whole
 // environments subtree: an unknown endpoint must still fail closed.
 func proxyEnvironmentControl(method, suffix string) bool {

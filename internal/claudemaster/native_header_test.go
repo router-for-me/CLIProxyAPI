@@ -6,14 +6,14 @@ import (
 	"testing"
 )
 
-// Protocol values are from the credential-free 2.1.269/270 native capture.
+// Protocol values are from credential-free native Claude captures through 2.1.285.
 // OAuth beta is explicit because the isolated executable capture used a fake
 // API key; this fixture must not imply a live OAuth-header capture was made.
 func nativeProtocolFixture() http.Header {
 	return http.Header{
 		"Content-Type": {"application/json"}, "Accept": {"application/json"},
 		"Accept-Encoding":   {"gzip, deflate, br, zstd"},
-		"User-Agent":        {"claude-cli/2.1.269 (external, sdk-cli)"},
+		"User-Agent":        {"claude-cli/2.1.285 (external, sdk-cli)"},
 		"Anthropic-Version": {"2023-06-01"},
 		"Anthropic-Beta":    {"claude-code-20250219,oauth-2025-04-20", "native-feature-order-preserved"},
 		"Anthropic-Dangerous-Direct-Browser-Access": {"true"}, "X-App": {"cli"},

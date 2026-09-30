@@ -288,14 +288,20 @@ func finalInterceptorHeaders(current, intercepted http.Header) http.Header {
 	return cloneHeader(intercepted)
 }
 
-func downstreamHeadersFromExecutor(headers http.Header, passthrough bool) http.Header {
+func downstreamHeadersFromExecutor(ctx context.Context, headers http.Header, passthrough bool) http.Header {
+	if _, native := coreexecutor.NativeClaudeProtocolHeadersFromContext(ctx); native {
+		return cloneHeader(headers)
+	}
 	if !passthrough {
 		return nil
 	}
 	return FilterUpstreamHeaders(headers)
 }
 
-func downstreamHeadersAfterInterceptors(baseRaw, finalRaw http.Header, passthrough bool) http.Header {
+func downstreamHeadersAfterInterceptors(ctx context.Context, baseRaw, finalRaw http.Header, passthrough bool) http.Header {
+	if _, native := coreexecutor.NativeClaudeProtocolHeadersFromContext(ctx); native {
+		return cloneHeader(finalRaw)
+	}
 	if passthrough {
 		return FilterUpstreamHeaders(finalRaw)
 	}
@@ -616,7 +622,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 		StatusCode:      statusCode,
 		Metadata:        opts.Metadata,
 	}, skipPluginID)
-	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), passthrough)
+	responseHeaders = downstreamHeadersAfterInterceptors(ctx, rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), passthrough)
 	if len(resp.Body) > 0 {
 		body = cloneBytes(resp.Body)
 	}

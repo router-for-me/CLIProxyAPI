@@ -22,7 +22,7 @@ func TestNativeClaudeSendBoundaryPreservesProtocol(t *testing.T) {
 				native := http.Header{
 					"Content-Type": {"application/json"}, "Accept": {"application/json"},
 					"Accept-Encoding":   {"gzip, deflate, br, zstd"},
-					"User-Agent":        {"claude-cli/2.1.269 (external, cli)"},
+					"User-Agent":        {"claude-cli/2.1.285 (external, cli)"},
 					"Anthropic-Version": {"2023-06-01"}, "Anthropic-Beta": {"native-beta-1", "native-beta-2"},
 					"X-Stainless-Os": {osName}, "X-Stainless-Arch": {"arm64"}, "X-Stainless-Package-Version": {"0.112.1"},
 					"X-Stainless-Runtime-Version": {"v26.3.0"}, "X-Stainless-Async": {"async"},

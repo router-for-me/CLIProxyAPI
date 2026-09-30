@@ -1,6 +1,7 @@
 package claudemaster
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ const (
 	integrationClaudeToken   = "sk-ant-oat01-synthetic-selected-account"
 	integrationClaudeAccount = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	integrationClaudeDevice  = "0000000000000000000000000000000000000000000000000000000000000000"
+	integrationClaudeSession = "11111111-2222-4333-8444-555555555555"
 	integrationMasterCanary  = "master-private-identity-canary"
 	integrationToolSchema    = `{"type":"object","properties":{"command":{"type":"string","description":"The command to run"}},"required":["command"],"additionalProperties":false}`
 	integrationClaudeReply   = `{"id":"msg_synthetic","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"synthetic answer"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":2}}`
@@ -48,6 +50,8 @@ type claudeIntegrationTransport struct {
 	status      int
 	contentType string
 	response    string
+	responseRaw []byte
+	headers     http.Header
 	respond     func([]byte) (int, string, string)
 	unexpected  bool
 }
@@ -85,16 +89,26 @@ func (rt *claudeIntegrationTransport) RoundTrip(request *http.Request) (*http.Re
 	if rt.respond != nil {
 		status, contentType, response = rt.respond(raw)
 	}
+	headers := http.Header{
+		"Content-Type": {contentType}, "Request-Id": {"selected-request-id"},
+		"Retry-After": {"3"}, "X-Should-Retry": {"false"},
+		"Anthropic-Ratelimit-Unified-Status": {"allowed"},
+		"Set-Cookie":                         {"selected-private-canary=a", "selected-private-canary=b"},
+		"X-Account-Id":                       {"selected-private-canary"},
+		"X-Anthropic-Future-Header":          {"one", "two"},
+	}
+	for key, values := range rt.headers {
+		headers[key] = append([]string(nil), values...)
+	}
+	bodyReader := io.Reader(strings.NewReader(response))
+	if rt.responseRaw != nil {
+		bodyReader = bytes.NewReader(rt.responseRaw)
+	}
 	return &http.Response{
 		StatusCode: status,
-		Header: http.Header{
-			"Content-Type": {contentType}, "Request-Id": {"selected-request-id"},
-			"Retry-After": {"3"}, "X-Should-Retry": {"false"},
-			"Anthropic-Ratelimit-Unified-Status": {"allowed"},
-			"Set-Cookie":                         {"selected-private-canary"}, "X-Account-Id": {"selected-private-canary"},
-		},
-		Body:    io.NopCloser(strings.NewReader(response)),
-		Request: request,
+		Header:     headers,
+		Body:       io.NopCloser(bodyReader),
+		Request:    request,
 	}, nil
 }
 
@@ -102,9 +116,11 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 	for _, tc := range []struct {
 		name, path, response, contentType string
 		stream                            bool
+		compressed                        bool
 		status                            int
 	}{
 		{name: "messages", path: "/v1/messages", status: http.StatusOK, contentType: "application/json", response: integrationClaudeReply},
+		{name: "compressed_messages", path: "/v1/messages", status: http.StatusOK, contentType: "application/json", response: integrationClaudeReply, compressed: true},
 		{name: "stream", path: "/v1/messages", stream: true, status: http.StatusOK, contentType: "text/event-stream", response: integrationClaudeStream()},
 		{name: "count_tokens", path: "/v1/messages/count_tokens", status: http.StatusOK, contentType: "application/json", response: `{"input_tokens":17}`},
 		{name: "upstream_failure", path: "/v1/messages", status: http.StatusTooManyRequests, contentType: "application/json", response: `{"type":"error","error":{"type":"rate_limit_error","message":"upstream-private-canary"}}`},
@@ -112,6 +128,15 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 		{name: "count_failure", path: "/v1/messages/count_tokens", status: http.StatusBadRequest, contentType: "application/json", response: `{"type":"error","error":{"type":"invalid_request_error","message":"upstream-private-canary"}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			responseRaw := []byte(nil)
+			responseHeaders := http.Header(nil)
+			if tc.compressed {
+				responseRaw = gzipBackendTestBody(t, []byte(tc.response))
+				responseHeaders = http.Header{
+					"Content-Encoding": {"gzip"},
+					"Content-Length":   {fmt.Sprint(len(responseRaw))},
+				}
+			}
 			// A real, separately loaded profile exercises auth normalization and
 			// identity preparation without importing any native master state.
 			opts := writeSyntheticBackendCredential(t, canonicalTestTempDir(t), "real-claude-"+tc.name+".json", map[string]any{
@@ -134,6 +159,7 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 			transport := &claudeIntegrationTransport{
 				expectedURL: "https://api.anthropic.com" + tc.path + "?beta=true",
 				status:      tc.status, contentType: tc.contentType, response: tc.response,
+				responseRaw: responseRaw, headers: responseHeaders,
 			}
 			// Keep the production selector and config: custom selectors take
 			// the manager's mixed-provider path even for one pinned account.
@@ -161,9 +187,10 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 			handler := newBackendHandler(lifetime, handlerOpts, handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
 			body := fmt.Sprintf(`{"model":%q,"max_tokens":64,"stream":%t,"metadata":{"user_id":%q},"messages":[{"role":"user","content":"integration hello"}],"tools":[{"name":"Bash","description":"Execute a command","input_schema":%s}]}`, opts.Model, tc.stream, integrationMasterCanary, integrationToolSchema)
 			request := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com"+tc.path+"?api_key="+integrationMasterCanary, strings.NewReader(body))
-			for _, header := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "X-Account-Id", "X-Claude-Code-Session-Id", "X-Claude-Remote-Container-Id", "X-Claude-Remote-Session-Id"} {
+			for _, header := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "X-Account-Id"} {
 				request.Header.Set(header, integrationMasterCanary)
 			}
+			request.Header.Set("X-Claude-Code-Session-Id", integrationClaudeSession)
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Anthropic-Version", "2023-06-01")
 			for key, values := range nativeProtocolFixture() {
@@ -182,12 +209,18 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 					t.Errorf("native response header %s was lost", key)
 				}
 			}
-			if strings.Contains(fmt.Sprint(response.Header()), "selected-private-canary") {
-				t.Fatal("account-bearing upstream header escaped the response boundary")
+			if !reflect.DeepEqual(response.Header().Values("Set-Cookie"), []string{"selected-private-canary=a", "selected-private-canary=b"}) ||
+				response.Header().Get("X-Account-Id") != "selected-private-canary" ||
+				!reflect.DeepEqual(response.Header().Values("X-Anthropic-Future-Header"), []string{"one", "two"}) {
+				t.Fatal("end-to-end upstream response headers were not preserved")
 			}
-			if tc.status >= 400 {
-				if strings.Contains(response.Body.String(), "upstream-private-canary") || !strings.Contains(response.Body.String(), "no fallback") {
-					t.Fatalf("upstream failure was not sanitized: %s", response.Body.String())
+			if tc.compressed {
+				if !bytes.Equal(response.Body.Bytes(), responseRaw) || response.Header().Get("Content-Encoding") != "gzip" || response.Header().Get("Content-Length") != fmt.Sprint(len(responseRaw)) {
+					t.Fatalf("compressed upstream representation changed: headers=%v got=%x want=%x", response.Header(), response.Body.Bytes(), responseRaw)
+				}
+			} else if tc.status >= 400 {
+				if response.Body.String() != tc.response {
+					t.Fatalf("upstream failure changed: got %q want %q", response.Body.String(), tc.response)
 				}
 			} else if tc.path == "/v1/messages/count_tokens" {
 				if gjson.GetBytes(response.Body.Bytes(), "input_tokens").Int() != 17 {
@@ -226,9 +259,12 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 			if upstream.header.Get("Authorization") != "Bearer "+integrationClaudeToken || upstream.header.Get("X-Api-Key") != "" {
 				t.Fatal("upstream did not use only the selected OAuth bearer")
 			}
-			for key, values := range upstream.header {
-				if strings.Contains(strings.Join(values, ","), integrationMasterCanary) {
-					t.Fatalf("master identity leaked through header %s", key)
+			if upstream.header.Get("X-Claude-Code-Session-Id") != integrationClaudeSession {
+				t.Fatal("native conversation session header changed")
+			}
+			for _, key := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "X-Account-Id"} {
+				if strings.Contains(strings.Join(upstream.header.Values(key), ","), integrationMasterCanary) {
+					t.Fatalf("master credential identity leaked through header %s", key)
 				}
 			}
 			if strings.Contains(string(upstream.body), integrationMasterCanary) || strings.Contains(upstream.target, integrationMasterCanary) {

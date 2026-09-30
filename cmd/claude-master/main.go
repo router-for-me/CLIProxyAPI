@@ -48,7 +48,7 @@ func run(args []string) (int, error) {
 		if _, err := claudemaster.Preflight(ctx, nil); err != nil {
 			return 1, err
 		}
-		fmt.Fprintln(os.Stdout, "Startup checks passed: native Claude "+claudemaster.NativeClaudeVersion+" and local settings. No login or session was started.")
+		fmt.Fprintln(os.Stdout, "Startup checks passed: installed native Claude and local settings. No login or session was started.")
 		return 0, nil
 	}
 	if len(args) < 2 {
@@ -68,7 +68,7 @@ func run(args []string) (int, error) {
 		flags.StringVar(&model, "model", "", "diagnostic model")
 	case "run":
 		flags.BoolVar(&diagnostics, "diagnostics", false, "print numeric proxy counters only")
-		flags.Var(&nextProfiles, "next-profile", "next inference profile after the preceding subscription is drained")
+		flags.Var(&nextProfiles, "next-profile", "additional inference profile for quota-aware subscription rotation")
 	}
 	if err := flags.Parse(args[2:]); err != nil {
 		return 2, errors.New("invalid launcher arguments")

@@ -8,10 +8,9 @@ import (
 	"path/filepath"
 )
 
-// resolveNativeBinary selects an already installed, reviewed executable without
-// changing the user's global Claude launcher or downloading another version.
-// Resolve the launcher's symlink before checking its version, so a background
-// updater changing that launcher cannot select a different binary at execution.
+// resolveNativeBinary selects the user's installed Claude executable without
+// changing or downloading it. Resolve the launcher symlink before starting so
+// an updater changing that symlink cannot swap the binary during this run.
 func resolveNativeBinary(ctx context.Context) (string, error) {
 	if ctx == nil {
 		return "", errors.New("native Claude selection requires a context")
@@ -19,37 +18,14 @@ func resolveNativeBinary(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if candidate, err := exec.LookPath("claude"); err == nil {
-		if resolved, err := reviewedNativeBinary(ctx, candidate); err == nil {
-			return resolved, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
+	candidate, err := exec.LookPath("claude")
+	if err != nil {
+		return "", errors.New("native Claude Code is not installed or not on PATH")
 	}
-	dataDir := os.Getenv("XDG_DATA_HOME")
-	if dataDir != "" {
-		if !filepath.IsAbs(dataDir) {
-			return "", errors.New("XDG_DATA_HOME must be absolute when selecting the reviewed native Claude executable")
-		}
-	} else {
-		homeDir, err := os.UserHomeDir()
-		if err != nil || homeDir == "" || !filepath.IsAbs(homeDir) {
-			return "", errors.New("cannot locate the current user's installed native Claude versions")
-		}
-		dataDir = filepath.Join(homeDir, ".local", "share")
-	}
-	installed := filepath.Join(dataDir, "claude", "versions", NativeClaudeVersion)
-	if resolved, err := reviewedNativeBinary(ctx, installed); err == nil {
-		return resolved, nil
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	return "", errors.New("reviewed native Claude Code " + NativeClaudeVersion + " is not installed; no unreviewed version was selected")
+	return installedNativeBinary(ctx, candidate)
 }
 
-func reviewedNativeBinary(ctx context.Context, candidate string) (string, error) {
+func installedNativeBinary(ctx context.Context, candidate string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		return "", errors.New("cannot resolve installed native Claude executable")
@@ -61,9 +37,6 @@ func reviewedNativeBinary(ctx context.Context, candidate string) (string, error)
 	info, err := os.Stat(resolved)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return "", errors.New("installed native Claude is not an executable file")
-	}
-	if err := verifyNativeVersion(ctx, resolved); err != nil {
-		return "", err
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err

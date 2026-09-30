@@ -22,9 +22,6 @@ import (
 	"time"
 )
 
-// NativeClaudeVersion is the reviewed native endpoint/settings contract. Advancing it needs proof.
-const NativeClaudeVersion = "2.1.269"
-
 // Launch starts the native master with its existing personal Claude login and a process-only proxy.
 // The caller must hold the profile lock until this returns. It never edits Claude configuration.
 func Launch(ctx context.Context, profile Profile, args []string) (int, error) {
@@ -189,21 +186,6 @@ func ChildEnvironment(environ, args []string, proxyURL, caPath string) ([]string
 	}
 	out = append(out, "HTTPS_PROXY="+proxyURL, "https_proxy="+proxyURL, "NODE_EXTRA_CA_CERTS="+caPath, "DISABLE_AUTOUPDATER=1")
 	return out, nil
-}
-
-func verifyNativeVersion(ctx context.Context, bin string) error {
-	cmd := exec.CommandContext(ctx, bin, "--version")
-	var output boundedOutput
-	cmd.Stdout = &output
-	if err := cmd.Run(); err != nil || !supportedNativeVersion(output.String()) {
-		return errors.New("native Claude version is unsupported; this launcher requires verified Claude Code " + NativeClaudeVersion)
-	}
-	return nil
-}
-
-func supportedNativeVersion(output string) bool {
-	text := strings.TrimSpace(output)
-	return text == NativeClaudeVersion || text == NativeClaudeVersion+" (Claude Code)"
 }
 
 type processCertificate struct {

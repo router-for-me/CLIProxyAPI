@@ -138,8 +138,11 @@ func TestBackendSeriesDoesNotFallThroughOnModelScopedRateLimit(t *testing.T) {
 	if got := strings.Join(capture.models, ","); got != model+","+otherModel {
 		t.Fatalf("model cooldown used the selection marker instead of requested models: models=%v", capture.models)
 	}
-	if selector.active != 0 {
-		t.Fatalf("model-scoped rate limit advanced cursor to %d", selector.active)
+	selector.mu.Lock()
+	_, quotaChanged := selector.quota[first]
+	selector.mu.Unlock()
+	if quotaChanged {
+		t.Fatal("model-scoped rate limit changed weekly account quota")
 	}
 	for i, response := range []*httptest.ResponseRecorder{firstResponse, secondResponse} {
 		if response.Code == http.StatusOK || strings.Contains(response.Body.String(), "private model rate limit") {

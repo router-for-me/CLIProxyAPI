@@ -27,7 +27,7 @@ import (
 
 // TestNativeCompatibilitySmoke is deliberately opt-in: normal unit tests never
 // find or launch an installed personal Claude binary. CI downloads a disposable
-// pinned artifact and verifies its publisher manifest before setting this path.
+// native artifact and verifies its publisher manifest before setting this path.
 // This tests native CONNECT, TLS, API-key/OAuth-shaped headers and SSE parsing,
 // not a real login or inference provider. Both upstreams are synthetic; other
 // CONNECT hosts are refused before the production proxy can dial them.
@@ -87,14 +87,18 @@ func nativeCompatibilitySmoke(t *testing.T, binary, mode string) {
 		mu.Unlock()
 		if before == nil {
 			t.Error("inference lost the native request correlation header")
-		} else if want := coreexecutor.NativeClaudeProtocolHeaders(before); !reflect.DeepEqual(r.Header, want) {
-			t.Error("inference changed or dropped reviewed native protocol headers")
+		} else if want := nativeCompatibilityExpectedHeaders(before); !reflect.DeepEqual(r.Header, want) {
+			t.Error("inference changed or dropped native end-to-end protocol headers")
 		}
 		marker, ok := coreexecutor.NativeClaudeProtocolHeadersFromContext(r.Context())
-		if !ok || !reflect.DeepEqual(marker, coreexecutor.NativeClaudeProtocolHeaders(before)) {
+		if !ok || !reflect.DeepEqual(marker, nativeCompatibilityExpectedHeaders(before)) {
 			t.Error("proxy lost the native protocol opt-in context required by the selected executor")
 		}
-		for _, name := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization"} {
+		for _, name := range []string{
+			"Authorization", "X-Api-Key", "Cookie", "Cookie2", "Proxy-Authorization",
+			"Forwarded", "Via", "X-Account-Id", "X-Forwarded-For",
+			"X-Organization-Uuid", "X-Real-Ip", "X-Trusted-Device-Token",
+		} {
 			if r.Header.Get(name) != "" {
 				t.Errorf("inference retained forbidden native identity header %s", name)
 			}
@@ -140,17 +144,6 @@ func nativeCompatibilitySmoke(t *testing.T, binary, mode string) {
 				}
 			} else if r.Header.Get("X-Api-Key") != syntheticAPIKey || r.Header.Get("Authorization") != "" {
 				t.Error("native API-key fixture did not use only its synthetic API key")
-			}
-			classified := coreexecutor.NativeClaudeProtocolHeaders(r.Header)
-			for name := range r.Header {
-				key := http.CanonicalHeaderKey(name)
-				switch key {
-				case "Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "Connection", "Content-Length":
-					continue // Explicit credential or transport exclusions.
-				}
-				if _, ok := classified[key]; !ok {
-					t.Errorf("unclassified native inference header %s requires compatibility review", key)
-				}
 			}
 			mu.Lock()
 			nativeHeaders[r.Header.Get("X-Client-Request-Id")] = r.Header.Clone()
@@ -243,4 +236,33 @@ func nativeCompatibilityEvents() [][2]string {
 		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}`},
 		{"message_stop", `{"type":"message_stop"}`},
 	}
+}
+
+// Keep the smoke-test oracle independent from NativeClaudeProtocolHeaders so a
+// new end-to-end header is expected automatically while an accidentally widened
+// credential or transport boundary still fails the test.
+func nativeCompatibilityExpectedHeaders(src http.Header) http.Header {
+	expected := src.Clone()
+	for _, value := range src.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				expected.Del(token)
+			}
+		}
+	}
+	for _, name := range []string{
+		"Authorization", "Cookie", "Cookie2", "Proxy-Authorization", "X-Api-Key",
+		"Forwarded", "Via", "X-Account-Id", "X-Organization-Uuid",
+		"X-Real-Ip", "X-Trusted-Device-Token",
+		"Connection", "Content-Length", "Keep-Alive", "Proxy-Authenticate",
+		"Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+	} {
+		expected.Del(name)
+	}
+	for name := range expected {
+		if strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
+			expected.Del(name)
+		}
+	}
+	return expected
 }
