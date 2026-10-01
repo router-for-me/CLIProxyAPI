@@ -266,6 +266,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// runs after the auth manager is attached.
 		s.mgmt.SetLiteLLMSyncStore(handles.LiteLLMSync)
 		s.mgmt.StartLiteLLMSyncSweep()
+		s.mgmt.SetLiteLLMOnTheFlyStore(handles.LiteLLMOnTheFly)
 		// Re-register every enabled Auto Router's model id in the in-memory
 		// registry + models catalog so auto routers survive a restart (the
 		// registry is rebuilt at boot and only sessions recreate it otherwise).

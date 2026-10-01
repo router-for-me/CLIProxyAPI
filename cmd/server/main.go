@@ -19,6 +19,7 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	litellmaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/litellm_access"
 	pgaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/pg_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	internalBackup "github.com/router-for-me/CLIProxyAPI/v7/internal/backup"
@@ -683,6 +684,9 @@ func main() {
 		pgLiteLLMKeys := store.NewLiteLLMKeyStore(pgStoreInst)
 		// Manage-LiteLLM external sync settings (base URL + sealed master key).
 		pgLiteLLMSync := store.NewLiteLLMSyncStore(pgStoreInst)
+		// Durable on-the-fly validation log + retention sweep.
+		pgLiteLLMOnTheFly := store.NewOnTheFlyLogStore(pgStoreInst)
+		store.StartOnTheFlyLogSweep(pgLiteLLMOnTheFly)
 		pgSyncAdapter = registry.NewPGSync(store.NewPGModelsAdapter(pgModelsStore))
 		policySvc = policy.NewService(pgAPIKeyStore, pgUsageStore, policy.ServiceConfig{})
 		// Attach the user store so per-user budget/RPM enforcement is
@@ -733,6 +737,23 @@ func main() {
 		// provider; the manager falls through from pg-store to config-inline
 		// so legacy file-based keys keep working.
 		pgaccess.Register(pgAPIKeyStore)
+		// Register the on-the-fly LiteLLM provider as a fallback after
+		// pg-store: it validates a client key against the external LiteLLM
+		// instance, lazily imports the matched key into the runtime api_keys
+		// table, and records the outcome in litellm_onthefly_log.
+		litellmaccess.Register(pgAPIKeyStore, pgLiteLLMKeys, pgLiteLLMOnTheFly,
+			func(ctx context.Context) (litellmaccess.Settings, error) {
+				set, err := pgLiteLLMSync.Get(ctx)
+				if err != nil {
+					return litellmaccess.Settings{}, err
+				}
+				return litellmaccess.Settings{
+					Enabled:  set.OnTheFlyEnabled,
+					BaseURL:  set.BaseURL,
+					CacheTTL: time.Duration(set.OnTheFlyCacheTTLSeconds) * time.Second,
+					Timeout:  time.Duration(set.OnTheFlyTimeoutMs) * time.Millisecond,
+				}, nil
+			})
 		// Wire the PG-backed error messages store + warm the cache so the
 		// policy middleware + handlers can serve customized error text
 		// without a per-request DB round-trip.
@@ -805,6 +826,7 @@ func main() {
 			LiteLLMUsers:       pgLiteLLMUsers,
 			LiteLLMKeys:        pgLiteLLMKeys,
 			LiteLLMSync:        pgLiteLLMSync,
+			LiteLLMOnTheFly:    pgLiteLLMOnTheFly,
 			Flusher:            usageFlusher,
 			PG:                 pgStoreInst,
 		}))

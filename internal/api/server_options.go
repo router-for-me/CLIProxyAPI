@@ -153,6 +153,10 @@ type PgStoreHandles struct {
 	// PG is not configured — the /litellm/settings and /litellm/sync/run routes
 	// return 503.
 	LiteLLMSync *store.LiteLLMSyncStore
+	// LiteLLMOnTheFly is the PG-backed store for the litellm_onthefly_log table
+	// (per-request LiteLLM API key validation outcomes). nil when PG is not
+	// configured — the /litellm/onthefly-log routes return 503.
+	LiteLLMOnTheFly *store.OnTheFlyLogStore
 }
 
 // ServerOption customises HTTP server construction.
