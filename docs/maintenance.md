@@ -19,21 +19,28 @@ operations; a request to review them does not authorize publishing or deployment
 1. Merge the reviewed task branch into our `main`. Resolve compatibility changes
    and choose our semantic version: patch for compatible fixes, minor for
    compatible additions, major for breaking changes.
-2. Copy `docs/releases/RELEASE_TEMPLATE.md` to `docs/releases/vX.Y.Z.md` and
+2. Build the release tag as `vX.Y.Z-upstreamA.B.C`, where `A.B.C` is the
+   upstream release this version is aligned to, or `vX.Y.Z-upstreamnone` for a
+   fork-only release. The suffix is what distinguishes our tags from upstream's
+   identical-looking `vX.Y.Z` names, and the workflow rejects a tag that still
+   points at an upstream commit.
+3. Copy `docs/releases/RELEASE_TEMPLATE.md` to `docs/releases/<tag>.md` and
    write the release from the user's perspective. Explain the compatibility or
    migration impact, validation actually performed, known limitations, and the
    exact upstream release aligned with this version. Use `none (fork-only
-   release)` when no upstream intake is included. Validate it locally:
+   release)` when no upstream intake is included; the tag suffix must agree with
+   that field. Validate it locally:
 
    ```bash
-   python3 ops/release-notes/validate.py validate v1.2.3 docs/releases/v1.2.3.md
+   python3 ops/release-notes/validate.py validate \
+     v1.2.3-upstream8.0.6 docs/releases/v1.2.3-upstream8.0.6.md
    ```
 
    Commit the curated note before tagging. Generated commit summaries do not
    explain compatibility and are not a substitute for this file.
-3. Run `ops/upstream-intake/verify-absorb.sh` on the candidate. For protocol
+4. Run `ops/upstream-intake/verify-absorb.sh` on the candidate. For protocol
    changes, include the relevant client replay evidence and its coverage limits.
-4. Confirm a clean checkout, exact release commit, `origin/main` ancestry, and
+5. Confirm a clean checkout, exact release commit, `origin/main` ancestry, and
    absence of the proposed tag both locally and remotely. Read-only checks:
 
    ```bash
@@ -41,20 +48,21 @@ operations; a request to review them does not authorize publishing or deployment
    git fetch --no-tags origin main
    git merge-base --is-ancestor HEAD origin/main
    git rev-parse HEAD
-   git ls-remote --tags origin refs/tags/v1.2.3
+   git ls-remote --tags origin refs/tags/v1.2.3-upstream8.0.6
+   ops/upstream-intake/guard-release-tag.sh v1.2.3-upstream8.0.6
    ```
 
-5. When release execution is authorized, create an annotated tag and push only
-   its ref. Replace `v1.2.3` with the reviewed version:
+6. When release execution is authorized, create an annotated tag and push only
+   its ref. Replace `v1.2.3-upstream8.0.6` with the reviewed tag:
 
    ```bash
-   git tag -a v1.2.3 -m "Release v1.2.3"
-   git push origin refs/tags/v1.2.3:refs/tags/v1.2.3
+   git tag -a v1.2.3-upstream8.0.6 -m "Release v1.2.3-upstream8.0.6"
+   git push origin refs/tags/v1.2.3-upstream8.0.6:refs/tags/v1.2.3-upstream8.0.6
    ```
 
    Never push `--tags`, `--mirror` or upstream refs. Do not move a published tag.
 
-6. `release.yaml` validates stable tag syntax, ancestry on `main`, the curated
+7. `release.yaml` validates stable tag syntax, ancestry on `main`, the curated
    release note and its upstream-alignment statement, then runs the full
    regression gate. It creates a draft and builds ten platform archives from the
    tagged source. One final job verifies the complete archive set, downloads the

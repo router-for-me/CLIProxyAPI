@@ -82,10 +82,20 @@ class FormulaTests(unittest.TestCase):
         self.assertNotIn("/download/v1.0.0/", result)
         self.assertIn(f'sha256 "{4:064x}"', result)
 
+    def test_upstream_aligned_tag_sets_version_explicitly(self):
+        version = "1.2.4-upstream8.0.6"
+        manifest = self.manifest.replace("CLIProxyAPI_1.2.3_", f"CLIProxyAPI_{version}_")
+        result = formula.render(f"v{version}", manifest, self.template)
+        self.assertIn(f'version "{version}"', result)
+        self.assertEqual(result.count(f"/download/v{version}/"), 4)
+        self.assertNotIn('version "0.0.0"', result)
+
     def test_invalid_or_incomplete_input_fails(self):
         cases = [
             ("v1.2.3-rc1", self.manifest),
             ("v01.2.3", self.manifest),
+            ("v1.2.3-fork", self.manifest),
+            ("v1.2.3-upstreamv8.0.6", self.manifest),
             ("v1.2.3", self.manifest.splitlines()[0]),
             ("v1.2.3", self.manifest + self.manifest),
             ("v1.2.3", self.manifest.replace("0000", "xxxx", 1)),
@@ -151,6 +161,33 @@ class ReleaseNoteTests(unittest.TestCase):
             "- Ported: none; fork-specific maintenance only",
         )
         self.assertEqual(release_notes.validate_note("v1.2.3", note), [])
+
+    def test_tag_upstream_suffix_must_match_the_note(self):
+        note = self.aligned.replace("# v1.2.3", "# v1.2.4-upstream8.0.6", 1)
+        self.assertEqual(release_notes.validate_note("v1.2.4-upstream8.0.6", note), [])
+
+        mismatched = note.replace("`v8.0.6`", "`v8.0.5`")
+        errors = release_notes.validate_note("v1.2.4-upstream8.0.6", mismatched)
+        self.assertTrue(
+            any("tag claims upstream" in error for error in errors),
+            f"expected a tag/alignment mismatch error, got {errors}",
+        )
+
+    def test_fork_only_tag_suffix(self):
+        note = self.aligned.replace("# v1.2.3", "# v1.2.4-upstreamnone", 1)
+        note = note.replace("`v8.0.6`", "none (fork-only release)")
+        note = note.replace("`v8.0.4`", "none")
+        self.assertEqual(release_notes.validate_note("v1.2.4-upstreamnone", note), [])
+
+    def test_malformed_tag_suffixes_are_rejected(self):
+        for tag in [
+            "v1.2.3-upstreamv8.0.6",
+            "v1.2.3-upstream8.0",
+            "v1.2.3-upstream",
+            "v1.2.3-fork",
+        ]:
+            with self.subTest(tag=tag):
+                self.assertNotEqual(release_notes.validate_note(tag, self.aligned), [])
 
     def test_invalid_release_notes_are_rejected(self):
         cases = {
@@ -222,6 +259,22 @@ class ReleaseNoteTests(unittest.TestCase):
             r'\s+"\$RELEASE_NOTES_FILE"',
         )
         self.assertNotIn("releases/generate-notes", workflow)
+
+    def test_workflow_rejects_upstream_tags(self):
+        workflow = (ROOT / ".github/workflows/release.yaml").read_text()
+        self.assertIn(
+            'ops/upstream-intake/guard-release-tag.sh "$RELEASE_TAG"',
+            workflow,
+        )
+        self.assertIn("v[0-9]+.[0-9]+.[0-9]+-upstream*", workflow)
+        self.assertNotIn("'v[0-9]+.[0-9]+.[0-9]+'", workflow)
+
+    def test_intake_scripts_are_executable(self):
+        for name in ["guard-release-tag", "check-tag-namespace", "establish-baseline"]:
+            with self.subTest(script=name):
+                path = ROOT / f"ops/upstream-intake/{name}.sh"
+                self.assertTrue(path.exists(), f"{name}.sh is missing")
+                self.assertTrue(os.access(path, os.X_OK), f"{name}.sh is not executable")
 
 
 class IntakeTests(unittest.TestCase):

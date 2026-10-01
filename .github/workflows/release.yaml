@@ -2,11 +2,12 @@ name: release
 
 on:
   push:
-    # Only version tags of the form vX.Y.Z produce a release.
-    # Upstream tags must never be pushed to this fork: a wildcard trigger
-    # would publish a spurious release for every imported upstream tag.
+    # Only our own version tags produce a release. The -upstreamX.Y.Z suffix
+    # records the upstream release the tag is aligned to; -upstreamnone marks a
+    # fork-only release. Upstream's own vX.Y.Z tags never match, and
+    # guard-release-tag.sh rejects any that are pushed by mistake.
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-upstream*'
   workflow_dispatch:
     inputs:
       tag:
@@ -41,10 +42,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-upstream((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)|none)$ ]]
           git show-ref --verify "refs/tags/$RELEASE_TAG"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "refs/tags/$RELEASE_TAG^{commit}" origin/main
+      - name: Reject tags that belong to upstream
+        shell: bash
+        run: ops/upstream-intake/guard-release-tag.sh "$RELEASE_TAG"
       - name: Validate curated release notes
         shell: bash
         run: python3 ops/release-notes/validate.py validate "$RELEASE_TAG" "$RELEASE_NOTES_FILE"

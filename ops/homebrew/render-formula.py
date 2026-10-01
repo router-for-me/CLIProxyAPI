@@ -8,9 +8,21 @@ from pathlib import Path
 
 
 def render(tag: str, manifest: str, template: str) -> str:
-    if not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag, re.ASCII):
-        raise ValueError("expected a stable vX.Y.Z tag")
+    core = r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    if not re.fullmatch(rf"v{core}(-upstream({core}|none))?", tag, re.ASCII):
+        raise ValueError(
+            "expected a vX.Y.Z tag with an optional -upstreamX.Y.Z or "
+            "-upstreamnone suffix"
+        )
     version = tag[1:]
+
+    # The version is declared explicitly in the template. Substitute it rather
+    # than leaving the placeholder, so a formula never ships a stale version.
+    declared = re.compile(r'^(  version )"[^"]*"$', re.MULTILINE)
+    if not declared.search(template):
+        raise ValueError("template is missing the explicit version declaration")
+    template = declared.sub(lambda _match: f'  version "{version}"', template, count=1)
+
     checksums = {}
     for line in manifest.splitlines():
         if not line.strip():

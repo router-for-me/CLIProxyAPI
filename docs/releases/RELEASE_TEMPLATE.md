@@ -4,6 +4,11 @@
 Copy this file to docs/releases/<tag>.md and replace every placeholder.
 The release workflow rejects placeholders, missing sections, and an
 ambiguous upstream alignment statement.
+
+Tag format: vX.Y.Z-upstreamA.B.C records the upstream release this tag is
+aligned to; vX.Y.Z-upstreamnone marks a fork-only release. The suffix must
+match the "Upstream release" field below, and the workflow rejects a release
+whose tag still points at an upstream commit.
 -->
 
 ## Summary

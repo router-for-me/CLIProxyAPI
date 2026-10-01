@@ -63,9 +63,12 @@ running service and representative client behavior separately.
    Exercise the corresponding artifacts on supported target platforms; one
    local test does not validate all four URLs. Only then publish the tap change.
 
-All four URLs and hashes must refer to the same release. Keep URL-derived version
-rather than a redundant `version` declaration. SHA256 verifies bytes, not publisher
-identity; the release workflow also verifies uploaded assets before publication.
+All four URLs and hashes must refer to the same release. The formula declares
+`version` explicitly and `render-formula.py` substitutes it from the tag; do not
+rely on Homebrew deriving the version from the URL, because release tags carry an
+`-upstreamX.Y.Z` suffix that its URL parsing does not handle reliably. SHA256
+verifies bytes, not publisher identity; the release workflow also verifies
+uploaded assets before publication.
 
 ## Prepare rollback before upgrading
 

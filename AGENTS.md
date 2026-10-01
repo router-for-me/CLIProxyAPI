@@ -16,13 +16,17 @@ and do not wait for upstream review before shipping our own work.
 - **Upstream intake is release-only.** Track `upstream` releases, not its `dev` or
   `main` branches. Fetch upstream tags into the local-only `refs/upstream/tags/*`
   namespace and never push them to `origin`: `release.yaml` triggers a full
-  multi-platform build on any `v[0-9]+.[0-9]+.[0-9]+` tag push, so pushing upstream
+  multi-platform build on a `vX.Y.Z-upstream*` tag push, so pushing upstream
   tags here would publish spurious releases from our fork.
-- **Our releases carry our own `vX.Y.Z` tags**, decoupled from upstream numbering.
-  Push only the specific release ref, never `--tags` or `--mirror`. Release CI
-  requires a curated `docs/releases/<tag>.md`, validates its upstream-alignment
-  statement, checks the tag and main ancestry, runs the regression gate, builds a
-  draft, and publishes only after all archives and checksums are verified.
+- **Our releases carry their own `vX.Y.Z-upstreamA.B.C` tags**, where the suffix
+  records the aligned upstream release (`upstreamnone` for a fork-only release).
+  The suffix is what separates our tags from upstream's identical-looking names,
+  and it must agree with the note's upstream-alignment statement. Push only the
+  specific release ref, never `--tags` or `--mirror`. Release CI rejects any tag
+  that still points at an upstream commit, requires a curated
+  `docs/releases/<tag>.md`, checks the tag and main ancestry, runs the regression
+  gate, builds a draft, and publishes only after all archives and checksums are
+  verified.
 - **Module path stays upstream.** `go.mod` keeps
   `module github.com/router-for-me/CLIProxyAPI/v8` so upstream releases can be ported
   without rewriting imports across the tree. Do not rename it.

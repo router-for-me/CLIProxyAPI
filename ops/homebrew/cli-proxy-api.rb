@@ -2,6 +2,10 @@ class CliProxyApi < Formula
   desc "Proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs"
   homepage "https://github.com/hrygo/CLIProxyAPI"
   license "MIT"
+  # Declared explicitly rather than derived from the URL. Release tags carry an
+  # -upstreamX.Y.Z suffix, and Homebrew's URL-derived version parsing is not
+  # reliable for that shape.
+  version "0.0.0"
 
   on_macos do
     if Hardware::CPU.arm?

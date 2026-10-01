@@ -9,7 +9,8 @@ description: >
 # CLIProxyAPI fork maintenance
 
 Maintain the `hrygo/CLIProxyAPI` fork with `main` as trunk and independent
-`vX.Y.Z` releases. Keep `module github.com/router-for-me/CLIProxyAPI/v8` unchanged.
+`vX.Y.Z-upstreamA.B.C` releases. Keep `module github.com/router-for-me/CLIProxyAPI/v8`
+unchanged.
 The requested operation determines which procedure to load:
 
 | Request | Read | Expected result |
@@ -29,8 +30,13 @@ continues to apply to its target; do not ask again for routine steps it covers.
 - Accept published stable releases after at least 72 hours, measured from
   `publishedAt`. This is fork policy; do not lower it through an environment override.
 - Use an explicit reviewed baseline from the ledger; a fetched tag does not mean
-  it was absorbed. For first intake, establish and record the inherited baseline.
+  it was absorbed. For first intake, derive it with `establish-baseline.sh` and
+  record the evidence. Ancestry against the trunk is the evidence, not tag
+  presence: this fork shares upstream history.
 - Fetch only into `refs/upstream/tags/*` with `--no-tags`. Never push those refs.
+- Run `check-tag-namespace.sh` when unsure whether upstream tags leaked into
+  `refs/tags/*`. It never proposes deleting a tag origin also publishes, because
+  this fork's version numbers overlap upstream's historical ones.
 - Evaluate individual diffs, including overlap with our changes. Prefer protocol,
   compatibility and security fixes; assess configuration changes and dependency
   upgrades on impact rather than commit-message prefixes alone.
@@ -44,10 +50,13 @@ continues to apply to its target; do not ask again for routine steps it covers.
 
 ## Release and installation decisions
 
-Release only reviewed commits reachable from our `main`. Push a single own tag,
-assemble complete assets as a draft, and publish after final checksum validation.
-Do not move published tags or overwrite published assets; fix forward with a new
-version. Every release requires a curated `docs/releases/<tag>.md` that explains
+Release only reviewed commits reachable from our `main`. Tag releases
+`vX.Y.Z-upstreamA.B.C` for the aligned upstream release, or
+`vX.Y.Z-upstreamnone` for a fork-only release; the suffix must match the note's
+upstream alignment. Push a single own tag, assemble complete assets as a draft,
+and publish after final checksum validation. Do not move published tags or
+overwrite published assets; fix forward with a new version. Every release
+requires a curated `docs/releases/<tag>.md` that explains
 user-visible changes, validation limits and the exact aligned upstream release;
 use `none (fork-only release)` when no intake is included. Update the separate
 tap only after the public release is complete.
