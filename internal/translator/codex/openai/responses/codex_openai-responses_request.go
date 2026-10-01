@@ -117,12 +117,30 @@ func setCodexRequiredBool(rawJSON []byte, path string, value bool) []byte {
 
 func setCodexRequiredInclude(rawJSON []byte) []byte {
 	current := gjson.GetBytes(rawJSON, "include")
-	values := current.Array()
-	if current.IsArray() && len(values) == 1 && values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" {
-		return rawJSON
+	includeSources := false
+	if current.IsArray() {
+		values := current.Array()
+		for _, value := range values {
+			if value.Type == gjson.String && value.String() == "web_search_call.action.sources" {
+				includeSources = true
+				break
+			}
+		}
+		if !includeSources && len(values) == 1 && values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" {
+			return rawJSON
+		}
+		if includeSources && len(values) == 2 &&
+			values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" &&
+			values[1].Type == gjson.String && values[1].String() == "web_search_call.action.sources" {
+			return rawJSON
+		}
 	}
 
-	updated, errSet := sjson.SetRawBytes(rawJSON, "include", []byte(`["reasoning.encrypted_content"]`))
+	encoded := []byte(`["reasoning.encrypted_content"]`)
+	if includeSources {
+		encoded = []byte(`["reasoning.encrypted_content","web_search_call.action.sources"]`)
+	}
+	updated, errSet := sjson.SetRawBytes(rawJSON, "include", encoded)
 	if errSet != nil {
 		return rawJSON
 	}
