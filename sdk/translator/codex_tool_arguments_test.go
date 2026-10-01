@@ -120,6 +120,21 @@ func TestCanonicalizeCodexToolArgumentsStream(t *testing.T) {
 			in:   `{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"2500.0"}]}}`,
 			want: `{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"2500.0"}]}}`,
 		},
+		{
+			name: "custom tool call input",
+			in:   `{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500.0}"}}`,
+			want: `{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500}"}}`,
+		},
+		{
+			name: "custom tool call untouched without integral float",
+			in:   `{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"apply_patch","input":"{\"ratio\":0.5}"}}`,
+			want: `{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"apply_patch","input":"{\"ratio\":0.5}"}}`,
+		},
+		{
+			name: "custom input event is not rewritten",
+			in:   `{"type":"response.custom_tool_call_input.done","input":"{\"count\":2500.0}"}`,
+			want: `{"type":"response.custom_tool_call_input.done","input":"{\"count\":2500.0}"}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,6 +166,16 @@ func TestCanonicalizeCodexToolArgumentsNonStream(t *testing.T) {
 			name: "inline object arguments",
 			in:   `{"output":[{"type":"function_call","arguments":{"yield_time_ms":2500.0}}]}`,
 			want: `{"output":[{"type":"function_call","arguments":{"yield_time_ms":2500}}]}`,
+		},
+		{
+			name: "custom tool call input",
+			in:   `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500.0}"}]}`,
+			want: `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500}"}]}`,
+		},
+		{
+			name: "custom tool call inline object input",
+			in:   `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":{"count":2500.0}}]}`,
+			want: `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":{"count":2500}}]}`,
 		},
 		{
 			name: "no output array",
@@ -199,7 +224,7 @@ func registerCodexArgumentResponders(r *Registry, to Format) {
 	})
 }
 
-func TestRegistryCanonicalizesResponsesTargetResponses(t *testing.T) {
+func TestRegistryCanonicalizesResponsesTargets(t *testing.T) {
 	ctx := context.Background()
 	// FormatOpenAIResponse is what the Codex client actually receives:
 	// OpenAIResponsesAPIHandler serves both /v1/responses and

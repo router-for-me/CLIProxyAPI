@@ -46,17 +46,36 @@ func CanonicalizeCodexToolArguments(body []byte, stream bool) []byte {
 	if stream {
 		switch gjson.GetBytes(body, "type").String() {
 		case "response.output_item.added", "response.output_item.done":
-			if updated := canonicalizeCodexArguments(body, "item.arguments"); updated != nil {
-				return updated
-			}
+			return canonicalizeCodexStreamItem(body)
 		}
 		return body
 	}
 	return canonicalizeCodexResponseBody(body)
 }
 
+// canonicalizeCodexStreamItem rewrites the tool payload of one output item
+// event. Function calls carry it in arguments, custom tool calls in input.
+// Custom input events (response.custom_tool_call_input.delta/.done) are left
+// alone: Codex clients ignore function-call argument delta events the same
+// way, and there is no client-side evidence that these carry the parsed form.
+func canonicalizeCodexStreamItem(event []byte) []byte {
+	itemType := gjson.GetBytes(event, "item.type").String()
+	switch itemType {
+	case "function_call":
+		if updated := canonicalizeCodexArguments(event, "item.arguments"); updated != nil {
+			return updated
+		}
+	case "custom_tool_call":
+		if updated := canonicalizeCodexArguments(event, "item.input"); updated != nil {
+			return updated
+		}
+	}
+	return event
+}
+
 // canonicalizeCodexResponseBody rewrites every function-call item in a
-// non-streaming Codex response.
+// non-streaming Codex response. Custom tool calls carry their payload in
+// input rather than arguments and are rewritten the same way.
 func canonicalizeCodexResponseBody(body []byte) []byte {
 	output := gjson.GetBytes(body, "output")
 	if !output.IsArray() {
@@ -64,10 +83,16 @@ func canonicalizeCodexResponseBody(body []byte) []byte {
 	}
 	out := body
 	for index, item := range output.Array() {
-		if gjson.Get(item.Raw, "type").String() != "function_call" {
+		var argumentsPath string
+		switch gjson.Get(item.Raw, "type").String() {
+		case "function_call":
+			argumentsPath = "arguments"
+		case "custom_tool_call":
+			argumentsPath = "input"
+		default:
 			continue
 		}
-		updated := canonicalizeCodexArguments([]byte(item.Raw), "arguments")
+		updated := canonicalizeCodexArguments([]byte(item.Raw), argumentsPath)
 		if updated == nil {
 			continue
 		}
