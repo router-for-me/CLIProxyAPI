@@ -2,21 +2,12 @@ package claudemaster
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"io"
-	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -151,7 +142,7 @@ func LaunchProfilesWithOptions(ctx context.Context, profiles []Profile, args []s
 			backend.Handler().ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
-	proxy, err := StartProxy(ProxyOptions{Certificate: certs.leaf, Inference: inference})
+	proxy, err := StartProxy(ProxyOptions{GetCertificate: certs.getCertificate, Inference: inference})
 	if err != nil {
 		return 1, errors.New("cannot start private inference proxy")
 	}
@@ -248,57 +239,4 @@ func ChildEnvironment(environ, args []string, proxyURL, caPath string) ([]string
 	}
 	out = append(out, "HTTPS_PROXY="+proxyURL, "https_proxy="+proxyURL, "NODE_EXTRA_CA_CERTS="+caPath, "DISABLE_AUTOUPDATER=1")
 	return out, nil
-}
-
-type processCertificate struct {
-	dir    string
-	caPath string
-	leaf   tls.Certificate
-}
-
-func newProcessCertificate() (*processCertificate, error) {
-	dir, err := os.MkdirTemp("", "claude-master-certs-")
-	if err != nil {
-		return nil, errors.New("cannot create private process certificate directory")
-	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(dir)
-		}
-	}()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, errors.New("cannot create process CA key")
-	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, errors.New("cannot create certificate serial")
-	}
-	now := time.Now()
-	caTemplate := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "claude-master process CA"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(7 * 24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	if err != nil {
-		return nil, errors.New("cannot create process CA certificate")
-	}
-	caPath := filepath.Join(dir, "ca.pem")
-	if err := writePrivateFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})); err != nil {
-		return nil, err
-	}
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, errors.New("cannot create process leaf key")
-	}
-	leafSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, errors.New("cannot create certificate serial")
-	}
-	leafTemplate := &x509.Certificate{SerialNumber: leafSerial, Subject: pkix.Name{CommonName: "api.anthropic.com"}, DNSNames: []string{"api.anthropic.com"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(7 * 24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caTemplate, &leafKey.PublicKey, caKey)
-	if err != nil {
-		return nil, errors.New("cannot create process leaf certificate")
-	}
-	// Private CA and leaf keys remain only in this process. Only the scoped CA certificate is on disk.
-	cleanup = false
-	return &processCertificate{dir: dir, caPath: caPath, leaf: tls.Certificate{Certificate: [][]byte{leafDER, caDER}, PrivateKey: leafKey}}, nil
 }

@@ -53,23 +53,27 @@ fi
 gym_require_command go
 gym_require_command claude
 gym_require_command tmux
+gym_require_command jq
+
+remote_control=${CLAUDE_MASTER_GYM_REMOTE_CONTROL:-0}
+if [[ $remote_control != 0 && $remote_control != 1 ]]; then
+  echo "CLAUDE_MASTER_GYM_REMOTE_CONTROL must be 0 or 1." >&2
+  exit 2
+fi
 
 parse_profiles() {
-  local value=$1 destination=$2 item
-  local -a parsed=()
-  IFS=',' read -r -a parsed <<<"$value"
-  if [[ ${#parsed[@]} -eq 0 || -z ${parsed[0]} ]]; then
+  local value=$1 item
+  parsed_profiles=()
+  IFS=',' read -r -a parsed_profiles <<<"$value"
+  if [[ ${#parsed_profiles[@]} -eq 0 || -z ${parsed_profiles[0]} ]]; then
     return 1
   fi
-  for item in "${parsed[@]}"; do
+  for item in "${parsed_profiles[@]}"; do
     if [[ ! $item =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]; then
       echo "Invalid profile name in lane list: $item" >&2
       return 1
     fi
   done
-  local -n result=$destination
-  # shellcheck disable=SC2034 # The nameref writes the caller's requested array.
-  result=("${parsed[@]}")
 }
 
 lane_a_value=${CLAUDE_MASTER_GYM_LANE_A_PROFILES:-}
@@ -96,19 +100,19 @@ if [[ -z $lane_a_value || -z $lane_b_value ]]; then
   exit 2
 fi
 
-declare -a lane_a_profiles lane_b_profiles
-parse_profiles "$lane_a_value" lane_a_profiles
-parse_profiles "$lane_b_value" lane_b_profiles
+declare -a lane_a_profiles lane_b_profiles parsed_profiles
+parse_profiles "$lane_a_value"
+lane_a_profiles=("${parsed_profiles[@]}")
+parse_profiles "$lane_b_value"
+lane_b_profiles=("${parsed_profiles[@]}")
 
-declare -A lane_a_set=()
-for profile in "${lane_a_profiles[@]}"; do
-  lane_a_set[$profile]=1
-done
 for profile in "${lane_b_profiles[@]}"; do
-  if [[ -n ${lane_a_set[$profile]:-} ]]; then
-    echo "Profile '$profile' appears in both lanes. Concurrent launchers require disjoint profile lists because each profile is exclusively locked." >&2
-    exit 2
-  fi
+  for lane_a_profile in "${lane_a_profiles[@]}"; do
+    if [[ $profile == "$lane_a_profile" ]]; then
+      echo "Profile '$profile' appears in both lanes. Concurrent launchers require disjoint profile lists because each profile is exclusively locked." >&2
+      exit 2
+    fi
+  done
 done
 
 profile_root="$HOME/.local/share/claude-master/profiles"
@@ -145,6 +149,9 @@ chmod 0700 "$run_dir"
 printf '%s\n' "${lane_a_profiles[@]}" >"$run_dir/lane-a.profiles"
 printf '%s\n' "${lane_b_profiles[@]}" >"$run_dir/lane-b.profiles"
 printf '%s\n' "$session" >"$run_dir/tmux-session"
+printf '%s\n' "$remote_control" >"$run_dir/remote-control"
+gym_new_session_id >"$run_dir/lane-a.session-id"
+gym_new_session_id >"$run_dir/lane-b.session-id"
 printf '%s\n' 'claude-sonnet-5-5' >"$run_dir/model"
 printf 'lane\tprofiles\tselection-evidence\n' >"$run_dir/routing.tsv"
 printf 'A\t%s\t%s\n' "$(IFS=,; echo "${lane_a_profiles[*]}")" "$([[ ${#lane_a_profiles[@]} -eq 1 ]] && echo exact || echo quota-selected-within-lane)" >>"$run_dir/routing.tsv"

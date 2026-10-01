@@ -341,6 +341,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
+		if _, native := cliproxyexecutor.NativeClaudeProtocolHeadersFromContext(ctx); native && provider == "claude" {
+			// The trusted native executor has already received successful HTTP
+			// headers. Expose them without reading body bytes; failures after this
+			// point belong to the established stream and must never replay it.
+			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, nil, streamResult.Chunks, attemptAliasResult, ephemeralResult, execOpts), nil
+		}
+
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		bootstrapErr = markUpstreamExecutionAttemptFromContext(ctx, bootstrapErr)
 		if hasUpstreamExecutionAttempt(bootstrapErr) {

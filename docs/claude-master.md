@@ -29,8 +29,10 @@ end-to-end protocol headers remain native Claude Code values. The request is re-
 after the selected account identity is installed.
 
 Responses retain Anthropic's status, body, duplicate header values, compression, and
-unknown end-to-end headers. Streaming bytes are forwarded as each upstream read
-arrives; the proxy does not buffer, parse/rebuild, or synthesize SSE events. HTTP
+unknown end-to-end headers. Successful streaming headers are exposed as soon as
+Anthropic accepts the request, without waiting for the first body bytes. Streaming
+bytes are forwarded as each upstream read arrives; the proxy does not buffer,
+parse/rebuild, or synthesize SSE events. HTTP
 hop-by-hop fields and connection framing are necessarily regenerated for the local
 connection.
 
@@ -126,9 +128,15 @@ and transport failures do not trigger the backup. Account-bound opaque continuat
 stay on their originating subscription; an exposed streaming response is never replayed
 on the key.
 
-Conversation bindings are process-local, not persisted across launcher restarts.
-Resuming opaque history after a restart can lose the originating account binding;
-restart/resume affinity is not yet guaranteed, including API-to-subscription resumes.
+Conversation origins are persisted in private routing directories beside each
+profile's auth directory. Records contain hashed session and account identities,
+never request content or API keys. Restarting or reordering a pool preserves the
+origin, including API-backup conversations when the same key is supplied. A new
+route is staged before dispatch and confirmed only after upstream accepts the
+generation. An interrupted or incomplete handoff stays ambiguous instead of
+being treated as a successful account switch. If an opaque continuation has no
+recorded origin, or that origin is no longer in the pool, the proxy refuses to
+silently send it to another account.
 
 API-key usage is billed separately from subscriptions. Model selection remains Claude
 Code's native value unless explicitly mapped below; a subscription model may not be
@@ -220,7 +228,7 @@ continuations carrying account-bound state:
 - Opaque/account-bound continuations remain on their bound account and may consume the
   reserve.
 - When every usable account is in its reserve, the earliest-reset account remains
-  eligible rather than stranding available tokens.
+  eligible and is drained instead of alternating accounts every turn.
 - After the reported weekly reset, that account becomes eligible again.
 
 The usage endpoint is an OAuth product endpoint used by Claude Code rather than a
@@ -248,23 +256,35 @@ provider-side state, including:
 
 Bindings use Claude Code's conversation and agent hierarchy. A subagent can receive a
 separate account for self-contained work; if its first request carries opaque state, it
-inherits the parent agent's binding. This lets independent fanout use separate
-subscriptions without moving account-bound continuation data.
+inherits the parent agent's binding only if the parent has never changed accounts.
+After a parent handoff, an unbound opaque child is ambiguous: its copied state
+could predate the switch. The proxy refuses that request; a self-contained child
+can still start normally, and already-bound children retain their own origins.
+This lets independent fanout use separate subscriptions without guessing the
+owner of account-bound continuation data.
 
-Only failures received before any response bytes are exposed can be retried on another
-profile. Once streaming begins, that request is never replayed. Any upstream SSE error
+An account handoff is deferred while another generation for the same session is
+active. Clients must preserve chronological history under a session ID; replaying
+an old opaque branch after a completed handoff requires its own previously bound
+child/session ID, not reuse of the parent's current ID.
+
+Only failures received before the response is exposed can be retried on another
+profile. Once successful streaming headers are delivered, that request is never replayed.
+Any upstream SSE error
 remains exactly the event Claude Code received, and routing changes can affect only a
 later request.
 
 ## Profiles and process boundaries
 
 - Profiles live under `~/.local/share/claude-master/profiles/` in private directories.
-  OAuth refresh persistence uses atomic replacement.
+  OAuth refresh persistence uses atomic replacement. A complete staged refresh
+  left by an interrupted write is recovered while holding the profile lock.
 - A launcher holds an exclusive lock on every profile in its pool until shutdown. Two
   concurrent launchers therefore need disjoint profile sets.
 - The local CONNECT proxy uses a random process-only credential. Its temporary CA is
   trusted only by the child through `NODE_EXTRA_CA_CERTS`; it is not installed in the
-  system trust store.
+  system trust store. Leaf certificates renew on new handshakes without interrupting
+  existing streams, so a long-running launcher does not lose TLS after a week.
 - Only `api.anthropic.com` is TLS-terminated. Other HTTPS destinations are blind
   tunnels. This is routing isolation, not an operating-system network sandbox.
 - Request bodies, tokens, and raw provider errors are not logged by the launcher.
@@ -295,17 +315,18 @@ explicit action.
 ## Verification and compatibility
 
 Automated tests cover credential separation, weekly-quota parsing and selection, the
-10% reserve, payload affinity, parent/subagent bindings, pre-byte retry, raw compressed
+10% reserve, durable payload affinity, parent/subagent bindings, pre-response retry, raw compressed
 responses, exact streaming chunks, request/response header boundaries, token counting,
 profile locking, and cancellation/shutdown.
 
-Trusted-contributor CI downloads Anthropic's current official Claude Code artifact,
+The Claude-specific CI job runs for all PR authors, including fork contributors.
+It downloads Anthropic's current official Claude Code artifact,
 checks its published manifest checksum and reported version, then runs a credential-free
 CONNECT/TLS/header/SSE smoke test. The repository intentionally has no Claude Code
 version constant.
 
 The historical transport audit exercised 53 releases from 2.1.209 through 2.1.270 in
-both synthetic API-key and OAuth modes. Follow-up smoke tests through 2.1.285 found no
+both synthetic API-key and OAuth modes. Follow-up smoke tests through 2.1.286 found no
 transport or streaming protocol break. Claude Code 2.1.283 added prompt-ID and
 request-class headers without changing the endpoint protocol; this is why the proxy
 uses an open end-to-end header boundary instead of a version pin or allowed-header

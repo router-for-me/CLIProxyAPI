@@ -38,10 +38,15 @@ func backendAPIBackupTestOptions(session string, opaque bool) coreexecutor.Optio
 
 func requireBackendAPIBackupPick(t *testing.T, selector *backendSeriesSelector, opts coreexecutor.Options, auths []*coreauth.Auth, wantID string) {
 	t.Helper()
-	auth, err := selector.Pick(t.Context(), "mixed", backendAuthSelectionModel, opts, auths)
+	ctx := withBackendAttempt(t.Context())
+	auth, err := selector.Pick(ctx, "mixed", backendAuthSelectionModel, opts, auths)
 	if err != nil || auth == nil || auth.ID != wantID {
 		t.Fatalf("Pick() = %#v, %v, want %q", auth, err, wantID)
 	}
+	// Selector-only fixtures simulate an accepted upstream request; production
+	// uses the trusted native HTTP success hook, never selection alone.
+	commitBackendRouteAttempt(ctx, auth.ID)
+	releaseBackendRouteAttempt(ctx)
 }
 
 func TestBackendAPIBackupIsLastAfterSubscriptionCapacity(t *testing.T) {
@@ -91,6 +96,7 @@ func TestBackendAPIBackupDoesNotReplaceBoundNonQuotaFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			selector, auths, reset := backendAPIBackupTestSelector(t)
+			ctx := withBackendAttempt(t.Context())
 			opts := backendAPIBackupTestOptions("bound-failure", false)
 			requireBackendAPIBackupPick(t, selector, opts, auths, "subscription-a")
 			// A failing response can also report the final weekly watermark.
@@ -98,8 +104,10 @@ func TestBackendAPIBackupDoesNotReplaceBoundNonQuotaFailure(t *testing.T) {
 			for _, id := range selector.authIDs {
 				selector.observeQuota(id, backendWeeklyQuota{known: true, used: 1, resetsAt: reset})
 			}
-			selector.OnResult(coreauth.Result{AuthID: "subscription-a", Model: "claude-test", CredentialScope: true, Error: tc.err})
-			if got, err := selector.Pick(t.Context(), "claude", backendAuthSelectionModel, opts, auths[:2]); err == nil || got != nil {
+			result := coreauth.Result{AuthID: "subscription-a", Model: "claude-test", CredentialScope: true, Error: tc.err}
+			recordBackendAttempt(ctx, result)
+			selector.OnResult(result)
+			if got, err := selector.Pick(ctx, "claude", backendAuthSelectionModel, opts, auths[:2]); err == nil || got != nil {
 				t.Fatalf("non-quota failure retried on API backup: got=%#v err=%v", got, err)
 			}
 		})

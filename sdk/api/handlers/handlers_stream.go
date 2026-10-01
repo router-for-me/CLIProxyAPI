@@ -554,7 +554,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	if h.AuthManager.HomeEnabled() {
 		maxBootstrapRetries = 0
 	}
-	for bootstrapRetries := 0; !streamCanceledBeforeRead; {
+	_, nativeStream := coreexecutor.NativeClaudeProtocolHeadersFromContext(ctx)
+	nativeStream = nativeStream && entryProtocol == "claude" && responseProtocol == "claude"
+	if nativeStream {
+		// Successful native HTTP headers establish the stream. Do not wait for
+		// the first body byte or perform a bootstrap replay after exposing them.
+		applyStreamHeaderInit()
+	}
+	for bootstrapRetries := 0; !nativeStream && !streamCanceledBeforeRead; {
 		readInitialStreamChunks()
 		if streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
 			break

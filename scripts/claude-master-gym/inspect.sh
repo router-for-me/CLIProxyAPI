@@ -6,6 +6,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/common.sh"
 
 gym_require_command tmux
+gym_require_command jq
 run_dir="$(gym_current_run)"
 session="$(gym_tmux_session "$run_dir")"
 
@@ -15,7 +16,6 @@ column -t -s $'\t' "$run_dir/routing.tsv" 2>/dev/null || cat "$run_dir/routing.t
 for lane in a b; do
   echo
   echo "===== lane $lane ====="
-  lane_upper=${lane^^}
   debug_file="$run_dir/lane-$lane.debug.log"
   pane_log="$run_dir/lane-$lane.pane.log"
   debug_bytes=$(wc -c <"$debug_file" | tr -d ' ')
@@ -30,14 +30,15 @@ for lane in a b; do
   else
     terminal_text="$(tail -n 200 "$pane_log" | gym_strip_ansi | gym_redact_text)"
   fi
-  completion_markers=$(grep -Fc "GYM_LANE_${lane_upper}_OK" <<<"$terminal_text" || true)
-  diagnostic_markers=$(grep -Eic 'inference[_ -]?dispatch|dispatches' <<<"$terminal_text" || true)
-  printf 'terminal checks: completion-markers=%s diagnostic-markers=%s\n' \
-    "$completion_markers" "$diagnostic_markers"
+  diagnostic_markers=$(grep -Eic '"InferenceRequests"[[:space:]]*:[[:space:]]*[1-9][0-9]*' <<<"$terminal_text" || true)
+  echo "Native transcript evidence (assistant output and matched agent results only):"
+  gym_lane_evidence "$run_dir" "$lane"
+  printf 'terminal diagnostics (advisory only): positive-inference-snapshots=%s\n' "$diagnostic_markers"
   echo "recent terminal evidence (sanitized):"
   tail -n 120 <<<"$terminal_text"
 done
 
 echo
 echo "Raw native debug logs are intentionally not printed because they may contain conversation data."
+echo "Effort needs manual verification of Claude's /effort acknowledgement; assistant claims are not evidence."
 echo "Private run artifacts: $run_dir"

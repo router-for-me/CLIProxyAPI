@@ -143,7 +143,7 @@ func main() {
 }
 
 func run(args []string) (int, error) {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := launcherSignalContext()
 	defer stop()
 	if len(args) == 1 && args[0] == "check" {
 		if _, err := claudemaster.Preflight(ctx, nil); err != nil {
@@ -264,6 +264,12 @@ func run(args []string) (int, error) {
 		return 0, nil
 	}
 	return 2, errors.New("expected login, run, or probe")
+}
+
+func launcherSignalContext() (context.Context, context.CancelFunc) {
+	// tmux pane/session shutdown and terminal disconnects deliver SIGHUP. Treat
+	// them like Ctrl-C so refresh persistence finishes before profile locks close.
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 func openRunProfiles(names []string) ([]claudemaster.Profile, []*claudemaster.ProfileLock, error) {
