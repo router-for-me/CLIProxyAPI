@@ -122,6 +122,19 @@ type Server struct {
 	autoDisableSweeper *managementHandlers.AutoDisableSweeper
 }
 
+// newGinEngine returns a Gin engine configured to route on the raw
+// (percent-encoded) request path. Go's net/http decodes %2F into URL.Path, so
+// without this a path parameter can never carry a value containing "/" (for
+// example a model id like "openai/gpt-4o"): the encoded value is split across
+// path segments and the :id route no longer matches. Routing on RawPath keeps
+// the encoded segment intact, and the default UnescapePathValues=true makes
+// c.Param("id") return the original decoded value.
+func newGinEngine() *gin.Engine {
+	engine := gin.New()
+	engine.UseRawPath = true
+	return engine
+}
+
 // NewServer creates and initializes a new API server instance.
 // It sets up the Gin engine, middleware, routes, and handlers.
 //
@@ -145,7 +158,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Create gin engine
-	engine := gin.New()
+	engine := newGinEngine()
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}
