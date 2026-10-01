@@ -57,8 +57,10 @@ and do not wait for upstream review before shipping our own work.
   linear-history rule holds. Approval is not required, so a solo maintainer is
   never blocked. Force pushes and branch deletion are disabled, including for
   admins, and unresolved review threads block the merge.
-- `codex/codex-tool-search-shim` is a locked read-only archive branch. Keep it
-  only while it holds work worth recovering; do not merge or build on it.
+- `codex/codex-tool-search-shim` is a locked read-only archive branch that is
+  never merged into `main` and must not be built on. The tool-search work it
+  explored shipped through the responses-tools pipeline instead, so the branch
+  is retained purely as a recoverable archive, not as pending work.
 - Tag pushes are not affected by branch protection, so release tags can still be
   pushed from a local tag ref.
 
