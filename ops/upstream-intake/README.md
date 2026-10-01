@@ -4,6 +4,11 @@ Track published stable releases from `router-for-me/CLIProxyAPI`. Use an explici
 baseline, wait at least **72 hours** after `publishedAt`, and selectively port
 individual commits. This is our fork policy, not a universal release rule.
 
+The three-day window exists to let regressions and hurried follow-up fixes
+surface upstream before we port from a release. Upstream publishes frequently, so
+a fixed wait costs little. Do not shorten it, and do not tier it by commit prefix:
+the wait is the only thing standing between a bad upstream cut and our `main`.
+
 ## Procedure
 
 1. Read [absorbed.md](absorbed.md). Choose the explicit comparison baseline;
@@ -63,6 +68,15 @@ Upstream tags belong in the local-only `refs/upstream/tags/*` namespace. A plain
 `git push --tags` would then publish every one of them from this fork. Upstream's
 whole release history is present locally this way today.
 
+Stop it at the source once per clone:
+
+```bash
+git config remote.upstream.tagOpt --no-tags
+```
+
+With that set, a plain `git fetch upstream` no longer imports tags at all, and
+only the explicit namespace-targeted fetches below bring any in.
+
 ```bash
 ops/upstream-intake/check-tag-namespace.sh --remote
 ```
@@ -70,6 +84,8 @@ ops/upstream-intake/check-tag-namespace.sh --remote
 The check compares tag names, but never proposes deleting a tag that `origin`
 also publishes: this fork numbers its releases independently and our `v1.0.0`
 already shares a name with an upstream tag pointing at a different commit.
+It also warns when `remote.upstream.tagOpt` is unset, since that is what makes
+the leak recur.
 
 At release time `ops/upstream-intake/guard-release-tag.sh <tag>` rejects any tag
 that resolves to the same commit as the upstream tag of that name. The release

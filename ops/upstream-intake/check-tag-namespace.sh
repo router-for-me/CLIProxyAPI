@@ -37,6 +37,23 @@ done
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
 
+# The durable fix is a fetch-level one. Without it, any plain `git fetch upstream`
+# re-imports every upstream tag into refs/tags/* and the cleanup has to be redone.
+if git remote get-url upstream >/dev/null 2>&1; then
+  tag_opt="$(git config --get remote.upstream.tagOpt || echo "")"
+  if [ "$tag_opt" != "--no-tags" ]; then
+    cat >&2 <<'WARN'
+warning: remote.upstream.tagOpt is not set to --no-tags.
+
+  A plain `git fetch upstream` will copy upstream tags into refs/tags/* again.
+  Prevent it once with:
+
+    git config remote.upstream.tagOpt --no-tags
+
+WARN
+  fi
+fi
+
 # Our own published tags as "commit tag" pairs. origin is authoritative here:
 # a tag we published is never a leak, even when upstream reuses the same name.
 # For an annotated tag ls-remote emits the tag object plus a peeled "^{}" line

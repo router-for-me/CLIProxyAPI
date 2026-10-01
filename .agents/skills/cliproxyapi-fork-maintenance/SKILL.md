@@ -28,7 +28,10 @@ continues to apply to its target; do not ask again for routine steps it covers.
 ## Upstream decisions
 
 - Accept published stable releases after at least 72 hours, measured from
-  `publishedAt`. This is fork policy; do not lower it through an environment override.
+  `publishedAt`. The window exists to let regressions and hurried follow-up
+  fixes surface upstream before we port from a release. Upstream publishes
+  frequently, so a fixed wait costs little; do not shorten it, tier it by
+  commit prefix, or lower it through an environment override.
 - Use an explicit reviewed baseline from the ledger; a fetched tag does not mean
   it was absorbed. For first intake, derive it with `establish-baseline.sh` and
   record the evidence. Ancestry against the trunk is the evidence, not tag
