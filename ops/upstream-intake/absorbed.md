@@ -100,6 +100,13 @@ parameter missing from `codexClientToolIntegerFields` in
 `internal/client/codex/tool-schema/tool_schema.go`, which is a whitelist gap
 rather than a release-alignment gap.
 
+**Resolved locally rather than by widening the whitelist.** The response side is
+now canonicalized for Responses clients by
+`sdk/translator/codex_tool_arguments.go`, which rewrites integral float
+literals in emitted tool-call arguments without touching schemas, so it covers
+every tool and parameter and a whitelist entry is no longer the remedy. Tracked
+upstream as `router-for-me/CLIProxyAPI#6255`.
+
 ## How to fill this in
 
 After `assess-release.sh` and `verify-absorb.sh`:
