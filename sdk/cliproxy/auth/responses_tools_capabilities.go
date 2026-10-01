@@ -166,7 +166,8 @@ func (m *Manager) ResponsesToolsMayApplyToRoute(provider, upstreamModel string) 
 			route.CustomTools == responsestools.CustomToolsStrip ||
 			route.CustomTools == responsestools.CustomToolsReject ||
 			route.Schema.CompletesSearchSchemas() ||
-			route.Schema.LocalRefs == responsestools.LocalRefsInline {
+			route.Schema.LocalRefs == responsestools.LocalRefsInline ||
+			route.Schema.LocalRefs == responsestools.LocalRefsFlatten {
 			return true
 		}
 	}
@@ -219,7 +220,8 @@ func (m *Manager) ResponsesToolsMayApplyToClientModel(modelID, provider, authID 
 			routePolicy.CustomTools == responsestools.CustomToolsStrip ||
 			routePolicy.CustomTools == responsestools.CustomToolsReject ||
 			routePolicy.Schema.CompletesSearchSchemas() ||
-			routePolicy.Schema.LocalRefs == responsestools.LocalRefsInline {
+			routePolicy.Schema.LocalRefs == responsestools.LocalRefsInline ||
+			routePolicy.Schema.LocalRefs == responsestools.LocalRefsFlatten {
 			return true
 		}
 	}

@@ -85,7 +85,8 @@ func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (
 	needsSearch := contract.ClientSearch && policy.ClientSearch == ClientSearchBridge
 	contract.SearchBridged = needsSearch
 	needsCustom := policy.CustomTools == CustomToolsFunction || policy.CustomTools == CustomToolsStrip
-	needsSchema := policy.Schema.CompletesSearchSchemas() || policy.Schema.LocalRefs == LocalRefsInline
+	needsSchema := policy.Schema.CompletesSearchSchemas() || policy.Schema.LocalRefs == LocalRefsInline ||
+		policy.Schema.LocalRefs == LocalRefsFlatten
 	needsCustomConversion := (policy.CustomTools == CustomToolsFunction || policy.CustomTools == CustomToolsStrip) &&
 		(customDeclarations || customHistory)
 	if contract.discoveryConflict && (needsSearch || needsCustomConversion) {
@@ -150,6 +151,38 @@ func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (
 				if inlined, err := InlineLocalRefs(tools, BudgetFromLimits(limits)); err != nil {
 					return Prepared{}, err
 				} else if inlined {
+					changed = true
+				}
+			}
+		}
+	}
+	if needsSchema && policy.Schema.LocalRefs == LocalRefsFlatten {
+		if tools, okTools := root["tools"].([]any); okTools {
+			if errDepth := ValidateToolArrayDepth(tools, 1, limits.MaxDepth); errDepth != nil {
+				return Prepared{}, errDepth
+			}
+			if flattened, err := FlattenRecursiveRefs(tools, BudgetFromLimits(limits)); err != nil {
+				return Prepared{}, err
+			} else if flattened {
+				changed = true
+			}
+		}
+		if input, okInput := root["input"].([]any); okInput {
+			for _, rawItem := range input {
+				item, okItem := rawItem.(map[string]any)
+				if !okItem || !IsToolDeclarationInput(item) {
+					continue
+				}
+				tools, okTools := item["tools"].([]any)
+				if !okTools {
+					continue
+				}
+				if errDepth := ValidateToolArrayDepth(tools, 1, limits.MaxDepth); errDepth != nil {
+					return Prepared{}, errDepth
+				}
+				if flattened, err := FlattenRecursiveRefs(tools, BudgetFromLimits(limits)); err != nil {
+					return Prepared{}, err
+				} else if flattened {
 					changed = true
 				}
 			}

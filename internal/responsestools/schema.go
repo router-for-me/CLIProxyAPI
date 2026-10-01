@@ -433,6 +433,293 @@ func inlineToolSchemaRef(rawTool any, depth int, budget SchemaBudget) (bool, err
 	return changed, nil
 }
 
+// FlattenRecursiveRefs rewrites cyclic local schema references in place under
+// the same strict reading as InlineLocalRefs: only references that close a
+// cycle are replaced, with an unconstrained schema that accepts the same
+// values the referenced definition would accept. A cyclic reference always
+// recurses into the value it constrains, so replacing the edge widens rather
+// than deletes the constraint, which lets the request reach upstreams that
+// reject recursive schemas. Non-recursive references are left untouched, so
+// upstreams that accept acyclic $defs keep receiving them. References inside
+// $defs containers are rewritten by the same rule: only the edges that belong
+// to a cycle change, and containers without cyclic edges pass through
+// unmodified. Sibling keys next to a cyclic $ref keep their conjunctive
+// meaning on the replacement: non-conflicting keys merge onto it, and
+// conflicting keys fall back to allOf, mirroring mergeRefSiblings.
+func FlattenRecursiveRefs(tools []any, budget SchemaBudget) (bool, error) {
+	changed := false
+	for _, rawTool := range tools {
+		toolChanged, err := flattenToolSchemaRef(rawTool, 1, budget)
+		if err != nil {
+			return changed, err
+		}
+		changed = changed || toolChanged
+	}
+	return changed, nil
+}
+
+func flattenToolSchemaRef(rawTool any, depth int, budget SchemaBudget) (bool, error) {
+	tool, ok := rawTool.(map[string]any)
+	if !ok {
+		return false, nil
+	}
+	if depth > budget.MaxDepth {
+		return false, schemaError("schema_depth_exceeded")
+	}
+	changed := false
+	if function, okFunction := tool["function"].(map[string]any); okFunction {
+		if parameters, exists := function["parameters"]; exists {
+			resolved, didChange, err := flattenSchemaRefs(parameters, depth, budget)
+			if err != nil {
+				return false, err
+			}
+			if didChange {
+				function["parameters"] = resolved
+				changed = true
+			}
+		}
+	} else if parameters, exists := tool["parameters"]; exists {
+		resolved, didChange, err := flattenSchemaRefs(parameters, depth, budget)
+		if err != nil {
+			return false, err
+		}
+		if didChange {
+			tool["parameters"] = resolved
+			changed = true
+		}
+	}
+	if toolType, _ := tool["type"].(string); strings.EqualFold(strings.TrimSpace(toolType), NamespaceToolType) {
+		if children, okChildren := tool["tools"].([]any); okChildren {
+			for _, child := range children {
+				childChanged, err := flattenToolSchemaRef(child, depth+1, budget)
+				if err != nil {
+					return false, err
+				}
+				changed = changed || childChanged
+			}
+		}
+	}
+	return changed, nil
+}
+
+func flattenSchemaRefs(schema any, depth int, budget SchemaBudget) (any, bool, error) {
+	root, ok := schema.(map[string]any)
+	if !ok || !schemaContainsLocalRef(root) {
+		return schema, false, nil
+	}
+	encodedRoot, err := json.Marshal(root)
+	if err != nil {
+		return schema, false, schemaError("schema_encoding_failed")
+	}
+	if len(encodedRoot) > budget.MaxBytes {
+		return schema, false, schemaError("schema_bytes_exceeded")
+	}
+	state := refFlattenState{budget: budget, cyclic: cyclicLocalRefs(root)}
+	resolved, changed, err := flattenLocalRefs(root, root, depth, &state)
+	if err != nil {
+		return schema, false, err
+	}
+	if !changed {
+		return schema, false, nil
+	}
+	encoded, err := json.Marshal(resolved)
+	if err != nil {
+		return schema, false, schemaError("schema_encoding_failed")
+	}
+	if len(encoded) > budget.MaxBytes {
+		return schema, false, schemaError("schema_bytes_exceeded")
+	}
+	return resolved, true, nil
+}
+
+type refFlattenState struct {
+	budget SchemaBudget
+	nodes  int
+	cyclic map[string]bool
+}
+
+func (state *refFlattenState) consume() error {
+	state.nodes++
+	if state.nodes > state.budget.MaxNodes {
+		return schemaError("schema_nodes_exceeded")
+	}
+	return nil
+}
+
+// flattenLocalRefs walks one parameters root, replacing only the $ref edges
+// that belong to a reference cycle with an unconstrained schema. Acyclic
+// references keep their $ref form. The walk terminates without expansion, so
+// a self-referencing definition cannot exhaust the budget by itself.
+func flattenLocalRefs(node any, root map[string]any, depth int, state *refFlattenState) (any, bool, error) {
+	if err := state.consume(); err != nil {
+		return nil, false, err
+	}
+	if depth > state.budget.MaxDepth {
+		return nil, false, schemaError("schema_depth_exceeded")
+	}
+	switch typed := node.(type) {
+	case []any:
+		out := make([]any, 0, len(typed))
+		changed := false
+		for _, item := range typed {
+			resolved, itemChanged, err := flattenLocalRefs(item, root, depth+1, state)
+			if err != nil {
+				return nil, false, err
+			}
+			changed = changed || itemChanged
+			out = append(out, resolved)
+		}
+		if !changed {
+			return node, false, nil
+		}
+		return out, true, nil
+	case map[string]any:
+		if ref, ok := typed["$ref"].(string); ok {
+			match := localRefPattern.FindStringSubmatch(ref)
+			if match == nil {
+				return nil, false, schemaError("unsupported_schema_reference")
+			}
+			if localRefTarget(root, match[1], decodeJSONPointerToken(match[2])) == nil {
+				return nil, false, schemaError("missing_schema_reference")
+			}
+			if !state.cyclic[ref] {
+				return node, false, nil
+			}
+			replacement := map[string]any{}
+			rest := copyWithoutKey(typed, "$ref")
+			if len(rest) == 0 {
+				return replacement, true, nil
+			}
+			merged, err := mergeRefSiblings(replacement, rest)
+			if err != nil {
+				return nil, false, err
+			}
+			return merged, true, nil
+		}
+		out := make(map[string]any, len(typed))
+		changed := false
+		for key, value := range typed {
+			resolved, valueChanged, err := flattenLocalRefs(value, root, depth+1, state)
+			if err != nil {
+				return nil, false, err
+			}
+			changed = changed || valueChanged
+			out[key] = resolved
+		}
+		if !changed {
+			return node, false, nil
+		}
+		return out, true, nil
+	default:
+		return node, false, nil
+	}
+}
+
+// cyclicLocalRefs returns the set of local reference strings that participate
+// in a reference cycle. Nodes are (container, name) definitions plus the
+// schema root; the analysis runs over the definition graph without expanding
+// anything, so recursive definitions terminate. A use-site reference outside
+// any definition resolves against the root node, which keeps cycles reachable
+// only through definitions intact.
+func cyclicLocalRefs(root map[string]any) map[string]bool {
+	const rootName = "\x00root"
+	refsOf := map[string][]string{}
+	targets := map[string]string{}
+	var collectRefs func(node any, owner string)
+	collectRefs = func(node any, owner string) {
+		switch typed := node.(type) {
+		case map[string]any:
+			for key, value := range typed {
+				if key == "$defs" || key == "definitions" {
+					continue
+				}
+				collectRefs(value, owner)
+			}
+			ref, ok := typed["$ref"].(string)
+			if !ok {
+				return
+			}
+			match := localRefPattern.FindStringSubmatch(ref)
+			if match == nil {
+				return
+			}
+			name := decodeJSONPointerToken(match[2])
+			target := localRefTarget(root, match[1], name)
+			if target == nil {
+				return
+			}
+			key := match[1] + "\x00" + name
+			targets[ref] = key
+			refsOf[owner] = append(refsOf[owner], ref)
+		case []any:
+			for _, item := range typed {
+				collectRefs(item, owner)
+			}
+		}
+	}
+	collectRefs(root, rootName)
+	for _, container := range []string{"$defs", "definitions"} {
+		definitions, ok := root[container].(map[string]any)
+		if !ok {
+			continue
+		}
+		for name, target := range definitions {
+			targetMap, ok := target.(map[string]any)
+			if !ok {
+				continue
+			}
+			collectRefs(targetMap, container+"\x00"+name)
+		}
+	}
+	cyclicNodes := map[string]bool{}
+	const (
+		white = 0
+		grey  = 1
+		black = 2
+	)
+	color := map[string]int{}
+	var visit func(node string, stack []string)
+	visit = func(node string, stack []string) {
+		switch color[node] {
+		case black:
+			return
+		case grey:
+			// Reached through a path the outer loop already explores; the
+			// cycle is recorded when the inner edge closes it.
+			return
+		}
+		color[node] = grey
+		stack = append(stack, node)
+		for _, ref := range refsOf[node] {
+			target, ok := targets[ref]
+			if !ok {
+				continue
+			}
+			if color[target] == grey {
+				for _, entry := range append(stack, target) {
+					cyclicNodes[entry] = true
+				}
+				continue
+			}
+			visit(target, stack)
+		}
+		color[node] = black
+	}
+	visit(rootName, nil)
+	for node := range refsOf {
+		if node != rootName {
+			visit(node, nil)
+		}
+	}
+	cyclic := map[string]bool{}
+	for ref, target := range targets {
+		if cyclicNodes[target] {
+			cyclic[ref] = true
+		}
+	}
+	return cyclic
+}
+
 func inlineSchemaRefs(schema any, depth int, budget SchemaBudget) (any, bool, error) {
 	root, ok := schema.(map[string]any)
 	if !ok || !schemaContainsLocalRef(root) {

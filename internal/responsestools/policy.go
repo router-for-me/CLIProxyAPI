@@ -68,7 +68,7 @@ func ValidateRoutePolicy(route RoutePolicy) error {
 		return unprocessableError(ReasonInvalidConfiguration, fmt.Errorf("unknown custom-grammar mode %q", string(route.CustomGrammar)))
 	}
 	switch route.Schema.LocalRefs {
-	case "", LocalRefsPreserve, LocalRefsInline:
+	case "", LocalRefsPreserve, LocalRefsInline, LocalRefsFlatten:
 	default:
 		return unprocessableError(ReasonInvalidConfiguration, fmt.Errorf("unknown local-refs mode %q", string(route.Schema.LocalRefs)))
 	}
@@ -236,6 +236,12 @@ func ConventionPolicy(route Route) RoutePolicy {
 		policy.CustomTools = CustomToolsFunction
 		policy.CustomGrammar = CustomGrammarDescribe
 		policy.Schema.SearchRequired = SearchRequiredComplete
+		// The same upstream rejects recursive schemas, so cyclic references
+		// are flattened instead of reaching it untouched. Flattening rewrites
+		// only the edges that close a cycle and preserves acyclic $defs, so
+		// it stays compatible with the convention of never expanding a
+		// client-authored reference.
+		policy.Schema.LocalRefs = LocalRefsFlatten
 	}
 	return policy
 }

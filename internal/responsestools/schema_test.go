@@ -134,6 +134,147 @@ func TestInlineLocalRefsRejectsExternalAndMissing(t *testing.T) {
 	}
 }
 
+// flattenRecursiveTools builds the tool shape the Codex desktop client sends
+// for request_environment_input: an arbitrary-JSON parameter whose definition
+// references itself.
+func flattenRecursiveTools() []any {
+	recursive := map[string]any{"anyOf": []any{
+		map[string]any{"type": "string"},
+		map[string]any{"type": "number"},
+		map[string]any{"type": "boolean"},
+		map[string]any{"type": "null"},
+		map[string]any{"items": map[string]any{"$ref": "#/$defs/__schema0"}, "type": "array"},
+		map[string]any{"additionalProperties": map[string]any{"$ref": "#/$defs/__schema0"}, "properties": map[string]any{}, "type": "object"},
+	}}
+	return []any{map[string]any{
+		"type": "namespace", "name": "mcp__codex_app",
+		"tools": []any{map[string]any{
+			"type": "function", "name": "request_environment_input",
+			"parameters": map[string]any{
+				"$defs": map[string]any{"__schema0": recursive},
+				"type":  "object",
+				"properties": map[string]any{
+					"mode":   map[string]any{"type": "string"},
+					"secret": map[string]any{"$ref": "#/$defs/__schema0"},
+				},
+				"required":             []any{"mode"},
+				"additionalProperties": false,
+			},
+		}},
+	}}
+}
+
+func TestFlattenRecursiveRefsBreaksSelfReference(t *testing.T) {
+	tools := flattenRecursiveTools()
+	changed, err := FlattenRecursiveRefs(tools, SchemaBudget{MaxBytes: 65536, MaxNodes: 10000, MaxDepth: 64})
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected change")
+	}
+	encoded := mustMarshal(tools)
+	if strings.Contains(string(encoded), "$ref") {
+		t.Fatalf("cyclic references remain: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "$defs") {
+		t.Fatalf("acyclic containers must be preserved, got %s", encoded)
+	}
+}
+
+func TestFlattenRecursiveRefsBreaksIndirectCycle(t *testing.T) {
+	tools := []any{map[string]any{
+		"type": "function", "name": "f",
+		"parameters": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"a": map[string]any{"$ref": "#/$defs/A"}},
+			"$defs": map[string]any{
+				"A": map[string]any{"type": "object", "properties": map[string]any{"b": map[string]any{"$ref": "#/$defs/B"}}},
+				"B": map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"$ref": "#/$defs/A"}}},
+			},
+		},
+	}}
+	changed, err := FlattenRecursiveRefs(tools, SchemaBudget{MaxBytes: 65536, MaxNodes: 10000, MaxDepth: 64})
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected change")
+	}
+	encoded := mustMarshal(tools)
+	if strings.Contains(string(encoded), "$ref") {
+		t.Fatalf("cyclic references remain: %s", encoded)
+	}
+}
+
+func TestFlattenRecursiveRefsKeepsAcyclicRefs(t *testing.T) {
+	before := []any{map[string]any{
+		"type": "function", "name": "f",
+		"parameters": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"item": map[string]any{"$ref": "#/$defs/Item"}},
+			"$defs": map[string]any{
+				"Item": map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string"}}},
+			},
+		},
+	}}
+	want := string(mustMarshal(before))
+	changed, err := FlattenRecursiveRefs(before, SchemaBudget{MaxBytes: 65536, MaxNodes: 10000, MaxDepth: 64})
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
+	if changed {
+		t.Fatalf("acyclic schemas must not change")
+	}
+	if got := string(mustMarshal(before)); got != want {
+		t.Fatalf("acyclic schema rewritten: %s", got)
+	}
+}
+
+func TestFlattenRecursiveRefsMergesSiblings(t *testing.T) {
+	tools := []any{map[string]any{
+		"type": "function", "name": "f",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"item": map[string]any{
+					"$ref":        "#/$defs/Item",
+					"description": "override",
+				},
+			},
+			"$defs": map[string]any{
+				"Item": map[string]any{"type": "object", "properties": map[string]any{"child": map[string]any{"$ref": "#/$defs/Item"}}},
+			},
+		},
+	}}
+	changed, err := FlattenRecursiveRefs(tools, SchemaBudget{MaxBytes: 65536, MaxNodes: 10000, MaxDepth: 64})
+	if err != nil {
+		t.Fatalf("flatten: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected change")
+	}
+	encoded := mustMarshal(tools)
+	if !strings.Contains(string(encoded), "override") {
+		t.Fatalf("sibling keys must survive flattening: %s", encoded)
+	}
+	if strings.Contains(string(encoded), "$ref") {
+		t.Fatalf("cyclic references remain: %s", encoded)
+	}
+}
+
+func TestFlattenRecursiveRefsRejectsExternalAndMissing(t *testing.T) {
+	for _, ref := range []string{"https://example.invalid/schema.json", "#/properties/x", "#/$defs/Missing"} {
+		tools := []any{map[string]any{
+			"type": "function", "name": "f",
+			"parameters": map[string]any{"a": map[string]any{"$ref": ref}},
+		}}
+		if _, err := FlattenRecursiveRefs(tools, SchemaBudget{MaxBytes: 65536, MaxNodes: 10000, MaxDepth: 64}); err == nil {
+			t.Fatalf("expected rejection for %q", ref)
+		}
+	}
+}
+
 func TestInlineRefSiblingConflictUsesAllOf(t *testing.T) {
 	tools := []any{map[string]any{
 		"type": "function", "name": "f",

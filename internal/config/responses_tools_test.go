@@ -57,6 +57,26 @@ func TestResponsesToolsInvalidEnumRejected(t *testing.T) {
 	}
 }
 
+func TestResponsesToolsFlattenEnumCompiles(t *testing.T) {
+	cfg := &Config{}
+	cfg.ResponsesTools.Enabled = boolPointer(true)
+	cfg.ResponsesTools.Routes = []ResponsesToolsRoute{{
+		Match:  ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex", BaseURL: "https://example.invalid/v1"},
+		Schema: ResponsesToolsSchema{LocalRefs: "flatten"},
+	}}
+	cfg.NormalizeResponsesToolsConfig()
+	if err := cfg.ValidateResponsesToolsConfig(); err != nil {
+		t.Fatalf("flatten must validate: %v", err)
+	}
+	policy, err := cfg.ResponsesTools.Compile()
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if policy.Routes[0].Schema.LocalRefs != responsestools.LocalRefsFlatten {
+		t.Fatalf("flatten lost in compile: %+v", policy.Routes[0].Schema)
+	}
+}
+
 func TestResponsesToolsOverlapRejected(t *testing.T) {
 	match := ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"}
 	cfg := &Config{}

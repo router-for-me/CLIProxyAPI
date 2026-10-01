@@ -84,6 +84,12 @@ const (
 	// LocalRefsInline expands local references, rejecting recursive, external,
 	// missing, or unsupported references instead of deleting constraints.
 	LocalRefsInline LocalRefsMode = "inline"
+	// LocalRefsFlatten keeps non-recursive references untouched and replaces
+	// only the references that close a cycle with an unconstrained schema.
+	// A cyclic edge accepts the same values as the unconstrained schema, so
+	// the replacement widens rather than deletes the constraint, and the
+	// request can reach upstreams that reject recursive schemas.
+	LocalRefsFlatten LocalRefsMode = "flatten"
 )
 
 // SearchRequiredMode selects how client-search parameter schemas are adapted.

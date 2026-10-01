@@ -341,3 +341,54 @@ func TestPrepareRetryRebuildsFromOriginal(t *testing.T) {
 		t.Fatalf("retry produced different wire body")
 	}
 }
+
+// The Codex desktop client declares request_environment_input with a
+// self-referencing definition under a namespace tool. A portable-surface
+// route must flatten the cyclic edges instead of forwarding them to an
+// upstream that rejects recursive schemas.
+func TestPrepareFlattenEndToEnd(t *testing.T) {
+	recursive := map[string]any{"anyOf": []any{
+		map[string]any{"type": "string"},
+		map[string]any{"items": map[string]any{"$ref": "#/$defs/__schema0"}, "type": "array"},
+		map[string]any{"additionalProperties": map[string]any{"$ref": "#/$defs/__schema0"}, "type": "object"},
+	}}
+	body := mustMarshal(map[string]any{
+		"model": "muse-spark-1.3-contributor",
+		"tools": []any{map[string]any{
+			"type": "namespace", "name": "mcp__codex_app",
+			"tools": []any{map[string]any{
+				"type": "function", "name": "request_environment_input",
+				"parameters": map[string]any{
+					"$defs":      map[string]any{"__schema0": recursive},
+					"type":       "object",
+					"properties": map[string]any{"secret": map[string]any{"$ref": "#/$defs/__schema0"}},
+				},
+			}},
+		}},
+		"input": []any{},
+	})
+	policy := RoutePolicy{
+		ClientSearch:  ClientSearchNative,
+		CustomTools:   CustomToolsFunction,
+		CustomGrammar: CustomGrammarDescribe,
+		Schema:        SchemaPolicy{SearchRequired: SearchRequiredComplete, LocalRefs: LocalRefsFlatten},
+	}
+	limiter := NewLimiter(DefaultLimits())
+	prepared, err := Prepare(body, policy, DefaultLimits(), limiter)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if prepared.Attempt == nil || !prepared.Attempt.Adapted() {
+		t.Fatalf("expected adapted attempt")
+	}
+	if strings.Contains(string(prepared.Body), "$ref") {
+		t.Fatalf("cyclic references reached the wire body: %s", prepared.Body)
+	}
+	if !strings.Contains(string(prepared.Body), "$defs") {
+		t.Fatalf("acyclic containers must be preserved: %s", prepared.Body)
+	}
+	prepared.Attempt.Close()
+	if attempts, _ := limiter.Usage(); attempts != 0 {
+		t.Fatalf("lease leaked")
+	}
+}

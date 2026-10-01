@@ -1071,7 +1071,7 @@ oauth:
   #       custom-grammar: "reject" # reject | describe (function mode only)
   #       schema:
   #         complete-search-required: false
-  #         local-refs: "preserve" # preserve | inline
+  #         local-refs: "preserve" # preserve | inline | flatten
 
 # Image and video behavior.
 multimedia:

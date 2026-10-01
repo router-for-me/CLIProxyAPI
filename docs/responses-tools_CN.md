@@ -117,18 +117,19 @@ provider 到格式的映射是固定的：
 - 所有路由一律 `schema.local-refs: preserve`、
   `schema.complete-search-required: false`。约定从不把其中任何一个改写为
   重写类取值。目前只有 `meta` 需要可移植工具面：它拒绝 `type: custom`，
-  且要求每个属性都出现在 `required` 中，因此约定会对它采用
-  `custom-tools: function`、`custom-grammar: describe` 与
-  `schema.complete-search-required: true`。`schema.local-refs: inline` 对所有
-  provider 都是手动开启，`meta` 也不例外：约定从不展开客户端自己写的
-  `$ref`。
+  且要求每个属性都出现在 `required` 中，还拒绝递归 schema，因此约定会
+  对它采用 `custom-tools: function`、`custom-grammar: describe`、
+  `schema.complete-search-required: true` 与 `schema.local-refs: flatten`。
+  `schema.local-refs: inline` 对所有 provider 都是手动开启，`meta` 也不
+  例外：约定从不展开客户端自己写的 `$ref`；flatten 只把成环的引用替换
+  为无约束 schema，非环 `$defs` 保持原样。
 
 有损策略保持手动开启，因为它们要么丢失能力，要么改写用户 schema。唯一的
 例外是上文所述的可移植工具面折叠——对 `meta` 而言这是约定而非可选项，
 因为该上游不接受其他方案：
 
 - `custom-tools: strip` 与 `custom-grammar: describe`
-- `schema.complete-search-required: true` 与 `schema.local-refs: inline`
+- `schema.complete-search-required: true` 与 `schema.local-refs: flatten`
 - `client-search: disabled`，用于单条路由关闭搜索
 
 `routes[]` 规则只覆盖它自己写出的策略；每一条未写出的策略会各自解析为
@@ -152,7 +153,9 @@ provider 到格式的映射是固定的：
   `true` 补齐 required 并把可选字段放宽为 nullable，`false` 保持声明
   原样。它只适配 client-search 参数 schema，不全局 strictify 所有工具。
 - `schema.local-refs`：`preserve`（默认）或 `inline`（展开本地引用；
-  递归、外部、缺失或不支持的引用直接失败，不删除约束）。
+  递归、外部、缺失或不支持的引用直接失败，不删除约束）或 `flatten`
+  （所有引用保持原样，只有成环的引用变为无约束 schema；外部或缺失
+  引用仍然直接失败，不删除约束）。
 
 匹配规则：
 

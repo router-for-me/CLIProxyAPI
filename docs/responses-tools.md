@@ -136,10 +136,13 @@ derived from the upstream format **and** the provider:
   for every route. Neither is ever set to a rewriting value by the convention.
   `meta` is the one provider that needs a portable tool surface today: it
   rejects `type: custom` and requires every property to be listed in
-  `required`, so the convention folds its tools with `custom-tools: function`,
-  `custom-grammar: describe`, and `schema.complete-search-required: true`.
+  `required` and rejects recursive schemas, so the convention folds its tools
+  with `custom-tools: function`, `custom-grammar: describe`,
+  `schema.complete-search-required: true`, and `schema.local-refs: flatten`.
   `schema.local-refs: inline` stays opt-in for every provider, `meta`
-  included: the convention never expands a client-authored `$ref`.
+  included: the convention never expands a client-authored `$ref`; flattening
+  only replaces the references that close a cycle with an unconstrained
+  schema and keeps acyclic `$defs` untouched.
 
 Lossy strategies stay opt-in, because each of them either drops a capability
 or rewrites user schema. The single exception is the portable-surface folding
@@ -147,7 +150,7 @@ described above, which the convention applies to `meta` because that upstream
 accepts nothing else:
 
 - `custom-tools: strip` and `custom-grammar: describe`
-- `schema.complete-search-required: true` and `schema.local-refs: inline`
+- `schema.complete-search-required: true` and `schema.local-refs: flatten`
 - `client-search: disabled`, to turn search off for one route
 
 A `routes[]` rule overrides only the strategies it states. Every strategy it
@@ -179,7 +182,10 @@ Strategy enums:
   client-search schemas, never strictifies every tool globally.
 - `schema.local-refs`: `preserve` (default) or `inline` (expands local
   references; recursive, external, missing, or unsupported references fail
-  instead of deleting constraints).
+  instead of deleting constraints) or `flatten` (keeps every reference
+  untouched except the ones that close a cycle, which become an unconstrained
+  schema; external or missing references still fail instead of deleting
+  constraints).
 
 Match rules:
 

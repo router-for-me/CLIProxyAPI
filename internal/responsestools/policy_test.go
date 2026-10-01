@@ -206,9 +206,14 @@ func TestConventionPolicyFoldsToolsForProvidersWithoutPortableSurface(t *testing
 	if !portable.Schema.CompletesSearchSchemas() {
 		t.Error("meta schema completion not enabled")
 	}
+	if portable.Schema.LocalRefs != LocalRefsFlatten {
+		t.Errorf("meta local-refs = %q, want %q", portable.Schema.LocalRefs, LocalRefsFlatten)
+	}
 	native := ConventionPolicy(Route{Provider: "codex", UpstreamFormat: "codex"})
-	if native.CustomTools != CustomToolsInherit || native.CustomGrammar != CustomGrammarReject || native.Schema.CompletesSearchSchemas() {
-		t.Errorf("codex tools = %q/%q complete=%v, want the native surface", native.CustomTools, native.CustomGrammar, native.Schema.CompletesSearchSchemas())
+	if native.CustomTools != CustomToolsInherit || native.CustomGrammar != CustomGrammarReject || native.Schema.CompletesSearchSchemas() ||
+		native.Schema.LocalRefs != LocalRefsPreserve {
+		t.Errorf("codex tools = %q/%q complete=%v local-refs=%q, want the native surface",
+			native.CustomTools, native.CustomGrammar, native.Schema.CompletesSearchSchemas(), native.Schema.LocalRefs)
 	}
 }
 
