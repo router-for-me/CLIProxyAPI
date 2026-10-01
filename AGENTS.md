@@ -38,11 +38,29 @@ and do not wait for upstream review before shipping our own work.
   over a Homebrew-managed path; that leaves a stale regular file outside Cellar
   management. Homebrew has no `brew rollback` command; prepare a versioned
   formula before upgrading if rollback is required.
+- **The tap formula is generated, not hand-maintained.** Edit
+  `ops/homebrew/cli-proxy-api.rb` and run `ops/homebrew/render-formula.py <tag>
+  <checksums.txt>`; never edit `Formula/cli-proxy-api.rb` in the tap repo. The
+  formula's `version` is the version in the asset filenames, which for an
+  upstream-aligned release equals the tag minus `v`; the tag's `-upstream`
+  suffix appears only in the download URL.
 - [Maintenance guide](docs/maintenance.md) is the workflow entrypoint.
   Detailed intake and installation procedures live under `ops/`.
 - Project skills live in `.agents/skills/`; use `cliproxyapi-fork-maintenance` for intake.
   Load only the procedure needed by the current task. Auditing a skill does
   not authorize its release or deployment steps.
+
+### Branch governance
+
+- `main` is protected. Direct pushes are rejected; open a PR from a `codex/*`
+  branch, let the `build` check pass, then merge with a rebase or squash so the
+  linear-history rule holds. Approval is not required, so a solo maintainer is
+  never blocked. Force pushes and branch deletion are disabled, including for
+  admins, and unresolved review threads block the merge.
+- `codex/codex-tool-search-shim` is a locked read-only archive branch. Keep it
+  only while it holds work worth recovering; do not merge or build on it.
+- Tag pushes are not affected by branch protection, so release tags can still be
+  pushed from a local tag ref.
 
 ### CI
 
