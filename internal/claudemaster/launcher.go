@@ -43,6 +43,60 @@ func LaunchProfiles(ctx context.Context, profiles []Profile, args []string) (int
 // LaunchProfilesWithDiagnostics is LaunchProfiles with privacy-safe diagnostics.
 // The caller must hold every supplied profile lock until this function returns.
 func LaunchProfilesWithDiagnostics(ctx context.Context, profiles []Profile, args []string, diagnostics io.Writer) (int, error) {
+	return LaunchProfilesWithOptions(ctx, profiles, args, LaunchOptions{Diagnostics: diagnostics})
+}
+
+// LaunchOptions configures process-local inference routing. BackupAPIKey is never
+// written to a profile or inherited by the native Claude process.
+type LaunchOptions struct {
+	BackupAPIKey    string
+	BackupAPIKeyEnv string
+	ModelMap        map[string]string
+	Diagnostics     io.Writer
+}
+
+// BackupAPIKeyEnvironment is the dedicated optional final-backup credential source.
+const BackupAPIKeyEnvironment = "CLAUDE_MASTER_BACKUP_API_KEY"
+
+// ValidateBackupAPIKeyEnv accepts portable shell environment variable names.
+func ValidateBackupAPIKeyEnv(name string) error {
+	if name == "" {
+		return errors.New("backup API key environment variable name is invalid")
+	}
+	for i, char := range name {
+		if char == '_' || char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || i > 0 && char >= '0' && char <= '9' {
+			continue
+		}
+		return errors.New("backup API key environment variable name is invalid")
+	}
+	return nil
+}
+
+func launchEnvironment(environ []string, source string) ([]string, error) {
+	if source == "" {
+		source = BackupAPIKeyEnvironment
+	}
+	if err := ValidateBackupAPIKeyEnv(source); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != source && key != BackupAPIKeyEnvironment {
+			out = append(out, entry)
+		}
+	}
+	return out, nil
+}
+
+// LaunchProfilesWithOptions starts a subscription pool with optional final API-key
+// backup and exact model mappings. Callers must hold every profile lock until return.
+func LaunchProfilesWithOptions(ctx context.Context, profiles []Profile, args []string, opts LaunchOptions) (int, error) {
+	environ, err := launchEnvironment(os.Environ(), opts.BackupAPIKeyEnv)
+	if err != nil {
+		return 1, err
+	}
+	diagnostics := opts.Diagnostics
 	if len(profiles) == 0 {
 		return 1, errors.New("at least one inference profile is required")
 	}
@@ -61,11 +115,11 @@ func LaunchProfilesWithDiagnostics(ctx context.Context, profiles []Profile, args
 	if provider != "claude" {
 		return 1, errors.New("native inference run requires Claude subscription profiles")
 	}
-	args, err := NativeArguments(provider, args)
+	args, err = NativeArguments(provider, args)
 	if err != nil {
 		return 1, err
 	}
-	bin, err := Preflight(ctx, args)
+	bin, err := preflight(ctx, args, environ)
 	if err != nil {
 		return 1, err
 	}
@@ -75,15 +129,15 @@ func LaunchProfilesWithDiagnostics(ctx context.Context, profiles []Profile, args
 	}
 	defer func() { _ = os.RemoveAll(certs.dir) }()
 	var backend *Backend
-	if len(profiles) == 1 {
+	if len(profiles) == 1 && opts.BackupAPIKey == "" {
 		profile := profiles[0]
-		backend, err = NewBackend(ctx, BackendOptions{AuthDir: profile.AuthDir, Provider: profile.Provider, AuthID: profile.AuthID, UseRequestModel: true})
+		backend, err = NewBackend(ctx, BackendOptions{AuthDir: profile.AuthDir, Provider: profile.Provider, AuthID: profile.AuthID, UseRequestModel: true, ModelMap: opts.ModelMap})
 	} else {
 		credentials := make([]BackendCredential, 0, len(profiles))
 		for _, profile := range profiles {
 			credentials = append(credentials, BackendCredential{AuthDir: profile.AuthDir, Provider: profile.Provider, AuthID: profile.AuthID})
 		}
-		backend, err = NewBackendSeries(ctx, BackendSeriesOptions{Credentials: credentials})
+		backend, err = NewBackendSeries(ctx, BackendSeriesOptions{Credentials: credentials, BackupAPIKey: opts.BackupAPIKey, ModelMap: opts.ModelMap})
 	}
 	if err != nil {
 		return 1, errors.New("cannot start selected inference backend; check the profile")
@@ -111,7 +165,7 @@ func LaunchProfilesWithDiagnostics(ctx context.Context, profiles []Profile, args
 			}{observation.result()})
 		}
 	}()
-	env, err := ChildEnvironment(os.Environ(), args, proxy.URL(), certs.caPath)
+	env, err := ChildEnvironment(environ, args, proxy.URL(), certs.caPath)
 	if err != nil {
 		return 1, err
 	}
@@ -138,10 +192,18 @@ func LaunchProfilesWithDiagnostics(ctx context.Context, profiles []Profile, args
 // Preflight checks native startup compatibility without opening profiles,
 // acquiring credentials, starting a session, or modifying native settings.
 func Preflight(ctx context.Context, args []string) (string, error) {
-	if _, err := ChildEnvironment(os.Environ(), args, "http://127.0.0.1:1", "/unused"); err != nil {
+	environ, err := launchEnvironment(os.Environ(), "")
+	if err != nil {
 		return "", err
 	}
-	if err := ValidateNativeSettings(ctx); err != nil {
+	return preflight(ctx, args, environ)
+}
+
+func preflight(ctx context.Context, args, environ []string) (string, error) {
+	if _, err := ChildEnvironment(environ, args, "http://127.0.0.1:1", "/unused"); err != nil {
+		return "", err
+	}
+	if err := validateNativeSettings(ctx, environ); err != nil {
 		return "", err
 	}
 	return resolveNativeBinary(ctx)

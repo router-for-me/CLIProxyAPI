@@ -37,7 +37,9 @@ func analyzeNativeRequestAffinity(body []byte) nativeRequestAffinity {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nativeRequestAffinity{}
 	}
-	if valuePresent(request["container"]) {
+	// Fallback credits are redeemable only by the organization/workspace that
+	// received them, even when the rest of the retry is self-contained.
+	if valuePresent(request["container"]) || valuePresent(request["fallback_credit_token"]) {
 		return nativeRequestAffinity{requiresAccount: true, validJSON: true}
 	}
 	scan := nativeContinuationScan{}
@@ -108,7 +110,7 @@ func (s *nativeContinuationScan) continuationValue(value any) {
 		}
 		// Encrypted provider payloads can be nested inside server-tool result
 		// blocks. Never inspect or rewrite them; presence alone pins the turn.
-		for _, key := range []string{"thought_signature", "encrypted_content"} {
+		for _, key := range []string{"thought_signature", "encrypted_content", "encrypted_stdout", "encrypted_stderr", "encrypted_index"} {
 			if valuePresent(typed[key]) {
 				s.requiresAccount = true
 				return

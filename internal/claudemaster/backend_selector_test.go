@@ -292,6 +292,7 @@ func TestBackendSeriesSelectorUsesSoonestWeeklyReset(t *testing.T) {
 	selector := &backendSeriesSelector{authIDs: []string{"profile-a", "profile-b", "profile-c"}, provider: "claude"}
 	t.Cleanup(selector.Stop)
 	resetSoon := time.Date(2026, time.October, 1, 0, 0, 0, 0, time.UTC)
+	selector.now = func() time.Time { return resetSoon.Add(-time.Hour) }
 	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 0.2, resetsAt: resetSoon.Add(48 * time.Hour)})
 	selector.observeQuota("profile-b", backendWeeklyQuota{known: true, used: 0.4, resetsAt: resetSoon})
 

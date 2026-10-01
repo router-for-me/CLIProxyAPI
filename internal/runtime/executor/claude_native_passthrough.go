@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -93,12 +94,37 @@ func (e *ClaudeExecutor) sendNativeClaudeRequest(ctx context.Context, auth *clip
 	if !ok {
 		return nil, fmt.Errorf("native Claude request is missing its trusted protocol headers")
 	}
+	isAPIKey := auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey
+	if isAPIKey {
+		if errMetadata := helps.ValidateClaudeCredentialMetadataContainers(payload); errMetadata != nil {
+			return nil, errMetadata
+		}
+		// This one beta declares an OAuth credential, not a native feature. Keep
+		// all other tokens and header values in their original order and form.
+		var betaValues []string
+		for _, value := range nativeHeaders.Values("Anthropic-Beta") {
+			var betaTokens []string
+			for _, token := range strings.Split(value, ",") {
+				if strings.TrimSpace(token) != claudeOAuthBeta {
+					betaTokens = append(betaTokens, token)
+				}
+			}
+			if len(betaTokens) > 0 {
+				betaValues = append(betaValues, strings.Join(betaTokens, ","))
+			}
+		}
+		nativeHeaders.Del("Anthropic-Beta")
+		if len(betaValues) > 0 {
+			nativeHeaders["Anthropic-Beta"] = betaValues
+		}
+	}
 
 	body := payload
 	sessionID := helps.ExtractClaudeCodeSessionID(ctx, payload, nativeHeaders)
-	if identityMode == nativeClaudeIdentityStrip {
-		// Native Claude omits metadata on count_tokens, and Anthropic rejects the
-		// ordinary identity-only shape there. Remove only the master-bound user_id.
+	if identityMode == nativeClaudeIdentityStrip || isAPIKey {
+		// Native Claude omits metadata on count_tokens. API-key credentials have
+		// no subscription account/device identity. In both cases remove only the
+		// master-bound user_id, not the native conversation session header.
 		// Preserve any unknown sibling fields so a future native protocol addition
 		// is not silently discarded; Anthropic remains the authority on whether it
 		// accepts those fields.
@@ -106,13 +132,13 @@ func (e *ClaudeExecutor) sendNativeClaudeRequest(ctx context.Context, auth *clip
 			var errDelete error
 			body, errDelete = sjson.DeleteBytes(payload, "metadata.user_id")
 			if errDelete != nil {
-				return nil, fmt.Errorf("remove native Claude count identity: %w", errDelete)
+				return nil, fmt.Errorf("remove native Claude credential identity: %w", errDelete)
 			}
 			remaining := gjson.GetBytes(body, "metadata")
 			if remaining.IsObject() && len(remaining.Map()) == 0 {
 				body, errDelete = sjson.DeleteBytes(body, "metadata")
 				if errDelete != nil {
-					return nil, fmt.Errorf("remove empty native Claude count metadata: %w", errDelete)
+					return nil, fmt.Errorf("remove empty native Claude metadata: %w", errDelete)
 				}
 			}
 		}

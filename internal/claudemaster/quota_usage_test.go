@@ -103,6 +103,52 @@ func TestParseClaudeWeeklyQuotaCurrentTopLevelLimits(t *testing.T) {
 	}
 }
 
+func TestParseClaudeWeeklyQuotaDoesNotPromoteScopedMeters(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload string
+	}{
+		{name: "scoped_weekly_group", payload: `{"limits":[{"kind":"weekly_fable","group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "scoped_generic_name", payload: `{"limits":[{"type":"weekly_sonnet","name":"weekly_all","group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "unknown_kind", payload: `{"limits":[{"kind":"future_model_meter","group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "conflicting_explicit_kinds", payload: `{"limits":[{"kind":"weekly_all","type":"weekly_scoped","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "keyed_scoped_meter", payload: `{"limits":{"weekly_all":{"kind":"weekly_fable","percent":100,"resets_at":"2026-10-04T00:00:00Z"}}}`},
+		{name: "wrapped_scoped_meter", payload: `{"rate_limits":{"limits":[{"limit_type":"weekly_scoped","group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}}`},
+		{name: "normalized_discriminator_key", payload: `{"limits":[{"RATE-LIMIT-TYPE":"weekly_scoped","group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "invalid_kind_type", payload: `{"limits":[{"kind":null,"group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "legacy_scoped_name", payload: `{"limits":[{"name":"weekly_sonnet","group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "legacy_scoped_id", payload: `{"limits":[{"id":"seven_day_opus","window":"seven_day","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "legacy_scoped_key", payload: `{"limits":[{"key":"weekly_fable","group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+		{name: "legacy_scoped_map_key", payload: `{"limits":{"weekly_sonnet":{"group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}}}`},
+		{name: "legacy_unknown_identifier", payload: `{"limits":[{"name":"future_meter","group":"weekly","percent":100,"resets_at":"2026-10-04T00:00:00Z"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			quota, known, err := ParseClaudeWeeklyQuota([]byte(tc.payload))
+			if err != nil || known || quota != (ClaudeWeeklyQuota{}) {
+				t.Fatalf("scoped/unknown meter promoted to global weekly quota: quota=%+v known=%t err=%v", quota, known, err)
+			}
+		})
+	}
+}
+
+func TestParseClaudeWeeklyQuotaScopedMetersKeepGlobalCompatibilityFallback(t *testing.T) {
+	for _, payload := range []string{
+		`{"limits":[{"kind":"weekly_scoped","group":"weekly","percent":100,"resets_at":"2026-10-03T00:00:00Z"}],"seven_day":{"utilization":20,"resets_at":"2026-10-04T00:00:00Z"}}`,
+		`{"rate_limits":{"limits":[{"kind":"weekly_scoped","group":"weekly","percent":100,"resets_at":"2026-10-03T00:00:00Z"},{"name":"weekly","percent":20,"resets_at":"2026-10-04T00:00:00Z"}]}}`,
+		`{"limits":{"weekly_all":{"kind":"weekly_fable","percent":100,"resets_at":"2026-10-03T00:00:00Z"},"seven_day":{"percent":20,"resets_at":"2026-10-04T00:00:00Z"}}}`,
+		`{"limits":[{"name":"weekly","group":"weekly","percent":20,"resets_at":"2026-10-04T00:00:00Z"}]}`,
+		`{"limits":[{"id":"seven_day","percent":20,"resets_at":"2026-10-04T00:00:00Z"}]}`,
+		`{"limits":[{"key":"weekly_all","percent":20,"resets_at":"2026-10-04T00:00:00Z"}]}`,
+		`{"limits":[{"group":"weekly","percent":20,"resets_at":"2026-10-04T00:00:00Z"}]}`,
+		`{"limits":[{"window":"seven_day","percent":20,"resets_at":"2026-10-04T00:00:00Z"}]}`,
+	} {
+		quota, known, err := ParseClaudeWeeklyQuota([]byte(payload))
+		wantReset := time.Date(2026, time.October, 4, 0, 0, 0, 0, time.UTC)
+		if err != nil || !known || quota.UsedFraction != 0.2 || !quota.ResetsAt.Equal(wantReset) {
+			t.Fatalf("global compatibility meter lost: quota=%+v known=%t err=%v", quota, known, err)
+		}
+	}
+}
+
 func TestParseClaudeWeeklyQuotaRateLimitsMap(t *testing.T) {
 	payload := []byte(`{
 		"rate_limits": {
@@ -190,7 +236,7 @@ func TestParseClaudeWeeklyQuotaHeaders(t *testing.T) {
 
 func TestFetchClaudeWeeklyQuota(t *testing.T) {
 	auth := &coreauth.Auth{ID: "quota-account", Provider: "claude"}
-	quota, known, err := FetchClaudeWeeklyQuota(context.Background(), auth, time.Second, func(_ context.Context, gotAuth *coreauth.Auth, request *http.Request) (*http.Response, error) {
+	quota, known, err := FetchClaudeWeeklyQuota(context.Background(), auth, func(_ context.Context, gotAuth *coreauth.Auth, request *http.Request) (*http.Response, error) {
 		if gotAuth != auth {
 			t.Fatal("quota callback did not receive selected account")
 		}
@@ -206,9 +252,8 @@ func TestFetchClaudeWeeklyQuota(t *testing.T) {
 		if request.Header.Get("Authorization") != "" {
 			t.Fatal("quota helper unexpectedly supplied authorization")
 		}
-		deadline, ok := request.Context().Deadline()
-		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > time.Second {
-			t.Fatalf("request deadline = %v, want active one-second timeout", deadline)
+		if deadline, ok := request.Context().Deadline(); ok {
+			t.Fatalf("usage HTTP request must not introduce a deadline: %v", deadline)
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -250,7 +295,7 @@ func TestFetchClaudeWeeklyQuotaFailures(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, err := FetchClaudeWeeklyQuota(context.Background(), &coreauth.Auth{ID: "quota-account", Provider: "claude"}, 0, test.do)
+			_, _, err := FetchClaudeWeeklyQuota(context.Background(), &coreauth.Auth{ID: "quota-account", Provider: "claude"}, test.do)
 			if err == nil {
 				t.Fatal("FetchClaudeWeeklyQuota() unexpectedly succeeded")
 			}

@@ -38,12 +38,12 @@ type ClaudeWeeklyQuota struct {
 // sending the request.
 type ClaudeQuotaRequestFunc func(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error)
 
-// FetchClaudeWeeklyQuota fetches and parses one subscription's weekly quota. A
-// non-positive timeout selects the ten-second credential-acquisition default.
+// FetchClaudeWeeklyQuota fetches and parses one subscription's weekly quota.
+// Only caller cancellation controls the established HTTP connection/body read.
 //
 // The callback owns authentication. This helper never accepts, stores, or logs
 // credential material.
-func FetchClaudeWeeklyQuota(ctx context.Context, auth *coreauth.Auth, timeout time.Duration, do ClaudeQuotaRequestFunc) (ClaudeWeeklyQuota, bool, error) {
+func FetchClaudeWeeklyQuota(ctx context.Context, auth *coreauth.Auth, do ClaudeQuotaRequestFunc) (ClaudeWeeklyQuota, bool, error) {
 	if ctx == nil {
 		return ClaudeWeeklyQuota{}, false, errors.New("Claude quota request requires a context")
 	}
@@ -53,20 +53,14 @@ func FetchClaudeWeeklyQuota(ctx context.Context, auth *coreauth.Auth, timeout ti
 	if do == nil {
 		return ClaudeWeeklyQuota{}, false, errors.New("Claude quota request requires a callback")
 	}
-	if timeout <= 0 {
-		timeout = claudeQuotaDefaultTimeout
-	}
-
-	requestCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, ClaudeOAuthUsageEndpoint, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, ClaudeOAuthUsageEndpoint, nil)
 	if err != nil {
 		return ClaudeWeeklyQuota{}, false, fmt.Errorf("create Claude quota request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 
-	response, err := do(requestCtx, auth, request)
+	response, err := do(ctx, auth, request)
 	if err != nil {
 		return ClaudeWeeklyQuota{}, false, fmt.Errorf("fetch Claude quota: %w", err)
 	}
@@ -221,8 +215,62 @@ func parseClaudeWeeklyLimits(limits any) (ClaudeWeeklyQuota, bool, error) {
 }
 
 func weeklyQuotaRank(name string, object map[string]any) int {
-	rank := weeklyQuotaNameRank(name)
-	for _, field := range []string{"kind", "name", "type", "group", "id", "key", "rate_limit_type", "limit_type", "window"} {
+	// A row's explicit meter kind is authoritative. Scoped/model-specific and
+	// unknown kinds must not become account-wide weekly quota merely because
+	// they also belong to the weekly group or carry a generic display name.
+	explicitRank := 0
+	hasExplicitKind := false
+	for _, field := range []string{"kind", "type", "rate_limit_type", "limit_type"} {
+		value, present := quotaMapValue(object, field)
+		if !present {
+			continue
+		}
+		hasExplicitKind = true
+		text, ok := value.(string)
+		if !ok || weeklyQuotaNameRank(text) == 0 {
+			return 0
+		}
+		explicitRank = max(explicitRank, weeklyQuotaNameRank(text))
+	}
+	if hasExplicitKind {
+		return explicitRank
+	}
+
+	// Legacy specific identifiers carry the same scope distinction. A weekly
+	// group/window is only a fallback when no meter identifier was provided.
+	rank := 0
+	hasIdentifier := false
+	if strings.TrimSpace(name) != "" {
+		hasIdentifier = true
+		rank = weeklyQuotaNameRank(name)
+		if rank == 0 {
+			return 0
+		}
+	}
+	for _, field := range []string{"name", "id", "key"} {
+		value, present := quotaMapValue(object, field)
+		if !present {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok {
+			return 0
+		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		hasIdentifier = true
+		identifierRank := weeklyQuotaNameRank(text)
+		if identifierRank == 0 {
+			return 0
+		}
+		rank = max(rank, identifierRank)
+	}
+	if hasIdentifier {
+		return rank
+	}
+
+	for _, field := range []string{"group", "window"} {
 		value, ok := quotaMapValue(object, field)
 		if !ok {
 			continue
