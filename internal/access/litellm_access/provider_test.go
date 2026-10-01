@@ -12,10 +12,11 @@ import (
 )
 
 type fakePG struct {
-	mu        sync.Mutex
-	byHash    map[string]*store.APIKey
-	upserted  []store.APIKey
-	upsertErr error
+	mu          sync.Mutex
+	byHash      map[string]*store.APIKey
+	existingIDs map[string]bool
+	upserted    []store.APIKey
+	upsertErr   error
 }
 
 func (f *fakePG) LookupByHash(_ context.Context, hash string) (*store.APIKey, *store.Policy, error) {
@@ -32,6 +33,9 @@ func (f *fakePG) Upsert(_ context.Context, k store.APIKey, _ *store.Policy) (sto
 	defer f.mu.Unlock()
 	if f.upsertErr != nil {
 		return store.APIKey{}, f.upsertErr
+	}
+	if f.existingIDs != nil {
+		f.existingIDs[k.ID] = true
 	}
 	f.upserted = append(f.upserted, k)
 	return k, nil
@@ -78,8 +82,13 @@ func secret() string { return "sk-litellm-abcdefghijklmnop" }
 
 func newProvider(t *testing.T, pg PGLookup, lite LiteLLMLookup, logs LogStore, srv *httptest.Server, ttl time.Duration) *Provider {
 	t.Helper()
+	return newProviderWithTimeout(t, pg, lite, logs, srv, ttl, 2*time.Second)
+}
+
+func newProviderWithTimeout(t *testing.T, pg PGLookup, lite LiteLLMLookup, logs LogStore, srv *httptest.Server, ttl, timeout time.Duration) *Provider {
+	t.Helper()
 	p := New(pg, lite, logs, func(context.Context) (Settings, error) {
-		return Settings{Enabled: true, BaseURL: srv.URL, CacheTTL: ttl, Timeout: 2 * time.Second}, nil
+		return Settings{Enabled: true, BaseURL: srv.URL, CacheTTL: ttl, Timeout: timeout}, nil
 	}, srv.Client())
 	if p == nil {
 		t.Fatal("New returned nil")
@@ -322,5 +331,152 @@ func TestAuthenticatePlaintextNeverPersisted(t *testing.T) {
 	}
 	if ev.ErrorMessage == secret() || ev.UserID == secret() || ev.Source == secret() || ev.KeyID == secret() {
 		t.Fatalf("plaintext logged in event: %+v", ev)
+	}
+}
+
+func TestAuthenticateUpstream5xxReturnsInternalError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	pg := &fakePG{byHash: map[string]*store.APIKey{}}
+	logs := &fakeLogs{ch: make(chan store.OnTheFlyLogEvent, 4)}
+	p := newProvider(t, pg, &fakeLite{}, logs, srv, time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+secret())
+	_, authErr := p.Authenticate(context.Background(), req)
+	if authErr == nil || authErr.Code != "internal_error" {
+		t.Fatalf("authErr = %+v; want internal_error", authErr)
+	}
+	if len(pg.upserted) != 0 {
+		t.Fatalf("upserts = %d; want 0", len(pg.upserted))
+	}
+	if ev := logs.wait(t); ev.Outcome != store.OnTheFlyOutcomeError {
+		t.Fatalf("log outcome = %q; want error", ev.Outcome)
+	}
+}
+
+func TestAuthenticateTransportTimeoutReturnsInternalError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	pg := &fakePG{byHash: map[string]*store.APIKey{}}
+	logs := &fakeLogs{ch: make(chan store.OnTheFlyLogEvent, 4)}
+	p := newProviderWithTimeout(t, pg, &fakeLite{}, logs, srv, time.Minute, 50*time.Millisecond)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+secret())
+	_, authErr := p.Authenticate(context.Background(), req)
+	if authErr == nil || authErr.Code != "internal_error" {
+		t.Fatalf("authErr = %+v; want internal_error", authErr)
+	}
+	if len(pg.upserted) != 0 {
+		t.Fatalf("upserts = %d; want 0", len(pg.upserted))
+	}
+	if ev := logs.wait(t); ev.Outcome != store.OnTheFlyOutcomeError {
+		t.Fatalf("log outcome = %q; want error", ev.Outcome)
+	}
+}
+
+func TestAuthenticateLookupByIDMissFallsBackToHash(t *testing.T) {
+	hash := store.HashSecret(secret())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":"unknown-token","info":{"user_id":"u1"}}`))
+	}))
+	defer srv.Close()
+
+	pg := &fakePG{byHash: map[string]*store.APIKey{}}
+	// The local LiteLLM key is only reachable by hash, not by the token id
+	// returned from /key/info, so the provider must fall back to LookupByHash.
+	lite := &fakeLite{byHash: map[string]*store.LiteLLMKey{hash: {
+		ID: "row-1", Name: "prod", UserID: "u1",
+	}}}
+	logs := &fakeLogs{ch: make(chan store.OnTheFlyLogEvent, 4)}
+	p := newProvider(t, pg, lite, logs, srv, time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+secret())
+	res, authErr := p.Authenticate(context.Background(), req)
+	if authErr != nil {
+		t.Fatalf("Authenticate err: %v; want hash fallback success", authErr)
+	}
+	if res.Metadata["key_id"] != "unknown-token" {
+		t.Fatalf("key_id = %q; want unknown-token", res.Metadata["key_id"])
+	}
+	if len(pg.upserted) != 1 {
+		t.Fatalf("upserts = %d; want 1", len(pg.upserted))
+	}
+	if up := pg.upserted[0]; up.KeyHash != hash || up.UserID != "u1" {
+		t.Fatalf("upserted key = %+v", up)
+	}
+	if ev := logs.wait(t); ev.Outcome != store.OnTheFlyOutcomeSynced {
+		t.Fatalf("log outcome = %q; want synced", ev.Outcome)
+	}
+}
+
+func TestAuthenticateNegativeCachePreventsSecondRemoteCall(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid"}`))
+	}))
+	defer srv.Close()
+
+	pg := &fakePG{byHash: map[string]*store.APIKey{}}
+	logs := &fakeLogs{ch: make(chan store.OnTheFlyLogEvent, 4)}
+	p := newProvider(t, pg, &fakeLite{}, logs, srv, time.Minute)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+secret())
+		_, authErr := p.Authenticate(context.Background(), req)
+		if authErr == nil || authErr.Code != "invalid_credential" {
+			t.Fatalf("call %d: authErr = %+v; want invalid_credential", i, authErr)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("server calls = %d; want 1 (negative cache)", calls)
+	}
+}
+
+func TestAuthenticateUpsertOverwritesPreexistingRow(t *testing.T) {
+	hash := store.HashSecret(secret())
+	hashID := "token-hash-existing"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":"` + hashID + `","info":{"user_id":"u1"}}`))
+	}))
+	defer srv.Close()
+
+	// The runtime api_keys table already holds a row with this id; the provider
+	// must route through upsert semantics rather than failing on the conflict.
+	pg := &fakePG{
+		byHash:      map[string]*store.APIKey{},
+		existingIDs: map[string]bool{hashID: true},
+	}
+	lite := &fakeLite{byID: map[string]*store.LiteLLMKey{hashID: {
+		ID: hashID, Name: "prod", UserID: "u1",
+	}}}
+	logs := &fakeLogs{ch: make(chan store.OnTheFlyLogEvent, 4)}
+	p := newProvider(t, pg, lite, logs, srv, time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+secret())
+	if _, authErr := p.Authenticate(context.Background(), req); authErr != nil {
+		t.Fatalf("Authenticate err: %v", authErr)
+	}
+	if len(pg.upserted) != 1 {
+		t.Fatalf("upserts = %d; want 1", len(pg.upserted))
+	}
+	if up := pg.upserted[0]; up.ID != hashID || up.KeyHash != hash {
+		t.Fatalf("upserted key = %+v; want ID=%q KeyHash=%q", up, hashID, hash)
 	}
 }

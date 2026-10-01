@@ -737,10 +737,18 @@ func main() {
 		// provider; the manager falls through from pg-store to config-inline
 		// so legacy file-based keys keep working.
 		pgaccess.Register(pgAPIKeyStore)
-		// Register the on-the-fly LiteLLM provider as a fallback after
-		// pg-store: it validates a client key against the external LiteLLM
-		// instance, lazily imports the matched key into the runtime api_keys
-		// table, and records the outcome in litellm_onthefly_log.
+		// Register the config-inline provider before the on-the-fly provider so
+		// that a config/plugin key is authenticated locally. The manager stops
+		// at the first internal_error, so an enabled-but-down LiteLLM must not
+		// sit ahead of config-inline or it would turn every config key into a
+		// 500. This call is idempotent: RegisterProvider only appends the order
+		// entry on first registration, so the later configaccess.Register call
+		// just refreshes the instance.
+		configaccess.Register(&cfg.SDKConfig)
+		// Register the on-the-fly LiteLLM provider as the last fallback: it
+		// validates a client key against the external LiteLLM instance, lazily
+		// imports the matched key into the runtime api_keys table, and records
+		// the outcome in litellm_onthefly_log.
 		litellmaccess.Register(pgAPIKeyStore, pgLiteLLMKeys, pgLiteLLMOnTheFly,
 			func(ctx context.Context) (litellmaccess.Settings, error) {
 				set, err := pgLiteLLMSync.Get(ctx)

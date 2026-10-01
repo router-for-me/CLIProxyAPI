@@ -73,8 +73,6 @@ type candidate struct {
 
 type cachedOutcome struct {
 	outcome   string
-	keyID     string
-	userID    string
 	expiresAt time.Time
 }
 
@@ -222,14 +220,12 @@ func (p *Provider) Authenticate(ctx context.Context, r *http.Request) (*sdkacces
 			return nil, sdkaccess.NewInternalAuthError("litellm access: local lookup failed", errLookup)
 		}
 
-		// Short-lived outcome cache.
+		// Short-lived negative outcome cache: a recently unmatched or invalid
+		// key is rejected without a second remote call. Successful syncs are
+		// not cached here because the local-first lookup above already handles
+		// them.
 		if cached, ok := p.outcomes.get(hash); ok && p.now().Before(cached.expiresAt) {
-			switch cached.outcome {
-			case store.OnTheFlyOutcomeSynced:
-				if k, _, e := p.pg.LookupByHash(ctx, hash); e == nil && k != nil {
-					return resultFromKey(c.value, c.source, k.ID, k.UserID), nil
-				}
-			case store.OnTheFlyOutcomeUnmatched, store.OnTheFlyOutcomeInvalid:
+			if cached.outcome == store.OnTheFlyOutcomeUnmatched || cached.outcome == store.OnTheFlyOutcomeInvalid {
 				rejected = true
 				continue
 			}
@@ -273,7 +269,7 @@ func (p *Provider) validateAndSync(ctx context.Context, c candidate, hash, baseU
 		return nil, sdkaccess.NewInternalAuthError("litellm access: upstream error", fmt.Errorf("litellm returned status %d", status))
 	}
 	if status < 200 || status >= 300 {
-		p.cacheOutcome(hash, store.OnTheFlyOutcomeInvalid, "", "", ttl)
+		p.cacheOutcome(hash, store.OnTheFlyOutcomeInvalid, ttl)
 		p.record(ctx, store.OnTheFlyOutcomeInvalid, c, "", "", latency, fmt.Sprintf("litellm returned status %d", status))
 		return nil, sdkaccess.NewInvalidCredentialError()
 	}
@@ -287,7 +283,7 @@ func (p *Provider) validateAndSync(ctx context.Context, c candidate, hash, baseU
 		liteKey, errLite = p.lite.LookupByHash(ctx, hash)
 	}
 	if errLite != nil || liteKey == nil {
-		p.cacheOutcome(hash, store.OnTheFlyOutcomeUnmatched, "", "", ttl)
+		p.cacheOutcome(hash, store.OnTheFlyOutcomeUnmatched, ttl)
 		p.record(ctx, store.OnTheFlyOutcomeUnmatched, c, token, "", latency, "no matching local litellm key")
 		return nil, sdkaccess.NewInvalidCredentialError()
 	}
@@ -320,7 +316,6 @@ func (p *Provider) validateAndSync(ctx context.Context, c candidate, hash, baseU
 		p.record(ctx, store.OnTheFlyOutcomeError, c, token, liteKey.UserID, latency, errUp.Error())
 		return nil, sdkaccess.NewInternalAuthError("litellm access: persist key failed", errUp)
 	}
-	p.cacheOutcome(hash, store.OnTheFlyOutcomeSynced, token, liteKey.UserID, ttl)
 	p.record(ctx, store.OnTheFlyOutcomeSynced, c, token, liteKey.UserID, latency, "")
 	return resultFromKey(c.value, c.source, token, liteKey.UserID), nil
 }
@@ -360,11 +355,11 @@ func (p *Provider) fetchKeyInfo(ctx context.Context, baseURL, secret string, tim
 	return &out, resp.StatusCode, nil
 }
 
-func (p *Provider) cacheOutcome(hash, outcome, keyID, userID string, ttl time.Duration) {
+func (p *Provider) cacheOutcome(hash, outcome string, ttl time.Duration) {
 	if p.outcomes == nil || ttl <= 0 {
 		return
 	}
-	p.outcomes.set(hash, cachedOutcome{outcome: outcome, keyID: keyID, userID: userID, expiresAt: p.now().Add(ttl)})
+	p.outcomes.set(hash, cachedOutcome{outcome: outcome, expiresAt: p.now().Add(ttl)})
 }
 
 func (p *Provider) record(ctx context.Context, outcome string, c candidate, keyID, userID string, latency int64, errMsg string) {
