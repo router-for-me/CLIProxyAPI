@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -115,5 +116,32 @@ func TestV8MigrationUpdatesScopeAfterSaving(t *testing.T) {
 				t.Fatal("save changed values or discarded runtime-only state")
 			}
 		})
+	}
+}
+
+func TestV8StreamBootstrapStaysGlobalForAPIKeys(t *testing.T) {
+	raw := []byte(`oauth:
+  providers:
+    codex:
+      stream-bootstrap-buffering: true
+      stream-bootstrap-timeout: "20s"
+      disable-codex-cloaking: true
+`)
+	cfg, err := ParseConfigBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := cfg.ForAPIKey()
+	if !api.Codex.StreamBootstrapBuffering {
+		t.Fatal("API-key view lost stream-bootstrap-buffering set via the v8 layout")
+	}
+	if d := api.Codex.StreamBootstrapTimeoutDuration(); d != 20*time.Second {
+		t.Fatalf("API-key view lost stream-bootstrap-timeout: got %s, want 20s", d)
+	}
+	if api.Codex.DisableCodexCloaking {
+		t.Fatal("API-key view must still not inherit OAuth-only disable-codex-cloaking")
+	}
+	if !cfg.Codex.StreamBootstrapBuffering || !cfg.Codex.DisableCodexCloaking {
+		t.Fatal("ForAPIKey mutated the shared configuration")
 	}
 }

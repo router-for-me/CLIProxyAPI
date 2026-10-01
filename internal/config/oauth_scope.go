@@ -29,6 +29,15 @@ func (cfg *Config) ForAPIKey() *Config {
 	if cfg.OAuthOnlyFields["codex.response-steering"] {
 		filtered.CodexResponseSteering = false
 	}
+	// The stream bootstrap knobs are global behavior settings that the v8
+	// layout merely relocates under oauth.providers.codex; legacy-spelled
+	// configs keep them for API-key traffic, so both spellings must agree.
+	if cfg.OAuthOnlyFields["codex.stream-bootstrap-buffering"] {
+		filtered.Codex.StreamBootstrapBuffering = cfg.Codex.StreamBootstrapBuffering
+	}
+	if cfg.OAuthOnlyFields["codex.stream-bootstrap-timeout"] {
+		filtered.Codex.StreamBootstrapTimeout = cfg.Codex.StreamBootstrapTimeout
+	}
 	filtered.OAuthOnlyFields = nil
 	return &filtered
 }
