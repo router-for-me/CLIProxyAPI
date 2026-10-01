@@ -183,6 +183,12 @@ func TestIsRequestFault(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "claude diagnostics thread not found",
+			status: http.StatusNotFound,
+			err:    errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id.","details":{"error_code":"thread_not_found"}}}`),
+			want:   true,
+		},
+		{
 			// An upstream internal error is not a request fault: it must stay eligible
 			// for credential rotation and (credential, model) cooldown.
 			name:   "upstream unknown internal error",
