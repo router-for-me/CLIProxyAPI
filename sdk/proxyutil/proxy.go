@@ -202,6 +202,22 @@ func buildHTTPSProxyDialTLSContext(
 	}
 }
 
+// SetInsecureSkipVerify sets InsecureSkipVerify on the provided transport.
+// If t is nil, it clones the default transport.
+func SetInsecureSkipVerify(t *http.Transport, skip bool) *http.Transport {
+	if !skip {
+		return t
+	}
+	if t == nil {
+		t = cloneDefaultTransport()
+	}
+	if t.TLSClientConfig == nil {
+		t.TLSClientConfig = &tls.Config{}
+	}
+	t.TLSClientConfig.InsecureSkipVerify = true
+	return t
+}
+
 // BuildDialer constructs a proxy dialer for settings that operate at the connection layer.
 func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	setting, errParse := Parse(raw)

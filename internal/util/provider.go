@@ -81,6 +81,10 @@ func GetProviderName(modelName string) []string {
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
 // It uses an empty handler type to get any available model from the registry.
 //
+// User-registered "auto" models (e.g. via oauth-model-alias or OpenAI-compatibility
+// aliases) take precedence over the built-in first-available resolution, so that
+// explicit alias configuration and credential round-robin keep working.
+//
 // Parameters:
 //   - modelName: The model name to check (should be "auto")
 //
@@ -88,6 +92,12 @@ func GetProviderName(modelName string) []string {
 //   - string: The resolved model name, or the original if not "auto" or resolution fails
 func ResolveAutoModel(modelName string) string {
 	if modelName != "auto" {
+		return modelName
+	}
+
+	// If any credential registered "auto" as a concrete model ID, keep the name
+	// and let normal provider/credential routing (incl. round-robin) handle it.
+	if count := registry.GetGlobalRegistry().GetModelCount("auto"); count > 0 {
 		return modelName
 	}
 

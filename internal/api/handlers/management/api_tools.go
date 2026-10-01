@@ -834,11 +834,12 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 }
 
 func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
+	skipVerify := h != nil && h.cfg != nil && h.cfg.InsecureSkipVerify
 	if proxyStr := strings.TrimSpace(requestProxyURL); proxyStr != "" {
 		if transport := buildProxyTransport(proxyStr); transport != nil {
-			return transport
+			return proxyutil.SetInsecureSkipVerify(transport, skipVerify)
 		}
-		return directAPICallTransport()
+		return directAPICallTransport(skipVerify)
 	}
 
 	var proxyCandidates []string
@@ -860,21 +861,22 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) 
 
 	for _, proxyStr := range proxyCandidates {
 		if transport := buildProxyTransport(proxyStr); transport != nil {
+			transport = proxyutil.SetInsecureSkipVerify(transport, skipVerify)
 			return transport
 		}
 	}
 
-	return directAPICallTransport()
+	return directAPICallTransport(skipVerify)
 }
 
-func directAPICallTransport() http.RoundTripper {
+func directAPICallTransport(skipVerify bool) http.RoundTripper {
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || transport == nil {
-		return &http.Transport{Proxy: nil}
+		return proxyutil.SetInsecureSkipVerify(&http.Transport{Proxy: nil}, skipVerify)
 	}
 	clone := transport.Clone()
 	clone.Proxy = nil
-	return clone
+	return proxyutil.SetInsecureSkipVerify(clone, skipVerify)
 }
 
 type apiKeyConfigEntry interface {

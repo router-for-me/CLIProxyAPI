@@ -23,8 +23,11 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 	}
+	transport = proxyutil.SetInsecureSkipVerify(transport, cfg.InsecureSkipVerify)
 	if transport != nil {
 		httpClient.Transport = transport
+	} else if cfg.InsecureSkipVerify {
+		httpClient.Transport = proxyutil.SetInsecureSkipVerify(nil, true)
 	}
 	return httpClient
 }

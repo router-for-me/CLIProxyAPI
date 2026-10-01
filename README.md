@@ -134,6 +134,40 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Quick Install
+
+**Install via Go:**
+
+```bash
+go install github.com/wwwmd5vip/CLIProxyAPI/v8/cmd/server@latest
+```
+
+**Run with Docker:**
+
+```bash
+# Download example config and start
+curl -fsSL -o config.yaml https://raw.githubusercontent.com/wwwmd5vip/CLIProxyAPI/main/config.example.yaml
+docker compose up -d
+```
+
+**Build from source:**
+
+```bash
+git clone https://github.com/wwwmd5vip/CLIProxyAPI.git
+cd CLIProxyAPI
+go build -o cli-proxy-api ./cmd/server
+```
+
+### Upgrade via Git
+
+If you already cloned the repository, upgrade to the latest version with:
+
+```bash
+cd CLIProxyAPI
+git pull
+go build -o cli-proxy-api ./cmd/server
+```
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
@@ -150,6 +184,14 @@ Standalone persistence and visualization service for CLIProxyAPI, with periodic 
 
 Full CLIProxyAPI management center with request-level monitoring and cost estimates. CPA-Manager tracks collected requests by account, model, channel, latency, status, and token usage; estimates cost with editable model prices and one-click LiteLLM price sync; persists events in SQLite; and provides Codex account-pool operations with batch inspection, quota detection, unhealthy account discovery, cleanup suggestions, and one-click execution for day-to-day multi-account maintenance.
 
+**One-click install script:**
+
+```bash
+bash scripts/cpa-manager.sh install   # Install CPA-Manager
+bash scripts/cpa-manager.sh fix       # Restart / fix CPA-Manager
+bash scripts/cpa-manager.sh setup     # Configure CLIProxyAPI & start CPA-Manager
+```
+
 ## SDK Docs
 
 - Usage: [docs/sdk-usage.md](docs/sdk-usage.md)
@@ -164,7 +206,16 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+3. Commit your changes with a clear description:
+   ```bash
+   git commit -m "feat: add some amazing feature"
+   ```
+   Prefix commit messages with a type tag when possible:
+   - `feat:` — new feature or capability
+   - `fix:` — bug fix
+   - `docs:` — documentation only changes
+   - `refactor:` — code change that neither fixes a bug nor adds a feature
+   - `chore:` — build process or auxiliary tool changes
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
