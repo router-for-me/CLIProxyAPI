@@ -8,6 +8,7 @@ config.yaml
 
 # Generated content
 bin/*
+__pycache__/
 /logs
 conv/*
 temp/*

@@ -7,8 +7,17 @@ individual commits. This is our fork policy, not a universal release rule.
 ## Procedure
 
 1. Read [absorbed.md](absorbed.md). Choose the explicit comparison baseline;
-   assessed/fetched does not mean absorbed. On first intake, document the inherited
-   upstream baseline and evidence before evaluating a candidate.
+   assessed/fetched does not mean absorbed. On first intake, derive the inherited
+   baseline and record the evidence before evaluating a candidate:
+
+   ```bash
+   ops/upstream-intake/establish-baseline.sh main
+   ```
+
+   Ancestry against the trunk is the evidence, not tag presence: this fork shares
+   upstream history, so upstream tags reach our commits whether or not anyone
+   assessed them. A baseline derived this way records inherited content only, with
+   no per-commit assessment and no replay evidence.
 2. Assess the candidate:
 
    ```bash
@@ -46,6 +55,25 @@ individual commits. This is our fork policy, not a universal release rule.
    [absorbed.md](absorbed.md); do not claim alignment to a merely fetched tag.
 8. Release through [docs/maintenance.md](../../docs/maintenance.md) when requested.
    Assessment or absorption alone does not authorize publishing or deployment.
+
+## Tag namespace hygiene
+
+Upstream tags belong in the local-only `refs/upstream/tags/*` namespace. A plain
+`git fetch upstream --tags` writes them into `refs/tags/*` instead, and a later
+`git push --tags` would then publish every one of them from this fork. Upstream's
+whole release history is present locally this way today.
+
+```bash
+ops/upstream-intake/check-tag-namespace.sh --remote
+```
+
+The check compares tag names, but never proposes deleting a tag that `origin`
+also publishes: this fork numbers its releases independently and our `v1.0.0`
+already shares a name with an upstream tag pointing at a different commit.
+
+At release time `ops/upstream-intake/guard-release-tag.sh <tag>` rejects any tag
+that resolves to the same commit as the upstream tag of that name. The release
+workflow runs it before building anything.
 
 ## Regression gate
 
