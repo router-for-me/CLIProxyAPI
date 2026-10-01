@@ -387,6 +387,7 @@ func TestBackendSeriesSelectorCanMoveOrdinaryToolHistory(t *testing.T) {
 	}, []*coreauth.Auth{authA, authB}); err != nil {
 		t.Fatal(err)
 	}
+	selector.OnResult(backendSeriesQuotaResult("profile-a"))
 	got, err := selector.Pick(t.Context(), "claude", "", coreexecutor.Options{
 		Headers: headers, OriginalRequest: []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"read","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}]}`),
 	}, []*coreauth.Auth{authB})

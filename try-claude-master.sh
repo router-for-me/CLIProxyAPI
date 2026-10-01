@@ -16,6 +16,7 @@ launcher_args=()
 claude_args=()
 backup_source=""
 backup_requested=0
+backup_index=-1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backup-api-key|--map)
@@ -23,17 +24,19 @@ while [[ $# -gt 0 ]]; do
         echo "Launcher option requires a value." >&2
         exit 2
       fi
-      launcher_args+=("$1" "$2")
       if [[ "$1" == --backup-api-key ]]; then
+        backup_index=${#launcher_args[@]}
         backup_source="$2"
         backup_requested=1
       fi
+      launcher_args+=("$1" "$2")
       shift 2
       ;;
     --backup-api-key=*)
       backup_source="${1#--backup-api-key=}"
       backup_requested=1
-      launcher_args+=("$1")
+      backup_index=${#launcher_args[@]}
+      launcher_args+=(--backup-api-key "$backup_source")
       shift
       ;;
     --map=*)
@@ -71,6 +74,14 @@ elif [[ -n "$backup_source" ]]; then
     echo "Backup API key file must be readable and nonempty." >&2
     exit 2
   fi
+  # Validation and consumption must refer to the same file after cd below.
+  if [[ "$backup_path" != /* ]]; then
+    backup_path="$PWD/$backup_path"
+  fi
+  backup_source="file:$backup_path"
+fi
+if [[ "$backup_requested" == 1 ]]; then
+  launcher_args[backup_index + 1]="$backup_source"
 fi
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -119,4 +130,8 @@ if [[ ${#claude_args[@]} -eq 0 ]]; then
   claude_args=(--remote-control)
 fi
 
-"$binary" run "${run_args[@]}" "${launcher_args[@]}" -- "${claude_args[@]}"
+# Bash 3 treats an empty array expansion as unset under nounset.
+if [[ ${#launcher_args[@]} -gt 0 ]]; then
+  run_args+=("${launcher_args[@]}")
+fi
+"$binary" run "${run_args[@]}" -- "${claude_args[@]}"

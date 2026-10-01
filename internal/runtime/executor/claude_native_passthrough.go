@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,15 +37,18 @@ const (
 func (e *ClaudeExecutor) executeNativeClaude(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request) (cliproxyexecutor.Response, error) {
 	httpResp, errRequest := e.sendNativeClaudeRequest(ctx, auth, req.Payload, nativeClaudeMessagesURL, nativeClaudeIdentityRequired)
 	if errRequest != nil {
-		return cliproxyexecutor.Response{}, errRequest
+		return cliproxyexecutor.Response{}, wrapNativeClaudeFastRequestError(ctx, req.Payload, 0, errRequest)
 	}
 
 	body, headers, errRead := readNativeClaudeResponse(httpResp)
 	if errRead != nil {
-		return cliproxyexecutor.Response{}, errRead
+		return cliproxyexecutor.Response{}, wrapNativeClaudeFastRequestError(ctx, req.Payload, 0, errRead)
 	}
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		return cliproxyexecutor.Response{}, newClaudeNativeDirectResponseError(httpResp.StatusCode, headers, body)
+		return cliproxyexecutor.Response{}, nativeClaudeResponseError(ctx, req.Payload, httpResp.StatusCode, headers, body)
+	}
+	if auth != nil {
+		cliproxyexecutor.NotifyNativeClaudeUpstreamSuccess(ctx, auth.ID)
 	}
 	return cliproxyexecutor.Response{Payload: body, Headers: headers}, nil
 }
@@ -71,18 +75,21 @@ func (e *ClaudeExecutor) countNativeClaudeTokens(ctx context.Context, auth *clip
 func (e *ClaudeExecutor) executeNativeClaudeStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request) (*cliproxyexecutor.StreamResult, error) {
 	httpResp, errRequest := e.sendNativeClaudeRequest(ctx, auth, req.Payload, nativeClaudeMessagesURL, nativeClaudeIdentityRequired)
 	if errRequest != nil {
-		return nil, errRequest
+		return nil, wrapNativeClaudeFastRequestError(ctx, req.Payload, 0, errRequest)
 	}
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		body, headers, errRead := readNativeClaudeResponse(httpResp)
 		if errRead != nil {
-			return nil, errRead
+			return nil, wrapNativeClaudeFastRequestError(ctx, req.Payload, 0, errRead)
 		}
-		return nil, newClaudeNativeDirectResponseError(httpResp.StatusCode, headers, body)
+		return nil, nativeClaudeResponseError(ctx, req.Payload, httpResp.StatusCode, headers, body)
+	}
+	if auth != nil {
+		cliproxyexecutor.NotifyNativeClaudeUpstreamSuccess(ctx, auth.ID)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
-	go relayNativeClaudeStream(ctx, httpResp, out)
+	go relayNativeClaudeStream(ctx, httpResp, out, nativeClaudeRequestUsesFastMode(ctx, req.Payload))
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
@@ -95,10 +102,12 @@ func (e *ClaudeExecutor) sendNativeClaudeRequest(ctx context.Context, auth *clip
 		return nil, fmt.Errorf("native Claude request is missing its trusted protocol headers")
 	}
 	isAPIKey := auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey
-	if isAPIKey {
+	if isAPIKey || identityMode == nativeClaudeIdentityStrip {
 		if errMetadata := helps.ValidateClaudeCredentialMetadataContainers(payload); errMetadata != nil {
 			return nil, errMetadata
 		}
+	}
+	if isAPIKey {
 		// This one beta declares an OAuth credential, not a native feature. Keep
 		// all other tokens and header values in their original order and form.
 		var betaValues []string
@@ -206,6 +215,7 @@ func (e *ClaudeExecutor) sendNativeClaudeRequest(ctx context.Context, auth *clip
 		return nil, errDo
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	cliproxyexecutor.SetNativeClaudeResponseStatus(ctx, httpResp.StatusCode)
 	return httpResp, nil
 }
 
@@ -225,7 +235,7 @@ func readNativeClaudeResponse(resp *http.Response) ([]byte, http.Header, error) 
 	return body, resp.Header.Clone(), nil
 }
 
-func relayNativeClaudeStream(ctx context.Context, resp *http.Response, out chan<- cliproxyexecutor.StreamChunk) {
+func relayNativeClaudeStream(ctx context.Context, resp *http.Response, out chan<- cliproxyexecutor.StreamChunk, fastRequest bool) {
 	defer close(out)
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -246,6 +256,7 @@ func relayNativeClaudeStream(ctx context.Context, resp *http.Response, out chan<
 		}
 		if errRead != nil {
 			if errRead != io.EOF {
+				errRead = wrapClaudeFastRequestError(fastRequest, 0, errRead)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
 				case <-ctx.Done():
@@ -266,6 +277,30 @@ type claudeNativeDirectResponseError struct {
 	body             []byte
 	retryAfter       *time.Duration
 	credentialScoped bool
+}
+
+// Native HTTP responses stay byte-exact, but Fast-only refusals must retain the
+// existing request-scoped availability policy. A Fast entitlement is not the
+// health or normal-mode quota of the selected subscription.
+func nativeClaudeResponseError(ctx context.Context, payload []byte, status int, headers http.Header, body []byte) error {
+	errResponse := newClaudeNativeDirectResponseError(status, headers, body)
+	return wrapNativeClaudeFastRequestError(ctx, payload, status, errResponse)
+}
+
+func wrapNativeClaudeFastRequestError(ctx context.Context, payload []byte, status int, errRequest error) error {
+	if status == 0 {
+		var statusError cliproxyexecutor.StatusError
+		if errors.As(errRequest, &statusError) {
+			status = statusError.StatusCode()
+		}
+	}
+	return wrapClaudeFastRequestError(nativeClaudeRequestUsesFastMode(ctx, payload), status, errRequest)
+}
+
+func nativeClaudeRequestUsesFastMode(ctx context.Context, payload []byte) bool {
+	nativeHeaders, _ := cliproxyexecutor.NativeClaudeProtocolHeadersFromContext(ctx)
+	request := &http.Request{Header: nativeHeaders}
+	return claudeRequestIsFast(request, payload)
 }
 
 func newClaudeNativeDirectResponseError(status int, headers http.Header, body []byte) error {

@@ -55,6 +55,9 @@ func TestNativeClaudeProtocolHeadersBoundary(t *testing.T) {
 	if _, ok := NativeClaudeProtocolHeadersFromContext(context.Background()); ok {
 		t.Fatal("ordinary API callers must not opt in")
 	}
+	if _, ok := NativeClaudeProtocolHeadersFromContext(nil); ok {
+		t.Fatal("a missing context must not opt in")
+	}
 }
 
 func TestNativeClaudeHeadersExcludeConnectionTokensCaseInsensitively(t *testing.T) {
@@ -64,5 +67,52 @@ func TestNativeClaudeHeadersExcludeConnectionTokensCaseInsensitively(t *testing.
 	}
 	if got := NativeClaudeProtocolHeaders(header); !reflect.DeepEqual(got, http.Header{"Anthropic-Beta": {"a", "b"}}) {
 		t.Fatalf("connection-scoped headers survived: %v", got)
+	}
+}
+
+func TestNativeClaudeUpstreamSuccessRequiresTrustedNativeContext(t *testing.T) {
+	var calls int
+	callback := func(ctx context.Context, authID string) {
+		if ctx == nil || authID != "selected-account" {
+			t.Fatal("success observer lost execution context or selected credential")
+		}
+		calls++
+	}
+	ordinary := WithNativeClaudeUpstreamSuccessCallback(context.Background(), callback)
+	NotifyNativeClaudeUpstreamSuccess(nil, "selected-account")
+	NotifyNativeClaudeUpstreamSuccess(ordinary, "selected-account")
+	native := WithNativeClaudeProtocolHeaders(ordinary, http.Header{})
+	NotifyNativeClaudeUpstreamSuccess(native, "")
+	NotifyNativeClaudeUpstreamSuccess(WithNativeClaudeUpstreamSuccessCallback(native, nil), "selected-account")
+	if calls != 0 {
+		t.Fatal("ordinary or incomplete context established a native conversation origin")
+	}
+	NotifyNativeClaudeUpstreamSuccess(native, "selected-account")
+	if calls != 1 {
+		t.Fatal("trusted native success was not observed exactly once")
+	}
+}
+
+func TestNativeClaudeResponseStatusHolderBoundary(t *testing.T) {
+	ordinary := WithNativeClaudeResponseStatusHolder(context.Background())
+	SetNativeClaudeResponseStatus(ordinary, http.StatusCreated)
+	SetNativeClaudeResponseStatus(nil, http.StatusCreated)
+	if NativeClaudeResponseStatusFromContext(ordinary) != 0 || NativeClaudeResponseStatusFromContext(nil) != 0 {
+		t.Fatal("ordinary execution captured a native upstream status")
+	}
+	native := WithNativeClaudeResponseStatusHolder(WithNativeClaudeProtocolHeaders(context.Background(), http.Header{}))
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNoContent} {
+		SetNativeClaudeResponseStatus(native, status)
+		if got := NativeClaudeResponseStatusFromContext(native); got != status {
+			t.Fatalf("successful native status=%d want=%d", got, status)
+		}
+	}
+	SetNativeClaudeResponseStatus(native, http.StatusTooManyRequests)
+	if NativeClaudeResponseStatusFromContext(native) != http.StatusNoContent {
+		t.Fatal("an error replaced the accepted native response status")
+	}
+	fresh := WithNativeClaudeResponseStatusHolder(native)
+	if NativeClaudeResponseStatusFromContext(fresh) != 0 || NativeClaudeResponseStatusFromContext(native) != http.StatusNoContent {
+		t.Fatal("a new request inherited or reset another request's native status")
 	}
 }

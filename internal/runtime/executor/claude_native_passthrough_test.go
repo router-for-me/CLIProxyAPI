@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -47,6 +48,301 @@ func nativeClaudePassthroughAuth() *cliproxyauth.Auth {
 func nativeClaudePassthroughContext(headers http.Header, roundTripper http.RoundTripper) context.Context {
 	ctx := cliproxyexecutor.WithNativeClaudeProtocolHeaders(context.Background(), headers)
 	return context.WithValue(ctx, "cliproxy.roundtripper", roundTripper)
+}
+
+func TestNativeClaudeFastFailuresRetainRequestScopeAndRawResponse(t *testing.T) {
+	for _, operation := range []string{"execute", "stream"} {
+		for _, testCase := range []struct {
+			name      string
+			status    int
+			betaOnly  bool
+			quota     bool
+			transport bool
+		}{
+			{name: "entitlement", status: http.StatusForbidden},
+			{name: "fast_credits", status: http.StatusTooManyRequests},
+			{name: "beta_only", status: http.StatusServiceUnavailable, betaOnly: true},
+			{name: "subscription_quota", status: http.StatusTooManyRequests, quota: true},
+			{name: "transport_failure", transport: true},
+		} {
+			t.Run(operation+"/"+testCase.name, func(t *testing.T) {
+				headers := http.Header{"Content-Type": {"application/json"}, "X-Future-Error-Header": {"one", "two"}}
+				if testCase.quota {
+					headers.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+				}
+				body := []byte{0x1f, 0x8b, 0x08, 0x00, 0xde, 0xad}
+				const transportError = "synthetic Fast connection failure"
+				var attempts atomic.Int32
+				transport := nativeClaudePassthroughTransport(func(request *http.Request) (*http.Response, error) {
+					attempts.Add(1)
+					if testCase.transport {
+						return nil, errors.New(transportError)
+					}
+					return &http.Response{StatusCode: testCase.status, Header: headers.Clone(), Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})
+				nativeHeaders := http.Header{"Content-Type": {"application/json"}}
+				payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"speed":"fast","messages":[]}`)
+				if testCase.betaOnly {
+					nativeHeaders.Set("Anthropic-Beta", "fast-mode-2026-02-01")
+					payload = []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[]}`)
+				}
+				ctx := nativeClaudePassthroughContext(nativeHeaders, transport)
+				executor := NewClaudeExecutor(&config.Config{})
+				request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+				var errExecute error
+				if operation == "stream" {
+					_, errExecute = executor.ExecuteStream(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{Stream: true})
+				} else {
+					_, errExecute = executor.Execute(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{})
+				}
+				if errExecute == nil || attempts.Load() != 1 {
+					t.Fatalf("Fast failure missing or replayed: err=%v attempts=%d", errExecute, attempts.Load())
+				}
+				var scope cliproxyexecutor.RequestScopedError
+				if !errors.As(errExecute, &scope) || scope.IsRequestScoped() == testCase.quota {
+					t.Fatalf("Fast request scope = %v, want request-scoped=%t", errExecute, !testCase.quota)
+				}
+				var credentialScope interface{ IsCredentialScoped() bool }
+				if !errors.As(errExecute, &credentialScope) || credentialScope.IsCredentialScoped() != testCase.quota {
+					t.Fatalf("Fast credential scope changed: %v", errExecute)
+				}
+				if testCase.transport {
+					if !strings.Contains(errExecute.Error(), transportError) {
+						t.Fatal("Fast transport error lost its cause")
+					}
+					return
+				}
+				var direct *claudeNativeDirectResponseError
+				if !errors.As(errExecute, &direct) || direct.StatusCode() != testCase.status || !bytes.Equal(direct.ResponseBody(), body) || !reflect.DeepEqual(direct.ResponseHeaders(), headers) {
+					t.Fatalf("raw native Fast response changed: %v", errExecute)
+				}
+			})
+		}
+	}
+}
+
+func TestNativeClaudeOAuthCountRejectsDuplicateIdentityContainers(t *testing.T) {
+	for _, payload := range []string{
+		`{"model":"claude-opus-5","messages":[],"metadata":{"user_id":"master-first"},"metadata":{"user_id":"master-second"}}`,
+		`{"model":"claude-opus-5","messages":[],"metadata":{"user_id":"master-first","user_id":"master-second"}}`,
+		`{"model":"claude-opus-5","messages":[],"metadata":{"user_id":"master-first","user\u005fid":"master-second"}}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			var attempts atomic.Int32
+			transport := nativeClaudePassthroughTransport(func(*http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return nil, errors.New("identity request unexpectedly reached upstream")
+			})
+			ctx := nativeClaudePassthroughContext(http.Header{"Content-Type": {"application/json"}}, transport)
+			_, errCount := NewClaudeExecutor(&config.Config{}).CountTokens(ctx, nativeClaudePassthroughAuth(), cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(payload)}, cliproxyexecutor.Options{})
+			var status interface{ StatusCode() int }
+			var scope cliproxyexecutor.RequestScopedError
+			if errCount == nil || !errors.As(errCount, &status) || status.StatusCode() != http.StatusBadRequest || !errors.As(errCount, &scope) || !scope.IsRequestScoped() || attempts.Load() != 0 {
+				t.Fatalf("ambiguous count identity not rejected locally: err=%v attempts=%d", errCount, attempts.Load())
+			}
+		})
+	}
+}
+
+func TestNativeClaudeFastLocalMetadataFailureRetainsStatus(t *testing.T) {
+	for _, operation := range []string{"execute", "stream"} {
+		t.Run(operation, func(t *testing.T) {
+			var attempts atomic.Int32
+			transport := nativeClaudePassthroughTransport(func(*http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return nil, errors.New("ambiguous identity unexpectedly reached upstream")
+			})
+			ctx := nativeClaudePassthroughContext(http.Header{}, transport)
+			request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(`{"model":"claude-opus-5","speed":"fast","messages":[],"metadata":{"user_id":"one"},"metadata":{"user_id":"two"}}`)}
+			executor := NewClaudeExecutor(&config.Config{})
+			var errExecute error
+			if operation == "stream" {
+				_, errExecute = executor.ExecuteStream(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{Stream: true})
+			} else {
+				_, errExecute = executor.Execute(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{})
+			}
+			var status interface{ StatusCode() int }
+			if !errors.As(errExecute, &status) || status.StatusCode() != http.StatusBadRequest || attempts.Load() != 0 {
+				t.Fatalf("native Fast validation masked local request status: err=%v attempts=%d", errExecute, attempts.Load())
+			}
+		})
+	}
+}
+
+type nativeClaudeObservedResponseBody struct {
+	reader io.Reader
+	reads  atomic.Int32
+}
+
+func (b *nativeClaudeObservedResponseBody) Read(buffer []byte) (int, error) {
+	b.reads.Add(1)
+	return b.reader.Read(buffer)
+}
+
+func (*nativeClaudeObservedResponseBody) Close() error { return nil }
+
+func TestNativeClaudeUpstreamSuccessObservationOrdering(t *testing.T) {
+	for _, operation := range []string{"execute", "stream", "count"} {
+		for _, failure := range []string{"none", "http", "body", "transport"} {
+			t.Run(operation+"/"+failure, func(t *testing.T) {
+				const rawResponse = "data: native-response\r\n\r\n"
+				body := &nativeClaudeObservedResponseBody{reader: strings.NewReader(rawResponse)}
+				if failure == "body" {
+					body.reader = &nativeClaudeFailedStreamBody{payload: []byte(rawResponse)}
+				}
+				var observations atomic.Int32
+				transport := nativeClaudePassthroughTransport(func(request *http.Request) (*http.Response, error) {
+					if failure == "transport" {
+						return nil, errors.New("synthetic connection failure")
+					}
+					status := http.StatusOK
+					if failure == "http" {
+						status = http.StatusForbidden
+					}
+					return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: body, Request: request}, nil
+				})
+				ctx := nativeClaudePassthroughContext(http.Header{"Content-Type": {"application/json"}}, transport)
+				ctx = cliproxyexecutor.WithNativeClaudeUpstreamSuccessCallback(ctx, func(_ context.Context, authID string) {
+					if authID != "selected-subscription" {
+						t.Error("success observation did not identify the selected subscription")
+					}
+					if operation == "stream" && body.reads.Load() != 0 {
+						t.Error("stream success observation waited for the response body")
+					}
+					if operation == "execute" && body.reads.Load() == 0 {
+						t.Error("non-stream success observation preceded the complete response")
+					}
+					observations.Add(1)
+				})
+				executor := NewClaudeExecutor(&config.Config{})
+				request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(`{"model":"claude-opus-5","messages":[]}`)}
+				var received []byte
+				var errExecute error
+				switch operation {
+				case "stream":
+					var stream *cliproxyexecutor.StreamResult
+					stream, errExecute = executor.ExecuteStream(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{Stream: true})
+					if errExecute == nil {
+						for chunk := range stream.Chunks {
+							received = append(received, chunk.Payload...)
+							if chunk.Err != nil {
+								errExecute = chunk.Err
+							}
+						}
+					}
+				case "execute":
+					var response cliproxyexecutor.Response
+					response, errExecute = executor.Execute(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{})
+					received = response.Payload
+				case "count":
+					var response cliproxyexecutor.Response
+					response, errExecute = executor.CountTokens(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{})
+					received = response.Payload
+				}
+				wantObservation := int32(0)
+				if operation != "count" && (failure == "none" || operation == "stream" && failure == "body") {
+					wantObservation = 1
+				}
+				if observations.Load() != wantObservation || (errExecute == nil) != (failure == "none") {
+					t.Fatalf("success observation=%d want=%d error=%v", observations.Load(), wantObservation, errExecute)
+				}
+				if failure == "none" && string(received) != rawResponse {
+					t.Fatal("success observer changed the raw response")
+				}
+			})
+		}
+	}
+}
+
+func TestNativeClaudeSuccessfulHTTPStatusIsPreserved(t *testing.T) {
+	for _, operation := range []string{"execute", "stream", "count"} {
+		for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNoContent} {
+			t.Run(fmt.Sprintf("%s/%d", operation, status), func(t *testing.T) {
+				body := "raw native response"
+				if status == http.StatusNoContent {
+					body = ""
+				}
+				transport := nativeClaudePassthroughTransport(func(request *http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+				})
+				ctx := cliproxyexecutor.WithNativeClaudeResponseStatusHolder(nativeClaudePassthroughContext(http.Header{}, transport))
+				request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(`{"model":"claude-opus-5","messages":[]}`)}
+				executor := NewClaudeExecutor(&config.Config{})
+				var payload []byte
+				var errExecute error
+				switch operation {
+				case "execute":
+					var response cliproxyexecutor.Response
+					response, errExecute = executor.Execute(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{})
+					payload = response.Payload
+				case "count":
+					var response cliproxyexecutor.Response
+					response, errExecute = executor.CountTokens(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{})
+					payload = response.Payload
+				case "stream":
+					var stream *cliproxyexecutor.StreamResult
+					stream, errExecute = executor.ExecuteStream(ctx, nativeClaudePassthroughAuth(), request, cliproxyexecutor.Options{Stream: true})
+					if errExecute == nil {
+						for chunk := range stream.Chunks {
+							payload = append(payload, chunk.Payload...)
+							if chunk.Err != nil {
+								errExecute = chunk.Err
+							}
+						}
+					}
+				}
+				if errExecute != nil || string(payload) != body || cliproxyexecutor.NativeClaudeResponseStatusFromContext(ctx) != status {
+					t.Fatalf("native success changed status/body: status=%d body=%q error=%v", cliproxyexecutor.NativeClaudeResponseStatusFromContext(ctx), payload, errExecute)
+				}
+			})
+		}
+	}
+}
+
+type nativeClaudeFailedStreamBody struct {
+	payload []byte
+}
+
+func (b *nativeClaudeFailedStreamBody) Read(buffer []byte) (int, error) {
+	if len(b.payload) > 0 {
+		count := copy(buffer, b.payload)
+		b.payload = b.payload[count:]
+		return count, nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (*nativeClaudeFailedStreamBody) Close() error { return nil }
+
+func TestNativeClaudeFastStreamReadFailureRetainsRequestScope(t *testing.T) {
+	const rawPrefix = "event: content_block_delta\r\ndata: opaque-fragment"
+	transport := nativeClaudePassthroughTransport(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body:       &nativeClaudeFailedStreamBody{payload: []byte(rawPrefix)},
+			Request:    request,
+		}, nil
+	})
+	ctx := nativeClaudePassthroughContext(http.Header{"Content-Type": {"application/json"}}, transport)
+	stream, errStream := NewClaudeExecutor(&config.Config{}).ExecuteStream(ctx, nativeClaudePassthroughAuth(), cliproxyexecutor.Request{
+		Model: "claude-opus-5", Payload: []byte(`{"model":"claude-opus-5","speed":"fast","stream":true,"messages":[]}`),
+	}, cliproxyexecutor.Options{Stream: true})
+	if errStream != nil {
+		t.Fatal(errStream)
+	}
+	var received []byte
+	var terminal error
+	for chunk := range stream.Chunks {
+		received = append(received, chunk.Payload...)
+		if chunk.Err != nil {
+			terminal = chunk.Err
+		}
+	}
+	var scope cliproxyexecutor.RequestScopedError
+	if string(received) != rawPrefix || !errors.Is(terminal, io.ErrUnexpectedEOF) || !errors.As(terminal, &scope) || !scope.IsRequestScoped() {
+		t.Fatalf("Fast stream failure changed bytes or availability scope: payload=%q err=%v", received, terminal)
+	}
 }
 
 func TestNativeClaudeAPIKeyPreservesProtocolWithoutSubscriptionIdentity(t *testing.T) {

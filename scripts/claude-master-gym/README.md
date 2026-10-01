@@ -15,6 +15,8 @@ and Claude Master selects within that lane using its quota policy.
 
 ## One-time setup
 
+The gym requires Go, Claude Code, tmux, and jq on `PATH`.
+
 Build/login commands create ordinary, separate Claude OAuth subscription
 profiles. Every `login` opens the normal Anthropic authorization flow; do not
 copy native tokens or credential files.
@@ -92,11 +94,22 @@ tmux attach -t claude-master-gym
 ```
 
 `status.sh` shows the two lane processes and their disjoint routing boundaries.
-`inspect.sh` prints sanitized terminal evidence and only aggregate counts from
-native debug logs; it never dumps raw debug records. Look for `GYM_LANE_A_OK`
-and `GYM_LANE_B_OK`, two subagent results per lane, streamed terminal progress,
-and nonzero Claude Master inference dispatch counters. `stop.sh` ends both
-sessions but retains the private run directory named in its output.
+`inspect.sh` prints sanitized terminal evidence and aggregate counts from native
+debug logs; it never dumps raw debug records. Each lane has a recorded native
+session ID so inspection can check that session's transcript. Completion is
+`verified` only when an assistant result contains the lane marker and exactly two
+foreground Agent/Task calls have matching successful tool results. An echoed
+prompt is not completion evidence. Missing, incomplete, or unfamiliar transcript
+shapes report `unverified`.
+
+Model verification uses the native assistant record, not the assistant's claim.
+Effort still requires checking Claude's `/effort` acknowledgement manually;
+`effort_verified` remains false. Also check streamed terminal progress and nonzero
+Claude Master inference dispatch counters. `stop.sh` ends both sessions through
+the launcher's graceful SIGHUP handling and retains the private run directory.
+
+The Remote Control option from `--config` is saved in the run directory and passed
+to each lane independently of the existing tmux server's environment.
 
 Do not put tokens in the config, prompts, or repository. The gym never reads,
 copies, or prints profile credential files.

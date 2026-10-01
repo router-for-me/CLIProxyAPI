@@ -23,7 +23,10 @@ if [[ ! -f $profile_file ]]; then
   echo "Missing lane profile list: $profile_file" >&2
   exit 1
 fi
-mapfile -t profiles <"$profile_file"
+profiles=()
+while IFS= read -r profile || [[ -n $profile ]]; do
+  profiles+=("$profile")
+done <"$profile_file"
 if [[ ${#profiles[@]} -eq 0 ]]; then
   echo "Lane $lane has no profiles." >&2
   exit 1
@@ -35,13 +38,24 @@ for profile in "${profiles[@]:1}"; do
 done
 launcher_args+=(--diagnostics --)
 
+session_id="$(gym_lane_session_id "$run_dir" "$lane")"
+remote_control=0
+if [[ -f $run_dir/remote-control ]]; then
+  IFS= read -r remote_control <"$run_dir/remote-control"
+fi
+if [[ $remote_control != 0 && $remote_control != 1 ]]; then
+  echo "The gym run's Remote Control option is invalid." >&2
+  exit 2
+fi
+
 native_args=(
   --model claude-sonnet-5-5
+  --session-id "$session_id"
   --name "claude-master-gym-$lane"
   --ax-screen-reader
   --debug-file "$run_dir/lane-$lane.debug.log"
 )
-if [[ ${CLAUDE_MASTER_GYM_REMOTE_CONTROL:-0} == 1 ]]; then
+if [[ $remote_control == 1 ]]; then
   native_args+=("--remote-control=claude-master-gym-$lane")
 fi
 

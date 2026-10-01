@@ -128,3 +128,35 @@ func TestClaudeExecutorSharedCredentialMetadataMixedAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestClaudeSetupTokenBooleanMetadataReadersShareWriterLock(t *testing.T) {
+	auth := newSharedClaudeOAuthAuth("claude-race-setup-flags")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(writer bool) {
+			defer wg.Done()
+			<-start
+			for iteration := 0; iteration < 128; iteration++ {
+				if writer {
+					for _, key := range []string{"skip_account_profile", "is_setup_token", "setup_token"} {
+						claudeauth.StoreMetadataValue(&auth.Metadata, key, iteration%2 == 0)
+					}
+				} else {
+					_ = isClaudeSetupToken(auth, auth.Attributes["api_key"])
+				}
+			}
+		}(i%2 == 0)
+	}
+	close(start)
+	wg.Wait()
+	for _, active := range []string{"skip_account_profile", "is_setup_token", "setup_token"} {
+		for _, key := range []string{"skip_account_profile", "is_setup_token", "setup_token"} {
+			claudeauth.StoreMetadataValue(&auth.Metadata, key, key == active)
+		}
+		if !isClaudeSetupToken(auth, auth.Attributes["api_key"]) {
+			t.Fatalf("boolean reader lost setup flag %s", active)
+		}
+	}
+}

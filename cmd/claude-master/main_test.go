@@ -1,14 +1,106 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudemaster"
 )
+
+func TestLauncherSignalHelper(t *testing.T) {
+	if os.Getenv("CLAUDE_MASTER_SIGNAL_TEST") != "1" {
+		return
+	}
+	ctx, stop := launcherSignalContext()
+	defer stop()
+	fmt.Println("ready")
+	<-ctx.Done()
+	if err := os.WriteFile(os.Getenv("CLAUDE_MASTER_SIGNAL_MARKER"), []byte("graceful shutdown"), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLauncherSIGHUPRunsGracefulShutdown(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "closed")
+	child := exec.CommandContext(t.Context(), executable, "-test.run=^TestLauncherSignalHelper$")
+	child.Env = []string{"CLAUDE_MASTER_SIGNAL_TEST=1", "CLAUDE_MASTER_SIGNAL_MARKER=" + marker}
+	stdout, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = child.Process.Kill() })
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || ready != "ready\n" {
+		t.Fatalf("signal helper did not start: %q %v", ready, err)
+	}
+	if err := child.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Wait(); err != nil {
+		t.Fatalf("SIGHUP bypassed graceful shutdown: %v", err)
+	}
+	if raw, err := os.ReadFile(marker); err != nil || string(raw) != "graceful shutdown" {
+		t.Fatal("SIGHUP did not finish shutdown before exit")
+	}
+}
+
+func TestTryHelperResolvesRelativeBackupFilesBeforeChangingDirectory(t *testing.T) {
+	helper, err := filepath.Abs("../../try-claude-master.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"--backup-api-key", "key.txt"}, {"--backup-api-key", "file:key.txt"}, {"--backup-api-key=key.txt"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(bin, 0700); err != nil {
+				t.Fatal(err)
+			}
+			launcher := filepath.Join(dir, "launcher")
+			launcherScript := "#!/bin/sh\ncase \"$1\" in check|login) exit 0 ;; esac\n" +
+				"while [ \"$#\" -gt 0 ]; do\nif [ \"$1\" = --backup-api-key ]; then\nshift\n" +
+				"path=${1#file:}\n[ -r \"$path\" ] || exit 9\nprintf 'FILE_OK\\n'\nexit 0\nfi\nshift\ndone\nexit 10\n"
+			for path, script := range map[string]string{
+				launcher:                     launcherScript,
+				filepath.Join(bin, "go"):     "#!/bin/sh\nexec /bin/cp \"$CLAUDE_MASTER_TEST_LAUNCHER\" \"$3\"\n",
+				filepath.Join(bin, "claude"): "#!/bin/sh\nexit 0\n",
+			} {
+				if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range []string{"claude-primary", "claude-secondary"} {
+				if err := os.MkdirAll(filepath.Join(dir, ".local", "share", "claude-master", "profiles", name, "current"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, "key.txt"), []byte("synthetic-not-a-key"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", dir)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CLAUDE_MASTER_TEST_LAUNCHER", launcher)
+			t.Chdir(dir)
+			output, err := exec.Command("bash", append([]string{helper}, args...)...).CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "FILE_OK") || strings.Contains(string(output), "synthetic-not-a-key") {
+				t.Fatalf("relative file was not consumed without exposing its value: %v %s", err, output)
+			}
+		})
+	}
+}
 
 func TestInvalidArgumentsStopBeforeProfileOrLogin(t *testing.T) {
 	for _, args := range [][]string{
@@ -184,6 +276,18 @@ func TestTryHelperSplitsLauncherOptionsAndFiltersLoginHelpers(t *testing.T) {
 	want := "<run>\n<claude-primary>\n<--next-profile>\n<claude-secondary>\n<--backup-api-key>\n<env:ANTHROPIC_API_KEY>\n<--map>\n<incoming:target>\n<-->\n<--model>\n<incoming>\n<--remote-control>\n"
 	if !strings.Contains(string(output), "<login>\n<claude-secondary>\n") || !strings.Contains(string(output), want) || strings.Contains(string(output), "canary") {
 		t.Fatalf("launcher/native arguments were not separated or credential was exposed: %s", output)
+	}
+	// No launcher overrides leaves an empty argument array. Bash 3 with nounset
+	// must still launch the normal subscription session and its default flag.
+	if err := os.Unsetenv("ANTHROPIC_API_KEY"); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("bash", "../../try-claude-master.sh")
+	cmd.Stdin = strings.NewReader("\n")
+	output, err = cmd.CombinedOutput()
+	want = "<run>\n<claude-primary>\n<--next-profile>\n<claude-secondary>\n<-->\n<--remote-control>\n"
+	if err != nil || !strings.Contains(string(output), want) || strings.Contains(string(output), "canary") {
+		t.Fatalf("default helper launch failed or exposed credentials: %v %s", err, output)
 	}
 }
 

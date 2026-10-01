@@ -25,7 +25,6 @@ jobs:
           rm -f test-output
 
   claude-master:
-    if: contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
     strategy:
       fail-fast: false
       matrix:
@@ -43,9 +42,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test Claude master boundaries
-        run: go test -race ./internal/claudemaster ./cmd/claude-master ./sdk/auth ./sdk/cliproxy/auth ./internal/auth/claude ./sdk/cliproxy/executor
-      - name: Test native Claude executor header boundaries
-        run: go test -race -run 'TestNativeClaude|TestClaude.*Header|TestClassifyClaude|TestClaudeExecutorCompatThinkingReplayClears|TestKimiExecutorClaudeErrorClears' ./internal/runtime/executor
+        run: go test -race ./internal/claudemaster ./cmd/claude-master ./sdk/auth ./sdk/api/handlers ./sdk/cliproxy/auth ./internal/auth/claude ./sdk/cliproxy/executor
+      - name: Test native Claude executor and credential concurrency
+        run: go test -race -run 'TestNativeClaude|TestClaudeExecutor|TestClaudeSetupToken|TestClaude.*Header|TestClassifyClaude|TestKimiExecutorClaudeErrorClears' ./internal/runtime/executor
       - name: Download current verified native Claude for isolated transport test
         shell: bash
         run: |

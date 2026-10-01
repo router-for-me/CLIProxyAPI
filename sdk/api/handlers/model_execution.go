@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	"golang.org/x/net/context"
 )
@@ -230,7 +231,15 @@ func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Contex
 		AuthSelectionModel: req.AuthSelectionModel,
 		Path:               strings.TrimSpace(req.Path),
 	})
-	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
+	var chunks <-chan ModelExecutionChunk
+	var errMsg *interfaces.ErrorMessage
+	if _, native := coreexecutor.NativeClaudeProtocolHeadersFromContext(ctx); native && dataChan != nil && req.EntryProtocol == "claude" && modelExecutionResponseProtocol(req.EntryProtocol, req.ExitProtocol) == "claude" {
+		// The native HTTP executor resolves non-success statuses synchronously.
+		// Keep successful headers available without consuming a body chunk.
+		chunks = wrapModelExecutionChunks(ctx, dataChan, errChan, nil)
+	} else {
+		chunks, errMsg = prepareModelExecutionStream(ctx, dataChan, errChan)
+	}
 	if errMsg != nil {
 		return ModelExecutionStream{}, errMsg
 	}

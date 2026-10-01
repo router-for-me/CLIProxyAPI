@@ -30,6 +30,7 @@ const masterAPIHost = "api.anthropic.com"
 // process only; this package never changes the operating system trust store.
 type ProxyOptions struct {
 	Certificate      tls.Certificate
+	GetCertificate   func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	Inference        http.Handler
 	ControlTransport http.RoundTripper
 }
@@ -82,7 +83,7 @@ type Proxy struct {
 // StartProxy binds an ephemeral IPv4 loopback port. It never reads account
 // credentials and never logs request URLs, bodies, headers, or transport errors.
 func StartProxy(opts ProxyOptions) (*Proxy, error) {
-	if opts.Inference == nil || len(opts.Certificate.Certificate) == 0 || opts.Certificate.PrivateKey == nil {
+	if opts.Inference == nil || opts.GetCertificate == nil && (len(opts.Certificate.Certificate) == 0 || opts.Certificate.PrivateKey == nil) {
 		return nil, errors.New("proxy requires an inference handler and TLS certificate")
 	}
 	secret := make([]byte, 32)
@@ -100,6 +101,11 @@ func StartProxy(opts ProxyOptions) (*Proxy, error) {
 		proxyAuth: "Basic " + base64.StdEncoding.EncodeToString([]byte("claude-master:"+password)), ctx: ctx, cancel: cancel,
 		inference: opts.Inference, conns: make(map[*proxyConn]struct{}),
 		tlsConfig: &tls.Config{Certificates: []tls.Certificate{opts.Certificate}, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
+	}
+	if opts.GetCertificate != nil {
+		// Empty Certificates makes Go invoke the provider even without SNI.
+		p.tlsConfig.Certificates = nil
+		p.tlsConfig.GetCertificate = opts.GetCertificate
 	}
 	p.innerListen = &proxyListener{connections: make(chan net.Conn), done: make(chan struct{}), addr: listener.Addr()}
 	transport := opts.ControlTransport

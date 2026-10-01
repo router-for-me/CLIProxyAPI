@@ -24,6 +24,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -92,7 +93,8 @@ type Backend struct {
 
 // NewBackend loads one profile, then starts its account-local refresh loop.
 func NewBackend(ctx context.Context, opts BackendOptions) (*Backend, error) {
-	return newBackend(ctx, []BackendCredential{{AuthDir: opts.AuthDir, Provider: opts.Provider, AuthID: opts.AuthID}}, opts.Model, opts.UseRequestModel, true, nil, backendRoutingOptions{modelMap: opts.ModelMap})
+	pinSingle := !(opts.Provider == "claude" && opts.UseRequestModel)
+	return newBackend(ctx, []BackendCredential{{AuthDir: opts.AuthDir, Provider: opts.Provider, AuthID: opts.AuthID}}, opts.Model, opts.UseRequestModel, pinSingle, nil, backendRoutingOptions{modelMap: opts.ModelMap})
 }
 
 // NewBackendSeries loads a quota-aware set of profiles. The caller must hold
@@ -161,8 +163,7 @@ func newBackend(ctx context.Context, credentials []BackendCredential, modelName 
 			return nil, errLoad
 		}
 		if provider == "claude" {
-			accountUUID, _ := credential.Metadata["account_uuid"].(string)
-			accountUUID = strings.TrimSpace(accountUUID)
+			accountUUID := helps.ClaudeCredentialAccountUUID(credential)
 			if accountUUID != "" {
 				if _, exists := subscriptionIDs[accountUUID]; exists {
 					return nil, errors.New("ordered inference profiles must use distinct Claude accounts")
@@ -199,6 +200,11 @@ func newBackend(ctx context.Context, credentials []BackendCredential, modelName 
 		selector = &backendSelector{authID: pinnedAuthID, provider: provider}
 	} else {
 		seriesSelector = &backendSeriesSelector{authIDs: subscriptionAuthIDs, backupAuthID: backupAuthID, provider: provider}
+		routes, errRoutes := newBackendSessionStore(credentials, loaded, backupAuthID, backupAPIKey)
+		if errRoutes != nil {
+			return nil, errRoutes
+		}
+		seriesSelector.routes = routes
 		selector = seriesSelector
 	}
 	cfg := backendConfig(credentials[0].AuthDir)
@@ -211,7 +217,15 @@ func newBackend(ctx context.Context, credentials []BackendCredential, modelName 
 	}
 	switch provider {
 	case "claude":
-		manager.RegisterExecutor(runtimeexecutor.NewClaudeExecutor(cfg))
+		executor := runtimeexecutor.NewClaudeExecutor(cfg)
+		manager.RegisterExecutor(executor)
+		if seriesSelector != nil {
+			seriesSelector.prepareIdentity = func(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+				prepareCtx, cancelPrepare := context.WithTimeout(ctx, claudeQuotaDefaultTimeout)
+				defer cancelPrepare()
+				return manager.PrepareRequestAuth(prepareCtx, executor, auth)
+			}
+		}
 	case "codex":
 		manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
 	}
@@ -230,7 +244,8 @@ func newBackend(ctx context.Context, credentials []BackendCredential, modelName 
 			return nil, errors.New("cannot register the selected inference credentials")
 		}
 	}
-	if seriesSelector != nil {
+	pollQuota := seriesSelector != nil && (len(subscriptionAuthIDs) > 1 || backupAuthID != "")
+	if pollQuota {
 		loadBackendWeeklyQuotas(ctx, manager, seriesSelector, subscriptionAuthIDs, quotaRequest)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -247,7 +262,7 @@ func newBackend(ctx context.Context, credentials []BackendCredential, modelName 
 		ModelMap:        modelMap,
 	}, handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
 	manager.StartAutoRefresh(runCtx, 15*time.Minute)
-	if seriesSelector != nil {
+	if pollQuota {
 		backend.quotaPollDone = startBackendQuotaPolling(runCtx, manager, seriesSelector, subscriptionAuthIDs, quotaRequest, nil)
 	}
 	return backend, nil
@@ -332,11 +347,12 @@ type backendCredentialStore interface {
 
 // backendStore prevents refresh/persistence from escaping the selected profile.
 type backendStore struct {
-	mu        sync.Mutex
-	closed    bool
-	opts      BackendOptions
-	path      string
-	runtimeID string
+	mu         sync.Mutex
+	closed     bool
+	opts       BackendOptions
+	path       string
+	runtimeID  string
+	renameFile func(string, string) error
 }
 
 func loadBackendCredential(ctx context.Context, opts BackendOptions) (*backendStore, *coreauth.Auth, error) {
@@ -354,6 +370,9 @@ func loadBackendCredentialAs(ctx context.Context, opts BackendOptions, runtimeID
 	info, err := os.Lstat(opts.AuthDir)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		return nil, nil, errors.New("inference auth directory must be private and not a symlink")
+	}
+	if err := recoverStagedRefresh(opts.AuthDir, opts.AuthID, opts.Provider); err != nil {
+		return nil, nil, err
 	}
 	entries, err := os.ReadDir(opts.AuthDir)
 	if err != nil || len(entries) != 1 || entries[0].Name() != opts.AuthID {
@@ -438,6 +457,11 @@ func (s *backendStore) Save(_ context.Context, auth *coreauth.Auth) (string, err
 	if auth.Storage != nil || auth.Metadata == nil {
 		return "", errors.New("unsupported inference credential storage")
 	}
+	// Finish a previous failed commit before creating another stage. Otherwise
+	// an older retained snapshot could overwrite a later successful save at restart.
+	if err := recoverStagedRefresh(s.opts.AuthDir, s.opts.AuthID, s.opts.Provider); err != nil {
+		return "", err
+	}
 	info, err := os.Lstat(s.opts.AuthDir)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		return "", errors.New("inference auth directory is no longer private")
@@ -467,24 +491,33 @@ func (s *backendStore) Save(_ context.Context, auth *coreauth.Auth) (string, err
 		return "", errors.New("cannot stage refreshed inference credential")
 	}
 	tempPath := temp.Name()
+	retainStage := false
 	defer func() {
-		// Best-effort cleanup also covers errors before rename; after a
-		// successful rename the temporary name no longer exists.
+		// A complete stage may hold the only valid rotated token. Keep it if
+		// sync/close/rename fails so locked startup recovery can finish it.
 		_ = temp.Close()
-		_ = os.Remove(tempPath)
+		if !retainStage {
+			_ = os.Remove(tempPath)
+		}
 	}()
 	if n, errWrite := temp.Write(raw); errWrite != nil || n != len(raw) {
 		return "", errors.New("cannot write refreshed inference credential")
 	}
+	retainStage = true
 	if errSync := temp.Sync(); errSync != nil {
 		return "", errors.New("cannot sync refreshed inference credential")
 	}
 	if errClose := temp.Close(); errClose != nil {
 		return "", errors.New("cannot close refreshed inference credential")
 	}
-	if errRename := os.Rename(tempPath, s.path); errRename != nil {
+	renameFile := os.Rename
+	if s.renameFile != nil {
+		renameFile = s.renameFile
+	}
+	if errRename := renameFile(tempPath, s.path); errRename != nil {
 		return "", errors.New("cannot commit refreshed inference credential")
 	}
+	retainStage = false
 	dir, err := os.Open(s.opts.AuthDir)
 	if err != nil {
 		return "", errors.New("refreshed credential was committed but its directory could not be opened for sync")
@@ -592,8 +625,10 @@ type backendSeriesSelector struct {
 	quotaRevision     map[string]uint64
 	quotaBlockedUntil map[string]time.Time
 	quotaBackoffLevel map[string]int
-	blocked           map[string]map[string]struct{}
 	sessions          *coreauth.SessionCache
+	routes            *backendSessionStore
+	prepareIdentity   func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
+	activeRoutes      map[string]map[string]int
 	now               func() time.Time
 	stopped           bool
 }
@@ -605,6 +640,10 @@ func (s *backendSeriesSelector) Pick(ctx context.Context, provider, model string
 	sessionID, parentSessionID := backendSeriesSessionIDs(opts)
 	affinity := analyzeNativeRequestAffinity(opts.OriginalRequest)
 	switchable := affinity.validJSON && !affinity.requiresAccount
+	// Empty OriginalRequest is used by body-less programmatic selection. Every
+	// native inference call supplies its validated body; malformed bodies stay
+	// conservative rather than establishing a guessed continuation origin.
+	opaque := !switchable && len(opts.OriginalRequest) != 0
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -614,16 +653,31 @@ func (s *backendSeriesSelector) Pick(ctx context.Context, provider, model string
 	s.initializeLocked()
 	// A paid API credential is not subscription capacity: do not use it to
 	// bypass the ten-percent reserve or an ordinary provider/request failure.
-	if switchable && s.backupAuthID != "" && s.subscriptionsExhaustedLocked(backendAvailabilityModel(model, opts)) {
+	if switchable && s.backupAuthID != "" && !backendAttemptFailed(ctx, "", backendAvailabilityModel(model, opts)) && s.subscriptionsExhaustedLocked() {
 		return s.pickBackupLocked(ctx, model, opts, auths, sessionID)
 	}
 	excludedAuthID := ""
 	if sessionID != "" {
-		boundID, boundFound := s.sessions.GetAndRefresh(sessionID)
+		boundID, boundFound, errBinding := s.sessionBindingLocked(sessionID, auths, opaque)
+		if errBinding != nil {
+			return nil, errBinding
+		}
 		inheritedParent := false
 		if !boundFound && parentSessionID != "" {
-			boundID, boundFound = s.sessions.GetAndRefresh(parentSessionID)
+			boundID, boundFound, errBinding = s.sessionBindingLocked(parentSessionID, auths, opaque)
+			if errBinding != nil {
+				return nil, errBinding
+			}
 			inheritedParent = boundFound
+			if inheritedParent && opaque {
+				changed, errEpoch := s.parentOriginChangedLocked(parentSessionID)
+				if errEpoch != nil {
+					return nil, errEpoch
+				}
+				if changed {
+					return nil, errors.New("the parent Claude conversation changed accounts; the first opaque child origin is ambiguous, so start the child with self-contained context")
+				}
+			}
 		}
 		// A self-contained child starts its own binding. It inherits the parent
 		// only when its first payload carries state that cannot cross accounts.
@@ -637,28 +691,35 @@ func (s *backendSeriesSelector) Pick(ctx context.Context, provider, model string
 				}
 				picked, err := s.pickAuthLocked(ctx, model, opts, selected)
 				if err == nil && picked != nil {
-					s.sessions.Set(sessionID, picked.ID)
+					return s.bindSessionLocked(ctx, sessionID, picked)
 				}
 				return picked, err
 			}
 			if bound := backendSeriesAuthByID(auths, s.provider, boundID); bound != nil {
-				if !switchable || !s.shouldMoveCleanWorkLocked(boundID, auths) {
+				available := backendSeriesAvailableAuths(ctx, s.provider, backendAvailabilityModel(model, opts), opts, auths)
+				if !switchable || !s.shouldMoveCleanWorkLocked(boundID, available) {
 					picked, err := s.pickAuthLocked(ctx, model, opts, bound)
-					if err == nil && inheritedParent && picked != nil {
-						s.sessions.Set(sessionID, picked.ID)
+					if err == nil && picked != nil {
+						if inheritedParent && opaque {
+							return s.bindInheritedSessionLocked(ctx, sessionID, parentSessionID, picked)
+						}
+						return s.bindSessionLocked(ctx, sessionID, picked)
 					}
 					return picked, err
 				}
-				selected := s.preferredAvailableAuthLocked(auths, boundID)
+				selected := s.preferredAvailableAuthLocked(available, boundID)
 				if selected == nil {
-					return s.pickAuthLocked(ctx, model, opts, bound)
+					picked, err := s.pickAuthLocked(ctx, model, opts, bound)
+					if err == nil && picked != nil {
+						return s.bindSessionLocked(ctx, sessionID, picked)
+					}
+					return picked, err
 				}
 				picked, err := s.pickAuthLocked(ctx, model, opts, selected)
 				if err != nil {
 					return nil, err
 				}
-				s.sessions.Set(sessionID, picked.ID)
-				return picked, nil
+				return s.bindSessionLocked(ctx, sessionID, picked)
 			} else {
 				if !switchable {
 					return nil, errors.New("the current Claude continuation account is unavailable; refusing to move opaque conversation state")
@@ -666,12 +727,16 @@ func (s *backendSeriesSelector) Pick(ctx context.Context, provider, model string
 				// Manager-side model cooldowns and request-scoped failures also
 				// remove an auth from this candidate slice. They must not rotate a
 				// subscription; only the weekly reserve policy may move clean work.
-				if s.nonQuotaBlockedLocked(boundID, backendAvailabilityModel(model, opts)) {
+				quota := s.currentQuotaLocked(boundID)
+				if backendAttemptFailed(ctx, boundID, backendAvailabilityModel(model, opts)) || (!strings.HasPrefix(boundID, "missing:") && !s.quotaBlockedLocked(boundID) && (!quota.known || quota.used < 1)) {
 					return nil, errors.New("the current Claude subscription is unavailable; no quota handoff is permitted")
 				}
 			}
 			excludedAuthID = boundID
 		}
+	}
+	if opaque && excludedAuthID == "" {
+		return nil, errors.New("the Claude continuation origin is unknown; start a self-contained session before switching subscriptions")
 	}
 
 	selected := s.preferredAuthLocked(auths, excludedAuthID)
@@ -683,7 +748,7 @@ func (s *backendSeriesSelector) Pick(ctx context.Context, provider, model string
 		return nil, err
 	}
 	if sessionID != "" && picked != nil {
-		s.sessions.Set(sessionID, picked.ID)
+		return s.bindSessionLocked(ctx, sessionID, picked)
 	}
 	return picked, nil
 }
@@ -704,14 +769,11 @@ func backendSeriesSessionIDs(opts coreexecutor.Options) (sessionID, parentSessio
 	return sessionID, parentSessionID
 }
 
-func (s *backendSeriesSelector) subscriptionsExhaustedLocked(model string) bool {
+func (s *backendSeriesSelector) subscriptionsExhaustedLocked() bool {
 	if len(s.authIDs) == 0 {
 		return false
 	}
 	for _, authID := range s.authIDs {
-		if s.nonQuotaBlockedLocked(authID, model) {
-			return false
-		}
 		quota := s.currentQuotaLocked(authID)
 		if (!quota.known || quota.used < 1) && !s.quotaBlockedLocked(authID) {
 			return false
@@ -727,7 +789,7 @@ func (s *backendSeriesSelector) pickBackupLocked(ctx context.Context, model stri
 	}
 	picked, err := s.pickAuthLocked(ctx, model, opts, backup)
 	if err == nil && sessionID != "" && picked != nil {
-		s.sessions.Set(sessionID, picked.ID)
+		return s.bindSessionLocked(ctx, sessionID, picked)
 	}
 	return picked, err
 }
@@ -744,9 +806,6 @@ func (s *backendSeriesSelector) initializeLocked() {
 	}
 	if s.quotaBackoffLevel == nil {
 		s.quotaBackoffLevel = make(map[string]int, len(s.authIDs))
-	}
-	if s.blocked == nil {
-		s.blocked = make(map[string]map[string]struct{}, len(s.authIDs))
 	}
 	if s.sessions == nil {
 		s.sessions = coreauth.NewSessionCacheWithCapacity(30*24*time.Hour, 4096)
@@ -803,11 +862,27 @@ func (s *backendSeriesSelector) shouldMoveCleanWorkLocked(boundID string, auths 
 			continue
 		}
 		other := s.currentQuotaLocked(auth.ID)
-		if !other.known || other.used < 1 {
+		if !other.known || other.used < 1-backendWeeklyReserve {
 			return true
 		}
 	}
-	return false
+	// Once every usable subscription is in reserve, drain the earliest reset
+	// instead of excluding the current binding and bouncing each clean turn.
+	preferred := s.preferredAvailableAuthLocked(auths, "")
+	return preferred != nil && preferred.ID != boundID
+}
+
+func backendSeriesAvailableAuths(ctx context.Context, provider, model string, opts coreexecutor.Options, auths []*coreauth.Auth) []*coreauth.Auth {
+	available := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if picked, err := (&coreauth.FillFirstSelector{}).Pick(ctx, provider, model, opts, []*coreauth.Auth{auth}); err == nil && picked != nil {
+			available = append(available, auth)
+		}
+	}
+	return available
 }
 
 func (s *backendSeriesSelector) preferredAuthLocked(auths []*coreauth.Auth, excludedAuthID string) *coreauth.Auth {
@@ -954,38 +1029,6 @@ func backendBlockedModelKey(model string) string {
 	return strings.TrimSpace(model)
 }
 
-func (s *backendSeriesSelector) nonQuotaBlockedLocked(authID, model string) bool {
-	models := s.blocked[authID]
-	if len(models) == 0 {
-		return false
-	}
-	_, globallyBlocked := models[""]
-	_, modelBlocked := models[backendBlockedModelKey(model)]
-	return globallyBlocked || modelBlocked
-}
-
-func (s *backendSeriesSelector) setNonQuotaBlockedLocked(authID, model string, blocked bool) {
-	if strings.TrimSpace(authID) == "" {
-		return
-	}
-	model = backendBlockedModelKey(model)
-	if !blocked {
-		if models := s.blocked[authID]; models != nil {
-			delete(models, model)
-			if len(models) == 0 {
-				delete(s.blocked, authID)
-			}
-		}
-		return
-	}
-	models := s.blocked[authID]
-	if models == nil {
-		models = make(map[string]struct{})
-		s.blocked[authID] = models
-	}
-	models[model] = struct{}{}
-}
-
 func (s *backendSeriesSelector) OnResult(result coreauth.Result) {
 	if strings.TrimSpace(result.AuthID) == "" {
 		return
@@ -1002,7 +1045,6 @@ func (s *backendSeriesSelector) OnResult(result coreauth.Result) {
 		return
 	}
 	if result.Success {
-		s.setNonQuotaBlockedLocked(result.AuthID, result.Model, false)
 		// A delayed in-flight success does not cancel a newer credential quota
 		// rejection; the manager likewise retains an active quota deadline.
 		if !s.quotaBlockedLocked(result.AuthID) {
@@ -1016,10 +1058,8 @@ func (s *backendSeriesSelector) OnResult(result coreauth.Result) {
 	credentialQuota := result.Error.HTTPStatus == http.StatusTooManyRequests && result.CredentialScope &&
 		result.Error.Code != coreauth.ErrorCodeRequestScoped && result.Error.Code != coreauth.ErrorCodeForceCooldown
 	if !credentialQuota {
-		s.setNonQuotaBlockedLocked(result.AuthID, result.Model, true)
 		return
 	}
-	s.setNonQuotaBlockedLocked(result.AuthID, result.Model, false)
 	s.quotaRevision[result.AuthID]++
 	// Credential-wide rejection can be a five-hour limit, not an exhausted
 	// weekly allocation. Keep that deadline separate from measured weekly usage.
@@ -1059,6 +1099,12 @@ func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSe
 				result.Model = requestedModel
 				result.RouteModel = requestedModel
 			}
+		}
+		recordBackendAttempt(ctx, result)
+		if result.Success {
+			commitBackendRouteAttempt(ctx, result.AuthID)
+		} else {
+			releaseFailedBackendRouteAttempt(ctx, result.AuthID)
 		}
 		// MarkResult applies this policy before publishing quota/cooldown state.
 		// Advancing here prevents a concurrent pick from observing the old
@@ -1281,8 +1327,11 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 	router := gin.New()
 	dispatch := func(c *gin.Context) {
 		ctx, cancel := context.WithCancel(c.Request.Context())
+		ctx = withBackendAttempt(ctx)
+		ctx = coreexecutor.WithNativeClaudeUpstreamSuccessCallback(ctx, commitBackendRouteAttempt)
+		ctx = coreexecutor.WithNativeClaudeResponseStatusHolder(ctx)
 		stop := context.AfterFunc(lifetime, cancel)
-		defer func() { stop(); cancel() }()
+		defer func() { stop(); cancel(); releaseBackendRouteAttempt(ctx) }()
 		ctx = internallogging.WithResponseHeadersHolder(ctx)
 		if lifetime.Err() != nil || ctx.Err() != nil {
 			observeBackendStage(ctx, BackendErrorClosed)
@@ -1303,10 +1352,14 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 		}
 		ctx = context.WithValue(ctx, "gin", c)
 		if c.Request.URL.Path == "/v1/messages/count_tokens" {
+			backendSetCountRequest(ctx)
 			if opts.UseRequestModel {
 				response, errMsg := base.CountProtocolWithAuthManager(ctx, backendProtocolRequest(model, raw, false))
 				observeBackendError(ctx, errMsg)
 				writeBackendNativeHeaders(c.Writer.Header(), response.Headers)
+				if errMsg == nil {
+					writeBackendNativeSuccessStatus(ctx, c.Writer)
+				}
 				writeBackendNativeResult(c.Writer, response.Body, errMsg)
 				return
 			}
@@ -1328,6 +1381,9 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 			response, errMsg := base.ExecuteProtocolWithAuthManager(ctx, backendProtocolRequest(model, raw, false))
 			observeBackendError(ctx, errMsg)
 			writeBackendNativeHeaders(c.Writer.Header(), response.Headers)
+			if errMsg == nil {
+				writeBackendNativeSuccessStatus(ctx, c.Writer)
+			}
 			writeBackendNativeResult(c.Writer, response.Body, errMsg)
 			return
 		}
@@ -1508,6 +1564,12 @@ func writeBackendNativeResult(w http.ResponseWriter, payload []byte, errMsg *int
 	_, _ = w.Write(payload)
 }
 
+func writeBackendNativeSuccessStatus(ctx context.Context, w http.ResponseWriter) {
+	if status := coreexecutor.NativeClaudeResponseStatusFromContext(ctx); status >= http.StatusOK && status < http.StatusMultipleChoices {
+		w.WriteHeader(status)
+	}
+}
+
 func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *handlers.BaseAPIHandler, model string, raw []byte, useRequestModel bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -1576,6 +1638,14 @@ func streamBackendProtocolResponse(ctx context.Context, w http.ResponseWriter, f
 		return
 	}
 	started := false
+	if _, native := coreexecutor.NativeClaudeProtocolHeadersFromContext(ctx); native {
+		// The native executor has already received successful upstream headers.
+		// Forward them now rather than waiting through a long first body read.
+		writeBackendNativeHeaders(w.Header(), stream.Headers)
+		writeBackendNativeSuccessStatus(ctx, w)
+		started = true
+		flusher.Flush()
+	}
 	for {
 		select {
 		case <-ctx.Done():

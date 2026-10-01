@@ -126,6 +126,9 @@ func (l *ProfileLock) Profile() (Profile, error) {
 		return Profile{}, errors.New("profile metadata is invalid")
 	}
 	authDir := filepath.Join(current, "auth")
+	if err := recoverStagedRefresh(authDir, meta.AuthID, meta.Provider); err != nil {
+		return Profile{}, err
+	}
 	if err := validateAuthDirectory(authDir, meta.AuthID); err != nil {
 		return Profile{}, err
 	}

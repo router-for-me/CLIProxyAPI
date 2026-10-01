@@ -68,7 +68,7 @@ done
 sleep 3
 
 for lane in a b; do
-  lane_upper=${lane^^}
+  lane_upper="$(gym_lane_upper "$lane")"
   target="$(gym_lane_target "$session" "$lane")"
   prompt="This is Claude Master gym lane $lane_upper. Do not modify files and do not use the network. Fan out with the Agent tool to exactly two read-only subagents in parallel. Subagent 1 must read go.mod and report the module path and Go version. Subagent 2 must read AGENTS.md and report its first heading plus one repository command. Wait for both. Then reply with GYM_LANE_${lane_upper}_OK, one sentence per subagent result, and the model and effort level you believe this session is using. Do not spawn any additional subagents."
   tmux send-keys -t "$target" -l -- "$prompt"
