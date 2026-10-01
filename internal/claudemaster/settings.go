@@ -22,6 +22,10 @@ const settingsByteLimit = 1024 * 1024
 // We preserve its settings/permissions/hooks instead of disabling their sources. Native MDM policies
 // are not JSON files and cannot be covered by this bounded file validator.
 func ValidateNativeSettings(ctx context.Context) error {
+	return validateNativeSettings(ctx, os.Environ())
+}
+
+func validateNativeSettings(ctx context.Context, environ []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -33,7 +37,7 @@ func ValidateNativeSettings(ctx context.Context) error {
 	if err != nil {
 		return errors.New("cannot locate native project settings")
 	}
-	roots, err := nativeProjectRoots(ctx, cwd)
+	roots, err := nativeProjectRootsWithEnvironment(ctx, cwd, environ)
 	if err != nil {
 		return err
 	}
@@ -181,6 +185,10 @@ func forbiddenProviderEnv(name string) bool {
 }
 
 func nativeProjectRoots(ctx context.Context, cwd string) ([]string, error) {
+	return nativeProjectRootsWithEnvironment(ctx, cwd, os.Environ())
+}
+
+func nativeProjectRootsWithEnvironment(ctx context.Context, cwd string, environ []string) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -189,7 +197,7 @@ func nativeProjectRoots(ctx context.Context, cwd string) ([]string, error) {
 		return nil, errors.New("cannot resolve project settings directory")
 	}
 	roots := []string{resolved}
-	root, err := boundedGitOutput(ctx, resolved, "rev-parse", "--show-toplevel")
+	root, err := boundedGitOutputWithEnvironment(ctx, resolved, environ, "rev-parse", "--show-toplevel")
 	if err != nil {
 		// Cancellation is never evidence that this is a non-Git directory. Propagate it before
 		// the ordinary Git-marker fallback so Ctrl-C cannot be mistaken for successful preflight.
@@ -213,7 +221,7 @@ func nativeProjectRoots(ctx context.Context, cwd string) ([]string, error) {
 		return nil, errors.New("Git returned an invalid settings root")
 	}
 	roots = append(roots, root)
-	worktrees, err := boundedGitOutput(ctx, resolved, "worktree", "list", "--porcelain", "-z")
+	worktrees, err := boundedGitOutputWithEnvironment(ctx, resolved, environ, "worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -237,9 +245,9 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func boundedGitOutput(ctx context.Context, cwd string, args ...string) (string, error) {
+func boundedGitOutputWithEnvironment(ctx context.Context, cwd string, environ []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", cwd}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(append([]string(nil), environ...), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
 	var output boundedOutput
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard

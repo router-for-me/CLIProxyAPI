@@ -36,7 +36,9 @@ connection.
 
 Known control and Remote Control routes continue to Anthropic with the master login.
 Unknown Anthropic routes fail closed instead of accidentally using the master account
-for inference. There is no API-key, Bedrock, or master-account inference fallback.
+for inference. There is no Bedrock or master-account inference fallback. An explicitly
+provided Anthropic API key can serve as the final backup after subscription quota is
+exhausted; without one, inference stays subscription-only.
 
 ## Install, login, and run
 
@@ -91,6 +93,76 @@ or its normal model flags:
 The launcher does not define or constrain those models. `probe --model` is different:
 that flag selects the model only for the launcher's small diagnostic request.
 
+### Optional final API-key backup
+
+Supply a paid Anthropic API key from a file or an environment variable, never as a
+literal key in process arguments:
+
+```bash
+./claude-master run claude-primary --next-profile claude-secondary \
+  --backup-api-key /home/me/claude_api.txt -- --remote-control
+```
+
+The file must contain only the key (surrounding whitespace is trimmed), be a regular
+file no larger than 16 KiB, and be readable by the launcher. Keep it private, for example
+with `chmod 600 /home/me/claude_api.txt`. `file:/home/me/claude_api.txt` is also
+accepted.
+
+The dedicated environment variable is consumed automatically when exported. Read it
+without echoing or putting it in shell history:
+
+```bash
+read -rsp 'Anthropic API key (final backup): ' CLAUDE_MASTER_BACKUP_API_KEY
+printf '\n'
+export CLAUDE_MASTER_BACKUP_API_KEY
+./claude-master run claude-primary --next-profile claude-secondary -- --remote-control
+unset CLAUDE_MASTER_BACKUP_API_KEY
+```
+
+The launcher uses this key only for a self-contained request after every subscription
+has exhausted its credential-scoped quota. The 10% continuation reserve is still usable
+subscription quota, not a reason to switch to the key. Authentication, request, model,
+and transport failures do not trigger the backup. Account-bound opaque continuations
+stay on their originating subscription; an exposed streaming response is never replayed
+on the key.
+
+Conversation bindings are process-local, not persisted across launcher restarts.
+Resuming opaque history after a restart can lose the originating account binding;
+restart/resume affinity is not yet guaranteed, including API-to-subscription resumes.
+
+API-key usage is billed separately from subscriptions. Model selection remains Claude
+Code's native value unless explicitly mapped below; a subscription model may not be
+available under the API key. The proxy does not silently substitute another model.
+
+To consume a key already exported under another name, select that environment variable
+before `--`:
+
+```bash
+./claude-master run claude-primary --backup-api-key env:MY_KEY -- --remote-control
+```
+
+An explicitly selected variable must exist and be nonempty. The key is held only by the
+proxy backend: it is not saved in a profile, passed to the native Claude child, or used
+for the master login. `--backup-api-key env:ANTHROPIC_API_KEY` consumes an existing
+standard API-key variable and removes it from native startup, so Claude Code continues
+to use its normal subscription login and Remote Control. An explicit file or environment
+source overrides the optional dedicated environment variable.
+
+### Optional exact model mappings
+
+Use repeatable `--map INCOMING:TARGET` options before `--` to change a model explicitly:
+
+```bash
+./claude-master run claude-primary --next-profile claude-secondary \
+  --map claude-sonnet-5-5:claude-sonnet-4-6 \
+  -- --model claude-sonnet-5-5 --remote-control
+```
+
+Mappings apply equally to subscription requests, the final API-key backup, and token
+counting. Matching is exact and happens once; there is no alias/suffix normalization,
+chained mapping, or model allowlist. Unmapped models pass through unchanged. Mappings
+do not relax account-bound continuation or streaming retry constraints.
+
 The repository helper builds the launcher, prompts for any missing normal logins, and
 starts the configured pool:
 
@@ -99,20 +171,46 @@ starts the configured pool:
 ```
 
 Edit the short `profiles=(...)` list at the top of that script for the desired profile
-names.
+names. It also consumes `CLAUDE_MASTER_BACKUP_API_KEY` automatically when exported;
+the key does not require another profile or login. The helper extracts `--backup-api-key`
+and repeatable `--map` options for the launcher; other arguments go to native Claude.
+Use `--` to stop helper option extraction and pass everything after it literally:
+
+```bash
+/home/me/CLIProxyAPI-claude-master/try-claude-master.sh \
+  --backup-api-key /home/me/claude_api.txt \
+  --map claude-sonnet-5-5:claude-sonnet-4-6 --remote-control
+```
 
 ## Weekly quota selection
 
-For a multi-profile run, startup asks Anthropic's OAuth usage endpoint for each
-profile's weekly utilization and reset time. New sessions use the usable account whose
+For a multi-profile run, or a subscription with an API-key backup, startup asks
+Anthropic's OAuth usage endpoint for each profile's weekly utilization and reset time.
+New sessions use the usable account whose
 weekly quota resets soonest, draining the quota that will be replenished first. The
 configured profile order is the deterministic fallback when usage is unavailable or
 reset times tie.
 
-Quota state is refreshed from Anthropic's rate-limit response headers. A confirmed
-credential-scoped weekly `429` also marks that account exhausted. Request-scoped,
+Quota state is refreshed from Anthropic's rate-limit response headers. A
+credential-scoped `429` temporarily blocks that account until its retry/reset deadline;
+it does not turn a five-hour rejection into exhausted weekly usage. Request-scoped,
 model-scoped, authentication, validation, and transport failures do not drain or rotate
 the account.
+
+After startup, the usage API is polled every 60 seconds for all subscription profiles,
+never the API-key backup. This retries failed startup reads and picks up weekly resets,
+quota grants, and usage from other processes. Accounts are queried independently, with
+at most one usage request in flight per account, so a stalled account does not stop
+the others from updating. Failed or unknown responses keep the last known quota.
+Fresh usage snapshots can lower utilization or correct the predicted reset time, but
+a slow poll cannot overwrite newer quota headers or a credential-scoped rejection.
+
+Weekly usage alone does not prove a five-hour limit has recharged: existing credential
+quota blocks and SDK cooldowns remain until their retry/reset deadlines. Known weekly
+resets also reopen capacity on the next request, with polling and response headers
+confirming the actual state. Polling never changes opaque continuation bindings or
+replays a stream. Backend shutdown cancels and joins usage requests before releasing
+profile locks. The separate OAuth refresh loop renews login tokens.
 
 When another account still has capacity, the final 10% of an account is reserved for
 continuations carrying account-bound state:

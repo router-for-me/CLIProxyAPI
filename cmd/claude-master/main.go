@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudemaster"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 )
 
 type stringListFlag []string
@@ -24,6 +25,106 @@ func (f *stringListFlag) String() string { return strings.Join(*f, ",") }
 func (f *stringListFlag) Set(value string) error {
 	*f = append(*f, value)
 	return nil
+}
+
+type modelMapFlag map[string]string
+
+func (f *modelMapFlag) String() string {
+	keys := make([]string, 0, len(*f))
+	for key := range *f {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, key+":"+(*f)[key])
+	}
+	return strings.Join(pairs, ",")
+}
+
+func (f *modelMapFlag) Set(value string) error {
+	if strings.Count(value, ":") != 1 {
+		return errors.New("model mapping must be INCOMING:TARGET")
+	}
+	incoming, target, _ := strings.Cut(value, ":")
+	incoming, target = strings.TrimSpace(incoming), strings.TrimSpace(target)
+	if incoming == "" || target == "" {
+		return errors.New("model mapping must be INCOMING:TARGET")
+	}
+	if _, exists := (*f)[incoming]; exists {
+		return errors.New("incoming model mappings must be distinct")
+	}
+	if *f == nil {
+		*f = make(modelMapFlag)
+	}
+	(*f)[incoming] = target
+	return nil
+}
+
+const backupAPIKeyByteLimit = 16 * 1024
+
+func readBackupAPIKey(source string, explicit bool) (string, string, error) {
+	if !explicit {
+		return readBackupAPIKeyEnv(claudemaster.BackupAPIKeyEnvironment, false)
+	}
+	if envName, ok := strings.CutPrefix(source, "env:"); ok {
+		return readBackupAPIKeyEnv(envName, true)
+	}
+	path := strings.TrimPrefix(source, "file:")
+	if path == "" {
+		return "", "", errors.New("backup API key requires a file path or env:VARIABLE")
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return "", "", errors.New("cannot read backup API key file")
+	}
+	file := os.NewFile(uintptr(fd), "backup-api-key")
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > backupAPIKeyByteLimit {
+		return "", "", errors.New("backup API key file must be a bounded regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, backupAPIKeyByteLimit+1))
+	if err != nil || len(data) > backupAPIKeyByteLimit {
+		return "", "", errors.New("cannot read backup API key file")
+	}
+	key := strings.TrimSpace(string(data))
+	if key == "" {
+		return "", "", errors.New("backup API key file must be nonempty")
+	}
+	if err := validateBackupAPIKey(key); err != nil {
+		return "", "", err
+	}
+	return key, "", nil
+}
+
+func validateBackupAPIKey(key string) error {
+	for _, char := range key {
+		if char < '!' || char > '~' {
+			return errors.New("backup API key contains invalid characters")
+		}
+	}
+	return nil
+}
+
+func readBackupAPIKeyEnv(envName string, explicit bool) (string, string, error) {
+	if err := claudemaster.ValidateBackupAPIKeyEnv(envName); err != nil {
+		return "", "", err
+	}
+	key := strings.TrimSpace(os.Getenv(envName))
+	if key == "" {
+		if explicit {
+			return "", "", errors.New("selected backup API key environment variable must be set and nonempty")
+		}
+		return "", "", nil
+	}
+	if len(key) > backupAPIKeyByteLimit {
+		return "", "", errors.New("backup API key environment value exceeds its size limit")
+	}
+	if err := validateBackupAPIKey(key); err != nil {
+		return "", "", err
+	}
+	return key, envName, nil
 }
 
 func main() {
@@ -52,7 +153,7 @@ func run(args []string) (int, error) {
 		return 0, nil
 	}
 	if len(args) < 2 {
-		return 2, errors.New("usage: claude-master check; claude-master login PROFILE; claude-master probe PROFILE --model MODEL; claude-master run PROFILE [--next-profile PROFILE ...] [--diagnostics] -- [Claude arguments]")
+		return 2, errors.New("usage: claude-master check; claude-master login PROFILE; claude-master probe PROFILE --model MODEL; claude-master run PROFILE [--next-profile PROFILE ...] [--backup-api-key FILE|env:VARIABLE] [--map INCOMING:TARGET ...] [--diagnostics] -- [Claude arguments]")
 	}
 	command, name := args[0], args[1]
 	if command != "login" && command != "run" && command != "probe" {
@@ -63,12 +164,16 @@ func run(args []string) (int, error) {
 	var model string
 	var diagnostics bool
 	var nextProfiles stringListFlag
+	var backupAPIKeySource string
+	var modelMap modelMapFlag
 	switch command {
 	case "probe":
 		flags.StringVar(&model, "model", "", "diagnostic model")
 	case "run":
 		flags.BoolVar(&diagnostics, "diagnostics", false, "print numeric proxy counters only")
 		flags.Var(&nextProfiles, "next-profile", "additional inference profile for quota-aware subscription rotation")
+		flags.StringVar(&backupAPIKeySource, "backup-api-key", "", "final-backup API key file path or env:VARIABLE")
+		flags.Var(&modelMap, "map", "exact model mapping INCOMING:TARGET (repeatable)")
 	}
 	if err := flags.Parse(args[2:]); err != nil {
 		return 2, errors.New("invalid launcher arguments")
@@ -81,6 +186,20 @@ func run(args []string) (int, error) {
 	}
 	if command == "probe" && len(flags.Args()) != 0 {
 		return 2, errors.New("probe does not accept Claude arguments or proxy diagnostics")
+	}
+	var backupAPIKey, consumedKeyEnv string
+	if command == "run" {
+		explicit := false
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name == "backup-api-key" {
+				explicit = true
+			}
+		})
+		var err error
+		backupAPIKey, consumedKeyEnv, err = readBackupAPIKey(backupAPIKeySource, explicit)
+		if err != nil {
+			return 2, err
+		}
 	}
 	profileNames := append([]string{name}, nextProfiles...)
 	seenProfiles := make(map[string]struct{}, len(profileNames))
@@ -103,7 +222,10 @@ func run(args []string) (int, error) {
 		if diagnostics {
 			diagnosticOutput = os.Stderr
 		}
-		return claudemaster.LaunchProfilesWithDiagnostics(ctx, profiles, flags.Args(), diagnosticOutput)
+		return claudemaster.LaunchProfilesWithOptions(ctx, profiles, flags.Args(), claudemaster.LaunchOptions{
+			BackupAPIKey: backupAPIKey, BackupAPIKeyEnv: consumedKeyEnv,
+			ModelMap: modelMap, Diagnostics: diagnosticOutput,
+		})
 	}
 	profileLock, err := claudemaster.OpenProfile(name, command == "login")
 	if err != nil {

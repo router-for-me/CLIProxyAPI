@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -16,6 +17,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type nativeClaudePassthroughTransport func(*http.Request) (*http.Response, error)
@@ -47,6 +49,202 @@ func nativeClaudePassthroughContext(headers http.Header, roundTripper http.Round
 	return context.WithValue(ctx, "cliproxy.roundtripper", roundTripper)
 }
 
+func TestNativeClaudeAPIKeyPreservesProtocolWithoutSubscriptionIdentity(t *testing.T) {
+	const sessionID = "11111111-2222-4333-8444-555555555555"
+	auth := &cliproxyauth.Auth{
+		ID:       "final-api-key-backup",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "sk-ant-api03-selected-backup",
+		},
+	}
+	identity := `"user_id":"{\"device_id\":\"master-device\",\"account_uuid\":\"master-account\",\"session_id\":\"` + sessionID + `\"}"`
+	for _, operation := range []string{"execute", "stream", "count"} {
+		for _, metadata := range []struct {
+			name  string
+			value string
+		}{
+			{name: "identity-only", value: `,"metadata":{` + identity + `}`},
+			{name: "unknown-siblings", value: `,"metadata":{` + identity + `,"future_metadata":{"keep":true}}`},
+			{name: "no-metadata"},
+		} {
+			t.Run(operation+"/"+metadata.name, func(t *testing.T) {
+				body := []byte("{\n  \"model\":\"claude-future-9\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}],\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=99.7.1; cc_entrypoint=cli; cch=00000;\"}],\"future_option\":{\"keep\":true},\"stream\":" + fmt.Sprint(operation == "stream") + metadata.value + "\n}\n")
+				expectedBody := body
+				if metadata.value != "" {
+					var errDelete error
+					expectedBody, errDelete = sjson.DeleteBytes(expectedBody, "metadata.user_id")
+					if errDelete != nil {
+						t.Fatal(errDelete)
+					}
+					if metadata.name == "identity-only" {
+						expectedBody, errDelete = sjson.DeleteBytes(expectedBody, "metadata")
+						if errDelete != nil {
+							t.Fatal(errDelete)
+						}
+					}
+				}
+				expectedBody, errSign := signAnthropicMessagesBody(expectedBody)
+				if errSign != nil {
+					t.Fatal(errSign)
+				}
+				nativeHeaders := http.Header{
+					"Authorization":                {"Bearer master-token"},
+					"X-Api-Key":                    {"master-key"},
+					"Anthropic-Organization-Id":    {"master-organization"},
+					"Accept-Encoding":              {"gzip, br, future"},
+					"Anthropic-Beta":               {"native-future-beta, oauth-2025-04-20,future-with-oauth-2025-04-20-suffix", "oauth-2025-04-20", "repeat,repeat,oauth-2025-04-20,future-last"},
+					"Content-Type":                 {"application/json"},
+					"X-Claude-Code-Session-Id":     {sessionID},
+					"X-Claude-Code-Future-Feature": {"keep"},
+				}
+				wantBetaValues := []string{"native-future-beta,future-with-oauth-2025-04-20-suffix", "repeat,repeat,future-last"}
+				if metadata.name == "identity-only" {
+					nativeHeaders.Set("Anthropic-Beta", " oauth-2025-04-20 ")
+					nativeHeaders.Del("X-Claude-Code-Session-Id")
+					wantBetaValues = nil
+				} else if metadata.name == "no-metadata" {
+					nativeHeaders.Del("Anthropic-Beta")
+					wantBetaValues = nil
+				}
+				rawResponse := []byte{0x1f, 0x8b, 0x08, 0x00, 0xde, 0xad, 0xbe, 0xef}
+				responseHeaders := http.Header{
+					"Content-Encoding":          {"gzip"},
+					"Content-Type":              {"application/json"},
+					"X-Anthropic-Future-Header": {"keep"},
+				}
+				chunks := [][]byte{[]byte(": keep-alive\r"), []byte("\ndata: opaque\r\n\r\n"), []byte("event: err"), []byte("or\ndata: unchanged\n\n")}
+				var closed atomic.Bool
+				roundTripper := nativeClaudePassthroughTransport(func(got *http.Request) (*http.Response, error) {
+					wantURL := nativeClaudeMessagesURL
+					if operation == "count" {
+						wantURL = nativeClaudeCountTokensURL
+					}
+					if got.Method != http.MethodPost || got.URL.String() != wantURL {
+						t.Fatalf("upstream target = %s %s, want POST %s", got.Method, got.URL, wantURL)
+					}
+					sentBody, errRead := io.ReadAll(got.Body)
+					if errRead != nil {
+						t.Fatal(errRead)
+					}
+					if !bytes.Equal(sentBody, expectedBody) {
+						t.Fatalf("body changed beyond identity removal/CCH\n got: %s\nwant: %s", sentBody, expectedBody)
+					}
+					wantHeaders := cliproxyexecutor.NativeClaudeProtocolHeaders(nativeHeaders)
+					wantHeaders.Del("Anthropic-Beta")
+					if len(wantBetaValues) > 0 {
+						wantHeaders["Anthropic-Beta"] = wantBetaValues
+					}
+					wantHeaders.Set("X-Api-Key", "sk-ant-api03-selected-backup")
+					wantHeaders.Set("X-Claude-Code-Session-Id", sessionID)
+					if !reflect.DeepEqual(got.Header, wantHeaders) {
+						t.Fatalf("headers changed beyond selected API key\n got: %#v\nwant: %#v", got.Header, wantHeaders)
+					}
+					var responseBody io.ReadCloser = io.NopCloser(bytes.NewReader(rawResponse))
+					if operation == "stream" {
+						responseBody = &nativeClaudeScriptedBody{chunks: append([][]byte(nil), chunks...), closed: &closed}
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: responseHeaders.Clone(), Body: responseBody, Request: got}, nil
+				})
+				ctx := nativeClaudePassthroughContext(nativeHeaders, roundTripper)
+				executor := NewClaudeExecutor(&config.Config{})
+				req := cliproxyexecutor.Request{Model: "must-not-replace-native-model", Payload: body}
+				if operation == "stream" {
+					result, errStream := executor.ExecuteStream(ctx, auth, req, cliproxyexecutor.Options{Stream: true})
+					if errStream != nil {
+						t.Fatal(errStream)
+					}
+					if !reflect.DeepEqual(result.Headers, responseHeaders) {
+						t.Fatalf("stream headers = %#v, want %#v", result.Headers, responseHeaders)
+					}
+					var gotChunks [][]byte
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatal(chunk.Err)
+						}
+						gotChunks = append(gotChunks, bytes.Clone(chunk.Payload))
+					}
+					if !reflect.DeepEqual(gotChunks, chunks) || !closed.Load() {
+						t.Fatalf("stream changed or body not closed: chunks=%q closed=%v", gotChunks, closed.Load())
+					}
+					return
+				}
+				var response cliproxyexecutor.Response
+				var errExecute error
+				if operation == "count" {
+					response, errExecute = executor.CountTokens(ctx, auth, req, cliproxyexecutor.Options{})
+				} else {
+					response, errExecute = executor.Execute(ctx, auth, req, cliproxyexecutor.Options{})
+				}
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				if !bytes.Equal(response.Payload, rawResponse) || !reflect.DeepEqual(response.Headers, responseHeaders) {
+					t.Fatalf("raw response changed: payload=%x headers=%#v", response.Payload, response.Headers)
+				}
+			})
+		}
+	}
+}
+
+func TestNativeClaudeAPIKeyRejectsDuplicateIdentityContainers(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:       "final-api-key-backup",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "sk-ant-api03-selected-backup",
+		},
+	}
+	for _, operation := range []string{"execute", "stream", "count"} {
+		for _, test := range []struct {
+			name string
+			body string
+		}{
+			{name: "metadata", body: `{"model":"claude-future-9","messages":[],"metadata":{"user_id":"master-first"},"metadata":{"user_id":"master-last"}}`},
+			{name: "user-id", body: `{"model":"claude-future-9","messages":[],"metadata":{"user_id":"master-first","user_id":"master-last"}}`},
+			{name: "escaped-user-id", body: `{"model":"claude-future-9","messages":[],"metadata":{"user_id":"master-first","user_\u0069d":"master-last"}}`},
+		} {
+			t.Run(operation+"/"+test.name, func(t *testing.T) {
+				var calls int
+				roundTripper := nativeClaudePassthroughTransport(func(req *http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{}`)), Request: req}, nil
+				})
+				ctx := nativeClaudePassthroughContext(http.Header{"Content-Type": {"application/json"}}, roundTripper)
+				executor := NewClaudeExecutor(&config.Config{})
+				req := cliproxyexecutor.Request{Model: "claude-future-9", Payload: []byte(test.body)}
+				var errExecute error
+				switch operation {
+				case "stream":
+					var stream *cliproxyexecutor.StreamResult
+					stream, errExecute = executor.ExecuteStream(ctx, auth, req, cliproxyexecutor.Options{Stream: true})
+					if stream != nil {
+						for range stream.Chunks {
+						}
+					}
+				case "count":
+					_, errExecute = executor.CountTokens(ctx, auth, req, cliproxyexecutor.Options{})
+				default:
+					_, errExecute = executor.Execute(ctx, auth, req, cliproxyexecutor.Options{})
+				}
+				var requestErr cliproxyexecutor.RequestScopedError
+				if !errors.As(errExecute, &requestErr) || !requestErr.IsRequestScoped() {
+					t.Fatalf("error = %T %v, want request-scoped duplicate identity rejection (upstream calls=%d)", errExecute, errExecute, calls)
+				}
+				var statusErr interface{ StatusCode() int }
+				if !errors.As(errExecute, &statusErr) || statusErr.StatusCode() != http.StatusBadRequest {
+					t.Fatalf("error = %T %v, want HTTP 400", errExecute, errExecute)
+				}
+				if calls != 0 {
+					t.Fatalf("duplicate identity reached upstream %d times", calls)
+				}
+			})
+		}
+	}
+}
+
 func TestNativeClaudeExecutePreservesRequestAndRawResponseRepresentation(t *testing.T) {
 	auth := nativeClaudePassthroughAuth()
 	const sessionID = "11111111-2222-4333-8444-555555555555"
@@ -54,7 +252,7 @@ func TestNativeClaudeExecutePreservesRequestAndRawResponseRepresentation(t *test
 	nativeHeaders := http.Header{
 		"Accept":                       {"application/json"},
 		"Accept-Encoding":              {"gzip, deflate, br, zstd, future"},
-		"Anthropic-Beta":               {"future-beta-2099-01-01"},
+		"Anthropic-Beta":               {"oauth-2025-04-20,future-beta-2099-01-01"},
 		"Anthropic-Version":            {"2023-06-01"},
 		"Content-Type":                 {"application/json"},
 		"Cookie":                       {"master-cookie-must-not-pass"},

@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,93 @@ func environmentMap(env []string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func TestBackupAPIKeyEnvironmentNames(t *testing.T) {
+	for _, name := range []string{BackupAPIKeyEnvironment, "ANTHROPIC_API_KEY", "_KEY_2", "a"} {
+		if err := ValidateBackupAPIKeyEnv(name); err != nil {
+			t.Fatalf("valid environment name rejected: %q", name)
+		}
+	}
+	for _, name := range []string{"", "2KEY", "KEY=value-canary", "KEY-NAME", " KEY", "KEY\n", "ÅKEY"} {
+		if err := ValidateBackupAPIKeyEnv(name); err == nil || strings.Contains(err.Error(), name) && name != "" {
+			t.Fatalf("invalid environment name accepted or exposed: %q", name)
+		}
+	}
+}
+
+func TestLaunchEnvironmentConsumesOnlyBackupKeySources(t *testing.T) {
+	for _, source := range []string{"", BackupAPIKeyEnvironment, "ANTHROPIC_API_KEY", "CUSTOM_BACKUP_KEY"} {
+		t.Run(source, func(t *testing.T) {
+			environ := []string{"PATH=/usr/bin", "USER=alice", BackupAPIKeyEnvironment + "=dedicated-secret"}
+			if source != "" && source != BackupAPIKeyEnvironment {
+				environ = append(environ, source+"=selected-secret", source+"=duplicate-secret")
+			}
+			filtered, err := launchEnvironment(environ, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := environmentMap(filtered)
+			if len(got) != 2 || got["PATH"] != "/usr/bin" || got["USER"] != "alice" {
+				t.Fatal("backup sources were inherited or unrelated environment was removed")
+			}
+			child, err := ChildEnvironment(filtered, nil, "proxy", "ca")
+			if err != nil {
+				t.Fatal("consumed key still triggered native provider-mode rejection")
+			}
+			if strings.Contains(strings.Join(child, "\n"), "secret") {
+				t.Fatal("backup secret reached the native child")
+			}
+			if environ[2] != BackupAPIKeyEnvironment+"=dedicated-secret" {
+				t.Fatal("parent environment was mutated")
+			}
+		})
+	}
+	filtered, err := launchEnvironment([]string{"ANTHROPIC_API_KEY=unrelated-secret"}, "CUSTOM_BACKUP_KEY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ChildEnvironment(filtered, nil, "proxy", "ca"); err == nil {
+		t.Fatal("an unselected native API key bypassed normal master-login validation")
+	}
+}
+
+func TestPreflightConsumesBackupKeyBeforeSettingsDiscovery(t *testing.T) {
+	home, binDir := nativeBinaryTestEnvironment(t)
+	t.Chdir(home)
+	writeNativeTestExecutable(t, filepath.Join(binDir, "claude"))
+	// Fake Git checks only presence, never echoes credentials. Both repository-discovery
+	// invocations must receive the filtered environment before native startup occurs.
+	git := "#!/bin/sh\n" +
+		"if [ \"${CLAUDE_MASTER_BACKUP_API_KEY+set}\" = set ] || [ \"${ANTHROPIC_API_KEY+set}\" = set ]; then exit 7; fi\n" +
+		"case \"$3\" in\n" +
+		"rev-parse) printf '%s\\n' \"$2\" ;;\n" +
+		"worktree) printf 'worktree %s\\000' \"$2\" ;;\n" +
+		"*) exit 8 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(git), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A marker makes a Git error fail settings validation instead of silently treating
+	// this checkout as a non-Git project.
+	if err := os.Mkdir(filepath.Join(home, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(BackupAPIKeyEnvironment, "dedicated-canary")
+	if _, err := Preflight(t.Context(), nil); err != nil {
+		t.Fatalf("default backup key reached preflight discovery: %v", err)
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "selected-canary")
+	environ, err := launchEnvironment(os.Environ(), "ANTHROPIC_API_KEY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preflight(t.Context(), nil, environ); err != nil {
+		t.Fatalf("selected backup key reached preflight discovery: %v", err)
+	}
+	if os.Getenv("ANTHROPIC_API_KEY") != "selected-canary" {
+		t.Fatal("launcher mutated the parent environment")
+	}
 }
 
 func TestChildEnvironmentPreservesMasterAndScopesProxy(t *testing.T) {
