@@ -16,6 +16,7 @@ func TestGeminiResponsesLateSignaturePreservesSummary(t *testing.T) {
 		`data: {"candidates":[{"content":{"parts":[{"text":"The answer is 42."}]}}]}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}]}`,
 	}
+	chunks = append(chunks, "data: [DONE]")
 	var state any
 	var completed gjson.Result
 	for _, chunk := range chunks {
@@ -83,7 +84,7 @@ func TestGeminiResponsesTextSignatureCacheRejectsInvalidSignature(t *testing.T) 
 	var state any
 	line := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"answer"},{"text":"","thoughtSignature":"invalid"}]},"finishReason":"STOP"}],"responseId":"invalid-cache-fallback"}`)
 	var completed gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-test", nil, nil, line, &state) {
+	for _, chunk := range feedGeminiResponsesStream("gemini-test", line, &state) {
 		name, data := parseSSEEvent(t, chunk)
 		if name == "response.completed" {
 			completed = data.Get("response.output")
@@ -98,7 +99,7 @@ func TestGeminiResponsesLateSignatureReplayWithThinkingSuffix(t *testing.T) {
 	var state any
 	line := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"suffix answer"},{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"responseId":"issue-5513-suffix"}`)
 	var completed gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-pro(8192)", nil, nil, line, &state) {
+	for _, chunk := range feedGeminiResponsesStream("gemini-2.5-pro(8192)", line, &state) {
 		name, data := parseSSEEvent(t, chunk)
 		if name == "response.completed" {
 			completed = data.Get("response.output")
@@ -136,6 +137,7 @@ func TestGeminiResponsesLateThoughtSignatureDoesNotBindEarlierMessage(t *testing
 		`data: {"candidates":[{"content":{"parts":[{"text":"later thought","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}]}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}]}`,
 	}
+	lines = append(lines, "data: [DONE]")
 	var state any
 	var completed gjson.Result
 	for _, line := range lines {
@@ -162,6 +164,7 @@ func TestGeminiResponsesCacheRecoveryPreservesFallbackSignatureOrder(t *testing.
 		`data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}]}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}]}`,
 	}
+	lines = append(lines, "data: [DONE]")
 	var state any
 	var completed gjson.Result
 	for index, line := range lines {

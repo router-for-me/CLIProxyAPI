@@ -18,6 +18,10 @@ import (
 
 const geminiTerminalContentFrame = `data: {"candidates":[{"content":{"parts":[{"text":"answer"}]}}],"responseId":"gemini-terminal"}`
 
+const geminiTerminalFinishFrame = `data: {"candidates":[{"finishReason":"STOP"}],"responseId":"gemini-terminal"}`
+
+const geminiTerminalUsageFrame = `data: {"candidates":[],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":10,"thoughtsTokenCount":50,"totalTokenCount":160},"responseId":"gemini-terminal"}`
+
 // geminiResponsesTerminalStream drives GeminiExecutor.ExecuteStream against a
 // local SSE server and reports the terminal events and stream errors observed
 // by the client.
@@ -86,6 +90,17 @@ func TestGeminiStreamReadErrorDoesNotSynthesizeCompletion(t *testing.T) {
 	}
 }
 
+func TestGeminiStreamPendingTerminalIsNotCompletedOnReadError(t *testing.T) {
+	frames := geminiTerminalContentFrame + "\n\n" + geminiTerminalFinishFrame + "\n\n"
+	observed := runGeminiResponsesTerminalStream(t, frames, true)
+	if len(observed.Errors) != 1 {
+		t.Fatalf("stream errors = %d (%v), want 1", len(observed.Errors), observed.Errors)
+	}
+	if len(observed.Terminals) != 0 {
+		t.Fatalf("pending terminal was completed by a read error: %s", observed.Terminals[0].Raw)
+	}
+}
+
 func TestGeminiStreamCleanEndOfStreamFinalizesOnce(t *testing.T) {
 	observed := runGeminiResponsesTerminalStream(t, geminiTerminalContentFrame+"\n\n", false)
 	if len(observed.Errors) != 0 {
@@ -93,5 +108,25 @@ func TestGeminiStreamCleanEndOfStreamFinalizesOnce(t *testing.T) {
 	}
 	if len(observed.Terminals) != 1 || observed.Terminals[0].Get("type").String() != "response.completed" {
 		t.Fatalf("clean EOF terminal events = %d, want one response.completed", len(observed.Terminals))
+	}
+}
+
+func TestGeminiStreamSplitTerminalUsageIsPreserved(t *testing.T) {
+	frames := geminiTerminalContentFrame + "\n\n" + geminiTerminalFinishFrame + "\n\n" + geminiTerminalUsageFrame + "\n\n"
+	observed := runGeminiResponsesTerminalStream(t, frames, false)
+	if len(observed.Errors) != 0 {
+		t.Fatalf("unexpected stream errors: %v", observed.Errors)
+	}
+	if len(observed.Terminals) != 1 {
+		t.Fatalf("terminal events = %d, want 1", len(observed.Terminals))
+	}
+	terminal := observed.Terminals[0]
+	if terminal.Get("type").String() != "response.completed" || terminal.Get("response.status").String() != "completed" {
+		t.Fatalf("terminal = %s", terminal.Raw)
+	}
+	usage := terminal.Get("response.usage")
+	if usage.Get("input_tokens").Int() != 100 || usage.Get("output_tokens").Int() != 60 ||
+		usage.Get("output_tokens_details.reasoning_tokens").Int() != 50 || usage.Get("total_tokens").Int() != 160 {
+		t.Fatalf("split terminal usage = %s", usage.Raw)
 	}
 }

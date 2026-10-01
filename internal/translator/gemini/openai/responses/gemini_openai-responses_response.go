@@ -40,6 +40,12 @@ type geminiToResponsesState struct {
 	Started    bool
 	Completed  bool
 
+	// terminal aggregation. FinishReason records the first upstream finish
+	// reason; the Responses terminal event stays pending while the stream may
+	// still deliver usage in a later chunk.
+	FinishReason string
+	Usage        geminiResponsesUsageTokens
+
 	// message aggregation
 	MsgOpened    bool
 	MsgClosed    bool
@@ -140,10 +146,58 @@ func unwrapGeminiResponseRoot(root gjson.Result) gjson.Result {
 		return root
 	}
 	// Vertex-style Gemini responses wrap the actual payload in a "response" object.
-	if resp.Get("candidates").Exists() || resp.Get("responseId").Exists() || resp.Get("usageMetadata").Exists() {
+	// cpaUsageMetadata is the renamed usageMetadata of a non-terminal chunk, so a
+	// usage-only tail may carry nothing else to identify the wrapper.
+	if resp.Get("candidates").Exists() || resp.Get("responseId").Exists() ||
+		resp.Get("usageMetadata").Exists() || resp.Get("cpaUsageMetadata").Exists() {
 		return resp
 	}
 	return root
+}
+
+// geminiResponsesUsageTokens is the latest usageMetadata snapshot seen on the
+// stream. Gemini reports cumulative counts, so a later frame replaces the
+// fields it carries instead of being summed onto the previous ones.
+type geminiResponsesUsageTokens struct {
+	PromptTokens     int64
+	CachedTokens     int64
+	CandidatesTokens int64
+	ThoughtsTokens   int64
+	TotalTokens      int64
+	HasUsage         bool
+}
+
+// Merge copies every field present in usage. An absent field leaves the
+// previously observed value untouched, while an explicit zero overwrites it.
+func (u *geminiResponsesUsageTokens) Merge(usage gjson.Result) {
+	if !usage.Exists() {
+		return
+	}
+	u.HasUsage = true
+	if v := usage.Get("promptTokenCount"); v.Exists() {
+		u.PromptTokens = v.Int()
+	}
+	if v := usage.Get("cachedContentTokenCount"); v.Exists() {
+		u.CachedTokens = v.Int()
+	}
+	if v := usage.Get("candidatesTokenCount"); v.Exists() {
+		u.CandidatesTokens = v.Int()
+	}
+	if v := usage.Get("thoughtsTokenCount"); v.Exists() {
+		u.ThoughtsTokens = v.Int()
+	}
+	if v := usage.Get("totalTokenCount"); v.Exists() {
+		u.TotalTokens = v.Int()
+	}
+}
+
+// geminiResponsesUsageFromRoot prefers the public usageMetadata and falls back
+// to the internal cpaUsageMetadata spelling used for non-terminal chunks.
+func geminiResponsesUsageFromRoot(root gjson.Result) gjson.Result {
+	if um := root.Get("usageMetadata"); um.Exists() {
+		return um
+	}
+	return root.Get("cpaUsageMetadata")
 }
 
 func emitEvent(event string, payload []byte) []byte {
@@ -285,11 +339,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	if len(rawJSON) == 0 || st.Completed {
 		return [][]byte{}
 	}
-	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+	doneMarker := bytes.Equal(rawJSON, []byte("[DONE]"))
+	if doneMarker {
 		if !st.Started {
 			return [][]byte{}
 		}
-		rawJSON = []byte(`{"candidates":[{"finishReason":"STOP"}]}`)
+		// The marker carries no finish reason of its own; the terminal block
+		// falls back to STOP only when upstream never announced one.
+		rawJSON = []byte(`{}`)
 	}
 
 	root := gjson.ParseBytes(rawJSON)
@@ -297,6 +354,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		return [][]byte{}
 	}
 	root = unwrapGeminiResponseRoot(root)
+
+	frameUsage := geminiResponsesUsageFromRoot(root)
+	st.Usage.Merge(frameUsage)
 
 	var out [][]byte
 	nextSeq := func() int { st.Seq++; return st.Seq }
@@ -1155,8 +1215,27 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		})
 	}
 
-	// Finalization on finishReason
-	if fr := root.Get("candidates.0.finishReason"); fr.Exists() && fr.String() != "" {
+	// Terminal outcome. Gemini may split the finish reason and the usage
+	// metadata across chunks, so a finish reason without same-frame usage keeps
+	// the Responses terminal pending until a usage tail arrives or the stream
+	// ends cleanly at [DONE].
+	finishReason := strings.TrimSpace(root.Get("candidates.0.finishReason").String())
+	finalizeTerminal := false
+	switch {
+	case doneMarker:
+		finalizeTerminal = true
+		if st.FinishReason == "" {
+			// A clean end of stream without an upstream finish reason is a stop.
+			st.FinishReason = "STOP"
+		}
+	case finishReason != "" && st.FinishReason == "":
+		st.FinishReason = finishReason
+		// Only same-frame usage is authoritative. Usage on earlier frames may
+		// still be provisional, so a terminal without it waits for [DONE].
+		finalizeTerminal = frameUsage.Exists()
+	}
+
+	if finalizeTerminal {
 		if st.PendingReasoningSignature != "" {
 			emitTrailingDetachedReasoning(st.PendingReasoningSignature)
 			st.PendingReasoningSignature = ""
@@ -1364,25 +1443,18 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			completed, _ = sjson.SetBytes(completed, "response.tool_usage.web_search.num_requests", 1)
 		}
 
-		// usage mapping
-		if um := root.Get("usageMetadata"); um.Exists() {
+		// usage mapping from the latest snapshot, which may have arrived in a
+		// chunk after the finish reason.
+		if st.Usage.HasUsage {
 			// input tokens = prompt only (thoughts go to output)
-			input := um.Get("promptTokenCount").Int()
+			input := st.Usage.PromptTokens
 			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", input)
 			// cached token details: align with OpenAI "cached_tokens" semantics.
-			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())
+			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", st.Usage.CachedTokens)
 			// output tokens
-			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", um.Get("candidatesTokenCount").Int()+um.Get("thoughtsTokenCount").Int())
-			if v := um.Get("thoughtsTokenCount"); v.Exists() {
-				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", v.Int())
-			} else {
-				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", 0)
-			}
-			if v := um.Get("totalTokenCount"); v.Exists() {
-				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", v.Int())
-			} else {
-				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", 0)
-			}
+			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", st.Usage.CandidatesTokens+st.Usage.ThoughtsTokens)
+			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", st.Usage.ThoughtsTokens)
+			completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", st.Usage.TotalTokens)
 		}
 
 		out = append(out, emitEvent("response.completed", completed))
@@ -1828,7 +1900,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	// usage mapping
-	if um := root.Get("usageMetadata"); um.Exists() {
+	if um := geminiResponsesUsageFromRoot(root); um.Exists() {
 		// input tokens = prompt only (thoughts go to output)
 		input := um.Get("promptTokenCount").Int()
 		resp, _ = sjson.SetBytes(resp, "usage.input_tokens", input)

@@ -26,6 +26,15 @@ func parseSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
 	return event, gjson.Parse(dataLine)
 }
 
+// feedGeminiResponsesStream pushes one frame through the streaming converter
+// and closes the stream with [DONE], returning every event of the whole stream.
+// Fixtures that end with a bare finish-reason frame need it because a finish
+// reason without same-frame usage no longer terminates the stream by itself.
+func feedGeminiResponsesStream(model string, line []byte, param *any) [][]byte {
+	chunks := ConvertGeminiResponseToOpenAIResponses(context.Background(), model, nil, nil, line, param)
+	return append(chunks, ConvertGeminiResponseToOpenAIResponses(context.Background(), model, nil, nil, []byte("[DONE]"), param)...)
+}
+
 func TestConvertGeminiResponseToOpenAIResponsesOutputTokensIncludeThoughts(t *testing.T) {
 	var param any
 	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63},"modelVersion":"gemini-3.6-flash","responseId":"resp_usage"}`)
@@ -224,6 +233,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ConsecutiveSignedVisibleTextPres
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"b","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"signed-text"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"c","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"signed-text"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	added := make(map[string]string)
 	done := make(map[string]string)
@@ -293,6 +303,7 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedVisibleThenUnsignedPreserv
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"signed","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"signed-then-unsigned"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned"}]},"finishReason":"STOP"}],"responseId":"signed-then-unsigned"}}`,
 	}
+	lines = append(lines, "data: [DONE]")
 	var param any
 	var completed gjson.Result
 	for _, line := range lines {
@@ -322,6 +333,7 @@ func TestConvertGeminiResponseToOpenAIResponses_LeadingCarrierDoesNotCrossSigned
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"reason","thought":true,"thoughtSignature":"` + signature2 + `"}]}}],"responseId":"leading-before-signed-thought"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"leading-before-signed-thought"}}`,
 	}
+	lines = append(lines, "data: [DONE]")
 	var param any
 	var streamOutput gjson.Result
 	for _, line := range lines {
@@ -377,6 +389,7 @@ func TestConvertGeminiResponseToOpenAIResponses_CachedTrailingCarrierPreservesDi
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"trailing-direction-stream"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"trailing-direction-stream"}}`,
 	}
+	lines = append(lines, "data: [DONE]")
 	var param any
 	var completed gjson.Result
 	for _, line := range lines {
@@ -405,6 +418,7 @@ func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureDoesNotOverwrite
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"one","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"signed-thought-visible"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"signed-thought-visible"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	added := make(map[string]string)
 	done := make(map[string]string)
@@ -459,6 +473,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FlushesVisibleSignatureBeforeLat
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + signature2 + `"}]}}],"responseId":"visible-before-thought"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"thought-c","thought":true,"thoughtSignature":"` + signature3 + `"}]},"finishReason":"STOP"}],"responseId":"visible-before-thought"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
@@ -484,6 +499,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionAndTrailingSignaturesRou
 		`data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `","functionCall":{"name":"run_command","args":{"command":"true"}}}]}}],"responseId":"function-trailing"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"function-trailing"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
@@ -524,7 +540,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionThenTrailingSignatureHas
 
 	var param any
 	var streamOutput gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, append([]byte("data: "), raw...), &param) {
+	for _, chunk := range feedGeminiResponsesStream("gemini-3.6-flash-high", append([]byte("data: "), raw...), &param) {
 		event, data := parseSSEEvent(t, chunk)
 		if event == "response.completed" {
 			streamOutput = data.Get("response.output")
@@ -574,7 +590,7 @@ func TestConvertGeminiResponseToOpenAIResponses_InterleavedThoughtAndTextPreserv
 	var param any
 	var doneTypes []string
 	var completed gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, line, &param) {
+	for _, chunk := range feedGeminiResponsesStream("gemini-3.6-flash-high", line, &param) {
 		event, data := parseSSEEvent(t, chunk)
 		if event == "response.output_item.done" {
 			doneTypes = append(doneTypes, data.Get("item.type").String())
@@ -609,6 +625,7 @@ func TestConvertGeminiResponseToOpenAIResponses_LeadingEmptyAndSignedTextRoundTr
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"leading-empty-signed-text"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"leading-empty-signed-text"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
@@ -643,6 +660,7 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedTextAndTrailingSignatureRo
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"responseId":"signed-text-trailing"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"signed-text-trailing"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
@@ -675,7 +693,7 @@ func TestConvertGeminiResponseToOpenAIResponses_PreservesMultipleLeadingEmptySig
 	line := []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"leading-empty-signatures"}}`)
 	var param any
 	var completed gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, line, &param) {
+	for _, chunk := range feedGeminiResponsesStream("gemini-3.6-flash-high", line, &param) {
 		event, data := parseSSEEvent(t, chunk)
 		if event == "response.completed" {
 			completed = data.Get("response.output")
@@ -701,6 +719,7 @@ func TestConvertGeminiResponseToOpenAIResponses_DistinctSignedThoughtsUseDistinc
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"one","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"signed-thoughts"}}`,
 		`data: {"response":{"candidates":[{"content":{"parts":[{"text":"two","thought":true,"thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"signed-thoughts"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	added := make(map[string]string)
 	done := make(map[string]string)
@@ -793,6 +812,7 @@ func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"one","thought":true}]}}],"responseId":"late-thought-signature"}}`,
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"two","thought":true,"thoughtSignature":"` + signature + `"}]},"finishReason":"STOP"}],"responseId":"late-thought-signature"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	var addedID, addedSignature, doneID, doneSignature, doneText string
 	for _, line := range in {
@@ -847,23 +867,42 @@ func TestConvertGeminiResponseToOpenAIResponses_DoneFinalizesStartedStreamExactl
 
 func TestConvertGeminiResponseToOpenAIResponses_FinishReasonThenDoneDoesNotDuplicateCompletion(t *testing.T) {
 	var param any
+	// A finish reason without same-frame usage keeps the terminal pending so a
+	// later usage-only chunk is still consumed.
 	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"finish-then-done"}}`), &param)
 
-	completedCount := 0
-	for _, chunk := range out {
-		event, _ := parseSSEEvent(t, chunk)
-		if event == "response.completed" {
-			completedCount++
+	countTerminals := func(chunks [][]byte) int {
+		count := 0
+		for _, chunk := range chunks {
+			event, _ := parseSSEEvent(t, chunk)
+			if event == "response.completed" || event == "response.incomplete" {
+				count++
+			}
 		}
+		return count
 	}
-	if completedCount != 1 {
-		t.Fatalf("finish reason emitted %d completion events", completedCount)
+	if got := countTerminals(out); got != 0 {
+		t.Fatalf("finish reason without same-frame usage emitted %d terminal events", got)
+	}
+	done := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("data: [DONE]"), &param)
+	if got := countTerminals(done); got != 1 {
+		t.Fatalf("[DONE] emitted %d terminal events, want 1", got)
 	}
 	if duplicate := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("data: [DONE]"), &param); len(duplicate) != 0 {
 		t.Fatalf("DONE after finish reason emitted %d events", len(duplicate))
 	}
 	if late := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`{"candidates":[{"content":{"parts":[{"text":"late"}]}}]}`), &param); len(late) != 0 {
 		t.Fatalf("input after completion emitted %d events", len(late))
+	}
+
+	// A finish reason carrying its own usage keeps the immediate completion.
+	var sameFrameParam any
+	sameFrame := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5},"responseId":"finish-with-usage"}}`), &sameFrameParam)
+	if got := countTerminals(sameFrame); got != 1 {
+		t.Fatalf("same-frame finish reason emitted %d terminal events, want 1", got)
+	}
+	if after := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("data: [DONE]"), &sameFrameParam); len(after) != 0 {
+		t.Fatalf("DONE after same-frame completion emitted %d events", len(after))
 	}
 }
 
@@ -899,6 +938,7 @@ func TestConvertGeminiResponseToOpenAIResponses_PreservesTextAroundFunction(t *t
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"true"}}}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_mixed_stream"}}`,
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"after"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"resp_mixed_stream"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	var out [][]byte
 	for _, line := range in {
@@ -949,6 +989,7 @@ func TestConvertGeminiResponseToOpenAIResponses_PendingSignatureBeforeFunctionRo
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"pending-function-signature"}}`,
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"native-pending-call","name":"run_command","args":{"command":"true"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"pending-function-signature"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
@@ -1008,6 +1049,7 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedTextBeforeSignedFunctionRo
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"tool","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp_signed_mixed"}}`,
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + toolSignature + `","functionCall":{"name":"run_command","args":{"command":"true"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"resp_signed_mixed"}}`,
 	}
+	in = append(in, "data: [DONE]")
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
@@ -1339,6 +1381,7 @@ func TestConvertGeminiResponseToOpenAIResponses_RestoresAdditionalNamespaceCusto
 	chunks := [][]byte{
 		[]byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"functions__exec","args":{"input":"pwd"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-2.5-flash","responseId":"resp_custom_stream"}`),
 	}
+	chunks = append(chunks, []byte("data: [DONE]"))
 
 	var param any
 	var added, inputDone, done, completed gjson.Result
@@ -1436,6 +1479,7 @@ func TestConvertGeminiResponseToOpenAIResponses_RestoresAdditionalNamespaceFunct
 	chunks := [][]byte{
 		[]byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"functions__continuity_probe","args":{"value":"PROBE"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-2.5-flash","responseId":"resp_func_stream"}`),
 	}
+	chunks = append(chunks, []byte("data: [DONE]"))
 
 	var param any
 	var added, argDone, done, completed gjson.Result
