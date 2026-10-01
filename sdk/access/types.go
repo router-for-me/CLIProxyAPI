@@ -34,6 +34,12 @@ const (
 	// remains authoritative.
 	AccessProviderTypePGAPIKey = "pg-api-key"
 
+	// AccessProviderTypeLiteLLMAPIKey is the on-the-fly provider that validates
+	// a client key against an external LiteLLM instance and lazily imports it
+	// into the runtime api_keys table. Activated only when PGSTORE_DSN is
+	// configured.
+	AccessProviderTypeLiteLLMAPIKey = "litellm-api-key"
+
 	// DefaultAccessProviderName is applied when no provider name is supplied.
 	DefaultAccessProviderName = "config-inline"
 )
