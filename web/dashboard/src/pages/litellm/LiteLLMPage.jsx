@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   listLiteLLMUsers,
   createLiteLLMUser,
@@ -17,8 +17,11 @@ import {
   runLiteLLMSyncNow,
   runLiteLLMSyncNixLLM,
   getUsageEvents,
+  listLiteLLMOnTheFlyLog,
+  clearLiteLLMOnTheFlyLog,
 } from '../../api/client.js';
 import { useAsync } from '../../hooks/useAsync.js';
+import { useAutoRefresh } from '../../hooks/useAutoRefresh.js';
 import {
   Spinner, ErrorBanner, EmptyState, StatusBadge, Modal,
   KpiCard, KpiSkeleton, CardSkeleton,
@@ -28,10 +31,15 @@ import CopyButton from '../../components/CopyButton.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import InternalUserPolicyForm, { formToPatch, userToForm } from '../../components/InternalUserPolicyForm.jsx';
 import LiteLLMPolicyForm, { liteLLMFormToPolicy, liteLLMPolicyToForm } from './LiteLLMPolicyForm.jsx';
+import {
+  ONTHEFLY_OUTCOME_OPTIONS, ONTHEFLY_LIMIT_OPTIONS,
+  formatOnTheFlyOutcome, onTheFlyOutcomeBadge, summarizeOnTheFlyOutcomes,
+  readOnTheFlyAutoRefresh, ONTHEFLY_AUTOREFRESH_STORAGE,
+} from './ontheflyLog.js';
 import { PasswordInput, ToggleRow } from '../manage-cpa/FormPrimitives.jsx';
 import { formatRelativeTime } from '../../utils/formatRelativeTime.js';
 import {
-  PRESETS, presetToRange, EVENTS_PAGE_SIZE, loadTimezone,
+  PRESETS, presetToRange, EVENTS_PAGE_SIZE, loadTimezone, formatInTZ,
   EventsTableBody, EventDetailModal,
 } from '../usageShared.jsx';
 
@@ -120,6 +128,13 @@ export default function LiteLLMPage() {
           >
             Sync Settings
           </button>
+          <button
+            type="button"
+            className={`seg-btn ${tab === 'onthefly' ? 'seg-btn--active' : ''}`}
+            onClick={() => setTab('onthefly')}
+          >
+            On-the-fly Log
+          </button>
         </div>
       </div>
 
@@ -127,6 +142,7 @@ export default function LiteLLMPage() {
       {tab === 'keys' && <KeysTab />}
       {tab === 'logs' && <UsageLogsTab />}
       {tab === 'settings' && <SyncSettingsTab />}
+      {tab === 'onthefly' && <OnTheFlyLogTab />}
     </>
   );
 }
@@ -1846,6 +1862,211 @@ function UsageLogsTab() {
         <EventDetailModal id={selectedId} timezone={timezone} onClose={() => setSelectedId(null)} />
       )}
     </>
+  );
+}
+
+// --- On-the-fly Log tab -----------------------------------------------------
+
+// OnTheFlyLogTab shows the durable audit trail recorded by the on-the-fly
+// LiteLLM API key validation provider (litellm_onthefly_log table): for each
+// incoming request whose key was validated against the external LiteLLM
+// instance, the outcome (synced / unmatched / invalid / error), the resolved
+// key/user, latency, and any error. Read-only + purge; 503 when PG is off.
+function OnTheFlyLogTab() {
+  const toast = useToast();
+  const [autoRefresh, setAutoRefresh] = useState(() => readOnTheFlyAutoRefresh());
+  const [outcome, setOutcome] = useState('');
+  const [keyPrefix, setKeyPrefix] = useState('');
+  const [limit, setLimit] = useState(100);
+  const [clearing, setClearing] = useState(false);
+  const timezone = useMemo(() => loadTimezone(), []);
+
+  const list = useAsync(
+    () => listLiteLLMOnTheFlyLog({ limit, outcome, keyPrefix: keyPrefix.trim() }),
+    [limit, outcome, keyPrefix],
+  );
+
+  const reload = useCallback(() => { list.reload(); }, [list]);
+  useAutoRefresh(reload, 10000, autoRefresh);
+
+  function toggleAutoRefresh() {
+    setAutoRefresh((v) => {
+      const next = !v;
+      try { localStorage.setItem(ONTHEFLY_AUTOREFRESH_STORAGE, next ? '1' : '0'); } catch { /* ignore */ }
+      return next;
+    });
+  }
+
+  function handleRefresh() {
+    reload();
+    toast.info('On-the-fly log refreshed');
+  }
+
+  async function handleClear() {
+    if (!window.confirm('Clear all on-the-fly validation log rows? This cannot be undone.')) return;
+    setClearing(true);
+    try {
+      const res = await clearLiteLLMOnTheFlyLog();
+      toast.success(`Cleared ${Number(res?.deleted || 0).toLocaleString()} log row(s)`);
+      reload();
+    } catch (err) {
+      toast.error(err?.message || 'Failed to clear on-the-fly log');
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  const entries = list.data?.entries || [];
+  const counts = summarizeOnTheFlyOutcomes(entries);
+
+  return (
+    <>
+      <div className="row gap-sm" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button
+          className={`autorefresh-chip ${autoRefresh ? '' : 'autorefresh-chip--off'}`}
+          onClick={toggleAutoRefresh}
+          title={autoRefresh ? 'Auto-refresh every 10s — click to pause' : 'Auto-refresh paused — click to resume'}
+        >
+          <span className="autorefresh-chip__dot" />
+          {autoRefresh ? 'Live' : 'Paused'}
+        </button>
+        <button onClick={handleRefresh}>Refresh</button>
+        <button onClick={handleClear} disabled={clearing || entries.length === 0}>
+          {clearing ? 'Clearing…' : 'Clear log'}
+        </button>
+      </div>
+
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-card__label">Synced</div>
+          <div className="stat-card__value">{counts.synced.toLocaleString()}</div>
+          <div className="stat-card__hint">key matched + imported</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card__label">Unmatched</div>
+          <div className="stat-card__value">{counts.unmatched.toLocaleString()}</div>
+          <div className="stat-card__hint">valid upstream, no local row</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card__label">Invalid</div>
+          <div className="stat-card__value">{counts.invalid.toLocaleString()}</div>
+          <div className="stat-card__hint">rejected by LiteLLM</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-card__label">Error</div>
+          <div className="stat-card__value">{counts.error.toLocaleString()}</div>
+          <div className="stat-card__hint">validation/upstream failure</div>
+        </div>
+      </div>
+
+      {list.error && <ErrorBanner error={list.error} onRetry={reload} />}
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="catalog-toolbar" style={{ flexWrap: 'wrap', gap: 12 }}>
+          <select
+            className="sort-select"
+            value={outcome}
+            onChange={(e) => setOutcome(e.target.value)}
+            aria-label="Filter by outcome"
+          >
+            {ONTHEFLY_OUTCOME_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+          <input
+            className="search-input"
+            type="text"
+            value={keyPrefix}
+            onChange={(e) => setKeyPrefix(e.target.value)}
+            placeholder="Filter by key prefix…"
+            aria-label="Filter by key prefix"
+            style={{ flex: '1 1 220px' }}
+          />
+          <label className="filter-label" style={{ marginLeft: 'auto' }}>
+            Limit
+            <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
+              {ONTHEFLY_LIMIT_OPTIONS.map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="dim" style={{ fontSize: 12, marginTop: 8 }}>
+          Per-request LiteLLM API key validation outcomes from the <code className="mono">litellm_onthefly_log</code> table
+          (30-day retention). Enable on-the-fly validation in Sync Settings. Times shown in {timezone}. Auto-refreshes every 10s.
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16, padding: 0 }}>
+        <OnTheFlyLogTableBody
+          loading={list.loading}
+          error={list.error}
+          entries={entries}
+          timezone={timezone}
+        />
+      </div>
+    </>
+  );
+}
+
+function OnTheFlyLogTableBody({ loading, error, entries, timezone }) {
+  const columns = 9;
+  if (loading) {
+    return (
+      <OnTheFlyTableShell timezone={timezone}>
+        <SkeletonRows columns={columns} rows={5} />
+      </OnTheFlyTableShell>
+    );
+  }
+  if (error) return <ErrorBanner error={error} />;
+  return (
+    <OnTheFlyTableShell timezone={timezone}>
+      {entries.length === 0 && (
+        <tr>
+          <td colSpan={columns} style={{ textAlign: 'center', padding: '24px 8px' }}>
+            No on-the-fly validations recorded yet.
+          </td>
+        </tr>
+      )}
+      {entries.map((e) => (
+        <tr key={e.id} className="table__row">
+          <td className="mono" style={{ whiteSpace: 'nowrap' }}>{formatInTZ(e.occurred_at, timezone)}</td>
+          <td><span className={`badge ${onTheFlyOutcomeBadge(e.outcome)}`}>{formatOnTheFlyOutcome(e.outcome)}</span></td>
+          <td className="mono">{e.key_prefix || '—'}</td>
+          <td className="mono" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.key_id || ''}>{e.key_id || '—'}</td>
+          <td className="mono">{e.user_id || '—'}</td>
+          <td>{e.source || '—'}</td>
+          <td style={{ textAlign: 'right' }} className="mono">{e.latency_ms ?? 0}ms</td>
+          <td className="mono">{e.request_id || '—'}</td>
+          <td className="mono" style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.error_message || ''}>
+            {e.error_message || <span style={{ color: 'var(--text-dim)' }}>—</span>}
+          </td>
+        </tr>
+      ))}
+    </OnTheFlyTableShell>
+  );
+}
+
+function OnTheFlyTableShell({ children, timezone }) {
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Time{timezone ? ` (${timezone})` : ''}</th>
+            <th>Outcome</th>
+            <th>Key prefix</th>
+            <th>Key ID</th>
+            <th>User ID</th>
+            <th>Source</th>
+            <th style={{ textAlign: 'right' }}>Latency</th>
+            <th>Request ID</th>
+            <th>Error</th>
+          </tr>
+        </thead>
+        <tbody>{children}</tbody>
+      </table>
+    </div>
   );
 }
 

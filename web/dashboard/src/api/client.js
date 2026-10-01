@@ -830,6 +830,24 @@ export async function runLiteLLMSyncNixLLM({
   });
 }
 
+// listLiteLLMOnTheFlyLog returns the newest-first audit rows recorded by the
+// on-the-fly LiteLLM API key validation provider (litellm_onthefly_log table).
+// params: { limit (default 100, capped 500), outcome, keyPrefix }. The endpoint
+// has no pagination/total; it returns { entries: [...] }. 503 when PG is off.
+export async function listLiteLLMOnTheFlyLog({ limit = 100, outcome = '', keyPrefix = '' } = {}) {
+  const qs = new URLSearchParams();
+  qs.set('limit', String(limit));
+  if (outcome) qs.set('outcome', outcome);
+  if (keyPrefix) qs.set('key_prefix', keyPrefix);
+  return fetchJSON(`/litellm/onthefly-log?${qs.toString()}`);
+}
+
+// clearLiteLLMOnTheFlyLog purges all on-the-fly validation rows.
+// Returns { deleted: <int> }.
+export async function clearLiteLLMOnTheFlyLog() {
+  return fetchJSON('/litellm/onthefly-log', { method: 'DELETE' });
+}
+
 // --- Models Catalog + Pricing -----------------------------------------------
 
 // listModelsCatalog lists catalog rows. When distinctIds=true the backend
