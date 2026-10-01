@@ -76,9 +76,10 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/$GH_REPO/releases?per_page=100" --paginate --slurp \
-            --jq 'add' > /tmp/releases.json
+            > /tmp/releases.json
           if jq -e --arg tag "$RELEASE_TAG" \
-            'any(.[]; .tag_name == $tag and .draft == false)' /tmp/releases.json; then
+            'any(.. | objects; .tag_name == $tag and .draft == false)' \
+            /tmp/releases.json; then
             echo "Published releases are immutable; create a new version instead" >&2
             exit 1
           fi
