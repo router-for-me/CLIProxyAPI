@@ -278,9 +278,16 @@ func TestAntigravityConcurrentRequestsReusePooledConnections(t *testing.T) {
 	// The first wave legitimately opens perWave connections. Later waves must reuse
 	// them; with MaxIdleConnsPerHost=2 only two survive each wave and distinct grows
 	// towards totalConns instead.
-	if distinct > perWave {
+	//
+	// A connection is handed back to the idle pool asynchronously, after
+	// Body.Close unblocks the caller, and wg.Wait does not cover that hand-off.
+	// Under load the next wave can start before replenishment finishes and dial
+	// a few extra connections. slack absorbs that window; the unpooled worst case
+	// is totalConns, so pooling and no pooling stay far apart.
+	const slack = 2
+	if distinct > perWave+slack {
 		t.Fatalf("%d waves of %d concurrent requests opened %d connections, want at most %d (unpooled worst case is %d)",
-			waves, perWave, distinct, perWave, totalConns)
+			waves, perWave, distinct, perWave+slack, totalConns)
 	}
 }
 
