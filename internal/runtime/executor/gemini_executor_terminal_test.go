@@ -111,6 +111,65 @@ func TestGeminiStreamCleanEndOfStreamFinalizesOnce(t *testing.T) {
 	}
 }
 
+// TestGeminiStreamCancellationDoesNotSynthesizeCompletion cancels the request
+// before the upstream body is allowed to end, so the terminal decision is
+// reached with an already-cancelled context. The channel handshake keeps the
+// ordering deterministic instead of relying on scheduling.
+func TestGeminiStreamCancellationDoesNotSynthesizeCompletion(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-release
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := []byte(`{"model":"gemini-3.8-flash-high","input":"synthetic local fixture","stream":true}`)
+	result, errExecute := NewGeminiExecutor(&config.Config{}).ExecuteStream(ctx, &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+	}, cliproxyexecutor.Request{
+		Model:   "gemini-3.8-flash-high",
+		Payload: request,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: request,
+		Stream:          true,
+	})
+	if errExecute != nil {
+		cancel()
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+
+	// Cancel before the upstream body ends so cancellation is already observed
+	// when the executor decides whether to synthesize the terminal event.
+	cancel()
+	close(release)
+
+	terminals := 0
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(chunk.Payload), "\n") {
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			switch gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:"))).Get("type").String() {
+			case "response.completed", "response.incomplete":
+				terminals++
+			}
+		}
+	}
+	if terminals != 0 {
+		t.Fatalf("cancelled stream produced %d terminal events", terminals)
+	}
+}
+
 func TestGeminiStreamSplitTerminalUsageIsPreserved(t *testing.T) {
 	frames := geminiTerminalContentFrame + "\n\n" + geminiTerminalFinishFrame + "\n\n" + geminiTerminalUsageFrame + "\n\n"
 	observed := runGeminiResponsesTerminalStream(t, frames, false)

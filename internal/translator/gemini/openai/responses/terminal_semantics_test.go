@@ -232,6 +232,16 @@ func TestTerminalRepeatFinishUsageAndDoneStayIdempotent(t *testing.T) {
 	if observed.TextDones != 1 {
 		t.Fatalf("output_text.done events = %d, want 1", observed.TextDones)
 	}
+	done := observed.ItemDone[0]
+	if done.Get("output_index").Int() != 0 || done.Get("item.id").String() == "" {
+		t.Fatalf("item.done lost its stable identity: %s", done.Raw)
+	}
+	// The rebuilt output must reuse the identifiers the client already saw, so
+	// a repeated finish or tail cannot renumber or duplicate an item.
+	output := observed.Terminals[0].Get("response.output")
+	if len(output.Array()) != 1 || output.Get("0.id").String() != done.Get("item.id").String() {
+		t.Fatalf("terminal output does not reuse the emitted item id: %s vs %s", output.Raw, done.Get("item.id").String())
+	}
 	requireStrictlyIncreasing(t, observed)
 }
 

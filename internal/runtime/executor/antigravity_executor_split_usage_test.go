@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,5 +96,163 @@ func TestAntigravityStreamFinalizesSplitTerminalUsageOnce(t *testing.T) {
 	}
 	if got := gjson.GetBytes(terminal, "usage.prompt_tokens").Int(); got != 11 {
 		t.Fatalf("terminal prompt_tokens = %d, want 11", got)
+	}
+}
+
+// antigravityResponsesSplitTerminalSSE is the Responses-shaped variant of the
+// split terminal stream. With a traceId the usage filter forwards the tail
+// untouched; without one it renames the tail usage to cpaUsageMetadata. Both
+// must reach the terminal event with the token counts.
+const antigravityResponsesSplitTerminalSSE = `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"first"}]}}],"modelVersion":"gemini-3.7-flash","responseId":"resp-split-responses"},"traceId":"trace-split-responses"}
+
+data: {"response":{"candidates":[{"finishReason":"STOP"}],"responseId":"resp-split-responses"},"traceId":"trace-split-responses"}
+
+data: {"response":{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"thoughtsTokenCount":8,"totalTokenCount":41},"responseId":"resp-split-responses"},"traceId":"trace-split-responses"}
+
+`
+
+const antigravityResponsesSplitTerminalSSEWithoutTraceID = `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"first"}]}}],"modelVersion":"gemini-3.7-flash","responseId":"resp-split-no-trace"}}
+
+data: {"response":{"candidates":[{"finishReason":"STOP"}],"responseId":"resp-split-no-trace"}}
+
+data: {"response":{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"thoughtsTokenCount":8,"totalTokenCount":41},"responseId":"resp-split-no-trace"}}
+
+`
+
+// runAntigravityResponsesStream feeds the SSE body through the Antigravity
+// executor and returns the terminal events the client observed.
+func runAntigravityResponsesStream(t *testing.T, body string) []gjson.Result {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, body)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	request := []byte(`{"model":"gemini-3.8-flash-high","input":"synthetic local fixture","stream":true}`)
+	result, errExecute := NewAntigravityExecutor(&config.Config{RequestRetry: 1}).ExecuteStream(context.Background(), &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"access_token": "token-123",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "project-1",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}, cliproxyexecutor.Request{
+		Model:   "gemini-3.8-flash-high",
+		Payload: request,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: request,
+		Stream:          true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+
+	var terminals []gjson.Result
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		for _, line := range strings.Split(string(chunk.Payload), "\n") {
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			switch data.Get("type").String() {
+			case "response.completed", "response.incomplete":
+				terminals = append(terminals, data)
+			}
+		}
+	}
+	return terminals
+}
+
+func TestAntigravityResponsesStreamPreservesSplitTerminalUsage(t *testing.T) {
+	for name, body := range map[string]string{
+		"with trace id":    antigravityResponsesSplitTerminalSSE,
+		"without trace id": antigravityResponsesSplitTerminalSSEWithoutTraceID,
+	} {
+		t.Run(name, func(t *testing.T) {
+			terminals := runAntigravityResponsesStream(t, body)
+			if len(terminals) != 1 {
+				t.Fatalf("terminal events = %d, want 1", len(terminals))
+			}
+			terminal := terminals[0]
+			if terminal.Get("type").String() != "response.completed" || terminal.Get("response.status").String() != "completed" {
+				t.Fatalf("terminal = %s", terminal.Raw)
+			}
+			usage := terminal.Get("response.usage")
+			if usage.Get("input_tokens").Int() != 11 || usage.Get("output_tokens").Int() != 30 ||
+				usage.Get("output_tokens_details.reasoning_tokens").Int() != 8 || usage.Get("total_tokens").Int() != 41 {
+				t.Fatalf("split terminal usage = %s", usage.Raw)
+			}
+			if strings.Contains(terminal.Raw, "cpaUsageMetadata") {
+				t.Fatalf("internal usage carrier leaked downstream: %s", terminal.Raw)
+			}
+		})
+	}
+}
+
+// TestAntigravityStreamReadErrorDoesNotSynthesizeCompletion pins the executor
+// ordering this fork already had, so the direct Gemini path cannot drift back
+// to translating [DONE] after a read failure.
+func TestAntigravityStreamReadErrorDoesNotSynthesizeCompletion(t *testing.T) {
+	body := antigravityResponsesSplitTerminalSSEWithoutTraceID
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)+64))
+		_, _ = io.WriteString(w, body)
+	}))
+	defer server.Close()
+
+	request := []byte(`{"model":"gemini-3.8-flash-high","input":"synthetic local fixture","stream":true}`)
+	result, errExecute := NewAntigravityExecutor(&config.Config{RequestRetry: 1}).ExecuteStream(context.Background(), &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"access_token": "token-123",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "project-1",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}, cliproxyexecutor.Request{
+		Model:   "gemini-3.8-flash-high",
+		Payload: request,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: request,
+		Stream:          true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+
+	terminals := 0
+	streamErrors := 0
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			streamErrors++
+			continue
+		}
+		for _, line := range strings.Split(string(chunk.Payload), "\n") {
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			switch gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:"))).Get("type").String() {
+			case "response.completed", "response.incomplete":
+				terminals++
+			}
+		}
+	}
+	if streamErrors != 1 {
+		t.Fatalf("stream errors = %d, want 1", streamErrors)
+	}
+	if terminals != 0 {
+		t.Fatalf("read error produced %d terminal events", terminals)
 	}
 }
