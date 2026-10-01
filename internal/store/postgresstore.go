@@ -831,6 +831,9 @@ func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
 		`last_nixllm_sync_logs INTEGER NOT NULL DEFAULT 0`,
 		`last_nixllm_sync_usage BOOLEAN NOT NULL DEFAULT FALSE`,
 		`last_litellm_users_updated_at TIMESTAMPTZ`,
+		`onthefly_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+		`onthefly_cache_ttl_seconds INTEGER NOT NULL DEFAULT 60`,
+		`onthefly_timeout_ms INTEGER NOT NULL DEFAULT 5000`,
 	} {
 		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s`, syncTable, col,

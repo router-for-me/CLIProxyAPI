@@ -24,6 +24,16 @@ const LiteLLMSyncMinInterval = 60
 // LiteLLMSyncDefaultInterval is the default auto-sync cadence (seconds).
 const LiteLLMSyncDefaultInterval = 300
 
+// LiteLLM on-the-fly validation defaults + floors. The on-the-fly provider
+// validates an incoming client key against the external LiteLLM instance and
+// lazily imports it into the runtime api_keys table.
+const (
+	LiteLLMOnTheFlyDefaultCacheTTLSeconds = 60
+	LiteLLMOnTheFlyDefaultTimeoutMs       = 5000
+	LiteLLMOnTheFlyMinCacheTTLSeconds     = 1
+	LiteLLMOnTheFlyMinTimeoutMs           = 100
+)
+
 // LiteLLMSyncSettings is the singleton operator configuration for the
 // Manage-LiteLLM external sync. The plaintext master API key is never
 // represented here — only MasterKeySet + a masked MasterKeyPrefix — so GET
@@ -61,7 +71,17 @@ type LiteLLMSyncSettings struct {
 	// litellm_internal_users rows at the last "sync to NixLLM" push, i.e. the
 	// newest change reflected from the external LiteLLM Internal Users.
 	LastLiteLLMUsersUpdatedAt *time.Time `json:"last_litellm_users_updated_at,omitempty"`
-	UpdatedAt                 time.Time  `json:"updated_at"`
+	// OnTheFlyEnabled toggles per-request validation of LiteLLM-issued client
+	// keys against the external instance. Off by default: no external traffic
+	// is attempted until an operator enables it and sets base_url.
+	OnTheFlyEnabled bool `json:"onthefly_enabled"`
+	// OnTheFlyCacheTTLSeconds bounds how long a validation outcome is cached
+	// in-process (per key hash).
+	OnTheFlyCacheTTLSeconds int `json:"onthefly_cache_ttl_seconds"`
+	// OnTheFlyTimeoutMs bounds a single GET /key/info call (credential
+	// acquisition).
+	OnTheFlyTimeoutMs int       `json:"onthefly_timeout_ms"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // defaultLiteLLMSyncSettings returns the fallback settings used when the
@@ -69,8 +89,11 @@ type LiteLLMSyncSettings struct {
 // is ever attempted until an operator configures base_url + master key.
 func defaultLiteLLMSyncSettings() LiteLLMSyncSettings {
 	return LiteLLMSyncSettings{
-		Enabled:         false,
-		IntervalSeconds: LiteLLMSyncDefaultInterval,
+		Enabled:                 false,
+		IntervalSeconds:         LiteLLMSyncDefaultInterval,
+		OnTheFlyEnabled:         false,
+		OnTheFlyCacheTTLSeconds: LiteLLMOnTheFlyDefaultCacheTTLSeconds,
+		OnTheFlyTimeoutMs:       LiteLLMOnTheFlyDefaultTimeoutMs,
 	}
 }
 
@@ -78,6 +101,12 @@ func defaultLiteLLMSyncSettings() LiteLLMSyncSettings {
 func clampLiteLLMSyncSettings(s LiteLLMSyncSettings) LiteLLMSyncSettings {
 	if s.IntervalSeconds < LiteLLMSyncMinInterval {
 		s.IntervalSeconds = LiteLLMSyncMinInterval
+	}
+	if s.OnTheFlyCacheTTLSeconds < LiteLLMOnTheFlyMinCacheTTLSeconds {
+		s.OnTheFlyCacheTTLSeconds = LiteLLMOnTheFlyDefaultCacheTTLSeconds
+	}
+	if s.OnTheFlyTimeoutMs < LiteLLMOnTheFlyMinTimeoutMs {
+		s.OnTheFlyTimeoutMs = LiteLLMOnTheFlyDefaultTimeoutMs
 	}
 	return s
 }
@@ -136,6 +165,7 @@ func (s *LiteLLMSyncStore) Get(ctx context.Context) (LiteLLMSyncSettings, error)
 		       last_nixllm_sync_at, COALESCE(last_nixllm_sync_status, ''), COALESCE(last_nixllm_sync_error, ''),
 		       last_nixllm_sync_users, last_nixllm_sync_keys, last_nixllm_sync_logs,
 		       last_nixllm_sync_usage, last_litellm_users_updated_at,
+		       onthefly_enabled, onthefly_cache_ttl_seconds, onthefly_timeout_ms,
 		       updated_at
 		FROM %s WHERE id = 1`, s.table))
 	err := row.Scan(
@@ -146,6 +176,7 @@ func (s *LiteLLMSyncStore) Get(ctx context.Context) (LiteLLMSyncSettings, error)
 		&set.LastNixLLMSyncAt, &set.LastNixLLMSyncStatus, &set.LastNixLLMSyncError,
 		&set.LastNixLLMSyncUsers, &set.LastNixLLMSyncKeys, &set.LastNixLLMSyncLogs,
 		&set.LastNixLLMSyncUsage, &set.LastLiteLLMUsersUpdatedAt,
+		&set.OnTheFlyEnabled, &set.OnTheFlyCacheTTLSeconds, &set.OnTheFlyTimeoutMs,
 		&set.UpdatedAt,
 	)
 	if err != nil {
@@ -215,18 +246,23 @@ func (s *LiteLLMSyncStore) Upsert(ctx context.Context, set LiteLLMSyncSettings, 
 
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, enabled, interval_seconds, base_url,
-			master_key_sealed, master_key_prefix, updated_at)
-		VALUES (1, $1, $2, $3, $4, $5, NOW())
+			master_key_sealed, master_key_prefix,
+			onthefly_enabled, onthefly_cache_ttl_seconds, onthefly_timeout_ms, updated_at)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, NOW())
 		ON CONFLICT (id) DO UPDATE SET
-			enabled            = EXCLUDED.enabled,
-			interval_seconds   = EXCLUDED.interval_seconds,
-			base_url           = EXCLUDED.base_url,
-			master_key_sealed  = EXCLUDED.master_key_sealed,
-			master_key_prefix  = EXCLUDED.master_key_prefix,
-			updated_at         = NOW()
+			enabled                      = EXCLUDED.enabled,
+			interval_seconds             = EXCLUDED.interval_seconds,
+			base_url                     = EXCLUDED.base_url,
+			master_key_sealed            = EXCLUDED.master_key_sealed,
+			master_key_prefix            = EXCLUDED.master_key_prefix,
+			onthefly_enabled             = EXCLUDED.onthefly_enabled,
+			onthefly_cache_ttl_seconds   = EXCLUDED.onthefly_cache_ttl_seconds,
+			onthefly_timeout_ms          = EXCLUDED.onthefly_timeout_ms,
+			updated_at                   = NOW()
 	`, s.table),
 		set.Enabled, set.IntervalSeconds, nullableString(set.BaseURL),
 		sealedArg, prefixArg,
+		set.OnTheFlyEnabled, set.OnTheFlyCacheTTLSeconds, set.OnTheFlyTimeoutMs,
 	)
 	if err != nil {
 		return set, fmt.Errorf("postgres store: upsert litellm_sync_settings: %w", err)
