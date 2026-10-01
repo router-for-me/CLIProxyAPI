@@ -49,6 +49,7 @@ AGENTS.override.md
 .pi
 .agents/*
 .opencode/*
+.omo/*
 .idea/*
 .beads/*
 .bmad/*
