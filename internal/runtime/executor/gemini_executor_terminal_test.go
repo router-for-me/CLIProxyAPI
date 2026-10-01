@@ -130,3 +130,31 @@ func TestGeminiStreamSplitTerminalUsageIsPreserved(t *testing.T) {
 		t.Fatalf("split terminal usage = %s", usage.Raw)
 	}
 }
+
+func TestGeminiStreamMaxTokensReportsIncomplete(t *testing.T) {
+	frames := geminiTerminalContentFrame + "\n\n" +
+		`data: {"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10},"responseId":"gemini-terminal"}` + "\n\n"
+	observed := runGeminiResponsesTerminalStream(t, frames, false)
+	if len(observed.Errors) != 0 {
+		t.Fatalf("unexpected stream errors: %v", observed.Errors)
+	}
+	if len(observed.Terminals) != 1 {
+		t.Fatalf("terminal events = %d, want 1", len(observed.Terminals))
+	}
+	terminal := observed.Terminals[0]
+	if terminal.Get("type").String() != "response.incomplete" || terminal.Get("response.status").String() != "incomplete" {
+		t.Fatalf("MAX_TOKENS terminal = %s", terminal.Raw)
+	}
+	if terminal.Get("response.incomplete_details.reason").String() != "max_output_tokens" {
+		t.Fatalf("incomplete_details = %s", terminal.Get("response.incomplete_details").Raw)
+	}
+	if terminal.Get("response.usage.total_tokens").Int() != 10 {
+		t.Fatalf("incomplete response lost usage: %s", terminal.Get("response.usage").Raw)
+	}
+	if got := terminal.Get(`response.output.#(type=="message").content.0.text`).String(); got != "answer" {
+		t.Fatalf("incomplete response lost partial output: %s", terminal.Raw)
+	}
+	if got := terminal.Get(`response.output.#(type=="message").status`).String(); got != "incomplete" {
+		t.Fatalf("truncated message status = %q, want incomplete", got)
+	}
+}

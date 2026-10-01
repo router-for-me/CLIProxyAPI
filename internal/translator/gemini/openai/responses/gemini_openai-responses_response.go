@@ -25,6 +25,7 @@ type geminiCompletedMessageItem struct {
 	ID          string
 	Text        string
 	Annotations [][]byte
+	Status      string
 }
 
 type geminiCompletedReasoningItem struct {
@@ -200,6 +201,18 @@ func geminiResponsesUsageFromRoot(root gjson.Result) gjson.Result {
 	return root.Get("cpaUsageMetadata")
 }
 
+func geminiResponsesTerminalState(finishReason string) (eventType, status string, incompleteDetails []byte) {
+	if strings.EqualFold(strings.TrimSpace(finishReason), "MAX_TOKENS") {
+		return "response.incomplete", "incomplete", []byte(`{"reason":"max_output_tokens"}`)
+	}
+	return "response.completed", "completed", nil
+}
+
+func geminiResponsesOutputStatus(finishReason string) string {
+	_, status, _ := geminiResponsesTerminalState(finishReason)
+	return status
+}
+
 func emitEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
@@ -360,6 +373,10 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 	var out [][]byte
 	nextSeq := func() int { st.Seq++; return st.Seq }
+	// terminalMessageStatus closes the still-active message when the response
+	// terminal is emitted. Mid-stream message transitions always complete their
+	// message, so it keeps "completed" outside terminal handling.
+	terminalMessageStatus := "completed"
 
 	reasoningEncryptedContent := func() string {
 		if st.ReasoningEnc == "" || st.ReasoningDirection == "" {
@@ -623,6 +640,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		final, _ = sjson.SetBytes(final, "sequence_number", nextSeq())
 		final, _ = sjson.SetBytes(final, "output_index", st.MsgIndex)
 		final, _ = sjson.SetBytes(final, "item.id", st.CurrentMsgID)
+		final, _ = sjson.SetBytes(final, "item.status", terminalMessageStatus)
 		final, _ = sjson.SetBytes(final, "item.content.0.text", fullText)
 		if len(msgCitations) > 0 {
 			final, _ = sjson.SetRawBytes(final, "item.content.0.annotations", translatorcommon.JoinRawArray(msgCitations))
@@ -634,6 +652,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			ID:          st.CurrentMsgID,
 			Text:        fullText,
 			Annotations: msgCitations,
+			Status:      terminalMessageStatus,
 		}
 		st.MsgClosed = true
 		st.CurrentMsgRuneOffset = 0
@@ -1236,6 +1255,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	}
 
 	if finalizeTerminal {
+		terminalMessageStatus = geminiResponsesOutputStatus(st.FinishReason)
 		if st.PendingReasoningSignature != "" {
 			emitTrailingDetachedReasoning(st.PendingReasoningSignature)
 			st.PendingReasoningSignature = ""
@@ -1308,11 +1328,17 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 		// Reasoning already finalized above if present
 
-		// Build response.completed with aggregated outputs and request echo fields
-		completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
+		// Build the terminal event with aggregated outputs and request echo fields
+		eventType, responseStatus, incompleteDetails := geminiResponsesTerminalState(st.FinishReason)
+		completed := []byte(`{"type":"","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null}}`)
+		completed, _ = sjson.SetBytes(completed, "type", eventType)
 		completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 		completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 		completed, _ = sjson.SetBytes(completed, "response.created_at", st.CreatedAt)
+		completed, _ = sjson.SetBytes(completed, "response.status", responseStatus)
+		if len(incompleteDetails) > 0 {
+			completed, _ = sjson.SetRawBytes(completed, "response.incomplete_details", incompleteDetails)
+		}
 
 		if reqJSON := pickRequestJSON(originalRequestRawJSON, requestRawJSON); len(reqJSON) > 0 {
 			req := unwrapRequestRoot(gjson.ParseBytes(reqJSON))
@@ -1398,6 +1424,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			if completedMessage, ok := st.CompletedMessages[idx]; ok {
 				item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 				item, _ = sjson.SetBytes(item, "id", completedMessage.ID)
+				item, _ = sjson.SetBytes(item, "status", completedMessage.Status)
 				item, _ = sjson.SetBytes(item, "content.0.text", completedMessage.Text)
 				if len(completedMessage.Annotations) > 0 {
 					item, _ = sjson.SetRawBytes(item, "content.0.annotations", translatorcommon.JoinRawArray(completedMessage.Annotations))
@@ -1457,7 +1484,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", st.Usage.TotalTokens)
 		}
 
-		out = append(out, emitEvent("response.completed", completed))
+		out = append(out, emitEvent(eventType, completed))
 		st.Completed = true
 	}
 
@@ -1474,6 +1501,12 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
+	finishReason := strings.TrimSpace(root.Get("candidates.0.finishReason").String())
+	_, responseStatus, incompleteDetails := geminiResponsesTerminalState(finishReason)
+	resp, _ = sjson.SetBytes(resp, "status", responseStatus)
+	if len(incompleteDetails) > 0 {
+		resp, _ = sjson.SetRawBytes(resp, "incomplete_details", incompleteDetails)
+	}
 
 	// id: prefer provider responseId, otherwise synthesize
 	id := root.Get("responseId").String()
@@ -1821,6 +1854,14 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		messageCitations = BuildResponsesURLCitationsForMessages(groundingMetadata, partMappings, messageTexts)
 	}
 
+	// Only a message still receiving text when the upstream stopped can be
+	// reported as truncated; earlier ones were already closed by a semantic
+	// switch and stay completed.
+	incompleteMessageIndex := -1
+	if responseStatus == "incomplete" && len(outputOrder) > 0 && outputOrder[len(outputOrder)-1].kind == "message" {
+		incompleteMessageIndex = outputOrder[len(outputOrder)-1].index
+	}
+
 	wsAppended := false
 	for _, outputItem := range outputOrder {
 		switch outputItem.kind {
@@ -1871,6 +1912,9 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			}
 			itemJSON := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 			itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("msg_%s_%d", strings.TrimPrefix(id, "resp_"), outputItem.index))
+			if outputItem.index == incompleteMessageIndex {
+				itemJSON, _ = sjson.SetBytes(itemJSON, "status", "incomplete")
+			}
 			itemJSON, _ = sjson.SetBytes(itemJSON, "content.0.text", messageOutput.text)
 			if c := messageCitations[outputItem.index]; len(c) > 0 {
 				itemJSON, _ = sjson.SetRawBytes(itemJSON, "content.0.annotations", translatorcommon.JoinRawArray(c))

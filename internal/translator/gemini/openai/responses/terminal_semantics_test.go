@@ -235,7 +235,91 @@ func TestTerminalRepeatFinishUsageAndDoneStayIdempotent(t *testing.T) {
 	requireStrictlyIncreasing(t, observed)
 }
 
-func TestTerminalNonStreamStopFinalizesCompleted(t *testing.T) {
+func TestTerminalMaxTokensReportsIncompleteStream(t *testing.T) {
+	observed := observeTerminalStream(t,
+		terminalContentFrame,
+		terminalFrame("MAX_TOKENS", ","+terminalUsageObject),
+	)
+	terminal := requireSingleTerminal(t, observed, "response.incomplete")
+	if terminal.Get("response.status").String() != "incomplete" {
+		t.Fatalf("status = %q, want incomplete", terminal.Get("response.status").String())
+	}
+	if terminal.Get("response.incomplete_details.reason").String() != "max_output_tokens" {
+		t.Fatalf("incomplete_details = %s", terminal.Get("response.incomplete_details").Raw)
+	}
+	if terminal.Get("response.usage.total_tokens").Int() != 160 {
+		t.Fatalf("incomplete response lost usage: %s", terminal.Get("response.usage").Raw)
+	}
+	if terminal.Get(`response.output.#(type=="message").content.0.text`).String() != "answer" {
+		t.Fatalf("incomplete response lost partial output: %s", terminal.Raw)
+	}
+	requireStrictlyIncreasing(t, observed)
+}
+
+func TestTerminalMaxTokensSurvivesUsageTailAndDone(t *testing.T) {
+	observed := observeTerminalStream(t,
+		terminalContentFrame,
+		terminalFrame("MAX_TOKENS", ""),
+		`data: {`+terminalUsageObject+`,"responseId":"terminal"}`,
+		terminalDoneFrame,
+	)
+	terminal := requireSingleTerminal(t, observed, "response.incomplete")
+	if terminal.Get("response.incomplete_details.reason").String() != "max_output_tokens" {
+		t.Fatalf("[DONE] overwrote the pending finish reason: %s", terminal.Raw)
+	}
+	if terminal.Get("response.usage.total_tokens").Int() != 160 {
+		t.Fatalf("incomplete response lost the usage tail: %s", terminal.Raw)
+	}
+}
+
+func TestTerminalMaxTokensMarksOnlyTheActiveMessageIncomplete(t *testing.T) {
+	observed := observeTerminalStream(t,
+		`data: {"candidates":[{"content":{"parts":[{"text":"preface"}]}}],"responseId":"terminal"}`,
+		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"run_command","args":{"command":"true"}}]}}],"responseId":"terminal"}`,
+		`data: {"candidates":[{"content":{"parts":[{"text":"truncated"}]}}],"responseId":"terminal"}`,
+		terminalFrame("MAX_TOKENS", ","+terminalUsageObject),
+	)
+	terminal := requireSingleTerminal(t, observed, "response.incomplete")
+	output := terminal.Get("response.output")
+	incompleteItems := 0
+	for _, item := range output.Array() {
+		if item.Get("status").String() == "incomplete" {
+			incompleteItems++
+			if item.Get("type").String() != "message" {
+				t.Fatalf("only the active message may be incomplete: %s", item.Raw)
+			}
+		}
+	}
+	if incompleteItems != 1 {
+		t.Fatalf("incomplete items = %d, want 1: %s", incompleteItems, output.Raw)
+	}
+	if output.Get(`0.content.0.text`).String() != "preface" || output.Get(`0.status`).String() != "completed" {
+		t.Fatalf("earlier message was retroactively marked incomplete: %s", output.Raw)
+	}
+	if output.Get(`1.type`).String() != "function_call" || output.Get(`1.status`).String() != "completed" {
+		t.Fatalf("completed tool call was marked incomplete: %s", output.Raw)
+	}
+	if output.Get(`2.content.0.text`).String() != "truncated" {
+		t.Fatalf("truncated message text = %q", output.Get(`2.content.0.text`).String())
+	}
+	if observed.ItemDone[2].Get("item.status").String() != "incomplete" {
+		t.Fatalf("item.done status = %q, want incomplete", observed.ItemDone[2].Get("item.status").String())
+	}
+}
+
+func TestTerminalMaxTokensWithCompletedToolKeepsItemStatuses(t *testing.T) {
+	observed := observeTerminalStream(t,
+		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"run_command","args":{"command":"true"}}]}}],"responseId":"terminal"}`,
+		terminalFrame("MAX_TOKENS", ","+terminalUsageObject),
+	)
+	terminal := requireSingleTerminal(t, observed, "response.incomplete")
+	if terminal.Get(`response.output.0.type`).String() != "function_call" ||
+		terminal.Get(`response.output.0.status`).String() != "completed" {
+		t.Fatalf("function call status must stay completed: %s", terminal.Raw)
+	}
+}
+
+func TestTerminalNonStreamStopAndMaxTokens(t *testing.T) {
 	stopRaw := requireValidJSON(t, []byte(`{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":4,"thoughtsTokenCount":1,"totalTokenCount":10},"responseId":"terminal"}`))
 	stopOut := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.6-flash-high", nil, nil, stopRaw, nil)
 	if gjson.GetBytes(stopOut, "status").String() != "completed" {
@@ -246,5 +330,50 @@ func TestTerminalNonStreamStopFinalizesCompleted(t *testing.T) {
 	}
 	if gjson.GetBytes(stopOut, "usage.output_tokens").Int() != 5 {
 		t.Fatalf("non-stream usage = %s", gjson.GetBytes(stopOut, "usage").Raw)
+	}
+
+	maxRaw := requireValidJSON(t, []byte(`{"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7},"responseId":"terminal"}`))
+	maxOut := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.6-flash-high", nil, nil, maxRaw, nil)
+	if gjson.GetBytes(maxOut, "status").String() != "incomplete" ||
+		gjson.GetBytes(maxOut, "incomplete_details.reason").String() != "max_output_tokens" {
+		t.Fatalf("non-stream MAX_TOKENS terminal = %s", maxOut)
+	}
+	if gjson.GetBytes(maxOut, "usage.total_tokens").Int() != 7 {
+		t.Fatalf("non-stream MAX_TOKENS lost usage: %s", maxOut)
+	}
+	if gjson.GetBytes(maxOut, "output.0.content.0.text").String() != "partial" {
+		t.Fatalf("non-stream MAX_TOKENS lost partial output: %s", maxOut)
+	}
+	if gjson.GetBytes(maxOut, "output.0.status").String() != "incomplete" {
+		t.Fatalf("non-stream truncated message status = %s", gjson.GetBytes(maxOut, "output.0.status").Raw)
+	}
+}
+
+func TestTerminalNonStreamMaxTokensKeepsEarlierMessagesCompleted(t *testing.T) {
+	raw := requireValidJSON(t, []byte(`{"candidates":[{"content":{"parts":[{"text":"preface"},{"functionCall":{"name":"run_command","args":{"command":"true"}}},{"text":"truncated"}]},"finishReason":"MAX_TOKENS"}],"responseId":"terminal"}`))
+	out := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil)
+	output := gjson.GetBytes(out, "output")
+	if output.Get(`0.type`).String() != "message" || output.Get(`0.status`).String() != "completed" {
+		t.Fatalf("earlier message must stay completed: %s", output.Raw)
+	}
+	if output.Get(`1.type`).String() != "function_call" || output.Get("1.status").String() != "completed" {
+		t.Fatalf("function call must stay completed: %s", output.Raw)
+	}
+	if output.Get(`2.type`).String() != "message" || output.Get("2.status").String() != "incomplete" {
+		t.Fatalf("trailing message must be incomplete: %s", output.Raw)
+	}
+}
+
+func TestTerminalNonStreamMaxTokensEndingOnToolKeepsMessagesCompleted(t *testing.T) {
+	raw := requireValidJSON(t, []byte(`{"candidates":[{"content":{"parts":[{"text":"preface"},{"functionCall":{"name":"run_command","args":{"command":"true"}}}]},"finishReason":"MAX_TOKENS"}],"responseId":"terminal"}`))
+	out := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.6-flash-high", nil, nil, raw, nil)
+	output := gjson.GetBytes(out, "output")
+	for _, item := range output.Array() {
+		if item.Get("status").String() == "incomplete" {
+			t.Fatalf("a truncated tool call must not mark earlier messages incomplete: %s", item.Raw)
+		}
+	}
+	if gjson.GetBytes(out, "status").String() != "incomplete" {
+		t.Fatalf("response status = %s", gjson.GetBytes(out, "status").Raw)
 	}
 }
