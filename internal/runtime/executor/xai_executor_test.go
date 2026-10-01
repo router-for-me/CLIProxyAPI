@@ -17,14 +17,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
@@ -2971,6 +2972,10 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 }
 
 func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient("xai-non-thinking-test", "xai", []*registry.ModelInfo{{ID: "grok-4", Type: "xai"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient("xai-non-thinking-test") })
+
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var errRead error
@@ -3009,31 +3014,83 @@ func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestXAISupportsReasoningEffortUsesModelRegistry(t *testing.T) {
+func TestXAIExecutorThinkingPayloadOverride(t *testing.T) {
+	const remoteModel = "grok-home-only-thinking-test"
+	if registry.LookupModelInfo(remoteModel, "xai") != nil {
+		t.Fatal("test model must be absent from the local registry")
+	}
+	levels := &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 	tests := []struct {
-		name  string
-		model string
-		want  bool
+		name        string
+		model       string
+		suffix      string
+		metadataKey string
+		thinking    *registry.ThinkingSupport
+		wantEffort  string
 	}{
-		{name: "grok-4.5", model: "grok-4.5", want: true},
-		{name: "grok-4.5 with suffix", model: "grok-4.5(high)", want: true},
-		{name: "grok-4.3", model: "grok-4.3", want: true},
-		{name: "grok-3-mini", model: "grok-3-mini", want: true},
-		{name: "grok-3-mini-fast", model: "grok-3-mini-fast", want: true},
-		{name: "grok-4.20-multi-agent", model: "grok-4.20-multi-agent-0309", want: true},
-		{name: "provider-prefixed grok-4.5", model: "xai/grok-4.5", want: true},
-		{name: "legacy grok-4", model: "grok-4", want: false},
-		{name: "composer without thinking metadata", model: "grok-composer-2.5-fast", want: false},
-		{name: "non-reasoning 4.20", model: "grok-4.20-0309-non-reasoning", want: false},
-		{name: "unknown model", model: "unknown-xai-model", want: false},
-		{name: "empty model", model: "", want: false},
+		{
+			name: "home-only model", model: remoteModel,
+			metadataKey: "cliproxy.resolved_home_model_info", thinking: levels, wantEffort: "high",
+		},
+		{
+			name: "configured API-key model", model: remoteModel,
+			metadataKey: "cliproxy.resolved_api_key_model_info", thinking: levels, wantEffort: "high",
+		},
+		{
+			name: "home disables local thinking support", model: "grok-4.5",
+			metadataKey: "cliproxy.resolved_home_model_info",
+		},
+		{
+			name: "API-key disables local thinking support", model: "grok-4.5",
+			metadataKey: "cliproxy.resolved_api_key_model_info",
+		},
+		{
+			name: "home supplies no thinking levels", model: "grok-4.5",
+			metadataKey: "cliproxy.resolved_home_model_info", thinking: &registry.ThinkingSupport{}, wantEffort: "high",
+		},
+		{
+			name: "home restricts thinking levels", model: "grok-4.5",
+			metadataKey: "cliproxy.resolved_home_model_info", thinking: &registry.ThinkingSupport{Levels: []string{"low"}}, wantEffort: "low",
+		},
+		{name: "local supported fallback", model: "grok-4.5", wantEffort: "high"},
+		{name: "local unsupported fallback", model: "grok-build-0.1"},
+		{name: "local unknown fallback", model: remoteModel, wantEffort: "high"},
+		{name: "model suffix", model: "grok-4.5", suffix: "(low)", wantEffort: "low"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := xaiSupportsReasoningEffort(tt.model); got != tt.want {
-				t.Fatalf("xaiSupportsReasoningEffort(%q) = %v, want %v", tt.model, got, tt.want)
-			}
-		})
+		for _, override := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/override=%t", tt.name, override), func(t *testing.T) {
+				cfg := &config.Config{}
+				wantEffort := tt.wantEffort
+				if override {
+					// Explicit overrides may force an effort beyond the model's declared capabilities.
+					wantEffort = "xhigh"
+					cfg.Payload.Override = []config.PayloadRule{{
+						Models: []config.PayloadModelRule{{Name: tt.model}},
+						Params: map[string]any{"reasoning.effort": wantEffort},
+					}}
+				}
+				exec := NewXAIExecutor(cfg)
+				req := cliproxyexecutor.Request{
+					Model:   tt.model + tt.suffix,
+					Payload: []byte(fmt.Sprintf(`{"model":%q,"input":"hello","reasoning":{"effort":"high"}}`, tt.model)),
+				}
+				if tt.metadataKey != "" {
+					req.Metadata = map[string]any{
+						tt.metadataKey: &registry.ModelInfo{ID: tt.model, Type: "xai", Thinking: tt.thinking},
+					}
+				}
+				prepared, errPrepare := exec.prepareResponsesRequest(t.Context(), req, cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAIResponse,
+				}, false)
+				if errPrepare != nil {
+					t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+				}
+				if got := gjson.GetBytes(prepared.body, "reasoning.effort").String(); got != wantEffort {
+					t.Fatalf("reasoning.effort = %q, want %q; body=%s", got, wantEffort, prepared.body)
+				}
+			})
+		}
 	}
 }
 
@@ -4138,6 +4195,20 @@ func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T
 	}
 	if !foundExec {
 		t.Fatalf("exec_command tool missing after normalize: %s", string(out))
+	}
+}
+
+func TestXAIExecutorPrepareResponsesRequestPreservesCodexNumberToolSchemas(t *testing.T) {
+	exec := &XAIExecutor{}
+	payload := []byte(`{"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"yield_time_ms":{"type":"number"}}}}],"input":[{"type":"additional_tools","tools":[{"type":"function","name":"functions__exec_command","parameters":{"type":"object","properties":{"yield_time_ms":{"type":"number"}}}}]}]}`)
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{Model: "grok-4", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex, Headers: http.Header{"User-Agent": []string{"codex_cli_rs/0.1"}}}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+	for _, path := range []string{"tools.0.parameters.properties.yield_time_ms.type", "tools.1.parameters.properties.yield_time_ms.type"} {
+		if got := gjson.GetBytes(prepared.body, path).String(); got != "integer" {
+			t.Errorf("%s = %q, want integer; body=%s", path, got, prepared.body)
+		}
 	}
 }
 

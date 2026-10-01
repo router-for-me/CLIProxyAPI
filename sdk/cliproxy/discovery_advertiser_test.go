@@ -2,13 +2,17 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/discovery"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/discovery"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 type fakeAdvertiser struct {
@@ -201,6 +205,78 @@ func TestDiscoveryManagerStopsAdvertiserOnBuildFailure(t *testing.T) {
 	starts, stops, _ := adv.snapshot()
 	if starts != 1 || stops != 1 {
 		t.Fatalf("starts=%d stops=%d, want 1/1", starts, stops)
+	}
+}
+
+func TestDiscoveryManagerWarnsOncePerBuildFailure(t *testing.T) {
+	_, hook := logtest.NewNullLogger()
+	logger := log.StandardLogger()
+	oldHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	oldLevel := logger.GetLevel()
+	logger.AddHook(hook)
+	logger.SetLevel(log.WarnLevel)
+	t.Cleanup(func() {
+		logger.SetLevel(oldLevel)
+		logger.ReplaceHooks(oldHooks)
+	})
+
+	mgr := newTestDiscoveryManager()
+	adv := &fakeAdvertiser{}
+	mgr.newAdvertiser = func() discovery.Advertiser { return adv }
+	buildErr := errors.New("no qualified physical interfaces")
+	buildCalls := 0
+	mgr.buildSpec = func(*config.Config, int, bool) (discovery.ServiceSpec, error) {
+		buildCalls++
+		if buildErr != nil {
+			return discovery.ServiceSpec{}, buildErr
+		}
+		return discovery.ServiceSpec{InstanceName: "n", Port: 8317}, nil
+	}
+	cfg := &config.Config{}
+	cfg.Discovery.Enabled = true
+	warnCount := func() int {
+		count := 0
+		for _, entry := range hook.AllEntries() {
+			if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "failed to build service spec") {
+				count++
+			}
+		}
+		return count
+	}
+
+	for i := 0; i < 3; i++ {
+		if mgr.ApplyContext(context.Background(), cfg, 8317, false) {
+			t.Fatal("build failure unexpectedly succeeded")
+		}
+	}
+	if buildCalls != 3 || warnCount() != 1 {
+		t.Fatalf("build calls=%d warnings=%d, want 3/1", buildCalls, warnCount())
+	}
+
+	buildErr = errors.New("interface address unavailable")
+	if mgr.ApplyContext(context.Background(), cfg, 8317, false) || warnCount() != 2 {
+		t.Fatalf("changed failure warnings=%d, want 2", warnCount())
+	}
+	buildErr = nil
+	if !mgr.ApplyContext(context.Background(), cfg, 8317, false) {
+		t.Fatal("expected recovery to start advertiser")
+	}
+	buildErr = errors.New("no qualified physical interfaces")
+	if mgr.ApplyContext(context.Background(), cfg, 8317, false) || warnCount() != 3 {
+		t.Fatalf("post-recovery failure warnings=%d, want 3", warnCount())
+	}
+	starts, stops, _ := adv.snapshot()
+	if starts != 1 || stops != 1 {
+		t.Fatalf("starts=%d stops=%d, want 1/1", starts, stops)
+	}
+
+	cfg.Discovery.Enabled = false
+	if !mgr.ApplyContext(context.Background(), cfg, 8317, false) {
+		t.Fatal("disable failed")
+	}
+	cfg.Discovery.Enabled = true
+	if mgr.ApplyContext(context.Background(), cfg, 8317, false) || warnCount() != 4 {
+		t.Fatalf("post-disable failure warnings=%d, want 4", warnCount())
 	}
 }
 

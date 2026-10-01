@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -23,10 +23,12 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
+	refreshCheckInterval    = 5 * time.Second
+	refreshMaxConcurrency   = 16
+	refreshPendingBackoff   = time.Minute
+	refreshFailureBackoff   = 5 * time.Minute
+	invalidGrantBackoffBase = time.Minute
+	invalidGrantBackoffMax  = 30 * time.Minute
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -116,7 +118,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
-	if hasUnauthorizedAuthFailure(a) {
+	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
 		return false
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
@@ -320,25 +322,63 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func (m *Manager) markRefreshPending(id string, now time.Time) bool {
+func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, registrationEpoch uint64, now time.Time) *authRefreshJob {
 	m.mu.Lock()
-	auth, ok := m.auths[id]
-	if !ok || auth == nil {
+	auth := m.auths[id]
+	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
 		m.mu.Unlock()
-		return false
+		return nil
 	}
-	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
+	if m.refreshJobs[id] != nil || (!auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter)) {
 		m.mu.Unlock()
-		return false
+		return nil
 	}
-	auth.NextRefreshAfter = now.Add(refreshPendingBackoff)
+	job := &authRefreshJob{
+		id:                id,
+		registrationEpoch: registrationEpoch,
+		pendingUntil:      now.Add(refreshPendingBackoff),
+		loop:              loop,
+	}
+	if m.refreshJobs == nil {
+		m.refreshJobs = make(map[string]*authRefreshJob)
+	}
+	m.refreshJobs[id] = job
+	auth.NextRefreshAfter = job.pendingUntil
 	auth.Generation++
 	auth.UpdatedAt = now
-	m.auths[id] = auth
 	m.mu.Unlock()
 
 	m.queueRefreshReschedule(id)
+	return job
+}
+
+func (m *Manager) beginRefreshJob(ctx context.Context, job *authRefreshJob) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	auth := m.auths[job.id]
+	if ctx.Err() != nil || m.refreshJobs[job.id] != job || auth == nil || auth.RegistrationEpoch != job.registrationEpoch {
+		return false
+	}
+	job.running = true
 	return true
+}
+
+func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queuedOnly bool) {
+	m.mu.Lock()
+	if m.refreshJobs[job.id] != job || (queuedOnly && job.running) {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.refreshJobs, job.id)
+	if auth := m.auths[job.id]; auth != nil && auth.RegistrationEpoch == job.registrationEpoch && auth.NextRefreshAfter.Equal(job.pendingUntil) {
+		// Clear only this job's pending marker, preserving newer refresh outcomes.
+		auth.NextRefreshAfter = retryAt
+		auth.Generation++
+		auth.UpdatedAt = time.Now()
+	}
+	m.mu.Unlock()
+	// Notify the current loop, which may differ from the job's original loop.
+	m.queueRefreshReschedule(job.id)
 }
 
 type authRefreshLock struct {
@@ -492,6 +532,21 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	return refreshed, true
 }
 
+func invalidGrantBackoffDuration(failures int) time.Duration {
+	if failures <= 1 {
+		return invalidGrantBackoffBase
+	}
+	shift := failures - 1
+	if shift > 10 {
+		shift = 10
+	}
+	backoff := invalidGrantBackoffBase * time.Duration(1<<shift)
+	if backoff > invalidGrantBackoffMax {
+		return invalidGrantBackoffMax
+	}
+	return backoff
+}
+
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	_, _ = m.refreshAuthForRequest(ctx, id, "")
 }
@@ -500,6 +555,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 // failedAccessToken lets concurrent callers reuse a refresh that already replaced the
 // access token that produced the unauthorized response.
 func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessToken string) (*Auth, error) {
+	return m.refreshAuthForRequestAtEpoch(ctx, id, failedAccessToken, 0)
+}
+
+func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
@@ -522,7 +581,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	defer lock.mu.Unlock()
 
 	m.mu.RLock()
-	auth := m.auths[id]
+	auth := m.auths[id].Clone()
 	var exec ProviderExecutor
 	if auth != nil {
 		// Use the same effective provider key as request execution so OpenAI-compat
@@ -532,6 +591,12 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
 		return nil, errors.New("auth or executor not found")
+	}
+	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
+		return nil, errors.New("auth registration changed before refresh")
+	}
+	if hasDisabledInvalidGrantFailure(auth) {
+		return nil, errors.New("auth is disabled with invalid grant")
 	}
 
 	// Another request may already have refreshed this credential.
@@ -551,7 +616,10 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	now := time.Now()
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
+		invalidGrant := isInvalidGrantError(err)
 		shouldReschedule := false
+		isDisabled := false
+		isPermanentlyDisabled := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
@@ -562,31 +630,61 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 			current.UpdatedAt = now
 			current.LastError = refreshErrorFromError(err)
 
+			isDisabled = current.Disabled || current.Status == StatusDisabled
 			hasValidAccessToken := current.HasValidAccessToken(now)
-			if !hasValidAccessToken {
+			if isDisabled && invalidGrant {
+				current.Unavailable = true
+				current.Status = StatusDisabled
+				current.NextRefreshAfter = time.Time{}
+				current.RefreshFailures = 0
+				current.StatusMessage = "disabled (invalid grant)"
+				isPermanentlyDisabled = true
+			} else if isDisabled {
+				current.Unavailable = true
+				current.Status = StatusDisabled
+				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+				if current.StatusMessage == "" {
+					current.StatusMessage = "disabled"
+				}
+				shouldReschedule = true
+			} else if !hasValidAccessToken {
 				current.Unavailable = true
 				current.Status = StatusError
 				if unauthorized {
 					current.NextRefreshAfter = time.Time{}
+					current.RefreshFailures = 0
 					current.StatusMessage = "unauthorized"
+				} else if invalidGrant {
+					current.RefreshFailures++
+					current.NextRefreshAfter = now.Add(invalidGrantBackoffDuration(current.RefreshFailures))
+					current.StatusMessage = "invalid grant (retrying)"
+					shouldReschedule = true
 				} else {
+					current.RefreshFailures = 0
 					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 					current.StatusMessage = "token expired"
+					shouldReschedule = true
 				}
 			} else {
 				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
 				nextRetry := now.Add(refreshFailureBackoff)
+				if invalidGrant {
+					current.RefreshFailures++
+					nextRetry = now.Add(invalidGrantBackoffDuration(current.RefreshFailures))
+				} else {
+					current.RefreshFailures = 0
+				}
 				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
 					nextRetry = exp
 				}
 				current.NextRefreshAfter = nextRetry
+				shouldReschedule = true
 
 				if !current.Unavailable {
 					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
 				}
 			}
 			m.auths[id] = current
-			shouldReschedule = true
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
 			}
@@ -594,6 +692,8 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		m.mu.Unlock()
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
+		} else if isPermanentlyDisabled {
+			m.queueRefreshUnschedule(id)
 		}
 		return nil, err
 	}
@@ -610,6 +710,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	updated.LastError = nil
 	updated.StatusMessage = ""
 	updated.Unavailable = false
+	updated.RefreshFailures = 0
 	if updated.Status == StatusError || updated.Status == "" {
 		updated.Status = StatusActive
 	}
@@ -620,7 +721,8 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	}
 	saved, errUpdate := m.UpdateRefreshedAuth(ctx, base, updated)
 	if errUpdate != nil {
-		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
+		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
 		return nil, errUpdate
 	}
 	if saved == nil {

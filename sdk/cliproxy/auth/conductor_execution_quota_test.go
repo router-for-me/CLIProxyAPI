@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	internalutil "github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	internalutil "github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
 type quotaAttemptIsolationSelector struct{}
@@ -351,5 +351,34 @@ func TestApplyRequestAfterAuthInterceptorPreservesLCPHierarchyOnUnrelatedHeaderC
 	meta := internallogging.GetClientRequestMetadata(syncedCtx)
 	if meta.SessionID != "lcp:v1:child-fork-123" || meta.ParentSessionID != "lcp:v1:parent-trunk-000" {
 		t.Fatalf("synced context hierarchy = (%q, %q), want (lcp:v1:child-fork-123, lcp:v1:parent-trunk-000)", meta.SessionID, meta.ParentSessionID)
+	}
+}
+
+func TestApplyRequestAfterAuthInterceptor_OverridesPath_Issue6196(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-image-2.5",
+		Payload: []byte(`{"model":"gpt-image-2.5","prompt":"edit this"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/edits",
+		},
+		RequestAfterAuthInterceptor: func(ctx context.Context, req cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+			return cliproxyexecutor.RequestAfterAuthInterceptResponse{
+				Path: "/v1/images/generations",
+				Body: []byte(`{"model":"gpt-image-2.5","prompt":"rewritten for generations"}`),
+			}
+		},
+	}
+
+	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai-compatibility", req, opts, "gpt-image-2.5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(finalReq.Payload) != `{"model":"gpt-image-2.5","prompt":"rewritten for generations"}` {
+		t.Fatalf("final payload = %s, want rewritten", string(finalReq.Payload))
+	}
+	if gotPath := finalOpts.Metadata[cliproxyexecutor.RequestPathMetadataKey]; gotPath != "/v1/images/generations" {
+		t.Fatalf("final request path = %v, want /v1/images/generations", gotPath)
 	}
 }

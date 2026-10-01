@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -139,6 +139,8 @@ func convertInteractionsEventToOpenAIChat(modelName string, rawJSON []byte, st *
 			st.EnvironmentID = envID
 		}
 		return appendOpenAIChatCompleted(nil, root, st)
+	case "response.failed", "interaction.failed":
+		return interactionsFailedToOpenAIChat(root)
 	case "done":
 		return nil
 	}
@@ -244,6 +246,32 @@ func appendOpenAIChatCompleted(out [][]byte, root gjson.Result, st *interactions
 	chunk = setOpenAIChatUsageFromInteractions(chunk, "usage", translatorcommon.InteractionsUsage(root))
 	st.Completed = true
 	return append(out, chunk)
+}
+
+func interactionsFailedToOpenAIChat(root gjson.Result) [][]byte {
+	errNode := root.Get("error")
+	if !errNode.Exists() {
+		errNode = root.Get("interaction.error")
+	}
+	msg := errNode.Get("message").String()
+	if msg == "" {
+		msg = "upstream error occurred"
+	}
+	code := errNode.Get("code").String()
+	errType := errNode.Get("type").String()
+	if errType == "" {
+		errType = "server_error"
+	}
+
+	errorJSON := []byte(`{"error":{"message":"","type":"","code":""}}`)
+	errorJSON, _ = sjson.SetBytes(errorJSON, "error.message", msg)
+	errorJSON, _ = sjson.SetBytes(errorJSON, "error.type", errType)
+	if code != "" {
+		errorJSON, _ = sjson.SetBytes(errorJSON, "error.code", code)
+	} else {
+		errorJSON, _ = sjson.DeleteBytes(errorJSON, "error.code")
+	}
+	return [][]byte{errorJSON}
 }
 
 func openAIChatBaseChunk(st *interactionsToOpenAIChatStreamState) []byte {

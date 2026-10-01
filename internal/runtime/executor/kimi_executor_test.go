@@ -10,12 +10,12 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
@@ -1547,5 +1547,132 @@ func TestKimiExecutor_KimiAI_Refresh(t *testing.T) {
 		if storage.Domain != "kimi.ai" {
 			t.Fatalf("storage.Domain = %q, want kimi.ai", storage.Domain)
 		}
+	}
+}
+
+func TestKimiExecutorExecuteResponses_InterleavedToolOutputsReordered(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"resp_test","object":"response","status":"completed","model":"kimi-k3","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}],"usage":{"total_tokens":2,"input_tokens":1,"output_tokens":1}}`,
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{
+		"model":"kimi-k3",
+		"input":[
+			{"type":"function_call","call_id":"view_image:31","name":"view_image","arguments":"{\"id\":31}"},
+			{"type":"function_call","call_id":"view_image:32","name":"view_image","arguments":"{\"id\":32}"},
+			{"type":"function_call_output","call_id":"view_image:31","output":"output_31"},
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"interleaved developer context"}]},
+			{"type":"function_call_output","call_id":"view_image:32","output":"output_32"}
+		]
+	}`)
+
+	_, errExecute := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+
+	input := gjson.GetBytes(upstreamBody, "input").Array()
+	if got := len(input); got != 5 {
+		t.Fatalf("upstream input count = %d, want 5; body=%s", got, upstreamBody)
+	}
+
+	if got := input[2].Get("type").String(); got != "function_call_output" || input[2].Get("call_id").String() != "view_image:31" {
+		t.Fatalf("input[2] = %s, want function_call_output for view_image:31", input[2].Raw)
+	}
+	if got := input[3].Get("type").String(); got != "function_call_output" || input[3].Get("call_id").String() != "view_image:32" {
+		t.Fatalf("input[3] = %s, want function_call_output for view_image:32", input[3].Raw)
+	}
+	if got := input[4].Get("type").String(); got != "message" || input[4].Get("role").String() != "developer" {
+		t.Fatalf("input[4] = %s, want deferred developer message", input[4].Raw)
+	}
+}
+
+func TestKimiExecutorExecuteResponsesStream_InterleavedToolOutputsReordered(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream\",\"status\":\"completed\",\"output\":[]}}\n\n",
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{
+		"model":"kimi-k3",
+		"stream":true,
+		"input":[
+			{"type":"function_call","call_id":"view_image:31","name":"view_image","arguments":"{\"id\":31}"},
+			{"type":"function_call","call_id":"view_image:32","name":"view_image","arguments":"{\"id\":32}"},
+			{"type":"function_call_output","call_id":"view_image:31","output":"output_31"},
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"interleaved developer context"}]},
+			{"type":"function_call_output","call_id":"view_image:32","output":"output_32"}
+		]
+	}`)
+
+	result, errStream := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+		Stream:          true,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	input := gjson.GetBytes(upstreamBody, "input").Array()
+	if got := len(input); got != 5 {
+		t.Fatalf("upstream input count = %d, want 5; body=%s", got, upstreamBody)
+	}
+
+	if got := input[2].Get("type").String(); got != "function_call_output" || input[2].Get("call_id").String() != "view_image:31" {
+		t.Fatalf("input[2] = %s, want function_call_output for view_image:31", input[2].Raw)
+	}
+	if got := input[3].Get("type").String(); got != "function_call_output" || input[3].Get("call_id").String() != "view_image:32" {
+		t.Fatalf("input[3] = %s, want function_call_output for view_image:32", input[3].Raw)
+	}
+	if got := input[4].Get("type").String(); got != "message" || input[4].Get("role").String() != "developer" {
+		t.Fatalf("input[4] = %s, want deferred developer message", input[4].Raw)
 	}
 }

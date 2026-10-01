@@ -672,7 +672,7 @@ func ssePayload(event []byte) []byte {
 	if idx < 0 {
 		return nil
 	}
-	return event[idx+len(prefix):]
+	return bytes.TrimRight(event[idx+len(prefix):], "\r\n")
 }
 
 func countInteractionsEventType(events [][]byte, eventType string) int {
@@ -1370,5 +1370,88 @@ func TestConvertInteractionsResponseToOpenAIResponses_AntigravityCustomToolResto
 	}
 	if customDoneCount != 1 {
 		t.Fatalf("expected exactly 1 response.custom_tool_call_input.done event on step.stop, got %d", customDoneCount)
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_ResponseFailed(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		wantMsg  string
+		wantCode string
+	}{
+		{
+			name:     "response_failed_top_level",
+			payload:  `data: {"event_type":"response.failed","error":{"message":"devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.","code":"403"}}`,
+			wantMsg:  "permission_denied",
+			wantCode: "403",
+		},
+		{
+			name:     "interaction_failed_nested",
+			payload:  `data: {"event_type":"interaction.failed","interaction":{"error":{"message":"service unavailable","code":"503"}}}`,
+			wantMsg:  "service unavailable",
+			wantCode: "503",
+		},
+		{
+			name:     "fallback_defaults",
+			payload:  `data: {"event_type":"response.failed"}`,
+			wantMsg:  "upstream execution failed",
+			wantCode: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			events := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/kimi-k3", nil, nil, []byte(tt.payload), &param)
+			if len(events) == 0 {
+				t.Fatalf("expected non-empty events for %s, got 0", tt.name)
+			}
+			payload := findResponsesEventPayload(events, "response.failed")
+			if len(payload) == 0 {
+				t.Fatalf("expected response.failed event payload, got: %s", string(bytes.Join(events, []byte("\n"))))
+			}
+			if got := gjson.GetBytes(payload, "response.status").String(); got != "failed" {
+				t.Fatalf("response.status = %q, want failed", got)
+			}
+			if got := gjson.GetBytes(payload, "response.error.message").String(); !strings.Contains(got, tt.wantMsg) {
+				t.Fatalf("response.error.message = %q, want containing %q", got, tt.wantMsg)
+			}
+			if tt.wantCode != "" {
+				if got := gjson.GetBytes(payload, "response.error.code").String(); got != tt.wantCode {
+					t.Fatalf("response.error.code = %q, want %q", got, tt.wantCode)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_PreservesIDAndSeqOnFailure(t *testing.T) {
+	var param any
+	createdChunk := []byte(`data: {"event_type":"interaction.created","interaction":{"id":"interaction_test_id","model":"devin/kimi-k3"}}`)
+	failedChunk := []byte(`data: {"event_type":"response.failed","error":{"message":"permission denied","code":"403"}}`)
+
+	eventsCreated := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/kimi-k3", nil, nil, createdChunk, &param)
+	if len(eventsCreated) == 0 {
+		t.Fatalf("expected response.created event")
+	}
+	createdPayload := findResponsesEventPayload(eventsCreated, "response.created")
+	if gotID := gjson.GetBytes(createdPayload, "response.id").String(); gotID != "interaction_test_id" {
+		t.Fatalf("created response.id = %q, want interaction_test_id", gotID)
+	}
+	if seq := gjson.GetBytes(createdPayload, "sequence_number").Int(); seq != 1 {
+		t.Fatalf("created sequence_number = %d, want 1", seq)
+	}
+
+	eventsFailed := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/kimi-k3", nil, nil, failedChunk, &param)
+	if len(eventsFailed) == 0 {
+		t.Fatalf("expected response.failed event")
+	}
+	failedPayload := findResponsesEventPayload(eventsFailed, "response.failed")
+	if gotID := gjson.GetBytes(failedPayload, "response.id").String(); gotID != "interaction_test_id" {
+		t.Fatalf("failed response.id = %q, want interaction_test_id", gotID)
+	}
+	if seq := gjson.GetBytes(failedPayload, "sequence_number").Int(); seq != 2 {
+		t.Fatalf("failed sequence_number = %d, want 2", seq)
 	}
 }

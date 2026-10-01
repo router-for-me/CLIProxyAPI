@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -137,5 +138,32 @@ func TestSetStringWithoutHTMLEscape(t *testing.T) {
 				t.Fatalf("round-trip value mismatch: got %q, want %q", res.String(), tc.value)
 			}
 		})
+	}
+}
+
+func TestSSEEventData_SelfTerminatingFrame(t *testing.T) {
+	event := "response.completed"
+	payload := []byte(`{"id":"resp_1"}`)
+	got := SSEEventData(event, payload)
+	want := "event: response.completed\ndata: {\"id\":\"resp_1\"}\n\n"
+	if string(got) != want {
+		t.Fatalf("SSEEventData() = %q, want %q", string(got), want)
+	}
+}
+
+func TestSSEEventData_ConcatenatedFramesSeparable(t *testing.T) {
+	frame1 := SSEEventData("event1", []byte(`{"a":1}`))
+	frame2 := SSEEventData("event2", []byte(`{"b":2}`))
+	concatenated := append(frame1, frame2...)
+
+	frames := bytes.Split(concatenated, []byte("\n\n"))
+	if len(frames) != 3 || len(frames[2]) != 0 {
+		t.Fatalf("expected 2 non-empty frames followed by trailing empty slice, got %d parts", len(frames))
+	}
+	if string(frames[0]) != "event: event1\ndata: {\"a\":1}" {
+		t.Fatalf("unexpected frame1: %s", string(frames[0]))
+	}
+	if string(frames[1]) != "event: event2\ndata: {\"b\":2}" {
+		t.Fatalf("unexpected frame2: %s", string(frames[1]))
 	}
 }

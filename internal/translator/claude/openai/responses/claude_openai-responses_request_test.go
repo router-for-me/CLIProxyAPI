@@ -1,12 +1,13 @@
 package responses
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
 
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -282,6 +283,32 @@ func TestConvertOpenAIResponsesRequestToClaude_ReasoningContentTextRebuildsThink
 	}
 	if got := thinking.Get("signature").String(); got != expectedSignature {
 		t.Fatalf("thinking signature = %q, want %q", got, expectedSignature)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SummarySetsThinkingDisplay(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+		want    string
+	}{
+		{name: "auto", summary: `"summary":"auto"`, want: "summarized"},
+		{name: "concise", summary: `"summary":"concise"`, want: "summarized"},
+		{name: "none", summary: `"summary":"none"`, want: "omitted"},
+		{name: "absent", summary: "", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reasoning := `"effort":"high"`
+			if test.summary != "" {
+				reasoning += "," + test.summary
+			}
+			raw := []byte(`{"model":"claude-opus-5-5","reasoning":{` + reasoning + `},"input":"hi"}`)
+			out := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", raw, false)
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.want {
+				t.Fatalf("thinking.display = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -2575,5 +2602,199 @@ func TestConvertOpenAIResponsesRequestToClaude_StringInput(t *testing.T) {
 	}
 	if got := complexMsgs[0].Get("content").String(); got != "line 1\n\"line 2\"\n你好，世界 🌍" {
 		t.Fatalf("unexpected content for complex input, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_LongToolNamesUniqueAndReversible(t *testing.T) {
+	reqJSON := []byte(`{
+		"model": "claude-sonnet-5-5",
+		"input": "test",
+		"stream": false,
+		"tools": [{
+			"type": "namespace",
+			"name": "mcp__example_apps__acme_inventory_service",
+			"tools": [
+				{"type": "function", "name": "acme_inventory_service_get_item_prices", "description": "prices", "parameters": {"type": "object", "properties": {}}},
+				{"type": "function", "name": "acme_inventory_service_get_item_metrics", "description": "metrics", "parameters": {"type": "object", "properties": {}}}
+			]
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", reqJSON, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+
+	name0 := tools[0].Get("name").String()
+	name1 := tools[1].Get("name").String()
+
+	if len(name0) > 64 || len(name1) > 64 {
+		t.Fatalf("tool names must not exceed 64 chars, got %d and %d", len(name0), len(name1))
+	}
+	if name0 == name1 {
+		t.Fatalf("tool names must be unique, got duplicate name %q for both tools", name0)
+	}
+
+	child0, ns0 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name0)
+	if child0 != "acme_inventory_service_get_item_prices" || ns0 != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (%q, %q)",
+			name0, child0, ns0, "acme_inventory_service_get_item_prices", "mcp__example_apps__acme_inventory_service")
+	}
+
+	child1, ns1 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name1)
+	if child1 != "acme_inventory_service_get_item_metrics" || ns1 != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (%q, %q)",
+			name1, child1, ns1, "acme_inventory_service_get_item_metrics", "mcp__example_apps__acme_inventory_service")
+	}
+
+	// Verify non-stream response restores the original tool name and namespace
+	claudeResp := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_test_123","usage":{"input_tokens":10,"output_tokens":5}}}`,
+		fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_test_0","name":%q,"input":{}}}`, name0),
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"item_id\":\"42\"}"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+	translatedResp := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-sonnet-5-5", reqJSON, nil, claudeResp, nil)
+	outputItem := gjson.GetBytes(translatedResp, "output.0")
+	if outputItem.Get("type").String() != "function_call" {
+		t.Fatalf("output.0.type = %q, want function_call", outputItem.Get("type").String())
+	}
+	if outputItem.Get("name").String() != "acme_inventory_service_get_item_prices" {
+		t.Fatalf("output.0.name = %q, want acme_inventory_service_get_item_prices", outputItem.Get("name").String())
+	}
+	if outputItem.Get("namespace").String() != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("output.0.namespace = %q, want mcp__example_apps__acme_inventory_service", outputItem.Get("namespace").String())
+	}
+
+	// Verify stream response restores the original tool name and namespace
+	streamChunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_stream_123","usage":{"input_tokens":10,"output_tokens":5}}}`),
+		[]byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_test_1","name":%q,"input":{}}}`, name1)),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"metric\":\"latency\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+	var param any
+	var streamAdded, streamDone, streamCompleted gjson.Result
+	for _, chunk := range streamChunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-sonnet-5-5", reqJSON, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "function_call" {
+					streamAdded = data
+				}
+			case "response.output_item.done":
+				if data.Get("item.type").String() == "function_call" {
+					streamDone = data
+				}
+			case "response.completed":
+				streamCompleted = data
+			}
+		}
+	}
+	if !streamAdded.Exists() || streamAdded.Get("item.name").String() != "acme_inventory_service_get_item_metrics" || streamAdded.Get("item.namespace").String() != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("stream added event mismatch: name=%q, namespace=%q", streamAdded.Get("item.name").String(), streamAdded.Get("item.namespace").String())
+	}
+	if !streamDone.Exists() || streamDone.Get("item.name").String() != "acme_inventory_service_get_item_metrics" || streamDone.Get("item.namespace").String() != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("stream done event mismatch: name=%q, namespace=%q", streamDone.Get("item.name").String(), streamDone.Get("item.namespace").String())
+	}
+	if !streamCompleted.Exists() || streamCompleted.Get("response.output.0.name").String() != "acme_inventory_service_get_item_metrics" || streamCompleted.Get("response.output.0.namespace").String() != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("stream completed event mismatch: name=%q, namespace=%q", streamCompleted.Get("response.output.0.name").String(), streamCompleted.Get("response.output.0.namespace").String())
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SanitizationCollisions(t *testing.T) {
+	reqJSON := []byte(`{
+		"model": "claude-sonnet-5-5",
+		"input": "test",
+		"stream": false,
+		"tools": [
+			{"type": "function", "name": "a_b", "description": "ab", "parameters": {"type": "object", "properties": {}}},
+			{"type": "function", "name": "a.b", "description": "a.b", "parameters": {"type": "object", "properties": {}}}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", reqJSON, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+
+	name0 := tools[0].Get("name").String()
+	name1 := tools[1].Get("name").String()
+
+	if name0 == name1 {
+		t.Fatalf("tool names must not collide, got %q for both", name0)
+	}
+	if name0 != "a_b" {
+		t.Fatalf("tool 0 name = %q, want a_b", name0)
+	}
+	if !strings.HasPrefix(name1, "a_b_") {
+		t.Fatalf("tool 1 name = %q, want a_b_<hash>", name1)
+	}
+
+	child0, ns0 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name0)
+	if child0 != "a_b" || ns0 != "" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (a_b, \"\")", name0, child0, ns0)
+	}
+
+	child1, ns1 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name1)
+	if child1 != "a.b" || ns1 != "" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (a.b, \"\")", name1, child1, ns1)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_LongToolChoiceAndHistory(t *testing.T) {
+	reqJSON := []byte(`{
+		"model": "claude-sonnet-5-5",
+		"input": [
+			{"type": "message", "role": "user", "content": "check item"},
+			{"type": "function_call", "call_id": "call_123", "namespace": "mcp__example_apps__acme_inventory_service", "name": "acme_inventory_service_get_item_prices", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_123", "output": "{\"price\": 100}"}
+		],
+		"stream": false,
+		"tool_choice": {
+			"type": "function",
+			"namespace": "mcp__example_apps__acme_inventory_service",
+			"name": "acme_inventory_service_get_item_prices"
+		},
+		"tools": [{
+			"type": "namespace",
+			"name": "mcp__example_apps__acme_inventory_service",
+			"tools": [
+				{"type": "function", "name": "acme_inventory_service_get_item_prices", "description": "prices", "parameters": {"type": "object", "properties": {}}},
+				{"type": "function", "name": "acme_inventory_service_get_item_metrics", "description": "metrics", "parameters": {"type": "object", "properties": {}}}
+			]
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", reqJSON, false)
+
+	// Tool definition name for prices
+	declaredPricesName := gjson.GetBytes(out, "tools.0.name").String()
+
+	// tool_choice should have the exact same Claude name as the declared tool
+	toolChoiceName := gjson.GetBytes(out, "tool_choice.name").String()
+	if toolChoiceName != declaredPricesName {
+		t.Fatalf("tool_choice.name = %q, want %q", toolChoiceName, declaredPricesName)
+	}
+
+	// In messages history, the assistant tool_use block should have the exact same Claude name
+	messages := gjson.GetBytes(out, "messages").Array()
+	var foundHistoryToolUseName string
+	for _, msg := range messages {
+		if msg.Get("role").String() == "assistant" {
+			for _, part := range msg.Get("content").Array() {
+				if part.Get("type").String() == "tool_use" {
+					foundHistoryToolUseName = part.Get("name").String()
+				}
+			}
+		}
+	}
+	if foundHistoryToolUseName != declaredPricesName {
+		t.Fatalf("history tool_use.name = %q, want %q", foundHistoryToolUseName, declaredPricesName)
 	}
 }

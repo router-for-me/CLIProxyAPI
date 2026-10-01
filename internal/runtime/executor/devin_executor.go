@@ -17,17 +17,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	devinauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/devin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	devinauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/devin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -493,11 +493,35 @@ func (e *DevinExecutor) streamDevinFrames(
 
 	firstStreamEvent := true
 	streamFrameCount := 0
-	emitInteractionsEvent := func(rawJSON []byte) bool {
+	createdSent := false
+	var emitInteractionsEvent func(rawJSON []byte) bool
+	emitInteractionsEvent = func(rawJSON []byte) bool {
 		if len(rawJSON) == 0 {
 			return true
 		}
 		trimmed := bytes.TrimSpace(rawJSON)
+
+		eventType := gjson.GetBytes(trimmed, "event_type").String()
+		isFailedEvent := eventType == "response.failed" || eventType == "interaction.failed"
+
+		// If a failure occurs before any stream content has started, suppress the payload event
+		// so the stream can cleanly fail at the bootstrap layer with an HTTP error status code.
+		if isFailedEvent && !createdSent {
+			return true
+		}
+
+		if !createdSent && eventType != "interaction.created" {
+			createdSent = true
+			createdEvent, _ := sjson.SetBytes([]byte(`{"event_type":"interaction.created","interaction":{"id":"","model":""}}`), "interaction.id", interactionID)
+			createdEvent, _ = sjson.SetBytes(createdEvent, "interaction.model", req.Model)
+			if !emitInteractionsEvent(createdEvent) {
+				return false
+			}
+		}
+		if eventType == "interaction.created" {
+			createdSent = true
+		}
+
 		if firstStreamEvent {
 			firstStreamEvent = false
 			helps.AppendAPIResponseChunk(ctx, e.cfg, []byte("=== INTERMEDIATE INTERACTIONS STREAM ===\n"))
@@ -543,13 +567,6 @@ func (e *DevinExecutor) streamDevinFrames(
 		case out <- cliproxyexecutor.StreamChunk{Err: err}:
 		case <-ctx.Done():
 		}
-	}
-
-	// 1. Send initial interaction.created event
-	createdEvent, _ := sjson.SetBytes([]byte(`{"event_type":"interaction.created","interaction":{"id":"","model":""}}`), "interaction.id", interactionID)
-	createdEvent, _ = sjson.SetBytes(createdEvent, "interaction.model", req.Model)
-	if !emitInteractionsEvent(createdEvent) {
-		return
 	}
 
 	thoughtStepIndex := -1

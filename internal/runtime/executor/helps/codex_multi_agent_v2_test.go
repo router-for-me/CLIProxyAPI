@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -232,7 +232,7 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
 
 	cfg := &config.Config{}
-	payload := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high"}`)
+	payload := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","include_reasoning":true}`)
 
 	out := TranslateRequestWithAPIKeyModelCompatibility(
 		context.Background(),
@@ -295,5 +295,137 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 	}
 	if got := gjson.GetBytes(outStream, "plugin_call").Int(); got != 1 {
 		t.Fatalf("stream compat plugin_call = %d, want 1; output was %s", got, outStream)
+	}
+}
+
+func TestTranslateRequestCompatibilityForExecutorToolIntegerTypes(t *testing.T) {
+	const responsesPayload = `{"input":"hi","tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"yield_time_ms":{"type":"number"},"unrelated":{"type":"number"}}}}]}`
+	const claudePayload = `{"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"exec_command","input_schema":{"type":"object","properties":{"yield_time_ms":{"type":"number"},"unrelated":{"type":"number"}}}}]}`
+	for _, route := range []struct {
+		name       string
+		from, to   sdktranslator.Format
+		payload    string
+		properties string
+	}{
+		{name: "responses_to_codex", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatCodex, payload: responsesPayload, properties: "tools.0.parameters.properties"},
+		{name: "claude_to_codex", from: sdktranslator.FormatClaude, to: sdktranslator.FormatCodex, payload: claudePayload, properties: "tools.0.parameters.properties"},
+		{name: "responses_to_claude", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatClaude, payload: responsesPayload, properties: "tools.0.input_schema.properties"},
+		{name: "responses_passthrough", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatOpenAIResponse, payload: responsesPayload, properties: "tools.0.parameters.properties"},
+	} {
+		for _, target := range []struct {
+			name     string
+			preserve bool
+		}{
+			{name: "codex", preserve: true},
+			{name: "codex-websockets", preserve: true},
+			{name: "xai"},
+			{name: "meta"},
+			{name: ""},
+		} {
+			for _, ua := range []string{"codex_cli_rs/0.1", "curl/8.7.1", ""} {
+				for _, compat := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/target=%s/ua=%s/compat=%t", route.name, target.name, ua, compat), func(t *testing.T) {
+						var headers http.Header
+						if ua != "" {
+							headers = http.Header{"User-Agent": []string{ua}, "X-Openai-Subagent": []string{"collab_spawn"}}
+						}
+						payload := []byte(route.payload)
+						out, changed := TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntentForExecutor(t.Context(), headers, &config.Config{}, target.name, route.from, route.to, "model", payload, false, compat)
+						outputs := map[string][]byte{
+							"update_intent": out,
+							"body":          TranslateRequestWithAPIKeyModelCompatibilityForExecutor(t.Context(), headers, &config.Config{}, target.name, route.from, route.to, "model", payload, false, compat),
+						}
+						if target.name == "" {
+							outputs["legacy_body"] = TranslateRequestWithAPIKeyModelCompatibility(t.Context(), headers, &config.Config{}, route.from, route.to, "model", payload, false, compat)
+							outputs["legacy_update_intent"], _ = TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(t.Context(), headers, &config.Config{}, route.from, route.to, "model", payload, false, compat)
+						}
+						wantType := "number"
+						if ua == "codex_cli_rs/0.1" && !target.preserve {
+							wantType = "integer"
+						}
+						for entry, body := range outputs {
+							if got := gjson.GetBytes(body, route.properties+".yield_time_ms.type").String(); got != wantType {
+								t.Errorf("%s: yield_time_ms.type = %q, want %q; body=%s", entry, got, wantType, body)
+							}
+							if got := gjson.GetBytes(body, route.properties+".unrelated.type").String(); got != "number" {
+								t.Errorf("%s: unrelated.type = %q, want number", entry, got)
+							}
+						}
+						if changed {
+							t.Error("schema normalization reported a plugin configuration update")
+						}
+						if string(payload) != route.payload {
+							t.Error("source payload was mutated")
+						}
+						if ua != "" && (headers.Get("User-Agent") != ua || headers.Get("X-Openai-Subagent") != "collab_spawn") {
+							t.Error("request headers were mutated")
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestTranslateRequestWithCodexMultiAgentV2_NormalizesCodexToolTypes(t *testing.T) {
+	payload := []byte(`{
+		"model": "gpt-5.5",
+		"input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools": [
+			{
+				"type": "function",
+				"name": "exec_command",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"yield_time_ms": {"type": "number"},
+						"timeout_ms": {"type": "number"}
+					}
+				}
+			}
+		]
+	}`)
+
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.154.0"}}
+	out := TranslateRequestWithCodexMultiAgentV2(
+		context.Background(),
+		headers,
+		&config.Config{},
+		sdktranslator.FormatOpenAIResponse,
+		sdktranslator.FormatClaude,
+		"claude-opus-5-5",
+		payload,
+		false,
+	)
+
+	// In Claude format, tool is under tools[0].input_schema.properties
+	if got := gjson.GetBytes(out, "tools.0.input_schema.properties.yield_time_ms.type").String(); got != "integer" {
+		t.Errorf("translated Claude tool yield_time_ms type = %q, want integer; out=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.properties.timeout_ms.type").String(); got != "integer" {
+		t.Errorf("translated Claude tool timeout_ms type = %q, want integer; out=%s", got, out)
+	}
+
+	outGemini := TranslateRequestWithCodexMultiAgentV2(
+		context.Background(),
+		headers,
+		&config.Config{},
+		sdktranslator.FormatOpenAIResponse,
+		sdktranslator.FormatGemini,
+		"gemini-2.5-flash",
+		payload,
+		false,
+	)
+
+	// In Gemini format, tool is under functionDeclarations with parameters or parametersJsonSchema
+	geminiParam := gjson.GetBytes(outGemini, "tools.0.functionDeclarations.0.parametersJsonSchema.properties")
+	if !geminiParam.Exists() {
+		geminiParam = gjson.GetBytes(outGemini, "tools.0.function_declarations.0.parameters.properties")
+	}
+	if got := geminiParam.Get("yield_time_ms.type").String(); got != "integer" {
+		t.Errorf("translated Gemini tool yield_time_ms type = %q, want integer; out=%s", got, outGemini)
+	}
+	if got := geminiParam.Get("timeout_ms.type").String(); got != "integer" {
+		t.Errorf("translated Gemini tool timeout_ms type = %q, want integer; out=%s", got, outGemini)
 	}
 }

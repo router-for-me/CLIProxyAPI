@@ -13,23 +13,24 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
-	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
-	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
-	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/grokbuild"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
+	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/grokbuild"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -682,7 +683,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 
 	models := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		models = append(models, formatHomeCodexModel(entry))
+		models = append(models, formatHomeCodexModelWithSettings(entry, s.cfg))
 	}
 
 	var webSearchCapabilityForModel codexmodels.WebSearchCapabilityForModelFunc
@@ -732,11 +733,41 @@ func formatHomeCodexModel(entry homeModelEntry) map[string]any {
 	if entry.contextLength > 0 {
 		model["context_length"] = entry.contextLength
 	}
+	if entry.maxContextLength > 0 {
+		model["max_context_length"] = entry.maxContextLength
+	}
 	if entry.maxCompletionTokens > 0 {
 		model["max_completion_tokens"] = entry.maxCompletionTokens
 	}
 	if entry.thinking != nil {
 		model["thinking"] = entry.thinking
+	}
+	return model
+}
+
+func formatHomeCodexModelWithSettings(entry homeModelEntry, cfg *config.Config) map[string]any {
+	model := formatHomeCodexModel(entry)
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return model
+	}
+	providers := append([]string(nil), entry.providers...)
+	sort.SliceStable(providers, func(i, j int) bool {
+		if strings.EqualFold(providers[i], "codex") {
+			return true
+		}
+		if strings.EqualFold(providers[j], "codex") {
+			return false
+		}
+		return strings.ToLower(providers[i]) < strings.ToLower(providers[j])
+	})
+	for _, p := range providers {
+		channel := strings.ToLower(strings.TrimSpace(p))
+		if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
+			if setting := config.ResolveOAuthModelSetting(channelSettings, entry.id, "", ""); setting != nil && setting.MaxContextLength > 0 {
+				model["max_context_length"] = setting.MaxContextLength
+				break
+			}
+		}
 	}
 	return model
 }
@@ -769,6 +800,7 @@ type homeModelEntry struct {
 	ownedBy                string
 	displayName            string
 	contextLength          int
+	maxContextLength       int
 	maxCompletionTokens    int
 	thinking               *registry.ThinkingSupport
 	providers              []string
@@ -1084,6 +1116,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				ownedBy:                ownedBy,
 				displayName:            displayName,
 				contextLength:          int(homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens")),
+				maxContextLength:       int(homeModelInt64Value(model, "max_context_length", "maxContextLength")),
 				maxCompletionTokens:    int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens")),
 				thinking:               thinking,
 				providers:              appendUniqueHomeProvider(nil, provider),

@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	"golang.org/x/net/context"
 )
 
@@ -25,6 +25,7 @@ type modelExecutionOptions struct {
 	ForcedProvider          string
 	AuthSelectionModel      string
 	ProxyURL                string
+	Path                    string
 }
 
 // ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.
@@ -39,6 +40,7 @@ type ProtocolExecutionRequest struct {
 	Headers            http.Header
 	Query              url.Values
 	Alt                string
+	Path               string
 }
 
 // ModelExecutionRequest describes an internal model execution request.
@@ -56,6 +58,7 @@ type ModelExecutionRequest struct {
 	ForcedProvider          string
 	AuthID                  string
 	ProxyURL                string
+	Path                    string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution response.
@@ -111,7 +114,8 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 	if req.AuthID != "" {
 		ctx = WithPinnedAuthID(ctx, req.AuthID)
 	}
-	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+	allowImageModel := isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol)
+	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, allowImageModel, modelExecutionOptions{
 		Headers:                 req.Headers,
 		Query:                   req.Query,
 		InternalSource:          true,
@@ -119,6 +123,7 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 		SkipRouterPluginID:      req.SkipRouterPluginID,
 		ForcedProvider:          req.ForcedProvider,
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
+		Path:                    strings.TrimSpace(req.Path),
 	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
@@ -145,7 +150,8 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 	if req.AuthID != "" {
 		ctx = WithPinnedAuthID(ctx, req.AuthID)
 	}
-	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+	allowImageModel := isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol)
+	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, allowImageModel, modelExecutionOptions{
 		Headers:                 req.Headers,
 		Query:                   req.Query,
 		InternalSource:          true,
@@ -153,6 +159,7 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		SkipRouterPluginID:      req.SkipRouterPluginID,
 		ForcedProvider:          req.ForcedProvider,
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
+		Path:                    strings.TrimSpace(req.Path),
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {
@@ -170,11 +177,13 @@ func (h *BaseAPIHandler) ExecuteProtocolWithAuthManager(ctx context.Context, req
 	if req.Stream {
 		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteProtocolWithAuthManager requires Stream=false")
 	}
-	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+	allowImageModel := isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol)
+	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, allowImageModel, modelExecutionOptions{
 		Headers:            req.Headers,
 		Query:              req.Query,
 		ForcedProvider:     req.ForcedProvider,
 		AuthSelectionModel: req.AuthSelectionModel,
+		Path:               strings.TrimSpace(req.Path),
 	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
@@ -191,11 +200,13 @@ func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Contex
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteProtocolStreamWithAuthManager requires Stream=true")
 	}
-	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+	allowImageModel := isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol)
+	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, allowImageModel, modelExecutionOptions{
 		Headers:            req.Headers,
 		Query:              req.Query,
 		ForcedProvider:     req.ForcedProvider,
 		AuthSelectionModel: req.AuthSelectionModel,
+		Path:               strings.TrimSpace(req.Path),
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {
@@ -210,6 +221,10 @@ func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Contex
 
 func modelExecutionModeError(message string) *interfaces.ErrorMessage {
 	return &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(message)}
+}
+
+func isModelExecutionImageProtocol(protocol string) bool {
+	return strings.EqualFold(strings.TrimSpace(protocol), "openai-image")
 }
 
 func validateModelExecutionProxy(raw string) *interfaces.ErrorMessage {

@@ -7,14 +7,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type interactionsToResponsesStreamState struct {
+	ID                 string
 	EnvironmentID      string
 	FunctionCalls      map[int]*interactionsFunctionCallState
 	ItemIDs            map[int]string
@@ -168,6 +169,8 @@ func convertInteractionsEventToResponses(modelName string, originalRequestRawJSO
 		return interactionsStepStopToResponses(root, st)
 	case "interaction.completed", "finish":
 		return [][]byte{responsesCompletedEvent(modelName, root, st)}
+	case "response.failed", "interaction.failed":
+		return [][]byte{responsesFailedEvent(modelName, root, st)}
 	case "done":
 		if st.Done {
 			return nil
@@ -230,7 +233,11 @@ func interactionsStepToResponsesOutput(step gjson.Result, forAntigravity bool, t
 func responsesCreatedEvent(modelName string, originalRequestRawJSON, requestRawJSON []byte, root gjson.Result, st *interactionsToResponsesStreamState) []byte {
 	payload := []byte(`{"type":"response.created","response":{"id":"","object":"response","status":"in_progress","model":"","output":[]}}`)
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
-	payload, _ = sjson.SetBytes(payload, "response.id", firstNonEmpty(root.Get("interaction.id").String(), root.Get("id").String()))
+	id := firstNonEmpty(root.Get("interaction.id").String(), root.Get("id").String())
+	if st != nil && id != "" {
+		st.ID = id
+	}
+	payload, _ = sjson.SetBytes(payload, "response.id", id)
 	payload, _ = sjson.SetBytes(payload, "response.model", modelName)
 	if envID := firstNonEmpty(root.Get("interaction.environment_id").String(), root.Get("environment_id").String(), root.Get("environment.id").String(), root.Get("interaction.environment.id").String()); envID != "" {
 		if st != nil {
@@ -517,6 +524,40 @@ func responsesCompletedEvent(modelName string, root gjson.Result, st *interactio
 	}
 	payload = setResponsesCompletedOutput(payload, st)
 	payload = setResponsesUsageFromInteractions(payload, "response.usage", translatorcommon.InteractionsUsage(root))
+	return emitResponsesEvent(eventType, payload)
+}
+
+func responsesFailedEvent(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) []byte {
+	eventType := "response.failed"
+	payload := []byte(`{"type":"response.failed","response":{"id":"","object":"response","status":"failed","model":"","output":[],"error":{"message":"","code":"","type":"server_error"}}}`)
+	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
+	interaction := root.Get("interaction")
+	id := firstNonEmpty(interaction.Get("id").String(), root.Get("id").String())
+	if id == "" && st != nil {
+		id = st.ID
+	}
+	payload, _ = sjson.SetBytes(payload, "response.id", id)
+	payload, _ = sjson.SetBytes(payload, "response.model", firstNonEmpty(interaction.Get("model").String(), modelName))
+	errNode := root.Get("error")
+	if !errNode.Exists() && interaction.Exists() {
+		errNode = interaction.Get("error")
+	}
+	msg := errNode.Get("message").String()
+	if msg == "" {
+		msg = "upstream execution failed"
+	}
+	code := errNode.Get("code").String()
+	payload, _ = sjson.SetBytes(payload, "response.error.message", msg)
+	if code != "" {
+		payload, _ = sjson.SetBytes(payload, "response.error.code", code)
+	} else {
+		payload, _ = sjson.DeleteBytes(payload, "response.error.code")
+	}
+	errType := errNode.Get("type").String()
+	if errType == "" {
+		errType = "server_error"
+	}
+	payload, _ = sjson.SetBytes(payload, "response.error.type", errType)
 	return emitResponsesEvent(eventType, payload)
 }
 

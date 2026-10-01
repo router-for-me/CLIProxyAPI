@@ -9,8 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 )
 
 type executionResources struct {
@@ -138,12 +138,13 @@ func (r *executionResources) Close() error {
 
 // HomeDispatchSelection keeps a Home execution scope separate from its auth.
 type HomeDispatchSelection struct {
-	Auth               *Auth
-	Executor           ProviderExecutor
-	Provider           string
-	CanonicalSessionID string
-	ParentSessionID    string
-	modelInfo          *registry.ModelInfo
+	Auth                       *Auth
+	Executor                   ProviderExecutor
+	Provider                   string
+	CanonicalSessionID         string
+	ParentSessionID            string
+	modelInfo                  *registry.ModelInfo
+	configurationUpdateSupport *bool
 
 	authMu           sync.RWMutex
 	scope            *executionregistry.Scope
