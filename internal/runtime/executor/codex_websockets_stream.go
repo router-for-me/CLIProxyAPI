@@ -24,6 +24,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if opts.Alt != "responses/compact" && helps.HasResponsesCompactionTrigger(req.Payload) {
+		return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
