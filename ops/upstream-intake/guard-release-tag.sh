@@ -28,8 +28,11 @@ die() {
 [ "$#" -ge 1 ] || die "usage: guard-release-tag.sh <tag> [upstream-repo]"
 tag="$1"
 
-[[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
-  die "expected a stable vX.Y.Z release tag, got '$tag'"
+# Our release tags are vX.Y.Z-upstreamA.B.C, the same shape the release
+# workflow triggers on. A bare vX.Y.Z is still accepted so the script can be
+# used against an untagged upstream name, but it is not what we publish.
+[[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-upstream(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))?$ ]] ||
+  die "expected a stable vX.Y.Z or vX.Y.Z-upstreamA.B.C release tag, got '$tag'"
 
 command -v gh >/dev/null 2>&1 || die "gh is required to query $UPSTREAM_REPO"
 git rev-parse --verify --quiet "refs/tags/$tag^{commit}" >/dev/null ||

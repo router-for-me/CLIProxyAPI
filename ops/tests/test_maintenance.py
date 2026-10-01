@@ -307,6 +307,22 @@ class ReleaseNoteTests(unittest.TestCase):
         self.assertIn("v[0-9]+.[0-9]+.[0-9]+-upstream*", workflow)
         self.assertNotIn("'v[0-9]+.[0-9]+.[0-9]+'", workflow)
 
+    def test_guard_script_accepts_the_tags_the_workflow_pushes(self):
+        # The workflow only ever pushes vX.Y.Z-upstreamA.B.C and then hands
+        # that exact string to guard-release-tag.sh. A guard that rejects the
+        # suffix fails every release at the validate job.
+        script = (ROOT / "ops/upstream-intake/guard-release-tag.sh").read_text()
+        pattern = re.search(r'\[\[ "\$tag" =~ (\^\S+) \]\]', script)
+        self.assertIsNotNone(pattern, "guard-release-tag.sh lost its tag shape check")
+        regex = re.compile(pattern.group(1))
+        for accepted in ["v1.0.0", "v1.2.3-upstream8.0.6", "v10.20.30-upstream8.0.7"]:
+            with self.subTest(tag=accepted):
+                self.assertIsNotNone(regex.fullmatch(accepted))
+        for rejected in ["v1.2.3-upstreamv8.0.6", "v1.2.3-upstream8.0",
+                         "v1.2.3-upstream8.0.6-extra", "1.2.3"]:
+            with self.subTest(tag=rejected):
+                self.assertIsNone(regex.fullmatch(rejected))
+
     def test_intake_scripts_are_executable(self):
         for name in ["guard-release-tag", "check-tag-namespace", "establish-baseline"]:
             with self.subTest(script=name):
