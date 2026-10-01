@@ -235,3 +235,92 @@ func TestAuthenticateNoCredentials(t *testing.T) {
 		t.Fatalf("authErr = %+v; want no_credentials", authErr)
 	}
 }
+
+func TestAuthenticateFallsThroughToSecondCandidate(t *testing.T) {
+	hashID := "token-hash-2"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+secret() {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":"` + hashID + `","info":{"user_id":"u1"}}`))
+	}))
+	defer srv.Close()
+
+	pg := &fakePG{byHash: map[string]*store.APIKey{}}
+	lite := &fakeLite{byID: map[string]*store.LiteLLMKey{hashID: {
+		ID: hashID, Name: "prod", UserID: "u1",
+	}}}
+	logs := &fakeLogs{ch: make(chan store.OnTheFlyLogEvent, 4)}
+	p := newProvider(t, pg, lite, logs, srv, time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-not-litellm-000000000000")
+	req.Header.Set("X-Api-Key", secret())
+	res, authErr := p.Authenticate(context.Background(), req)
+	if authErr != nil {
+		t.Fatalf("Authenticate err: %v; want fall-through to second candidate", authErr)
+	}
+	if res.Metadata["key_id"] != hashID {
+		t.Fatalf("key_id = %q; want %q", res.Metadata["key_id"], hashID)
+	}
+	if len(pg.upserted) != 1 {
+		t.Fatalf("upserts = %d; want 1", len(pg.upserted))
+	}
+	// Two candidates are attempted: the first records an invalid outcome, the
+	// second records a single synced outcome.
+	var synced int
+	for i := 0; i < 2; i++ {
+		if ev := logs.wait(t); ev.Outcome == store.OnTheFlyOutcomeSynced {
+			synced++
+		}
+	}
+	if synced != 1 {
+		t.Fatalf("synced events = %d; want 1", synced)
+	}
+}
+
+func TestAuthenticatePlaintextNeverPersisted(t *testing.T) {
+	hash := store.HashSecret(secret())
+	hashID := "token-hash-3"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"key":"` + hashID + `","info":{"user_id":"u1"}}`))
+	}))
+	defer srv.Close()
+
+	pg := &fakePG{byHash: map[string]*store.APIKey{}}
+	lite := &fakeLite{byID: map[string]*store.LiteLLMKey{hashID: {
+		ID: hashID, Name: "prod", UserID: "u1",
+	}}}
+	logs := &fakeLogs{ch: make(chan store.OnTheFlyLogEvent, 4)}
+	p := newProvider(t, pg, lite, logs, srv, time.Minute)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+secret())
+	if _, authErr := p.Authenticate(context.Background(), req); authErr != nil {
+		t.Fatalf("Authenticate err: %v", authErr)
+	}
+	if len(pg.upserted) != 1 {
+		t.Fatalf("upserts = %d; want 1", len(pg.upserted))
+	}
+	up := pg.upserted[0]
+	if up.KeyHash != hash {
+		t.Fatalf("KeyHash = %q; want %q", up.KeyHash, hash)
+	}
+	if up.KeyPrefix == secret() {
+		t.Fatalf("plaintext persisted as KeyPrefix: %q", up.KeyPrefix)
+	}
+	if up.ID == secret() || up.Name == secret() || up.KeyAlias == secret() || up.UserID == secret() {
+		t.Fatalf("plaintext persisted in APIKey: %+v", up)
+	}
+	ev := logs.wait(t)
+	if ev.KeyPrefix == secret() {
+		t.Fatalf("plaintext logged as KeyPrefix: %q", ev.KeyPrefix)
+	}
+	if ev.ErrorMessage == secret() || ev.UserID == secret() || ev.Source == secret() || ev.KeyID == secret() {
+		t.Fatalf("plaintext logged in event: %+v", ev)
+	}
+}

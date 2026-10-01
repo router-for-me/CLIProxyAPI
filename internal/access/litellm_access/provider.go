@@ -206,6 +206,7 @@ func (p *Provider) Authenticate(ctx context.Context, r *http.Request) (*sdkacces
 		ttl = defaultCacheTTL
 	}
 
+	rejected := false
 	for _, c := range candidates {
 		hash := store.HashSecret(c.value)
 
@@ -229,11 +230,25 @@ func (p *Provider) Authenticate(ctx context.Context, r *http.Request) (*sdkacces
 					return resultFromKey(c.value, c.source, k.ID, k.UserID), nil
 				}
 			case store.OnTheFlyOutcomeUnmatched, store.OnTheFlyOutcomeInvalid:
-				return nil, sdkaccess.NewInvalidCredentialError()
+				rejected = true
+				continue
 			}
 		}
 
-		return p.validateAndSync(ctx, c, hash, settings.BaseURL, timeout, ttl)
+		res, authErr := p.validateAndSync(ctx, c, hash, settings.BaseURL, timeout, ttl)
+		if authErr == nil {
+			return res, nil
+		}
+		// An upstream/internal failure will not improve on another candidate,
+		// so surface it immediately; an invalid credential may be one of
+		// several supplied, so try the next one.
+		if authErr.Code != sdkaccess.AuthErrorCodeInvalidCredential {
+			return nil, authErr
+		}
+		rejected = true
+	}
+	if rejected {
+		return nil, sdkaccess.NewInvalidCredentialError()
 	}
 	return nil, sdkaccess.NewNotHandledError()
 }
