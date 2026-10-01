@@ -22,6 +22,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Bound a hung step so it cannot consume runner minutes indefinitely.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -32,9 +34,20 @@ jobs:
           cache: true
       - name: Check maintenance tooling
         run: python3 ops/tests/test_maintenance.py
+      # Upstream refreshes this catalog from the network in its PR CI. We
+      # validate the tracked copy offline instead, so the gate stays hermetic
+      # and never mutates the checkout.
+      - name: Validate Codex model catalog
+        run: go run ./cmd/validate_codex_models --file internal/registry/models/codex_client_models.json
       - name: Check formatting
         run: |
-          unformatted="$(gofmt -l .)"
+          set -euo pipefail
+          # Use the formatter shipped with the active toolchain and check only
+          # tracked sources, matching ops/upstream-intake/verify-absorb.sh. A
+          # separately installed gofmt on PATH may be a different Go release
+          # and disagree with what CI will reject.
+          gofmt_bin="$(go env GOROOT)/bin/gofmt"
+          unformatted="$(git ls-files -z '*.go' | xargs -0 "$gofmt_bin" -l)"
           if [ -n "$unformatted" ]; then
             echo "These files need gofmt:"
             echo "$unformatted"
