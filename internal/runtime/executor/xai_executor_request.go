@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -334,7 +336,14 @@ func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth, clientHeade
 // applyXAIHeaders behavior. CLI chat-proxy identity headers are only attached
 // when using_api is false and the resolved chat base URL is the official CLI
 // chat-proxy endpoint.
-func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, clientHeaders ...http.Header) {
+func xaiChatClientVersion(cfg *config.Config) string {
+	if cfg != nil && cfg.XAI.GrokCLIVersion != "" {
+		return cfg.XAI.GrokCLIVersion
+	}
+	return misc.GrokCLILatestVersion()
+}
+
+func applyXAIChatHeaders(r *http.Request, cfg *config.Config, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, clientHeaders ...http.Header) {
 	if xaiUsingAPI(auth) {
 		applyXAIHeaders(r, auth, token, stream, sessionID, clientHeaders...)
 		return
@@ -342,8 +351,9 @@ func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string,
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
 	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
 		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
-		r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
-		r.Header.Set("User-Agent", "xai-grok-workspace/"+xaiClientVersionValue)
+		version := xaiChatClientVersion(cfg)
+		r.Header.Set(xaiClientVersionHeader, version)
+		r.Header.Set("User-Agent", "xai-grok-workspace/"+version)
 		r.Header.Set(xaiClientIdentifierHeader, xaiClientIdentifierValue)
 		r.Header.Set(xaiAuthenticateResponseHeader, xaiAuthenticateResponseValue)
 	}

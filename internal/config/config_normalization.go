@@ -4,7 +4,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
+	log "github.com/sirupsen/logrus"
 )
 
 // NormalizePluginsConfig applies default plugin configuration values.
@@ -30,6 +32,21 @@ func (cfg *Config) NormalizePluginsConfig() {
 	cfg.Plugins.StoreAuth = sdkpluginstore.NormalizeAuthConfigs(cfg.Plugins.StoreAuth)
 	if cfg.Plugins.Configs == nil {
 		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
+	}
+}
+
+// SanitizeXAIConfig trims and validates provider-wide xAI settings.
+func (cfg *Config) SanitizeXAIConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.XAI.GrokCLIVersion = strings.TrimSpace(cfg.XAI.GrokCLIVersion)
+	if cfg.XAI.GrokCLIVersion == "" {
+		return
+	}
+	if !misc.IsValidGrokCLIVersion(cfg.XAI.GrokCLIVersion) {
+		log.WithField("version", cfg.XAI.GrokCLIVersion).Warn("invalid xai.grok-cli-version; using dynamic Grok CLI stable version")
+		cfg.XAI.GrokCLIVersion = ""
 	}
 }
 

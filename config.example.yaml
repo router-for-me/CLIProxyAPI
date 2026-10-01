@@ -1036,6 +1036,10 @@ oauth:
       # The injected tool is also added to tool_choice.allowed_tools when applicable.
       inject-x-search: false
 
+      # Stable Grok CLI version reported to xAI cli-chat-proxy.
+      # Leave empty to track the latest stable version dynamically.
+      # grok-cli-version: "1.0.46"
+
     # Devin provider behavior.
     # devin:
     #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts

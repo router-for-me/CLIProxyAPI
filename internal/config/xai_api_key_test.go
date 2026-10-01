@@ -10,15 +10,32 @@ func TestParseConfigBytesXAIConfig(t *testing.T) {
 	if defaultCfg.XAI.InjectXSearch {
 		t.Fatal("xai.inject-x-search = true by default, want false")
 	}
+	if defaultCfg.XAI.GrokCLIVersion != "" {
+		t.Fatalf("xai.grok-cli-version = %q by default, want dynamic lookup", defaultCfg.XAI.GrokCLIVersion)
+	}
 
 	enabledCfg, errEnabled := ParseConfigBytes([]byte(`xai:
   inject-x-search: true
+  grok-cli-version: " 1.0.46 "
 `))
 	if errEnabled != nil {
 		t.Fatalf("ParseConfigBytes(enabled) error = %v", errEnabled)
 	}
 	if !enabledCfg.XAI.InjectXSearch {
 		t.Fatal("xai.inject-x-search = false, want true")
+	}
+	if enabledCfg.XAI.GrokCLIVersion != "1.0.46" {
+		t.Fatalf("xai.grok-cli-version = %q, want trimmed 1.0.46", enabledCfg.XAI.GrokCLIVersion)
+	}
+
+	invalidCfg, errInvalid := ParseConfigBytes([]byte(`xai:
+  grok-cli-version: "v1.0.46"
+`))
+	if errInvalid != nil {
+		t.Fatalf("ParseConfigBytes(invalid) error = %v", errInvalid)
+	}
+	if invalidCfg.XAI.GrokCLIVersion != "" {
+		t.Fatalf("xai.grok-cli-version = %q, want dynamic lookup after invalid value", invalidCfg.XAI.GrokCLIVersion)
 	}
 }
 

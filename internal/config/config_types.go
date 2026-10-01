@@ -146,6 +146,10 @@ type CodexHeaderDefaults struct {
 type XAIConfig struct {
 	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
+
+	// GrokCLIVersion is the stable Grok CLI version reported to cli-chat-proxy.
+	// An empty value tracks the latest stable release dynamically.
+	GrokCLIVersion string `yaml:"grok-cli-version,omitempty" json:"grok-cli-version,omitempty"`
 }
 
 // DevinConfig configures provider-wide Devin request behavior.
