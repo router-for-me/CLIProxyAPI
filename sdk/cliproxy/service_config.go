@@ -279,6 +279,7 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 		needsAliasRebuild = true
 		authForRegistration := prepared
 		tasks = append(tasks, modelRegistrationTask{
+			authID:   authForRegistration.ID,
 			phase:    modelRegistrationPhaseConfigAPIKey,
 			category: modelRegistrationCategory(authForRegistration),
 			run: func(compatCache *openAICompatibilityRegistrationCache) {

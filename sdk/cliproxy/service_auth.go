@@ -184,6 +184,7 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 			authID := authForRegistration.ID
 			wait := startedWaitByID[authID]
 			tasks = append(tasks, modelRegistrationTask{
+				authID:   authID,
 				phase:    modelRegistrationPhase(authForRegistration),
 				category: modelRegistrationCategory(authForRegistration),
 				run: func(compatCache *openAICompatibilityRegistrationCache) {

@@ -453,9 +453,10 @@ func TestHandleAuthUpdates_ModelRegistrationDoesNotHoldAuthUpdateLock(t *testing
 
 	started := make(chan struct{})
 	block := make(chan struct{})
-	var first atomic.Bool
-	modelRegistrationTaskHook = func() {
-		if first.CompareAndSwap(false, true) {
+	finishedA := make(chan struct{})
+	var blocked atomic.Bool
+	modelRegistrationTaskHook = func(authID string) {
+		if authID == authAID && blocked.CompareAndSwap(false, true) {
 			close(started)
 			<-block
 		}
@@ -467,9 +468,15 @@ func TestHandleAuthUpdates_ModelRegistrationDoesNotHoldAuthUpdateLock(t *testing
 		default:
 			close(block)
 		}
+		// Wait for the blocked registration to finish before the deferred
+		// UnregisterClient calls run, so a failing test cannot re-register
+		// these auths in the process-wide registry.
+		select {
+		case <-finishedA:
+		case <-time.After(5 * time.Second):
+		}
 	})
 
-	finishedA := make(chan struct{})
 	go func() {
 		defer close(finishedA)
 		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
@@ -619,8 +626,9 @@ func TestHandleAuthUpdates_StaleDisableRegistrationDoesNotDropNewerEnable(t *tes
 
 	started := make(chan struct{})
 	block := make(chan struct{})
+	finishedDisable := make(chan struct{})
 	var first atomic.Bool
-	modelRegistrationTaskHook = func() {
+	modelRegistrationTaskHook = func(_ string) {
 		if first.CompareAndSwap(false, true) {
 			close(started)
 			<-block
@@ -633,9 +641,15 @@ func TestHandleAuthUpdates_StaleDisableRegistrationDoesNotDropNewerEnable(t *tes
 		default:
 			close(block)
 		}
+		// Wait for the blocked registration to finish before the deferred
+		// UnregisterClient call runs, so a failing test cannot re-register
+		// this auth in the process-wide registry.
+		select {
+		case <-finishedDisable:
+		case <-time.After(5 * time.Second):
+		}
 	})
 
-	finishedDisable := make(chan struct{})
 	go func() {
 		defer close(finishedDisable)
 		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
@@ -719,9 +733,13 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 
 	bStarted := make(chan struct{})
 	bBlock := make(chan struct{})
-	var started atomic.Int32
-	modelRegistrationTaskHook = func() {
-		if started.Add(1) == 2 {
+	finishedBatch := make(chan struct{})
+	var blocked atomic.Bool
+	// Block auth B specifically. Counting registrations instead would block
+	// whichever worker reached the hook second, and the batch runs A and B
+	// concurrently, so the blocked auth was a scheduling race.
+	modelRegistrationTaskHook = func(authID string) {
+		if authID == authBID && blocked.CompareAndSwap(false, true) {
 			close(bStarted)
 			<-bBlock
 		}
@@ -733,6 +751,13 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		default:
 			close(bBlock)
 		}
+		// The batch registers models in the process-wide registry. Wait for it
+		// to finish before the deferred UnregisterClient calls run, so a failing
+		// test cannot leave these auths registered for later tests.
+		select {
+		case <-finishedBatch:
+		case <-time.After(5 * time.Second):
+		}
 	})
 
 	updateA := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authAID, Auth: authA}
@@ -740,7 +765,6 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 	updateB := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authBID, Auth: authB}
 	updateB.SetRevision(1)
 
-	finishedBatch := make(chan struct{})
 	go func() {
 		defer close(finishedBatch)
 		service.handleAuthUpdates(context.Background(), []watcher.AuthUpdate{updateA, updateB})

@@ -29,6 +29,7 @@ const (
 )
 
 type modelRegistrationTask struct {
+	authID   string
 	phase    int
 	category string
 	run      func(*openAICompatibilityRegistrationCache)
@@ -50,9 +51,11 @@ var registerPluginExecutors = func(host *pluginhost.Host, manager *coreauth.Mana
 }
 
 // modelRegistrationTaskHook, if set, runs after auth-update commits and before
-// model registration workers start. Tests use it to prove registration no longer
-// holds authUpdateMu.
-var modelRegistrationTaskHook func()
+// model registration workers start, receiving the ID of the auth whose models
+// are about to be registered. Tests use it to prove registration no longer
+// holds authUpdateMu, and to block one specific auth rather than whichever
+// worker happens to reach the hook first.
+var modelRegistrationTaskHook func(authID string)
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -178,6 +181,7 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 		}
 		authForRegistration := auth.Clone()
 		tasks = append(tasks, modelRegistrationTask{
+			authID:   authForRegistration.ID,
 			phase:    modelRegistrationPhase(authForRegistration),
 			category: modelRegistrationCategory(authForRegistration),
 			run: func(compatCache *openAICompatibilityRegistrationCache) {
@@ -260,7 +264,7 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 						default:
 						}
 						if modelRegistrationTaskHook != nil {
-							modelRegistrationTaskHook()
+							modelRegistrationTaskHook(task.authID)
 						}
 						task.run(compatCache)
 					}(task)
@@ -362,6 +366,7 @@ func (s *Service) registerModelRefreshCallback() {
 			}
 			authForRefresh := auth
 			tasks = append(tasks, modelRegistrationTask{
+				authID:   authForRefresh.ID,
 				phase:    modelRegistrationPhase(authForRefresh),
 				category: modelRegistrationCategory(authForRefresh),
 				run: func(compatCache *openAICompatibilityRegistrationCache) {
