@@ -20,16 +20,17 @@ operations; a request to review them does not authorize publishing or deployment
    and choose our semantic version: patch for compatible fixes, minor for
    compatible additions, major for breaking changes.
 2. Build the release tag as `vX.Y.Z-upstreamA.B.C`, where `A.B.C` is the
-   upstream release this version is aligned to, or `vX.Y.Z-upstreamnone` for a
-   fork-only release. The suffix is what distinguishes our tags from upstream's
-   identical-looking `vX.Y.Z` names, and the workflow rejects a tag that still
-   points at an upstream commit.
+   upstream release this version is aligned to. A version that ports no new
+   upstream work keeps the previous release's suffix, because it is still built
+   on that baseline; the `Ported` field records that nothing new was taken. The
+   suffix is what distinguishes our tags from upstream's identical-looking
+   `vX.Y.Z` names, and the workflow rejects a tag that still points at an
+   upstream commit.
 3. Copy `docs/releases/RELEASE_TEMPLATE.md` to `docs/releases/<tag>.md` and
    write the release from the user's perspective. Explain the compatibility or
    migration impact, validation actually performed, known limitations, and the
-   exact upstream release aligned with this version. Use `none (fork-only
-   release)` when no upstream intake is included; the tag suffix must agree with
-   that field. Validate it locally:
+   exact upstream release aligned with this version, which must match the tag
+   suffix. Validate it locally:
 
    ```bash
    python3 ops/release-notes/validate.py validate \

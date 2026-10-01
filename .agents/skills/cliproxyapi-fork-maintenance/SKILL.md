@@ -54,15 +54,16 @@ continues to apply to its target; do not ask again for routine steps it covers.
 ## Release and installation decisions
 
 Release only reviewed commits reachable from our `main`. Tag releases
-`vX.Y.Z-upstreamA.B.C` for the aligned upstream release, or
-`vX.Y.Z-upstreamnone` for a fork-only release; the suffix must match the note's
-upstream alignment. Push a single own tag, assemble complete assets as a draft,
+`vX.Y.Z-upstreamA.B.C`, where the suffix names the upstream release the tag is
+aligned to and must match the note's upstream alignment. A release that ports no
+new upstream work keeps the previous release's suffix, because it is still
+built on that baseline; record that in `Ported` rather than declaring the
+alignment absent. Push a single own tag, assemble complete assets as a draft,
 and publish after final checksum validation. Do not move published tags or
 overwrite published assets; fix forward with a new version. Every release
 requires a curated `docs/releases/<tag>.md` that explains
-user-visible changes, validation limits and the exact aligned upstream release;
-use `none (fork-only release)` when no intake is included. Update the separate
-tap only after the public release is complete.
+user-visible changes, validation limits and the exact aligned upstream release.
+Update the separate tap only after the public release is complete.
 
 Upgrade through Homebrew. Prepare a versioned rollback formula first when a
 rollback path is needed. Verify public assets, tap metadata, installed binary and

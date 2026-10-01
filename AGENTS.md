@@ -19,9 +19,10 @@ and do not wait for upstream review before shipping our own work.
   multi-platform build on a `vX.Y.Z-upstream*` tag push, so pushing upstream
   tags here would publish spurious releases from our fork.
 - **Our releases carry their own `vX.Y.Z-upstreamA.B.C` tags**, where the suffix
-  records the aligned upstream release (`upstreamnone` for a fork-only release).
-  The suffix is what separates our tags from upstream's identical-looking names,
-  and it must agree with the note's upstream-alignment statement. Push only the
+  records the aligned upstream release. A release that ports no new upstream work
+  keeps the previous suffix; the `Ported` field records that nothing new was
+  taken. The suffix separates our tags from upstream's identical-looking names
+  and must agree with the note's upstream-alignment statement. Push only the
   specific release ref, never `--tags` or `--mirror`. Release CI rejects any tag
   that still points at an upstream commit, requires a curated
   `docs/releases/<tag>.md`, checks the tag and main ancestry, runs the regression

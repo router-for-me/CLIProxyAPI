@@ -9,10 +9,9 @@ from pathlib import Path
 
 def render(tag: str, manifest: str, template: str) -> str:
     core = r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
-    if not re.fullmatch(rf"v{core}(-upstream({core}|none))?", tag, re.ASCII):
+    if not re.fullmatch(rf"v{core}(-upstream{core})?", tag, re.ASCII):
         raise ValueError(
-            "expected a vX.Y.Z tag with an optional -upstreamX.Y.Z or "
-            "-upstreamnone suffix"
+            "expected a vX.Y.Z tag with an optional -upstreamX.Y.Z suffix"
         )
     version = tag[1:]
 

@@ -11,12 +11,13 @@ from pathlib import Path
 VERSION_CORE = r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
 UPSTREAM_VERSION = rf"v{VERSION_CORE}"
 # Our releases are vX.Y.Z. The optional suffix records the upstream release the
-# tag is aligned to, or "none" for a fork-only release. The suffix is validated
-# against the curated note so the tag cannot drift from the recorded alignment.
-# The suffix repeats the version without a leading "v": v1.0.2-upstream8.0.5.
-UPSTREAM_SUFFIX = rf"-upstream(?:{VERSION_CORE}|none)"
+# tag is aligned to. A release that ports no new upstream work keeps the previous
+# release's suffix, because it is still built on that baseline; whether this
+# release absorbed anything is carried by the Ported field, not by the tag. The
+# suffix repeats the version without a leading "v": v1.0.2-upstream8.0.5.
+UPSTREAM_SUFFIX = rf"-upstream{VERSION_CORE}"
 STABLE_TAG = re.compile(rf"{UPSTREAM_VERSION}(?:{UPSTREAM_SUFFIX})?")
-TAGGED_UPSTREAM = re.compile(rf"{UPSTREAM_VERSION}-upstream({VERSION_CORE}|none)")
+TAGGED_UPSTREAM = re.compile(rf"{UPSTREAM_VERSION}-upstream({VERSION_CORE})")
 HEADING = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 LIST_ITEM = re.compile(r"^-\s+\S", re.MULTILINE)
 PLACEHOLDER = re.compile(
@@ -56,7 +57,7 @@ def stable_tag(value: str) -> bool:
 
 
 def tag_upstream_claim(tag: str) -> str | None:
-    """Return the upstream version a tag claims, "none", or None if absent."""
+    """Return the upstream version a tag claims, or None when it has no suffix."""
     match = TAGGED_UPSTREAM.fullmatch(tag)
     return match.group(1) if match else None
 
@@ -65,8 +66,8 @@ def validate_note(tag: str, text: str) -> list[str]:
     errors: list[str] = []
     if not stable_tag(tag):
         errors.append(
-            "release tag must be vX.Y.Z with an optional -upstreamX.Y.Z or "
-            f"-upstreamnone suffix: {tag}"
+            "release tag must be vX.Y.Z with an optional -upstreamX.Y.Z suffix: "
+            f"{tag}"
         )
 
     if not text.strip():
@@ -126,10 +127,11 @@ def validate_note(tag: str, text: str) -> list[str]:
 
     upstream_release = values["Upstream release"] or ""
     tagged_upstream = re.fullmatch(rf"`({UPSTREAM_VERSION})`", upstream_release)
-    if not tagged_upstream and upstream_release != "none (fork-only release)":
+    if not tagged_upstream:
         errors.append(
-            "upstream release must be a stable vX.Y.Z tag or "
-            "'none (fork-only release)'"
+            "upstream release must be a stable vX.Y.Z tag naming the upstream "
+            "release this tag is aligned to; a release that ports nothing new "
+            "repeats the previous baseline rather than declaring none"
         )
 
     baseline = values["Previous baseline"] or ""
@@ -143,9 +145,7 @@ def validate_note(tag: str, text: str) -> list[str]:
 
     claim = tag_upstream_claim(tag)
     if claim is not None:
-        recorded = "none"
-        if tagged_upstream:
-            recorded = tagged_upstream.group(1).removeprefix("v")
+        recorded = tagged_upstream.group(1).removeprefix("v") if tagged_upstream else ""
         if claim != recorded:
             errors.append(
                 f"tag claims upstream {claim} but the note records {recorded}; "

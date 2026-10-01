@@ -6,9 +6,10 @@ The release workflow rejects placeholders, missing sections, and an
 ambiguous upstream alignment statement.
 
 Tag format: vX.Y.Z-upstreamA.B.C records the upstream release this tag is
-aligned to; vX.Y.Z-upstreamnone marks a fork-only release. The suffix must
-match the "Upstream release" field below, and the workflow rejects a release
-whose tag still points at an upstream commit.
+aligned to. A release that ports no new upstream work keeps the previous
+release's suffix and says so under Ported. The suffix must match the
+"Upstream release" field below, and the workflow rejects a release whose tag
+still points at an upstream commit.
 -->
 
 ## Summary
@@ -24,9 +25,10 @@ whose tag still points at an upstream commit.
 - Ported: Summarize the upstream fixes or features included in this release.
 - Skipped: Summarize intentionally excluded upstream work and its reason.
 
-Use `none (fork-only release)` for Upstream release and `none` for Previous
-baseline when this release contains no upstream intake. Do not claim alignment
-to a fetched tag that has not been assessed and recorded in the intake ledger.
+Upstream release always names a real version, the baseline this release is built
+on; use `none` for Previous baseline only on the first release. Do not claim
+alignment to a fetched tag that has not been assessed and recorded in the intake
+ledger.
 
 ## Breaking changes
 

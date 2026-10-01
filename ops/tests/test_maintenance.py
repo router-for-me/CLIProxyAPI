@@ -96,6 +96,7 @@ class FormulaTests(unittest.TestCase):
             ("v01.2.3", self.manifest),
             ("v1.2.3-fork", self.manifest),
             ("v1.2.3-upstreamv8.0.6", self.manifest),
+            ("v1.2.3-upstreamnone", self.manifest),
             ("v1.2.3", self.manifest.splitlines()[0]),
             ("v1.2.3", self.manifest + self.manifest),
             ("v1.2.3", self.manifest.replace("0000", "xxxx", 1)),
@@ -154,8 +155,7 @@ class ReleaseNoteTests(unittest.TestCase):
         self.assertEqual(release_notes.validate_note("v1.2.3", self.aligned), [])
 
     def test_valid_fork_only_release_note(self):
-        note = self.aligned.replace("`v8.0.6`", "none (fork-only release)")
-        note = note.replace("`v8.0.4`", "none")
+        note = self.aligned
         note = note.replace(
             "- Ported: protocol compatibility and security fixes",
             "- Ported: none; fork-specific maintenance only",
@@ -173,16 +173,19 @@ class ReleaseNoteTests(unittest.TestCase):
             f"expected a tag/alignment mismatch error, got {errors}",
         )
 
-    def test_fork_only_tag_suffix(self):
-        note = self.aligned.replace("# v1.2.3", "# v1.2.4-upstreamnone", 1)
-        note = note.replace("`v8.0.6`", "none (fork-only release)")
-        note = note.replace("`v8.0.4`", "none")
-        self.assertEqual(release_notes.validate_note("v1.2.4-upstreamnone", note), [])
+    def test_release_without_new_intake_keeps_the_previous_suffix(self):
+        note = self.aligned.replace("# v1.2.3", "# v1.2.4-upstream8.0.6", 1)
+        note = note.replace(
+            "- Ported: protocol compatibility and security fixes",
+            "- Ported: none; no new upstream intake in this release",
+        )
+        self.assertEqual(release_notes.validate_note("v1.2.4-upstream8.0.6", note), [])
 
     def test_malformed_tag_suffixes_are_rejected(self):
         for tag in [
             "v1.2.3-upstreamv8.0.6",
             "v1.2.3-upstream8.0",
+            "v1.2.3-upstreamnone",
             "v1.2.3-upstream",
             "v1.2.3-fork",
         ]:
