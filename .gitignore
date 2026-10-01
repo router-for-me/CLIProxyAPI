@@ -32,6 +32,9 @@ auths/*
 # Documentation
 docs/*
 !docs/management-api-v8.md
+# Curated release notes are a release requirement: release.yaml reads
+# docs/releases/<tag>.md from the tagged tree.
+!docs/releases/
 AGENTS.md
 CLAUDE.md
 GEMINI.md
