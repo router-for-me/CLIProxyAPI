@@ -67,6 +67,7 @@ const (
 	// master API key) plus the last-sync outcome. Mirrors the alert_settings
 	// singleton pattern.
 	defaultLiteLLMSyncSettingsTable = "litellm_sync_settings"
+	defaultLiteLLMOnTheFlyLogTable  = "litellm_onthefly_log"
 	// JevSettingsTable stores the singleton Jev AI classifier configuration
 	// (master toggle + sealed API key + pinned model). Mirrors the
 	// alert_settings / litellm_sync_settings singleton pattern.
@@ -266,6 +267,9 @@ type PostgresStoreConfig struct {
 	// LiteLLMSyncSettingsTable stores the singleton Manage-LiteLLM external
 	// sync settings (base URL + sealed master API key + last-sync outcome).
 	LiteLLMSyncSettingsTable string
+	// LiteLLMOnTheFlyLogTable stores the append-only audit trail of per-request
+	// LiteLLM API key validations (synced / unmatched / invalid / error).
+	LiteLLMOnTheFlyLogTable string
 	// JevSettingsTable stores the singleton Jev AI classifier configuration
 	// (master toggle + sealed API key + pinned model).
 	JevSettingsTable string
@@ -434,6 +438,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.LiteLLMSyncSettingsTable == "" {
 		cfg.LiteLLMSyncSettingsTable = defaultLiteLLMSyncSettingsTable
+	}
+	if cfg.LiteLLMOnTheFlyLogTable == "" {
+		cfg.LiteLLMOnTheFlyLogTable = defaultLiteLLMOnTheFlyLogTable
 	}
 	if cfg.JevSettingsTable == "" {
 		cfg.JevSettingsTable = defaultJevSettingsTable
@@ -840,6 +847,32 @@ func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
 		)); err != nil {
 			return fmt.Errorf("postgres store: alter litellm_sync_settings add column %q: %w", col, err)
 		}
+	}
+
+	// litellm_onthefly_log records the outcome of every per-request LiteLLM API
+	// key validation performed by the litellm-api-key access provider. Durable
+	// so operators can monitor sync health; swept on a 30-day retention.
+	onTheFlyTable := s.fullTableName(s.cfg.LiteLLMOnTheFlyLogTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id            BIGSERIAL PRIMARY KEY,
+			occurred_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			request_id    TEXT NOT NULL DEFAULT '',
+			outcome       TEXT NOT NULL DEFAULT '',
+			key_prefix    TEXT NOT NULL DEFAULT '',
+			key_id        TEXT NOT NULL DEFAULT '',
+			user_id       TEXT NOT NULL DEFAULT '',
+			source        TEXT NOT NULL DEFAULT '',
+			latency_ms    INTEGER NOT NULL DEFAULT 0,
+			error_message TEXT NOT NULL DEFAULT ''
+		)
+	`, onTheFlyTable)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_onthefly_log table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_litellm_onthefly_log_occurred_at ON %s(occurred_at DESC)`, onTheFlyTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create litellm_onthefly_log occurred_at index: %w", err)
 	}
 
 	// jev_settings stores the singleton Jev AI classifier configuration: the
@@ -2875,6 +2908,15 @@ func (s *PostgresStore) LiteLLMSyncSettingsTable() string {
 		return quoteIdentifier(defaultLiteLLMSyncSettingsTable)
 	}
 	return s.fullTableName(s.cfg.LiteLLMSyncSettingsTable)
+}
+
+// LiteLLMOnTheFlyLogTable returns the fully-qualified name of the on-the-fly
+// validation log table.
+func (s *PostgresStore) LiteLLMOnTheFlyLogTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultLiteLLMOnTheFlyLogTable)
+	}
+	return s.fullTableName(s.cfg.LiteLLMOnTheFlyLogTable)
 }
 
 // JevSettingsTable returns the fully-qualified name of the jev_settings
