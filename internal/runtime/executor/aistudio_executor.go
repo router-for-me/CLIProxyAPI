@@ -350,6 +350,19 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					break
 				}
 			case wsrelay.MessageTypeStreamEnd:
+				// The relay reports a clean end of stream and never forwards a
+				// [DONE] marker. The Responses translator needs that marker to
+				// close the stream, otherwise the client sees "stream closed
+				// before a terminal event". Translating it here is idempotent:
+				// a stream that already completed emits nothing further.
+				tail := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, opts.OriginalRequest, translatedReq, []byte("[DONE]"), &param, claudeInputTokens)
+				for i := range tail {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(tail[i])}:
+					case <-ctx.Done():
+						return false
+					}
+				}
 				return false
 			case wsrelay.MessageTypeHTTPResp:
 				if !metadataLogged && event.Status > 0 {
