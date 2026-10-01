@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   getAPIToken, patchAPIToken, putAPITokenPolicy, regenerateAPIToken,
-  deleteAPIToken, getAPITokenAuditLog,
+  deleteAPIToken, getAPITokenAuditLog, listInternalUsers,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, StatusBadge, Modal } from '../components/Primitives.jsx';
@@ -92,6 +92,14 @@ function TokenDetailsCard({ token, onUpdated }) {
   const [savingDefaultUser, setSavingDefaultUser] = useState(false);
   const [defaultUserID, setDefaultUserID] = useState(token.default_user_id || '');
   const [defaultEndpoints, setDefaultEndpoints] = useState((token.default_user_id_endpoints || []).join('\n'));
+  const [userSearch, setUserSearch] = useState('');
+  const usersReq = useAsync(
+    () => listInternalUsers({ page: 1, pageSize: 200, sortBy: 'user_alias', sortOrder: 'asc' }),
+    [],
+  );
+  const users = usersReq.data?.users || [];
+  const filteredUsers = filterInternalUsers(users, userSearch);
+  const selectedUserMissing = defaultUserID && !users.some((u) => u.id === defaultUserID);
   const isExpired = token.status === 'expired';
 
   async function handleStatusChange(e) {
@@ -180,14 +188,56 @@ function TokenDetailsCard({ token, onUpdated }) {
       {token.scope === 'write' && (
         <form className="form__row" onSubmit={handleDefaultUserSave}>
           <div className="form__label">Default user fallback</div>
-          <input
-            type="text"
-            value={defaultUserID}
-            onChange={(e) => setDefaultUserID(e.target.value)}
-            placeholder="Internal User id (optional)"
-            disabled={savingDefaultUser}
-            style={{ marginBottom: 8 }}
-          />
+          {usersReq.loading ? (
+            <Spinner label="Loading Internal Users…" />
+          ) : usersReq.error ? (
+            <div className="error-banner">
+              {usersReq.error.message || 'Failed to load Internal Users.'}
+            </div>
+          ) : (
+            <>
+              <input
+                type="text"
+                className="search-input"
+                value={userSearch}
+                onChange={(e) => setUserSearch(e.target.value)}
+                placeholder="Search by name, email, or ID…"
+                aria-label="Search Internal Users"
+                disabled={savingDefaultUser}
+                style={{ marginBottom: 8, width: '100%' }}
+              />
+              <select
+                value={defaultUserID}
+                onChange={(e) => setDefaultUserID(e.target.value)}
+                disabled={savingDefaultUser}
+                style={{ width: '100%' }}
+                size={Math.min(6, Math.max(3, filteredUsers.length + 1))}
+              >
+                <option value="">— none (disable fallback) —</option>
+                {selectedUserMissing && (
+                  <option value={defaultUserID}>
+                    {defaultUserID} · (not in loaded list)
+                  </option>
+                )}
+                {filteredUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.user_alias ? `👤 ${u.user_alias}` : '👤 (no alias)'}
+                    {u.user_email ? ` <${u.user_email}>` : ''}
+                    {` · ${u.id}`}
+                  </option>
+                ))}
+              </select>
+              {!filteredUsers.length && userSearch.trim() !== '' && (
+                <div className="form__hint">No Internal Users match “{userSearch}”.</div>
+              )}
+              {!users.length && (
+                <div className="form__hint">
+                  No Internal Users yet.{' '}
+                  <Link to="/internal-users">Create an Internal User first</Link> to use as a fallback.
+                </div>
+              )}
+            </>
+          )}
           <textarea
             rows={3}
             value={defaultEndpoints}
@@ -438,6 +488,20 @@ function PolicyEditor({ tokenId, initial, onCancel, onSaved }) {
 
 function parseList(text) {
   return text.split('\n').map((s) => s.trim()).filter(Boolean);
+}
+
+// filterInternalUsers returns the Internal Users whose alias, email, or id
+// contains the query (case-insensitive). An empty query returns every user.
+// Exported for unit testing — the dashboard has no React render harness.
+export function filterInternalUsers(users, query) {
+  const list = Array.isArray(users) ? users : [];
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return list;
+  return list.filter((u) => [u.user_alias, u.user_email, u.id]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(q));
 }
 
 function AuditLogCard({ tokenId }) {
