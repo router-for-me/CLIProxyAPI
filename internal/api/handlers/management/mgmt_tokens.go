@@ -44,22 +44,95 @@ type mgmtPagedAuditResponse struct {
 // token has no per-endpoint or rate limits (subject only to the IP ban + the
 // global management secret's allow-remote gate).
 type mgmtCreateTokenRequest struct {
-	Name      string                       `json:"name"`
-	Scope     string                       `json:"scope"`
-	ExpiresAt *time.Time                   `json:"expires_at,omitempty"`
-	Metadata  map[string]any               `json:"metadata,omitempty"`
-	Policy    *store.ManagementTokenPolicy `json:"policy,omitempty"`
+	Name                   string                       `json:"name"`
+	Scope                  string                       `json:"scope"`
+	DefaultUserID          string                       `json:"default_user_id,omitempty"`
+	DefaultUserIDEndpoints []string                     `json:"default_user_id_endpoints,omitempty"`
+	ExpiresAt              *time.Time                   `json:"expires_at,omitempty"`
+	Metadata               map[string]any               `json:"metadata,omitempty"`
+	Policy                 *store.ManagementTokenPolicy `json:"policy,omitempty"`
 }
 
 // mgmtPatchTokenRequest supports partial updates on a token. Pointer-typed
 // fields are applied only when non-nil.
 type mgmtPatchTokenRequest struct {
-	Name        *string         `json:"name,omitempty"`
-	Status      *string         `json:"status,omitempty"`
-	Scope       *string         `json:"scope,omitempty"`
-	Metadata    *map[string]any `json:"metadata,omitempty"`
-	ExpiresAt   *time.Time      `json:"expires_at,omitempty"` // nil clears the expiry
-	ClearExpiry *bool           `json:"clear_expiry,omitempty"`
+	Name                   *string         `json:"name,omitempty"`
+	Status                 *string         `json:"status,omitempty"`
+	Scope                  *string         `json:"scope,omitempty"`
+	DefaultUserID          *string         `json:"default_user_id,omitempty"`
+	DefaultUserIDEndpoints *[]string       `json:"default_user_id_endpoints,omitempty"`
+	Metadata               *map[string]any `json:"metadata,omitempty"`
+	ExpiresAt              *time.Time      `json:"expires_at,omitempty"` // nil clears the expiry
+	ClearExpiry            *bool           `json:"clear_expiry,omitempty"`
+}
+
+// validateDefaultUserConfig enforces the invariants tying the default-user
+// fallback to write scope. It returns a human-readable reason when the
+// configuration is invalid, or "" when valid. The default-user fallback is
+// opt-in: both fields empty is always valid.
+func validateDefaultUserConfig(scope, defaultUserID string, endpoints []string) string {
+	if strings.TrimSpace(defaultUserID) == "" && len(normalizeMgmtEndpoints(endpoints)) == 0 {
+		return ""
+	}
+	if scope != store.MgmtTokenScopeWrite {
+		return "default_user_id and default_user_id_endpoints require scope 'write'"
+	}
+	if strings.TrimSpace(defaultUserID) == "" {
+		return "default_user_id_endpoints requires default_user_id"
+	}
+	for _, ep := range endpoints {
+		ep = strings.TrimSpace(ep)
+		if ep == "" {
+			continue
+		}
+		if !strings.HasPrefix(ep, "/") {
+			return "default_user_id_endpoints entries must be management paths starting with '/'"
+		}
+	}
+	return ""
+}
+
+// normalizeMgmtEndpoints trims entries and drops blanks so validation and
+// persistence agree on what counts as an empty allow-list.
+func normalizeMgmtEndpoints(endpoints []string) []string {
+	out := make([]string, 0, len(endpoints))
+	for _, ep := range endpoints {
+		if ep = strings.TrimSpace(ep); ep != "" {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
+// validateDefaultUserExists verifies the referenced Internal User exists before
+// persisting the fallback. The default user id is always an internal_users id;
+// Manage-LiteLLM users (litellm_internal_users) are intentionally not consulted.
+// The check is skipped (accepted) when the PG internal-user store is not wired,
+// so the feature degrades gracefully on deployments that only carry management
+// tokens.
+func (h *Handler) validateDefaultUserExists(c *gin.Context, defaultUserID string) bool {
+	userID := strings.TrimSpace(defaultUserID)
+	if userID == "" {
+		return true
+	}
+	h.mu.Lock()
+	users := h.pgUsers
+	h.mu.Unlock()
+	if users == nil {
+		return true
+	}
+	if _, err := users.Get(c.Request.Context(), userID); err != nil {
+		if errors.Is(err, store.ErrInternalUserNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
+				"type":    "not_found",
+				"message": "default_user_id references an unknown internal user",
+			}})
+			return false
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return false
+	}
+	return true
 }
 
 // ListAPITokens handles GET /v0/management/api-tokens.
@@ -131,7 +204,16 @@ func (h *Handler) CreateAPIToken(c *gin.Context) {
 		}})
 		return
 	}
-	created, secret, err := tokens.Create(c.Request.Context(), req.Name, req.Scope, req.ExpiresAt, req.Metadata, req.Policy)
+	defaultUserID := strings.TrimSpace(req.DefaultUserID)
+	defaultEndpoints := normalizeMgmtEndpoints(req.DefaultUserIDEndpoints)
+	if msg := validateDefaultUserConfig(req.Scope, defaultUserID, defaultEndpoints); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
+		return
+	}
+	if !h.validateDefaultUserExists(c, defaultUserID) {
+		return
+	}
+	created, secret, err := tokens.Create(c.Request.Context(), req.Name, req.Scope, defaultUserID, defaultEndpoints, req.ExpiresAt, req.Metadata, req.Policy)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
@@ -168,12 +250,13 @@ func (h *Handler) PatchAPIToken(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	if req.Name != nil {
-		if err := tokens.Rename(ctx, id, *req.Name); err != nil {
-			h.translateTokenError(c, err)
-			return
-		}
+	current, _, err := tokens.LookupByID(ctx, id)
+	if err != nil {
+		h.translateTokenError(c, err)
+		return
 	}
+
+	newScope := current.Scope
 	if req.Scope != nil {
 		if *req.Scope != store.MgmtTokenScopeRead && *req.Scope != store.MgmtTokenScopeWrite {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
@@ -182,7 +265,43 @@ func (h *Handler) PatchAPIToken(c *gin.Context) {
 			}})
 			return
 		}
+		newScope = *req.Scope
+	}
+	newDefaultUserID := current.DefaultUserID
+	if req.DefaultUserID != nil {
+		newDefaultUserID = strings.TrimSpace(*req.DefaultUserID)
+	}
+	newDefaultEndpoints := current.DefaultUserIDEndpoints
+	if req.DefaultUserIDEndpoints != nil {
+		newDefaultEndpoints = normalizeMgmtEndpoints(*req.DefaultUserIDEndpoints)
+	}
+	// A read-scope token cannot carry a default-user fallback: downgrading to
+	// read clears it automatically so the invariant always holds.
+	if newScope == store.MgmtTokenScopeRead {
+		newDefaultUserID, newDefaultEndpoints = "", nil
+	}
+	if msg := validateDefaultUserConfig(newScope, newDefaultUserID, newDefaultEndpoints); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
+		return
+	}
+	if !h.validateDefaultUserExists(c, newDefaultUserID) {
+		return
+	}
+
+	if req.Name != nil {
+		if err := tokens.Rename(ctx, id, *req.Name); err != nil {
+			h.translateTokenError(c, err)
+			return
+		}
+	}
+	if req.Scope != nil {
 		if err := tokens.UpdateScope(ctx, id, *req.Scope); err != nil {
+			h.translateTokenError(c, err)
+			return
+		}
+	}
+	if req.DefaultUserID != nil || req.DefaultUserIDEndpoints != nil || req.Scope != nil {
+		if err := tokens.UpdateDefaultUserID(ctx, id, newDefaultUserID, newDefaultEndpoints); err != nil {
 			h.translateTokenError(c, err)
 			return
 		}

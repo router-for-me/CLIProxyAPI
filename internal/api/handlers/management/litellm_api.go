@@ -631,12 +631,18 @@ func (h *Handler) GenerateLiteLLMKeyCompat(c *gin.Context) {
 	// The runtime Policy has no tpm_limit or budget_duration columns. Accept
 	// them for spec-parity but note the limitation is surfaced via the policy
 	// row's supported subset. (LiteLLM itself accepts them on generate.)
-	if req.UserID == "" {
+	userID := strings.TrimSpace(req.UserID)
+	if userID == "" {
+		// Fall back to the management token's default user id when its opt-in
+		// endpoint allow-list covers this request.
+		userID = defaultUserIDFromContext(c)
+	}
+	if userID == "" {
 		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "user_id is required")
 		return
 	}
 	// Validate the owner exists; surface a 404 when the caller picked a stale id.
-	if _, err := users.Get(c.Request.Context(), req.UserID); err != nil {
+	if _, err := users.Get(c.Request.Context(), userID); err != nil {
 		translateLiteLLMUserCompatError(c, err)
 		return
 	}
@@ -672,7 +678,7 @@ func (h *Handler) GenerateLiteLLMKeyCompat(c *gin.Context) {
 	}
 	// Stamp the owner assignment.
 	keyID := key.ID
-	if err := keys.UpdateUserID(c.Request.Context(), keyID, req.UserID); err != nil {
+	if err := keys.UpdateUserID(c.Request.Context(), keyID, userID); err != nil {
 		// Roll back: drop the orphaned key rather than presenting a half-assigned row.
 		if delErr := keys.Delete(c.Request.Context(), keyID); delErr != nil {
 			log.WithError(delErr).WithField("api_key_id", keyID).

@@ -24,6 +24,11 @@ const (
 	ctxMgmtToken    = "nixllm.mgmt.token"
 	ctxMgmtPolicy   = "nixllm.mgmt.policy"
 	ctxMgmtProvided = "nixllm.mgmt.provided"
+	// ctxMgmtDefaultUserID carries the token's default-user fallback for the
+	// current request path (write scope + endpoint allow-list match). Handlers
+	// that require user_id read it via defaultUserIDFromContext when the request
+	// omits user_id. Absent means no fallback applies.
+	ctxMgmtDefaultUserID = "nixllm.mgmt.default_user_id"
 )
 
 // mgmtTokenCache is a short-TTL in-memory cache of token lookups keyed by
@@ -198,6 +203,14 @@ func (h *Handler) EnforceTokenPolicy() gin.HandlerFunc {
 			return
 		}
 
+		// 2b. Default-user fallback: when this write-scope token names a default
+		// Internal User and the request path is on its opt-in allow-list, expose
+		// the id to handlers so a request that omits user_id can adopt it.
+		if tok.Scope == store.MgmtTokenScopeWrite && tok.DefaultUserID != "" &&
+			pathMatchesAny(path, tok.DefaultUserIDEndpoints) {
+			c.Set(ctxMgmtDefaultUserID, tok.DefaultUserID)
+		}
+
 		// 3. Per-endpoint allowlist/blocklist.
 		signature := method + " " + path
 		if pol != nil {
@@ -278,6 +291,43 @@ func endpointMatches(signature string, patterns []string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// pathMatchesAny reports whether path is covered by any allow-list pattern.
+// Patterns are absolute management paths ("/v0/management/api-keys-pg") with an
+// optional trailing "*" for a prefix match. An empty pattern list matches
+// nothing, keeping the default-user fallback strictly opt-in.
+func pathMatchesAny(path string, patterns []string) bool {
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.HasSuffix(p, "*") {
+			if strings.HasPrefix(path, strings.TrimSuffix(p, "*")) {
+				return true
+			}
+			continue
+		}
+		if p == path {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultUserIDFromContext returns the token's default-user fallback resolved
+// for the current request by EnforceTokenPolicy, or "" when none applies.
+func defaultUserIDFromContext(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	v, ok := c.Get(ctxMgmtDefaultUserID)
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
 }
 
 // ipMatches reports whether clientIP matches any entry in patterns. Each

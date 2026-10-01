@@ -62,6 +62,15 @@ type ManagementToken struct {
 	ExpiresAt  *time.Time     `json:"expires_at,omitempty"`
 	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+	// DefaultUserID is the Internal User id used as the owner when a request to
+	// one of DefaultUserIDEndpoints omits user_id. Only meaningful for
+	// write-scope tokens; read-scope tokens must leave it empty.
+	DefaultUserID string `json:"default_user_id,omitempty"`
+	// DefaultUserIDEndpoints is the opt-in allow-list of management paths that
+	// may use DefaultUserID. An empty list disables the fallback entirely.
+	// Entries are absolute paths ("/v0/management/api-keys-pg"), optionally
+	// ending in "*" for a prefix match.
+	DefaultUserIDEndpoints []string `json:"default_user_id_endpoints,omitempty"`
 }
 
 // ManagementTokenPolicy captures the limits enforced on a management token.
@@ -193,11 +202,24 @@ func mgmtPrefixOf(secret string) string {
 	return body
 }
 
+// normalizeMgmtPatterns trims each entry and drops blanks so persisted
+// default-user endpoint allow-lists never carry whitespace-only patterns. It
+// always returns a non-nil slice so the JSONB column stores [] rather than NULL.
+func normalizeMgmtPatterns(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // Create inserts a new management token and (optionally) its policy in a single
 // transaction. It returns the freshly generated plaintext secret; the caller is
 // responsible for surfacing it to the user exactly once as the secret is never
 // recoverable from the database. Scope defaults to "read" when empty.
-func (s *ManagementTokenStore) Create(ctx context.Context, name, scope string, expiresAt *time.Time, metadata map[string]any, policy *ManagementTokenPolicy) (*ManagementToken, string, error) {
+func (s *ManagementTokenStore) Create(ctx context.Context, name, scope, defaultUserID string, defaultUserIDEndpoints []string, expiresAt *time.Time, metadata map[string]any, policy *ManagementTokenPolicy) (*ManagementToken, string, error) {
 	if s == nil || s.db == nil {
 		return nil, "", fmt.Errorf("postgres store: management token store not initialized")
 	}
@@ -211,6 +233,12 @@ func (s *ManagementTokenStore) Create(ctx context.Context, name, scope string, e
 	displayName := trimOr(name, "unnamed")
 	if scope == "" {
 		scope = MgmtTokenScopeRead
+	}
+	defaultUserID = strings.TrimSpace(defaultUserID)
+	endpoints := normalizeMgmtPatterns(defaultUserIDEndpoints)
+	endpointsJSON, err := json.Marshal(endpoints)
+	if err != nil {
+		return nil, "", fmt.Errorf("postgres store: marshal management token default user endpoints: %w", err)
 	}
 	meta := metadata
 	if meta == nil {
@@ -228,9 +256,11 @@ func (s *ManagementTokenStore) Create(ctx context.Context, name, scope string, e
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, name, key_hash, key_prefix, status, scope, expires_at, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-	`, s.tokensTable), id, displayName, hash, prefix, MgmtTokenStatusActive, scope, expiresAt, string(metaJSON)); err != nil {
+		INSERT INTO %s (id, name, key_hash, key_prefix, status, scope,
+		                default_user_id, default_user_id_endpoints, expires_at, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb)
+	`, s.tokensTable), id, displayName, hash, prefix, MgmtTokenStatusActive, scope,
+		defaultUserID, string(endpointsJSON), expiresAt, string(metaJSON)); err != nil {
 		return nil, "", fmt.Errorf("postgres store: insert management token: %w", err)
 	}
 
@@ -250,6 +280,7 @@ func (s *ManagementTokenStore) Create(ctx context.Context, name, scope string, e
 		created = &ManagementToken{
 			ID: id, Name: displayName, KeyHash: hash, KeyPrefix: prefix,
 			Status: MgmtTokenStatusActive, Scope: scope, ExpiresAt: expiresAt, Metadata: meta,
+			DefaultUserID: defaultUserID, DefaultUserIDEndpoints: endpoints,
 			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		}
 	}
@@ -264,6 +295,7 @@ func (s *ManagementTokenStore) LookupByHash(ctx context.Context, hash string) (*
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT t.id, t.name, t.key_hash, t.key_prefix, t.status, t.scope,
+		       t.default_user_id, t.default_user_id_endpoints,
 		       t.created_at, t.updated_at, t.expires_at, t.last_used_at, t.metadata,
 		       p.rpm_limit, p.max_parallel_requests, p.hourly_rate_limit,
 		       p.allowed_endpoints, p.blocked_endpoints,
@@ -290,6 +322,7 @@ func (s *ManagementTokenStore) LookupByID(ctx context.Context, id string) (*Mana
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT t.id, t.name, t.key_hash, t.key_prefix, t.status, t.scope,
+		       t.default_user_id, t.default_user_id_endpoints,
 		       t.created_at, t.updated_at, t.expires_at, t.last_used_at, t.metadata,
 		       p.rpm_limit, p.max_parallel_requests, p.hourly_rate_limit,
 		       p.allowed_endpoints, p.blocked_endpoints,
@@ -313,6 +346,7 @@ func scanManagementTokenRow(row *sql.Row) (*ManagementToken, *ManagementTokenPol
 	var (
 		token            ManagementToken
 		metadata         []byte
+		defaultEndpoints []byte
 		rpmLimit         sql.NullInt64
 		maxParallel      sql.NullInt64
 		hourlyRateLimit  sql.NullInt64
@@ -324,6 +358,7 @@ func scanManagementTokenRow(row *sql.Row) (*ManagementToken, *ManagementTokenPol
 	)
 	if err := row.Scan(
 		&token.ID, &token.Name, &token.KeyHash, &token.KeyPrefix, &token.Status, &token.Scope,
+		&token.DefaultUserID, &defaultEndpoints,
 		&token.CreatedAt, &token.UpdatedAt, &token.ExpiresAt, &token.LastUsedAt, &metadata,
 		&rpmLimit, &maxParallel, &hourlyRateLimit,
 		&allowedEndpoints, &blockedEndpoints,
@@ -332,6 +367,7 @@ func scanManagementTokenRow(row *sql.Row) (*ManagementToken, *ManagementTokenPol
 	); err != nil {
 		return nil, nil, err
 	}
+	token.DefaultUserIDEndpoints = decodeStringArray(defaultEndpoints)
 	if len(metadata) > 0 {
 		_ = json.Unmarshal(metadata, &token.Metadata)
 	}
@@ -542,6 +578,29 @@ func (s *ManagementTokenStore) UpdateScope(ctx context.Context, id, scope string
 	), scope, id)
 	if err != nil {
 		return fmt.Errorf("postgres store: update management token scope: %w", err)
+	}
+	return assertMgmtRowsAffected(res, id)
+}
+
+// UpdateDefaultUserID replaces the token's default-user fallback configuration:
+// the owner id used when an allowed endpoint omits user_id and the allow-list of
+// endpoints it applies to. Passing an empty user id and nil endpoints disables
+// the fallback. The token must already have write scope (enforced by the
+// caller); this method only persists the values.
+func (s *ManagementTokenStore) UpdateDefaultUserID(ctx context.Context, id, defaultUserID string, endpoints []string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: management token store not initialized")
+	}
+	endpointsJSON, err := json.Marshal(normalizeMgmtPatterns(endpoints))
+	if err != nil {
+		return fmt.Errorf("postgres store: marshal management token default user endpoints: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET default_user_id = $1, default_user_id_endpoints = $2::jsonb, updated_at = NOW() WHERE id = $3`,
+		s.tokensTable,
+	), strings.TrimSpace(defaultUserID), string(endpointsJSON), id)
+	if err != nil {
+		return fmt.Errorf("postgres store: update management token default user id: %w", err)
 	}
 	return assertMgmtRowsAffected(res, id)
 }

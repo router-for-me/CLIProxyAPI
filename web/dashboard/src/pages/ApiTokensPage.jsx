@@ -212,6 +212,8 @@ function CreateTokenModal({ onClose, onCreated }) {
   const toast = useToast();
   const [name, setName] = useState('');
   const [scope, setScope] = useState('read');
+  const [defaultUserID, setDefaultUserID] = useState('');
+  const [defaultEndpoints, setDefaultEndpoints] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -224,9 +226,15 @@ function CreateTokenModal({ onClose, onCreated }) {
     setSubmitting(true);
     setError('');
     try {
+      const endpoints = defaultEndpoints
+        .split(/[\n,]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
       const result = await createAPIToken({
         name,
         scope,
+        default_user_id: scope === 'write' ? defaultUserID.trim() : '',
+        default_user_id_endpoints: scope === 'write' ? endpoints : [],
         expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
       });
       setCreated(result);
@@ -257,6 +265,9 @@ function CreateTokenModal({ onClose, onCreated }) {
         <div className="row gap-sm" style={{ marginTop: 8 }}>
           <span className="dim mono">id: {created.id}</span>
           <span className="dim">· scope: {created.scope}</span>
+          {created.default_user_id && (
+            <span className="dim">· default user: {created.default_user_id}</span>
+          )}
         </div>
         <label className="row gap-sm" style={{ cursor: 'pointer', marginTop: 16 }}>
           <input
@@ -299,6 +310,36 @@ function CreateTokenModal({ onClose, onCreated }) {
             policy can be configured after creation.
           </div>
         </div>
+        {scope === 'write' && (
+          <>
+            <div className="form__row">
+              <label className="form__label" htmlFor="default-user-id">Default user ID (optional)</label>
+              <input
+                id="default-user-id" type="text" value={defaultUserID}
+                onChange={(e) => setDefaultUserID(e.target.value)}
+                placeholder="e.g. internal-user-uuid"
+                disabled={submitting}
+              />
+              <div className="form__hint">
+                When a request to one of the endpoints below omits <code>user_id</code>,
+                this Internal User id is used as the owner. Leave empty to disable.
+              </div>
+            </div>
+            <div className="form__row">
+              <label className="form__label" htmlFor="default-endpoints">Apply default user to endpoints</label>
+              <textarea
+                id="default-endpoints" rows={3} value={defaultEndpoints}
+                onChange={(e) => setDefaultEndpoints(e.target.value)}
+                placeholder={'/v0/management/api-keys-pg\n/v0/management/litellm/key/generate'}
+                disabled={submitting}
+              />
+              <div className="form__hint">
+                One path per line (a trailing <code>*</code> matches a prefix). An empty
+                list disables the fallback even when a default user id is set.
+              </div>
+            </div>
+          </>
+        )}
         <div className="form__row">
           <label className="form__label" htmlFor="expires">Expires at (optional)</label>
           <input

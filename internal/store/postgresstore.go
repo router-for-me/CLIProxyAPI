@@ -1790,6 +1790,8 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			key_prefix   TEXT NOT NULL,
 			status       TEXT NOT NULL DEFAULT 'active',
 			scope        TEXT NOT NULL DEFAULT 'read',
+			default_user_id          TEXT NOT NULL DEFAULT '',
+			default_user_id_endpoints JSONB NOT NULL DEFAULT '[]'::jsonb,
 			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			expires_at   TIMESTAMPTZ,
@@ -1798,6 +1800,21 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		)
 	`, mgmtTokensTable)); err != nil {
 		return fmt.Errorf("postgres store: create management_tokens table: %w", err)
+	}
+	// Backfill default-user fallback columns for deployments that already have
+	// management_tokens without them. Idempotent so existing deployments upgrade
+	// transparently.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS default_user_id TEXT NOT NULL DEFAULT ''`,
+		mgmtTokensTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter management_tokens add default_user_id: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS default_user_id_endpoints JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		mgmtTokensTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter management_tokens add default_user_id_endpoints: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_management_tokens_key_hash ON %s(key_hash)`, mgmtTokensTable,

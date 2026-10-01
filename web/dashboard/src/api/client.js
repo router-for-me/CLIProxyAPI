@@ -1879,10 +1879,13 @@ export async function getAPIToken(id) {
 // returned ONCE in the response (secret field); the dashboard surfaces it
 // immediately and the value is never recoverable afterwards. Scope defaults
 // to "read" on the server when omitted; pass "write" to allow mutations.
-export async function createAPIToken({ name, scope = 'read', expires_at, metadata, policy }) {
+// default_user_id + default_user_id_endpoints are write-scope only: when a
+// request to an allow-listed endpoint omits user_id, the server uses the
+// default owner instead.
+export async function createAPIToken({ name, scope = 'read', default_user_id, default_user_id_endpoints, expires_at, metadata, policy }) {
   return fetchJSON('/api-tokens', {
     method: 'POST',
-    body: JSON.stringify({ name, scope, expires_at, metadata, policy }),
+    body: JSON.stringify({ name, scope, default_user_id, default_user_id_endpoints, expires_at, metadata, policy }),
   });
 }
 

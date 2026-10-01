@@ -192,6 +192,11 @@ func (h *Handler) CreatePGAPIKey(c *gin.Context) {
 	}
 	userID := strings.TrimSpace(req.UserID)
 	if userID == "" {
+		// Fall back to the management token's default user id when its opt-in
+		// endpoint allow-list covers this request.
+		userID = defaultUserIDFromContext(c)
+	}
+	if userID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
 			"type":    "invalid_request",
 			"message": "user_id is required: every API key must be owned by an Internal User",

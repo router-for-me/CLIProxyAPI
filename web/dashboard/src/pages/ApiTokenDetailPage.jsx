@@ -89,6 +89,9 @@ function TokenDetailsCard({ token, onUpdated }) {
   const [newStatus, setNewStatus] = useState(token.status);
   const [savingScope, setSavingScope] = useState(false);
   const [newScope, setNewScope] = useState(token.scope);
+  const [savingDefaultUser, setSavingDefaultUser] = useState(false);
+  const [defaultUserID, setDefaultUserID] = useState(token.default_user_id || '');
+  const [defaultEndpoints, setDefaultEndpoints] = useState((token.default_user_id_endpoints || []).join('\n'));
   const isExpired = token.status === 'expired';
 
   async function handleStatusChange(e) {
@@ -120,6 +123,23 @@ function TokenDetailsCard({ token, onUpdated }) {
       setNewScope(token.scope);
     } finally {
       setSavingScope(false);
+    }
+  }
+
+  async function handleDefaultUserSave(e) {
+    e.preventDefault();
+    setSavingDefaultUser(true);
+    try {
+      await patchAPIToken(token.id, {
+        default_user_id: defaultUserID.trim(),
+        default_user_id_endpoints: parseList(defaultEndpoints),
+      });
+      toast.success('Default user settings saved');
+      onUpdated();
+    } catch (err) {
+      toast.error(err.message || 'Failed to update default user');
+    } finally {
+      setSavingDefaultUser(false);
     }
   }
 
@@ -156,6 +176,37 @@ function TokenDetailsCard({ token, onUpdated }) {
           {savingScope && <div className="spinner spinner--sm" />}
         </div>
       </div>
+
+      {token.scope === 'write' && (
+        <form className="form__row" onSubmit={handleDefaultUserSave}>
+          <div className="form__label">Default user fallback</div>
+          <input
+            type="text"
+            value={defaultUserID}
+            onChange={(e) => setDefaultUserID(e.target.value)}
+            placeholder="Internal User id (optional)"
+            disabled={savingDefaultUser}
+            style={{ marginBottom: 8 }}
+          />
+          <textarea
+            rows={3}
+            value={defaultEndpoints}
+            onChange={(e) => setDefaultEndpoints(e.target.value)}
+            placeholder={'/v0/management/api-keys-pg\n/v0/management/litellm/key/generate'}
+            disabled={savingDefaultUser}
+          />
+          <div className="form__hint">
+            When a request to one of these endpoints omits <code>user_id</code>, the
+            default Internal User id is used as the owner. One path per line; an empty
+            list disables the fallback.
+          </div>
+          <div className="form__actions">
+            <button type="submit" className="primary" disabled={savingDefaultUser}>
+              {savingDefaultUser ? 'Saving…' : 'Save default user'}
+            </button>
+          </div>
+        </form>
+      )}
 
       <div className="grid grid--3" style={{ gap: 10, marginBottom: 16 }}>
         <KeyStat label="Created" value={formatDate(token.created_at)} />
