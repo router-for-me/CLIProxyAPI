@@ -97,10 +97,13 @@ func (h *Handler) GetLiteLLMSyncSettings(c *gin.Context) {
 // Pointer-typed fields are applied only when non-nil. master_key: nil = keep the
 // stored key, "" = clear it, non-empty = rotate (sealed at rest).
 type liteLLMSyncSettingsRequest struct {
-	Enabled         *bool   `json:"enabled,omitempty"`
-	IntervalSeconds *int    `json:"interval_seconds,omitempty"`
-	BaseURL         *string `json:"base_url,omitempty"`
-	MasterKey       *string `json:"master_key,omitempty"`
+	Enabled                 *bool   `json:"enabled,omitempty"`
+	IntervalSeconds         *int    `json:"interval_seconds,omitempty"`
+	BaseURL                 *string `json:"base_url,omitempty"`
+	MasterKey               *string `json:"master_key,omitempty"`
+	OnTheFlyEnabled         *bool   `json:"onthefly_enabled,omitempty"`
+	OnTheFlyCacheTTLSeconds *int    `json:"onthefly_cache_ttl_seconds,omitempty"`
+	OnTheFlyTimeoutMs       *int    `json:"onthefly_timeout_ms,omitempty"`
 }
 
 // PutLiteLLMSyncSettings handles PUT /v0/management/litellm/settings.
@@ -128,6 +131,15 @@ func (h *Handler) PutLiteLLMSyncSettings(c *gin.Context) {
 	}
 	if req.BaseURL != nil {
 		set.BaseURL = strings.TrimSpace(*req.BaseURL)
+	}
+	if req.OnTheFlyEnabled != nil {
+		set.OnTheFlyEnabled = *req.OnTheFlyEnabled
+	}
+	if req.OnTheFlyCacheTTLSeconds != nil {
+		set.OnTheFlyCacheTTLSeconds = *req.OnTheFlyCacheTTLSeconds
+	}
+	if req.OnTheFlyTimeoutMs != nil {
+		set.OnTheFlyTimeoutMs = *req.OnTheFlyTimeoutMs
 	}
 	// Validate the base URL scheme (http/https) when non-empty so the sync
 	// runner never dials an unexpected scheme.

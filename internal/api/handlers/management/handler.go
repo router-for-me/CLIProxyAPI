@@ -211,6 +211,10 @@ type Handler struct {
 	// — the /litellm/settings and /litellm/sync/run routes return 503.
 	litellmSync *store.LiteLLMSyncStore
 
+	// litellmOnTheFly is the durable audit log of per-request LiteLLM API key
+	// validations (litellm_onthefly_log). nil when PG is not configured.
+	litellmOnTheFly *store.OnTheFlyLogStore
+
 	// pgControl is the raw PostgresStore handle used by the runtime-config
 	// management routes (GET/POST /runtime-config, /config-revisions,
 	// /config-imports). nil when PG is not configured — those routes return
@@ -380,6 +384,17 @@ func (h *Handler) SetLiteLLMSyncStore(s *store.LiteLLMSyncStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.litellmSync = s
+}
+
+// SetLiteLLMOnTheFlyStore wires the PG-backed on-the-fly validation log store.
+// When nil, the /litellm/onthefly-log routes return 503.
+func (h *Handler) SetLiteLLMOnTheFlyStore(s *store.OnTheFlyLogStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.litellmOnTheFly = s
 }
 
 // SetV1ModelsHandler wires the http.Handler that serves GET /v1/models on

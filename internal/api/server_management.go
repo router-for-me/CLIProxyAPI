@@ -258,6 +258,9 @@ func (s *Server) registerManagementRoutes() {
 		// Manage LiteLLM — push Manage-LiteLLM Internal Users into the runtime
 		// internal_users table ("sync to NixLLM"). Needs no external connection.
 		mgmt.POST("/litellm/sync/nixllm", s.mgmt.RunLiteLLMSyncNixLLM)
+		// Manage LiteLLM — on-the-fly validation log (durable audit trail).
+		mgmt.GET("/litellm/onthefly-log", s.mgmt.ListLiteLLMOnTheFlyLog)
+		mgmt.DELETE("/litellm/onthefly-log", s.mgmt.ClearLiteLLMOnTheFlyLog)
 
 		// Jev AI classifier settings (global master toggle + sealed API key +
 		// pinned model). The API key is write-only: GET returns only
