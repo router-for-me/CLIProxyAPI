@@ -18,7 +18,8 @@ const weeklyWindowMinutes = 7 * 24 * 60
 // Once that credential is exhausted it enters cooldown and the next-soonest one is used.
 //
 // Reset times come from the passive quota snapshot (Quota.Signals) captured from upstream
-// response headers. Credentials without a known future reset, either never observed or
+// response headers. The requested model's own snapshot is preferred over the credential-wide
+// one, so a model-specific weekly window (Claude's Fable 7d_oi window) is honored. Credentials without a known future reset, either never observed or
 // with a reset that already passed, are picked first so a single request can learn their
 // current window. Ties fall back to ID order, which makes providers without quota
 // signals behave like fill-first.
@@ -36,7 +37,7 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 	var picked *Auth
 	var pickedReset time.Time
 	for _, auth := range available {
-		resetAt := weeklyQuotaResetAt(auth, now)
+		resetAt := weeklyQuotaResetAt(auth, model, now)
 		if picked == nil || resetAt.Before(pickedReset) {
 			picked = auth
 			pickedReset = resetAt
@@ -48,27 +49,47 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 	return picked, nil
 }
 
-// weeklyQuotaResetAt returns the observed weekly quota reset time for auth, or the zero
-// time when no future reset is known.
-func weeklyQuotaResetAt(auth *Auth, now time.Time) time.Time {
-	if auth == nil || len(auth.Quota.Signals) == 0 {
+// weeklyQuotaResetAt returns the observed weekly quota reset time for auth serving model,
+// or the zero time when no future reset is known. The model-scoped snapshot is checked
+// first and the credential-wide snapshot is the fallback.
+func weeklyQuotaResetAt(auth *Auth, model string, now time.Time) time.Time {
+	if auth == nil {
 		return time.Time{}
 	}
-	signals := auth.Quota.Signals
+	if state := existingModelState(auth, model); state != nil {
+		if resetAt := weeklyQuotaResetFromSnapshot(auth.Provider, state.Quota, true, now); !resetAt.IsZero() {
+			return resetAt
+		}
+	}
+	return weeklyQuotaResetFromSnapshot(auth.Provider, auth.Quota, false, now)
+}
+
+// weeklyQuotaResetFromSnapshot extracts the weekly reset time from one quota snapshot.
+// Model-specific windows are only read from model-scoped snapshots, because the
+// credential-wide snapshot may have been captured from a different model's response.
+func weeklyQuotaResetFromSnapshot(provider string, quota QuotaState, modelScoped bool, now time.Time) time.Time {
+	if len(quota.Signals) == 0 {
+		return time.Time{}
+	}
 	signal := func(name string) string {
-		return strings.TrimSpace(signals[http.CanonicalHeaderKey(name)])
+		return strings.TrimSpace(quota.Signals[http.CanonicalHeaderKey(name)])
 	}
 	var resetAt time.Time
-	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "claude":
-		resetAt = parseQuotaResetAt(signal("Anthropic-Ratelimit-Unified-7d-Reset"), "", auth.Quota.ObservedAt)
+		if modelScoped {
+			resetAt = parseQuotaResetAt(signal("Anthropic-Ratelimit-Unified-7d_oi-Reset"), "", quota.ObservedAt)
+		}
+		if resetAt.IsZero() {
+			resetAt = parseQuotaResetAt(signal("Anthropic-Ratelimit-Unified-7d-Reset"), "", quota.ObservedAt)
+		}
 	case "codex":
 		// Codex reports the weekly limit as the secondary window. Accounts without a
 		// secondary window may expose the weekly limit as the primary one instead.
-		resetAt = parseQuotaResetAt(signal("X-Codex-Secondary-Reset-At"), signal("X-Codex-Secondary-Reset-After-Seconds"), auth.Quota.ObservedAt)
+		resetAt = parseQuotaResetAt(signal("X-Codex-Secondary-Reset-At"), signal("X-Codex-Secondary-Reset-After-Seconds"), quota.ObservedAt)
 		if resetAt.IsZero() {
 			if minutes, errParse := strconv.ParseInt(signal("X-Codex-Primary-Window-Minutes"), 10, 64); errParse == nil && minutes >= weeklyWindowMinutes {
-				resetAt = parseQuotaResetAt(signal("X-Codex-Primary-Reset-At"), signal("X-Codex-Primary-Reset-After-Seconds"), auth.Quota.ObservedAt)
+				resetAt = parseQuotaResetAt(signal("X-Codex-Primary-Reset-At"), signal("X-Codex-Primary-Reset-After-Seconds"), quota.ObservedAt)
 			}
 		}
 	}

@@ -124,10 +124,65 @@ func TestWeeklyQuotaResetAt_Codex(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			auth := &Auth{ID: "x", Provider: "codex", Quota: QuotaState{ObservedAt: observed, Signals: tt.signals}}
-			if got := weeklyQuotaResetAt(auth, now); !got.Equal(tt.want) {
+			if got := weeklyQuotaResetAt(auth, "", now); !got.Equal(tt.want) {
 				t.Fatalf("weeklyQuotaResetAt() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSoonestResetSelectorPick_PrefersModelScopedWeeklyReset(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	// "a" has the sooner credential-wide reset, but "b" has a sooner Fable window
+	// recorded on its model-scoped snapshot, which wins for that model.
+	a := claudeAuthResettingAt("a", now.Add(2*24*time.Hour))
+	b := claudeAuthResettingAt("b", now.Add(3*24*time.Hour))
+	b.ModelStates = map[string]*ModelState{
+		"claude-fable-5": {
+			Quota: QuotaState{
+				ObservedAt: now,
+				Signals: map[string]string{
+					"Anthropic-Ratelimit-Unified-7d_oi-Reset": strconv.FormatInt(now.Add(24*time.Hour).Unix(), 10),
+					"Anthropic-Ratelimit-Unified-7d-Reset":    strconv.FormatInt(now.Add(3*24*time.Hour).Unix(), 10),
+				},
+			},
+		},
+	}
+	auths := []*Auth{a, b}
+
+	got, err := (&SoonestResetSelector{}).Pick(context.Background(), "claude", "claude-fable-5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "b" {
+		t.Fatalf("Pick(fable) auth.ID = %v, want %q", got, "b")
+	}
+
+	got, err = (&SoonestResetSelector{}).Pick(context.Background(), "claude", "claude-opus-4-7", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "a" {
+		t.Fatalf("Pick(other model) auth.ID = %v, want %q", got, "a")
+	}
+}
+
+func TestWeeklyQuotaResetAt_IgnoresModelWindowOnCredentialSnapshot(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	shared := now.Add(3 * 24 * time.Hour).Truncate(time.Second)
+	auth := &Auth{ID: "x", Provider: "claude", Quota: QuotaState{
+		ObservedAt: now,
+		Signals: map[string]string{
+			"Anthropic-Ratelimit-Unified-7d_oi-Reset": strconv.FormatInt(now.Add(time.Hour).Unix(), 10),
+			"Anthropic-Ratelimit-Unified-7d-Reset":    strconv.FormatInt(shared.Unix(), 10),
+		},
+	}}
+	if got := weeklyQuotaResetAt(auth, "claude-fable-5", now); !got.Equal(shared) {
+		t.Fatalf("weeklyQuotaResetAt() = %v, want shared 7d reset %v", got, shared)
 	}
 }
 

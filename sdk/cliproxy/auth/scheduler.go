@@ -553,7 +553,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			}
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
-		picked := pickSoonestResetScheduled(entries, predicate, now)
+		picked := pickSoonestResetScheduled(entries, modelKey, predicate, now)
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
@@ -1406,7 +1406,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	case schedulerStrategyFillFirst:
 		picked = view.pickFirst(predicate)
 	case schedulerStrategySoonestReset:
-		picked = pickSoonestResetScheduled(view.flat, predicate, time.Now())
+		picked = pickSoonestResetScheduled(view.flat, m.modelKey, predicate, time.Now())
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
 	default:
@@ -1674,9 +1674,9 @@ func (v *readyView) pickFirst(predicate func(*scheduledAuth) bool) *scheduledAut
 	return nil
 }
 
-// pickSoonestResetScheduled returns the matching entry whose weekly quota resets soonest.
-// Entries are expected in ID order so ties resolve deterministically.
-func pickSoonestResetScheduled(entries []*scheduledAuth, predicate func(*scheduledAuth) bool, now time.Time) *scheduledAuth {
+// pickSoonestResetScheduled returns the matching entry whose weekly quota for model resets
+// soonest. Entries are expected in ID order so ties resolve deterministically.
+func pickSoonestResetScheduled(entries []*scheduledAuth, model string, predicate func(*scheduledAuth) bool, now time.Time) *scheduledAuth {
 	var picked *scheduledAuth
 	var pickedReset time.Time
 	for _, entry := range entries {
@@ -1686,7 +1686,7 @@ func pickSoonestResetScheduled(entries []*scheduledAuth, predicate func(*schedul
 		if predicate != nil && !predicate(entry) {
 			continue
 		}
-		resetAt := weeklyQuotaResetAt(entry.auth, now)
+		resetAt := weeklyQuotaResetAt(entry.auth, model, now)
 		if picked == nil || resetAt.Before(pickedReset) {
 			picked = entry
 			pickedReset = resetAt
