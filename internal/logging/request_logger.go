@@ -18,6 +18,15 @@ const (
 	APIResponseSourceContextKey          = "API_RESPONSE_SOURCE"
 	APIResponseCapturedContextKey        = "API_RESPONSE_CAPTURED"
 	APIWebsocketTimelineSourceContextKey = "API_WEBSOCKET_TIMELINE_SOURCE"
+
+	// StoreRequestBodies* gate per-request request-body capture for a request
+	// whose resolved auth has the provider's store_request_bodies toggle set.
+	// The provider and upstream provider id are carried alongside so the
+	// capture middleware can attribute the stored body without re-resolving
+	// the auth.
+	StoreRequestBodiesContextKey           = "STORE_REQUEST_BODIES"
+	StoreRequestBodiesProviderContextKey   = "STORE_REQUEST_BODIES_PROVIDER"
+	StoreRequestBodiesUpstreamIDContextKey = "STORE_REQUEST_BODIES_UPSTREAM_ID"
 )
 
 // DeferredAPIRequest builds an upstream request log only when an error log needs it.

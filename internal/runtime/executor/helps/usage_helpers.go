@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,23 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
+	}
+	// Set the per-request body-capture gate only when the resolved auth carries
+	// the provider's store_request_bodies toggle. The middleware reads the
+	// provider and upstream provider id from the same gin context to attribute
+	// the body without re-resolving the auth.
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeStoreRequestBodies]), "true") {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+			var upstreamID int64
+			if raw := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeUpstreamProviderID]); raw != "" {
+				if parsed, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
+					upstreamID = parsed
+				}
+			}
+			ginCtx.Set(internallogging.StoreRequestBodiesContextKey, true)
+			ginCtx.Set(internallogging.StoreRequestBodiesProviderContextKey, provider)
+			ginCtx.Set(internallogging.StoreRequestBodiesUpstreamIDContextKey, upstreamID)
+		}
 	}
 	return reporter
 }

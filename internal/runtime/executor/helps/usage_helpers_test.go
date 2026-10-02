@@ -5,14 +5,41 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
+
+func TestNewUsageReporterSetsCaptureGate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			cliproxyauth.AttributeStoreRequestBodies: "true",
+			cliproxyauth.AttributeUpstreamProviderID: "7",
+		},
+	}
+	_ = NewUsageReporter(ctx, "claude", "claude-opus", auth)
+
+	if v, ok := ginCtx.Get(internallogging.StoreRequestBodiesContextKey); !ok || v != true {
+		t.Fatalf("capture gate not set: %v %v", v, ok)
+	}
+	if v, _ := ginCtx.Get(internallogging.StoreRequestBodiesUpstreamIDContextKey); v != int64(7) {
+		t.Fatalf("upstream id not set: %v", v)
+	}
+}
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
