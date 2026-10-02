@@ -945,94 +945,117 @@ export function EventBodiesSection({ id }) {
   return <EventBodiesContent data={detail.data} loading={detail.loading} error={detail.error} />;
 }
 
+// EventDetailContent renders a fetched usage event inside the modal shell.
+// Split from EventDetailModal so the data-driven markup can be exercised by
+// the react-dom/server test harness (effects do not run there).
+export function EventDetailContent({ id, timezone, e }) {
+  // A silent upstream substitution is when the served model differs from the
+  // resolved model. Surface it explicitly rather than burying it in a field.
+  const substituted = Boolean(e?.served_model && e?.model && e.served_model !== e.model);
+  return (
+    <>
+      <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+        <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
+        <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
+      </div>
+
+      <div className="detail-row__block-label" style={{ marginTop: 14 }}>Routing</div>
+      <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+        <div className="detail-row">
+          <div className="detail-row__label">Request ID</div>
+          <div className="detail-row__value mono">
+            {e.request_id || '—'}
+            <CopyButton value={e.request_id} label="request id" />
+          </div>
+        </div>
+        <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
+        <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
+
+        <div className="detail-row__block-label" style={{ marginTop: 14, gridColumn: '1 / -1' }}>Upstream credential</div>
+        <DetailRow label="Upstream provider" value={e.official_provider || e.provider || '—'} />
+        <DetailRow label="Credential identity" value={e.source || '—'} mono />
+        <DetailRow label="Auth kind" value={e.auth_type || '—'} />
+        <DetailRow label="Executor" value={e.executor_type || '—'} />
+        <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
+
+        <DetailRow label="Route Model" value={e.route_model || '—'} mono />
+        <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
+        <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
+        <div className="detail-row">
+          <div className="detail-row__label">Model (served)</div>
+          <div className="detail-row__value mono">
+            {e.served_model || '—'}
+            {substituted && <span className="badge badge--warn" title="Upstream served a different model than requested">substituted</span>}
+          </div>
+        </div>
+        <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
+        <DetailRow label="Service Tier" value={e.service_tier || '—'} />
+        <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
+        <DetailRow label="Endpoint" value={e.endpoint || '—'} mono />
+
+        <DetailRow label="User ID" value={e.user_id || '—'} mono />
+        <DetailRow label="Router tier" value={e.tier || '—'} />
+        <DetailRow label="Router ID" value={e.router_id || '—'} mono />
+        <DetailRow label="Scored tier" value={e.scored_tier || '—'} />
+        <DetailRow label="Mapping tier" value={e.mapping_tier || '—'} />
+        <DetailRow label="Decision cause" value={e.decision_cause || '—'} mono />
+        <DetailRow label="Profile version" value={e.profile_version ? String(e.profile_version) : '—'} mono />
+      </div>
+
+      <div style={{ marginTop: 14 }}>
+        <TokenBreakdownCard e={e} />
+      </div>
+
+      <div className="detail-row__block-label" style={{ marginTop: 14 }}>Timing & cost</div>
+      <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+        <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
+        {Number(e.discount_pct || 0) > 0 && (
+          <DetailRow
+            label="Discount"
+            value={`${e.discount_pct}% (was $${(e.original_cost_usd || 0).toFixed(4)})`}
+            mono
+          />
+        )}
+        <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
+        <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
+        {e.energy_joules != null && (
+          <DetailRow label="Energy (J)" value={String(e.energy_joules)} mono />
+        )}
+      </div>
+
+      <div className="detail-row__block-label" style={{ marginTop: 14 }}>Client</div>
+      <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+        <DetailRow label="Client IP" value={e.client_ip || '—'} mono />
+        <DetailRow label="Forwarded For" value={e.forwarded_for || '—'} mono />
+        <DetailRow label="Failed" value={e.failed ? 'yes' : 'no'} mono />
+        <DetailRow label="Fail Status" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
+        <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
+      </div>
+
+      <EventBodiesSection id={id} />
+
+      <FailoverHistory
+        requestId={e.request_id}
+        currentId={e.id}
+        currentKind="event"
+        timezone={timezone}
+      />
+    </>
+  );
+}
+
 // EventDetailModal fetches and renders a single usage event. The sealed
 // api_key_principal is intentionally never shown; the operator sees the
 // non-secret key_alias and the other fields needed for triage.
 export function EventDetailModal({ id, timezone, onClose }) {
   const detail = useAsync(() => getUsageEvent(id), [id]);
   const e = detail.data?.event;
-  // A silent upstream substitution is when the served model differs from the
-  // resolved model. Surface it explicitly rather than burying it in a field.
-  const substituted = Boolean(e?.served_model && e?.model && e.served_model !== e.model);
   return (
     <Modal title={`Event #${id}`} onClose={onClose} size="lg">
       {detail.loading && <Spinner label="Loading…" />}
       {detail.error && <ErrorBanner error={detail.error} />}
       {!detail.loading && !detail.error && e && (
-        <>
-          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
-            <DetailRow label={`Time (${tzAbbreviation(e.requested_at, timezone)})`} value={e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'} mono />
-            <DetailRow label="Time (UTC)" value={e.requested_at ? new Date(e.requested_at).toISOString() : '—'} mono />
-          </div>
-
-          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Routing</div>
-          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
-            <div className="detail-row">
-              <div className="detail-row__label">Request ID</div>
-              <div className="detail-row__value mono">
-                {e.request_id || '—'}
-                <CopyButton value={e.request_id} label="request id" />
-              </div>
-            </div>
-            <DetailRow label="API Key ID" value={e.api_key_id || '—'} mono />
-            <DetailRow label="Key Alias" value={e.key_alias || '—'} mono />
-            <DetailRow label="Provider Official" value={e.official_provider || e.provider || '—'} />
-            <DetailRow label="Provider (internal)" value={e.provider || '—'} mono />
-            <DetailRow label="Route Model" value={e.route_model || '—'} mono />
-            <DetailRow label="Model Alias" value={e.alias || e.model || '—'} mono />
-            <DetailRow label="Model (resolved)" value={e.model || '—'} mono />
-            <div className="detail-row">
-              <div className="detail-row__label">Model (served)</div>
-              <div className="detail-row__value mono">
-                {e.served_model || '—'}
-                {substituted && <span className="badge badge--warn" title="Upstream served a different model than requested">substituted</span>}
-              </div>
-            </div>
-            <DetailRow label="Executor" value={e.executor_type || '—'} />
-            <DetailRow label="Auth Type" value={e.auth_type || '—'} />
-            <DetailRow label="Source" value={e.source || '—'} />
-            <DetailRow label="Reasoning Effort" value={e.reasoning_effort || '—'} />
-            <DetailRow label="Service Tier" value={e.service_tier || '—'} />
-            <DetailRow label="Response Service Tier" value={e.response_service_tier || '—'} />
-            <DetailRow label="Endpoint" value={e.endpoint || '—'} mono />
-          </div>
-
-          <div style={{ marginTop: 14 }}>
-            <TokenBreakdownCard e={e} />
-          </div>
-
-          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Timing & cost</div>
-          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
-            <DetailRow label="Cost (USD)" value={`$${(e.cost_usd || 0).toFixed(4)}`} mono />
-            {Number(e.discount_pct || 0) > 0 && (
-              <DetailRow
-                label="Discount"
-                value={`${e.discount_pct}% (was $${(e.original_cost_usd || 0).toFixed(4)})`}
-                mono
-              />
-            )}
-            <DetailRow label="Latency" value={e.latency_ms ? `${e.latency_ms} ms` : '—'} mono />
-            <DetailRow label="TTFT" value={e.ttft_ms ? `${e.ttft_ms} ms` : '—'} mono />
-          </div>
-
-          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Client</div>
-          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
-            <DetailRow label="Client IP" value={e.client_ip || '—'} mono />
-            <DetailRow label="Forwarded For" value={e.forwarded_for || '—'} mono />
-            <DetailRow label="Failed" value={e.failed ? 'yes' : 'no'} mono />
-            <DetailRow label="Fail Status" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
-            <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
-          </div>
-
-          <EventBodiesSection id={id} />
-
-          <FailoverHistory
-            requestId={e.request_id}
-            currentId={e.id}
-            currentKind="event"
-            timezone={timezone}
-          />
-        </>
+        <EventDetailContent id={id} timezone={timezone} e={e} />
       )}
       {!detail.loading && !detail.error && !e && <EmptyState title="Event not found" />}
     </Modal>

@@ -13,7 +13,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { EventBodiesContent, EventBodiesSection } from './usageShared.jsx';
+import { EventBodiesContent, EventBodiesSection, EventDetailContent } from './usageShared.jsx';
 
 const FULL = {
   available: true,
@@ -84,4 +84,47 @@ test('EventBodiesSection renders its loading shell', () => {
   const html = renderToStaticMarkup(<EventBodiesSection id={1} />);
   assert.match(html, /Request &amp; Response/);
   assert.match(html, /Loading captured payloads/);
+});
+
+// GET_USAGE_EVENT_RESPONSE mirrors the shape resolved by getUsageEvent
+// ({ event: UsageEventRow }). EventDetailModal loads it through useAsync, whose
+// effect does not run under renderToStaticMarkup, so the assertions target the
+// presentational EventDetailContent with the loaded row — the same convention
+// used for EventBodiesContent above.
+const GET_USAGE_EVENT_RESPONSE = {
+  event: {
+    id: 7,
+    official_provider: 'SemutSSH',
+    provider: 'openai-compatible-semut',
+    source: 'team@example.com',
+    auth_type: 'oauth',
+    tier: 'complex',
+    user_id: 'u1',
+    router_id: 'router:smart',
+    scored_tier: 'complex',
+    mapping_tier: 'medium',
+    decision_cause: 'complexity_scorer',
+    profile_version: 3,
+    energy_joules: 12.5,
+  },
+};
+
+test('EventDetailContent renders the upstream credential group and router metadata', () => {
+  const html = renderToStaticMarkup(
+    <EventDetailContent id={7} timezone="UTC" e={GET_USAGE_EVENT_RESPONSE.event} />,
+  );
+  assert.match(html, /Upstream credential/);
+  assert.match(html, /Upstream provider/);
+  assert.match(html, /SemutSSH/);
+  assert.match(html, /Credential identity/);
+  assert.match(html, /team@example\.com/);
+  assert.match(html, /Auth kind/);
+  assert.match(html, /oauth/);
+  assert.match(html, /Router tier/);
+  assert.match(html, /complex/);
+  assert.match(html, /u1/);
+  assert.match(html, /router:smart/);
+  assert.match(html, /Profile version/);
+  assert.match(html, /Energy \(J\)/);
+  assert.match(html, /12\.5/);
 });

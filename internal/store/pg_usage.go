@@ -1664,15 +1664,37 @@ type UsageEventRow struct {
 	// ServedModel is the model the upstream response reported serving. It
 	// differs from Model when the provider silently substituted a different
 	// model; empty when the upstream did not report one.
-	ServedModel         string  `json:"served_model,omitempty"`
-	Endpoint            string  `json:"endpoint,omitempty"`
-	ClientIP            string  `json:"client_ip,omitempty"`
-	ForwardedFor        string  `json:"forwarded_for,omitempty"`
-	AuthType            string  `json:"auth_type,omitempty"`
-	Source              string  `json:"source,omitempty"`
-	ReasoningEffort     string  `json:"reasoning_effort,omitempty"`
-	ServiceTier         string  `json:"service_tier,omitempty"`
-	ResponseServiceTier string  `json:"response_service_tier,omitempty"`
+	ServedModel         string `json:"served_model,omitempty"`
+	Endpoint            string `json:"endpoint,omitempty"`
+	ClientIP            string `json:"client_ip,omitempty"`
+	ForwardedFor        string `json:"forwarded_for,omitempty"`
+	AuthType            string `json:"auth_type,omitempty"`
+	Source              string `json:"source,omitempty"`
+	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
+	ServiceTier         string `json:"service_tier,omitempty"`
+	ResponseServiceTier string `json:"response_service_tier,omitempty"`
+	UserID              string `json:"user_id,omitempty"`
+	// Tier stores the Auto Router complexity tier chosen for the request.
+	// Empty for non-routed requests.
+	Tier string `json:"tier,omitempty"`
+	// RouterID stores the Auto Router id that owned the tier decision. Empty
+	// for non-routed requests.
+	RouterID string `json:"router_id,omitempty"`
+	// ScoredTier is the tier the scorer derived before any keyword override or
+	// mapping fallback. Empty for non-routed requests.
+	ScoredTier string `json:"scored_tier,omitempty"`
+	// EffectiveTier mirrors Tier but is persisted as its own column.
+	EffectiveTier string `json:"effective_tier,omitempty"`
+	// MappingTier is the tier whose mapping the resolver actually used.
+	MappingTier string `json:"mapping_tier,omitempty"`
+	// DecisionCause explains why the effective tier differs from the scored
+	// tier (literal_keyword_match) or matches it (complexity_scorer).
+	DecisionCause string `json:"decision_cause,omitempty"`
+	// ProfileVersion identifies the Auto Router profile version used to score
+	// the request. Zero when the default built-in profile was used.
+	ProfileVersion int64 `json:"profile_version,omitempty"`
+	// ProfileHash identifies the exact profile configuration used.
+	ProfileHash         string  `json:"profile_hash,omitempty"`
 	InputTokens         int64   `json:"input_tokens"`
 	OutputTokens        int64   `json:"output_tokens"`
 	ReasoningTokens     int64   `json:"reasoning_tokens"`
@@ -1701,9 +1723,12 @@ type UsageEventRow struct {
 	// pricing row matched (i.e. "no pricing configured"), mirroring
 	// CostBreakdown's missing-row semantics. Stays nil when CostBreakdown is
 	// not requested so the list endpoint's payload is unchanged.
-	AppliedPricing *Pricing  `json:"applied_pricing,omitempty"`
-	LatencyMs      int64     `json:"latency_ms,omitempty"`
-	TTFTMs         int64     `json:"ttft_ms,omitempty"`
+	AppliedPricing *Pricing `json:"applied_pricing,omitempty"`
+	LatencyMs      int64    `json:"latency_ms,omitempty"`
+	TTFTMs         int64    `json:"ttft_ms,omitempty"`
+	// EnergyJoules is the upstream-reported energy consumption, nil when not
+	// measured (persisted as SQL NULL rather than a misleading 0).
+	EnergyJoules   *float64  `json:"energy_joules,omitempty"`
 	Failed         bool      `json:"failed"`
 	FailStatusCode int       `json:"fail_status_code,omitempty"`
 	Generate       bool      `json:"generate,omitempty"`
@@ -1728,11 +1753,13 @@ const eventRowSelectColumns = `
 	e.client_ip, e.forwarded_for,
 	e.auth_type,
 	e.source, e.reasoning_effort, e.service_tier, e.response_service_tier,
+	e.user_id, e.tier, e.router_id, e.scored_tier, e.effective_tier, e.mapping_tier, e.decision_cause,
+	e.profile_version, e.profile_hash,
 	e.input_tokens, e.output_tokens, e.reasoning_tokens,
 	e.cached_tokens, e.cache_creation_tokens, e.total_tokens, e.cost_usd,
 	e.discount_pct,
 	e.original_cost_usd,
-	e.latency_ms, e.ttft_ms, e.failed, e.fail_status_code, e.generate,
+	e.latency_ms, e.ttft_ms, e.energy_joules, e.failed, e.fail_status_code, e.generate,
 	e.requested_at,
 	COALESCE(mcAlias.official_provider, mcModel.official_provider, mcCompat.official_provider, '') AS official_provider
 `
@@ -1787,6 +1814,9 @@ func scanEventRow(scanner interface {
 }) (UsageEventRow, error) {
 	var r UsageEventRow
 	var clientIP, forwardedFor, routeModel, servedModel sql.NullString
+	var userID, tier, routerID, scoredTier, effectiveTier, mappingTier, decisionCause, profileHash sql.NullString
+	var profileVersion sql.NullInt64
+	var energyJoules sql.NullFloat64
 	if err := scanner.Scan(
 		&r.ID, &r.RequestID, &r.APIKeyID, &r.KeyAlias,
 		&r.Provider, &r.ExecutorType, &r.Model, &r.Alias, &r.Endpoint,
@@ -1794,8 +1824,11 @@ func scanEventRow(scanner interface {
 		&clientIP, &forwardedFor,
 		&r.AuthType,
 		&r.Source, &r.ReasoningEffort, &r.ServiceTier, &r.ResponseServiceTier,
+		&userID, &tier, &routerID, &scoredTier, &effectiveTier, &mappingTier, &decisionCause,
+		&profileVersion, &profileHash,
 		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
 		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.DiscountPct, &r.OriginalCostUSD, &r.LatencyMs, &r.TTFTMs,
+		&energyJoules,
 		&r.Failed, &r.FailStatusCode, &r.Generate, &r.RequestedAt,
 		&r.OfficialProvider,
 	); err != nil {
@@ -1812,6 +1845,37 @@ func scanEventRow(scanner interface {
 	}
 	if forwardedFor.Valid {
 		r.ForwardedFor = forwardedFor.String
+	}
+	if userID.Valid {
+		r.UserID = userID.String
+	}
+	if tier.Valid {
+		r.Tier = tier.String
+	}
+	if routerID.Valid {
+		r.RouterID = routerID.String
+	}
+	if scoredTier.Valid {
+		r.ScoredTier = scoredTier.String
+	}
+	if effectiveTier.Valid {
+		r.EffectiveTier = effectiveTier.String
+	}
+	if mappingTier.Valid {
+		r.MappingTier = mappingTier.String
+	}
+	if decisionCause.Valid {
+		r.DecisionCause = decisionCause.String
+	}
+	if profileVersion.Valid {
+		r.ProfileVersion = profileVersion.Int64
+	}
+	if profileHash.Valid {
+		r.ProfileHash = profileHash.String
+	}
+	if energyJoules.Valid {
+		v := energyJoules.Float64
+		r.EnergyJoules = &v
 	}
 	return r, nil
 }
