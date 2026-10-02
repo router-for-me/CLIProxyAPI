@@ -536,6 +536,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	if modelID == "" {
 		return nil
 	}
+	modelID = normalizeAntigravityModelID(modelID)
 
 	data := getModels()
 	allModels := [][]*ModelInfo{
@@ -566,12 +567,38 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 // (e.g. gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro) that should
 // not depend on remote models.json updates.
 func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models,
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(m.ID))
+		if id == "gemini-3.8-flash-high" || id == "gemini-3.7-flash-high" || id == "gemini-3.6-flash-high" || id == "gemini-3.1-pro-low" || id == "gemini-pro-agent" {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return upsertModelInfos(filtered,
 		antigravityBuiltinGemini38FlashModelInfo(),
 		antigravityBuiltinGemini37FlashModelInfo(),
 		antigravityBuiltinGemini36FlashModelInfo(),
 		antigravityBuiltinGemini31ProModelInfo(),
 	)
+}
+
+func normalizeAntigravityModelID(modelID string) string {
+	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case "gemini-3.8-flash-high":
+		return "gemini-3.8-flash"
+	case "gemini-3.7-flash-high":
+		return "gemini-3.7-flash"
+	case "gemini-3.6-flash-high":
+		return "gemini-3.6-flash"
+	case "gemini-3.1-pro-low", "gemini-pro-agent":
+		return "gemini-3.1-pro"
+	default:
+		return modelID
+	}
 }
 
 func antigravityBuiltinGemini38FlashModelInfo() *ModelInfo {
