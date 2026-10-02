@@ -120,6 +120,13 @@ type Server struct {
 	// sink; its ticks are a no-op when PG is not configured. Stopped during
 	// shutdown (Stop) so the goroutine cannot outlive the server.
 	autoDisableSweeper *managementHandlers.AutoDisableSweeper
+
+	// requestBodyRetentionSweeper periodically prunes captured request/response
+	// bodies older than the retention window so the request_bodies capture
+	// table stays bounded. Constructed and started at boot alongside the
+	// auto-disable sweeper; its ticks are a no-op when PG is not configured.
+	// Stopped during shutdown (Stop) so the goroutine cannot outlive the server.
+	requestBodyRetentionSweeper *managementHandlers.RequestBodyRetentionSweeper
 }
 
 // newGinEngine returns a Gin engine configured to route on the raw
@@ -330,6 +337,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// absent. It is stopped on server shutdown (see Stop).
 		s.autoDisableSweeper = s.mgmt.ReenableSweeper()
 		s.autoDisableSweeper.Start()
+		// Prune captured request/response bodies on their own retention window
+		// so the request_bodies capture table stays bounded. Constructed here
+		// (like the auto-disable sweeper) so it tracks the same usage store;
+		// its ticks are a harmless no-op when PG is absent. Stopped on server
+		// shutdown (see Stop).
+		s.requestBodyRetentionSweeper = managementHandlers.NewRequestBodyRetentionSweeper(handles.Usage)
+		s.requestBodyRetentionSweeper.Start()
 		// Surface persisted official_provider values in auth-selection errors.
 		s.handlers.SetModelsCatalogStore(store.NewModelsCatalogResolver(handles.Models))
 		// Wire the per-model-id global routing override (pinned providers +
@@ -559,6 +573,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	// safe when the sweeper was never started (no PG).
 	if s.autoDisableSweeper != nil {
 		s.autoDisableSweeper.Stop()
+	}
+	// Stop the request-body retention sweeper on the same teardown path.
+	// Idempotent and safe when it was never started (no PG).
+	if s.requestBodyRetentionSweeper != nil {
+		s.requestBodyRetentionSweeper.Stop()
 	}
 
 	if s.keepAliveEnabled {
