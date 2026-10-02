@@ -454,6 +454,7 @@ const NAV_GROUPS = [
     label: 'System',
     items: [
       { to: '/settings', label: 'Settings', icon: 'gear' },
+      { to: '/security', label: 'Login Security', icon: 'shield' },
       { to: '/branding', label: 'Branding', icon: 'tag' },
       { to: '/import-export', label: 'Import / Export', icon: 'transfer' },
       { to: '/backup', label: 'Backups', icon: 'archive' },

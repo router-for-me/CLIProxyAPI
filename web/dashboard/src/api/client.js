@@ -1184,6 +1184,54 @@ export async function putAlertSettings(body) {
   });
 }
 
+// --- Management login security ---------------------------------------------
+//
+// Brute-force policy singleton + attempt log for the management API auth path
+// (AuthenticateManagementKey). Sourced from the management_login_settings /
+// management_login_events PG tables; 503 when PG is not configured.
+
+export async function getManagementLoginSettings() {
+  return fetchJSON('/management-login/settings');
+}
+
+export async function putManagementLoginSettings(body) {
+  return fetchJSON('/management-login/settings', {
+    method: 'PUT',
+    body: JSON.stringify(body || {}),
+  });
+}
+
+// params: { ip, outcome, from, to, page, page_size }.
+// Returns { events: [...], total, page, page_size }.
+export async function getManagementLoginEvents(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.ip) qs.set('ip', params.ip);
+  if (params.outcome) qs.set('outcome', params.outcome);
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  if (params.page) qs.set('page', params.page);
+  if (params.page_size) qs.set('page_size', params.page_size);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return fetchJSON(`/management-login/events${suffix}`);
+}
+
+export async function clearManagementLoginEvents() {
+  return fetchJSON('/management-login/events', { method: 'DELETE' });
+}
+
+// Returns { bans: [{ ip, blocked_until, count, last_activity }] }.
+export async function getManagementLoginBans() {
+  return fetchJSON('/management-login/bans');
+}
+
+export async function deleteManagementLoginBan(ip) {
+  return fetchJSON(`/management-login/bans/${encodeURIComponent(ip)}`, { method: 'DELETE' });
+}
+
+export async function clearManagementLoginBans() {
+  return fetchJSON('/management-login/bans', { method: 'DELETE' });
+}
+
 // --- Global routing strategy -------------------------------------------------
 //
 // The top-level credential selector applied when no per-pool or per-model rule

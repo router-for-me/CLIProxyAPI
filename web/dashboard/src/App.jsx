@@ -55,6 +55,7 @@ import ConfigRevisionsPage from './pages/ConfigRevisionsPage.jsx';
 import ConfigImportsPage from './pages/ConfigImportsPage.jsx';
 import LiteLLMPage from './pages/litellm/LiteLLMPage.jsx';
 import QuotaPage from './pages/Quota.jsx';
+import ManagementLoginSecurityPage from './pages/ManagementLoginSecurityPage.jsx';
 import { ToastProvider } from './components/Toast.jsx';
 import AlertsDropdown from './components/AlertsDropdown.jsx';
 
@@ -370,6 +371,7 @@ export default function App() {
             <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/security" element={<ManagementLoginSecurityPage />} />
             <Route path="/branding" element={<BrandingPage />} />
             <Route path="/import-export" element={<ImportExportPage />} />
             <Route path="/backup" element={<BackupPage />} />
