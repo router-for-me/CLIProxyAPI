@@ -64,11 +64,24 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
+var defaultAntigravityFingerprints = []string{
+	"Claude Agent SDK",
+	"system-conventions",
+	"system_conventions",
+	"system-directive",
+	"system_directive",
+	"RFC 2119",
+}
+
 func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
-	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+	if e == nil {
 		return payload
 	}
-	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
+	words := append([]string{}, defaultAntigravityFingerprints...)
+	if e.cfg != nil && len(e.cfg.Antigravity.SensitiveWords) > 0 {
+		words = append(words, e.cfg.Antigravity.SensitiveWords...)
+	}
+	matcher := helps.BuildSensitiveWordMatcher(words)
 	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
 }
 
