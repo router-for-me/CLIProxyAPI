@@ -485,6 +485,15 @@ func transformSealedColumns(sealer *Sealer, raw json.RawMessage, cols []string, 
 			continue
 		}
 		found = true
+		// Import re-seals plaintext columns. A backup produced before the
+		// schema-qualified sealed-column lookup was fixed exported these columns
+		// as still-ciphertext; sealing that ciphertext again would double-seal it
+		// and make reads return "v1:...". Skip values that are already valid
+		// sealed payloads so import is idempotent. Plaintext that merely starts
+		// with the seal prefix fails GCM authentication and is sealed normally.
+		if !unseal && isAlreadySealed(sealer, str) {
+			continue
+		}
 		var out string
 		var err error
 		if unseal {
@@ -505,6 +514,20 @@ func transformSealedColumns(sealer *Sealer, raw json.RawMessage, cols []string, 
 		return nil, err
 	}
 	return json.RawMessage(enc), nil
+}
+
+// isAlreadySealed reports whether v is a valid sealed payload for sealer. It
+// requires both the seal-version prefix and a successful Open (GCM authentication
+// validates the payload), so arbitrary plaintext that merely starts with the
+// prefix is not mistaken for already-sealed data. A nil sealer is never enabled.
+func isAlreadySealed(sealer *Sealer, v string) bool {
+	if sealer == nil || !sealer.Enabled() || !strings.HasPrefix(v, sealVersion+":") {
+		return false
+	}
+	if _, err := sealer.Open(v); err != nil {
+		return false
+	}
+	return true
 }
 
 // exportResource dumps every table of one resource into BackupResourceData,

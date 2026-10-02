@@ -986,6 +986,127 @@ func TestBackupRequestBodiesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestTransformSealedColumnsImportIsIdempotent pins the fix for backups
+// produced before the schema-qualified sealed-column lookup was corrected:
+// those exported sealed columns as ciphertext, and import must not seal them a
+// second time. Plaintext that merely starts with the seal prefix must still be
+// sealed.
+func TestTransformSealedColumnsImportIsIdempotent(t *testing.T) {
+	sealer, err := NewSealer([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatalf("sealer: %v", err)
+	}
+	original := `{"prompt":"secret"}`
+	sealed, err := sealer.Seal(original)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+
+	// Already-sealed ciphertext must pass through the import path unchanged.
+	raw, err := json.Marshal(map[string]string{"client_request_body": sealed})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out, err := transformSealedColumns(sealer, raw, []string{"client_request_body"}, false)
+	if err != nil {
+		t.Fatalf("transform sealed: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, _ := m["client_request_body"].(string)
+	if got != sealed {
+		t.Fatalf("already-sealed value was re-sealed: got %q want %q", got, sealed)
+	}
+	if dec, err := sealer.Open(got); err != nil || dec != original {
+		t.Fatalf("open of imported value = %q, %v; want %q", dec, err, original)
+	}
+
+	// Plaintext that merely starts with the seal prefix must still be sealed.
+	plain := sealVersion + `:not-really-sealed`
+	rawPlain, err := json.Marshal(map[string]string{"client_request_body": plain})
+	if err != nil {
+		t.Fatalf("marshal plain: %v", err)
+	}
+	outPlain, err := transformSealedColumns(sealer, rawPlain, []string{"client_request_body"}, false)
+	if err != nil {
+		t.Fatalf("transform plaintext: %v", err)
+	}
+	var mp map[string]any
+	if err := json.Unmarshal(outPlain, &mp); err != nil {
+		t.Fatalf("decode plaintext: %v", err)
+	}
+	gotPlain, _ := mp["client_request_body"].(string)
+	if gotPlain == plain {
+		t.Fatalf("plaintext prefixed value was not sealed: %q", gotPlain)
+	}
+	if dec, err := sealer.Open(gotPlain); err != nil || dec != plain {
+		t.Fatalf("open of sealed plaintext = %q, %v; want %q", dec, err, plain)
+	}
+}
+
+// TestBackupImportAlreadySealedBodyNotDoubleSealed exercises the full import
+// path with a bundle row whose sealed column already holds ciphertext (the
+// shape produced by a pre-fix schema-qualified backup).
+func TestBackupImportAlreadySealedBodyNotDoubleSealed(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	st, err := NewPostgresStore(ctx, PostgresStoreConfig{
+		DSN:                pgTestDSN(),
+		Schema:             "backup_reseal_" + randSuffix(),
+		UsageEncryptionKey: key,
+	})
+	if err != nil {
+		t.Fatalf("NewPostgresStore: %v", err)
+	}
+	if err := st.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	sealer, err := NewSealer(key)
+	if err != nil {
+		t.Fatalf("sealer: %v", err)
+	}
+	original := `{"prompt":"secret"}`
+	sealed, err := sealer.Seal(original)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	row, err := json.Marshal(map[string]any{
+		"request_id":          "req-old",
+		"provider":            "claude",
+		"client_request_body": sealed,
+		"truncated":           false,
+		"created_at":          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal row: %v", err)
+	}
+	bundle := BackupBundle{
+		Version: backupBundleVersion,
+		Resources: map[string]BackupResourceData{
+			string(ResourceUsage): {
+				Tables: map[string][]json.RawMessage{
+					st.RequestBodiesTable(): {json.RawMessage(row)},
+				},
+			},
+		},
+	}
+	if _, err := st.ImportData(ctx, bundle, BackupImportOpts{Resources: []BackupResource{ResourceUsage}}); err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+	usage := NewUsageStore(st)
+	got, err := usage.GetRequestBodyByRequestID(ctx, "req-old")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ClientRequestBody != original {
+		t.Fatalf("imported body = %q, want original plaintext %q", got.ClientRequestBody, original)
+	}
+}
+
 func TestBackupBundleV2JSON(t *testing.T) {
 	b := BackupBundle{
 		Version:    backupBundleVersion,
