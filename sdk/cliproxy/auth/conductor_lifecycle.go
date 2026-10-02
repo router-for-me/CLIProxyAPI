@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // SetRetryConfig updates additional credential retry rounds, the per-round credential limit, and the cooldown wait interval.
@@ -124,7 +125,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
+	// Persist failures stay non-fatal, but must not be silent: a restart would
+	// lose the credential that only exists in memory.
+	if errPersist := m.persist(ctx, auth); errPersist != nil {
+		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist registered auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+	}
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
@@ -271,7 +276,11 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
 	if !persistMetaMint {
-		_ = m.persist(ctx, auth)
+		// Persist failures stay non-fatal, but must not be silent: after a token
+		// refresh the rotated credentials only exist in memory until persisted.
+		if errPersist := m.persist(ctx, auth); errPersist != nil {
+			log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist updated auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+		}
 	}
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if cooldownStateChanged {

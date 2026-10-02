@@ -8,10 +8,10 @@ package claude
 import (
 	"strings"
 
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -78,8 +78,12 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 					}
+				} else if v := root.Get("output_config.effort"); v.Exists() && v.Type == gjson.String && strings.TrimSpace(v.String()) != "" {
+					// Some Claude-compatible clients pair manual thinking with output_config.effort.
+					// Preserve that explicit level when there is no legacy token budget to map.
+					out, _ = sjson.SetBytes(out, "reasoning_effort", strings.ToLower(strings.TrimSpace(v.String())))
 				} else {
-					// No budget_tokens specified, default to "auto" for enabled thinking
+					// No budget_tokens or explicit effort specified; preserve the enabled-thinking default.
 					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
 						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 					}
@@ -423,6 +427,15 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 func normalizeObjectSchemaProperties(schema any) any {
 	switch value := schema.(type) {
+	case bool:
+		// JSON Schema boolean subschemas (true/false) are valid, but strict OpenAPI 3.0
+		// upstream validators reject boolean subschemas.
+		// Normalize `true` (accept anything) to an empty object schema `{}`.
+		// Preserve `false` (reject all) to avoid turning rejection constraints into open schemas.
+		if value {
+			return map[string]any{}
+		}
+		return value
 	case map[string]any:
 		if schemaType, ok := value["type"].(string); ok && schemaType == "object" {
 			if _, ok := value["properties"]; !ok {
@@ -458,6 +471,12 @@ func normalizeObjectSchemaProperties(schema any) any {
 		for _, valKey := range util.SchemaValueKeywords {
 			if val, exists := value[valKey]; exists {
 				switch sub := val.(type) {
+				case bool:
+					// Normalize boolean subschemas (e.g. items: true), but preserve boolean
+					// additionalProperties (false/true) required by OpenAI structured outputs.
+					if valKey != "additionalProperties" && sub {
+						value[valKey] = map[string]any{}
+					}
 				case map[string]any:
 					value[valKey] = normalizeObjectSchemaProperties(sub)
 				case []any:

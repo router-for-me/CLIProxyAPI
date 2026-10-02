@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type memoryAuthStorage struct {
@@ -398,5 +399,166 @@ func TestHostAuthSaveCallbackWritesPhysicalFile(t *testing.T) {
 	auths := host.currentAuthManager().List()
 	if len(auths) != 1 || auths[0].FileName != "saved.json" {
 		t.Fatalf("auths = %#v, want one registered auth", auths)
+	}
+}
+
+func TestHostAuthSaveCallbackPreservesDisabledState(t *testing.T) {
+	authDir := t.TempDir()
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	host.SetAuthManager(coreauth.NewManager(sdkauth.NewFileTokenStore(), nil, nil))
+
+	reqDisabled, errMarshal := json.Marshal(pluginapi.HostAuthSaveRequest{
+		Name: "test-auth.json",
+		JSON: json.RawMessage(`{"type":"demo","email":"disabled@example.com","api_key":"test-key","disabled":true}`),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthSave, reqDisabled)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostAuthSaveResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+
+	auths := host.currentAuthManager().List()
+	if len(auths) != 1 {
+		t.Fatalf("auths len = %d, want 1", len(auths))
+	}
+	if !auths[0].Disabled {
+		t.Fatalf("auth.Disabled = %v, want true", auths[0].Disabled)
+	}
+	if auths[0].Status != coreauth.StatusDisabled {
+		t.Fatalf("auth.Status = %v, want %v", auths[0].Status, coreauth.StatusDisabled)
+	}
+
+	data, errRead := os.ReadFile(resp.Path)
+	if errRead != nil {
+		t.Fatalf("read saved file: %v", errRead)
+	}
+	var fileMeta map[string]any
+	if errUnmarshal := json.Unmarshal(data, &fileMeta); errUnmarshal != nil {
+		t.Fatalf("unmarshal saved file: %v", errUnmarshal)
+	}
+	if disabled, ok := fileMeta["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("saved file metadata disabled = %v, want true", fileMeta["disabled"])
+	}
+
+	reqEnabled, errMarshalEnabled := json.Marshal(pluginapi.HostAuthSaveRequest{
+		Name: "test-auth.json",
+		JSON: json.RawMessage(`{"type":"demo","email":"disabled@example.com","api_key":"test-key","disabled":false}`),
+	})
+	if errMarshalEnabled != nil {
+		t.Fatalf("marshal request enabled: %v", errMarshalEnabled)
+	}
+	rawRespEnabled, errCallEnabled := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthSave, reqEnabled)
+	if errCallEnabled != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCallEnabled)
+	}
+	if _, errDecodeEnabled := decodeRPCEnvelope[pluginapi.HostAuthSaveResponse](rawRespEnabled); errDecodeEnabled != nil {
+		t.Fatalf("decode response enabled: %v", errDecodeEnabled)
+	}
+	auths = host.currentAuthManager().List()
+	if len(auths) != 1 {
+		t.Fatalf("auths len = %d, want 1", len(auths))
+	}
+	if auths[0].Disabled {
+		t.Fatalf("auth.Disabled after re-enable = %v, want false", auths[0].Disabled)
+	}
+	if auths[0].Status != coreauth.StatusActive {
+		t.Fatalf("auth.Status after re-enable = %v, want %v", auths[0].Status, coreauth.StatusActive)
+	}
+
+	dataEnabled, errReadEnabled := os.ReadFile(resp.Path)
+	if errReadEnabled != nil {
+		t.Fatalf("read saved file: %v", errReadEnabled)
+	}
+	var fileMetaEnabled map[string]any
+	if errUnmarshalEnabled := json.Unmarshal(dataEnabled, &fileMetaEnabled); errUnmarshalEnabled != nil {
+		t.Fatalf("unmarshal saved file: %v", errUnmarshalEnabled)
+	}
+	if disabled, ok := fileMetaEnabled["disabled"].(bool); ok && disabled {
+		t.Fatalf("saved file metadata disabled after re-enable = %v, want false", fileMetaEnabled["disabled"])
+	}
+
+	reqUpdateDisabled, errMarshalUpdateDisabled := json.Marshal(pluginapi.HostAuthSaveRequest{
+		Name: "test-auth.json",
+		JSON: json.RawMessage(`{"type":"demo","email":"disabled@example.com","api_key":"test-key","disabled":true}`),
+	})
+	if errMarshalUpdateDisabled != nil {
+		t.Fatalf("marshal update disabled request: %v", errMarshalUpdateDisabled)
+	}
+	rawRespUpdateDisabled, errCallUpdateDisabled := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthSave, reqUpdateDisabled)
+	if errCallUpdateDisabled != nil {
+		t.Fatalf("callFromPlugin() update disabled error = %v", errCallUpdateDisabled)
+	}
+	if _, errDecodeUpdateDisabled := decodeRPCEnvelope[pluginapi.HostAuthSaveResponse](rawRespUpdateDisabled); errDecodeUpdateDisabled != nil {
+		t.Fatalf("decode update disabled response: %v", errDecodeUpdateDisabled)
+	}
+	auths = host.currentAuthManager().List()
+	if len(auths) != 1 {
+		t.Fatalf("auths len = %d, want 1", len(auths))
+	}
+	if !auths[0].Disabled {
+		t.Fatalf("auth.Disabled after update to disabled = %v, want true", auths[0].Disabled)
+	}
+	if auths[0].Status != coreauth.StatusDisabled {
+		t.Fatalf("auth.Status after update to disabled = %v, want %v", auths[0].Status, coreauth.StatusDisabled)
+	}
+
+	dataUpdateDisabled, errReadUpdateDisabled := os.ReadFile(resp.Path)
+	if errReadUpdateDisabled != nil {
+		t.Fatalf("read update disabled file: %v", errReadUpdateDisabled)
+	}
+	var fileMetaUpdateDisabled map[string]any
+	if errUnmarshalUpdateDisabled := json.Unmarshal(dataUpdateDisabled, &fileMetaUpdateDisabled); errUnmarshalUpdateDisabled != nil {
+		t.Fatalf("unmarshal update disabled file: %v", errUnmarshalUpdateDisabled)
+	}
+	if disabled, ok := fileMetaUpdateDisabled["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("saved file metadata disabled after update to disabled = %v, want true", fileMetaUpdateDisabled["disabled"])
+	}
+}
+
+func TestHostListAuthFilesFromDiskParsesDisabled(t *testing.T) {
+	authDir := t.TempDir()
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+
+	disabledFile := filepath.Join(authDir, "disabled.json")
+	if errWrite := os.WriteFile(disabledFile, []byte(`{"type":"demo","disabled":true}`), 0o600); errWrite != nil {
+		t.Fatalf("write disabled file: %v", errWrite)
+	}
+	activeFile := filepath.Join(authDir, "active.json")
+	if errWrite := os.WriteFile(activeFile, []byte(`{"type":"demo","disabled":false}`), 0o600); errWrite != nil {
+		t.Fatalf("write active file: %v", errWrite)
+	}
+
+	files, errList := host.listAuthFilesFromDisk()
+	if errList != nil {
+		t.Fatalf("listAuthFilesFromDisk() error = %v", errList)
+	}
+	if len(files) != 2 {
+		t.Fatalf("listAuthFilesFromDisk() len = %d, want 2", len(files))
+	}
+	for _, f := range files {
+		if f.Name == "disabled.json" {
+			if !f.Disabled {
+				t.Fatalf("disabled.json entry.Disabled = %v, want true", f.Disabled)
+			}
+			if f.Status != string(coreauth.StatusDisabled) {
+				t.Fatalf("disabled.json entry.Status = %v, want %v", f.Status, coreauth.StatusDisabled)
+			}
+		}
+		if f.Name == "active.json" {
+			if f.Disabled {
+				t.Fatalf("active.json entry.Disabled = %v, want false", f.Disabled)
+			}
+			if f.Status != string(coreauth.StatusActive) {
+				t.Fatalf("active.json entry.Status = %v, want %v", f.Status, coreauth.StatusActive)
+			}
+		}
 	}
 }

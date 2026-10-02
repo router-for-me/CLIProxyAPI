@@ -3,6 +3,7 @@ package chat_completions
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -881,5 +882,76 @@ func TestConvertCodexResponseToOpenAI_RestoresNormalizedToolNames(t *testing.T) 
 	gotNameStream := gjson.GetBytes(streamChunks[0], "choices.0.delta.tool_calls.0.function.name").String()
 	if gotNameStream != originalName {
 		t.Fatalf("stream expected restored name %q, got %q", originalName, gotNameStream)
+	}
+}
+
+// Only the original winning custom patch declaration allows the JSON wrapper.
+func TestApplyPatchCustomChatCompletionsWrapper(t *testing.T) {
+	for _, toolType := range []string{"custom", "function"} {
+		t.Run(toolType, func(t *testing.T) {
+			request := []byte(`{"tools":[{"type":"` + toolType + `","name":"apply_patch"}]}`)
+			var param any
+			var arguments strings.Builder
+			send := func(event string) {
+				for _, out := range ConvertCodexResponseToOpenAI(t.Context(), "model", request, request, []byte("data: "+event), &param) {
+					arguments.WriteString(gjson.GetBytes(out, "choices.0.delta.tool_calls.0.function.arguments").String())
+				}
+			}
+			send(`{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`)
+			for _, delta := range []string{"*** Begin Patch\n", "+中文😀 \"\n", "*** End Patch\n"} {
+				send(`{"type":"response.custom_tool_call_input.delta","item_id":"a","output_index":0,"delta":` + string(mustJSONMarshal(t, delta)) + `}`)
+			}
+			patch := "*** Begin Patch\n+中文😀 \"\n*** End Patch\n"
+			send(`{"type":"response.custom_tool_call_input.done","item_id":"a","output_index":0,"input":` + string(mustJSONMarshal(t, patch)) + `}`)
+			send(`{"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":` + string(mustJSONMarshal(t, patch)) + `}}`)
+			want := patch
+			if toolType == "custom" {
+				want = `{"input":` + string(mustJSONMarshal(t, patch)) + `}`
+			}
+			if arguments.String() != want {
+				t.Fatalf("arguments=%q want=%q", arguments.String(), want)
+			}
+			var nonStream any
+			out := ConvertCodexResponseToOpenAINonStream(t.Context(), "model", request, request, []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","name":"apply_patch","call_id":"c","input":`+string(mustJSONMarshal(t, patch))+`}]}}`), &nonStream)
+			if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != want {
+				t.Fatalf("nonstream arguments=%q want=%q", got, want)
+			}
+		})
+	}
+}
+
+func TestApplyPatchCustomChatCompletionsDoneFallback(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	for _, added := range []bool{false, true} {
+		var param any
+		if added {
+			_ = ConvertCodexResponseToOpenAI(t.Context(), "m", request, request, []byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`), &param)
+		}
+		out := ConvertCodexResponseToOpenAI(t.Context(), "m", request, request, []byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}}`), &param)
+		if len(out) != 1 || gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String() != `{"input":"p"}` {
+			t.Fatalf("fallback: %s", out)
+		}
+	}
+}
+
+// This round trip requires the request converter to unwrap only a winning custom
+// patch's normalized function envelope, while explicit custom inputs remain raw.
+func TestApplyPatchChatCompletionNativeHistoryRoundTrip(t *testing.T) {
+	original := []byte(`{"messages":[{"role":"user","content":"patch"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	response := []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"p"}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, original, response, nil)
+	message := gjson.GetBytes(out, "choices.0.message")
+	followup := []byte(`{"messages":[` + message.Raw + `,{"role":"tool","tool_call_id":"c","content":"ok"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	request := ConvertOpenAIRequestToCodex("m", followup, true)
+	if got := gjson.GetBytes(request, "input.0.input").String(); got != "p" {
+		t.Fatalf("normalized function history must restore raw patch before native Codex: got %q, request=%s", got, request)
+	}
+}
+
+func TestApplyPatchChatResponseOrdinaryFunctionPreference(t *testing.T) {
+	original := []byte(`{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","function":{"name":"apply_patch","parameters":{}}}]}`)
+	out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, nil, []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"raw"}]}}`), nil)
+	if gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.arguments").String() != "raw" {
+		t.Fatalf("ordinary preference stolen: %s", out)
 	}
 }

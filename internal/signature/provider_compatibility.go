@@ -283,7 +283,7 @@ func DecideSignatureCompatibilityForModel(targetProvider SignatureProvider, targ
 		if blockKind == SignatureBlockKindGeminiFunctionCall || blockKind == SignatureBlockKindGeminiModelPart || blockKind == SignatureBlockKindUnknown {
 			decision.Action = SignatureActionReplaceWithGeminiBypass
 			decision.ReplacementSignature = GeminiSkipThoughtSignatureValidator
-			decision.Reason = "Gemini can bypass synthetic or incompatible model-part signatures with the documented sentinel"
+			decision.Reason = "missing or incompatible signature"
 			return decision
 		}
 		decision.Action = SignatureActionDropBlock

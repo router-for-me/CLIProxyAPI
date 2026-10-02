@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -33,7 +33,20 @@ type geminiCompletedReasoningItem struct {
 	Text      string
 }
 
+type geminiFunctionCallEvidence struct {
+	PartIndex    int
+	HasPartIndex bool
+	ApplyPatch   bool
+	RawName      string
+	UpstreamID   string
+	Input        string
+	HasInput     bool
+	Err          error
+	PatchCall    *translatorcommon.ApplyPatchCallState
+}
+
 type geminiToResponsesState struct {
+	translatorcommon.ApplyPatchErrorState
 	Seq        int
 	ResponseID string
 	CreatedAt  int64
@@ -76,6 +89,7 @@ type geminiToResponsesState struct {
 	FuncDone         map[int]bool
 	SanitizedNameMap map[string]string
 	ToolIdentityMap  map[string]util.ResponsesToolIdentity
+	FunctionEvidence map[string]*geminiFunctionCallEvidence
 
 	// web search aggregation
 	WebSearchStreamMode          bool
@@ -1041,7 +1055,20 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				finalizeMessage()
 				st.LastSemanticKind = geminiResponsesCarrierFunction
 
+				evidence := geminiRecordFunctionEvidence(st, fc, explicitPartIndex, gjson.ValidBytes(rawJSON))
+				if evidence.ApplyPatch && evidence.Err != nil {
+					st.SetToolInputError(evidence.Err)
+					st.Completed = true
+					out = append(out, emitEvent("response.failed", translatorcommon.ApplyPatchFailure(st.ResponseID, nextSeq())))
+					return false
+				}
+				if evidence.RawName == "" {
+					return true
+				}
 				rawName := fc.Get("name").String()
+				if evidence.ApplyPatch {
+					rawName = evidence.RawName
+				}
 				identity, hasIdentity := st.ToolIdentityMap[rawName]
 				if !hasIdentity {
 					restored := util.RestoreSanitizedToolName(st.SanitizedNameMap, rawName)
@@ -1050,12 +1077,24 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				name := identity.Name
 				namespace := identity.Namespace
 				isCustom := identity.Custom
+				if evidence.ApplyPatch && evidence.PatchCall != nil {
+					if _, _, errFinishArguments := evidence.PatchCall.FinishArguments(fc.Get("args").Raw); errFinishArguments != nil {
+						st.SetToolInputError(errFinishArguments)
+						st.Completed = true
+						out = append(out, emitEvent("response.failed", translatorcommon.ApplyPatchFailure(st.ResponseID, nextSeq())))
+						return false
+					}
+					return true
+				}
 
 				idx := st.NextIndex
 				st.NextIndex++
 				// Ensure buffers
 				if st.FuncArgsBuf[idx] == nil {
 					st.FuncArgsBuf[idx] = &strings.Builder{}
+				}
+				if identity.ApplyPatch {
+					st.FuncCallIDs[idx] = evidence.UpstreamID
 				}
 				if st.FuncCallIDs[idx] == "" {
 					st.FuncCallIDs[idx] = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
@@ -1074,6 +1113,22 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 				if isCustom {
 					inputStr := util.UnwrapResponsesCustomToolInput(argsJSON)
+					var patchCall *translatorcommon.ApplyPatchCallState
+					if identity.ApplyPatch {
+						patchCall = &translatorcommon.ApplyPatchCallState{ItemID: fmt.Sprintf("ctc_%s", st.FuncCallIDs[idx]), CallID: st.FuncCallIDs[idx], Name: name, Namespace: namespace, OutputIndex: idx}
+						_, input, errFinishArguments := patchCall.FinishArguments(argsJSON)
+						if !gjson.ValidBytes(rawJSON) {
+							errFinishArguments = fmt.Errorf("invalid Gemini apply_patch response JSON")
+						}
+						if errFinishArguments != nil {
+							st.SetToolInputError(errFinishArguments)
+							st.Completed = true
+							out = append(out, emitEvent("response.failed", translatorcommon.ApplyPatchFailure(st.ResponseID, nextSeq())))
+							return false
+						}
+						inputStr = input
+						evidence.PatchCall = patchCall
+					}
 					st.FuncInputBuf[idx] = inputStr
 
 					// Emit item.added for custom tool call
@@ -1085,6 +1140,10 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					item = translatorcommon.SetResponsesToolCallIdentity(item, name, namespace, "item")
 					out = append(out, emitEvent("response.output_item.added", item))
 
+					// Gemini delivers complete arguments; this delta is not an early preview.
+					if patchCall != nil && inputStr != "" {
+						out = append(out, emitEvent("response.custom_tool_call_input.delta", translatorcommon.ApplyPatchInputDelta(patchCall, inputStr, nextSeq())))
+					}
 					// Emit custom tool call input.done
 					if !st.FuncDone[idx] {
 						inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
@@ -1092,6 +1151,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 						inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", st.FuncCallIDs[idx]))
 						inputDone, _ = sjson.SetBytes(inputDone, "output_index", idx)
 						inputDone, _ = sjson.SetBytes(inputDone, "input", inputStr)
+						if patchCall != nil {
+							inputDone = translatorcommon.ApplyPatchInputDone(patchCall, inputStr, st.Seq)
+						}
 						out = append(out, emitEvent("response.custom_tool_call_input.done", inputDone))
 
 						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}}`)
@@ -1155,8 +1217,17 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		})
 	}
 
+	if st.Completed {
+		return out
+	}
+
 	// Finalization on finishReason
 	if fr := root.Get("candidates.0.finishReason"); fr.Exists() && fr.String() != "" {
+		if errIdentity := geminiPendingIdentityError(st); errIdentity != nil {
+			st.SetToolInputError(errIdentity)
+			st.Completed = true
+			return append(out, emitEvent("response.failed", translatorcommon.ApplyPatchFailure(st.ResponseID, nextSeq())))
+		}
 		if st.PendingReasoningSignature != "" {
 			emitTrailingDetachedReasoning(st.PendingReasoningSignature)
 			st.PendingReasoningSignature = ""
@@ -1393,7 +1464,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 }
 
 // ConvertGeminiResponseToOpenAIResponsesNonStream aggregates Gemini response JSON into a single OpenAI Responses JSON object.
-func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
 	reqJSON := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
@@ -1557,6 +1628,8 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		currentMsgRuneOffset = 0
 	}
 
+	var toolInputError error
+	evidenceState := &geminiToResponsesState{ToolIdentityMap: toolIdentityMap}
 	var outputs [][]byte
 	appendOutput := func(itemJSON []byte) {
 		outputs = append(outputs, itemJSON)
@@ -1648,7 +1721,24 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				flushMessageOutput()
 				currentMsgRuneOffset = 0
 
+				explicitIndex := -1
+				if p.Get("partIndex").Exists() {
+					explicitIndex = int(p.Get("partIndex").Int())
+				} else if p.Get("index").Exists() {
+					explicitIndex = int(p.Get("index").Int())
+				}
+				evidence := geminiRecordFunctionEvidence(evidenceState, fc, explicitIndex, gjson.ValidBytes(rawJSON))
+				if evidence.ApplyPatch && evidence.Err != nil {
+					toolInputError = evidence.Err
+					return false
+				}
+				if evidence.RawName == "" {
+					return true
+				}
 				rawName := fc.Get("name").String()
+				if evidence.ApplyPatch {
+					rawName = evidence.RawName
+				}
 				identity, hasIdentity := toolIdentityMap[rawName]
 				if !hasIdentity {
 					restored := util.RestoreSanitizedToolName(sanitizedNameMap, rawName)
@@ -1657,6 +1747,14 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				name := identity.Name
 				namespace := identity.Namespace
 				isCustom := identity.Custom
+				if identity.ApplyPatch && evidence.PatchCall != nil {
+					_, _, errFinishArguments := evidence.PatchCall.FinishArguments(fc.Get("args").Raw)
+					if errFinishArguments != nil {
+						toolInputError = errFinishArguments
+						return false
+					}
+					return true
+				}
 
 				args := fc.Get("args")
 				argsStr := ""
@@ -1664,9 +1762,25 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 					argsStr = args.Raw
 				}
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
+				if identity.ApplyPatch && evidence.UpstreamID != "" {
+					callID = evidence.UpstreamID
+				}
 				var itemJSON []byte
 				if isCustom {
 					inputStr := util.UnwrapResponsesCustomToolInput(argsStr)
+					if identity.ApplyPatch {
+						var patchCall translatorcommon.ApplyPatchCallState
+						_, input, errFinishArguments := patchCall.FinishArguments(argsStr)
+						if !gjson.ValidBytes(rawJSON) {
+							errFinishArguments = fmt.Errorf("invalid Gemini apply_patch response JSON")
+						}
+						if errFinishArguments != nil {
+							toolInputError = errFinishArguments
+							return false
+						}
+						inputStr = input
+						evidence.PatchCall = &patchCall
+					}
 					itemJSON = []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 					itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("ctc_%s", callID))
 					itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
@@ -1721,6 +1835,17 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		})
 	}
 
+	if toolInputError == nil {
+		toolInputError = geminiPendingIdentityError(evidenceState)
+	}
+	if toolInputError != nil {
+		if param != nil {
+			state := &translatorcommon.ApplyPatchErrorState{}
+			state.SetToolInputError(toolInputError)
+			*param = state
+		}
+		return nil
+	}
 	flushReasoningOutput()
 	flushMessageOutput()
 
@@ -1845,4 +1970,139 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	return resp
+}
+
+// Full snapshots are evidence, never source prefixes. Stable IDs and explicit
+// part indexes identify repeated snapshots without merging distinct unkeyed calls.
+func geminiRecordFunctionEvidence(st *geminiToResponsesState, fc gjson.Result, partIndex int, validJSON bool) *geminiFunctionCallEvidence {
+	if st.FunctionEvidence == nil {
+		st.FunctionEvidence = make(map[string]*geminiFunctionCallEvidence)
+	}
+	var keys []string
+	if partIndex >= 0 {
+		keys = append(keys, fmt.Sprintf("part:%d", partIndex))
+	}
+	if id := fc.Get("id").String(); id != "" {
+		keys = append(keys, "id:"+id)
+	}
+	// Never guess which later named call owns an unkeyed nameless snapshot.
+	if len(keys) == 0 && fc.Get("name").String() == "" {
+		keys = append(keys, fmt.Sprintf("unknown:%d", len(st.FunctionEvidence)))
+	}
+	var evidence *geminiFunctionCallEvidence
+	conflict := false
+	patchRelated := st.ToolIdentityMap[fc.Get("name").String()].ApplyPatch
+	for _, key := range keys {
+		if prior := st.FunctionEvidence[key]; prior != nil {
+			patchRelated = patchRelated || prior.ApplyPatch
+			if evidence == nil {
+				evidence = prior
+			} else if evidence != prior {
+				conflict = true
+			}
+		}
+	}
+	if conflict {
+		errIdentity := fmt.Errorf("conflicting apply_patch call indexes")
+		if patchRelated {
+			// Reject before rebinding either established call's aliases or provenance.
+			return &geminiFunctionCallEvidence{ApplyPatch: true, Err: errIdentity}
+		}
+		// Ordinary-only cross-key reuse keeps the legacy first-match behavior.
+		evidence.Err = errIdentity
+	}
+	if evidence == nil {
+		evidence = &geminiFunctionCallEvidence{}
+	}
+	recordError := func(err error) {
+		if evidence.Err == nil {
+			evidence.Err = err
+		}
+	}
+	if partIndex >= 0 {
+		if evidence.HasPartIndex && evidence.PartIndex != partIndex {
+			recordError(fmt.Errorf("conflicting apply_patch part index"))
+		} else {
+			evidence.PartIndex = partIndex
+			evidence.HasPartIndex = true
+		}
+	}
+	if st.ToolIdentityMap[fc.Get("name").String()].ApplyPatch {
+		evidence.ApplyPatch = true
+	}
+	for _, key := range keys {
+		st.FunctionEvidence[key] = evidence
+	}
+	if name := fc.Get("name").String(); name != "" {
+		if evidence.RawName != "" && evidence.RawName != name {
+			recordError(fmt.Errorf("conflicting apply_patch call name"))
+		} else {
+			evidence.RawName = name
+		}
+	}
+	if id := fc.Get("id").String(); id != "" {
+		if evidence.UpstreamID != "" && evidence.UpstreamID != id {
+			recordError(fmt.Errorf("conflicting apply_patch call ID"))
+		} else {
+			evidence.UpstreamID = id
+		}
+	}
+	var snapshot translatorcommon.ApplyPatchCallState
+	_, input, errFinishArguments := snapshot.FinishArguments(fc.Get("args").Raw)
+	if !validJSON {
+		recordError(fmt.Errorf("invalid Gemini apply_patch response JSON"))
+	}
+	if errFinishArguments != nil {
+		recordError(errFinishArguments)
+	} else {
+		if evidence.HasInput && evidence.Input != input {
+			recordError(fmt.Errorf("conflicting apply_patch complete snapshots"))
+		}
+		evidence.HasInput = true
+		evidence.Input = input
+	}
+	return evidence
+}
+
+func geminiPendingIdentityError(st *geminiToResponsesState) error {
+	patchEnabled := false
+	for _, identity := range st.ToolIdentityMap {
+		if identity.ApplyPatch {
+			patchEnabled = true
+			break
+		}
+	}
+	if !patchEnabled {
+		return nil
+	}
+	for _, evidence := range st.FunctionEvidence {
+		if evidence.RawName == "" {
+			if evidence.Err != nil {
+				return evidence.Err
+			}
+			return fmt.Errorf("unresolved Gemini apply_patch call identity")
+		}
+	}
+	return nil
+}
+
+// FinalizeToolInput rejects a patch-enabled stream lacking its source terminator.
+func (st *geminiToResponsesState) FinalizeToolInput() [][]byte {
+	if st.ToolInputError() != nil || st.Completed {
+		return nil
+	}
+	enabled := false
+	for _, identity := range st.ToolIdentityMap {
+		if identity.ApplyPatch {
+			enabled = true
+			break
+		}
+	}
+	if !enabled {
+		return nil
+	}
+	st.SetToolInputError(fmt.Errorf("upstream apply_patch stream ended before protocol completion"))
+	st.Completed = true
+	st.Seq++
+	return [][]byte{emitEvent("response.failed", translatorcommon.ApplyPatchFailure(st.ResponseID, st.Seq))}
 }

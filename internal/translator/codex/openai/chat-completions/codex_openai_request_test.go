@@ -1141,7 +1141,7 @@ func TestCustomToolCallResponseFollowUpRoundTrip(t *testing.T) {
 	if got := assistantMessage.Get("tool_calls.0.type").String(); got != "function" {
 		t.Fatalf("expected response to normalize custom call as function, got %s", assistantMessage.Raw)
 	}
-	if got := assistantMessage.Get("tool_calls.0.function.arguments").String(); got != "patch" {
+	if got := assistantMessage.Get("tool_calls.0.function.arguments").String(); got != `{"input":"patch"}` {
 		t.Fatalf("expected normalized custom input, got %s", assistantMessage.Raw)
 	}
 
@@ -1163,6 +1163,9 @@ func TestCustomToolCallResponseFollowUpRoundTrip(t *testing.T) {
 	}
 	if got := items[2].Get("type").String(); got != "custom_tool_call_output" {
 		t.Fatalf("expected custom_tool_call_output after response round trip, got %s", items[2].Raw)
+	}
+	if got := items[1].Get("input").String(); got != "patch" {
+		t.Fatalf("raw follow-up input = %q", got)
 	}
 }
 
@@ -1628,5 +1631,115 @@ func TestHistoricalToolCallCollisionWithDeclaredTool(t *testing.T) {
 	}
 	if got := rev[histCallName]; got != historicalName {
 		t.Fatalf("expected reverse map for historical %q to be %q, got %q", histCallName, historicalName, got)
+	}
+}
+
+func TestConvertOpenAIRequestToCodexServiceTier(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantTier   string
+		wantExists bool
+		wantEffort string
+	}{
+		{
+			name:       "priority service tier preserved",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high","service_tier":"priority"}`,
+			wantTier:   "priority",
+			wantExists: true,
+			wantEffort: "high",
+		},
+		{
+			name:       "priority case-insensitive and trimmed",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low","service_tier":"  PRIORITY  "}`,
+			wantTier:   "priority",
+			wantExists: true,
+			wantEffort: "low",
+		},
+		{
+			name:       "fast service tier normalized to priority",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"fast"}`,
+			wantTier:   "priority",
+			wantExists: true,
+			wantEffort: "medium",
+		},
+		{
+			name:       "fast case-insensitive and trimmed",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"  Fast  "}`,
+			wantTier:   "priority",
+			wantExists: true,
+			wantEffort: "medium",
+		},
+		{
+			name:       "ultrafast service tier preserved",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"ultrafast"}`,
+			wantTier:   "ultrafast",
+			wantExists: true,
+			wantEffort: "medium",
+		},
+		{
+			name:       "default service tier omitted",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"default"}`,
+			wantExists: false,
+			wantEffort: "medium",
+		},
+		{
+			name:       "auto service tier omitted",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"auto"}`,
+			wantExists: false,
+			wantEffort: "medium",
+		},
+		{
+			name:       "non-string service tier omitted",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":1}`,
+			wantExists: false,
+			wantEffort: "medium",
+		},
+		{
+			name:       "absent service tier omitted",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}]}`,
+			wantExists: false,
+			wantEffort: "medium",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToCodex("gpt-6-sol", []byte(tt.body), true)
+			tierRes := gjson.GetBytes(out, "service_tier")
+			if tierRes.Exists() != tt.wantExists {
+				t.Fatalf("service_tier exists = %v, want %v; payload=%s", tierRes.Exists(), tt.wantExists, out)
+			}
+			if tt.wantExists && tierRes.String() != tt.wantTier {
+				t.Fatalf("service_tier = %q, want %q; payload=%s", tierRes.String(), tt.wantTier, out)
+			}
+			if gotEffort := gjson.GetBytes(out, "reasoning.effort").String(); gotEffort != tt.wantEffort {
+				t.Fatalf("reasoning.effort = %q, want %q; payload=%s", gotEffort, tt.wantEffort, out)
+			}
+		})
+	}
+}
+
+func TestApplyPatchChatHistoryBoundary(t *testing.T) {
+	for _, tc := range []struct{ name, tools, call, wantType, want string }{
+		{"normalized", `[{"type":"custom","name":"apply_patch"}]`, `{"type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"p\"}"}}`, "custom_tool_call", "p"},
+		{"legacy", `[{"type":"custom","name":"apply_patch"}]`, `{"type":"function","function":{"name":"apply_patch","arguments":"raw patch"}}`, "custom_tool_call", "raw patch"},
+		{"explicit", `[{"type":"custom","name":"apply_patch"}]`, `{"type":"custom","custom":{"name":"apply_patch","input":"{\"input\":\"p\"}"}}`, "custom_tool_call", `{"input":"p"}`},
+		{"invalid-wrapper", `[{"type":"custom","name":"apply_patch"}]`, `{"type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"p\",\"extra\":1}"}}`, "custom_tool_call", `{"input":"p","extra":1}`},
+		{"function-preference", `[{"type":"custom","name":"apply_patch"},{"type":"function","function":{"name":"apply_patch","parameters":{}}}]`, `{"type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"p\"}"}}`, "function_call", `{"input":"p"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"tools":` + tc.tools + `,"messages":[{"role":"assistant","tool_calls":[` + tc.call + `]}]}`)
+			out := ConvertOpenAIRequestToCodex("m", raw, true)
+			items := gjson.GetBytes(out, "input").Array()
+			item := items[len(items)-1]
+			field := "arguments"
+			if tc.wantType == "custom_tool_call" {
+				field = "input"
+			}
+			if item.Get("type").String() != tc.wantType || item.Get(field).String() != tc.want {
+				t.Fatalf("history boundary: %s", out)
+			}
+		})
 	}
 }

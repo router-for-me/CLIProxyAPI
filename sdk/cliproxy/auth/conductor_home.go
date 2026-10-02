@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -356,15 +356,16 @@ type homeAuthDispatchResponse struct {
 }
 
 type homeDispatchModelInfo struct {
-	ID                  string                       `json:"id"`
-	Type                string                       `json:"type,omitempty"`
-	InputTokenLimit     int                          `json:"inputTokenLimit,omitempty"`
-	OutputTokenLimit    int                          `json:"outputTokenLimit,omitempty"`
-	ContextLength       int                          `json:"context_length,omitempty"`
-	MaxCompletionTokens int                          `json:"max_completion_tokens,omitempty"`
-	Thinking            *registry.ThinkingSupport    `json:"thinking,omitempty"`
-	NativeCapabilities  *registry.NativeCapabilities `json:"native_capabilities,omitempty"`
-	UserDefined         bool                         `json:"user_defined"`
+	ID                         string                       `json:"id"`
+	Type                       string                       `json:"type,omitempty"`
+	InputTokenLimit            int                          `json:"inputTokenLimit,omitempty"`
+	OutputTokenLimit           int                          `json:"outputTokenLimit,omitempty"`
+	ContextLength              int                          `json:"context_length,omitempty"`
+	MaxCompletionTokens        int                          `json:"max_completion_tokens,omitempty"`
+	Thinking                   *registry.ThinkingSupport    `json:"thinking,omitempty"`
+	NativeCapabilities         *registry.NativeCapabilities `json:"native_capabilities,omitempty"`
+	SupportConfigurationUpdate *bool                        `json:"support_configuration_update,omitempty"`
+	UserDefined                bool                         `json:"user_defined"`
 }
 
 func (m *homeDispatchModelInfo) registryModelInfo() *registry.ModelInfo {
@@ -372,15 +373,16 @@ func (m *homeDispatchModelInfo) registryModelInfo() *registry.ModelInfo {
 		return nil
 	}
 	return &registry.ModelInfo{
-		ID:                  strings.TrimSpace(m.ID),
-		Type:                strings.TrimSpace(m.Type),
-		InputTokenLimit:     m.InputTokenLimit,
-		OutputTokenLimit:    m.OutputTokenLimit,
-		ContextLength:       m.ContextLength,
-		MaxCompletionTokens: m.MaxCompletionTokens,
-		Thinking:            m.Thinking,
-		NativeCapabilities:  m.NativeCapabilities,
-		UserDefined:         m.UserDefined,
+		ID:                         strings.TrimSpace(m.ID),
+		Type:                       strings.TrimSpace(m.Type),
+		InputTokenLimit:            m.InputTokenLimit,
+		OutputTokenLimit:           m.OutputTokenLimit,
+		ContextLength:              m.ContextLength,
+		MaxCompletionTokens:        m.MaxCompletionTokens,
+		Thinking:                   m.Thinking,
+		NativeCapabilities:         m.NativeCapabilities,
+		SupportConfigurationUpdate: m.SupportConfigurationUpdate != nil && *m.SupportConfigurationUpdate,
+		UserDefined:                m.UserDefined,
 	}
 }
 
@@ -1210,6 +1212,9 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 	selection.modelInfo = dispatch.ModelInfo.registryModelInfo()
+	if dispatch.ModelInfo != nil {
+		selection.configurationUpdateSupport = dispatch.ModelInfo.SupportConfigurationUpdate
+	}
 	if pinnedAuthID == "" && dispatch.RequestRetry != nil && *dispatch.RequestRetry >= 0 {
 		selection.requestRetry = *dispatch.RequestRetry
 		selection.hasRequestRetry = true

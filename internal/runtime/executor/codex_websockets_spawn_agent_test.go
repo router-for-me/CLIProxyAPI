@@ -9,11 +9,11 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -58,7 +58,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 			}))
 			t.Cleanup(server.Close)
 
-			executor := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
+			executor := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: true}}}})
 			const executionSessionID = "multi-agent-v2-incremental"
 			t.Cleanup(func() { executor.CloseExecutionSession(executionSessionID) })
 			auth := &cliproxyauth.Auth{
@@ -215,7 +215,7 @@ func TestCodexWebsocketsExecutorOptimizeMultiAgentV2(t *testing.T) {
 		{name: "stream disabled", enabled: false, stream: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			executor := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: tt.enabled}})
+			executor := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: tt.enabled}}}})
 			var clientPayload []byte
 			if tt.stream {
 				result, errExecute := executor.ExecuteStream(codexSpawnAgentTestContext(), auth, req, opts)

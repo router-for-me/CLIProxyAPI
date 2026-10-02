@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -1137,6 +1137,17 @@ func TestAntigravityReasoningReplayScopePrefersStableSessionOverExecutionUUID(t 
 	scope := antigravityReasoningReplayScopeFromRequest(context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, opts, nil)
 	if got := scope.sessionKey; got != "responses:stable-session" {
 		t.Fatalf("session key = %q, want stable Responses session", got)
+	}
+}
+
+func TestAntigravityReasoningReplayScopeSupportsUnderscoreSessionIDHeader(t *testing.T) {
+	opts := cliproxyexecutor.Options{
+		Headers:  http.Header{"Session_id": []string{"underscore-session"}},
+		Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "socket-uuid"},
+	}
+	scope := antigravityReasoningReplayScopeFromRequest(context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, opts, nil)
+	if got := scope.sessionKey; got != "responses:underscore-session" {
+		t.Fatalf("session key = %q, want stable Responses session from Session_id header", got)
 	}
 }
 

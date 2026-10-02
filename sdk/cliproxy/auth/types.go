@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -90,6 +90,8 @@ type Auth struct {
 	LastRefreshedAt time.Time `json:"last_refreshed_at"`
 	// NextRefreshAfter is the earliest time a refresh should retrigger.
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
+	// RefreshFailures tracks consecutive refresh failures for exponential backoff (in-memory only).
+	RefreshFailures int `json:"-"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// ModelStates tracks per-model runtime availability data.
@@ -291,19 +293,19 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
-	if len(a.Attributes) > 0 {
+	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {
 			copyAuth.Attributes[key] = value
 		}
 	}
-	if len(a.Metadata) > 0 {
+	if a.Metadata != nil {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
 		for key, value := range a.Metadata {
 			copyAuth.Metadata[key] = value
 		}
 	}
-	if len(a.ModelStates) > 0 {
+	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()

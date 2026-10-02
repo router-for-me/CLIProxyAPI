@@ -3,8 +3,9 @@ package responses
 import (
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -481,7 +482,11 @@ func appendResponsesToolsToInteractions(out []byte, root gjson.Result, forAntigr
 
 		item := []byte(`{"type":"function","name":""}`)
 		item, _ = sjson.SetBytes(item, "name", name)
-		if desc := util.ResponsesToolDescription(descriptor.Tool); desc != "" {
+		desc := util.ResponsesToolDescription(descriptor.Tool)
+		if applypatch.IsCustomTool(descriptor.Tool) {
+			desc = applypatch.Description(descriptor.Tool)
+		}
+		if desc != "" {
 			if forDevin {
 				desc = translatorcommon.SanitizeDevinToolDescription(descriptor.Name, desc)
 				if descriptor.LocalName != "" && descriptor.LocalName != descriptor.Name {
@@ -491,7 +496,9 @@ func appendResponsesToolsToInteractions(out []byte, root gjson.Result, forAntigr
 			item, _ = sjson.SetBytes(item, "description", desc)
 		}
 
-		if descriptor.ToolType == "custom" {
+		if applypatch.IsCustomTool(descriptor.Tool) {
+			item, _ = sjson.SetRawBytes(item, "parameters", applypatch.Parameters())
+		} else if descriptor.ToolType == "custom" {
 			item, _ = sjson.SetRawBytes(item, "parameters", []byte(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`))
 		} else {
 			params := util.ResponsesToolParameters(descriptor.Tool)

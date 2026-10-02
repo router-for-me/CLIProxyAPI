@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestHomeDispatchWebSearchCapability(t *testing.T) {
@@ -21,7 +21,7 @@ func TestHomeDispatchWebSearchCapability(t *testing.T) {
 			if err := json.Unmarshal([]byte(tc.raw), &wire); err != nil {
 				t.Fatal(err)
 			}
-			req := attachResolvedHomeModelInfo(cliproxyexecutor.Request{Model: "alias"}, wire.registryModelInfo())
+			req := attachResolvedHomeModelInfo(cliproxyexecutor.Request{Model: "alias"}, nil, "alias", wire.registryModelInfo(), wire.SupportConfigurationUpdate)
 			info, ok := ResolvedModelInfo(req)
 			if !ok || info.ID != "upstream" {
 				t.Fatalf("missing resolved model: %+v", info)

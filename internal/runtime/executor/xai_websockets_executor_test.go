@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -2371,5 +2371,165 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatalf("chunk error: %v", chunk.Err)
 		}
+	}
+}
+
+func TestXAIWebsocketApplyPatchTransport(t *testing.T) {
+	for _, fold := range []bool{false, true} {
+		for _, tc := range []struct{ downstreamWS, snapshotOnly, sparseTerminal, lateName bool }{
+			{false, false, false, false}, {true, false, false, false},
+			{false, true, false, false}, {true, true, false, false},
+			{false, true, true, false}, {true, true, true, false},
+			{false, true, false, true}, {true, true, false, true},
+			{false, true, true, true}, {true, true, true, true},
+		} {
+			downstreamWS, snapshotOnly := tc.downstreamWS, tc.snapshotOnly
+			t.Run(fmt.Sprintf("fold=%v/ws=%v/snapshotOnly=%v/sparseTerminal=%v/lateName=%v", fold, downstreamWS, snapshotOnly, tc.sparseTerminal, tc.lateName), func(t *testing.T) {
+				bodies := make(chan []byte, 1)
+				upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+					if errUpgrade != nil {
+						return
+					}
+					defer func() {
+						if errClose := conn.Close(); errClose != nil {
+							t.Logf("close test websocket: %v", errClose)
+						}
+					}()
+					_, body, errRead := conn.ReadMessage()
+					if errRead != nil {
+						return
+					}
+					bodies <- body
+					name, args := "apply_patch", `{"input":"p\n中😀"}`
+					if fold {
+						name = "n"
+						args = `{"name":"apply_patch","arguments":{"input":"p\n中😀"}}`
+					}
+					added := fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":%q,"arguments":""}}`, name)
+					done := fmt.Sprintf(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":%q,"arguments":%q}}`, name, args)
+					events := []string{added}
+					if !snapshotOnly {
+						events = append(events, fmt.Sprintf(`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"a","delta":%q}`, args))
+					} else {
+						// Call identity may first arrive with the omitted-arguments item completion.
+						added = fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","name":%q,"arguments":""}}`, name)
+						events[0] = added
+						done = fmt.Sprintf(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":%q}}`, name)
+					}
+					events = append(events, fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"a","arguments":%q}`, args), done, `{"type":"response.completed","response":{"id":"r","output":[]}}`)
+					if tc.lateName {
+						events[0] = `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a"}}`
+					}
+					if tc.sparseTerminal {
+						events[len(events)-1] = fmt.Sprintf(`{"type":"response.completed","response":{"id":"r","output":[{"type":"function_call","id":"a","call_id":"c","name":%q}]}}`, name)
+					}
+					for _, e := range events {
+						if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(e)); errWrite != nil {
+							return
+						}
+					}
+				}))
+				defer server.Close()
+				tools := `[{"type":"custom","name":"apply_patch"}]`
+				cfg := &config.Config{}
+				if fold {
+					var declarations []string
+					declarations = append(declarations, `{"type":"custom","name":"apply_patch"}`)
+					for i := 0; i < 205; i++ {
+						declarations = append(declarations, fmt.Sprintf(`{"type":"function","name":"lookup%d","parameters":{"type":"object"}}`, i))
+					}
+					tools = `[{"type":"namespace","name":"n","tools":[` + strings.Join(declarations, ",") + `]}]`
+				}
+				exec := NewXAIWebsocketsExecutor(cfg)
+				exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+				auth := &cliproxyauth.Auth{ID: "patch-ws", Provider: "xai", Attributes: map[string]string{"base_url": server.URL, "api_key": "test", "websockets": "true"}}
+				ctx := t.Context()
+				if downstreamWS {
+					ctx = cliproxyexecutor.WithDownstreamWebsocket(ctx)
+				}
+				result, errExecute := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "grok-4", Payload: []byte(`{"input":[],"tools":` + tools + `}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				var output, final []byte
+				var lifecycle [][]byte
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					output = append(output, chunk.Payload...)
+					lifecycle = append(lifecycle, applyPatchTestPayloads(chunk.Payload)...)
+					payload := bytes.TrimSpace(bytes.TrimPrefix(chunk.Payload, []byte("data:")))
+					if gjson.GetBytes(payload, "type").String() == "response.completed" {
+						final = []byte(gjson.GetBytes(payload, "response").Raw)
+					}
+				}
+				if !bytes.Contains(output, []byte(`"custom_tool_call"`)) || !bytes.Contains(output, []byte(`"response.custom_tool_call_input.done"`)) || !bytes.Contains(output, []byte(`"input":"p\n中😀"`)) {
+					t.Fatalf("actual websocket bridge bypass: %s", output)
+				}
+				if snapshotOnly && bytes.Contains(output, []byte(`"response.custom_tool_call_input.delta"`)) {
+					t.Fatalf("snapshot-only completion invented progress: %s", output)
+				}
+				var fragments []string
+				if !snapshotOnly && !fold {
+					fragments = []string{"p\n中😀"}
+				}
+				assertApplyPatchIdentityLifecycle(t, lifecycle, "a", "c", "p\n中😀", 0, fragments)
+				if gjson.GetBytes(final, "output.0.type").String() != "custom_tool_call" || gjson.GetBytes(final, "output.0.input").String() != "p\n中😀" || gjson.GetBytes(final, "output.0.call_id").String() != "c" || (fold && gjson.GetBytes(final, "output.0.namespace").String() != "n") {
+					t.Fatalf("terminal lost child input/identity: %s", final)
+				}
+				if bytes.Count(output, []byte(`"type":"response.custom_tool_call_input.done"`)) != 1 || bytes.Count(output, []byte(`"type":"response.completed"`)) != 1 {
+					t.Fatalf("duplicate completion: %s", output)
+				}
+				body := <-bodies
+				if fold {
+					if gjson.GetBytes(body, "tools.0.name").String() != "n" || !strings.Contains(gjson.GetBytes(body, "tools.0.description").String(), "apply_patch") {
+						t.Fatalf("dispatcher lost patch: %s", body)
+					}
+				} else if !gjson.GetBytes(body, "tools.0.parameters.properties.input").Exists() {
+					t.Fatalf("missing patch schema: %s", body)
+				}
+			})
+		}
+	}
+}
+
+func TestXAIWebsocketApplyPatchIncompleteEOF(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Logf("close test websocket: %v", errClose)
+			}
+		}()
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","name":"apply_patch","arguments":""}}`))
+	}))
+	defer server.Close()
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	result, errExecute := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(t.Context()), &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"base_url": server.URL, "api_key": "test", "websockets": "true"}}, cliproxyexecutor.Request{Model: "grok-4", Payload: []byte(`{"input":[],"tools":[{"type":"custom","name":"apply_patch"}]}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if errExecute != nil {
+		t.Fatal(errExecute)
+	}
+	var output []byte
+	var streamErr error
+	for chunk := range result.Chunks {
+		output = append(output, chunk.Payload...)
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	assertTask6PatchError(t, streamErr)
+	if streamErr == nil || !bytes.Contains(output, []byte(`"type":"response.failed"`)) || bytes.Count(output, []byte(`"type":"response.failed"`)) != 1 || bytes.Contains(output, []byte(`"type":"response.completed"`)) {
+		t.Fatalf("bridge EOF was not finished: %s err=%v", output, streamErr)
 	}
 }

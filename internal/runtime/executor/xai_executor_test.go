@@ -17,15 +17,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/gorilla/websocket"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
@@ -172,7 +173,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 			t.Fatalf("read body: %v", errRead)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},{\"type\":\"function_call\",\"id\":\"patch_item\",\"call_id\":\"cp\",\"name\":\"apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"p\\\"}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -190,7 +191,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		},
 	}
 
-	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	result, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
 		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"type":"reasoning","summary":[{"type":"summary_text","text":"second"}]},{"role":"user","content":"hello"}],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]},{"type":"namespace","name":"codex_app","description":"Tools in the codex_app namespace.","tools":[{"type":"function","name":"automation_update"},{"type":"custom","name":"namespace_custom"},{"type":"tool_search"}]}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"automation_update","namespace":"codex_app"},{"type":"function","name":"lookup"},{"type":"web_search"}]}}`),
 	}, cliproxyexecutor.Options{
@@ -204,6 +205,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
+	if gjson.GetBytes(result.Payload, "output.1.type").String() != "custom_tool_call" || gjson.GetBytes(result.Payload, "output.1.input").String() != "p" {
+		t.Fatalf("retained patch was not actually bridged: %s", result.Payload)
+	}
 	if gotPath != "/responses" {
 		t.Fatalf("path = %q, want /responses", gotPath)
 	}
@@ -247,8 +251,8 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		t.Fatalf("input.2 exists, want consecutive reasoning item merged; body=%s", string(gotBody))
 	}
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 6 {
-		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
+	if len(tools) != 7 {
+		t.Fatalf("tools length = %d, want 7; body=%s", len(tools), string(gotBody))
 	}
 	foundAutomationUpdate := false
 	foundNamespaceCustom := false
@@ -268,7 +272,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
 		}
 		if got := tool.Get("name").String(); got == "apply_patch" {
-			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
+			if tool.Get("type").String() != "function" || tool.Get("parameters.required.0").String() != "input" || tool.Get("parameters.additionalProperties").Bool() || tool.Get("parameters.properties.input.type").String() != "string" {
+				t.Fatalf("tools.%d invalid patch contract: %s", i, tool.Raw)
+			}
 		}
 		switch tool.Get("name").String() {
 		case "codex_app__automation_update":
@@ -335,7 +341,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessage(t *testing.T) {
 	t.Parallel()
 
-	exec := NewXAIExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
+	exec := NewXAIExecutor(&config.Config{SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: true}}}})
 	payload := []byte(`{
 		"model":"grok-4.5",
 		"input":[{
@@ -3235,7 +3241,7 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 			t.Fatalf("read body: %v", errRead)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},{\"type\":\"function_call\",\"id\":\"patch_item\",\"call_id\":\"cp\",\"name\":\"apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"p\\\"}\"}]}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -3256,15 +3262,20 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
 	}
+	var output []byte
 	for chunk := range result.Chunks {
+		output = append(output, chunk.Payload...)
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error = %v", chunk.Err)
 		}
 	}
 
+	if !bytes.Contains(output, []byte(`"type":"custom_tool_call"`)) || !bytes.Contains(output, []byte(`"input":"p"`)) || !bytes.Contains(output, []byte("response.custom_tool_call_input.done")) {
+		t.Fatalf("retained patch was not actually bridged: %s", output)
+	}
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 6 {
-		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
+	if len(tools) != 7 {
+		t.Fatalf("tools length = %d, want 7; body=%s", len(tools), string(gotBody))
 	}
 	if gjson.GetBytes(gotBody, "input.0.content").Exists() {
 		t.Fatalf("input.0.content exists, want removed; body=%s", string(gotBody))
@@ -3299,7 +3310,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
 		}
 		if got := tool.Get("name").String(); got == "apply_patch" {
-			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
+			if tool.Get("type").String() != "function" || tool.Get("parameters.required.0").String() != "input" || tool.Get("parameters.additionalProperties").Bool() || tool.Get("parameters.properties.input.type").String() != "string" {
+				t.Fatalf("tools.%d invalid patch contract: %s", i, tool.Raw)
+			}
 		}
 		switch tool.Get("name").String() {
 		case "codex_app__automation_update":
@@ -4195,6 +4208,20 @@ func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T
 	}
 	if !foundExec {
 		t.Fatalf("exec_command tool missing after normalize: %s", string(out))
+	}
+}
+
+func TestXAIExecutorPrepareResponsesRequestPreservesCodexNumberToolSchemas(t *testing.T) {
+	exec := &XAIExecutor{}
+	payload := []byte(`{"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"yield_time_ms":{"type":"number"}}}}],"input":[{"type":"additional_tools","tools":[{"type":"function","name":"functions__exec_command","parameters":{"type":"object","properties":{"yield_time_ms":{"type":"number"}}}}]}]}`)
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{Model: "grok-4", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex, Headers: http.Header{"User-Agent": []string{"codex_cli_rs/0.1"}}}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+	for _, path := range []string{"tools.0.parameters.properties.yield_time_ms.type", "tools.1.parameters.properties.yield_time_ms.type"} {
+		if got := gjson.GetBytes(prepared.body, path).String(); got != "integer" {
+			t.Errorf("%s = %q, want integer; body=%s", path, got, prepared.body)
+		}
 	}
 }
 
@@ -7039,5 +7066,440 @@ func TestXAIExecutorFoldsNamespaceNamedWebSearchWithoutAliasing(t *testing.T) {
 	}
 	if got := output.Get("namespace").String(); got != "web_search" {
 		t.Fatalf("output.0.namespace = %q, want web_search; payload=%s", got, resp.Payload)
+	}
+}
+
+// Removing request normalization or restoring the same-format bypass breaks these wire assertions.
+func testApplyPatchResponsesExecutor(t *testing.T, provider string, exec interface {
+	Execute(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	ExecuteStream(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error)
+}, model string) {
+	t.Helper()
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			request := []byte(`{"input":[{"type":"custom_tool_call","call_id":"old","name":"apply_patch","input":"old\n"},{"type":"custom_tool_call_output","call_id":"old","output":"ok"}],"tools":[{"type":"custom","name":"apply_patch"}],"tool_choice":{"type":"custom","name":"apply_patch"}}`)
+			item := `{"type":"function_call","id":"fc1","call_id":"c1","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n+中😀\\n*** End Patch\\n\"}"}`
+			completed := `{"type":"response.completed","response":{"id":"r1","status":"completed","output":[` + item + `]}}`
+			bodies := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				bodies <- body
+				if provider == "kimi" && !stream {
+					_, _ = w.Write([]byte(completed))
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", `{"type":"response.output_item.done","output_index":0,"item":`+item+`}`, completed)
+			}))
+			defer server.Close()
+			auth := &cliproxyauth.Auth{Provider: provider, Attributes: map[string]string{"api_key": "test", "base_url": server.URL}}
+			req := cliproxyexecutor.Request{Model: model, Payload: request}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
+			var output []byte
+			if stream {
+				result, errExecute := exec.ExecuteStream(t.Context(), auth, req, opts)
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					output = append(output, chunk.Payload...)
+				}
+				if !bytes.Contains(output, []byte(`"custom_tool_call"`)) || !bytes.Contains(output, []byte(`"response.custom_tool_call_input.done"`)) {
+					t.Fatalf("bridge bypass: %s", output)
+				}
+			} else {
+				result, errExecute := exec.Execute(t.Context(), auth, req, opts)
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				output = result.Payload
+				root := gjson.ParseBytes(output)
+				if root.Get("response").Exists() {
+					root = root.Get("response")
+				}
+				if root.Get("output.0.type").String() != "custom_tool_call" || root.Get("output.0.input").String() != "*** Begin Patch\n+中😀\n*** End Patch\n" {
+					t.Fatalf("bridge bypass: %s", output)
+				}
+			}
+			body := <-bodies
+			if gjson.GetBytes(body, "tools.0.type").String() != "function" || !gjson.GetBytes(body, "tools.0.parameters.properties.input").Exists() || gjson.GetBytes(body, "tool_choice.type").String() != "function" {
+				t.Fatalf("patch declaration missing: %s", body)
+			}
+			if gjson.GetBytes(body, "input.0.arguments").String() != `{"input":"old\n"}` || gjson.GetBytes(body, "input.1.type").String() != "function_call_output" {
+				t.Fatalf("history lost: %s", body)
+			}
+		})
+	}
+}
+
+func TestXAIApplyPatchResponsesExecutor(t *testing.T) {
+	testApplyPatchResponsesExecutor(t, "xai", NewXAIExecutor(&config.Config{}), "grok-4")
+}
+
+func TestApplyPatchActualCodexExecutorNativePassthrough(t *testing.T) {
+	for _, responseFormat := range []sdktranslator.Format{sdktranslator.FormatCodex, sdktranslator.FormatOpenAIResponse} {
+		t.Run(responseFormat.String(), func(t *testing.T) {
+			tool := `{ "type":"custom", "name":"apply_patch", "format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}`
+			history := `{ "type":"custom_tool_call", "call_id":"old", "name":"apply_patch", "input":"{\"input\":\"raw\"}"}`
+			events := []string{
+				`{ "type":"response.output_item.added", "output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`,
+				`{ "type":"response.custom_tool_call_input.delta", "item_id":"a", "delta":"p"}`,
+				`{ "type":"response.custom_tool_call_input.done", "item_id":"a", "input":"p"}`,
+				`{ "type":"response.output_item.done", "output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}}`,
+				`{ "type":"response.completed", "sequence_number":80, "response":{"id":"r","status":"completed","output":[{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}]}}`,
+			}
+			bodies := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				bodies <- body
+				w.Header().Set("Content-Type", "text/event-stream")
+				for _, event := range events {
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+				}
+			}))
+			defer server.Close()
+			exec := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{DisableCodexCloaking: true}})
+			req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(`{"input":[` + history + `],"tools":[` + tool + `]}`)}
+			result, errExecute := exec.ExecuteStream(t.Context(), codexTestAuth(server.URL), req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: responseFormat, Headers: http.Header{codexResponsesLiteHeader: {"true"}}})
+			if errExecute != nil {
+				t.Fatal(errExecute)
+			}
+			var output []byte
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				output = append(output, chunk.Payload...)
+			}
+			body := <-bodies
+			if gjson.GetBytes(body, "tools.0").Raw != tool || gjson.GetBytes(body, "input.0").Raw != history {
+				t.Fatalf("native declarations/history altered: %s", body)
+			}
+			for _, event := range events {
+				if !bytes.Contains(output, []byte(event)) {
+					t.Fatalf("native event bytes altered: want=%s got=%s", event, output)
+				}
+			}
+		})
+	}
+}
+
+func TestXAIApplyPatchFoldedNamespaceHTTP(t *testing.T) {
+	for _, tc := range []struct{ stream, snapshotOnly, sparseTerminal, lateName bool }{
+		{false, false, false, false}, {true, false, false, false},
+		{false, true, false, false}, {true, true, false, false},
+		{false, true, true, false}, {true, true, true, false},
+		{false, true, false, true}, {true, true, false, true},
+		{false, true, true, true}, {true, true, true, true},
+	} {
+		stream, snapshotOnly := tc.stream, tc.snapshotOnly
+		t.Run(fmt.Sprintf("stream=%v/snapshotOnly=%v/sparseTerminal=%v/lateName=%v", stream, snapshotOnly, tc.sparseTerminal, tc.lateName), func(t *testing.T) {
+			var declarations []string
+			declarations = append(declarations, `{"type":"custom","name":"apply_patch"}`)
+			for i := 0; i < 205; i++ {
+				declarations = append(declarations, fmt.Sprintf(`{"type":"function","name":"lookup%d","parameters":{"type":"object"}}`, i))
+			}
+			tools := `[{"type":"namespace","name":"n","tools":[` + strings.Join(declarations, ",") + `]}]`
+			request := []byte(`{"tools":` + tools + `,"input":[{"type":"custom_tool_call","call_id":"old","name":"apply_patch","namespace":"n","input":"old"},{"type":"custom_tool_call_output","call_id":"old","output":"ok"}]}`)
+			bodies := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				bodies <- body
+				w.Header().Set("Content-Type", "text/event-stream")
+				patch := `{"type":"function_call","id":"a","call_id":"c","name":"n","arguments":"{\"name\":\"apply_patch\",\"arguments\":{\"input\":\"p\"}}"}`
+				ordinary := `{"type":"function_call","id":"b","call_id":"d","name":"n","arguments":"{\"name\":\"lookup0\",\"arguments\":{\"x\":1}}"}`
+				events := []string{`{"type":"response.output_item.done","output_index":0,"item":` + patch + `}`}
+				if snapshotOnly {
+					events = []string{
+						`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","name":"n","arguments":""}}`,
+						`{"type":"response.function_call_arguments.done","item_id":"a","arguments":"{\"name\":\"apply_patch\",\"arguments\":{\"input\":\"p\"}}"}`,
+						`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":"n"}}`,
+					}
+				}
+				if snapshotOnly {
+					events = append(events,
+						`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"b","name":"n","arguments":""}}`,
+						`{"type":"response.function_call_arguments.done","item_id":"b","arguments":"{\"name\":\"lookup0\",\"arguments\":{\"x\":1}}"}`,
+						`{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"b","call_id":"d","name":"n"}}`,
+						`{"type":"response.completed","response":{"output":[]}}`,
+					)
+				} else {
+					events = append(events, `{"type":"response.output_item.done","output_index":1,"item":`+ordinary+`}`, `{"type":"response.completed","response":{"output":[`+ordinary+`]}}`)
+				}
+				if tc.lateName {
+					events[0] = `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a"}}`
+					events[3] = `{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"b"}}`
+				}
+				if tc.sparseTerminal {
+					events[len(events)-1] = `{"type":"response.completed","response":{"output":[{"type":"function_call","id":"a","call_id":"c","name":"n"},{"type":"function_call","id":"b","call_id":"d","name":"n"}]}}`
+				}
+				for _, e := range events {
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", e)
+				}
+			}))
+			defer server.Close()
+			exec := NewXAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+			req := cliproxyexecutor.Request{Model: "grok-4", Payload: request}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+			var final, output []byte
+			if stream {
+				result, errExecute := exec.ExecuteStream(t.Context(), auth, req, opts)
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					output = append(output, chunk.Payload...)
+					for _, line := range bytes.Split(chunk.Payload, []byte("\n")) {
+						payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+						if gjson.GetBytes(payload, "type").String() == "response.completed" {
+							final = []byte(gjson.GetBytes(payload, "response").Raw)
+						}
+					}
+				}
+			} else {
+				result, errExecute := exec.Execute(t.Context(), auth, req, opts)
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				final = result.Payload
+			}
+			if gjson.GetBytes(final, "output.0.type").String() != "custom_tool_call" || gjson.GetBytes(final, "output.0.namespace").String() != "n" || gjson.GetBytes(final, "output.0.input").String() != "p" || gjson.GetBytes(final, "output.1.name").String() != "lookup0" || gjson.GetBytes(final, "output.1.arguments").String() != `{"x":1}` {
+				t.Fatalf("mixed namespace restoration: %s", final)
+			}
+			if stream && snapshotOnly && (bytes.Contains(output, []byte(`"response.custom_tool_call_input.delta"`)) || bytes.Count(output, []byte(`"type":"response.custom_tool_call_input.done"`)) != 1) {
+				t.Fatalf("snapshot-only completion invented progress or lost input.done: %s", output)
+			}
+			body := <-bodies
+			if gjson.GetBytes(body, "tools.0.name").String() != "n" || gjson.GetBytes(body, "input.0.name").String() != "n" || gjson.GetBytes(body, "input.0.arguments").String() != `{"arguments":{"input":"old"},"name":"apply_patch"}` || gjson.GetBytes(body, "input.1.type").String() != "function_call_output" {
+				t.Fatalf("dispatcher declaration/history: %s", body)
+			}
+		})
+	}
+}
+
+func TestXAIApplyPatchDispatcherEvidenceLifecycle(t *testing.T) {
+	patch := `{"name":"apply_patch","arguments":{"input":"p"}}`
+	ordinary := `{"name":"lookup0","arguments":{"name":"apply_patch","arguments":{"input":"ordinary"}}}`
+	added := `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a"}}`
+	argsDone := fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"a","arguments":%q}`, patch)
+	done := `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":"n"}}`
+	sparse := `{"type":"function_call","id":"a","call_id":"c","name":"n"}`
+	terminal := `{"type":"response.completed","response":{"output":[]}}`
+	type evidenceCase struct {
+		name     string
+		events   []string
+		wantName string
+		wantArgs string
+		fail     bool
+	}
+	cases := []evidenceCase{
+		{"unnamed_added_full_wrapper", []string{fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","arguments":%q}}`, patch), done, terminal}, "apply_patch", "p", false},
+		{"index_acquired_after_snapshot", []string{argsDone, `{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"a"}}`, `{"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"a","call_id":"c","name":"n"}}`, `{"type":"response.completed","response":{"output":[` + sparse + `]}}`}, "apply_patch", "p", false},
+		{"completed_namespace_conflict", []string{added, argsDone, done, `{"type":"response.completed","response":{"output":[{"type":"function_call","id":"a","call_id":"c","name":"n","namespace":"other"}]}}`}, "", "", true},
+		{"candidate_dual_call_conflict", []string{`{"type":"response.output_item.added","output_index":0,"call_id":"x","item":{"type":"function_call","id":"a","call_id":"c"}}`, argsDone, done, terminal}, "", "", true},
+		{"candidate_dual_item_conflict", []string{`{"type":"response.output_item.added","output_index":0,"item_id":"x","item":{"type":"function_call","id":"a"}}`, argsDone, done, terminal}, "", "", true},
+		{"terminal_first_dispatcher_name", []string{added, argsDone, `{"type":"response.completed","response":{"output":[` + sparse + `]}}`}, "apply_patch", "p", false},
+		{"late_ordinary_dispatcher_child", []string{added, fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"a","arguments":%q}`, ordinary), done, `{"type":"response.completed","response":{"output":[` + sparse + `]}}`}, "lookup0", `{"name":"apply_patch","arguments":{"input":"ordinary"}}`, false},
+		{"ordinary_wrapper_is_literal", []string{added, argsDone, fmt.Sprintf(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":"plain","arguments":%q}}`, patch), terminal}, "plain", patch, false},
+		{"dispatcher_delta_child_conflict", []string{`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","name":"n"}}`, `{"type":"response.function_call_arguments.delta","item_id":"a","name":"lookup0","namespace":"n","delta":""}`, argsDone, done, terminal}, "", "", true},
+		{"completed_delta_child_conflict", []string{added, argsDone, done, `{"type":"response.function_call_arguments.delta","item_id":"a","name":"lookup0","namespace":"n","delta":""}`, terminal}, "", "", true},
+		{"completed_added_child_conflict", []string{added, argsDone, done, `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","name":"lookup0","namespace":"n","arguments":""}}`, terminal}, "", "", true},
+		{"completed_added_repeated", []string{added, argsDone, done, `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","name":"n","arguments":""}}`, terminal}, "apply_patch", "p", false},
+		{"folded_child_snapshot_is_valid", []string{`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","name":"n"}}`, fmt.Sprintf(`{"type":"response.function_call_arguments.delta","item_id":"a","delta":%q}`, patch), `{"type":"response.function_call_arguments.done","item_id":"a","arguments":"{\"input\":\"p\"}"}`, done, terminal}, "apply_patch", "p", false},
+		{"completed_child_snapshot_consistent", []string{added, argsDone, done, `{"type":"response.function_call_arguments.done","item_id":"a","arguments":"{\"input\":\"p\"}"}`, terminal}, "apply_patch", "p", false},
+		{"completed_child_snapshot_conflicting", []string{added, argsDone, done, `{"type":"response.function_call_arguments.done","item_id":"a","arguments":"{\"input\":\"q\"}"}`, terminal}, "", "", true},
+		{"completed_arguments_done_conflict", []string{added, argsDone, done, `{"type":"response.function_call_arguments.done","item_id":"a","arguments":"{\"name\":\"apply_patch\",\"arguments\":{\"input\":\"q\"}}"}`, terminal}, "", "", true},
+		{"completed_arguments_done_repeated", []string{added, argsDone, done, argsDone, terminal}, "apply_patch", "p", false},
+		{"completed_child_conflict", []string{added, argsDone, done, `{"type":"response.completed","response":{"output":[{"type":"function_call","id":"a","call_id":"c","name":"n","arguments":"{\"name\":\"lookup0\",\"arguments\":{\"input\":\"p\"}}"}]}}`}, "", "", true},
+		{"completed_snapshot_conflict", []string{added, argsDone, done, `{"type":"response.completed","response":{"output":[{"type":"function_call","id":"a","call_id":"c","name":"n","arguments":"{\"name\":\"apply_patch\",\"arguments\":{\"input\":\"q\"}}"}]}}`}, "", "", true},
+		{"completed_call_conflict", []string{added, argsDone, done, `{"type":"response.completed","response":{"output":[{"type":"function_call","id":"a","call_id":"different","name":"n"}]}}`}, "", "", true},
+		{"completed_type_conflict", []string{added, argsDone, done, `{"type":"response.completed","response":{"output":[{"type":"message","id":"a","call_id":"c","name":"n"}]}}`}, "", "", true},
+		{"completed_item_conflict", []string{added, argsDone, done, `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"different","call_id":"c","name":"n"}}`, terminal}, "", "", true},
+		{"completed_index_conflict", []string{added, argsDone, done, `{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"a","call_id":"c","name":"n"}}`, terminal}, "", "", true},
+		{"candidate_item_conflict", []string{added, `{"type":"response.function_call_arguments.done","output_index":0,"item_id":"different","arguments":"{\"name\":\"apply_patch\",\"arguments\":{\"input\":\"p\"}}"}`, done, terminal}, "", "", true},
+		{"candidate_type_conflict", []string{`{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"a"}}`, argsDone, done, terminal}, "", "", true},
+		{"candidate_name_conflict", []string{`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","name":"plain"}}`, argsDone, done, terminal}, "", "", true},
+		{"candidate_snapshot_type_conflict", []string{added, `{"type":"response.function_call_arguments.done","item_id":"a","arguments":{"name":"apply_patch","arguments":{"input":"p"}}}`, done, terminal}, "", "", true},
+	}
+	for discover := 0; discover < 3; discover++ {
+		events := []string{}
+		for i := 0; i < 3; i++ {
+			events = append(events, fmt.Sprintf(`{"type":"response.output_item.added","output_index":%d,"item":{"type":"function_call","id":"i%d","call_id":"c%d"}}`, i, i, i))
+		}
+		events = append(events, fmt.Sprintf(`{"type":"response.function_call_arguments.done","output_index":0,"item_id":"i1","call_id":"c2","arguments":%q}`, patch), fmt.Sprintf(`{"type":"response.output_item.done","output_index":%d,"item":{"type":"function_call","id":"i%d","call_id":"c%d","name":"n"}}`, discover, discover, discover), terminal)
+		cases = append(cases, evidenceCase{fmt.Sprintf("candidate_all_keys_discover_%d", discover), events, "", "", true})
+	}
+	for _, mode := range []string{"http", "http_stream", "ws_sse", "ws_raw"} {
+		for _, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if strings.HasPrefix(mode, "ws_") {
+						conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+						if errUpgrade != nil {
+							return
+						}
+						defer func() {
+							if errClose := conn.Close(); errClose != nil {
+								t.Logf("close test websocket: %v", errClose)
+							}
+						}()
+						if _, _, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
+							return
+						}
+						for _, event := range tc.events {
+							if errWriteMessage := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWriteMessage != nil {
+								return
+							}
+						}
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					for _, event := range tc.events {
+						_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+					}
+				}))
+				defer server.Close()
+				declarations := []string{`{"type":"custom","name":"apply_patch"}`}
+				for i := 0; i < 205; i++ {
+					declarations = append(declarations, fmt.Sprintf(`{"type":"function","name":"lookup%d","parameters":{"type":"object"}}`, i))
+				}
+				request := []byte(`{"input":[],"tools":[{"type":"function","name":"plain","parameters":{"type":"object"}},{"type":"namespace","name":"n","tools":[` + strings.Join(declarations, ",") + `]}]}`)
+				auth := &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"base_url": server.URL, "api_key": "test", "websockets": "true"}}
+				req := cliproxyexecutor.Request{Model: "grok-4", Payload: request}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+				var output, final []byte
+				var resultErr error
+				if mode == "http" {
+					result, errExecute := NewXAIExecutor(&config.Config{}).Execute(t.Context(), auth, req, opts)
+					final, resultErr = result.Payload, errExecute
+				} else {
+					var exec interface {
+						ExecuteStream(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error)
+					} = NewXAIExecutor(&config.Config{})
+					ctx := t.Context()
+					if strings.HasPrefix(mode, "ws_") {
+						wsExec := NewXAIWebsocketsExecutor(&config.Config{})
+						wsExec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+						exec = wsExec
+					}
+					if mode == "ws_raw" {
+						ctx = cliproxyexecutor.WithDownstreamWebsocket(ctx)
+					}
+					result, errExecuteStream := exec.ExecuteStream(ctx, auth, req, opts)
+					if errExecuteStream != nil {
+						t.Fatal(errExecuteStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							resultErr = chunk.Err
+						}
+						output = append(output, chunk.Payload...)
+						for _, line := range bytes.Split(chunk.Payload, []byte("\n")) {
+							payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+							if gjson.GetBytes(payload, "type").String() == "response.completed" {
+								final = []byte(gjson.GetBytes(payload, "response").Raw)
+							}
+						}
+					}
+				}
+				if tc.fail {
+					if resultErr == nil || !strings.Contains(resultErr.Error(), "apply_patch") || len(final) != 0 || (mode != "http" && bytes.Count(output, []byte(`"type":"response.failed"`)) != 1) {
+						t.Fatalf("conflict escaped: final=%s output=%s err=%v", final, output, resultErr)
+					}
+					return
+				}
+				if resultErr != nil {
+					t.Fatal(resultErr)
+				}
+				if mode != "http" && bytes.Count(output, []byte(`"type":"response.completed"`)) != 1 {
+					t.Fatalf("missing or repeated response completion: %s", output)
+				}
+				item := gjson.GetBytes(final, "output.0")
+				if item.Get("name").String() != tc.wantName || item.Get("call_id").String() != "c" {
+					t.Fatalf("child identity lost: %s", final)
+				}
+				if tc.wantName == "apply_patch" {
+					if item.Get("type").String() != "custom_tool_call" || item.Get("namespace").String() != "n" || item.Get("input").String() != tc.wantArgs || bytes.Contains(output, []byte(`"response.custom_tool_call_input.delta"`)) || (mode != "http" && bytes.Count(output, []byte(`"type":"response.custom_tool_call_input.done"`)) != 1) {
+						t.Fatalf("snapshot patch lost or progress fabricated: %s %s", final, output)
+					}
+				} else if item.Get("type").String() != "function_call" || item.Get("arguments").String() != tc.wantArgs || (tc.wantName == "lookup0" && item.Get("namespace").String() != "n") || bytes.Contains(output, []byte(`custom_tool_call`)) || (mode != "http" && bytes.Count(output, []byte(`"type":"response.function_call_arguments.done"`)) != 1) {
+					t.Fatalf("ordinary wrapper reclassified or replayed: %s %s", final, output)
+				}
+			})
+		}
+	}
+}
+
+func TestApplyPatchResponsesExecutorLocalFailures(t *testing.T) {
+	for _, provider := range []string{"xai", "meta", "kimi"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", provider, stream), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if provider == "kimi" && !stream {
+						_, _ = fmt.Fprint(w, `{"output":[{"type":"function_call","name":"apply_patch","arguments":"{}"}]}`)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					if stream {
+						_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"a\",\"name\":\"apply_patch\",\"arguments\":\"\"}}\n\n")
+						return
+					}
+					_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"name\":\"apply_patch\",\"arguments\":\"{}\"}]}}\n\n")
+				}))
+				defer server.Close()
+				var exec interface {
+					Execute(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+					ExecuteStream(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error)
+				}
+				model := "grok-4"
+				switch provider {
+				case "xai":
+					exec = NewXAIExecutor(&config.Config{})
+				case "meta":
+					exec = NewMetaExecutor(&config.Config{})
+					model = "muse-spark-1.3"
+				case "kimi":
+					exec = NewKimiExecutor(&config.Config{})
+					model = "kimi-k2.5"
+				}
+				auth := &cliproxyauth.Auth{ID: "task6-owned", Provider: provider, Attributes: map[string]string{"api_key": "test", "base_url": server.URL}}
+				checkUsage := task6CaptureFailureUsage(t, auth.ID)
+				defer checkUsage()
+				req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"input":[],"tools":[{"type":"custom","name":"apply_patch"}]}`)}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+				if stream {
+					result, errExecute := exec.ExecuteStream(t.Context(), auth, req, opts)
+					if errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					var output []byte
+					var streamErr error
+					for chunk := range result.Chunks {
+						output = append(output, chunk.Payload...)
+						if chunk.Err != nil {
+							streamErr = chunk.Err
+						}
+					}
+					assertTask6PatchError(t, streamErr)
+					if streamErr == nil || !bytes.Contains(output, []byte(`"type":"response.failed"`)) || bytes.Contains(output, []byte(`"type":"response.completed"`)) {
+						t.Fatalf("EOF falsely succeeded: %s %v", output, streamErr)
+					}
+				} else {
+					result, errExecute := exec.Execute(t.Context(), auth, req, opts)
+					assertTask6PatchError(t, errExecute)
+					if errExecute == nil || len(result.Payload) > 0 {
+						t.Fatalf("malformed nonstream succeeded: %s %v", result.Payload, errExecute)
+					}
+				}
+			})
+		}
 	}
 }

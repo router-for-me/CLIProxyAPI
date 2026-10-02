@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -22,6 +22,7 @@ import (
 )
 
 type metaPreparedRequest struct {
+	applyPatch      *helps.ApplyPatchResponsesState
 	baseModel       string
 	from            sdktranslator.Format
 	responseFormat  sdktranslator.Format
@@ -61,10 +62,19 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.DeleteBytes(body, "client_metadata")
+	applyPatch := helps.NewApplyPatchResponsesState(from, originalPayload, originalTranslated)
+	var errNormalizePatch error
+	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body, originalPayload)
+	if errNormalizePatch != nil {
+		return nil, errNormalizePatch
+	}
 	body = normalizeCodexInstructions(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "meta executor", body)
+	body = helps.SanitizeMetaWebSearchTools(body)
+	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 
 	return &metaPreparedRequest{
+		applyPatch:      applyPatch,
 		baseModel:       baseModel,
 		from:            from,
 		responseFormat:  responseFormat,
@@ -168,25 +178,47 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 		if errEvent := metaStreamEventError(eventData); errEvent != nil {
 			return metaCompletedTranslation{}, errEvent
 		}
-		eventType := gjson.GetBytes(eventData, "type").String()
-		switch eventType {
-		case "response.output_item.done":
-			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed", "response.incomplete":
-			completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			var param any
-			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
+		events, errBridge := prepared.applyPatch.Transform(eventData)
+		if errBridge != nil {
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			return metaCompletedTranslation{}, errBridge
+		}
+		for _, eventData := range events {
+			eventType := gjson.GetBytes(eventData, "type").String()
+			switch eventType {
+			case "response.output_item.done":
+				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.incomplete":
+				completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+				var param any
+				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+					return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+				}
+				return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
+			}
 		}
 	}
 
 	if completedData, ok := metaAsCompletedEvent(data); ok {
 		completedData = patchCodexCompletedOutput(completedData, outputItemsByIndex, outputItemsFallback)
+		var errBridge error
+		completedData, errBridge = prepared.applyPatch.Bridge.TransformNonStream(completedData)
+		if errBridge != nil {
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			return metaCompletedTranslation{}, errBridge
+		}
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+		if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+			return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		}
 		return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
 	}
 
+	if errFinish := prepared.applyPatch.Finish(); errFinish != nil {
+		return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
 	return metaCompletedTranslation{}, statusErr{code: http.StatusRequestTimeout, msg: "meta stream error: stream disconnected before response.completed or response.incomplete"}
 }
 
@@ -239,6 +271,7 @@ func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token strin
 		req.Header.Del("Authorization")
 	}
 	req.Header.Set("User-Agent", metaUserAgent)
+	req.Header.Set("X-Client-Id", "tbh:tui")
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 		req.Header.Set("Cache-Control", "no-cache")
@@ -252,6 +285,8 @@ func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token strin
 	util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders)
 }
 
+const metaNotFoundCooldown = 5 * time.Minute
+
 func wrapMetaUpstreamError(statusCode int, body []byte) error {
 	se := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
@@ -260,6 +295,14 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 		}
 		if isMetaSubscriptionQuota(statusCode, body) {
 			return metaRateLimitError{statusErr: se, credentialScoped: true}
+		}
+	}
+	if statusCode == http.StatusNotFound {
+		if retryAfter := parseMetaRetryAfter(statusCode, body, time.Now()); retryAfter != nil {
+			se.retryAfter = retryAfter
+		} else {
+			retry := metaNotFoundCooldown
+			se.retryAfter = &retry
 		}
 	}
 	return se

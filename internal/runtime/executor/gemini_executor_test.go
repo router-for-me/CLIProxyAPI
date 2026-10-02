@@ -8,11 +8,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -1325,6 +1325,8 @@ func TestGeminiExecutorNativeInteractionsResponsesStreamEmitsDone(t *testing.T) 
 		_, _ = w.Write([]byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"i1\",\"model\":\"gemini-3.1-flash-lite\"}}\n\n"))
 		_, _ = w.Write([]byte("event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"i1\",\"status\":\"completed\",\"usage\":{\"total_input_tokens\":1,\"total_output_tokens\":2}}}\n\n"))
 		_, _ = w.Write([]byte("event: done\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("event: done\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"late\"}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -1349,17 +1351,24 @@ func TestGeminiExecutorNativeInteractionsResponsesStreamEmitsDone(t *testing.T) 
 		t.Fatalf("ExecuteStream() error = %v", errExecute)
 	}
 
-	done := false
+	done := 0
+	completed := 0
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
+		if bytes.Contains(chunk.Payload, []byte(`"type":"response.completed"`)) {
+			completed++
+		}
+		if bytes.Contains(chunk.Payload, []byte(`"late"`)) {
+			t.Fatal("post-terminal content was forwarded")
+		}
 		if bytes.Equal(bytes.TrimSpace(chunk.Payload), []byte("data: [DONE]")) {
-			done = true
+			done++
 		}
 	}
-	if !done {
-		t.Fatal("Responses [DONE] chunk not found")
+	if done != 1 || completed != 1 {
+		t.Fatalf("Responses terminal counts: DONE=%d completed=%d, want one each", done, completed)
 	}
 }
 
