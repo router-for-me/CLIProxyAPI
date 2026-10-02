@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,45 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	}
 	if got.ID != "a" {
 		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "a")
+	}
+}
+
+func TestResetAwareSelectorPick_UsesSoonestLongWindowReset(t *testing.T) {
+	selector := &ResetAwareSelector{}
+	now := time.Now()
+	auths := []*Auth{
+		{ID: "later-high-priority", Attributes: map[string]string{"priority": "100"}, Quota: QuotaState{Signals: map[string]string{
+			"X-Codex-Secondary-Reset-At": strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10),
+		}}},
+		{ID: "sooner-low-priority", Attributes: map[string]string{"priority": "1"}, Quota: QuotaState{Signals: map[string]string{
+			"X-Codex-Secondary-Reset-At": strconv.FormatInt(now.Add(time.Hour).Unix(), 10),
+		}}},
+	}
+
+	got, errPick := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if errPick != nil || got == nil || got.ID != "sooner-low-priority" {
+		t.Fatalf("Pick() = %#v, %v; want sooner-low-priority", got, errPick)
+	}
+}
+
+func TestResetAwareSelectorPick_TieBreaksByPriorityAndSkipsFiveHourLimit(t *testing.T) {
+	selector := &ResetAwareSelector{}
+	reset := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	auths := []*Auth{
+		{ID: "limited", Attributes: map[string]string{"priority": "100"}, Quota: QuotaState{Signals: map[string]string{
+			"X-Codex-Primary-Window-Minutes": "300", "X-Codex-Primary-Used-Percent": "100", "X-Codex-Secondary-Reset-At": reset,
+		}}},
+		{ID: "low", Attributes: map[string]string{"priority": "1"}, Quota: QuotaState{Signals: map[string]string{
+			"X-Codex-Secondary-Reset-At": reset,
+		}}},
+		{ID: "high", Attributes: map[string]string{"priority": "10"}, Quota: QuotaState{Signals: map[string]string{
+			"X-Codex-Secondary-Reset-At": reset,
+		}}},
+	}
+
+	got, errPick := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if errPick != nil || got == nil || got.ID != "high" {
+		t.Fatalf("Pick() = %#v, %v; want high", got, errPick)
 	}
 }
 
