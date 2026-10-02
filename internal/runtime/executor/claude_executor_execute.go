@@ -178,10 +178,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// Initialize continuity and diagnostics if cloaked and eligible.
 		if cloaked {
 			existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(body)
-			prevReq, promptID, cCtx, ok := resolveClaudeContinuityTags(ctx, auth, incomingHeaders, body, confirmedClaudeCode, existingPrevReq, existingPromptID)
+			prevReq, promptID, cCtx, ok := resolveClaudeContinuityTags(ctx, e.cfg, auth, incomingHeaders, body, confirmedClaudeCode, existingPrevReq, existingPromptID)
 			if ok {
 				if continuityCtx != nil {
 					*continuityCtx = cCtx
+				}
+				if cCtx.PinnedDate != "" {
+					body = injectClaudeCodeCurrentDate(body, cCtx.PinnedDate)
 				}
 				body = helps.InjectClaudeBillingTags(body, prevReq, promptID)
 				if fp.InjectDiagnostics && isAnthropicUpstreamBase(baseURL) {

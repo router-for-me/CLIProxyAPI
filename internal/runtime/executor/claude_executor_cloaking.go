@@ -194,6 +194,7 @@ func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, wo
 
 func resolveClaudeContinuityTags(
 	ctx context.Context,
+	cfg *config.Config,
 	auth *cliproxyauth.Auth,
 	incomingHeaders http.Header,
 	payload []byte,
@@ -212,6 +213,11 @@ func resolveClaudeContinuityTags(
 	credIdentity := claudeDiagnosticsCredentialIdentity(auth)
 	isNewTurn := helps.IsClaudeNewPromptTurn(payload)
 	continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
+
+	// The currentDate reminder is pinned to the session on its first request so
+	// a local-midnight flip between requests cannot rewrite it and invalidate
+	// the prompt-cache prefix in front of the whole conversation.
+	pinnedDate := helps.PinClaudeSessionDate(continuityKey, claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth)))
 
 	if existingPromptID != "" {
 		promptID = existingPromptID
@@ -233,6 +239,7 @@ func resolveClaudeContinuityTags(
 		Key:         continuityKey,
 		Sequence:    seq,
 		PromptID:    promptID,
+		PinnedDate:  pinnedDate,
 		Initialized: true,
 	}
 	if hasExecutionMetadata || existingPrevReq != "" {
@@ -313,7 +320,7 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // Claude models give it operator-level authority without changing the cached
 // top-level prefix.
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string) []byte {
-	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, time.Now(), false, "", "")
+	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "")
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
@@ -337,7 +344,7 @@ func checkSystemInstructionsWithSigningModeAt(
 	strictMode bool,
 	cchSigning bool,
 	version, entrypoint, workload string,
-	now time.Time,
+	currentDate string,
 	isSubagent bool,
 	prevReq, promptID string,
 	turnOrigin ...string,
@@ -356,19 +363,19 @@ func checkSystemInstructionsWithSigningModeAt(
 	}
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 	if strictMode {
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, currentDate)
 	}
 
 	forwardedSystemBlocks := collectForwardedClaudeSystemPromptBlocks(system)
 	if len(forwardedSystemBlocks) == 0 {
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, currentDate)
 	}
 	if claudeHistoryHasAdvisorCallOrResult(payload) {
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildTextBlock(block, nil))
 		}
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, currentDate)
 	}
 	if claudeUsesLegacySystemReminder(payload) {
 		payload = prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
@@ -378,7 +385,7 @@ func checkSystemInstructionsWithSigningModeAt(
 		// stay on the user-reminder compatibility path.
 		payload = insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks)
 	}
-	return injectClaudeCodeCurrentDate(payload, now)
+	return injectClaudeCodeCurrentDate(payload, currentDate)
 }
 
 // relocateClaudeSystemPromptForCountTokens keeps a cloaked count_tokens request
@@ -1081,7 +1088,12 @@ func claudeCodeLocalDate(now time.Time) string {
 	return fmt.Sprintf("%04d-%02d-%02d", year, int(month), day)
 }
 
+var claudeCodeCurrentTimeFunc func(cfg *config.Config, auth *cliproxyauth.Auth) time.Time
+
 func claudeCodeCurrentTime(cfg *config.Config, auth *cliproxyauth.Auth) time.Time {
+	if claudeCodeCurrentTimeFunc != nil {
+		return claudeCodeCurrentTimeFunc(cfg, auth)
+	}
 	return time.Now().In(claudeCodeTimezone(cfg, auth))
 }
 
@@ -1117,7 +1129,7 @@ func claudeCredentialTimezone(auth *cliproxyauth.Auth) string {
 	return strings.TrimSpace(claudeauth.ReadMetadataString(&auth.Metadata, "timezone"))
 }
 
-func claudeCodeCurrentDateReminder(now time.Time) string {
+func claudeCodeCurrentDateReminder(date string) string {
 	return fmt.Sprintf(`<system-reminder>
 As you answer the user's questions, you can use the following context:
 # currentDate
@@ -1126,7 +1138,7 @@ Today's date is %s.
       IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
 </system-reminder>
 
-`, claudeCodeLocalDate(now))
+`, date)
 }
 
 func firstClaudeUserMessageIndex(payload []byte) int {
@@ -1154,7 +1166,11 @@ func isClaudeCodeCurrentDateReminder(text string) bool {
 	return strings.HasPrefix(text, "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ")
 }
 
-func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
+// injectClaudeCodeCurrentDate stamps the currentDate reminder into the first
+// user message. date is the already-resolved calendar date (the session-pinned
+// one whenever continuity is available) so the reminder text cannot change
+// between requests of one session.
+func injectClaudeCodeCurrentDate(payload []byte, date string) []byte {
 	firstUserIdx := firstClaudeUserMessageIndex(payload)
 	if firstUserIdx < 0 {
 		return payload
@@ -1162,7 +1178,7 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 
 	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
 	content := gjson.GetBytes(payload, contentPath)
-	dateText := claudeCodeCurrentDateReminder(now)
+	dateText := claudeCodeCurrentDateReminder(date)
 	dateBlock := buildTextBlock(dateText, nil)
 
 	if content.Type == gjson.String {
@@ -1420,6 +1436,7 @@ func applyCloakingInternal(
 	isSubagent := false
 	prevReq := ""
 	promptID := ""
+	pinnedDate := ""
 	var incomingHeaders http.Header
 	if !isProbeOrHelper {
 		incomingHeaders = resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
@@ -1428,12 +1445,18 @@ func applyCloakingInternal(
 
 		var cCtx helps.ClaudeContinuityContext
 		var ok bool
-		prevReq, promptID, cCtx, ok = resolveClaudeContinuityTags(ctx, auth, incomingHeaders, payload, confirmedClaudeCode, existingPrevReq, existingPromptID)
+		prevReq, promptID, cCtx, ok = resolveClaudeContinuityTags(ctx, cfg, auth, incomingHeaders, payload, confirmedClaudeCode, existingPrevReq, existingPromptID)
 		if ok {
+			pinnedDate = cCtx.PinnedDate
 			if continuityCtx := helps.ClaudeContinuityContextFromContext(ctx); continuityCtx != nil {
 				*continuityCtx = cCtx
 			}
 		}
+	}
+	// Without continuity state (probe/helper traffic, or no session identity)
+	// fall back to the per-request date, which is the pre-pinning behaviour.
+	if pinnedDate == "" {
+		pinnedDate = claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
 	}
 
 	turnOrigin := ""
@@ -1447,7 +1470,7 @@ func applyCloakingInternal(
 		billingVersion,
 		"cli",
 		workload,
-		claudeCodeCurrentTime(cfg, auth),
+		pinnedDate,
 		isSubagent,
 		prevReq,
 		promptID,
