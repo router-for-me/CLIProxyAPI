@@ -78,6 +78,9 @@ const (
 	// ResourceManagementAuditLog covers the management API audit trail
 	// (management_audit_log).
 	ResourceManagementAuditLog BackupResource = "management_audit_log"
+	// ResourceManagementLogin covers the management-login brute-force policy
+	// singleton and the append-only login attempt log.
+	ResourceManagementLogin BackupResource = "management_login"
 )
 
 // importBatchSize is the maximum number of rows restored per multi-row INSERT.
@@ -100,7 +103,7 @@ func dataResource(res BackupResource) bool {
 func IsBackupDataResource(res BackupResource) bool {
 	switch res {
 	case ResourceUsage, ResourceAlerts, ResourceModelHealth, ResourceSyncLog,
-		ResourceUsageStatDay, ResourceManagementAuditLog:
+		ResourceUsageStatDay, ResourceManagementAuditLog, ResourceManagementLogin:
 		return true
 	default:
 		return false
@@ -134,6 +137,7 @@ var AllBackupResources = []BackupResource{
 	ResourceUsageStatDay,
 	ResourceModelRouting,
 	ResourceManagementAuditLog,
+	ResourceManagementLogin,
 }
 
 // ValidBackupResource reports whether s names a known backup resource.
@@ -245,6 +249,11 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 		return []backupTable{{s.ModelRoutingTable(), "id"}}
 	case ResourceManagementAuditLog:
 		return []backupTable{{s.ManagementAuditLogTable(), "id"}}
+	case ResourceManagementLogin:
+		return []backupTable{
+			{s.ManagementLoginSettingsTable(), "id"},
+			{s.ManagementLoginEventsTable(), "id"},
+		}
 	default:
 		return nil
 	}
