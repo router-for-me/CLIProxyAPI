@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { getUsageEvent, getUsageErrors } from '../api/client.js';
+import { getUsageEvent, getUsageErrors, getUsageEventBodies } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import {
   Spinner, ErrorBanner, EmptyState, Modal,
@@ -862,6 +862,89 @@ export function EventsTableBody({ events, page, pageSize, onPage, onRowClick, ti
   );
 }
 
+// prettyJSON returns a 2-space-indented body when it parses as JSON, else the
+// raw text. Keeps the modal readable for both JSON and streamed payloads.
+function prettyJSON(body) {
+  if (!body) return '';
+  try {
+    return JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    return body;
+  }
+}
+
+function HeadersList({ headers }) {
+  const entries = Object.entries(headers || {});
+  if (entries.length === 0) return <div className="dim">No headers captured.</div>;
+  return (
+    <table className="table" style={{ tableLayout: 'fixed' }}>
+      <tbody>
+        {entries.map(([k, v]) => (
+          <tr key={k}>
+            <td className="mono" style={{ width: 220 }}>{k}</td>
+            <td className="mono" style={{ wordBreak: 'break-all' }}>{Array.isArray(v) ? v.join(', ') : String(v)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function BodyBlock({ title, section }) {
+  if (!section) return null;
+  return (
+    <details className="card" style={{ marginTop: 8 }}>
+      <summary style={{ cursor: 'pointer' }}>{title}</summary>
+      <div className="detail-row__block-label" style={{ marginTop: 8 }}>Headers</div>
+      <HeadersList headers={section.headers} />
+      <div className="detail-row__block-label" style={{ marginTop: 8 }}>
+        Body
+        <CopyButton value={section.body || ''} label={`${title} body`} />
+      </div>
+      <pre className="mono" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 420, overflow: 'auto' }}>
+        {prettyJSON(section.body) || '—'}
+      </pre>
+    </details>
+  );
+}
+
+// EventBodiesContent renders one captured payload response. It is split from
+// EventBodiesSection so the data-driven markup can be exercised by the
+// react-dom/server test harness (effects do not run there).
+export function EventBodiesContent({ data, loading, error }) {
+  return (
+    <>
+      <div className="detail-row__block-label" style={{ marginTop: 14 }}>
+        Request &amp; Response
+        {data?.truncated && <span className="badge badge--warn" title="Capture hit a size cap">truncated</span>}
+      </div>
+      {loading && <Spinner label="Loading captured payloads…" />}
+      {error && <ErrorBanner error={error} />}
+      {!loading && !error && data && !data.available && (
+        <div className="dim">
+          No request/response captured for this request (capture is off for the provider or the data was not retained).
+        </div>
+      )}
+      {!loading && !error && data?.available && (
+        <>
+          <BodyBlock title="Client request" section={data.client_request} />
+          <BodyBlock title="Upstream request" section={{ body: data.upstream_request }} />
+          <BodyBlock title="Client response" section={data.client_response} />
+          <BodyBlock title="Upstream response" section={{ body: data.upstream_response }} />
+        </>
+      )}
+    </>
+  );
+}
+
+// EventBodiesSection lazily loads captured request/response payloads for one
+// event. Capture is opt-in per upstream provider, so available:false is a
+// normal state, not an error.
+export function EventBodiesSection({ id }) {
+  const detail = useAsync(() => getUsageEventBodies(id), [id]);
+  return <EventBodiesContent data={detail.data} loading={detail.loading} error={detail.error} />;
+}
+
 // EventDetailModal fetches and renders a single usage event. The sealed
 // api_key_principal is intentionally never shown; the operator sees the
 // non-secret key_alias and the other fields needed for triage.
@@ -940,6 +1023,8 @@ export function EventDetailModal({ id, timezone, onClose }) {
             <DetailRow label="Fail Status" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
             <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
           </div>
+
+          <EventBodiesSection id={id} />
 
           <FailoverHistory
             requestId={e.request_id}
