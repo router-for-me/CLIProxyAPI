@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategySoonestReset       schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -170,6 +171,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
+	case *SoonestResetSelector:
+		return schedulerStrategySoonestReset
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -527,6 +530,32 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			if picked != nil {
 				return picked, providerKey, nil
 			}
+		}
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+
+	if strategy == schedulerStrategySoonestReset {
+		entries := make([]*scheduledAuth, 0)
+		for _, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			if bucket := shard.readyByPriority[bestPriority]; bucket != nil {
+				entries = append(entries, bucket.all.flat...)
+			}
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i] == nil || entries[i].auth == nil {
+				return false
+			}
+			if entries[j] == nil || entries[j].auth == nil {
+				return true
+			}
+			return entries[i].auth.ID < entries[j].auth.ID
+		})
+		picked := pickSoonestResetScheduled(entries, predicate, now)
+		if picked != nil && picked.meta != nil {
+			return picked.auth, picked.meta.providerKey, nil
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
@@ -1376,6 +1405,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	switch strategy {
 	case schedulerStrategyFillFirst:
 		picked = view.pickFirst(predicate)
+	case schedulerStrategySoonestReset:
+		picked = pickSoonestResetScheduled(view.flat, predicate, time.Now())
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
 	default:
@@ -1641,6 +1672,27 @@ func (v *readyView) pickFirst(predicate func(*scheduledAuth) bool) *scheduledAut
 		}
 	}
 	return nil
+}
+
+// pickSoonestResetScheduled returns the matching entry whose weekly quota resets soonest.
+// Entries are expected in ID order so ties resolve deterministically.
+func pickSoonestResetScheduled(entries []*scheduledAuth, predicate func(*scheduledAuth) bool, now time.Time) *scheduledAuth {
+	var picked *scheduledAuth
+	var pickedReset time.Time
+	for _, entry := range entries {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		resetAt := weeklyQuotaResetAt(entry.auth, now)
+		if picked == nil || resetAt.Before(pickedReset) {
+			picked = entry
+			pickedReset = resetAt
+		}
+	}
+	return picked
 }
 
 // pickRoundRobin returns the next ready entry using flat round-robin traversal.
