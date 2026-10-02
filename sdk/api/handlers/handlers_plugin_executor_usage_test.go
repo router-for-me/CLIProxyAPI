@@ -69,6 +69,48 @@ func registerUsagePluginForTest(t *testing.T, name string, plugin usage.Plugin) 
 	})
 }
 
+func TestHandlerPluginExecutorPublishesUsageNonStreamOpenAIResponseWithServiceTier(t *testing.T) {
+	targetPluginID := "custom-responses-plugin"
+	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)
+	registerUsagePluginForTest(t, "test-plugin-executor-usage-nonstream-responses-tier", plugin)
+
+	originalModel := "deepseek/deepseek-v4.1-flash"
+	responseBody := []byte(`{"id":"resp_1","object":"response","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`)
+
+	mockHost := &mockPluginUsageHost{
+		execResp: coreexecutor.Response{Payload: responseBody},
+	}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+
+	body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai-response", originalModel, []byte(fmt.Sprintf(`{"model":%q}`, originalModel)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+	if len(body) == 0 {
+		t.Fatal("empty response body")
+	}
+
+	record := plugin.waitRecord(t)
+	if record.Provider != targetPluginID {
+		t.Errorf("record.Provider = %q, want %q", record.Provider, targetPluginID)
+	}
+	if record.Stream {
+		t.Errorf("record.Stream = true, want false")
+	}
+	if record.Detail.InputTokens != 34 || record.Detail.OutputTokens != 499 || record.Detail.TotalTokens != 533 {
+		t.Errorf("record.Detail = %+v, want input=34 output=499 total=533", record.Detail)
+	}
+	if record.Detail.ResponseServiceTier != "default" {
+		t.Errorf("record.Detail.ResponseServiceTier = %q, want default", record.Detail.ResponseServiceTier)
+	}
+}
+
 func TestHandlerPluginExecutorPublishesUsageNonStreamOpenAI(t *testing.T) {
 	targetPluginID := "custom-openai-plugin"
 	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)

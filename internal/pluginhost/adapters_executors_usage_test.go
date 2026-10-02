@@ -886,3 +886,62 @@ func TestUsageAdapterRecoversSessionHierarchyFromContext(t *testing.T) {
 		t.Fatalf("loop protection = (%q, %q), want (loop-sess, empty)", recLoop.SessionID, recLoop.ParentSessionID)
 	}
 }
+
+func TestExecutorAdapterExecuteAttributesResponsesUsageToSelectedAuth(t *testing.T) {
+	plugin := newTestUsageCapturePlugin("plugin-provider-responses")
+	registerTestUsagePlugin(t, "test-executor-adapter-responses-auth-usage", plugin)
+
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin-responses"})
+	host := newHostWithRecords(executorRecord)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider-responses",
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{
+				Payload: []byte(`{"id":"resp_1","object":"response","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`),
+			}, nil
+		},
+	}
+
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+	)
+	adapter.provider = "plugin-provider-responses"
+
+	auth := &coreauth.Auth{
+		ID:         "auth-responses-1",
+		Provider:   "plugin-provider-responses",
+		FileName:   "auth-responses-1.json",
+		Attributes: map[string]string{"type": "oauth"},
+	}
+	req := coreexecutor.Request{
+		Model:   "deepseek/deepseek-v4.1-flash",
+		Payload: []byte(`{"model":"deepseek/deepseek-v4.1-flash","input":"Write me a poem"}`),
+	}
+	opts := coreexecutor.Options{
+		Stream:         false,
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	ctx := coreusage.WithStream(context.Background(), false)
+	resp, errExecute := adapter.Execute(ctx, auth, req, opts)
+	if errExecute != nil {
+		t.Fatalf("adapter.Execute returned unexpected error: %v", errExecute)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("adapter.Execute returned empty payload")
+	}
+
+	rec := plugin.waitRecord(t, 200*time.Millisecond)
+	if rec.AuthID != auth.ID {
+		t.Errorf("AuthID = %q, want %q", rec.AuthID, auth.ID)
+	}
+	if rec.Stream {
+		t.Errorf("Stream = true, want false")
+	}
+	if rec.Detail.InputTokens != 34 || rec.Detail.OutputTokens != 499 || rec.Detail.TotalTokens != 533 {
+		t.Errorf("usage = %+v, want input=34 output=499 total=533", rec.Detail)
+	}
+}
