@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -19,6 +21,7 @@ type unauthorizedRefreshExecutor struct {
 	refreshCalls  int
 	tokenInvalid  map[string]struct{}
 	refreshFail   bool
+	refreshErr    error
 	refreshTokens map[string]string
 }
 
@@ -61,6 +64,9 @@ func (e *unauthorizedRefreshExecutor) Refresh(_ context.Context, auth *Auth) (*A
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.refreshCalls++
+	if e.refreshErr != nil {
+		return nil, e.refreshErr
+	}
 	if e.refreshFail {
 		return nil, &Error{HTTPStatus: http.StatusUnauthorized, Message: "refresh token invalid"}
 	}
@@ -224,6 +230,52 @@ func TestManager_ExecuteStream_UnauthorizedRefreshesCurrentAuthBeforeFallback(t 
 		if id == backup.ID {
 			t.Fatalf("backup auth should not be used when refresh recovers primary")
 		}
+	}
+}
+
+func TestManager_Execute_RejectedTokenWithInvalidGrantStopsSelectingAuth(t *testing.T) {
+	m, executor, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
+	executor.mu.Lock()
+	executor.refreshErr = errors.New(`token refresh failed with status 400: {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}`)
+	executor.mu.Unlock()
+	// The revoked access token still has a future expiry, as in production.
+	updated, ok := m.GetByID(primary.ID)
+	if !ok || updated == nil {
+		t.Fatal("primary auth missing")
+	}
+	updated.Metadata["expired"] = time.Now().Add(6 * time.Hour).Format(time.RFC3339)
+	if _, errUpdate := m.Update(context.Background(), updated); errUpdate != nil {
+		t.Fatalf("update primary: %v", errUpdate)
+	}
+
+	for i := 0; i < 2; i++ {
+		resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("Execute %d error = %v, want success via backup", i, errExecute)
+		}
+		if got := string(resp.Payload); got != backup.ID+":backup-access-token" {
+			t.Fatalf("Execute %d payload = %q, want backup response", i, got)
+		}
+	}
+
+	primaryCalls := 0
+	for _, id := range executor.ExecuteCalls() {
+		if id == primary.ID {
+			primaryCalls++
+		}
+	}
+	if primaryCalls != 1 {
+		t.Fatalf("primary executions = %d, want 1; calls = %v", primaryCalls, executor.ExecuteCalls())
+	}
+	if got := executor.RefreshCalls(); got != 1 {
+		t.Fatalf("Refresh calls = %d, want 1", got)
+	}
+	final, ok := m.GetByID(primary.ID)
+	if !ok || final == nil {
+		t.Fatal("primary auth missing after refresh failure")
+	}
+	if !hasUnauthorizedAuthFailure(final) {
+		t.Fatalf("expected terminal unauthorized state, got unavailable=%v status=%s next_refresh=%v last_error=%+v", final.Unavailable, final.Status, final.NextRefreshAfter, final.LastError)
 	}
 }
 

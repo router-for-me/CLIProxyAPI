@@ -619,7 +619,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		invalidGrant := isInvalidGrantError(err)
 		shouldReschedule := false
 		isDisabled := false
-		isPermanentlyDisabled := false
+		shouldUnschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
@@ -632,13 +632,16 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 
 			isDisabled = current.Disabled || current.Status == StatusDisabled
 			hasValidAccessToken := current.HasValidAccessToken(now)
+			// failedAccessToken is set only when upstream rejected this exact access
+			// token. Its expiry time no longer proves it is usable.
+			accessTokenRejected := failedAccessToken != "" && authAccessToken(current) == failedAccessToken
 			if isDisabled && invalidGrant {
 				current.Unavailable = true
 				current.Status = StatusDisabled
 				current.NextRefreshAfter = time.Time{}
 				current.RefreshFailures = 0
 				current.StatusMessage = "disabled (invalid grant)"
-				isPermanentlyDisabled = true
+				shouldUnschedule = true
 			} else if isDisabled {
 				current.Unavailable = true
 				current.Status = StatusDisabled
@@ -647,6 +650,17 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 					current.StatusMessage = "disabled"
 				}
 				shouldReschedule = true
+			} else if accessTokenRejected && invalidGrant {
+				// Neither token can recover without a new login. Stop selecting the
+				// credential until its tokens change instead of retrying it after
+				// every cooldown and returning the same 401 to clients.
+				current.Unavailable = true
+				current.Status = StatusError
+				current.NextRefreshAfter = time.Time{}
+				current.RefreshFailures = 0
+				current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+				current.StatusMessage = "unauthorized (refresh token invalid)"
+				shouldUnschedule = true
 			} else if !hasValidAccessToken {
 				current.Unavailable = true
 				current.Status = StatusError
@@ -692,7 +706,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		m.mu.Unlock()
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
-		} else if isPermanentlyDisabled {
+		} else if shouldUnschedule {
 			m.queueRefreshUnschedule(id)
 		}
 		return nil, err
