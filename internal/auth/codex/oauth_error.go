@@ -23,12 +23,18 @@ func sanitizedOAuthIOError(message string, err error) error {
 // fields. OAuth responses may echo credentials; even error codes are untrusted.
 func sanitizedOAuthError(operation string, status int, body []byte) error {
 	var response struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
+		Error json.RawMessage `json:"error"`
+		Code  string          `json:"code"`
 	}
 	_ = json.Unmarshal(body, &response)
+	var flatError string
+	var nestedError struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(response.Error, &flatError)
+	_ = json.Unmarshal(response.Error, &nestedError)
 	code := "oauth_error"
-	for _, candidate := range []string{response.Code, response.Error} {
+	for _, candidate := range []string{response.Code, flatError, nestedError.Code} {
 		switch candidate {
 		case "refresh_token_reused", "invalid_grant", "invalid_client", "invalid_request", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "temporarily_unavailable", "server_error":
 			code = candidate
