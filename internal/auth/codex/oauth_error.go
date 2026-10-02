@@ -1,9 +1,23 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
+
+// sanitizedOAuthIOError preserves trusted cancellation classes without wrapping
+// arbitrary transport/body errors, whose messages may contain credentials.
+func sanitizedOAuthIOError(message string, err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return errors.New(message)
+}
 
 // sanitizedOAuthError deliberately excludes descriptions and unknown provider
 // fields. OAuth responses may echo credentials; even error codes are untrusted.

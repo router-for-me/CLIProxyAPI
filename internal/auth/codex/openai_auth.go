@@ -123,7 +123,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("token exchange request failed")
+		return nil, sanitizedOAuthIOError("token exchange request failed", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -131,7 +131,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read token response")
+		return nil, sanitizedOAuthIOError("failed to read token response", err)
 	}
 	// log.Debugf("Token response: %s", string(body))
 
@@ -231,7 +231,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
-		return nil, fmt.Errorf("token refresh request failed")
+		return nil, sanitizedOAuthIOError("token refresh request failed", errDo)
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -241,7 +241,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 
 	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
-		return nil, fmt.Errorf("failed to read refresh response")
+		return nil, sanitizedOAuthIOError("failed to read refresh response", errRead)
 	}
 
 	if resp.StatusCode != http.StatusOK {
