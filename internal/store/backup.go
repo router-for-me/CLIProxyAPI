@@ -217,6 +217,7 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 			{s.UsageEventsTable(), "id"},
 			{s.UsageErrorsTable(), "id"},
 			{s.UsageWindowsTable(), ""},
+			{s.RequestBodiesTable(), "request_id"},
 		}
 	case ResourceAlerts:
 		return []backupTable{
@@ -366,6 +367,10 @@ var sealedColumnsByTable = map[string][]string{
 	defaultModelHealthLogTable:     {"error_message", "prompt_message", "completion"},
 	defaultAlertsTable:             {"message"},
 	defaultManagementAuditLogTable: {"request_body", "response_body"},
+	defaultRequestBodiesTable: {
+		"client_request_body", "client_response_body",
+		"upstream_request", "upstream_response",
+	},
 }
 
 // exportTable dumps every row of one table as json.RawMessage objects, applying
@@ -1163,11 +1168,11 @@ func (s *PostgresStore) restorePricingSourceFiles(ctx context.Context, tx *sql.T
 // defaultTableHint maps a fully-qualified table name back to its bare default
 // name for sealer-column lookups. It strips any schema prefix and quotes.
 func defaultTableHint(qualified string) string {
-	name := strings.Trim(qualified, `"`)
+	name := qualified
 	if idx := strings.LastIndex(name, "."); idx >= 0 {
 		name = name[idx+1:]
 	}
-	return name
+	return strings.Trim(name, `"`)
 }
 
 // unquoteTable strips the schema prefix and surrounding quotes from a

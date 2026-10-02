@@ -915,6 +915,77 @@ func randSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
+// TestBackupRequestBodiesRoundTrip pins the request_bodies registration on
+// ResourceUsage and the four sealed body columns: the export must contain the
+// unsealed plaintext body, and importing it back must restore a readable row.
+func TestBackupRequestBodiesRoundTrip(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	st, err := NewPostgresStore(ctx, PostgresStoreConfig{
+		DSN:                pgTestDSN(),
+		Schema:             "backup_reqbodies_" + randSuffix(),
+		UsageEncryptionKey: key,
+	})
+	if err != nil {
+		t.Fatalf("NewPostgresStore: %v", err)
+	}
+	if err := st.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	sealer, err := NewSealer(key)
+	if err != nil {
+		t.Fatalf("sealer: %v", err)
+	}
+	usage := NewUsageStore(st)
+	usage.SetSealer(sealer)
+
+	rb := RequestBody{
+		RequestID:             "req-rt",
+		Provider:              "claude",
+		ClientRequestHeaders:  `{"Content-Type":["application/json"]}`,
+		ClientRequestBody:     `{"prompt":"secret"}`,
+		ClientResponseHeaders: `{"Content-Type":["text/event-stream"]}`,
+		ClientResponseBody:    `data: hello`,
+		UpstreamRequest:       `POST /v1/messages {"prompt":"secret"}`,
+		UpstreamResponse:      `{"content":[{"text":"hi"}]}`,
+	}
+	if err := usage.InsertRequestBody(ctx, rb); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	bundle, err := st.ExportData(ctx, BackupExportOpts{Resources: []BackupResource{ResourceUsage}})
+	if err != nil {
+		t.Fatalf("ExportData: %v", err)
+	}
+	rows := bundle.Resources[string(ResourceUsage)].Tables[st.RequestBodiesTable()]
+	if len(rows) != 1 {
+		t.Fatalf("request_bodies rows = %d, want 1", len(rows))
+	}
+	var exported map[string]any
+	if err := json.Unmarshal(rows[0], &exported); err != nil {
+		t.Fatalf("decode exported row: %v", err)
+	}
+	if gotBody, _ := exported["client_request_body"].(string); gotBody != rb.ClientRequestBody {
+		t.Fatalf("exported client_request_body = %q, want unsealed plaintext %q", gotBody, rb.ClientRequestBody)
+	}
+
+	if err := st.clearAllResourceTables(ctx, []BackupResource{ResourceUsage}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if _, err := st.ImportData(ctx, bundle, BackupImportOpts{Resources: []BackupResource{ResourceUsage}}); err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+	got, err := usage.GetRequestBodyByRequestID(ctx, "req-rt")
+	if err != nil {
+		t.Fatalf("get after import: %v", err)
+	}
+	if got.ClientRequestBody != rb.ClientRequestBody || got.UpstreamResponse != rb.UpstreamResponse {
+		t.Fatalf("round trip mismatch: %+v", got)
+	}
+}
+
 func TestBackupBundleV2JSON(t *testing.T) {
 	b := BackupBundle{
 		Version:    backupBundleVersion,
