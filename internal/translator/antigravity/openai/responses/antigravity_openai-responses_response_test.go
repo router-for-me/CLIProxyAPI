@@ -240,7 +240,9 @@ func TestAntigravityApplyPatchReuse(t *testing.T) {
 	var param any
 	var delta strings.Builder
 	var done, item, final string
-	for _, chunk := range ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini", request, translated, raw, &param) {
+	chunks := ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini", request, translated, raw, &param)
+	chunks = append(chunks, ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini", request, translated, []byte("[DONE]"), &param)...)
+	for _, chunk := range chunks {
 		for _, line := range strings.Split(string(chunk), "\n") {
 			if !strings.HasPrefix(line, "data:") {
 				continue

@@ -147,6 +147,7 @@ func TestGeminiApplyPatchCrossKeyOrdinaryLegacy(t *testing.T) {
 						for i, part := range parts {
 							events = append(events, geminiPatchReviewEvents(t, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini", []byte(request.request), nil, geminiPatchReviewFrame([]string{part}, i == len(parts)-1), &param))...)
 						}
+						events = append(events, geminiPatchReviewEvents(t, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini", []byte(request.request), nil, []byte("[DONE]"), &param))...)
 						counts := map[string]int{}
 						var final gjson.Result
 						for _, event := range events {

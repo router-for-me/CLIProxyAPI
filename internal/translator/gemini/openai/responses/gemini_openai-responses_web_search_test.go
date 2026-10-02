@@ -801,6 +801,7 @@ func TestConvertGeminiResponseToOpenAIResponsesStream_ModelAliasUsesEffectiveReq
 	events2 := ConvertGeminiResponseToOpenAIResponses(context.Background(), resolvedModel, originalReq, effectiveReq, chunk2, &param)
 
 	allEvents := append(events1, events2...)
+	allEvents = append(allEvents, ConvertGeminiResponseToOpenAIResponses(context.Background(), resolvedModel, originalReq, effectiveReq, []byte("[DONE]"), &param)...)
 	var completedJSON gjson.Result
 	for _, ev := range allEvents {
 		lines := strings.Split(string(ev), "\n")
