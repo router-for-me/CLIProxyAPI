@@ -56,6 +56,17 @@ func TestClampLoginSecuritySettings(t *testing.T) {
 	}
 }
 
+func TestManagementLoginStoreNilFailOpen(t *testing.T) {
+	var st *ManagementLoginStore
+	got, err := st.GetLoginSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetLoginSettings on nil store returned error: %v", err)
+	}
+	if got.MaxFailedAttempts != 5 || !got.Enabled || !got.LogSuccesses {
+		t.Fatalf("nil store did not return defaults: %+v", got)
+	}
+}
+
 func TestManagementLoginStoreRoundTrip(t *testing.T) {
 	pg := newTestPostgresStore(t, "test_management_login")
 	ctx := context.Background()

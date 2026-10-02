@@ -194,11 +194,11 @@ func (s *ManagementLoginStore) getLoginSettingsRow(ctx context.Context) (LoginSe
 }
 
 // GetLoginSettings returns the singleton policy, clamped. A missing row or an
-// uninitialized store yields the default policy with no error so the auth path
-// can fail open.
+// uninitialized (nil) store yields the default policy with no error so the auth
+// path can fail open.
 func (s *ManagementLoginStore) GetLoginSettings(ctx context.Context) (LoginSecuritySettings, error) {
 	if s == nil || s.db == nil {
-		return DefaultLoginSecuritySettings(), fmt.Errorf("postgres store: management login store not initialized")
+		return DefaultLoginSecuritySettings(), nil
 	}
 	set, err := s.getLoginSettingsRow(ctx)
 	if err != nil {
