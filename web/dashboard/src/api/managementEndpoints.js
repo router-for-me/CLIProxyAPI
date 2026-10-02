@@ -126,6 +126,7 @@ function withGlobSuffix(entries) {
       entry('GET', '/usage-stats/top'),
       entry('GET', '/usage-stats/events'),
       entry('GET', '/usage-stats/events/:id'),
+      entry('GET', '/usage-stats/events/:id/bodies'),
       entry('GET', '/usage-stats/errors'),
       entry('GET', '/usage-stats/errors/:id'),
       entry('GET', '/usage-stats/filters'),

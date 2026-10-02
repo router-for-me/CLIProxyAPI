@@ -293,6 +293,14 @@ export async function getUsageEvent(id) {
   return fetchJSON(`/usage-stats/events/${encodeURIComponent(id)}`);
 }
 
+// Captured request/response bodies for one usage event (privacy opt-in per
+// upstream provider). Returns { available, reason?, provider, truncated,
+// client_request?, client_response?, upstream_request?, upstream_response? }.
+// available:false with a reason means capture was off / not captured.
+export async function getUsageEventBodies(id) {
+  return fetchJSON(`/usage-stats/events/${encodeURIComponent(id)}/bodies`);
+}
+
 // Paginated list of raw failed-attempt records (usage_errors table). Mirrors
 // getUsageEvents in shape but surfaces fail_status_code and error_message so
 // operators can triage request errors separately from successful responses.

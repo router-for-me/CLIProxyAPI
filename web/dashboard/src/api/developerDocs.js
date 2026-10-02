@@ -908,6 +908,11 @@ export const sections = [
         ],
       },
       {
+        method: 'GET', path: '/usage-stats/events/:id/bodies',
+        summary: 'Captured client/upstream request and response payloads for one event (opt-in per upstream provider).',
+        exampleCurl: `curl -s "${'{API_BASE}'}/usage-stats/events/123/bodies" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+      },
+      {
         method: 'GET', path: '/usage-stats/errors', summary: 'Paginated failed-attempt rows (upstream errors, stream errors).',
         params: [
           ...sharedUsageFilters('errors', { includePagination: true }),
