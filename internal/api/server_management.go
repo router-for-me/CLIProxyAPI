@@ -473,6 +473,17 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/alerts/settings", s.mgmt.PutAlertSettings)
 		mgmt.PATCH("/alerts/settings", s.mgmt.PutAlertSettings)
 
+		// Management login security (brute-force policy + attempt log). Returns
+		// 503 when the PG store is not configured.
+		mgmt.GET("/management-login/settings", s.mgmt.GetLoginSecuritySettings)
+		mgmt.PUT("/management-login/settings", s.mgmt.PutLoginSecuritySettings)
+		mgmt.PATCH("/management-login/settings", s.mgmt.PutLoginSecuritySettings)
+		mgmt.GET("/management-login/events", s.mgmt.ListLoginSecurityEvents)
+		mgmt.DELETE("/management-login/events", s.mgmt.ClearLoginSecurityEvents)
+		mgmt.GET("/management-login/bans", s.mgmt.ListLoginSecurityBans)
+		mgmt.DELETE("/management-login/bans/:ip", s.mgmt.DeleteLoginSecurityBan)
+		mgmt.DELETE("/management-login/bans", s.mgmt.ClearLoginSecurityBans)
+
 		// Reusable Model Group templates (allowed-models grant lists +
 		// per-model upstream routing) attachable to API-key policies and
 		// internal users. Return 503 when the PG store is not configured.

@@ -1,10 +1,14 @@
 package management
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
@@ -74,5 +78,64 @@ func TestApplyManagementFailure_TumblingWindow(t *testing.T) {
 	outcome, _ := h.applyManagementFailure("9.9.9.9", store.LoginOutcomeInvalidKey)
 	if outcome == store.LoginOutcomeBanStarted {
 		t.Fatal("tumbling window should have reset the counter instead of banning")
+	}
+}
+
+type fakeLoginStore struct {
+	settings store.LoginSecuritySettings
+}
+
+func (f *fakeLoginStore) GetLoginSettings(ctx context.Context) (store.LoginSecuritySettings, error) {
+	return f.settings, nil
+}
+
+func (f *fakeLoginStore) UpsertLoginSettings(ctx context.Context, s store.LoginSecuritySettings) (store.LoginSecuritySettings, error) {
+	f.settings = store.ClampLoginSecuritySettings(s)
+	return f.settings, nil
+}
+
+func (f *fakeLoginStore) RecordLoginEvents(ctx context.Context, events []store.LoginEvent) error {
+	return nil
+}
+
+func (f *fakeLoginStore) ListLoginEvents(ctx context.Context, flt store.LoginEventFilter, page, pageSize int) ([]store.LoginEvent, int64, error) {
+	return []store.LoginEvent{{ID: 1, IP: "1.2.3.4", Outcome: store.LoginOutcomeInvalidKey}}, 1, nil
+}
+
+func (f *fakeLoginStore) PurgeLoginEventsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeLoginStore) ClearLoginEvents(ctx context.Context) (int64, error) { return 0, nil }
+
+func TestPutLoginSecuritySettingsUpdatesCache(t *testing.T) {
+	h := newLoginTestHandler(store.DefaultLoginSecuritySettings())
+	h.pgLogin = &fakeLoginStore{settings: store.DefaultLoginSecuritySettings()}
+
+	engine := gin.New()
+	engine.PUT("/settings", h.PutLoginSecuritySettings)
+
+	body := strings.NewReader(`{"max_failed_attempts":9}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/settings", body)
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := h.currentLoginSettings().MaxFailedAttempts; got != 9 {
+		t.Fatalf("cache not updated: MaxFailedAttempts = %d, want 9", got)
+	}
+}
+
+func TestListLoginSecuritySettingsRequiresPG(t *testing.T) {
+	h := &Handler{cfg: &config.Config{}, failedAttempts: make(map[string]*attemptInfo)}
+	engine := gin.New()
+	engine.GET("/settings", h.GetLoginSecuritySettings)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 }
