@@ -1,0 +1,30 @@
+name: ci-build-test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'opt/reduce-size-*'
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+
+      - name: Run make release
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp }}
+        run: |
+          make release GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+          ls -lh bin/server
+          wc -c < bin/server
