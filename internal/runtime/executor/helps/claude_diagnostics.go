@@ -441,6 +441,12 @@ func isClaudeTitleHelperInstruction(body []byte) bool {
 }
 
 func isClaudeTitleHelperRequest(body []byte) bool {
+	// Without an output_config key the request is a helper only if one of the
+	// system title instructions below appears, so skip the walks when none can.
+	if !jsonMayContainASCII(body, "output_config", "naming a coding session", "Return a short title",
+		"Write the title in the predominant language") {
+		return false
+	}
 	props := gjson.GetBytes(body, "output_config.format.schema.properties")
 	if props.Exists() {
 		if props.Get("title").Exists() && len(props.Map()) == 1 {
@@ -527,7 +533,9 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 // ClaudePayloadHas1hTTL reports whether the request payload contains any cache_control
 // block with ttl set to "1h".
 func ClaudePayloadHas1hTTL(payload []byte) bool {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	// A ttl of "1h" is the JSON string "1h"; its quotes are structural and never
+	// escaped, so a payload without that token cannot match.
+	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !gjson.ValidBytes(payload) {
 		return false
 	}
 	has1h := false
