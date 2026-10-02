@@ -32,8 +32,10 @@ func jsonMayContainASCII(body []byte, needles ...string) bool {
 
 // hasPrintableASCIIUnicodeEscape reports whether body contains a \u00XX
 // escape whose first hex digit is 2-7, i.e. a printable ASCII character. It
-// also matches an escaped backslash followed by literal text such as
-// `\\u0041`; that only makes the caller fall back to a full walk.
+// errs only toward "yes": it also matches DEL (7F), malformed escapes such as
+// a 2-7 digit followed by a non-hex character, an escape truncated after that
+// digit, and an escaped backslash followed by literal text such as `\\u0041`.
+// Each of those only makes the caller fall back to a full walk.
 func hasPrintableASCIIUnicodeEscape(body []byte) bool {
 	for rest := body; ; {
 		i := bytes.Index(rest, []byte(`\u00`))

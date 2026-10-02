@@ -107,3 +107,17 @@ func BenchmarkClaudePayloadHas1hTTLLarge(b *testing.B) {
 		}
 	}
 }
+
+// The worst case: an early printable-ASCII escape forces the full walk, so the
+// pre-filter's scan is pure overhead.
+func BenchmarkClaudePayloadHas1hTTLLargeEscapeFallback(b *testing.B) {
+	body := largeClaudeCodeBody(1500)
+	body = append([]byte(`{"note":"`+`\`+`u0041",`), body[1:]...)
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if ClaudePayloadHas1hTTL(body) {
+			b.Fatal("5m payload reported as 1h")
+		}
+	}
+}
