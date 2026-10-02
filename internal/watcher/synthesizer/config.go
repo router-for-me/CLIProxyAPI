@@ -122,6 +122,20 @@ func addEntryConcurrencyAttrs(attrs map[string]string, maxConcurrent, maxWaitMs 
 	}
 }
 
+// addStoreRequestBodiesAttrs stamps the per-provider request/response capture
+// toggle and stable provider row id onto the auth. The attribute value is the
+// literal "true" (absent = capture off); the provider id is the base-10 row id
+// used by the runtime to persist captured bodies against the right row.
+func addStoreRequestBodiesAttrs(attrs map[string]string, storeRequestBodies bool, upstreamProviderID int64) {
+	if attrs == nil || !storeRequestBodies {
+		return
+	}
+	attrs[coreauth.AttributeStoreRequestBodies] = "true"
+	if upstreamProviderID > 0 {
+		attrs[coreauth.AttributeUpstreamProviderID] = strconv.FormatInt(upstreamProviderID, 10)
+	}
+}
+
 // addAutoDisableAttrs stamps the provider-level auto-disable configuration on
 // every entry auth of that provider: `auto_disable_codes` is the JSON-encoded
 // error-code list the conductor's classification path matches on, and
@@ -219,6 +233,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		addUpstreamProviderKey(attrs, provider, entry.UpstreamProviderID)
+		addStoreRequestBodiesAttrs(attrs, entry.StoreRequestBodies, entry.UpstreamProviderID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   provider,
@@ -307,6 +322,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if ck.UpstreamProviderCircuitBreaker {
 			attrs[coreauth.AttributePoolCircuitBreaker] = "true"
 		}
+		addStoreRequestBodiesAttrs(attrs, ck.StoreRequestBodies, ck.UpstreamProviderID)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		relayBaseURL := strings.TrimSpace(ck.RelayBaseURL)
 		if relayBaseURL != "" {
@@ -394,6 +410,7 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		addUpstreamProviderKey(attrs, provider, entry.UpstreamProviderID)
+		addStoreRequestBodiesAttrs(attrs, entry.StoreRequestBodies, entry.UpstreamProviderID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   provider,
@@ -480,6 +497,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.CircuitBreaker {
 				attrs[coreauth.AttributePoolCircuitBreaker] = "true"
 			}
+			addStoreRequestBodiesAttrs(attrs, compat.StoreRequestBodies, compat.UpstreamProviderID)
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -537,6 +555,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.CircuitBreaker {
 				attrs[coreauth.AttributePoolCircuitBreaker] = "true"
 			}
+			addStoreRequestBodiesAttrs(attrs, compat.StoreRequestBodies, compat.UpstreamProviderID)
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}
@@ -596,6 +615,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
 		addUpstreamProviderKey(attrs, providerName, compat.UpstreamProviderID)
+		addStoreRequestBodiesAttrs(attrs, compat.StoreRequestBodies, compat.UpstreamProviderID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,
@@ -692,6 +712,7 @@ func (s *ConfigSynthesizer) synthesizeOpenCodeGo(ctx *SynthesisContext) []*corea
 			if row.CircuitBreaker {
 				attrs[coreauth.AttributePoolCircuitBreaker] = "true"
 			}
+			addStoreRequestBodiesAttrs(attrs, row.StoreRequestBodies, row.UpstreamProviderID)
 			if key != "" {
 				attrs["api_key"] = key
 			}

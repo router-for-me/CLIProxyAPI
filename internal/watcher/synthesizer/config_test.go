@@ -274,6 +274,37 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_ClaudeKeys_StoreRequestBodiesAttrs(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:             "sk-ant-store-xxx",
+					StoreRequestBodies: true,
+					UpstreamProviderID: 7,
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes[coreauth.AttributeStoreRequestBodies]; got != "true" {
+		t.Errorf("expected store_request_bodies=true, got %q", got)
+	}
+	if got := auths[0].Attributes[coreauth.AttributeUpstreamProviderID]; got != "7" {
+		t.Errorf("expected upstream_provider_id=7, got %q", got)
+	}
+}
+
 func TestConfigSynthesizer_ClaudeKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

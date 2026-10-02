@@ -26,6 +26,8 @@ const (
 	AttributePath                       = "path"
 	AttributePoolCircuitBreaker         = "pool_circuit_breaker"
 	AttributePoolStrategy               = "pool_strategy"
+	AttributeStoreRequestBodies         = "store_request_bodies"
+	AttributeUpstreamProviderID         = "upstream_provider_id"
 	AttributeRuntimeOnly                = "runtime_only"
 	AttributeSource                     = "source"
 	AttributeSourceBackend              = "source_backend"

@@ -578,6 +578,12 @@ type ClaudeKey struct {
 	// subject to its blocking. false (default) keeps failures scoped to
 	// per-auth cooldowns. Operators should not set this field manually.
 	UpstreamProviderCircuitBreaker bool `yaml:"upstream-provider-circuit-breaker,omitempty" json:"-"`
+
+	// StoreRequestBodies is renderer-managed: the upstream_providers row's
+	// request/response capture privacy toggle. The synthesizer embeds it in
+	// the auth's `store_request_bodies` attribute; absent means capture off.
+	// Operators should not set this field manually.
+	StoreRequestBodies bool `yaml:"store-request-bodies,omitempty" json:"-"`
 }
 
 func (k ClaudeKey) GetAPIKey() string { return k.APIKey }
@@ -680,6 +686,12 @@ type CodexKey struct {
 	// the full rationale; this field is populated by the upstreamsync
 	// renderer and omitted when zero (legacy YAML-only configs).
 	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
+
+	// StoreRequestBodies is renderer-managed: the upstream_providers row's
+	// request/response capture privacy toggle. The synthesizer embeds it in
+	// the auth's `store_request_bodies` attribute; absent means capture off.
+	// Operators should not set this field manually.
+	StoreRequestBodies bool `yaml:"store-request-bodies,omitempty" json:"-"`
 }
 
 func (k CodexKey) GetAPIKey() string { return k.APIKey }
@@ -787,6 +799,12 @@ type GeminiKey struct {
 	// ClaudeKey for the full rationale; this field is populated by the
 	// upstreamsync renderer and omitted when zero.
 	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
+
+	// StoreRequestBodies is renderer-managed: the upstream_providers row's
+	// request/response capture privacy toggle. The synthesizer embeds it in
+	// the auth's `store_request_bodies` attribute; absent means capture off.
+	// Operators should not set this field manually.
+	StoreRequestBodies bool `yaml:"store-request-bodies,omitempty" json:"-"`
 }
 
 func (k GeminiKey) GetAPIKey() string { return k.APIKey }
@@ -903,6 +921,18 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// UpstreamProviderID is renderer-managed: the stable upstream_providers
+	// row id this provider was rendered from. Its name-based routing key is
+	// unchanged; this field only identifies the row for per-provider
+	// request/response capture. Operators should not set this field manually.
+	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
+
+	// StoreRequestBodies is renderer-managed: the upstream_providers row's
+	// request/response capture privacy toggle. The synthesizer embeds it in
+	// the auth's `store_request_bodies` attribute; absent means capture off.
+	// Operators should not set this field manually.
+	StoreRequestBodies bool `yaml:"store-request-bodies,omitempty" json:"-"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -1184,4 +1214,10 @@ type OpenCodeGo struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// StoreRequestBodies is renderer-managed: the upstream_providers row's
+	// request/response capture privacy toggle. The synthesizer embeds it in
+	// the auth's `store_request_bodies` attribute; absent means capture off.
+	// Operators should not set this field manually.
+	StoreRequestBodies bool `yaml:"store-request-bodies,omitempty" json:"-"`
 }

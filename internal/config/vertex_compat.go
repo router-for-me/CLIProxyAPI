@@ -51,6 +51,12 @@ type VertexCompatKey struct {
 	// ClaudeKey (in config_types.go) for the full rationale; this field is
 	// populated by the upstreamsync renderer and omitted when zero.
 	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
+
+	// StoreRequestBodies is renderer-managed: the upstream_providers row's
+	// request/response capture privacy toggle. The synthesizer embeds it in
+	// the auth's `store_request_bodies` attribute; absent means capture off.
+	// Operators should not set this field manually.
+	StoreRequestBodies bool `yaml:"store-request-bodies,omitempty" json:"-"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string   { return k.APIKey }

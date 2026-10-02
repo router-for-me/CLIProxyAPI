@@ -219,6 +219,11 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			}
 		}
 	}
+	// Per-provider request/response capture opt-in carried in the auth file
+	// metadata (set by the upstreamsync OAuth renderer). Absent = capture off.
+	if storeBodies, ok := metadata["store_request_bodies"].(bool); ok && storeBodies {
+		a.Attributes[coreauth.AttributeStoreRequestBodies] = "true"
+	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")

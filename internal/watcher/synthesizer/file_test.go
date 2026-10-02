@@ -788,3 +788,54 @@ func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestFileSynthesizer_Synthesize_StoreRequestBodies(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		present bool
+	}{
+		{name: "enabled", value: true, present: true},
+		{name: "disabled", value: false, present: false},
+		{name: "absent", value: nil, present: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			authData := map[string]any{"type": "claude"}
+			if tt.value != nil {
+				authData["store_request_bodies"] = tt.value
+			}
+			data, _ := json.Marshal(authData)
+			if errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644); errWriteFile != nil {
+				t.Fatalf("failed to write auth file: %v", errWriteFile)
+			}
+
+			synth := NewFileSynthesizer()
+			ctx := &SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}
+
+			auths, errSynthesize := synth.Synthesize(ctx)
+			if errSynthesize != nil {
+				t.Fatalf("unexpected error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+			got, ok := auths[0].Attributes[coreauth.AttributeStoreRequestBodies]
+			if tt.present {
+				if !ok || got != "true" {
+					t.Fatalf("expected store_request_bodies=true, got %q (present=%v)", got, ok)
+				}
+				return
+			}
+			if ok {
+				t.Fatalf("expected store_request_bodies attribute absent, got %q", got)
+			}
+		})
+	}
+}

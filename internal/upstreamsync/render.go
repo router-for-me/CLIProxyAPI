@@ -184,6 +184,7 @@ func geminiKeyFromProvider(p store.UpstreamProvider) config.GeminiKey {
 		Headers:            p.Headers,
 		ExcludedModels:     p.ExcludedModels,
 		UpstreamProviderID: p.ID,
+		StoreRequestBodies: p.StoreRequestBodies,
 	}
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.GeminiModel{
@@ -210,6 +211,7 @@ func codexKeyFromProvider(p store.UpstreamProvider) config.CodexKey {
 		Headers:            p.Headers,
 		ExcludedModels:     p.ExcludedModels,
 		UpstreamProviderID: p.ID,
+		StoreRequestBodies: p.StoreRequestBodies,
 	}
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.CodexModel{
@@ -289,6 +291,7 @@ func buildClaudeKeyWithPools(p store.UpstreamProvider, e store.UpstreamProviderA
 		ExperimentalCCHSigning:     p.ExperimentalCCHSigning,
 		UpstreamProviderID:         p.ID,
 		UpstreamProviderEntryID:    e.ID,
+		StoreRequestBodies:         p.StoreRequestBodies,
 	}
 	// A nil entry priority inherits the row-level default set in the literal
 	// above; a non-nil pointer overrides it with the entry's own tier.
@@ -349,6 +352,8 @@ func openAICompatFromProviderWithPools(p store.UpstreamProvider, pools poolLooku
 		RelayBaseURL:               rowRelayBase,
 		ProxyPoolID:                p.ProxyPoolID,
 		Headers:                    p.Headers,
+		UpstreamProviderID:         p.ID,
+		StoreRequestBodies:         p.StoreRequestBodies,
 	}
 	for _, e := range p.APIKeyEntries {
 		if e.Disabled {
@@ -419,6 +424,7 @@ func openCodeGoFromProviderWithPools(p store.UpstreamProvider, pools poolLookup)
 		ProxyPoolID:                p.ProxyPoolID,
 		UpstreamProviderID:         p.ID,
 		Headers:                    p.Headers,
+		StoreRequestBodies:         p.StoreRequestBodies,
 	}
 	for _, e := range p.APIKeyEntries {
 		if e.Disabled {
@@ -481,6 +487,7 @@ func vertexKeyFromProvider(p store.UpstreamProvider) config.VertexCompatKey {
 		Headers:            p.Headers,
 		ExcludedModels:     p.ExcludedModels,
 		UpstreamProviderID: p.ID,
+		StoreRequestBodies: p.StoreRequestBodies,
 	}
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.VertexCompatModel{
@@ -533,6 +540,11 @@ func RenderAuthFile(p store.UpstreamProvider) ([]byte, error) {
 	}
 	if p.Prefix != "" {
 		meta["prefix"] = p.Prefix
+	}
+	// Per-row request/response capture opt-in. Written only when true so
+	// rows (and legacy files) default to capture off.
+	if p.StoreRequestBodies {
+		meta["store_request_bodies"] = true
 	}
 	// Extra config passthrough for auth-file keys.
 	if v, ok := p.ExtraConfig["disable_cooling"].(bool); ok && v {
