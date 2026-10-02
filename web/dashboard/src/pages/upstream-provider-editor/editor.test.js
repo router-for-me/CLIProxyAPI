@@ -584,6 +584,32 @@ test('buildForm/buildPayload: circuit_breaker hydrates and is always emitted as 
     'undefined form field emits false (key present, boolean)');
 });
 
+test('buildForm/buildPayload: store_request_bodies hydrates and is always emitted as a boolean', () => {
+  const on = buildForm('claude-api-key', { provider_type: 'claude-api-key', store_request_bodies: true });
+  assert.equal(on.store_request_bodies, true);
+  const off = buildForm('claude-api-key', { provider_type: 'claude-api-key' });
+  assert.equal(off.store_request_bodies, false);
+  assert.equal(buildPayload(on, 'claude-api-key').store_request_bodies, true);
+  assert.equal(buildPayload(off, 'claude-api-key').store_request_bodies, false);
+});
+
+test('buildPayload: store_request_bodies defaults false for a legacy form without the field', () => {
+  const payload = buildPayload({ name: 'row' }, 'claude-api-key');
+  assert.equal(payload.store_request_bodies, false,
+    'undefined form field emits false (key present, boolean)');
+});
+
+test('buildSchemas: every provider schema carries the Privacy store_request_bodies toggle', () => {
+  const schemas = buildSchemas();
+  for (const [type, schema] of Object.entries(schemas)) {
+    const privacy = schema.sections.find((s) => s.title === 'Privacy');
+    assert.ok(privacy, `${type} must expose a Privacy section`);
+    const field = privacy.fields.find((f) => f.name === 'store_request_bodies');
+    assert.ok(field, `${type} Privacy section must expose store_request_bodies`);
+    assert.equal(field.type, 'toggle', `${type} store_request_bodies must be a toggle`);
+  }
+});
+
 test('buildPayload: per-entry priority emitted incl. explicit 0; blank omitted', () => {
   const form = {
     api_key_entries: [

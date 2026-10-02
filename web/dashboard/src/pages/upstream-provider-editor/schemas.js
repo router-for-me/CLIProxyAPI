@@ -213,6 +213,18 @@ export function buildSchemas() {
     ],
   };
 
+  // privacySection is appended to every provider schema (API-key, explicit,
+  // and OAuth) so the per-upstream request/response capture opt-in is always
+  // reachable. Kept as a shared object because the schemas only read it.
+  const privacySection = {
+    title: 'Privacy',
+    hint: 'Controls whether full request/response content is stored for this upstream.',
+    fields: [
+      { name: 'store_request_bodies', label: 'Store request/response bodies', type: 'toggle',
+        hint: 'When on, full client/upstream request and response payloads (including headers) are stored and shown in Recent Events → Detail. Off by default.' },
+    ],
+  };
+
   const schemaMap = {
     'gemini-api-key': apiKeyBase([], [], [identifierField]),
     'interactions-api-key': apiKeyBase([], [], [identifierField]),
@@ -402,6 +414,16 @@ export function buildSchemas() {
     ];
     if (oauthType === 'oauth:claude') sections.push(claudeCloakSection);
     schemaMap[oauthType] = { sections };
+  }
+
+  // Append the Privacy section to every provider schema — the apiKeyBase(...)
+  // results, the explicit claude-api-key / openai-compatibility / opencode-go
+  // literals, and the OAuth schemas built above. Idempotent so a schema that
+  // ever embeds it explicitly does not double-add.
+  for (const schema of Object.values(schemaMap)) {
+    if (schema && Array.isArray(schema.sections) && !schema.sections.includes(privacySection)) {
+      schema.sections.push(privacySection);
+    }
   }
 
   return schemaMap;

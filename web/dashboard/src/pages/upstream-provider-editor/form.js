@@ -181,6 +181,10 @@ export function buildForm(providerType, initial, carryOver) {
     // any dashboard edit preserves the flag (management Update is a
     // full-row replace — omitting it would silently reset it to false).
     circuit_breaker: !!(src && src.circuit_breaker),
+    // Per-provider request/response capture opt-in (Privacy section).
+    // Always emitted as a boolean in buildPayload for the same full-row
+    // replace reason as circuit_breaker: omitting it would reset it to false.
+    store_request_bodies: !!(src && src.store_request_bodies),
     disabled: src.disabled ?? false,
     websockets: src.websockets ?? false,
     rebuild_mid_system_message: src.rebuild_mid_system_message ?? false,
@@ -333,6 +337,9 @@ export function buildPayload(form, providerType) {
     // Always emitted as a boolean so editing any other field keeps the
     // persisted opt-in (a full-row Update must not reset it).
     circuit_breaker: !!form.circuit_breaker,
+    // Always emitted as a boolean so editing any other field preserves the
+    // persisted request/response capture opt-in (full-row Update).
+    store_request_bodies: !!form.store_request_bodies,
     prefix: (form.prefix || '').trim(),
     base_url: (form.base_url || '').trim(),
     proxy_url: (form.proxy_url || '').trim() || 'none',
