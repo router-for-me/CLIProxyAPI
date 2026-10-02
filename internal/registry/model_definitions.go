@@ -588,11 +588,11 @@ func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
 
 func normalizeAntigravityModelID(modelID string) string {
 	switch strings.ToLower(strings.TrimSpace(modelID)) {
-	case "gemini-3.8-flash-high":
+	case "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low":
 		return "gemini-3.8-flash"
-	case "gemini-3.7-flash-high":
+	case "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low":
 		return "gemini-3.7-flash"
-	case "gemini-3.6-flash-high":
+	case "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low":
 		return "gemini-3.6-flash"
 	case "gemini-3.1-pro-low", "gemini-pro-agent":
 		return "gemini-3.1-pro"
