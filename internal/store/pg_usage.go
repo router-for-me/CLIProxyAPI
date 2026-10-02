@@ -504,6 +504,7 @@ type UsageStore struct {
 	pricingTable       string
 	internalUsersTable string
 	modelsCatalogTable string
+	requestBodiesTable string
 	// sealer encrypts api_key_principal at rest. nil when no passphrase was
 	// configured (writes stay plaintext; reads tolerate plaintext rows).
 	sealer *Sealer
@@ -536,6 +537,7 @@ func NewUsageStore(parent *PostgresStore) *UsageStore {
 		pricingTable:       parent.ModelPricingTable(),
 		internalUsersTable: parent.InternalUsersTable(),
 		modelsCatalogTable: parent.ModelsTable(),
+		requestBodiesTable: parent.RequestBodiesTable(),
 		sealer:             sealer,
 		cache:              newUsageCache(),
 	}

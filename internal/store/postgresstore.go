@@ -61,6 +61,9 @@ const (
 	// ManagementLoginEventsTable stores the append-only audit trail of every
 	// management login attempt (success + failure + ban outcomes).
 	defaultManagementLoginEventsTable = "management_login_events"
+	// defaultRequestBodiesTable stores captured per-provider request/response
+	// bodies (opt-in per upstream provider).
+	defaultRequestBodiesTable = "request_bodies"
 	// Manage-LiteLLM tables. These mirror LiteLLM's own schema (internal
 	// users + API keys + key policies) but are intentionally separate from the
 	// runtime tables (internal_users / api_keys / api_key_policies) so the
@@ -264,6 +267,10 @@ type PostgresStoreConfig struct {
 	// ManagementLoginEventsTable stores the append-only management login
 	// attempt log.
 	ManagementLoginEventsTable string
+	// RequestBodiesTable stores opt-in captured request/response payloads,
+	// keyed by request_id. Populated only for providers whose
+	// store_request_bodies flag is on.
+	RequestBodiesTable string
 
 	// LiteLLMUsersTable stores the Manage-LiteLLM internal-user entity
 	// (LiteLLM-style key owners). Kept separate from InternalUsersTable so the
@@ -447,6 +454,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if cfg.ManagementLoginEventsTable == "" {
 		cfg.ManagementLoginEventsTable = defaultManagementLoginEventsTable
 	}
+	if cfg.RequestBodiesTable == "" {
+		cfg.RequestBodiesTable = defaultRequestBodiesTable
+	}
 	if cfg.LiteLLMUsersTable == "" {
 		cfg.LiteLLMUsersTable = defaultLiteLLMUsersTable
 	}
@@ -597,11 +607,50 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	if err := s.ensurePolicySchema(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureRequestBodySchema(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureLiteLLMSchema(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureRuntimeConfigSchema(ctx); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ensureRequestBodySchema creates the opt-in request/response body capture
+// table. Bodies are stored per request_id and pruned alongside usage_events.
+func (s *PostgresStore) ensureRequestBodySchema(ctx context.Context) error {
+	table := s.RequestBodiesTable()
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			request_id              TEXT PRIMARY KEY,
+			provider                TEXT NOT NULL DEFAULT '',
+			upstream_provider_id    BIGINT,
+			client_request_headers  TEXT,
+			client_request_body     TEXT,
+			client_response_headers TEXT,
+			client_response_body    TEXT,
+			upstream_request        TEXT,
+			upstream_response       TEXT,
+			truncated               BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, table)); err != nil {
+		return fmt.Errorf("postgres store: create request_bodies table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS %s ON %s(created_at)`,
+		quoteIdentifier("idx_request_bodies_created_at"), table,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create request_bodies created_at index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS %s ON %s(provider, created_at)`,
+		quoteIdentifier("idx_request_bodies_provider_created_at"), table,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create request_bodies provider index: %w", err)
 	}
 	return nil
 }
@@ -2984,6 +3033,15 @@ func (s *PostgresStore) ManagementLoginEventsTable() string {
 		return quoteIdentifier(defaultManagementLoginEventsTable)
 	}
 	return s.fullTableName(s.cfg.ManagementLoginEventsTable)
+}
+
+// RequestBodiesTable returns the fully-qualified name of the captured
+// request/response body table.
+func (s *PostgresStore) RequestBodiesTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultRequestBodiesTable)
+	}
+	return s.fullTableName(s.cfg.RequestBodiesTable)
 }
 
 // LiteLLMUsersTable returns the fully-qualified name of the Manage-LiteLLM
