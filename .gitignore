@@ -99,3 +99,6 @@ docker-compose.override.yml
 
 # Git worktrees
 .worktrees/
+
+# Superpowers SDD scratch workspace
+.superpowers/
