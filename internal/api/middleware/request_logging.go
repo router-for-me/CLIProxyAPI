@@ -28,14 +28,20 @@ const (
 // It captures detailed information about the request and response, including headers and body,
 // and uses the provided RequestLogger to record this data. When full request logging is disabled,
 // large and unknown-size bodies are spooled to disk and retained only for error logs.
-func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
+//
+// sink, when non-nil, receives an opt-in body capture (gated per request by the
+// executor) independently of file logging; a nil logger is therefore valid.
+func RequestLoggingMiddleware(logger logging.RequestLogger, sink BodyCaptureSink) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if logger == nil {
+		if logger == nil && sink == nil {
 			c.Next()
 			return
 		}
 
-		if shouldSkipMethodForRequestLogging(c.Request) {
+		// The method skip only applies to file logging. Body capture is gated
+		// dynamically by the executor (which may run for any method), so the
+		// wrapper must be installed whenever a sink is configured.
+		if sink == nil && shouldSkipMethodForRequestLogging(c.Request) {
 			c.Next()
 			return
 		}
@@ -46,7 +52,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		loggerEnabled := logger.IsEnabled()
+		loggerEnabled := logger != nil && logger.IsEnabled()
 		captureBody := shouldCaptureRequestBody(loggerEnabled, c.Request)
 
 		// Capture request information
@@ -60,12 +66,16 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
+		wrapper.bodySink = sink
+		wrapper.captureEnabled = func() bool { return storeRequestBodiesRequested(c) }
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
-		attachRequestLogSources(c, logger, loggerEnabled)
-		attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, loggerEnabled, captureBody)
+		if logger != nil {
+			attachRequestLogSources(c, logger, loggerEnabled)
+			attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, loggerEnabled, captureBody)
+		}
 
 		// Process the request
 		c.Next()

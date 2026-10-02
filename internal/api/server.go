@@ -186,8 +186,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		if optionState.requestLoggerFactory != nil {
 			requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
 		}
+	}
+	// Body capture is independent of file logging: install the middleware
+	// whenever either a file logger or a PG capture sink is available.
+	var bodySink middleware.BodyCaptureSink
+	if optionState.pgStores != nil && optionState.pgStores.Usage != nil {
+		bodySink = newUsageBodyCaptureSink(optionState.pgStores.Usage)
+	}
+	if requestLogger != nil || bodySink != nil {
+		engine.Use(middleware.RequestLoggingMiddleware(requestLogger, bodySink))
 		if requestLogger != nil {
-			engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
 			if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
 				toggle = setter.SetEnabled
 			}

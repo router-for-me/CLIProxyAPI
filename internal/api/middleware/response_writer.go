@@ -45,6 +45,37 @@ type ResponseWriterWrapper struct {
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+
+	// body capture (opt-in, gated per request by the resolved executor)
+	bodySink          BodyCaptureSink // bodySink persists captured pairs; nil disables capture.
+	captureEnabled    func() bool     // captureEnabled reports whether this request opted into capture.
+	capturedStreamBuf *bytes.Buffer   // capturedStreamBuf tees streaming response chunks for capture.
+	captureTruncated  bool            // captureTruncated records that a captured section was capped.
+}
+
+// captureOn reports whether this request should capture bodies. It is nil-safe
+// and never blocks: a nil sink or gate closure disables capture.
+func (w *ResponseWriterWrapper) captureOn() bool {
+	if w == nil || w.captureEnabled == nil {
+		return false
+	}
+	return w.captureEnabled()
+}
+
+// appendCapturedStream tees a streaming chunk into a bounded buffer. Once the
+// section cap is reached it stops buffering and records truncation.
+func (w *ResponseWriterWrapper) appendCapturedStream(data []byte) {
+	if w == nil {
+		return
+	}
+	if w.capturedStreamBuf == nil {
+		w.capturedStreamBuf = &bytes.Buffer{}
+	}
+	if w.capturedStreamBuf.Len() >= bodyCaptureSectionMaxBytes {
+		w.captureTruncated = true
+		return
+	}
+	w.capturedStreamBuf.Write(data)
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -80,6 +111,11 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.Write(data)
 
+	// Tee streaming response chunks into the bounded capture buffer.
+	if w.isStreaming && w.captureOn() {
+		w.appendCapturedStream(data)
+	}
+
 	// THEN: Handle logging based on response type
 	if w.isStreaming && w.chunkChannel != nil {
 		// Capture TTFB on first chunk (synchronous, before async channel send)
@@ -105,6 +141,9 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if w.logger != nil && w.logger.IsEnabled() {
 		return true
 	}
+	if w.captureOn() {
+		return true
+	}
 	if !w.logOnErrorOnly {
 		return false
 	}
@@ -127,6 +166,11 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.WriteString(data)
+
+	// Tee streaming response chunks into the bounded capture buffer.
+	if w.isStreaming && w.captureOn() {
+		w.appendCapturedStream([]byte(data))
+	}
 
 	// THEN: Capture for logging
 	if w.isStreaming && w.chunkChannel != nil {
@@ -161,7 +205,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	w.isStreaming = w.detectStreaming(contentType)
 
 	// If streaming, initialize streaming log writer
-	if w.isStreaming && w.logger.IsEnabled() {
+	if w.isStreaming && w.logger != nil && w.logger.IsEnabled() {
 		streamWriter, err := w.logger.LogStreamingRequest(
 			w.requestInfo.URL,
 			w.requestInfo.Method,
@@ -262,9 +306,6 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	if w.requestInfo != nil && w.requestInfo.deferredBodyCapture != nil {
 		defer w.requestInfo.deferredBodyCapture.Cleanup()
 	}
-	if w.logger == nil {
-		return nil
-	}
 
 	finalStatusCode := w.statusCode
 	if finalStatusCode == 0 {
@@ -284,14 +325,21 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
-	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+	loggerActive := w.logger != nil && w.logger.IsEnabled()
+	forceLog := w.logger != nil && w.logOnErrorOnly && hasAPIError && !loggerActive
 	websocketTimelineSource := w.extractWebsocketTimelineSource(c)
 	apiRequestSource := w.extractAPIRequestSource(c)
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
-	if !w.logger.IsEnabled() && !forceLog {
+	if !loggerActive && !forceLog {
+		if w.captureOn() && w.bodySink != nil {
+			w.captureToSink(c)
+		}
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil
+	}
+	if w.captureOn() && w.bodySink != nil {
+		w.captureToSink(c)
 	}
 
 	if w.isStreaming && w.streamWriter != nil {
@@ -383,6 +431,60 @@ func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
 	}
 
 	return finalHeaders
+}
+
+// captureToSink assembles and forwards one capture to the configured sink. It
+// is best-effort: the sink owns error handling and must never affect the
+// client response.
+//
+// Limitation: when API_REQUEST/API_RESPONSE were spooled to a file
+// (FileBodySource), only the in-memory portion is captured here. Merging the
+// file-backed part would require mergeFileBodySource; the common case is
+// in-memory and is captured fully.
+func (w *ResponseWriterWrapper) captureToSink(c *gin.Context) {
+	if w == nil || w.bodySink == nil {
+		return
+	}
+	req := BodyCaptureRequest{
+		RequestID:          requestIDFromRequestInfo(w.requestInfo),
+		Provider:           storeRequestBodiesProvider(c),
+		UpstreamProviderID: storeRequestBodiesUpstreamID(c),
+	}
+	if w.requestInfo != nil {
+		req.ClientRequestHeaders = w.requestInfo.Headers
+		req.ClientRequestBody = w.requestInfo.Body
+	}
+	req.ClientResponseHeaders = w.cloneHeaders()
+	if w.isStreaming && w.capturedStreamBuf != nil {
+		req.ClientResponseBody = w.capturedStreamBuf.Bytes()
+	} else if w.body != nil {
+		req.ClientResponseBody = w.body.Bytes()
+	}
+
+	upReq := bytes.Clone(w.extractAPIRequest(c))
+	upResp := bytes.Clone(w.extractAPIResponse(c))
+	upReq, truncReq := capSection(upReq, bodyCaptureSectionMaxBytes)
+	upResp, truncResp := capSection(upResp, bodyCaptureSectionMaxBytes)
+	var truncCReq, truncCResp bool
+	req.ClientRequestBody, truncCReq = capSection(req.ClientRequestBody, bodyCaptureSectionMaxBytes)
+	req.ClientResponseBody, truncCResp = capSection(req.ClientResponseBody, bodyCaptureSectionMaxBytes)
+	req.Truncated = w.captureTruncated || truncReq || truncResp || truncCReq || truncCResp
+
+	total := len(req.ClientRequestBody) + len(req.ClientResponseBody) + len(upReq) + len(upResp)
+	if total > bodyCaptureTotalMaxBytes {
+		req.Truncated = true
+	}
+	req.UpstreamRequest = upReq
+	req.UpstreamResponse = upResp
+
+	w.bodySink.Capture(c.Request.Context(), req)
+}
+
+func requestIDFromRequestInfo(info *RequestInfo) string {
+	if info == nil {
+		return ""
+	}
+	return info.RequestID
 }
 
 func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {

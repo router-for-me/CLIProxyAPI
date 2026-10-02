@@ -203,7 +203,7 @@ func TestRequestLoggingMiddlewareCapturesLargeErrorRequestAndDeferredAPIRequest(
 	upstreamBody := []byte(`{"model":"upstream-model","input":"translated"}`)
 
 	router := gin.New()
-	router.Use(RequestLoggingMiddleware(logger))
+	router.Use(RequestLoggingMiddleware(logger, nil))
 	router.POST("/v1/responses", func(c *gin.Context) {
 		body, errRead := io.ReadAll(c.Request.Body)
 		if errRead != nil {
