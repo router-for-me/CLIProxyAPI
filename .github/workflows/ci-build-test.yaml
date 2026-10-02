@@ -6,25 +6,41 @@ on:
     branches:
       - 'opt/reduce-size-*'
 
+permissions:
+  contents: read
+
 jobs:
-  test-build:
+  build-test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.27'
-          check-latest: true
+          go-version: '1.27.x'
+          cache: true
 
-      - name: Run make release
+      - name: Build with make release
         env:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
           BUILD_DATE: ${{ github.event.head_commit.timestamp }}
         run: |
-          make release GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+          set -euo pipefail
+          make release
+          echo "=== Built binary details ==="
           ls -lh bin/server
           wc -c < bin/server
+          ./bin/server --help
+
+      - name: Verify binary properties
+        run: |
+          set -euo pipefail
+          file bin/server
+          if readelf -l bin/server | grep -q 'Requesting program interpreter'; then
+            echo "Error: binary is dynamically linked" >&2
+            exit 1
+          fi
+          echo "Binary is fully statically linked."
