@@ -4,7 +4,6 @@ package management
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
@@ -30,20 +29,14 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type attemptInfo struct {
 	count        int
 	blockedUntil time.Time
 	lastActivity time.Time // track last activity for cleanup
+	windowStart  time.Time // start of the current failure-count window
 }
-
-// attemptCleanupInterval controls how often stale IP entries are purged
-const attemptCleanupInterval = 1 * time.Hour
-
-// attemptMaxIdleTime controls how long an IP can be idle before cleanup
-const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
@@ -141,6 +134,18 @@ type Handler struct {
 	// return 503 in that case.
 	pgAlerts           *store.AlertStore
 	pgFlusherLastDrops int64
+
+	// pgLogin is the PG-backed management-login security store (settings +
+	// attempt log). nil when PG is not configured — the /management-login
+	// routes return 503 and the auth path falls back to built-in defaults.
+	pgLogin loginSecurityStore
+
+	loginSettingsMu sync.RWMutex
+	loginSettings   store.LoginSecuritySettings
+	loginSettingsAt time.Time
+
+	loginRecorderOnce sync.Once
+	loginEventCh      chan store.LoginEvent
 
 	// pgJev stores the singleton Jev AI classifier configuration (master
 	// toggle + sealed API key + pinned model + API root). nil when PG is not
@@ -290,30 +295,29 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 }
 
 // startAttemptCleanup launches a background goroutine that periodically
-// removes stale IP entries from failedAttempts to prevent memory leaks.
+// removes stale IP entries from failedAttempts to prevent memory leaks. The
+// idle timeout is read live from the management-login policy.
 func (h *Handler) startAttemptCleanup() {
 	go func() {
-		ticker := time.NewTicker(attemptCleanupInterval)
+		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			h.purgeStaleAttempts()
+			h.purgeStaleAttempts(h.currentLoginSettings().IdleTimeout())
 		}
 	}()
 }
 
-// purgeStaleAttempts removes IP entries that have been idle beyond attemptMaxIdleTime
+// purgeStaleAttempts removes IP entries that have been idle beyond maxIdle
 // and whose ban (if any) has expired.
-func (h *Handler) purgeStaleAttempts() {
+func (h *Handler) purgeStaleAttempts(maxIdle time.Duration) {
 	now := time.Now()
 	h.attemptsMu.Lock()
 	defer h.attemptsMu.Unlock()
 	for ip, ai := range h.failedAttempts {
-		// Skip if still banned
 		if !ai.blockedUntil.IsZero() && now.Before(ai.blockedUntil) {
 			continue
 		}
-		// Remove if idle too long
-		if now.Sub(ai.lastActivity) > attemptMaxIdleTime {
+		if now.Sub(ai.lastActivity) > maxIdle {
 			delete(h.failedAttempts, ip)
 		}
 	}
@@ -964,133 +968,79 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			provided = c.GetHeader("X-Management-Key")
 		}
 
-		allowed, statusCode, errMsg := h.AuthenticateManagementKey(clientIP, localClient, provided)
-		if !allowed {
-			// Static-secret auth failed. Before rejecting, attempt to
-			// authenticate the credential as a management API token
-			// (per-token policy + audit log). A resolved token is stashed
-			// in the context so the EnforceTokenPolicy + AuditTokenCall
-			// middlewares can act on it. The IP-ban logic above already ran
-			// for the static-secret miss; token failures are not added to
-			// the ban counter to avoid locking out legit token users.
-			if provided != "" {
-				if tok, pol := h.authenticateManagementToken(c.Request.Context(), provided); tok != nil {
-					// Token auth succeeded. Stash the token + policy and
-					// proceed; the per-token enforcement middleware will
-					// gate scope/endpoints/rate downstream.
-					c.Set(ctxMgmtToken, tok)
-					c.Set(ctxMgmtPolicy, pol)
-					c.Set(ctxMgmtProvided, provided)
-					c.Next()
-					return
-				}
-			}
-			c.AbortWithStatusJSON(statusCode, gin.H{"error": errMsg})
+		userAgent := c.GetHeader("User-Agent")
+		d := h.evaluateManagementKey(clientIP, localClient, provided)
+		if d.allowed {
+			h.resetManagementAttempts(clientIP)
+			h.recordLoginEvent(store.LoginEvent{
+				IP: clientIP, Outcome: store.LoginOutcomeSuccess, Local: localClient, UserAgent: userAgent,
+			})
+			c.Next()
 			return
 		}
-		c.Next()
+
+		// Static-secret auth failed. Before rejecting, attempt to
+		// authenticate the credential as a management API token. This runs
+		// before any ban accounting so token-authenticated callers never
+		// accrue a brute-force ban. A resolved token is stashed in the
+		// context for the EnforceTokenPolicy + AuditTokenCall middlewares.
+		if provided != "" {
+			if tok, pol := h.authenticateManagementToken(c.Request.Context(), provided); tok != nil {
+				h.recordLoginEvent(store.LoginEvent{
+					IP: clientIP, Outcome: store.LoginOutcomeSuccess, Reason: "management token",
+					Local: localClient, UserAgent: userAgent,
+				})
+				c.Set(ctxMgmtToken, tok)
+				c.Set(ctxMgmtPolicy, pol)
+				c.Set(ctxMgmtProvided, provided)
+				c.Next()
+				return
+			}
+		}
+
+		outcome := d.outcome
+		count := 0
+		if banAccountingOutcome(d.outcome) {
+			outcome, count = h.applyManagementFailure(clientIP, d.outcome)
+		}
+		if outcome != "" {
+			h.recordLoginEvent(store.LoginEvent{
+				IP: clientIP, Outcome: outcome, Reason: d.message,
+				AttemptCount: count, Local: localClient, UserAgent: userAgent,
+			})
+		}
+		c.AbortWithStatusJSON(d.status, gin.H{"error": d.message})
 	}
 }
 
-// AuthenticateManagementKey verifies the provided management key for the given client.
-// It mirrors the behaviour of Middleware() so non-HTTP callers can reuse the same logic.
+// AuthenticateManagementKey verifies the provided management key for the given
+// client. It mirrors the behaviour of Middleware() so non-HTTP callers (the
+// Redis protocol handler) can reuse the same logic. Each attempt is recorded to
+// the management login event log when PG is configured.
 func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, provided string) (bool, int, string) {
-	const maxFailures = 5
-	const banDuration = 30 * time.Minute
-
 	if h == nil {
 		return false, http.StatusForbidden, "remote management disabled"
 	}
-
-	cfg := h.cfg
-	var (
-		allowRemote bool
-		secretHash  string
-	)
-	if cfg != nil {
-		allowRemote = cfg.RemoteManagement.AllowRemote
-		secretHash = cfg.RemoteManagement.SecretKey
-	}
-	if h.allowRemoteOverride {
-		allowRemote = true
-	}
-	envSecret := h.envSecret
-
-	now := time.Now()
-	h.attemptsMu.Lock()
-	ai := h.failedAttempts[clientIP]
-	if ai != nil && !ai.blockedUntil.IsZero() {
-		if now.Before(ai.blockedUntil) {
-			remaining := ai.blockedUntil.Sub(now).Round(time.Second)
-			h.attemptsMu.Unlock()
-			return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
-		}
-		// Ban expired, reset state
-		ai.blockedUntil = time.Time{}
-		ai.count = 0
-	}
-	h.attemptsMu.Unlock()
-
-	if !localClient && !allowRemote {
-		return false, http.StatusForbidden, "remote management disabled"
-	}
-
-	fail := func() {
-		h.attemptsMu.Lock()
-		aip := h.failedAttempts[clientIP]
-		if aip == nil {
-			aip = &attemptInfo{}
-			h.failedAttempts[clientIP] = aip
-		}
-		aip.count++
-		aip.lastActivity = time.Now()
-		if aip.count >= maxFailures {
-			aip.blockedUntil = time.Now().Add(banDuration)
-			aip.count = 0
-		}
-		h.attemptsMu.Unlock()
-	}
-
-	reset := func() {
-		h.attemptsMu.Lock()
-		if ai := h.failedAttempts[clientIP]; ai != nil {
-			ai.count = 0
-			ai.blockedUntil = time.Time{}
-		}
-		h.attemptsMu.Unlock()
-	}
-
-	if secretHash == "" && envSecret == "" {
-		return false, http.StatusForbidden, "remote management key not set"
-	}
-
-	if provided == "" {
-		fail()
-		return false, http.StatusUnauthorized, "missing management key"
-	}
-
-	if localClient {
-		if lp := h.localPassword; lp != "" {
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-				reset()
-				return true, 0, ""
-			}
-		}
-	}
-
-	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
-		reset()
+	d := h.evaluateManagementKey(clientIP, localClient, provided)
+	if d.allowed {
+		h.resetManagementAttempts(clientIP)
+		h.recordLoginEvent(store.LoginEvent{
+			IP: clientIP, Outcome: store.LoginOutcomeSuccess, Local: localClient,
+		})
 		return true, 0, ""
 	}
-
-	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
-		fail()
-		return false, http.StatusUnauthorized, "invalid management key"
+	outcome := d.outcome
+	count := 0
+	if banAccountingOutcome(d.outcome) {
+		outcome, count = h.applyManagementFailure(clientIP, d.outcome)
 	}
-
-	reset()
-
-	return true, 0, ""
+	if outcome != "" {
+		h.recordLoginEvent(store.LoginEvent{
+			IP: clientIP, Outcome: outcome, Reason: d.message,
+			AttemptCount: count, Local: localClient,
+		})
+	}
+	return false, d.status, d.message
 }
 
 // persist saves the current in-memory config to disk.
