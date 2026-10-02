@@ -9,7 +9,8 @@ import "bytes"
 // request body carries the whole conversation (often several MB), and each
 // walk re-scans it. bytes.Contains is far cheaper than a gjson walk.
 //
-// Every needle must be printable ASCII without '\\'. A '"' may only stand at
+// Every needle must be printable ASCII without '\\' or '/' (JSON may spell
+// '/' as `\/`). A '"' may only stand at
 // either end of a needle, where it matches a structural string delimiter
 // (`"1h"` matches the whole string value 1h). JSON can only
 // spell such a character as itself or as a \u00XX escape, so when body holds
