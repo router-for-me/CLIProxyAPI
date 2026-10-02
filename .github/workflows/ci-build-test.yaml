@@ -16,7 +16,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.27.x'
+          go-version: '1.27'
           check-latest: true
 
       - name: Run make release
