@@ -57,6 +57,7 @@ func newTestPostgresStore(t *testing.T, schema string) *PostgresStore {
 		store.cfg.ManagementLoginSettingsTable,
 		store.cfg.ManagementLoginEventsTable,
 		store.cfg.ProxyPoolsTable,
+		store.cfg.RequestBodiesTable,
 	} {
 		if _, err := store.DB().ExecContext(ctx, "DELETE FROM "+store.fullTableName(table)); err != nil {
 			// Best-effort: dependencies may fail; ignore.

@@ -16,6 +16,11 @@ import (
 // can distinguish its own ciphertext from plaintext (legacy rows) on read.
 const sealVersion = "v1"
 
+// sealRandReader supplies the nonce randomness for Seal. It is a package
+// variable so tests can inject a failing reader to exercise the seal-error
+// path; production always uses crypto/rand.
+var sealRandReader io.Reader = rand.Reader
+
 // Sealer applies symmetric authenticated encryption (AES-256-GCM) to short
 // string fields at rest. It is used to protect the api_key_principal column
 // in usage_events: the plaintext principal is the raw API key secret and
@@ -61,7 +66,7 @@ func (s *Sealer) Seal(plaintext string) (string, error) {
 		return plaintext, nil
 	}
 	nonce := make([]byte, s.gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	if _, err := io.ReadFull(sealRandReader, nonce); err != nil {
 		return "", fmt.Errorf("store: seal nonce: %w", err)
 	}
 	ciphertext := s.gcm.Seal(nil, nonce, []byte(plaintext), nil)

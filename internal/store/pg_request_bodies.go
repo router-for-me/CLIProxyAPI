@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // ErrRequestBodyNotFound is returned when no captured body row exists for a
@@ -37,17 +39,36 @@ func (s *UsageStore) InsertRequestBody(ctx context.Context, rb RequestBody) erro
 	if rb.CreatedAt.IsZero() {
 		rb.CreatedAt = time.Now().UTC()
 	}
-	seal := func(v string) string {
+	// Seal the four body columns. A seal failure aborts the write: storing the
+	// plaintext body would defeat encryption, so we fail closed and let the
+	// best-effort capture caller log and drop the row.
+	seal := func(v string) (string, error) {
 		if v == "" || s.sealer == nil {
-			return v
+			return v, nil
 		}
 		out, err := s.sealer.Seal(v)
 		if err != nil {
-			return v
+			return "", fmt.Errorf("postgres store: seal request body: %w", err)
 		}
-		return out
+		return out, nil
 	}
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+	clientReqBody, err := seal(rb.ClientRequestBody)
+	if err != nil {
+		return err
+	}
+	clientRespBody, err := seal(rb.ClientResponseBody)
+	if err != nil {
+		return err
+	}
+	upReq, err := seal(rb.UpstreamRequest)
+	if err != nil {
+		return err
+	}
+	upResp, err := seal(rb.UpstreamResponse)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			request_id, provider, upstream_provider_id,
 			client_request_headers, client_request_body,
@@ -67,9 +88,9 @@ func (s *UsageStore) InsertRequestBody(ctx context.Context, rb RequestBody) erro
 			created_at = EXCLUDED.created_at
 	`, s.requestBodiesTable),
 		rb.RequestID, rb.Provider, nullableInt64(rb.UpstreamProviderID),
-		nullableString(rb.ClientRequestHeaders), nullableString(seal(rb.ClientRequestBody)),
-		nullableString(rb.ClientResponseHeaders), nullableString(seal(rb.ClientResponseBody)),
-		nullableString(seal(rb.UpstreamRequest)), nullableString(seal(rb.UpstreamResponse)),
+		nullableString(rb.ClientRequestHeaders), nullableString(clientReqBody),
+		nullableString(rb.ClientResponseHeaders), nullableString(clientRespBody),
+		nullableString(upReq), nullableString(upResp),
 		rb.Truncated, rb.CreatedAt,
 	)
 	if err != nil {
@@ -101,7 +122,11 @@ func (s *UsageStore) GetRequestBodyByRequestID(ctx context.Context, requestID st
 	if err != nil {
 		return rb, fmt.Errorf("postgres store: get request body: %w", err)
 	}
-	open := func(v sql.NullString) string {
+	// open decrypts a sealed body column. A nil sealer passes plaintext rows
+	// through unchanged (encryption disabled). A decrypt failure for a sealed
+	// payload logs a warning and yields an empty string: ciphertext must never
+	// be surfaced to API callers as if it were the body.
+	open := func(column string, v sql.NullString) string {
 		if !v.Valid {
 			return ""
 		}
@@ -110,7 +135,11 @@ func (s *UsageStore) GetRequestBodyByRequestID(ctx context.Context, requestID st
 		}
 		out, errOpen := s.sealer.Open(v.String)
 		if errOpen != nil {
-			return v.String
+			log.WithError(errOpen).WithFields(log.Fields{
+				"request_id": requestID,
+				"column":     column,
+			}).Warn("postgres store: decrypt request body column failed; returning empty")
+			return ""
 		}
 		return out
 	}
@@ -118,11 +147,11 @@ func (s *UsageStore) GetRequestBodyByRequestID(ctx context.Context, requestID st
 		rb.UpstreamProviderID = upstreamID.Int64
 	}
 	rb.ClientRequestHeaders = clientReqH.String
-	rb.ClientRequestBody = open(clientReqB)
+	rb.ClientRequestBody = open("client_request_body", clientReqB)
 	rb.ClientResponseHeaders = clientRespH.String
-	rb.ClientResponseBody = open(clientRespB)
-	rb.UpstreamRequest = open(upReq)
-	rb.UpstreamResponse = open(upResp)
+	rb.ClientResponseBody = open("client_response_body", clientRespB)
+	rb.UpstreamRequest = open("upstream_request", upReq)
+	rb.UpstreamResponse = open("upstream_response", upResp)
 	return rb, nil
 }
 
