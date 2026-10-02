@@ -16,8 +16,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -102,25 +102,18 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 				}
 			}
 
-			// If neither thinkingLevel nor thinkingBudget is provided (e.g. client auto mode),
-			// default to disabling thinking for faster, zero-overhead responses unless explicitly requested
-			// with a model suffix (like -high or -medium) or specified in the request.
+			// If neither thinkingLevel nor thinkingBudget is provided, supply default thinkingLevel
 			currLevel = gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel")
 			currBudget = gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
 			if !currLevel.Exists() && !currBudget.Exists() && modelInfo != nil && modelInfo.Thinking != nil {
 				if len(modelInfo.Thinking.Levels) > 0 && !strings.Contains(strings.ToLower(modelName), "claude") {
-					if strings.HasSuffix(strings.ToLower(modelName), "-high") {
-						payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
+					defaultLevel := "high"
+					if strings.HasSuffix(strings.ToLower(modelName), "-low") {
+						defaultLevel = "low"
 					} else if strings.HasSuffix(strings.ToLower(modelName), "-medium") {
-						payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel", "medium")
-					} else if strings.HasSuffix(strings.ToLower(modelName), "-low") {
-						payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel", "low")
-					} else {
-						// Client auto mode: cleanly disable thinking
-						payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel")
-						payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget", 0)
-						payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.includeThoughts", false)
+						defaultLevel = "medium"
 					}
+					payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel", defaultLevel)
 				}
 			}
 		}

@@ -573,50 +573,21 @@ func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
 			continue
 		}
 		id := strings.ToLower(strings.TrimSpace(m.ID))
-		if id == "gemini-3.8-flash-high" || id == "gemini-3.7-flash-high" || id == "gemini-3.6-flash-high" || id == "gemini-3.1-pro-low" || id == "gemini-pro-agent" {
+		if id == "gemini-3.8-flash-high" || id == "gemini-3.8-flash-medium" || id == "gemini-3.8-flash-low" ||
+			id == "gemini-3.7-flash-high" || id == "gemini-3.7-flash-medium" || id == "gemini-3.7-flash-low" ||
+			id == "gemini-3.6-flash-high" || id == "gemini-3.6-flash-medium" || id == "gemini-3.6-flash-low" ||
+			id == "gemini-3.1-pro-low" || id == "gemini-3.1-pro-high" || id == "gemini-3.1-pro-medium" ||
+			id == "gemini-pro-agent" {
 			continue
 		}
 		filtered = append(filtered, m)
 	}
 	return upsertModelInfos(filtered,
 		antigravityBuiltinGemini38FlashModelInfo(),
-		antigravityBuiltinGemini38FlashSuffixedModelInfo("high"),
-		antigravityBuiltinGemini38FlashSuffixedModelInfo("medium"),
-		antigravityBuiltinGemini38FlashSuffixedModelInfo("low"),
 		antigravityBuiltinGemini37FlashModelInfo(),
-		antigravityBuiltinGemini37FlashSuffixedModelInfo("high"),
-		antigravityBuiltinGemini37FlashSuffixedModelInfo("medium"),
-		antigravityBuiltinGemini37FlashSuffixedModelInfo("low"),
 		antigravityBuiltinGemini36FlashModelInfo(),
-		antigravityBuiltinGemini36FlashSuffixedModelInfo("high"),
-		antigravityBuiltinGemini36FlashSuffixedModelInfo("medium"),
-		antigravityBuiltinGemini36FlashSuffixedModelInfo("low"),
 		antigravityBuiltinGemini31ProModelInfo(),
 	)
-}
-
-func antigravityBuiltinGemini38FlashSuffixedModelInfo(suffix string) *ModelInfo {
-	m := antigravityBuiltinGemini38FlashModelInfo()
-	m.ID = "gemini-3.8-flash-" + suffix
-	m.Name = "gemini-3.8-flash-" + suffix
-	m.DisplayName = "Gemini 3.8 Flash (" + suffix + ")"
-	return m
-}
-
-func antigravityBuiltinGemini37FlashSuffixedModelInfo(suffix string) *ModelInfo {
-	m := antigravityBuiltinGemini37FlashModelInfo()
-	m.ID = "gemini-3.7-flash-" + suffix
-	m.Name = "gemini-3.7-flash-" + suffix
-	m.DisplayName = "Gemini 3.7 Flash (" + suffix + ")"
-	return m
-}
-
-func antigravityBuiltinGemini36FlashSuffixedModelInfo(suffix string) *ModelInfo {
-	m := antigravityBuiltinGemini36FlashModelInfo()
-	m.ID = "gemini-3.6-flash-" + suffix
-	m.Name = "gemini-3.6-flash-" + suffix
-	m.DisplayName = "Gemini 3.6 Flash (" + suffix + ")"
-	return m
 }
 
 func normalizeAntigravityModelID(modelID string) string {
@@ -627,7 +598,7 @@ func normalizeAntigravityModelID(modelID string) string {
 		return "gemini-3.7-flash"
 	case "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low":
 		return "gemini-3.6-flash"
-	case "gemini-3.1-pro-low", "gemini-pro-agent":
+	case "gemini-3.1-pro-low", "gemini-3.1-pro-high", "gemini-3.1-pro-medium", "gemini-pro-agent":
 		return "gemini-3.1-pro"
 	default:
 		return modelID

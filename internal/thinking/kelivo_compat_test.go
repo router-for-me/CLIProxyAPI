@@ -19,10 +19,10 @@ func TestExtractOpenAIConfig_KelivoCompatibility(t *testing.T) {
 			wantBudget: 2048,
 		},
 		{
-			name:       "Kelivo OpenRouter effort",
-			body:       `{"model":"gemini-3.8-flash","reasoning":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`,
-			wantMode:   ModeLevel,
-			wantLevel:  LevelLow,
+			name:      "Kelivo OpenRouter effort",
+			body:      `{"model":"gemini-3.8-flash","reasoning":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`,
+			wantMode:  ModeLevel,
+			wantLevel: LevelLow,
 		},
 		{
 			name:       "Kelivo OpenRouter disabled",
@@ -61,10 +61,10 @@ func TestExtractOpenAIConfig_KelivoCompatibility(t *testing.T) {
 			wantBudget: 8192,
 		},
 		{
-			name:       "Kelivo Gemini level",
-			body:       `{"model":"gemini-3.8-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH","includeThoughts":true}},"messages":[{"role":"user","content":"hi"}]}`,
-			wantMode:   ModeLevel,
-			wantLevel:  LevelHigh,
+			name:      "Kelivo Gemini level",
+			body:      `{"model":"gemini-3.8-flash","generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH","includeThoughts":true}},"messages":[{"role":"user","content":"hi"}]}`,
+			wantMode:  ModeLevel,
+			wantLevel: LevelHigh,
 		},
 	}
 
