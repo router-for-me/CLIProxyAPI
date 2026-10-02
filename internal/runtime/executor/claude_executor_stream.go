@@ -181,7 +181,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// Initialize continuity and diagnostics if cloaked and eligible.
 		if cloaked {
 			existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(body)
-			prevReq, promptID, cCtx, ok := resolveClaudeContinuityTags(ctx, auth, incomingHeaders, body, confirmedClaudeCode, existingPrevReq, existingPromptID)
+			prevReq, promptID, cCtx, ok := resolveClaudeContinuityTags(ctx, e.cfg, auth, incomingHeaders, body, confirmedClaudeCode, existingPrevReq, existingPromptID)
 			if ok {
 				if continuityCtx != nil {
 					*continuityCtx = cCtx

@@ -63,7 +63,11 @@ type ClaudeContinuityContext struct {
 	PreviousMessageID string
 	PreviousRequestID string
 	PromptID          string
-	Initialized       bool
+	// PinnedDate is the calendar date this session was first seen on. The
+	// cloaked currentDate reminder reuses it so the reminder text stays
+	// byte-stable within a session even when the local date flips mid-session.
+	PinnedDate  string
+	Initialized bool
 }
 
 // WithClaudeSessionID attaches a known Claude session ID to ctx.
@@ -108,6 +112,7 @@ type claudeDiagnosticsEntry struct {
 	previousMessageID string
 	previousRequestID string
 	promptID          string
+	pinnedDate        string
 	minimumSequence   uint64
 	committedSequence uint64
 	lastAccess        uint64
@@ -190,6 +195,34 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 	entry.expiresAt = now.Add(claudeDiagnosticsTTL)
 	claudeDiagnosticsState.entries[key] = entry
 	return key, sequence, entry.previousMessageID, entry.previousRequestID, activePromptID
+}
+
+// PinClaudeSessionDate returns the calendar date pinned for this continuity
+// session, recording date on the first call of a session and returning the
+// pinned value on later calls. This keeps the cloaked currentDate reminder
+// byte-stable within a session so a local-midnight flip cannot invalidate the
+// prompt-cache prefix. TTL expiry resets the entry, which re-anchors the next
+// request of the same session to the then-current date. An unknown key (for
+// example after a process restart) returns date unchanged, matching the
+// per-request behaviour.
+func PinClaudeSessionDate(key, date string) string {
+	key = strings.TrimSpace(key)
+	date = strings.TrimSpace(date)
+	if key == "" || date == "" {
+		return date
+	}
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	entry, ok := claudeDiagnosticsState.entries[key]
+	if !ok {
+		return date
+	}
+	if entry.pinnedDate == "" {
+		entry.pinnedDate = date
+		claudeDiagnosticsState.entries[key] = entry
+		return date
+	}
+	return entry.pinnedDate
 }
 
 // BeginClaudeDiagnostics starts one request generation for a stable credential
