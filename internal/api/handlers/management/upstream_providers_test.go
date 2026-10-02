@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -722,5 +723,109 @@ func TestToUpstreamProviderExplicitEmptyCodesIsClearPath(t *testing.T) {
 	}
 	if row.AutoDisableCooldownSeconds == nil || *row.AutoDisableCooldownSeconds != 0 {
 		t.Fatalf("store row cooldown = %#v, want pointer to 0", row.AutoDisableCooldownSeconds)
+	}
+}
+
+// newTestUpstreamProvidersHandler opens a PG-backed store, wires it into a bare
+// Handler, and returns a router serving the upstream-provider CRUD routes.
+// Skips when PGSTORE_TEST_DSN is unset (mirrors newTestBackupHandler).
+func newTestUpstreamProvidersHandler(t *testing.T, prefix string) (*Handler, *gin.Engine) {
+	t.Helper()
+	skipIfNoPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pg, err := store.NewPostgresStore(ctx, store.PostgresStoreConfig{DSN: pgTestDSN(), Schema: backupTestSchema(prefix)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore: %v", err)
+	}
+	if err := pg.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	if err := pg.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	h := newBareHandler()
+	h.SetUpstreamProvidersStore(store.NewUpstreamProviderStore(pg))
+	r := gin.New()
+	g := r.Group("/v0/management")
+	g.GET("/upstream-providers/:id", h.GetUpstreamProvider)
+	g.POST("/upstream-providers", h.CreateUpstreamProvider)
+	g.PUT("/upstream-providers/:id", h.UpdateUpstreamProvider)
+	return h, r
+}
+
+// TestUpstreamProviderStoreRequestBodiesRequestResponse covers the per-provider
+// privacy toggle end-to-end through the management HTTP surface: POST a
+// provider with store_request_bodies true, GET it back and observe true, PUT it
+// back to false, then GET again and observe false. PG-backed, skipped when
+// PGSTORE_TEST_DSN is unset.
+func TestUpstreamProviderStoreRequestBodiesRequestResponse(t *testing.T) {
+	_, r := newTestUpstreamProvidersHandler(t, "upstream_srb")
+
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	const createBody = `{"provider_type":"claude-api-key","name":"privacy-toggle","base_url":"https://claude.example.test","store_request_bodies":true,"api_key_entries":[{"api_key":"privacy-secret","name":"alpha"}]}`
+	rec := do(http.MethodPost, "/v0/management/upstream-providers", createBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var created struct {
+		ID                 int64 `json:"id"`
+		StoreRequestBodies bool  `json:"store_request_bodies"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatalf("create response missing id: %s", rec.Body.String())
+	}
+	if !created.StoreRequestBodies {
+		t.Fatalf("create response store_request_bodies = false, want true: %s", rec.Body.String())
+	}
+
+	getPath := fmt.Sprintf("/v0/management/upstream-providers/%d", created.ID)
+	rec = do(http.MethodGet, getPath, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		StoreRequestBodies bool `json:"store_request_bodies"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if !got.StoreRequestBodies {
+		t.Fatalf("get store_request_bodies = false, want true: %s", rec.Body.String())
+	}
+
+	const updateBody = `{"provider_type":"claude-api-key","name":"privacy-toggle","base_url":"https://claude.example.test","store_request_bodies":false,"api_key_entries":[{"api_key":"privacy-secret","name":"alpha"}]}`
+	rec = do(http.MethodPut, getPath, updateBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if got.StoreRequestBodies {
+		t.Fatalf("update response store_request_bodies = true, want false: %s", rec.Body.String())
+	}
+
+	rec = do(http.MethodGet, getPath, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get-after-update status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got.StoreRequestBodies = true
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode get-after-update response: %v", err)
+	}
+	if got.StoreRequestBodies {
+		t.Fatalf("get-after-update store_request_bodies = true, want false: %s", rec.Body.String())
 	}
 }

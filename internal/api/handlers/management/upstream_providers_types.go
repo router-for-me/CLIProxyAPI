@@ -21,12 +21,15 @@ type upstreamProviderReq struct {
 	// (design G3): true feeds 408/5xx failures into the pool-wide breaker and
 	// subjects the pool's auths to its blocking. false (default) keeps
 	// failures scoped to per-auth cooldowns.
-	CircuitBreaker bool   `json:"circuit_breaker,omitempty"`
-	Disabled       bool   `json:"disabled,omitempty"`
-	Prefix         string `json:"prefix,omitempty"`
-	APIKey         string `json:"api_key,omitempty"`
-	BaseURL        string `json:"base_url,omitempty"`
-	ProxyURL       string `json:"proxy_url,omitempty"`
+	CircuitBreaker bool `json:"circuit_breaker,omitempty"`
+	// StoreRequestBodies opts this provider into full request/response body
+	// capture (privacy toggle). false (default) keeps bodies uncaptured.
+	StoreRequestBodies bool   `json:"store_request_bodies,omitempty"`
+	Disabled           bool   `json:"disabled,omitempty"`
+	Prefix             string `json:"prefix,omitempty"`
+	APIKey             string `json:"api_key,omitempty"`
+	BaseURL            string `json:"base_url,omitempty"`
+	ProxyURL           string `json:"proxy_url,omitempty"`
 	// ProxyPoolID, when non-nil, binds the row to a proxy_pools entry; the
 	// renderer resolves it into the concrete ProxyURL (or RelayBaseURL).
 	ProxyPoolID             *int64         `json:"proxy_pool_id,omitempty"`

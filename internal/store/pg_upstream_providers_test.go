@@ -1672,3 +1672,82 @@ func TestUpstreamProviderStoreAutoDisableProviderCoalesce(t *testing.T) {
 		t.Fatalf("Get after clear cooldown = %#v, want pointer to 0", reloaded.AutoDisableCooldownSeconds)
 	}
 }
+
+// TestUpstreamProviderStoreRequestBodiesRoundTrip pins the schema contract for
+// the per-provider request/response capture privacy toggle:
+// upstream_providers.store_request_bodies is a NOT NULL BOOLEAN column
+// defaulting to FALSE — legacy rows survive the migration opted out — and the
+// flag round-trips through Create/Update/Get, including clearing it back to
+// false. Like the other store round-trips this is gated on PGSTORE_TEST_DSN.
+func TestUpstreamProviderStoreRequestBodiesRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_store_request_bodies")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The migration must add a NOT NULL BOOLEAN store_request_bodies column
+	// defaulting to FALSE so legacy rows stay opted out after the upgrade.
+	var colType, colNullable, colDefault string
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type, is_nullable, COALESCE(column_default, '')
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'store_request_bodies'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProvidersTable).Scan(&colType, &colNullable, &colDefault); err != nil {
+		t.Fatalf("query store_request_bodies column: %v", err)
+	}
+	if colType != "boolean" || colNullable != "NO" {
+		t.Fatalf("store_request_bodies column = %s/%s, want boolean/NO", colType, colNullable)
+	}
+	if !strings.Contains(colDefault, "false") {
+		t.Fatalf("store_request_bodies column default = %q, want false", colDefault)
+	}
+
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType:       "claude-api-key",
+		Name:               "privacy-on",
+		BaseURL:            "https://claude.example.test",
+		StoreRequestBodies: true,
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "privacy-secret-a", Name: "alpha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created.StoreRequestBodies {
+		t.Fatal("created store_request_bodies = false, want true")
+	}
+
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !loaded.StoreRequestBodies {
+		t.Fatal("store_request_bodies round-trip = false, want true")
+	}
+
+	// Clearing the opt-in back to default must persist.
+	_, err = src.Update(ctx, UpstreamProvider{
+		ID:                 created.ID,
+		ProviderType:       "claude-api-key",
+		Name:               "privacy-on",
+		BaseURL:            "https://claude.example.test",
+		StoreRequestBodies: false,
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: created.APIKeyEntries[0].ID, APIKey: "privacy-secret-a", Name: "alpha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update clearing store_request_bodies: %v", err)
+	}
+	reloaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after clear: %v", err)
+	}
+	if reloaded.StoreRequestBodies {
+		t.Fatal("store_request_bodies after clear = true, want false")
+	}
+}

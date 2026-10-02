@@ -1060,6 +1060,14 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: migrate upstream providers circuit breaker column: %w", err)
 	}
+	// upstream_providers.store_request_bodies column. The per-provider
+	// privacy toggle for full request/response capture. NOT NULL DEFAULT
+	// FALSE so legacy rows survive the upgrade opted out.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS store_request_bodies BOOLEAN NOT NULL DEFAULT FALSE`, upstreamProvidersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream providers store request bodies column: %w", err)
+	}
 	// upstream_provider_api_key_entries priority column. Optional per-entry
 	// selection tier; NULL = inherit the provider row priority. Nullable
 	// INTEGER with no DEFAULT, mirroring the weight column contract.
