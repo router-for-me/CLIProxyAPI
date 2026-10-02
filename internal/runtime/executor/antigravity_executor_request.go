@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -56,11 +57,16 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errProject != nil {
 		return nil, errProject
 	}
-	payload = geminiToAntigravity(modelName, payload, projectID, derivedSessionIDs...)
+	upstreamModelName := mapAntigravityUpstreamModel(modelName)
+	payload = geminiToAntigravity(upstreamModelName, payload, projectID, derivedSessionIDs...)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
 	if maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == gjson.Number {
-		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+		if modelInfo == nil {
+			modelInfo = registry.LookupModelInfo(upstreamModelName, "antigravity")
+		}
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
 				payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
 			}
@@ -70,19 +76,33 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	// Ensure includeThoughts and default thinkingLevel for Antigravity models that support thinking,
 	// so upstream Google Antigravity emits thinking process rather than silently
 	// consuming thinking quota while stripping thoughts.
-	if !isAntigravityIncludeThoughtsExplicitlyFalse(payload) {
+	if !isThinkingExplicitlyDisabled(payload) {
 		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+		if modelInfo == nil {
+			modelInfo = registry.LookupModelInfo(upstreamModelName, "antigravity")
+		}
 		hasThinkingSupport := modelInfo != nil && modelInfo.Thinking != nil
 		hasThinkingConfig := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig").Exists()
 		if hasThinkingSupport || hasThinkingConfig {
 			payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.includeThoughts", true)
 
-			// If neither thinkingLevel nor thinkingBudget is provided, supply the default thinkingLevel
-			// derived from the model name (e.g. -high -> "high", -low -> "low") or model capabilities
 			currLevel := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel")
 			currBudget := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
+
+			// If budget is provided for level-only model, convert to thinkingLevel
+			if currBudget.Exists() && (!currLevel.Exists() || currLevel.String() == "") && modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0 && !strings.Contains(strings.ToLower(modelName), "claude") {
+				budgetVal := int(currBudget.Int())
+				if levelStr, ok := thinking.ConvertBudgetToLevel(budgetVal); ok && levelStr != "" && levelStr != "none" {
+					payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel", levelStr)
+					payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
+				}
+			}
+
+			// If neither thinkingLevel nor thinkingBudget is provided, supply default thinkingLevel
+			currLevel = gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel")
+			currBudget = gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
 			if !currLevel.Exists() && !currBudget.Exists() && modelInfo != nil && modelInfo.Thinking != nil {
-				if len(modelInfo.Thinking.Levels) > 0 {
+				if len(modelInfo.Thinking.Levels) > 0 && !strings.Contains(strings.ToLower(modelName), "claude") {
 					defaultLevel := "high"
 					if strings.HasSuffix(strings.ToLower(modelName), "-low") {
 						defaultLevel = "low"
@@ -581,6 +601,48 @@ func isAntigravityIncludeThoughtsExplicitlyFalse(payload []byte) bool {
 		if res := gjson.GetBytes(payload, path); res.Exists() && res.Type == gjson.False {
 			return true
 		}
+	}
+	return false
+}
+func mapAntigravityUpstreamModel(modelName string) string {
+	switch strings.ToLower(strings.TrimSpace(modelName)) {
+	case "gemini-3.8-flash":
+		return "gemini-3.8-flash-high"
+	case "gemini-3.7-flash":
+		return "gemini-3.7-flash-high"
+	case "gemini-3.6-flash":
+		return "gemini-3.6-flash-high"
+	case "gemini-3.1-pro", "gemini-3-pro":
+		return "gemini-pro-agent"
+	default:
+		return modelName
+	}
+}
+
+func isThinkingExplicitlyDisabled(payload []byte) bool {
+	if isAntigravityIncludeThoughtsExplicitlyFalse(payload) {
+		return true
+	}
+	for _, path := range []string{
+		"reasoning_effort",
+		"reasoning.effort",
+		"output_config.effort",
+	} {
+		if val := gjson.GetBytes(payload, path); val.Exists() {
+			s := strings.ToLower(strings.TrimSpace(val.String()))
+			if s == "none" || s == "off" {
+				return true
+			}
+		}
+	}
+	if res := gjson.GetBytes(payload, "reasoning.enabled"); res.Exists() && res.Type == gjson.False {
+		return true
+	}
+	if res := gjson.GetBytes(payload, "enable_thinking"); res.Exists() && res.Type == gjson.False {
+		return true
+	}
+	if res := gjson.GetBytes(payload, "thinking.type"); res.Exists() && strings.EqualFold(res.String(), "disabled") {
+		return true
 	}
 	return false
 }
