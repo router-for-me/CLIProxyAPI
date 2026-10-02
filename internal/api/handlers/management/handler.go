@@ -295,16 +295,28 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 }
 
 // startAttemptCleanup launches a background goroutine that periodically
-// removes stale IP entries from failedAttempts to prevent memory leaks. The
-// idle timeout is read live from the management-login policy.
+// removes stale IP entries from failedAttempts to prevent memory leaks. Both
+// the idle timeout and the cleanup cadence are read live from the
+// management-login policy.
 func (h *Handler) startAttemptCleanup() {
 	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			h.purgeStaleAttempts(h.currentLoginSettings().IdleTimeout())
+		timer := time.NewTimer(cleanupFloor(h.currentLoginSettings().CleanupInterval()))
+		defer timer.Stop()
+		for range timer.C {
+			set := h.currentLoginSettings()
+			h.purgeStaleAttempts(set.IdleTimeout())
+			timer.Reset(cleanupFloor(set.CleanupInterval()))
 		}
 	}()
+}
+
+// cleanupFloor keeps the sweep cadence at one minute or slower so a
+// misconfigured value cannot busy-loop the purge.
+func cleanupFloor(d time.Duration) time.Duration {
+	if d < time.Minute {
+		return time.Minute
+	}
+	return d
 }
 
 // purgeStaleAttempts removes IP entries that have been idle beyond maxIdle
