@@ -54,6 +54,13 @@ const (
 	defaultModelHealthSettingsTable      = "model_health_settings"
 	defaultAlertsTable                   = "alerts"
 	defaultAlertSettingsTable            = "alert_settings"
+	// ManagementLoginSettingsTable stores the singleton management-login
+	// security policy (brute-force threshold, ban duration, failure window,
+	// cleanup cadence, event retention). Mirrors the alert_settings pattern.
+	defaultManagementLoginSettingsTable = "management_login_settings"
+	// ManagementLoginEventsTable stores the append-only audit trail of every
+	// management login attempt (success + failure + ban outcomes).
+	defaultManagementLoginEventsTable = "management_login_events"
 	// Manage-LiteLLM tables. These mirror LiteLLM's own schema (internal
 	// users + API keys + key policies) but are intentionally separate from the
 	// runtime tables (internal_users / api_keys / api_key_policies) so the
@@ -251,6 +258,13 @@ type PostgresStoreConfig struct {
 	// alert sweep (enabled, interval_seconds, per-category toggles, thresholds).
 	AlertSettingsTable string
 
+	// ManagementLoginSettingsTable stores the singleton management-login
+	// brute-force policy row.
+	ManagementLoginSettingsTable string
+	// ManagementLoginEventsTable stores the append-only management login
+	// attempt log.
+	ManagementLoginEventsTable string
+
 	// LiteLLMUsersTable stores the Manage-LiteLLM internal-user entity
 	// (LiteLLM-style key owners). Kept separate from InternalUsersTable so the
 	// Manage LiteLLM feature holds its own data without touching the runtime
@@ -426,6 +440,12 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.AlertSettingsTable == "" {
 		cfg.AlertSettingsTable = defaultAlertSettingsTable
+	}
+	if cfg.ManagementLoginSettingsTable == "" {
+		cfg.ManagementLoginSettingsTable = defaultManagementLoginSettingsTable
+	}
+	if cfg.ManagementLoginEventsTable == "" {
+		cfg.ManagementLoginEventsTable = defaultManagementLoginEventsTable
 	}
 	if cfg.LiteLLMUsersTable == "" {
 		cfg.LiteLLMUsersTable = defaultLiteLLMUsersTable
@@ -2497,6 +2517,63 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: seed alert_settings singleton: %w", err)
 	}
+
+	// management_login_settings stores the singleton brute-force policy for
+	// the management API auth path. Seeded so GetLoginSettings always finds a
+	// row; defaults match the historical hardcoded constants.
+	managementLoginSettingsTable := s.fullTableName(s.cfg.ManagementLoginSettingsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                        INTEGER PRIMARY KEY DEFAULT 1,
+			enabled                   BOOLEAN NOT NULL DEFAULT TRUE,
+			max_failed_attempts       INTEGER NOT NULL DEFAULT 5,
+			ban_duration_seconds      INTEGER NOT NULL DEFAULT 1800,
+			failure_window_seconds    INTEGER NOT NULL DEFAULT 0,
+			cleanup_interval_seconds  INTEGER NOT NULL DEFAULT 3600,
+			idle_timeout_seconds      INTEGER NOT NULL DEFAULT 7200,
+			log_successes             BOOLEAN NOT NULL DEFAULT TRUE,
+			retention_days            INTEGER NOT NULL DEFAULT 30,
+			updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT management_login_settings_singleton CHECK (id = 1)
+		)
+	`, managementLoginSettingsTable)); err != nil {
+		return fmt.Errorf("postgres store: create management_login_settings table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (id) VALUES (1) ON CONFLICT (id) DO NOTHING`, managementLoginSettingsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: seed management_login_settings singleton: %w", err)
+	}
+
+	// management_login_events stores the append-only management login attempt
+	// log. Indexed by time and by (ip, time) for the dashboard filters.
+	managementLoginEventsTable := s.fullTableName(s.cfg.ManagementLoginEventsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id            BIGSERIAL PRIMARY KEY,
+			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			ip            TEXT NOT NULL DEFAULT '',
+			outcome       TEXT NOT NULL DEFAULT '',
+			reason        TEXT NOT NULL DEFAULT '',
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			local         BOOLEAN NOT NULL DEFAULT FALSE,
+			user_agent    TEXT NOT NULL DEFAULT ''
+		)
+	`, managementLoginEventsTable)); err != nil {
+		return fmt.Errorf("postgres store: create management_login_events table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS %s ON %s (created_at DESC)`,
+		quoteIdentifier("idx_management_login_events_created_at"), managementLoginEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create management_login_events time index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS %s ON %s (ip, created_at DESC)`,
+		quoteIdentifier("idx_management_login_events_ip"), managementLoginEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create management_login_events ip index: %w", err)
+	}
 	return nil
 }
 
@@ -2889,6 +2966,24 @@ func (s *PostgresStore) AlertSettingsTable() string {
 		return quoteIdentifier(defaultAlertSettingsTable)
 	}
 	return s.fullTableName(s.cfg.AlertSettingsTable)
+}
+
+// ManagementLoginSettingsTable returns the fully-qualified name of the
+// management_login_settings singleton table.
+func (s *PostgresStore) ManagementLoginSettingsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultManagementLoginSettingsTable)
+	}
+	return s.fullTableName(s.cfg.ManagementLoginSettingsTable)
+}
+
+// ManagementLoginEventsTable returns the fully-qualified name of the
+// management_login_events append-only log table.
+func (s *PostgresStore) ManagementLoginEventsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultManagementLoginEventsTable)
+	}
+	return s.fullTableName(s.cfg.ManagementLoginEventsTable)
 }
 
 // LiteLLMUsersTable returns the fully-qualified name of the Manage-LiteLLM
