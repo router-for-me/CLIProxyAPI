@@ -157,6 +157,10 @@ type PgStoreHandles struct {
 	// (per-request LiteLLM API key validation outcomes). nil when PG is not
 	// configured — the /litellm/onthefly-log routes return 503.
 	LiteLLMOnTheFly *store.OnTheFlyLogStore
+	// ManagementLogin is the PG-backed store for the management-login
+	// brute-force policy + attempt log. nil when PG is not configured — the
+	// /management-login routes return 503 and the auth path uses defaults.
+	ManagementLogin *store.ManagementLoginStore
 }
 
 // ServerOption customises HTTP server construction.
