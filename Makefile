@@ -7,7 +7,15 @@ BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 TAGS ?= netgo osusergo
 OUTPUT ?= bin/server
 
-LDFLAGS_COMMON := -checklinkname=0 -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)
+# Technical Debt Note: -checklinkname=0
+# According to Go documentation:
+#   "-checklinkname=0 can be used to disable this check, for debugging and experimenting purposes"
+# This is NOT a standard build parameter; it is a temporary technical debt caused by:
+#   pion/ice -> pion/transport -> wlynxg/anet (links to internal net.zoneCache)
+# See docs/tech-debt-checklinkname.md for full details and removal roadmap (B-4).
+CHECKLINKNAME_FLAG := -checklinkname=0
+
+LDFLAGS_COMMON := $(CHECKLINKNAME_FLAG) -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)
 LDFLAGS_RELEASE := -s -w $(LDFLAGS_COMMON)
 
 .PHONY: all build release clean test
@@ -25,6 +33,6 @@ release:
 clean:
 	rm -rf bin/ dist/
 
-# 单测命令：明确指定 -checklinkname=0（因 wlynxg/anet 链接私有符号 net.zoneCache）
+# 单测命令：附带 -checklinkname=0 确保含 live 依赖的测试包在 Go 1.23+ 正常链接
 test:
-	go test -ldflags="-checklinkname=0" ./...
+	go test -ldflags="$(CHECKLINKNAME_FLAG)" ./...
