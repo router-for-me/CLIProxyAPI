@@ -1,7 +1,10 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -84,4 +87,58 @@ func capSection(b []byte, max int) ([]byte, bool) {
 		return b, false
 	}
 	return b[:max], true
+}
+
+// captureBuffer is a bounded io.Writer used as the destination of a request
+// body tee. It keeps the first max bytes and records truncation; writes beyond
+// the cap are swallowed (never errored) so the tee cannot disturb the handler.
+type captureBuffer struct {
+	buf       bytes.Buffer
+	max       int
+	truncated bool
+}
+
+func (b *captureBuffer) Write(p []byte) (int, error) {
+	if b == nil {
+		return len(p), nil
+	}
+	remaining := b.max - b.buf.Len()
+	if remaining <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		if _, errWrite := b.buf.Write(p[:remaining]); errWrite != nil {
+			return 0, errWrite
+		}
+		b.truncated = true
+		return len(p), nil
+	}
+	if _, errWrite := b.buf.Write(p); errWrite != nil {
+		return 0, errWrite
+	}
+	return len(p), nil
+}
+
+// teeReadCloser combines the tee reader with the original body's closer so the
+// handler can read and close the request body as usual.
+type teeReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// attachRequestBodyCapture installs a bounded tee on req.Body that copies up
+// to buf.max bytes while still delivering the full stream to the handler. It
+// is independent of the file-logging capture heuristic. Multipart bodies are
+// skipped, matching the existing request-log capture behavior.
+func attachRequestBodyCapture(req *http.Request, buf *captureBuffer) {
+	if req == nil || req.Body == nil || req.Body == http.NoBody || buf == nil {
+		return
+	}
+	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		return
+	}
+	body := req.Body
+	req.Body = teeReadCloser{Reader: io.TeeReader(body, buf), Closer: body}
 }

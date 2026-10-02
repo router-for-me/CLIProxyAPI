@@ -47,10 +47,11 @@ type ResponseWriterWrapper struct {
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
 
 	// body capture (opt-in, gated per request by the resolved executor)
-	bodySink          BodyCaptureSink // bodySink persists captured pairs; nil disables capture.
-	captureEnabled    func() bool     // captureEnabled reports whether this request opted into capture.
-	capturedStreamBuf *bytes.Buffer   // capturedStreamBuf tees streaming response chunks for capture.
-	captureTruncated  bool            // captureTruncated records that a captured section was capped.
+	bodySink            BodyCaptureSink // bodySink persists captured pairs; nil disables capture.
+	captureEnabled      func() bool     // captureEnabled reports whether this request opted into capture.
+	capturedStreamBuf   *bytes.Buffer   // capturedStreamBuf tees streaming response chunks for capture.
+	captureTruncated    bool            // captureTruncated records that a captured section was capped.
+	capturedRequestBody *captureBuffer  // capturedRequestBody holds the bounded client request body tee.
 }
 
 // captureOn reports whether this request should capture bodies. It is nil-safe
@@ -141,7 +142,9 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if w.logger != nil && w.logger.IsEnabled() {
 		return true
 	}
-	if w.captureOn() {
+	// Streaming responses rely solely on the bounded capturedStreamBuf tee;
+	// never accumulate them in w.body (which is unbounded).
+	if w.captureOn() && !w.isStreaming {
 		return true
 	}
 	if !w.logOnErrorOnly {
@@ -454,6 +457,12 @@ func (w *ResponseWriterWrapper) captureToSink(c *gin.Context) {
 		req.ClientRequestHeaders = w.requestInfo.Headers
 		req.ClientRequestBody = w.requestInfo.Body
 	}
+	// When a bounded request-body tee is installed (sink mode), it is the
+	// authoritative source; fall back to the file-log capture only if the
+	// handler never consumed the tee.
+	if w.capturedRequestBody != nil && w.capturedRequestBody.buf.Len() > 0 {
+		req.ClientRequestBody = w.capturedRequestBody.buf.Bytes()
+	}
 	req.ClientResponseHeaders = w.cloneHeaders()
 	if w.isStreaming && w.capturedStreamBuf != nil {
 		req.ClientResponseBody = w.capturedStreamBuf.Bytes()
@@ -469,6 +478,9 @@ func (w *ResponseWriterWrapper) captureToSink(c *gin.Context) {
 	req.ClientRequestBody, truncCReq = capSection(req.ClientRequestBody, bodyCaptureSectionMaxBytes)
 	req.ClientResponseBody, truncCResp = capSection(req.ClientResponseBody, bodyCaptureSectionMaxBytes)
 	req.Truncated = w.captureTruncated || truncReq || truncResp || truncCReq || truncCResp
+	if w.capturedRequestBody != nil && w.capturedRequestBody.truncated {
+		req.Truncated = true
+	}
 
 	total := len(req.ClientRequestBody) + len(req.ClientResponseBody) + len(upReq) + len(upResp)
 	if total > bodyCaptureTotalMaxBytes {

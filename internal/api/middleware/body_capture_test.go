@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,18 +19,34 @@ func (r *recordingSink) Capture(_ context.Context, req BodyCaptureRequest) {
 	r.got = append(r.got, req)
 }
 
+func TestBodyCaptureSinkSkipsGETEvenWithSink(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := &recordingSink{}
+	logger := logging.NewFileRequestLogger(true, t.TempDir(), "", 0)
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger, sink))
+	engine.GET("/skip", func(c *gin.Context) {
+		c.Set(logging.StoreRequestBodiesContextKey, true)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/skip", nil))
+	if len(sink.got) != 0 {
+		t.Fatalf("GET must stay skipped with a sink present, got %d captures", len(sink.got))
+	}
+}
+
 func TestBodyCaptureSinkCalledWhenGateSet(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	sink := &recordingSink{}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(nil, sink))
-	engine.GET("/x", func(c *gin.Context) {
+	engine.POST("/x", func(c *gin.Context) {
 		c.Set(logging.StoreRequestBodiesContextKey, true)
 		c.Set(logging.StoreRequestBodiesProviderContextKey, "claude")
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 	rec := httptest.NewRecorder()
-	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/x", nil))
 	if len(sink.got) != 1 {
 		t.Fatalf("want 1 capture, got %d", len(sink.got))
 	}
@@ -42,8 +60,8 @@ func TestBodyCaptureSinkNotCalledWhenGateAbsent(t *testing.T) {
 	sink := &recordingSink{}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(nil, sink))
-	engine.GET("/y", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
-	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/y", nil))
+	engine.POST("/y", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/y", nil))
 	if len(sink.got) != 0 {
 		t.Fatalf("expected no capture, got %d", len(sink.got))
 	}
@@ -98,7 +116,7 @@ func TestBodyCaptureSinkTeesStreamingResponse(t *testing.T) {
 	sink := &recordingSink{}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(nil, sink))
-	engine.GET("/stream", func(c *gin.Context) {
+	engine.POST("/stream", func(c *gin.Context) {
 		c.Set(logging.StoreRequestBodiesContextKey, true)
 		c.Set(logging.StoreRequestBodiesProviderContextKey, "claude")
 		c.Header("Content-Type", "text/event-stream")
@@ -110,7 +128,7 @@ func TestBodyCaptureSinkTeesStreamingResponse(t *testing.T) {
 			t.Fatalf("write chunk 2: %v", errWrite)
 		}
 	})
-	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/stream", nil))
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/stream", nil))
 
 	if len(sink.got) != 1 {
 		t.Fatalf("want 1 capture, got %d", len(sink.got))
@@ -118,5 +136,90 @@ func TestBodyCaptureSinkTeesStreamingResponse(t *testing.T) {
 	body := string(sink.got[0].ClientResponseBody)
 	if !strings.Contains(body, "data: one") || !strings.Contains(body, "data: two") {
 		t.Fatalf("streamed capture = %q", body)
+	}
+}
+
+func TestBodyCaptureSinkBoundsStreamingCapture(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := &recordingSink{}
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(nil, sink))
+	chunk := bytes.Repeat([]byte("s"), 1024)
+	chunks := (bodyCaptureSectionMaxBytes / len(chunk)) + 8
+	engine.POST("/stream-big", func(c *gin.Context) {
+		c.Set(logging.StoreRequestBodiesContextKey, true)
+		c.Set(logging.StoreRequestBodiesProviderContextKey, "claude")
+		c.Header("Content-Type", "text/event-stream")
+		c.Writer.WriteHeader(http.StatusOK)
+		for i := 0; i < chunks; i++ {
+			if _, errWrite := c.Writer.Write(chunk); errWrite != nil {
+				t.Fatalf("write chunk %d: %v", i, errWrite)
+			}
+		}
+	})
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/stream-big", nil))
+
+	if rec.Body.Len() != len(chunk)*chunks {
+		t.Fatalf("client bytes = %d, want %d", rec.Body.Len(), len(chunk)*chunks)
+	}
+	if len(sink.got) != 1 {
+		t.Fatalf("want 1 capture, got %d", len(sink.got))
+	}
+	got := sink.got[0]
+	if len(got.ClientResponseBody) > bodyCaptureSectionMaxBytes {
+		t.Fatalf("captured %d stream bytes, want <= %d", len(got.ClientResponseBody), bodyCaptureSectionMaxBytes)
+	}
+	if !got.Truncated {
+		t.Fatal("expected truncation for oversized stream")
+	}
+}
+
+func TestBodyCaptureStreamingDoesNotBufferBody(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	w := NewResponseWriterWrapper(c.Writer, nil, &RequestInfo{})
+	w.captureEnabled = func() bool { return true }
+	w.isStreaming = true
+	w.capturedStreamBuf = &bytes.Buffer{}
+
+	if _, errWrite := w.Write([]byte("chunk")); errWrite != nil {
+		t.Fatalf("write: %v", errWrite)
+	}
+	if w.body.Len() != 0 {
+		t.Fatalf("streaming wrote %d bytes into w.body, want 0", w.body.Len())
+	}
+	if w.capturedStreamBuf.Len() != len("chunk") {
+		t.Fatalf("tee captured %d bytes, want %d", w.capturedStreamBuf.Len(), len("chunk"))
+	}
+}
+
+func TestBodyCaptureSinkTruncatesOversizedClientBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := &recordingSink{}
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(nil, sink))
+	engine.POST("/big", func(c *gin.Context) {
+		c.Set(logging.StoreRequestBodiesContextKey, true)
+		c.Set(logging.StoreRequestBodiesProviderContextKey, "openai")
+		if _, errCopy := io.Copy(io.Discard, c.Request.Body); errCopy != nil {
+			t.Fatalf("drain body: %v", errCopy)
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	payload := bytes.Repeat([]byte("a"), bodyCaptureSectionMaxBytes+4096)
+	request := httptest.NewRequest(http.MethodPost, "/big", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(httptest.NewRecorder(), request)
+
+	if len(sink.got) != 1 {
+		t.Fatalf("want 1 capture, got %d", len(sink.got))
+	}
+	got := sink.got[0]
+	if len(got.ClientRequestBody) != bodyCaptureSectionMaxBytes {
+		t.Fatalf("captured %d request bytes, want %d", len(got.ClientRequestBody), bodyCaptureSectionMaxBytes)
+	}
+	if !got.Truncated {
+		t.Fatal("expected Truncated for oversized client body")
 	}
 }

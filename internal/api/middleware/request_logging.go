@@ -38,10 +38,9 @@ func RequestLoggingMiddleware(logger logging.RequestLogger, sink BodyCaptureSink
 			return
 		}
 
-		// The method skip only applies to file logging. Body capture is gated
-		// dynamically by the executor (which may run for any method), so the
-		// wrapper must be installed whenever a sink is configured.
-		if sink == nil && shouldSkipMethodForRequestLogging(c.Request) {
+		// The method skip applies to file logging and body capture alike: a
+		// skipped method (e.g. plain GET) never has a body to capture.
+		if shouldSkipMethodForRequestLogging(c.Request) {
 			c.Next()
 			return
 		}
@@ -68,6 +67,13 @@ func RequestLoggingMiddleware(logger logging.RequestLogger, sink BodyCaptureSink
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
 		wrapper.bodySink = sink
 		wrapper.captureEnabled = func() bool { return storeRequestBodiesRequested(c) }
+		if sink != nil {
+			// Bounded request-body tee, independent of the file-logging
+			// heuristic: captures up to one section cap while the handler
+			// still reads the full stream.
+			wrapper.capturedRequestBody = &captureBuffer{max: bodyCaptureSectionMaxBytes}
+			attachRequestBodyCapture(c.Request, wrapper.capturedRequestBody)
+		}
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}
