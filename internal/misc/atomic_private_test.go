@@ -3,6 +3,7 @@ package misc
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -57,7 +58,7 @@ func TestAtomicWritePrivateReplacementContentsAndMode(t *testing.T) {
 	if os.SameFile(before, after) {
 		t.Fatal("destination inode was not replaced")
 	}
-	if after.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && after.Mode().Perm() != 0600 {
 		t.Fatalf("mode=%o", after.Mode().Perm())
 	}
 	entries, err := os.ReadDir(dir)

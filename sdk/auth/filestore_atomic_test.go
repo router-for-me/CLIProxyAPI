@@ -5,6 +5,7 @@ import (
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -23,7 +24,7 @@ func TestMetadataSaveAtomicEvenForIdenticalPayload(t *testing.T) {
 	if os.SameFile(before, after) {
 		t.Fatal("identical payload must not skip durability retry")
 	}
-	if after.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && after.Mode().Perm() != 0600 {
 		t.Fatal("not private")
 	}
 }

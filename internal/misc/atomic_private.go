@@ -7,9 +7,12 @@ import (
 )
 
 // AtomicWritePrivate replaces a credential file only after syncing its contents.
-// An error after Rename is commit-uncertain: the replacement may be visible
-// without confirmed directory durability. This helper does not make remote OAuth
-// rotation atomic or provide refresh-owner restart recovery.
+// On Unix it also syncs the parent directory; an error after replacement is
+// commit-uncertain. On Windows it uses a native same-volume replacement with
+// write-through requested, without promising directory-fsync or power-loss
+// atomicity. Mode 0600 is enforced on Unix; Windows permissions inherit the
+// directory ACL (Chmod does not establish a private ACL). This helper does not
+// make remote OAuth rotation atomic or provide refresh-owner restart recovery.
 func AtomicWritePrivate(path string, data []byte) error {
 	return atomicWritePrivate(path, data, privateWriteOpsDefault())
 }
@@ -25,7 +28,7 @@ type privateWriteOps struct {
 }
 
 func privateWriteOpsDefault() privateWriteOps {
-	return privateWriteOps{os.CreateTemp, (*os.File).Chmod, (*os.File).Write, (*os.File).Sync, (*os.File).Close, (*os.File).Sync, (*os.File).Close, os.Rename, os.Open}
+	return privateWriteOps{os.CreateTemp, (*os.File).Chmod, (*os.File).Write, (*os.File).Sync, (*os.File).Close, (*os.File).Sync, (*os.File).Close, replacePrivateFile, os.Open}
 }
 
 func atomicWritePrivate(path string, data []byte, ops privateWriteOps) error {
@@ -63,14 +66,5 @@ func atomicWritePrivate(path string, data []byte, ops privateWriteOps) error {
 	if err = ops.rename(name, path); err != nil {
 		return err
 	}
-	d, err := ops.openDir(dir)
-	if err != nil {
-		return err
-	}
-	syncErr := ops.syncDir(d)
-	closeErr := ops.closeDir(d)
-	if syncErr != nil {
-		return syncErr
-	}
-	return closeErr
+	return syncPrivateDirectory(dir, ops)
 }

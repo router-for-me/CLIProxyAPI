@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +14,9 @@ import (
 func TestAtomicWritePrivateOperationFailures(t *testing.T) {
 	for _, stage := range []string{"create", "chmod", "write", "short-write", "file-sync", "file-close", "rename", "dir-open", "dir-sync", "dir-close"} {
 		t.Run(stage, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.HasPrefix(stage, "dir-") {
+				t.Skip("Windows uses native write-through replacement, not directory fsync")
+			}
 			dir := t.TempDir()
 			path := filepath.Join(dir, "credential.json")
 			if err := os.WriteFile(path, []byte("old"), 0600); err != nil {

@@ -3,6 +3,7 @@ package codex
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -23,7 +24,7 @@ func TestTokenSaveAtomicPrivateReplacement(t *testing.T) {
 	if os.SameFile(before, after) {
 		t.Fatal("token save truncated existing inode instead of atomic replacement")
 	}
-	if after.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && after.Mode().Perm() != 0600 {
 		t.Fatalf("mode=%o", after.Mode().Perm())
 	}
 }
