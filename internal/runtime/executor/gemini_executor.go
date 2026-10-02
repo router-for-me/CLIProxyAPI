@@ -865,14 +865,14 @@ func translateGeminiInteractionsRequestBody(ctx context.Context, cfg *config.Con
 }
 
 // translateGeminiInteractionsRequestPair translates the working payload and the
-// payload-config baseline. Identical inputs are translated once when no plugin
-// hooks are installed. The baseline is captured before model and thinking
-// mutations, and the working buffer is a separate copy so those mutations cannot
-// change it. Distinct inputs and plugin hooks keep the existing order: working
-// payload first, then the payload-config source.
+// payload-config baseline. Identical inputs are translated once, including plugin
+// hooks. The baseline is captured before model and thinking mutations, and the
+// working buffer is a separate copy so those mutations cannot change it. Distinct
+// inputs keep the existing order: working payload first, then the payload-config
+// source.
 func translateGeminiInteractionsRequestPair(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) (original, working []byte) {
 	source := geminiInteractionsPayloadConfigInput(opts, payload)
-	if geminiInteractionsSameByteSlice(payload, source) && !sdktranslator.HasPluginHooks() {
+	if geminiInteractionsSameByteSlice(payload, source) {
 		original = translateGeminiInteractionsRequestBody(ctx, cfg, model, payload, opts, stream, isCompat)
 		return original, bytes.Clone(original)
 	}

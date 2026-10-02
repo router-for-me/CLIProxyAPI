@@ -132,32 +132,45 @@ func TestTranslateRequestPairTranslatesDistinctPayloads(t *testing.T) {
 	}
 }
 
-func TestTranslateRequestPairPreservesPluginHookInvocations(t *testing.T) {
+func TestTranslateRequestPairInvokesPluginOncePerInput(t *testing.T) {
 	hooks := &pairRequestPluginHooks{}
 	sdktranslator.SetPluginHooks(hooks)
 	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
 
 	payload := geminiToolHistoryPayload(1)
-	base, work := TranslateRequestPairWithCodexMultiAgentV2(
-		context.Background(),
-		http.Header{},
-		&config.Config{},
-		sdktranslator.FormatGemini,
-		sdktranslator.FromString("antigravity"),
-		"gemini-3.6-flash-high",
-		payload,
-		payload,
-		true,
-	)
-
-	if hooks.calls != 2 {
-		t.Fatalf("plugin hook calls = %d, want 2", hooks.calls)
-	}
-	if got := gjson.GetBytes(base, "plugin_call").Int(); got != 1 {
-		t.Fatalf("baseline plugin_call = %d, want 1", got)
-	}
-	if got := gjson.GetBytes(work, "plugin_call").Int(); got != 2 {
-		t.Fatalf("working plugin_call = %d, want 2", got)
+	for _, stream := range []bool{false, true} {
+		for _, distinct := range []bool{false, true} {
+			hooks.calls = 0
+			request := payload
+			wantCalls := int64(1)
+			if distinct {
+				request = geminiToolHistoryPayload(2)
+				wantCalls = 2
+			}
+			base, work := TranslateRequestPairWithCodexMultiAgentV2(
+				context.Background(), http.Header{}, &config.Config{},
+				sdktranslator.FormatGemini, sdktranslator.FormatAntigravity,
+				"gemini-3.6-flash-high", payload, request, stream,
+			)
+			if hooks.calls != wantCalls {
+				t.Fatalf("stream=%v distinct=%v: plugin calls = %d, want %d", stream, distinct, hooks.calls, wantCalls)
+			}
+			if got := gjson.GetBytes(base, "plugin_call").Int(); got != 1 {
+				t.Fatalf("baseline plugin_call = %d, want 1", got)
+			}
+			if got := gjson.GetBytes(work, "plugin_call").Int(); got != wantCalls {
+				t.Fatalf("working plugin_call = %d, want %d", got, wantCalls)
+			}
+			if !distinct && !bytes.Equal(base, work) {
+				t.Fatal("same input produced different plugin results")
+			}
+			baselineBefore := bytes.Clone(base)
+			inputBefore := bytes.Clone(request)
+			work[0] = 'X'
+			if !bytes.Equal(base, baselineBefore) || !bytes.Equal(request, inputBefore) {
+				t.Fatal("working buffer aliases the baseline or input")
+			}
+		}
 	}
 }
 

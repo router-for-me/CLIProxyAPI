@@ -66,12 +66,10 @@ func TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx context.Context, headers 
 
 // TranslateRequestPairWithCodexMultiAgentV2 translates the untouched baseline
 // payload and the working payload that later stages mutate in place. Executors
-// normally assign the original payload to the request before translating, so both
-// translations would rescan the same bytes and produce the same result. Built-in
-// request translation is deterministic, so that case is translated once and
-// duplicated when no plugin hooks are installed. Hooks retain two invocations
-// because they may have request-scoped output or side effects. This removes a
-// full extra pass over payloads that can reach tens of megabytes.
+// normally assign the original payload to the request before translating, so the
+// same input is translated once, including plugin hooks, then copied into a
+// separate working buffer. This avoids duplicate plugin side effects and a full
+// extra pass over payloads that can reach tens of megabytes.
 func TranslateRequestPairWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream bool) (original, working []byte) {
 	req := sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream}
 	return TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx, headers, cfg, from, to, req, originalPayload, requestPayload)
@@ -83,7 +81,7 @@ func TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx context.Context, head
 	originalReq := req
 	originalReq.Body = originalPayload
 	original = TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, originalReq).Body
-	if sameByteSlice(originalPayload, requestPayload) && !sdktranslator.HasPluginHooks() {
+	if sameByteSlice(originalPayload, requestPayload) {
 		// The caller mutates the working copy, so it must not share the baseline array.
 		return original, append([]byte(nil), original...)
 	}
@@ -106,7 +104,7 @@ func sameByteSlice(a, b []byte) bool {
 }
 
 // TranslateRequestPairWithAPIKeyModelCompatibility avoids translating identical
-// inputs twice while retaining separate buffers and stateful plugin invocations.
+// inputs twice while retaining separate buffers and invoking plugins once per input.
 func TranslateRequestPairWithAPIKeyModelCompatibility(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream, isCompat bool) (original, working []byte) {
 	original, working, _ = TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, originalPayload, requestPayload, stream, isCompat)
 	return original, working
@@ -115,9 +113,9 @@ func TranslateRequestPairWithAPIKeyModelCompatibility(ctx context.Context, heade
 // TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent returns the
 // normalizer decision for the working payload, not for the baseline payload.
 func TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream, isCompat bool) (original, working []byte, updatesChanged bool) {
-	original, _ = TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, originalPayload, stream, isCompat)
-	if sameByteSlice(originalPayload, requestPayload) && !sdktranslator.HasPluginHooks() {
-		return original, append([]byte(nil), original...), false
+	original, updatesChanged = TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, originalPayload, stream, isCompat)
+	if sameByteSlice(originalPayload, requestPayload) {
+		return original, append([]byte(nil), original...), updatesChanged
 	}
 	working, updatesChanged = TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, requestPayload, stream, isCompat)
 	return original, working, updatesChanged
