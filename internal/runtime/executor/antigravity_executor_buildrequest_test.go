@@ -533,3 +533,79 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 		t.Fatalf("deprecated should be removed from nested schema")
 	}
 }
+
+func TestAntigravityBuildRequest_ThinkingConfigIncludeThoughts(t *testing.T) {
+	t.Run("defaults includeThoughts to true for thinking models", func(t *testing.T) {
+		body := buildRequestBodyFromRawPayload(t, "gemini-3.8-flash-high", []byte(`{
+			"request": {
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}]
+			}
+		}`))
+		request, ok := body["request"].(map[string]any)
+		if !ok {
+			t.Fatalf("request missing")
+		}
+		genConfig, ok := request["generationConfig"].(map[string]any)
+		if !ok {
+			t.Fatalf("generationConfig missing: %v", request)
+		}
+		thinkingConfig, ok := genConfig["thinkingConfig"].(map[string]any)
+		if !ok {
+			t.Fatalf("thinkingConfig missing: %v", genConfig)
+		}
+		if thinkingConfig["includeThoughts"] != true {
+			t.Fatalf("includeThoughts = %v, want true", thinkingConfig["includeThoughts"])
+		}
+	})
+
+	t.Run("preserves explicit includeThoughts false", func(t *testing.T) {
+		body := buildRequestBodyFromRawPayload(t, "gemini-3.8-flash-high", []byte(`{
+			"request": {
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"thinkingConfig": {
+						"includeThoughts": false
+					}
+				}
+			}
+		}`))
+		request, ok := body["request"].(map[string]any)
+		if !ok {
+			t.Fatalf("request missing")
+		}
+		genConfig, ok := request["generationConfig"].(map[string]any)
+		if !ok {
+			t.Fatalf("generationConfig missing")
+		}
+		thinkingConfig, ok := genConfig["thinkingConfig"].(map[string]any)
+		if !ok {
+			t.Fatalf("thinkingConfig missing")
+		}
+		if thinkingConfig["includeThoughts"] != false {
+			t.Fatalf("includeThoughts = %v, want false", thinkingConfig["includeThoughts"])
+		}
+	})
+
+	t.Run("enables includeThoughts for claude thinking models", func(t *testing.T) {
+		body := buildRequestBodyFromRawPayload(t, "claude-sonnet-4-6", []byte(`{
+			"request": {
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}]
+			}
+		}`))
+		request, ok := body["request"].(map[string]any)
+		if !ok {
+			t.Fatalf("request missing")
+		}
+		genConfig, ok := request["generationConfig"].(map[string]any)
+		if !ok {
+			t.Fatalf("generationConfig missing")
+		}
+		thinkingConfig, ok := genConfig["thinkingConfig"].(map[string]any)
+		if !ok {
+			t.Fatalf("thinkingConfig missing")
+		}
+		if thinkingConfig["includeThoughts"] != true {
+			t.Fatalf("includeThoughts = %v, want true", thinkingConfig["includeThoughts"])
+		}
+	})
+}

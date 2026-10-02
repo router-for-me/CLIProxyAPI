@@ -67,6 +67,18 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 
+	// Ensure includeThoughts: true for Antigravity models that support thinking,
+	// so upstream Google Antigravity emits thinking process rather than silently
+	// consuming thinking quota while stripping thoughts.
+	if !isAntigravityIncludeThoughtsExplicitlyFalse(payload) {
+		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+		hasThinkingSupport := modelInfo != nil && modelInfo.Thinking != nil
+		hasThinkingConfig := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig").Exists()
+		if hasThinkingSupport || hasThinkingConfig {
+			payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.includeThoughts", true)
+		}
+	}
+
 	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
 	var (
 		bodyReader io.Reader
@@ -539,4 +551,18 @@ func generateStableSessionID(payload []byte) string {
 		return stableID
 	}
 	return generateSessionID()
+}
+
+func isAntigravityIncludeThoughtsExplicitlyFalse(payload []byte) bool {
+	for _, path := range []string{
+		"request.generationConfig.thinkingConfig.includeThoughts",
+		"request.generationConfig.thinkingConfig.include_thoughts",
+		"generationConfig.thinkingConfig.includeThoughts",
+		"generationConfig.thinkingConfig.include_thoughts",
+	} {
+		if res := gjson.GetBytes(payload, path); res.Exists() && res.Type == gjson.False {
+			return true
+		}
+	}
+	return false
 }
