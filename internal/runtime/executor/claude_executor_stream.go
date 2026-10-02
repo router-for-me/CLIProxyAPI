@@ -186,7 +186,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if continuityCtx != nil {
 					*continuityCtx = cCtx
 				}
-				if cCtx.PinnedDate != "" {
+				if cCtx.PinnedDate != "" && !wireSettings.relaxedSystemPrompt {
 					body = injectClaudeCodeCurrentDate(body, cCtx.PinnedDate)
 				}
 				body = helps.InjectClaudeBillingTags(body, prevReq, promptID)

@@ -4170,7 +4170,7 @@ func TestApplyClaudeSystemInstructionPolicy_RelaxedPreservesTopLevelBlocksWithou
 		"2.1.220",
 		"cli",
 		"",
-		time.Now(),
+		claudeCodeLocalDate(time.Now()),
 		false,
 		"",
 		"",
@@ -4222,7 +4222,7 @@ func TestApplyClaudeSystemInstructionPolicy_RelaxedPreservesFinalCallerCacheCont
 		"2.1.220",
 		"cli",
 		"",
-		time.Now(),
+		claudeCodeLocalDate(time.Now()),
 		false,
 		"",
 		"",
@@ -4298,11 +4298,11 @@ func TestClaudeExecutor_RelaxedSystemPromptDefersCacheOwnershipUntilAfterPayload
       keys:
         - api-key: key-relaxed-cache-policy
           cloak:
+            mode: auto
             relaxed-system-prompt: true
-oauth:
-  providers:
-    claude:
-      disable-claude-cloak-mode: true
+upstream:
+  claude:
+    disable-claude-cloak-mode: true
 `, server.URL)
 			if test.payloadBreakpoint {
 				configYAML += `requests:

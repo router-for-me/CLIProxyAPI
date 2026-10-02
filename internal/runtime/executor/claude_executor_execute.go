@@ -183,7 +183,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 				if continuityCtx != nil {
 					*continuityCtx = cCtx
 				}
-				if cCtx.PinnedDate != "" {
+				if cCtx.PinnedDate != "" && !wireSettings.relaxedSystemPrompt {
 					body = injectClaudeCodeCurrentDate(body, cCtx.PinnedDate)
 				}
 				body = helps.InjectClaudeBillingTags(body, prevReq, promptID)

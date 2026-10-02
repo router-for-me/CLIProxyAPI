@@ -105,6 +105,123 @@ func TestClaudeExecutor_DirectMessagesOAuthCacheOwnership(t *testing.T) {
 	}
 }
 
+func TestResolveClaudeWirePolicy_RelaxedHonorsSharedUpstreamDefaults(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cloak     string
+		attrMode  string
+		wantCloak bool
+		wantRelax bool
+	}{
+		{name: "shared disable", cloak: "relaxed-system-prompt: true", wantRelax: true},
+		{name: "key enables cloak", cloak: "mode: auto, relaxed-system-prompt: true", wantCloak: true, wantRelax: true},
+		{name: "key disables relaxed", cloak: "mode: auto, relaxed-system-prompt: false", wantCloak: true},
+		{name: "strict wins", cloak: "mode: auto, strict-mode: true, relaxed-system-prompt: true", wantCloak: true},
+		{name: "metadata enables cloak", cloak: "relaxed-system-prompt: true", attrMode: "always", wantCloak: true, wantRelax: true},
+		{name: "key overrides metadata mode", cloak: "mode: never, relaxed-system-prompt: true", attrMode: "always", wantRelax: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, errConfig := config.ParseConfigBytes([]byte(fmt.Sprintf(`upstream:
+  claude:
+    disable-claude-cloak-mode: true
+    header-defaults: {timezone: Asia/Singapore}
+api-keys:
+  claude:
+    - name: primary
+      keys:
+        - api-key: shared-default-key
+          fingerprint-profile: claude-code-cli
+          cloak: {%s}
+`, test.cloak)))
+			if errConfig != nil {
+				t.Fatal(errConfig)
+			}
+			auth := &cliproxyauth.Auth{
+				Attributes: map[string]string{"api_key": "shared-default-key", "cloak_mode": test.attrMode},
+				Metadata:   map[string]any{"cloak_relaxed_system_prompt": true},
+			}
+			for _, snapshot := range []*config.Config{cfg, cfg.CloneForRuntime()} {
+				if scoped := snapshot.ForAPIKey(); !scoped.DisableClaudeCloakMode || scoped.ClaudeHeaderDefaults.Timezone != "Asia/Singapore" {
+					t.Fatal("shared Claude defaults must remain available to API-key credentials")
+				}
+				policy, settings := resolveClaudeWirePolicy(snapshot, auth, "shared-default-key", false)
+				if policy.Cloak != test.wantCloak || settings.relaxedSystemPrompt != test.wantRelax {
+					t.Fatalf("cloak/relaxed = %t/%t, want %t/%t", policy.Cloak, settings.relaxedSystemPrompt, test.wantCloak, test.wantRelax)
+				}
+				if native, _ := resolveClaudeWirePolicy(snapshot, auth, "shared-default-key", true); native.Cloak {
+					t.Fatal("confirmed native Claude Code must remain a passthrough client")
+				}
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_RelaxedDeclassifiedProbePreservesMessages(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, strict := range []bool{false, true} {
+			t.Run(fmt.Sprintf("stream=%t/strict=%t", stream, strict), func(t *testing.T) {
+				captured := make(chan []byte, 1)
+				transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					body, errRead := io.ReadAll(req.Body)
+					if errRead != nil {
+						return nil, errRead
+					}
+					captured <- body
+					responseBody := `{"id":"msg_probe","type":"message","model":"claude-opus-5","role":"assistant","content":[]}`
+					contentType := "application/json"
+					if stream {
+						responseBody = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+						contentType = "text/event-stream"
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(responseBody)), Request: req}, nil
+				})
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+				auth := directClaudeOAuthAuth()
+				auth.ID = t.Name()
+				auth.Metadata["cloak_relaxed_system_prompt"] = true
+				auth.Metadata["cloak_strict_mode"] = strict
+				cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "*", Protocol: "claude"}},
+					Params: map[string]any{"max_tokens": 1024, "system.1.cache_control": map[string]any{"type": "ephemeral"}},
+				}}}}
+				payload := []byte(`{"model":"claude-opus-5","max_tokens":1,"system":[{"type":"text","text":"caller guidance"}],"messages":[{"role":"user","content":"probe"}]}`)
+				if !helps.IsClaudeProbeOrHelperRequest(payload) {
+					t.Fatal("test request must enter the probe branch before Payload")
+				}
+				executor := NewClaudeExecutor(cfg)
+				request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+				if stream {
+					result, errExecute := executor.ExecuteStream(ctx, auth, request, opts)
+					if errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatal(chunk.Err)
+						}
+					}
+				} else if _, errExecute := executor.Execute(ctx, auth, request, opts); errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				body := <-captured
+				if helps.IsClaudeProbeOrHelperRequest(body) || gjson.GetBytes(body, "max_tokens").Int() != 1024 {
+					t.Fatalf("Payload must declassify the probe: %s", body)
+				}
+				if bytes.Contains(body, []byte("# currentDate")) != strict {
+					t.Fatalf("generated currentDate must follow strict/relaxed policy: %s", body)
+				}
+				if !strict && gjson.GetBytes(body, "messages").Raw != gjson.GetBytes(payload, "messages").Raw {
+					t.Fatalf("relaxed probe declassification changed caller messages: %s", body)
+				}
+				if countCacheControls(body) != 1 || !gjson.GetBytes(body, "system.1.cache_control").Exists() {
+					t.Fatalf("Payload must retain complete cache ownership: %s", body)
+				}
+			})
+		}
+	}
+}
+
 func TestClaudeExecutor_RelaxedFablePreservesSystemLayoutAfterPayload(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		for _, test := range []struct {
