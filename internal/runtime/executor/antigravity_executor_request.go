@@ -67,7 +67,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 
-	// Ensure includeThoughts: true for Antigravity models that support thinking,
+	// Ensure includeThoughts and default thinkingLevel for Antigravity models that support thinking,
 	// so upstream Google Antigravity emits thinking process rather than silently
 	// consuming thinking quota while stripping thoughts.
 	if !isAntigravityIncludeThoughtsExplicitlyFalse(payload) {
@@ -76,6 +76,24 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		hasThinkingConfig := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig").Exists()
 		if hasThinkingSupport || hasThinkingConfig {
 			payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.includeThoughts", true)
+
+			// If neither thinkingLevel nor thinkingBudget is provided, supply the default thinkingLevel
+			// derived from the model name (e.g. -high -> "high", -low -> "low") or model capabilities
+			currLevel := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel")
+			currBudget := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
+			if !currLevel.Exists() && !currBudget.Exists() && modelInfo != nil && modelInfo.Thinking != nil {
+				if len(modelInfo.Thinking.Levels) > 0 {
+					defaultLevel := "high"
+					if strings.HasSuffix(strings.ToLower(modelName), "-low") {
+						defaultLevel = "low"
+					} else if strings.HasSuffix(strings.ToLower(modelName), "-medium") {
+						defaultLevel = "medium"
+					} else if strings.HasSuffix(strings.ToLower(modelName), "-high") {
+						defaultLevel = "high"
+					}
+					payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel", defaultLevel)
+				}
+			}
 		}
 	}
 
