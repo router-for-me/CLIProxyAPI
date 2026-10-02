@@ -33,7 +33,7 @@ func TestAuthenticateManagementKey_DefaultsToFiveFailures(t *testing.T) {
 		}
 	}
 	allowed, status, msg := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret")
-	if allowed || status != http.StatusForbidden || msg[:3] != "IP " {
+	if allowed || status != http.StatusForbidden || !strings.HasPrefix(msg, "IP ") {
 		t.Fatalf("expected ban after 5 failures: allowed=%v status=%d msg=%q", allowed, status, msg)
 	}
 }
@@ -137,5 +137,98 @@ func TestListLoginSecuritySettingsRequiresPG(t *testing.T) {
 	engine.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/settings", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestShouldRecordLoginEvent(t *testing.T) {
+	set := store.DefaultLoginSecuritySettings()
+	if !shouldRecordLoginEvent(set, store.LoginOutcomeSuccess) {
+		t.Fatal("success must be recorded when log_successes=true")
+	}
+	set.LogSuccesses = false
+	if shouldRecordLoginEvent(set, store.LoginOutcomeSuccess) {
+		t.Fatal("success must be suppressed when log_successes=false")
+	}
+	if !shouldRecordLoginEvent(set, store.LoginOutcomeInvalidKey) {
+		t.Fatal("failure outcomes must always be recorded")
+	}
+	if !shouldRecordLoginEvent(set, store.LoginOutcomeBanStarted) {
+		t.Fatal("ban_started must always be recorded")
+	}
+}
+
+func TestApplyManagementFailure_DisabledDoesNotCount(t *testing.T) {
+	set := store.DefaultLoginSecuritySettings()
+	set.Enabled = false
+	h := newLoginTestHandler(set)
+
+	outcome, count := h.applyManagementFailure("1.1.1.1", store.LoginOutcomeInvalidKey)
+	if outcome != store.LoginOutcomeInvalidKey {
+		t.Fatalf("outcome = %q, want %q", outcome, store.LoginOutcomeInvalidKey)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
+	}
+	for i := 0; i < 10; i++ {
+		h.applyManagementFailure("1.1.1.1", store.LoginOutcomeInvalidKey)
+	}
+	h.attemptsMu.Lock()
+	ai := h.failedAttempts["1.1.1.1"]
+	h.attemptsMu.Unlock()
+	if ai == nil || ai.count != 0 || !ai.blockedUntil.IsZero() {
+		t.Fatalf("disabled policy accrued ban state: %+v", ai)
+	}
+}
+
+func TestAuthenticateManagementKey_DisabledRecoversActiveBan(t *testing.T) {
+	set := store.DefaultLoginSecuritySettings()
+	set.MaxFailedAttempts = 1
+	h := newLoginTestHandler(set)
+	// Drive the IP into a ban.
+	if allowed, _, _ := h.AuthenticateManagementKey("127.0.0.1", true, "wrong"); allowed {
+		t.Fatal("expected first failure to be rejected")
+	}
+	if allowed, status, _ := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret"); allowed || status != http.StatusForbidden {
+		t.Fatalf("expected active ban: allowed=%v status=%d", allowed, status)
+	}
+	// Disabling banning must immediately recover the active lockout.
+	off := store.DefaultLoginSecuritySettings()
+	off.Enabled = false
+	h.setLoginSettingsCache(off)
+	if allowed, _, _ := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret"); !allowed {
+		t.Fatal("disabling banning must short-circuit an active ban check")
+	}
+}
+
+func TestMiddleware_ManagementTokenBypassesBanAccounting(t *testing.T) {
+	set := store.DefaultLoginSecuritySettings()
+	set.MaxFailedAttempts = 1
+	h := newLoginTestHandler(set)
+	h.allowRemoteOverride = true
+	h.tokenAuthenticator = func(ctx context.Context, provided string) (*store.ManagementToken, *store.ManagementTokenPolicy) {
+		if provided == "mgmt-token" {
+			return &store.ManagementToken{ID: "tok-1", Status: store.MgmtTokenStatusActive}, nil
+		}
+		return nil, nil
+	}
+
+	engine := gin.New()
+	engine.Use(h.Middleware())
+	engine.GET("/x", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for i := 0; i < 5; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("X-Management-Key", "mgmt-token")
+		engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("attempt %d: status = %d, body = %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	h.attemptsMu.Lock()
+	n := len(h.failedAttempts)
+	h.attemptsMu.Unlock()
+	if n != 0 {
+		t.Fatalf("management-token fallback accrued ban accounting: %d entries", n)
 	}
 }

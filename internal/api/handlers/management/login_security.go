@@ -69,48 +69,70 @@ func (h *Handler) SetLoginSecurityStore(s *store.ManagementLoginStore) {
 	h.startLoginEventRetentionSweep()
 }
 
-// currentLoginSettings returns the cached policy, refreshing it from PG when
-// stale. It never returns a zero-value policy: a read failure or a missing
-// store falls back to the last known value or the built-in defaults.
+// currentLoginSettings returns the cached policy without ever blocking on a
+// database read. When the cache is stale it triggers at most one background
+// refresh (single-flight) and returns the currently cached value immediately.
+// It never returns a zero-value policy: a cold cache is seeded synchronously
+// with the built-in defaults (and stamped) so the auth path always has a
+// usable, fail-open policy.
 func (h *Handler) currentLoginSettings() store.LoginSecuritySettings {
 	h.loginSettingsMu.RLock()
 	cached := h.loginSettings
-	fresh := !h.loginSettingsAt.IsZero() && time.Since(h.loginSettingsAt) < loginSettingsCacheTTL
+	stamped := h.loginSettingsAt
 	h.loginSettingsMu.RUnlock()
-	if fresh {
+
+	if stamped.IsZero() {
+		// Never seeded: apply defaults synchronously (no DB) so we never
+		// return a zero-value policy, then let the async refresh pick up any
+		// configured policy from PG.
+		h.loginSettingsMu.Lock()
+		if h.loginSettingsAt.IsZero() {
+			h.loginSettings = store.DefaultLoginSecuritySettings()
+			h.loginSettingsAt = time.Now()
+		}
+		cached = h.loginSettings
+		h.loginSettingsMu.Unlock()
+		h.refreshLoginSettingsAsync()
 		return cached
 	}
 
-	h.loginSettingsMu.Lock()
-	defer h.loginSettingsMu.Unlock()
-	if !h.loginSettingsAt.IsZero() && time.Since(h.loginSettingsAt) < loginSettingsCacheTTL {
-		return h.loginSettings
+	if time.Since(stamped) >= loginSettingsCacheTTL {
+		h.refreshLoginSettingsAsync()
 	}
+	return cached
+}
 
-	h.mu.Lock()
-	s := h.pgLogin
-	h.mu.Unlock()
-	if s == nil {
-		h.loginSettings = store.DefaultLoginSecuritySettings()
-		h.loginSettingsAt = time.Now()
-		return h.loginSettings
+// refreshLoginSettingsAsync refreshes the cached policy from PG in the
+// background. A single-flight flag guarantees at most one refresh runs at a
+// time so a burst of auth requests cannot stampede the database. A read
+// failure falls back to the built-in fail-open defaults (never keeps a
+// possibly-strict last-known policy).
+func (h *Handler) refreshLoginSettingsAsync() {
+	if !h.loginSettingsRefresh.CompareAndSwap(false, true) {
+		return
 	}
+	go func() {
+		defer h.loginSettingsRefresh.Store(false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	set, err := s.GetLoginSettings(ctx)
-	if err != nil {
-		if h.loginSettingsAt.IsZero() {
-			h.loginSettings = store.DefaultLoginSecuritySettings()
+		h.mu.Lock()
+		s := h.pgLogin
+		h.mu.Unlock()
+		if s == nil {
+			h.setLoginSettingsCache(store.DefaultLoginSecuritySettings())
+			return
 		}
-		// Stamp the time so an outage does not trigger a DB read on every
-		// request; keep the last known policy.
-		h.loginSettingsAt = time.Now()
-		return h.loginSettings
-	}
-	h.loginSettings = set
-	h.loginSettingsAt = time.Now()
-	return h.loginSettings
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		set, err := s.GetLoginSettings(ctx)
+		if err != nil {
+			// Fail open on a read error and stamp the cache so an outage does
+			// not trigger a DB read for every subsequent request.
+			h.setLoginSettingsCache(store.DefaultLoginSecuritySettings())
+			return
+		}
+		h.setLoginSettingsCache(set)
+	}()
 }
 
 // setLoginSettingsCache stores a freshly persisted policy.
@@ -167,6 +189,16 @@ func (h *Handler) startLoginEventRecorder() {
 	})
 }
 
+// shouldRecordLoginEvent reports whether an outcome should be persisted under
+// the given policy. Successful outcomes are suppressed when log_successes is
+// disabled; every other outcome is always recorded.
+func shouldRecordLoginEvent(set store.LoginSecuritySettings, outcome string) bool {
+	if outcome == store.LoginOutcomeSuccess {
+		return set.LogSuccesses
+	}
+	return true
+}
+
 // recordLoginEvent enqueues a login event, best-effort. No-op when PG is not
 // configured or when success logging is disabled.
 func (h *Handler) recordLoginEvent(ev store.LoginEvent) {
@@ -179,7 +211,7 @@ func (h *Handler) recordLoginEvent(ev store.LoginEvent) {
 	if ch == nil {
 		return
 	}
-	if ev.Outcome == store.LoginOutcomeSuccess && !h.currentLoginSettings().LogSuccesses {
+	if !shouldRecordLoginEvent(h.currentLoginSettings(), ev.Outcome) {
 		return
 	}
 	if ev.CreatedAt.IsZero() {
@@ -193,29 +225,32 @@ func (h *Handler) recordLoginEvent(ev store.LoginEvent) {
 }
 
 // startLoginEventRetentionSweep periodically deletes events older than the
-// configured retention window. Started only when PG is configured.
+// configured retention window. Started only once and only when PG is
+// configured.
 func (h *Handler) startLoginEventRetentionSweep() {
-	go func() {
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			h.mu.Lock()
-			s := h.pgLogin
-			h.mu.Unlock()
-			if s == nil {
-				continue
+	h.loginSweepOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				h.mu.Lock()
+				s := h.pgLogin
+				h.mu.Unlock()
+				if s == nil {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				cutoff := time.Now().Add(-h.currentLoginSettings().Retention())
+				n, err := s.PurgeLoginEventsBefore(ctx, cutoff)
+				cancel()
+				if err != nil {
+					log.WithError(err).Warn("management login: event retention sweep failed")
+				} else if n > 0 {
+					log.WithField("deleted", n).Debug("management login: purged aged events")
+				}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			cutoff := time.Now().Add(-h.currentLoginSettings().Retention())
-			n, err := s.PurgeLoginEventsBefore(ctx, cutoff)
-			cancel()
-			if err != nil {
-				log.WithError(err).Warn("management login: event retention sweep failed")
-			} else if n > 0 {
-				log.WithField("deleted", n).Debug("management login: purged aged events")
-			}
-		}
-	}()
+		}()
+	})
 }
 
 // evaluateManagementKey is the pure credential evaluation. It performs no
@@ -236,21 +271,24 @@ func (h *Handler) evaluateManagementKey(clientIP string, localClient bool, provi
 	}
 	envSecret := h.envSecret
 
-	now := time.Now()
-	h.attemptsMu.Lock()
-	ai := h.failedAttempts[clientIP]
-	banned := ai != nil && !ai.blockedUntil.IsZero() && now.Before(ai.blockedUntil)
-	var remaining time.Duration
-	if banned {
-		remaining = ai.blockedUntil.Sub(now).Round(time.Second)
-	}
-	h.attemptsMu.Unlock()
-	if banned {
-		return loginDecision{
-			allowed: false,
-			status:  http.StatusForbidden,
-			message: fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining),
-			outcome: store.LoginOutcomeBanned,
+	set := h.currentLoginSettings()
+	if set.Enabled {
+		now := time.Now()
+		h.attemptsMu.Lock()
+		ai := h.failedAttempts[clientIP]
+		banned := ai != nil && !ai.blockedUntil.IsZero() && now.Before(ai.blockedUntil)
+		var remaining time.Duration
+		if banned {
+			remaining = ai.blockedUntil.Sub(now).Round(time.Second)
+		}
+		h.attemptsMu.Unlock()
+		if banned {
+			return loginDecision{
+				allowed: false,
+				status:  http.StatusForbidden,
+				message: fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining),
+				outcome: store.LoginOutcomeBanned,
+			}
 		}
 	}
 

@@ -119,8 +119,14 @@ func (h *Handler) ListLoginSecurityEvents(c *gin.Context) {
 	}
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+	if page < 1 {
+		page = 1
+	}
 	if pageSize <= 0 {
 		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
 	}
 	f := store.LoginEventFilter{
 		IP:      strings.TrimSpace(c.Query("ip")),

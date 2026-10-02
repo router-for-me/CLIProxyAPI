@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -140,12 +141,20 @@ type Handler struct {
 	// routes return 503 and the auth path falls back to built-in defaults.
 	pgLogin loginSecurityStore
 
-	loginSettingsMu sync.RWMutex
-	loginSettings   store.LoginSecuritySettings
-	loginSettingsAt time.Time
+	loginSettingsMu      sync.RWMutex
+	loginSettings        store.LoginSecuritySettings
+	loginSettingsAt      time.Time
+	loginSettingsRefresh atomic.Bool
 
 	loginRecorderOnce sync.Once
 	loginEventCh      chan store.LoginEvent
+	loginSweepOnce    sync.Once
+
+	// tokenAuthenticator, when non-nil, overrides authenticateManagementToken
+	// in the management Middleware. It is a test seam so the token-fallback
+	// auth path can be exercised without a PG-backed token store. Production
+	// leaves it nil, so Middleware uses the real method.
+	tokenAuthenticator func(context.Context, string) (*store.ManagementToken, *store.ManagementTokenPolicy)
 
 	// pgJev stores the singleton Jev AI classifier configuration (master
 	// toggle + sealed API key + pinned model + API root). nil when PG is not
@@ -997,7 +1006,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		// accrue a brute-force ban. A resolved token is stashed in the
 		// context for the EnforceTokenPolicy + AuditTokenCall middlewares.
 		if provided != "" {
-			if tok, pol := h.authenticateManagementToken(c.Request.Context(), provided); tok != nil {
+			if tok, pol := h.authenticateToken(c.Request.Context(), provided); tok != nil {
 				h.recordLoginEvent(store.LoginEvent{
 					IP: clientIP, Outcome: store.LoginOutcomeSuccess, Reason: "management token",
 					Local: localClient, UserAgent: userAgent,

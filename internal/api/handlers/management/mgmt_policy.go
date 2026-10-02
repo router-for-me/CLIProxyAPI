@@ -123,6 +123,17 @@ func (h *Handler) authenticateManagementToken(ctx context.Context, provided stri
 	return tok, pol
 }
 
+// authenticateToken dispatches to the configured token authenticator. It
+// defaults to authenticateManagementToken; tests may override the
+// tokenAuthenticator field to exercise the token-fallback auth path without a
+// PG-backed token store.
+func (h *Handler) authenticateToken(ctx context.Context, provided string) (*store.ManagementToken, *store.ManagementTokenPolicy) {
+	if h.tokenAuthenticator != nil {
+		return h.tokenAuthenticator(ctx, provided)
+	}
+	return h.authenticateManagementToken(ctx, provided)
+}
+
 // mgmtTokenUsable reports whether a token is in a usable state: active status
 // and not past its expiry. Expired tokens are rejected; the caller may also
 // flip their status to "expired" lazily (handled at the enforcement layer).

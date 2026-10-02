@@ -116,7 +116,7 @@ export default function ManagementLoginSecurityPage() {
         </p>
         {bansReq.loading && <Spinner label="Loading bans…" />}
         {bansReq.error && <ErrorBanner error={bansReq.error} onRetry={bansReq.reload} />}
-        {!bansReq.loading && bans.length === 0 && <p className="muted">No active bans.</p>}
+        {!bansReq.loading && !bansReq.error && bans.length === 0 && <p className="muted">No active bans.</p>}
         {bans.length > 0 && (
           <div style={{ overflowX: 'auto' }}>
             <table className="table">

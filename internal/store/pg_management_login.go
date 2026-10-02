@@ -216,7 +216,7 @@ func (s *ManagementLoginStore) UpsertLoginSettings(ctx context.Context, set Logi
 		return DefaultLoginSecuritySettings(), fmt.Errorf("postgres store: management login store not initialized")
 	}
 	set = ClampLoginSecuritySettings(set)
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, enabled, max_failed_attempts, ban_duration_seconds,
 			failure_window_seconds, cleanup_interval_seconds, idle_timeout_seconds,
@@ -232,12 +232,13 @@ func (s *ManagementLoginStore) UpsertLoginSettings(ctx context.Context, set Logi
 			log_successes            = EXCLUDED.log_successes,
 			retention_days           = EXCLUDED.retention_days,
 			updated_at               = EXCLUDED.updated_at
+		RETURNING updated_at
 		`, s.settingsTable),
 		set.Enabled, set.MaxFailedAttempts, set.BanDurationSeconds,
 		set.FailureWindowSeconds, set.CleanupIntervalSeconds, set.IdleTimeoutSeconds,
 		set.LogSuccesses, set.RetentionDays,
 	)
-	if err != nil {
+	if err := row.Scan(&set.UpdatedAt); err != nil {
 		return set, fmt.Errorf("postgres store: upsert management_login_settings: %w", err)
 	}
 	return set, nil
