@@ -2,7 +2,7 @@ FROM golang:1.26-bookworm AS builder
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates git && rm -rf /var/lib/apt/lists/*
 
 COPY go.mod go.sum ./
 
@@ -14,24 +14,36 @@ ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
 
-RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
+# Technical Debt Note: -checklinkname=0 inherited from Commit 2 (pion/ice -> wlynxg/anet)
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false \
+    -tags "netgo osusergo" \
+    -ldflags="-s -w -checklinkname=0 -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" \
+    -o ./CLIProxyAPI ./cmd/server/
 
-FROM debian:bookworm
+# Prepare directories with permissive access for nonroot compatibility
+RUN mkdir -p /root/.cli-proxy-api /CLIProxyAPI/logs /CLIProxyAPI/plugins /home/nonroot \
+    && ln -s /root/.cli-proxy-api /home/nonroot/.cli-proxy-api \
+    && chmod -R 777 /root /CLIProxyAPI /home/nonroot
 
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/static-debian12:nonroot
 
-RUN mkdir /CLIProxyAPI
+# Copy timezone data from builder
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
-COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
-
-COPY config.example.yaml /CLIProxyAPI/config.example.yaml
+# Copy directories and compatibility symlinks
+COPY --from=builder --chown=nonroot:nonroot /root /root
+COPY --from=builder --chown=nonroot:nonroot /home/nonroot /home/nonroot
+COPY --from=builder --chown=nonroot:nonroot /CLIProxyAPI /CLIProxyAPI
 
 WORKDIR /CLIProxyAPI
+
+COPY --from=builder --chown=nonroot:nonroot /app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+COPY --chown=nonroot:nonroot config.example.yaml /CLIProxyAPI/config.example.yaml
 
 EXPOSE 8317
 
 ENV TZ=Asia/Shanghai
 
-RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+USER nonroot:nonroot
 
-CMD ["./CLIProxyAPI"]
+CMD ["/CLIProxyAPI/CLIProxyAPI"]
