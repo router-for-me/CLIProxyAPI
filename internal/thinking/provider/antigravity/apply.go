@@ -64,6 +64,8 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 				config.Mode = thinking.ModeNone
 				config.Budget = 0
 			}
+		} else if config.Mode == thinking.ModeNone {
+			config.Budget = 0
 		} else if config.Mode == thinking.ModeAuto {
 			config.Level = thinking.LevelHigh
 			config.Mode = thinking.ModeLevel
@@ -117,17 +119,11 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
-		if config.Budget == 0 && config.Level == "" {
-			// With the amount fully disabled, visibility is irrelevant. Restoring
-			// includeThoughts alone would recreate thinkingConfig and let a
-			// default-on model think again.
-			result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig")
-			return result, nil
-		}
-		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
-		}
-		return applyAntigravityIncludeThoughts(result, body), nil
+		result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel")
+		result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
+		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", 0)
+		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
+		return result, nil
 	}
 
 	// Only handle ModeLevel - budget conversion should be done by upper layer

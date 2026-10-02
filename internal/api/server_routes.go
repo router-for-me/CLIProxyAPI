@@ -59,6 +59,23 @@ func (s *Server) setupRoutes() {
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 	s.codexLiveHandler = codexlive.NewHandler(s.handlers.AuthManager, s.cfg)
 
+	creditsHandler := func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"object": "credit_summary",
+			"data": gin.H{
+				"total_usage":     0.0,
+				"total_available": 100.0,
+				"total_granted":   100.0,
+			},
+			"total_usage":     0.0,
+			"total_available": 100.0,
+			"total_granted":   100.0,
+		})
+	}
+	s.engine.GET("/credits", AuthMiddleware(s.accessManager), creditsHandler)
+	s.engine.GET("/dashboard/billing/credit_grants", AuthMiddleware(s.accessManager), creditsHandler)
+	s.engine.GET("/dashboard/billing/subscription", AuthMiddleware(s.accessManager), creditsHandler)
+
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
@@ -78,6 +95,9 @@ func (s *Server) setupRoutes() {
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		v1.GET("/credits", creditsHandler)
+		v1.GET("/dashboard/billing/credit_grants", creditsHandler)
+		v1.GET("/dashboard/billing/subscription", creditsHandler)
 		v1.POST("/alpha/search", s.codexAlphaSearch)
 		v1.POST("/live", s.codexLiveHandler.Handle)
 		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)

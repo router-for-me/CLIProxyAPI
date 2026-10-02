@@ -76,7 +76,11 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	// Ensure includeThoughts and default thinkingLevel for Antigravity models that support thinking,
 	// so upstream Google Antigravity emits thinking process rather than silently
 	// consuming thinking quota while stripping thoughts.
-	if !isThinkingExplicitlyDisabled(payload) {
+	if isThinkingExplicitlyDisabled(payload) {
+		payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel")
+		payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget", 0)
+		payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.includeThoughts", false)
+	} else {
 		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
 		if modelInfo == nil {
 			modelInfo = registry.LookupModelInfo(upstreamModelName, "antigravity")
@@ -92,7 +96,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 			// If budget is provided for level-only model, convert to thinkingLevel
 			if currBudget.Exists() && (!currLevel.Exists() || currLevel.String() == "") && modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0 && !strings.Contains(strings.ToLower(modelName), "claude") {
 				budgetVal := int(currBudget.Int())
-				if levelStr, ok := thinking.ConvertBudgetToLevel(budgetVal); ok && levelStr != "" && levelStr != "none" {
+				if levelStr, ok := thinking.ConvertBudgetToLevel(budgetVal); ok && levelStr != "" {
 					payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel", levelStr)
 					payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
 				}
@@ -622,6 +626,29 @@ func mapAntigravityUpstreamModel(modelName string) string {
 func isThinkingExplicitlyDisabled(payload []byte) bool {
 	if isAntigravityIncludeThoughtsExplicitlyFalse(payload) {
 		return true
+	}
+	for _, path := range []string{
+		"request.generationConfig.thinkingConfig.thinkingLevel",
+		"request.generationConfig.thinkingConfig.thinking_level",
+		"generationConfig.thinkingConfig.thinkingLevel",
+		"generationConfig.thinkingConfig.thinking_level",
+	} {
+		if val := gjson.GetBytes(payload, path); val.Exists() {
+			s := strings.ToLower(strings.TrimSpace(val.String()))
+			if s == "none" || s == "off" {
+				return true
+			}
+		}
+	}
+	for _, path := range []string{
+		"request.generationConfig.thinkingConfig.thinkingBudget",
+		"request.generationConfig.thinkingConfig.thinking_budget",
+		"generationConfig.thinkingConfig.thinkingBudget",
+		"generationConfig.thinkingConfig.thinking_budget",
+	} {
+		if val := gjson.GetBytes(payload, path); val.Exists() && val.Type == gjson.Number && val.Int() == 0 {
+			return true
+		}
 	}
 	for _, path := range []string{
 		"reasoning_effort",

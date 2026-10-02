@@ -44,20 +44,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRawBytes(out, "request.generationConfig", []byte(genConfig.Raw))
 	}
 
-	// Apply thinking configuration: convert OpenAI reasoning_effort to Antigravity thinkingConfig.
-	// Inline translation-only mapping; capability checks happen later in ApplyThinking.
-	re := gjson.GetBytes(rawJSON, "reasoning_effort")
-	if re.Exists() {
-		effort := strings.ToLower(strings.TrimSpace(re.String()))
-		if effort != "" {
-			thinkingPath := "request.generationConfig.thinkingConfig"
-			if effort == "auto" {
-				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", -1)
-			} else {
-				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", effort)
-			}
-		}
-	}
+	// Apply thinking configuration: handle all Kelivo & OpenAI reasoning dialects
+	out = applyOpenAIRawThinkingToAntigravity(out, rawJSON)
 	out = applyOpenAIThinkingCompatibilityToAntigravity(out, rawJSON)
 
 	// Temperature/top_p/top_k/max_tokens/max_completion_tokens
@@ -168,10 +156,21 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							}
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
+							if imageURL == "" {
+								imageURL = item.Get("image_url").String()
+							}
+							if len(imageURL) > 5 && strings.HasPrefix(imageURL, "data:") {
 								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false)
+								if len(pieces) == 2 {
+									mime := pieces[0]
+									if mime == "" {
+										mime = "image/png"
+									}
+									data := pieces[1]
+									if strings.HasPrefix(data, "base64,") {
+										data = data[7:]
+									}
+									part := antigravityOpenAIInlineDataPart(mime, data, false)
 									partItems = append(partItems, part)
 								}
 							}
@@ -222,10 +221,21 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							}
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
+							if imageURL == "" {
+								imageURL = item.Get("image_url").String()
+							}
+							if len(imageURL) > 5 && strings.HasPrefix(imageURL, "data:") {
 								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false)
+								if len(pieces) == 2 {
+									mime := pieces[0]
+									if mime == "" {
+										mime = "image/png"
+									}
+									data := pieces[1]
+									if strings.HasPrefix(data, "base64,") {
+										data = data[7:]
+									}
+									part := antigravityOpenAIInlineDataPart(mime, data, false)
 									partItems = append(partItems, part)
 								}
 							}
@@ -637,4 +647,105 @@ func antigravityDemotedSystemText(text string, isDemoted bool) string {
 		return text
 	}
 	return translatorcommon.SystemReminderText(text)
+}
+
+func applyOpenAIRawThinkingToAntigravity(out []byte, rawJSON []byte) []byte {
+	thinkingPath := "request.generationConfig.thinkingConfig"
+
+	// 1. Explicitly disabled check
+	if isRawThinkingDisabled(rawJSON) {
+		out, _ = sjson.DeleteBytes(out, thinkingPath+".thinkingLevel")
+		out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", 0)
+		out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", false)
+		return out
+	}
+
+	// 2. Budget extraction (numeric)
+	budget := extractRawBudget(rawJSON)
+	if budget > 0 {
+		if level, ok := thinking.ConvertBudgetToLevel(budget); ok && level != "" && level != "none" {
+			out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", level)
+			out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", true)
+			out, _ = sjson.DeleteBytes(out, thinkingPath+".thinkingBudget")
+			return out
+		}
+	} else if budget == 0 {
+		out, _ = sjson.DeleteBytes(out, thinkingPath+".thinkingLevel")
+		out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", 0)
+		out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", false)
+		return out
+	}
+
+	// 3. Level extraction (string)
+	level := extractRawLevel(rawJSON)
+	if level != "" {
+		if level == "none" || level == "off" {
+			out, _ = sjson.DeleteBytes(out, thinkingPath+".thinkingLevel")
+			out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", 0)
+			out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", false)
+		} else if level == "auto" {
+			out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", "high")
+			out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", true)
+		} else {
+			out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", level)
+			out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", true)
+		}
+		return out
+	}
+
+	return out
+}
+
+func isRawThinkingDisabled(rawJSON []byte) bool {
+	if res := gjson.GetBytes(rawJSON, "reasoning.enabled"); res.Exists() && res.Type == gjson.False {
+		return true
+	}
+	if res := gjson.GetBytes(rawJSON, "enable_thinking"); res.Exists() && res.Type == gjson.False {
+		return true
+	}
+	if res := gjson.GetBytes(rawJSON, "thinking.type"); res.Exists() && strings.EqualFold(res.String(), "disabled") {
+		return true
+	}
+	for _, p := range []string{"reasoning_effort", "reasoning.effort", "output_config.effort"} {
+		if s := strings.ToLower(strings.TrimSpace(gjson.GetBytes(rawJSON, p).String())); s == "none" || s == "off" {
+			return true
+		}
+	}
+	return false
+}
+
+func extractRawBudget(rawJSON []byte) int {
+	for _, p := range []string{
+		"reasoning.max_tokens",
+		"thinking.budget_tokens",
+		"thinking_budget",
+		"generationConfig.thinkingConfig.thinkingBudget",
+		"generation_config.thinking_config.thinking_budget",
+	} {
+		if r := gjson.GetBytes(rawJSON, p); r.Exists() && r.Type == gjson.Number {
+			return int(r.Int())
+		}
+	}
+	if re := gjson.GetBytes(rawJSON, "reasoning_effort"); re.Exists() && re.Type == gjson.Number {
+		return int(re.Int())
+	}
+	return -1
+}
+
+func extractRawLevel(rawJSON []byte) string {
+	for _, p := range []string{
+		"reasoning_effort",
+		"reasoning.effort",
+		"thinking.effort",
+		"output_config.effort",
+		"generationConfig.thinkingConfig.thinkingLevel",
+		"generation_config.thinking_config.thinking_level",
+	} {
+		if r := gjson.GetBytes(rawJSON, p); r.Exists() && r.Type == gjson.String {
+			if s := strings.ToLower(strings.TrimSpace(r.String())); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }

@@ -588,7 +588,7 @@ func antigravityBuiltinGemini38FlashModelInfo() *ModelInfo {
 		MaxCompletionTokens: 65536,
 		SupportsWebSearch:   true,
 		Thinking: &ThinkingSupport{
-			Min:            1,
+			Min:            0,
 			Max:            65535,
 			DynamicAllowed: true,
 			Levels:         []string{"low", "medium", "high"},
@@ -613,7 +613,7 @@ func antigravityBuiltinGemini37FlashModelInfo() *ModelInfo {
 		MaxCompletionTokens: 65536,
 		SupportsWebSearch:   true,
 		Thinking: &ThinkingSupport{
-			Min:            1,
+			Min:            0,
 			Max:            65535,
 			DynamicAllowed: true,
 			Levels:         []string{"low", "medium", "high"},
@@ -638,10 +638,10 @@ func antigravityBuiltinGemini36FlashModelInfo() *ModelInfo {
 		MaxCompletionTokens: 65536,
 		SupportsWebSearch:   true,
 		Thinking: &ThinkingSupport{
-			Min:            1,
+			Min:            0,
 			Max:            65535,
 			DynamicAllowed: true,
-			Levels:         []string{"minimal", "low", "medium", "high"},
+			Levels:         []string{"low", "medium", "high"},
 		},
 		NativeCapabilities: &NativeCapabilities{
 			WebSearch: &webSearch,
@@ -663,7 +663,7 @@ func antigravityBuiltinGemini31ProModelInfo() *ModelInfo {
 		MaxCompletionTokens: 65536,
 		SupportsWebSearch:   true,
 		Thinking: &ThinkingSupport{
-			Min:            1,
+			Min:            0,
 			Max:            65535,
 			DynamicAllowed: true,
 			Levels:         []string{"low", "medium", "high"},
