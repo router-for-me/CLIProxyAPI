@@ -223,6 +223,27 @@ func TestClassifyAntigravity429(t *testing.T) {
 			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429SoftRateLimit)
 		}
 	})
+
+	t.Run("bare resource exhausted is credential quota", func(t *testing.T) {
+		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)
+		if got := classifyAntigravity429(body); got != antigravity429QuotaExhausted {
+			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429QuotaExhausted)
+		}
+		decision := decideAntigravity429(body)
+		if decision.kind != antigravity429DecisionFullQuotaExhausted {
+			t.Fatalf("decideAntigravity429().kind = %q, want %q", decision.kind, antigravity429DecisionFullQuotaExhausted)
+		}
+		if decision.retryAfter != nil {
+			t.Fatalf("decideAntigravity429().retryAfter = %s, want nil", *decision.retryAfter)
+		}
+		err := newAntigravityStatusErr(http.StatusTooManyRequests, body)
+		if !err.IsCredentialScoped() {
+			t.Fatal("newAntigravityStatusErr().IsCredentialScoped() = false, want true")
+		}
+		if err.RetryAfter() == nil || *err.RetryAfter() != antigravityBareResourceExhaustedCooldown {
+			t.Fatalf("newAntigravityStatusErr().RetryAfter() = %v, want %s", err.RetryAfter(), antigravityBareResourceExhaustedCooldown)
+		}
+	})
 }
 
 func TestInjectEnabledCreditTypes(t *testing.T) {

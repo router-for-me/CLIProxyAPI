@@ -277,6 +277,15 @@ func decideAntigravity429(body []byte) antigravity429Decision {
 		}
 	}
 
+	// Google's live quota body is RESOURCE_EXHAUSTED with "check quota" and no
+	// RetryInfo. That text does not match the quota keywords. A no-delay
+	// RESOURCE_EXHAUSTED is still quota exhaustion. A parsed delay keeps the
+	// soft-retry path so a short reset is not turned into a long hold.
+	if decision.retryAfter == nil {
+		decision.kind = antigravity429DecisionFullQuotaExhausted
+		decision.reason = "resource_exhausted"
+		return decision
+	}
 	decision.kind = antigravity429DecisionSoftRetry
 	return decision
 }
@@ -345,10 +354,22 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
-	if statusCode == http.StatusTooManyRequests {
-		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
-			err.retryAfter = retryAfter
-		}
+	if statusCode != http.StatusTooManyRequests {
+		return err
+	}
+	if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
+		err.retryAfter = retryAfter
+	}
+	if decideAntigravity429(body).kind != antigravity429DecisionFullQuotaExhausted {
+		return err
+	}
+	// One Google account serves every Gemini tier. Hold the credential, and
+	// supply a delay when Google did not, so the conductor does not retry each
+	// model on its one-second ladder.
+	err.credentialScoped = true
+	if err.retryAfter == nil {
+		delay := antigravityBareResourceExhaustedCooldown
+		err.retryAfter = &delay
 	}
 	return err
 }

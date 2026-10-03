@@ -45,6 +45,10 @@ const (
 	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
 	antigravityInstantRetryThreshold       = 3 * time.Second
+	// antigravityBareResourceExhaustedCooldown is the delay used when Google
+	// returns RESOURCE_EXHAUSTED without RetryInfo. The conductor otherwise
+	// starts its no-delay quota ladder at one second per model.
+	antigravityBareResourceExhaustedCooldown = antigravityShortQuotaCooldownThreshold
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
