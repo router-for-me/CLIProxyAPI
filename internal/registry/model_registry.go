@@ -1670,6 +1670,24 @@ func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 	return nil
 }
 
+// HasModel reports whether the model ID exists in the registry, regardless of provider availability.
+func (r *ModelRegistry) HasModel(modelID string) bool {
+	if r == nil || modelID == "" {
+		return false
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if _, exists := r.models[modelID]; exists {
+		return true
+	}
+	if lower := strings.ToLower(modelID); lower != modelID {
+		if _, exists := r.models[lower]; exists {
+			return true
+		}
+	}
+	return false
+}
+
 // convertModelToMap converts ModelInfo to the appropriate format for different handler types
 func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) map[string]any {
 	if model == nil {

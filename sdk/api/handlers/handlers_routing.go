@@ -200,6 +200,20 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	}
 
 	if len(providers) == 0 {
+		if fallbackBase := util.ResolveGeminiFamilyFallback(baseModel); fallbackBase != "" {
+			fallbackProviders := util.GetProviderName(fallbackBase)
+			if len(fallbackProviders) > 0 {
+				providers = fallbackProviders
+				if parsed.HasSuffix {
+					resolvedModelName = fmt.Sprintf("%s(%s)", fallbackBase, parsed.RawSuffix)
+				} else {
+					resolvedModelName = fallbackBase
+				}
+			}
+		}
+	}
+
+	if len(providers) == 0 {
 		// The client asked for a model this proxy cannot route. Report it as a request
 		// error so streaming clients receive an actionable message instead of a
 		// gateway failure they would keep retrying. 400 is used rather than 404 to keep
