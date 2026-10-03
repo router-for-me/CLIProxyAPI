@@ -7,10 +7,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-var emptyGeminiUserTurnJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
+// A single space: some Gemini endpoints reject an empty text part, while
+// Claude-on-Antigravity still rejects even this and is skipped upstream.
+var placeholderGeminiUserTurnJSON = []byte(`{"role":"user","parts":[{"text":" "}]}`)
 
-// EnsureGeminiLeadingUserContent ensures that the contents array at the given path
-// starts with a user turn when sending to Gemini/Antigravity upstreams.
+// EnsureGeminiLeadingUserContent prepends a placeholder user turn when the
+// contents array at the given path starts with role=model.
 func EnsureGeminiLeadingUserContent(payload []byte, path string) []byte {
 	firstRole := gjson.GetBytes(payload, path+".0.role")
 	if firstRole.String() != "model" {
@@ -26,7 +28,7 @@ func EnsureGeminiLeadingUserContent(payload []byte, path string) []byte {
 	}
 
 	contentItems := make([][]byte, 0, len(contentArray)+1)
-	contentItems = append(contentItems, emptyGeminiUserTurnJSON)
+	contentItems = append(contentItems, placeholderGeminiUserTurnJSON)
 	for _, content := range contentArray {
 		contentItems = append(contentItems, []byte(content.Raw))
 	}
