@@ -361,10 +361,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// so the downstream disconnect must stay silent until the conductor has had the
 				// chance to retry. Notifying it first would close the client websocket with
 				// zero frames even though the retry succeeds.
-				// The bootstrap time budget is spent, so no retry follows: this rejection is
-				// delivered in-stream with the ordinary notifying teardown, exactly like the
-				// sibling terminal branch guards its request-scoped failover decision below.
-				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, wsErr) && !timeoutReached
+				// An exhausted bootstrap time budget only rules that retry out once a payload
+				// frame has been buffered: the buffered handshake is released ahead of the
+				// rejection, so the conductor can no longer retry. With nothing buffered the
+				// rejection cannot have reached the client, so the transparent failover is kept
+				// even after the budget is spent instead of tearing the client session down.
+				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, wsErr) && (!timeoutReached || len(bufferedChunks) == 0)
 				if sess != nil {
 					if requestScopedFailover {
 						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
@@ -400,7 +402,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// legitimately terminates the session, so it keeps the notifying variant.
 				failoverPending := isCodexOverloadBootstrapFailure(terminalBody)
 				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, streamErr)
-				if (failoverPending || requestScopedFailover) && timeoutReached {
+				// A spent bootstrap time budget only rules a transparent retry out once a payload
+				// frame has been buffered: the buffered handshake is released ahead of the
+				// rejection, so the conductor can no longer retry. With nothing buffered the
+				// rejection has not reached the client, so a request-scoped continue rule keeps the
+				// failover available even after the budget is spent.
+				if (failoverPending || (requestScopedFailover && len(bufferedChunks) > 0)) && timeoutReached {
 					failoverPending = false
 					requestScopedFailover = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)

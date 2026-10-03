@@ -32,6 +32,40 @@ const (
 	codexWSTestModel        = "gpt-5.6-terra"
 )
 
+const (
+	// The same rejection with a top-level status, which the backend sometimes adds. It routes
+	// through the websocket-error branch instead of the terminal-failure branch, so both wire
+	// shapes of the production rejection must be covered by the failover tests.
+	codexWSTestFlaggedStatusEvent = `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_prompt","message":"flagged as potentially violating our usage policy"}}`
+	// A downstream read that never sees a single frame must fail fast instead of hanging.
+	codexWSDownstreamFirstFrameTimeout = 10 * time.Second
+	// After response.completed the downstream socket may stay open for another response.create,
+	// so keep reading for a short quiet window: a duplicated or orphaned frame emitted after the
+	// first completion would otherwise be missed by an early break.
+	codexWSDownstreamDrainWindow = 750 * time.Millisecond
+	// codex.stream-bootstrap-buffering with a short timeout expires the bootstrap window while
+	// the flagged upstream is still silent, which is the spent-budget path under test.
+	codexWSShortBootstrapTimeout = "50ms"
+	// Longer than codexWSShortBootstrapTimeout so the first upstream read happens after the
+	// bootstrap budget is already spent.
+	codexWSBudgetExceededDelay = 200 * time.Millisecond
+)
+
+// codexWSTestRejection is one wire shape of the credential-scoped rejection under test.
+type codexWSTestRejection struct {
+	name  string
+	frame string
+}
+
+// codexWSTestFlaggedRejections returns both wire shapes of the production invalid_prompt
+// rejection so a test can pin the failover rule for each one.
+func codexWSTestFlaggedRejections() []codexWSTestRejection {
+	return []codexWSTestRejection{
+		{name: "no-status", frame: codexWSTestFlaggedEvent},
+		{name: "status-bearing", frame: codexWSTestFlaggedStatusEvent},
+	}
+}
+
 // codexWSTestSuccessFrames returns the created/completed frames for a healthy credential. The
 // response id is tagged with the account so a frame leaked from the rejected first attempt can
 // never be mistaken for the successful retry's output.
@@ -42,11 +76,19 @@ func codexWSTestSuccessFrames(account string) (created, completed string) {
 	return created, completed
 }
 
-// newCodexWSFailoverServer upgrades every request and answers per Authorization bearer key.
-// Accounts other than "account-flagged" complete normally; the flagged account answers with the
-// frames produced by flaggedFrames. Connections are deliberately held open after the frames so
-// the executor's own teardown path runs, not the reader observing EOF.
-func newCodexWSFailoverServer(t *testing.T, attempts *[]string, mu *sync.Mutex, flaggedFrames func(account string) []string) *httptest.Server {
+// codexWSTestFlaggedAccount reports whether a bearer key belongs to a credential this test
+// server rejects. Keys are matched by prefix so a test can register several distinct flagged
+// credentials and still tell which one was attempted.
+func codexWSTestFlaggedAccount(account string) bool {
+	return strings.HasPrefix(account, "account-flagged")
+}
+
+// newCodexWSFailoverServerScript upgrades every request and answers per Authorization bearer
+// key. A flagged key is answered by flaggedScript, which owns both the timing and the content of
+// the rejected attempt, so a test can reproduce a rejection that arrives after the bootstrap
+// budget is spent. Connections are deliberately held open after the frames so the executor's own
+// teardown path runs, not the reader observing EOF.
+func newCodexWSFailoverServerScript(t *testing.T, attempts *[]string, mu *sync.Mutex, flaggedScript func(account string, conn *websocket.Conn)) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,15 +108,15 @@ func newCodexWSFailoverServer(t *testing.T, attempts *[]string, mu *sync.Mutex, 
 			return
 		}
 
-		created, completed := codexWSTestSuccessFrames(account)
-		frames := []string{created, completed}
-		if account == "account-flagged" {
-			frames = flaggedFrames(account)
-		}
-		for _, frame := range frames {
-			if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(frame)); errWrite != nil {
-				t.Errorf("write websocket event: %v", errWrite)
-				return
+		if codexWSTestFlaggedAccount(account) {
+			flaggedScript(account, conn)
+		} else {
+			created, completed := codexWSTestSuccessFrames(account)
+			for _, frame := range []string{created, completed} {
+				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(frame)); errWrite != nil {
+					t.Errorf("write websocket event: %v", errWrite)
+					return
+				}
 			}
 		}
 		for {
@@ -83,6 +125,20 @@ func newCodexWSFailoverServer(t *testing.T, attempts *[]string, mu *sync.Mutex, 
 			}
 		}
 	}))
+}
+
+// newCodexWSFailoverServer answers the flagged credential with the fixed frame list produced by
+// flaggedFrames, so a caller describes the rejected attempt's content but not its timing.
+func newCodexWSFailoverServer(t *testing.T, attempts *[]string, mu *sync.Mutex, flaggedFrames func(account string) []string) *httptest.Server {
+	t.Helper()
+	return newCodexWSFailoverServerScript(t, attempts, mu, func(account string, conn *websocket.Conn) {
+		for _, frame := range flaggedFrames(account) {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(frame)); errWrite != nil {
+				t.Errorf("write websocket event: %v", errWrite)
+				return
+			}
+		}
+	})
 }
 
 // codexWSFailoverServer rejects the flagged credential with the rejection as the very first
@@ -192,9 +248,16 @@ func codexWSStreamEvents(t *testing.T, body []byte) []string {
 
 func newCodexWSScopedManager(t *testing.T, buffering bool) (*cliproxyauth.Manager, *runtimeexecutor.CodexWebsocketsExecutor) {
 	t.Helper()
+	return newCodexWSScopedManagerWithTimeout(t, buffering, "")
+}
+
+// newCodexWSScopedManagerWithTimeout additionally sets codex.stream-bootstrap-timeout, the knob
+// that lets the bootstrap budget run out while the upstream is still silent.
+func newCodexWSScopedManagerWithTimeout(t *testing.T, buffering bool, bootstrapTimeout string) (*cliproxyauth.Manager, *runtimeexecutor.CodexWebsocketsExecutor) {
+	t.Helper()
 	manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 2)
-	cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: buffering}}
+	cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: buffering, StreamBootstrapTimeout: bootstrapTimeout}}
 	exec := runtimeexecutor.NewCodexWebsocketsExecutor(cfg)
 	manager.RegisterExecutor(exec)
 	return manager, exec
@@ -447,6 +510,172 @@ func TestCodexWSRequestScopedAllCandidatesFlaggedSurfacesError(t *testing.T) {
 			case disconnectErr := <-disconnectCh:
 				t.Fatalf("request-scoped rejections must not signal a downstream disconnect: %v", disconnectErr)
 			default:
+			}
+		})
+	}
+}
+
+// codexWSDownstreamRead is every frame a downstream client observed during one response.create
+// round trip, so missing, extra, or reordered frames are all visible to the caller.
+type codexWSDownstreamRead struct {
+	eventTypes  []string
+	responseIDs []string
+	errorFrames []string
+}
+
+// readCodexWSDownstreamFrames reads until the downstream connection closes or falls quiet for
+// codexWSDownstreamDrainWindow after the first terminal frame, so a duplicate or orphaned frame
+// emitted after the completion is still observed instead of being truncated by an early break.
+// It never fails the test itself; the caller asserts on the collected frames.
+func readCodexWSDownstreamFrames(t *testing.T, conn *websocket.Conn) codexWSDownstreamRead {
+	t.Helper()
+	var read codexWSDownstreamRead
+	deadline := codexWSDownstreamFirstFrameTimeout
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(deadline))
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			return read
+		}
+		eventType := gjson.GetBytes(payload, "type").String()
+		read.eventTypes = append(read.eventTypes, eventType)
+		if eventType == "error" {
+			read.errorFrames = append(read.errorFrames, string(payload))
+		}
+		if id := gjson.GetBytes(payload, "response.id").String(); id != "" {
+			read.responseIDs = append(read.responseIDs, id)
+		}
+		if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
+			deadline = codexWSDownstreamDrainWindow
+		}
+	}
+}
+
+// A request-scoped rejection that arrives after the bootstrap time budget is spent but before
+// any payload frame was buffered must still fail over transparently: nothing has reached the
+// client yet, so the retry can be delivered on the same socket. Notifying the downstream
+// disconnect here would close the client session and cost one credential per connection, even
+// though the conductor can still answer on the next credential. Both wire shapes of the
+// rejection are covered because they take different executor branches.
+func TestCodexWSRequestScopedSpentBudgetWithoutBufferedFrameFailsOver(t *testing.T) {
+	for _, rejection := range codexWSTestFlaggedRejections() {
+		t.Run(rejection.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+
+			var mu sync.Mutex
+			var attempts []string
+			upstream := newCodexWSFailoverServerScript(t, &attempts, &mu, func(_ string, conn *websocket.Conn) {
+				// Stay silent past the bootstrap budget, then reject before any frame was buffered.
+				time.Sleep(codexWSBudgetExceededDelay)
+				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(rejection.frame)); errWrite != nil {
+					t.Errorf("write websocket event: %v", errWrite)
+				}
+			})
+			defer upstream.Close()
+
+			cfg := &config.Config{Codex: config.CodexConfig{
+				StreamBootstrapBuffering: true,
+				StreamBootstrapTimeout:   codexWSShortBootstrapTimeout,
+			}}
+			manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+			manager.SetRetryConfig(0, 0, 2)
+			manager.RegisterExecutor(runtimeexecutor.NewCodexWebsocketsExecutor(cfg))
+			registerCodexWSTestAuth(t, manager, "ws-budget-flagged", 100, upstream.URL, "account-flagged", cliproxyauth.RequestScopedActionContinueAndCooldown)
+			registerCodexWSTestAuth(t, manager, "ws-budget-ok", 0, upstream.URL, "account-ok", "")
+
+			base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
+			handler := openaihandlers.NewOpenAIResponsesAPIHandler(base)
+			router := gin.New()
+			router.GET("/v1/responses/ws", handler.ResponsesWebsocket)
+			server := httptest.NewServer(router)
+			defer server.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+			conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+			if errDial != nil {
+				t.Fatalf("dial downstream websocket: %v", errDial)
+			}
+			defer func() { _ = conn.Close() }()
+
+			request := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","role":"user","content":"hello"}]}`, codexWSTestModel)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+				t.Fatalf("write downstream request: %v", errWrite)
+			}
+
+			read := readCodexWSDownstreamFrames(t, conn)
+			if len(read.errorFrames) != 0 {
+				t.Fatalf("downstream received an error instead of a transparent failover: %v", read.errorFrames)
+			}
+			if len(read.eventTypes) != 2 || read.eventTypes[0] != "response.created" || read.eventTypes[1] != "response.completed" {
+				t.Fatalf("downstream event sequence = %v, want exactly [response.created response.completed]", read.eventTypes)
+			}
+			for _, id := range read.responseIDs {
+				if id != "resp_ws_scoped_account-ok" {
+					t.Fatalf("downstream saw a response id from the rejected attempt: %q (all ids: %v)", id, read.responseIDs)
+				}
+			}
+
+			mu.Lock()
+			gotAttempts := append([]string(nil), attempts...)
+			mu.Unlock()
+			if len(gotAttempts) != 2 || gotAttempts[0] != "account-flagged" || gotAttempts[1] != "account-ok" {
+				t.Fatalf("attempts = %v, want [account-flagged, account-ok]", gotAttempts)
+			}
+		})
+	}
+}
+
+// The same spent budget with a payload frame already buffered is the opposite case: the buffered
+// handshake is released before the rejection, so the conductor can no longer retry the request.
+// The teardown must stay the ordinary notifying one, and the rejection must be delivered
+// in-stream after the buffered frame instead of silently rotating a second credential. Both wire
+// shapes of the rejection are covered because they take different executor branches.
+func TestCodexWSRequestScopedSpentBudgetWithBufferedFrameNotifiesAndSurfacesRejection(t *testing.T) {
+	for _, rejection := range codexWSTestFlaggedRejections() {
+		t.Run(rejection.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var attempts []string
+			upstream := newCodexWSFailoverServerScript(t, &attempts, &mu, func(account string, conn *websocket.Conn) {
+				created, _ := codexWSTestSuccessFrames(account)
+				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(created)); errWrite != nil {
+					t.Errorf("write websocket event: %v", errWrite)
+					return
+				}
+				// The buffered frame is already in hand; the rejection only arrives once the budget is spent.
+				time.Sleep(codexWSBudgetExceededDelay)
+				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(rejection.frame)); errWrite != nil {
+					t.Errorf("write websocket event: %v", errWrite)
+				}
+			})
+			defer upstream.Close()
+
+			manager, exec := newCodexWSScopedManagerWithTimeout(t, true, codexWSShortBootstrapTimeout)
+			registerCodexWSTestAuth(t, manager, "ws-budget-buffered-flagged", 100, upstream.URL, "account-flagged", cliproxyauth.RequestScopedActionContinueAndCooldown)
+			registerCodexWSTestAuth(t, manager, "ws-budget-buffered-ok", 0, upstream.URL, "account-ok", "")
+
+			const sessionID = "ws-request-scoped-spent-budget-buffered-frame"
+			disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+			defer exec.CloseExecutionSession(sessionID)
+
+			body, chunkErr := runCodexWSStream(t, manager, sessionID)
+			if chunkErr == nil || !strings.Contains(chunkErr.Error(), "invalid_prompt") {
+				t.Fatalf("the spent-budget buffered rejection must be delivered in-stream, got %v", chunkErr)
+			}
+			if events := codexWSStreamEvents(t, body); len(events) != 1 || events[0] != "response.created" {
+				t.Fatalf("downstream events = %v, want the buffered [response.created]", events)
+			}
+
+			mu.Lock()
+			gotAttempts := append([]string(nil), attempts...)
+			mu.Unlock()
+			if len(gotAttempts) != 1 || gotAttempts[0] != "account-flagged" {
+				t.Fatalf("attempts = %v, want [account-flagged]: a released frame rules out a clean retry", gotAttempts)
+			}
+
+			select {
+			case <-disconnectCh:
+			case <-time.After(time.Second):
+				t.Fatal("a spent-budget rejection after a buffered frame must still signal the downstream disconnect")
 			}
 		})
 	}
