@@ -35,6 +35,7 @@ func headerValueCaseInsensitive(headers http.Header, name string) string {
 	return ""
 }
 
+// Keys are explicit schema paths relative to parameters.properties, not recursive field names.
 var codexClientToolIntegerFields = map[string]map[string]struct{}{
 	"exec_command": {
 		"yield_time_ms":     struct{}{},
@@ -60,10 +61,85 @@ var codexClientToolIntegerFields = map[string]map[string]struct{}{
 		"limit": struct{}{},
 	},
 	"test_sync_tool": {
-		"sleep_before_ms": struct{}{},
-		"sleep_after_ms":  struct{}{},
-		"participants":    struct{}{},
-		"timeout_ms":      struct{}{},
+		"sleep_before_ms":                 struct{}{},
+		"sleep_after_ms":                  struct{}{},
+		"participants":                    struct{}{},
+		"timeout_ms":                      struct{}{},
+		"barrier.properties.participants": struct{}{},
+		"barrier.properties.timeout_ms":   struct{}{},
+	},
+	"create_goal": {
+		"token_budget": struct{}{},
+	},
+	"get_channels": {
+		"limit": struct{}{},
+	},
+	"list_threads": {
+		"limit":              struct{}{},
+		"max_chars_per_post": struct{}{},
+	},
+	"search_posts": {
+		"limit":              struct{}{},
+		"max_chars_per_post": struct{}{},
+	},
+	"read_thread": {
+		"limit":              struct{}{},
+		"max_chars_per_post": struct{}{},
+	},
+	"read_post": {
+		"offset_chars": struct{}{},
+		"limit_chars":  struct{}{},
+	},
+	"memories__list": {
+		"max_results": struct{}{},
+	},
+	"memories__read": {
+		"line_offset": struct{}{},
+		"max_lines":   struct{}{},
+	},
+	"memories__search": {
+		"context_lines": struct{}{},
+		"max_results":   struct{}{},
+	},
+	"history__list_windows": {
+		"limit": struct{}{},
+	},
+	"history__list_items": {
+		"limit":              struct{}{},
+		"max_chars_per_item": struct{}{},
+	},
+	"history__read_item": {
+		"offset_chars": struct{}{},
+		"limit_chars":  struct{}{},
+	},
+	"history__search_contents": {
+		"limit": struct{}{},
+	},
+	"notes__list_files_by_prefix": {
+		"max_results": struct{}{},
+	},
+	"notes__read_file": {
+		"start_line": struct{}{},
+		"stop_line":  struct{}{},
+		// Codex declares signed line numbers in the first nullable union branch.
+		"start_line.anyOf.0": struct{}{},
+		"stop_line.anyOf.0":  struct{}{},
+	},
+	"notes__search_contents": {
+		"max_matches_per_file": struct{}{},
+		"max_files":            struct{}{},
+	},
+	"image_gen__imagegen": {
+		"num_last_images_to_include": struct{}{},
+	},
+	"web__run": {
+		"search_query.items.properties.recency": struct{}{},
+		"image_query.items.properties.recency":  struct{}{},
+		"open.items.properties.lineno":          struct{}{},
+		"click.items.properties.id":             struct{}{},
+		"screenshot.items.properties.pageno":    struct{}{},
+		"weather.items.properties.duration":     struct{}{},
+		"sports.items.properties.num_games":     struct{}{},
 	},
 }
 
@@ -73,6 +149,13 @@ func matchCodexTargetTool(toolName string) map[string]struct{} {
 		baseName = strings.TrimPrefix(baseName, "functions__")
 	} else if strings.HasPrefix(baseName, "collab__") {
 		baseName = strings.TrimPrefix(baseName, "collab__")
+	}
+	switch baseName {
+	case "multi_agent_v1__wait_agent", "collaboration__wait_agent":
+		baseName = "wait_agent"
+	case "collaboration__get_channels", "collaboration__list_threads", "collaboration__search_posts",
+		"collaboration__read_thread", "collaboration__read_post":
+		baseName = strings.TrimPrefix(baseName, "collaboration__")
 	}
 	return codexClientToolIntegerFields[baseName]
 }
@@ -96,9 +179,9 @@ func normalizeCodexToolFieldTypes(rawParams []byte, targetFields map[string]stru
 		if !typeVal.Exists() {
 			continue
 		}
-		escapedKey := escapeCodexSjsonKey(fieldName)
+		typePath := "properties." + fieldName + ".type"
 		if typeVal.Type == gjson.String && typeVal.String() == "number" {
-			if updated, errSet := sjson.SetBytes(rawParams, "properties."+escapedKey+".type", "integer"); errSet == nil {
+			if updated, errSet := sjson.SetBytes(rawParams, typePath, "integer"); errSet == nil {
 				rawParams = updated
 				changed = true
 			}
@@ -119,7 +202,7 @@ func normalizeCodexToolFieldTypes(rawParams []byte, targetFields map[string]stru
 				}
 			}
 			if hasNumber {
-				if updated, errSet := sjson.SetBytes(rawParams, "properties."+escapedKey+".type", newTypes); errSet == nil {
+				if updated, errSet := sjson.SetBytes(rawParams, typePath, newTypes); errSet == nil {
 					rawParams = updated
 					changed = true
 				}
@@ -142,7 +225,7 @@ func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
 	// 1. Process top-level tools
 	toolsResult := gjson.GetBytes(body, "tools")
 	if toolsResult.IsArray() {
-		if updated, ok := normalizeToolIntegerTypesInArray(toolsResult); ok {
+		if updated, ok := normalizeToolIntegerTypesInArray(toolsResult, ""); ok {
 			if out, errSet := sjson.SetRawBytes(body, "tools", updated); errSet == nil {
 				body = out
 				changed = true
@@ -157,7 +240,7 @@ func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
 			if item.Get("type").String() == "additional_tools" {
 				addTools := item.Get("tools")
 				if addTools.IsArray() {
-					if updated, ok := normalizeToolIntegerTypesInArray(addTools); ok {
+					if updated, ok := normalizeToolIntegerTypesInArray(addTools, ""); ok {
 						path := fmt.Sprintf("input.%d.tools", idx)
 						if out, errSet := sjson.SetRawBytes(body, path, updated); errSet == nil {
 							body = out
@@ -175,14 +258,14 @@ func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
 	return body
 }
 
-func normalizeToolIntegerTypesInArray(tools gjson.Result) ([]byte, bool) {
+func normalizeToolIntegerTypesInArray(tools gjson.Result, namespace string) ([]byte, bool) {
 	if !tools.IsArray() {
 		return nil, false
 	}
 	var out []byte
 	offset := 0
 	tools.ForEach(func(_, tool gjson.Result) bool {
-		updated, changed := normalizeToolIntegerTypesInElement(tool)
+		updated, changed := normalizeToolIntegerTypesInElement(tool, namespace)
 		if !changed {
 			return true
 		}
@@ -201,15 +284,22 @@ func normalizeToolIntegerTypesInArray(tools gjson.Result) ([]byte, bool) {
 	return append(out, tools.Raw[offset:]...), true
 }
 
-func normalizeToolIntegerTypesInElement(tool gjson.Result) ([]byte, bool) {
+func normalizeToolIntegerTypesInElement(tool gjson.Result, namespace string) ([]byte, bool) {
 	toolRaw := []byte(tool.Raw)
 	changed := false
 
 	// Handle namespace tools
 	if tool.Get("type").String() == "namespace" {
+		if namespace != "" {
+			return nil, false
+		}
+		namespace = tool.Get("name").String()
+		if namespace == "" {
+			return nil, false
+		}
 		nested := tool.Get("tools")
 		if nested.IsArray() {
-			if updated, ok := normalizeToolIntegerTypesInArray(nested); ok {
+			if updated, ok := normalizeToolIntegerTypesInArray(nested, namespace); ok {
 				if out, errSet := sjson.SetRawBytes(toolRaw, "tools", updated); errSet == nil {
 					toolRaw = out
 					changed = true
@@ -223,7 +313,7 @@ func normalizeToolIntegerTypesInElement(tool gjson.Result) ([]byte, bool) {
 	for _, declKey := range []string{"function_declarations", "functionDeclarations"} {
 		decls := tool.Get(declKey)
 		if decls.IsArray() {
-			if updated, ok := normalizeToolIntegerTypesInArray(decls); ok {
+			if updated, ok := normalizeToolIntegerTypesInArray(decls, namespace); ok {
 				if out, errSet := sjson.SetRawBytes(toolRaw, declKey, updated); errSet == nil {
 					toolRaw = out
 					changed = true
@@ -256,6 +346,9 @@ func normalizeToolIntegerTypesInElement(tool gjson.Result) ([]byte, bool) {
 		}
 	}
 
+	if namespace != "" {
+		toolName = namespace + "__" + toolName
+	}
 	targetFields := matchCodexTargetTool(toolName)
 	if len(targetFields) == 0 {
 		return nil, false
@@ -271,11 +364,4 @@ func normalizeToolIntegerTypesInElement(tool gjson.Result) ([]byte, bool) {
 		return nil, false
 	}
 	return updatedTool, true
-}
-
-func escapeCodexSjsonKey(key string) string {
-	key = strings.ReplaceAll(key, `\`, `\\`)
-	key = strings.ReplaceAll(key, `.`, `\.`)
-	key = strings.ReplaceAll(key, `:`, `\:`)
-	return key
 }
