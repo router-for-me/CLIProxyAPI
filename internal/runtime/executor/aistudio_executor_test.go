@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -229,6 +230,83 @@ func TestAIStudioExecutorWithoutRelaySessionDoesNotMarkUpstreamAttempt(t *testin
 				t.Fatal("missing relay session was marked as an upstream attempt")
 			}
 		})
+	}
+}
+
+func TestAIStudioExecutorExecuteStreamPreservesRelayErrorStatus(t *testing.T) {
+	const authID = "aistudio-status-error"
+	connected := make(chan struct{}, 1)
+	relay := wsrelay.NewManager(wsrelay.Options{
+		ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
+		OnConnected:     func(string) { connected <- struct{}{} },
+	})
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	defer func() {
+		if errStop := relay.Stop(context.Background()); errStop != nil {
+			t.Errorf("relay stop error = %v", errStop)
+		}
+	}()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + relay.Path()
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Errorf("websocket close error = %v", errClose)
+		}
+	}()
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for relay connection")
+	}
+
+	clientDone := make(chan error, 1)
+	go func() {
+		var request wsrelay.Message
+		if errRead := conn.ReadJSON(&request); errRead != nil {
+			clientDone <- errRead
+			return
+		}
+		clientDone <- conn.WriteJSON(wsrelay.Message{
+			ID:   request.ID,
+			Type: wsrelay.MessageTypeError,
+			Payload: map[string]any{
+				"error":  "invalid api key",
+				"status": http.StatusUnauthorized,
+			},
+		})
+	}()
+
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	result, errExecute := exec.ExecuteStream(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+		Model:   "gemini-3.1-pro-preview",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	if result == nil {
+		t.Fatal("ExecuteStream() result is nil")
+	}
+	var streamErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("ExecuteStream() emitted no relay error")
+	}
+	var statusCoder interface{ StatusCode() int }
+	if !errors.As(streamErr, &statusCoder) || statusCoder.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("ExecuteStream() error = %v, want status %d", streamErr, http.StatusUnauthorized)
+	}
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatalf("relay client error = %v", errClient)
 	}
 }
 
