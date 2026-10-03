@@ -33,6 +33,7 @@ const EMPTY_POLICY = {
   model_group_id: '',
   allowed_ips: [],
   blocked_ips: [],
+  store_request_bodies: false,
 };
 
 export function policyToForm(policy) {
@@ -59,6 +60,7 @@ export function policyToForm(policy) {
     model_group_id: policy.model_group_id ?? '',
     allowed_ips: Array.isArray(policy.allowed_ips) ? [...policy.allowed_ips] : [],
     blocked_ips: Array.isArray(policy.blocked_ips) ? [...policy.blocked_ips] : [],
+    store_request_bodies: policy.store_request_bodies ?? false,
   };
 }
 
@@ -85,6 +87,7 @@ export function formToPolicy(form, apiKeyId) {
           .map((r) => routeToWire(r)),
     allowed_ips: dedupeStrings(form.allowed_ips),
     blocked_ips: dedupeStrings(form.blocked_ips),
+    store_request_bodies: !!form.store_request_bodies,
   };
   return policy;
 }
@@ -268,6 +271,21 @@ export default function PolicyForm({ initial, onChange }) {
         <div className="form__hint">
           Blocked entries take precedence over the allow list — a match denies
           the request even if the IP is also allowlisted.
+        </div>
+      </div>
+      <div className="form__row">
+        <label className="form__label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={!!form.store_request_bodies}
+            onChange={(e) => update({ store_request_bodies: e.target.checked })}
+          />
+          Simpan request/response log
+        </label>
+        <div className="form__hint">
+          When on, this key's request and response bodies may be stored in the
+          database for inspection. Capture happens when the upstream provider
+          OR this key allows it.
         </div>
       </div>
     </div>

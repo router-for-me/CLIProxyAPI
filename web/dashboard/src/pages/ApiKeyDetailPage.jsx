@@ -382,6 +382,7 @@ function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
     );
   }
   const usingGroup = !!initial?.model_group_id;
+  const storeBodiesOn = !!initial?.store_request_bodies;
   return (
     <div className="card">
       <h3 className="card__title">Policy</h3>
@@ -392,6 +393,10 @@ function PolicyCard({ apiKeyId, policy: initial, onUpdated }) {
         <PolicyStat label="Weekly Budget" value={fmtUSD(initial.budget_weekly_usd)} />
         <PolicyStat label="Monthly Budget" value={fmtUSD(initial.budget_monthly_usd)} />
         <PolicyStat label="Max Parallel" value={initial.max_parallel_requests ?? 'unlimited'} />
+      </div>
+      <div className="form__row">
+        <div className="form__label">Request/response logging</div>
+        <div>{storeBodiesOn ? 'Allowed for this key' : 'Not allowed for this key'}</div>
       </div>
       {usingGroup ? (
         <div className="form__row group-summary">
