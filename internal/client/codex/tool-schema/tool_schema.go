@@ -207,6 +207,11 @@ func normalizeToolIntegerTypesInElement(tool gjson.Result) ([]byte, bool) {
 
 	// Handle namespace tools
 	if tool.Get("type").String() == "namespace" {
+		// Codex reserves collaboration and validates its tool schemas exactly.
+		// Changing even number to integer makes otherwise valid requests fail.
+		if tool.Get("name").String() == "collaboration" {
+			return nil, false
+		}
 		nested := tool.Get("tools")
 		if nested.IsArray() {
 			if updated, ok := normalizeToolIntegerTypesInArray(nested); ok {
