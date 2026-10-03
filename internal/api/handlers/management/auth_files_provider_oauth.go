@@ -32,6 +32,7 @@ type codexOAuthService interface {
 	GenerateAuthURL(state string, pkceCodes *codex.PKCECodes) (string, error)
 	ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *codex.PKCECodes) (*codex.CodexAuthBundle, error)
 	CreateTokenStorage(bundle *codex.CodexAuthBundle) *codex.CodexTokenStorage
+	ApplyDaybreakTiers(ctx context.Context, metadata map[string]any, accessToken, accountID string)
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
@@ -336,6 +337,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"plan_type": planType,
 			},
 		}
+		openaiAuth.ApplyDaybreakTiers(ctx, record.Metadata, tokenStorage.AccessToken, tokenStorage.AccountID)
 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
 			return
 		}

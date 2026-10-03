@@ -64,6 +64,8 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		planType = codexauth.DefaultPlanType
 	}
 	auth.Metadata["plan_type"] = planType
+	accountID, _ := auth.Metadata["account_id"].(string)
+	svc.ApplyDaybreakTiers(ctx, auth.Metadata, td.AccessToken, accountID)
 	clonedAttributes := make(map[string]string, len(auth.Attributes)+1)
 	for k, v := range auth.Attributes {
 		clonedAttributes[k] = v
