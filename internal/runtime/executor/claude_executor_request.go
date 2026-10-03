@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"sort"
@@ -1647,7 +1648,8 @@ func isClaudeOAuthToken(apiKey string) bool {
 }
 
 type claudeMCPAliasOptions struct {
-	secret string
+	secret    string
+	inherited map[string]string
 }
 
 func resolveClaudeMCPAliasOptions(ctx context.Context) claudeMCPAliasOptions {
@@ -1714,7 +1716,10 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 		return nil, nil, false
 	}
 
-	reverseMap := make(map[string]string)
+	reverseMap := maps.Clone(mcpAliases.inherited)
+	if reverseMap == nil {
+		reverseMap = make(map[string]string)
+	}
 	recordRename := func(original, renamed string) {
 		// Preserve the first-seen original name if the same upstream name is
 		// produced from multiple call sites; they all map back identically.
@@ -1730,6 +1735,14 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 	forwardMap := make(map[string]string)
 	protectedNames := make(map[string]bool)
 	reservedNames := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	for alias, original := range mcpAliases.inherited {
+		reservedNames[alias] = true
+		reservedNames[original] = true
+		if alias != original {
+			forwardMap[original] = alias
+		}
+	}
+
 	if tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			name := tool.Get("name").String()
@@ -2003,7 +2016,10 @@ func applyClaudeRawJSONEdits(body []byte, edits []claudeRawJSONEdit) ([]byte, bo
 // fallback for malformed JSON or an unexpected GJSON offset. Keep it available
 // as a differential-test oracle for the batched implementation.
 func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAliasOptions) ([]byte, map[string]string) {
-	reverseMap := make(map[string]string)
+	reverseMap := maps.Clone(mcpAliases.inherited)
+	if reverseMap == nil {
+		reverseMap = make(map[string]string)
+	}
 	recordRename := func(original, renamed string) {
 		// Preserve the first-seen original name if the same upstream name is
 		// produced from multiple call sites; they all map back identically.
@@ -2019,6 +2035,14 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 	forwardMap := make(map[string]string)
 	protectedNames := make(map[string]bool)
 	reservedNames := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	for alias, original := range mcpAliases.inherited {
+		reservedNames[alias] = true
+		reservedNames[original] = true
+		if alias != original {
+			forwardMap[original] = alias
+		}
+	}
+
 	if tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			name := tool.Get("name").String()
