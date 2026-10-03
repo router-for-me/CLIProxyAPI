@@ -1167,6 +1167,10 @@ func applyClaudeHeadersWithNativeProfile(
 				includeExtendedCacheTTL := (!isSubagent || subagent1h) && !isProbe
 				baseBetas = withClaudeOAuthCredentialBetas(baseBetas, includeExtendedCacheTTL)
 			}
+		} else if useOAuthBetas && helperProfile && !countTokens {
+			// A helper sent through an API-key gateway session carries no OAuth
+			// credential beta; add it without extended-cache-ttl.
+			baseBetas = withClaudeOAuthCredentialBetas(baseBetas, false)
 		}
 	} else if preserveCallerFingerprint && useOAuthBetas {
 		if countTokens {

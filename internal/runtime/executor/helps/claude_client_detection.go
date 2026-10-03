@@ -104,6 +104,9 @@ var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 	claudeCodeHelperBetaProfile(false,
 		"structured-outputs-2025-12-15",
 	): claudeCodeHelperShapeStructured,
+	// Claude Code 2.1.280 and 2.1.285 title helper behind a gateway configured
+	// with an API key (no OAuth credential): only these two betas are sent.
+	"interleaved-thinking-2025-05-14,structured-outputs-2025-12-15": claudeCodeHelperShapeStructured,
 	claudeCodeHelperBetaProfile(true,
 		"structured-outputs-2025-12-15",
 		"server-side-fallback-2026-06-01",
