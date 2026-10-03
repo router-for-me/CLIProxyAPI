@@ -97,7 +97,7 @@ func IsRequestFault(status int, err error) bool {
 	if hasModelNotFoundErrorBody(err) {
 		return false
 	}
-	if hasRequestFaultBody(err) {
+	if hasRequestFaultBody(status, err) {
 		return true
 	}
 	if err != nil && IsItemNotPersisted(err.Error()) {
@@ -162,7 +162,7 @@ func hasAuthenticationErrorBody(err error) bool {
 	return false
 }
 
-func hasRequestFaultBody(err error) bool {
+func hasRequestFaultBody(status int, err error) bool {
 	if err == nil {
 		return false
 	}
@@ -170,8 +170,10 @@ func hasRequestFaultBody(err error) bool {
 	if body == "" || !json.Valid([]byte(body)) {
 		return false
 	}
+	hasCode := false
 	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
 		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		hasCode = hasCode || code != ""
 		if _, ok := requestFaultCodes[code]; ok {
 			return true
 		}
@@ -180,6 +182,19 @@ func hasRequestFaultBody(err error) bool {
 		errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
 		if _, ok := requestFaultTypes[errType]; ok {
 			return true
+		}
+	}
+	// Some compatible relays wrap missing messages in a generic HTTP 500.
+	// Match only this validation error, without overriding a structured code
+	// or treating arbitrary server errors containing validation text as faults.
+	if status == http.StatusInternalServerError && !hasCode {
+		for _, prefix := range []string{"error.", "", "response.error.", "body.error."} {
+			if !strings.EqualFold(strings.TrimSpace(gjson.Get(body, prefix+"type").String()), "server_error") {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(gjson.Get(body, prefix+"message").String()), "field messages is required") {
+				return true
+			}
 		}
 	}
 	return false

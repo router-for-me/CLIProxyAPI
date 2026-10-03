@@ -230,6 +230,52 @@ func TestIsRequestFault(t *testing.T) {
 	}
 }
 
+func TestIsRequestFaultMissingMessagesValidation(t *testing.T) {
+	const message = `"message":"field messages is required"`
+	const body = `{"error":{"type":"server_error",` + message + `}}`
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{name: "relay validation", status: 500, body: body, want: true},
+		{name: "top-level error", status: 500, body: `{"type":"server_error",` + message + `}`, want: true},
+		{name: "response envelope", status: 500, body: `{"response":{"error":{"type":"server_error",` + message + `}}}`, want: true},
+		{name: "body envelope", status: 500, body: `{"body":{"error":{"type":"server_error",` + message + `}}}`, want: true},
+		{name: "case and whitespace", status: 500, body: `{"error":{"type":"server_error","message":" Field messages is required "}}`, want: true},
+		{name: "null code", status: 500, body: `{"error":{"type":"server_error","code":null,` + message + `}}`, want: true},
+		{name: "structured request fault", status: 500, body: `{"error":{"type":"server_error","code":"invalid_value","message":"invalid input"}}`, want: true},
+		{name: "upstream internal failure", status: 500, body: `{"error":{"code":500,"message":"Internal error encountered.","status":"UNKNOWN"}}`},
+		{name: "other required field", status: 500, body: `{"error":{"type":"server_error","message":"field api_key is required"}}`},
+		{name: "embedded diagnostic", status: 500, body: `{"error":{"type":"server_error","message":"upstream crashed: field messages is required"}}`},
+		{name: "plain text", status: 500, body: "field messages is required"},
+		{name: "invalid json", status: 500, body: `{"error":{"type":"server_error",` + message},
+		{name: "missing type", status: 500, body: `{"error":{` + message + `}}`},
+		{name: "authentication type", status: 500, body: `{"error":{"type":"authentication_error",` + message + `}}`},
+		{name: "model capability code", status: 500, body: `{"error":{"type":"server_error","code":"model_not_found",` + message + `}}`},
+		{name: "quota code", status: 500, body: `{"error":{"type":"server_error","code":"insufficient_quota",` + message + `}}`},
+		{name: "outer quota code", status: 500, body: `{"code":"insufficient_quota","error":{"type":"server_error",` + message + `}}`},
+		{name: "numeric server code", status: 500, body: `{"error":{"type":"server_error","code":500,` + message + `}}`},
+		{name: "overload code", status: 500, body: `{"error":{"type":"server_error","code":"server_is_overloaded",` + message + `}}`},
+		{name: "unauthorized status", status: 401, body: body},
+		{name: "payment status", status: 402, body: body},
+		{name: "forbidden status", status: 403, body: body},
+		{name: "rate limit status", status: 429, body: body},
+		{name: "service unavailable status", status: 503, body: body},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := statusError{status: tc.status, body: tc.body}
+			for _, status := range []int{tc.status, 0} {
+				if got := IsRequestFault(status, err); got != tc.want {
+					t.Errorf("IsRequestFault(%d, %v) = %t, want %t", status, err, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestIsClientCancellation(t *testing.T) {
 	tests := []struct {
 		name   string
