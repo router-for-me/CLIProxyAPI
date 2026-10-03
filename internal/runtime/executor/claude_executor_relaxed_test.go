@@ -1,0 +1,342 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
+)
+
+func TestClaudeExecutor_DirectMessagesOAuthCacheOwnership(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, relaxed := range []bool{false, true} {
+			for _, payloadMarker := range []bool{false, true} {
+				t.Run(fmt.Sprintf("stream=%t/relaxed=%t/payloadMarker=%t", stream, relaxed, payloadMarker), func(t *testing.T) {
+					captured := make(chan []byte, 1)
+					transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						body, errRead := io.ReadAll(req.Body)
+						if errRead != nil {
+							return nil, errRead
+						}
+						captured <- body
+						if got := helps.HeaderValueCaseInsensitive(req.Header, "X-App"); got != "cli" {
+							t.Errorf("X-App = %q, want default OAuth CLI fingerprint", got)
+						}
+						responseBody := `{"id":"msg_cache","type":"message","model":"claude-opus-5","role":"assistant","content":[]}`
+						contentType := "application/json"
+						if stream {
+							responseBody = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+							contentType = "text/event-stream"
+						}
+						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(responseBody)), Request: req}, nil
+					})
+					ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+					auth := directClaudeOAuthAuth()
+					auth.ID = t.Name()
+					auth.Attributes["base_url"] = "https://api.anthropic.com"
+					if relaxed {
+						auth.Metadata["cloak_relaxed_system_prompt"] = true
+					}
+					cfg := &config.Config{}
+					if payloadMarker {
+						cfg.Payload.Override = []config.PayloadRule{{
+							Models: []config.PayloadModelRule{{Name: "*", Protocol: "claude", FromProtocol: "claude"}},
+							Params: map[string]any{"system.1.cache_control": map[string]any{"type": "ephemeral"}},
+						}}
+					}
+					payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"caller guidance"}],"messages":[{"role":"user","content":"hello"}]}`)
+					request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+					opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: http.Header{"User-Agent": {"pi (linux; x64)"}}}
+					executor := NewClaudeExecutor(cfg)
+					if stream {
+						result, errExecute := executor.ExecuteStream(ctx, auth, request, opts)
+						if errExecute != nil {
+							t.Fatal(errExecute)
+						}
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								t.Fatal(chunk.Err)
+							}
+						}
+					} else if _, errExecute := executor.Execute(ctx, auth, request, opts); errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					body := <-captured
+					if got := gjson.GetBytes(body, "system.1.text").String(); got != claudeCodeCLIIdentity {
+						t.Fatalf("direct Messages OAuth must use the cloak: %s", body)
+					}
+					wantCount := 2
+					wantSystem := "system.1.cache_control"
+					wantTTL := "1h"
+					if relaxed {
+						wantSystem = "system.2.cache_control"
+						if got := gjson.GetBytes(body, "system.2.text").String(); got != "caller guidance" || bytes.Contains(body, []byte("# currentDate")) {
+							t.Fatalf("relaxed caller layout changed: %s", body)
+						}
+					}
+					if payloadMarker {
+						wantCount, wantSystem, wantTTL = 1, "system.1.cache_control", ""
+					}
+					if countCacheControls(body) != wantCount || gjson.GetBytes(body, wantSystem+".type").String() != "ephemeral" || gjson.GetBytes(body, wantSystem+".ttl").String() != wantTTL {
+						t.Fatalf("post-Payload cache ownership changed: %s", body)
+					}
+					if _, ok := claudeBillingCCHDigitsOffset(body); !ok {
+						t.Fatalf("final body is missing the CCH signature: %s", body)
+					}
+					signed, errSign := signAnthropicMessagesBody(body)
+					if errSign != nil || !bytes.Equal(signed, body) {
+						t.Fatalf("final body CCH is not stable: %v", errSign)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestResolveClaudeWirePolicy_RelaxedHonorsSharedUpstreamDefaults(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cloak     string
+		attrMode  string
+		wantCloak bool
+		wantRelax bool
+	}{
+		{name: "shared disable", cloak: "relaxed-system-prompt: true", wantRelax: true},
+		{name: "key enables cloak", cloak: "mode: auto, relaxed-system-prompt: true", wantCloak: true, wantRelax: true},
+		{name: "key disables relaxed", cloak: "mode: auto, relaxed-system-prompt: false", wantCloak: true},
+		{name: "strict wins", cloak: "mode: auto, strict-mode: true, relaxed-system-prompt: true", wantCloak: true},
+		{name: "metadata enables cloak", cloak: "relaxed-system-prompt: true", attrMode: "always", wantCloak: true, wantRelax: true},
+		{name: "key overrides metadata mode", cloak: "mode: never, relaxed-system-prompt: true", attrMode: "always", wantRelax: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, errConfig := config.ParseConfigBytes([]byte(fmt.Sprintf(`upstream:
+  claude:
+    disable-claude-cloak-mode: true
+    header-defaults: {timezone: Asia/Singapore}
+api-keys:
+  claude:
+    - name: primary
+      keys:
+        - api-key: shared-default-key
+          fingerprint-profile: claude-code-cli
+          cloak: {%s}
+`, test.cloak)))
+			if errConfig != nil {
+				t.Fatal(errConfig)
+			}
+			auth := &cliproxyauth.Auth{
+				Attributes: map[string]string{"api_key": "shared-default-key", "cloak_mode": test.attrMode},
+				Metadata:   map[string]any{"cloak_relaxed_system_prompt": true},
+			}
+			for _, snapshot := range []*config.Config{cfg, cfg.CloneForRuntime()} {
+				if scoped := snapshot.ForAPIKey(); !scoped.DisableClaudeCloakMode || scoped.ClaudeHeaderDefaults.Timezone != "Asia/Singapore" {
+					t.Fatal("shared Claude defaults must remain available to API-key credentials")
+				}
+				policy, settings := resolveClaudeWirePolicy(snapshot, auth, "shared-default-key", false)
+				if policy.Cloak != test.wantCloak || settings.relaxedSystemPrompt != test.wantRelax {
+					t.Fatalf("cloak/relaxed = %t/%t, want %t/%t", policy.Cloak, settings.relaxedSystemPrompt, test.wantCloak, test.wantRelax)
+				}
+				if native, _ := resolveClaudeWirePolicy(snapshot, auth, "shared-default-key", true); native.Cloak {
+					t.Fatal("confirmed native Claude Code must remain a passthrough client")
+				}
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_RelaxedDeclassifiedProbePreservesMessages(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, strict := range []bool{false, true} {
+			t.Run(fmt.Sprintf("stream=%t/strict=%t", stream, strict), func(t *testing.T) {
+				captured := make(chan []byte, 1)
+				transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					body, errRead := io.ReadAll(req.Body)
+					if errRead != nil {
+						return nil, errRead
+					}
+					captured <- body
+					responseBody := `{"id":"msg_probe","type":"message","model":"claude-opus-5","role":"assistant","content":[]}`
+					contentType := "application/json"
+					if stream {
+						responseBody = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+						contentType = "text/event-stream"
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(responseBody)), Request: req}, nil
+				})
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+				auth := directClaudeOAuthAuth()
+				auth.ID = t.Name()
+				auth.Metadata["cloak_relaxed_system_prompt"] = true
+				auth.Metadata["cloak_strict_mode"] = strict
+				cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "*", Protocol: "claude"}},
+					Params: map[string]any{"max_tokens": 1024, "system.1.cache_control": map[string]any{"type": "ephemeral"}},
+				}}}}
+				payload := []byte(`{"model":"claude-opus-5","max_tokens":1,"system":[{"type":"text","text":"caller guidance"}],"messages":[{"role":"user","content":"probe"}]}`)
+				if !helps.IsClaudeProbeOrHelperRequest(payload) {
+					t.Fatal("test request must enter the probe branch before Payload")
+				}
+				executor := NewClaudeExecutor(cfg)
+				request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+				if stream {
+					result, errExecute := executor.ExecuteStream(ctx, auth, request, opts)
+					if errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatal(chunk.Err)
+						}
+					}
+				} else if _, errExecute := executor.Execute(ctx, auth, request, opts); errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				body := <-captured
+				if helps.IsClaudeProbeOrHelperRequest(body) || gjson.GetBytes(body, "max_tokens").Int() != 1024 {
+					t.Fatalf("Payload must declassify the probe: %s", body)
+				}
+				if bytes.Contains(body, []byte("# currentDate")) != strict {
+					t.Fatalf("generated currentDate must follow strict/relaxed policy: %s", body)
+				}
+				if !strict && gjson.GetBytes(body, "messages").Raw != gjson.GetBytes(payload, "messages").Raw {
+					t.Fatalf("relaxed probe declassification changed caller messages: %s", body)
+				}
+				if countCacheControls(body) != 1 || !gjson.GetBytes(body, "system.1.cache_control").Exists() {
+					t.Fatalf("Payload must retain complete cache ownership: %s", body)
+				}
+			})
+		}
+	}
+}
+
+func TestClaudeExecutor_RelaxedFablePreservesSystemLayoutAfterPayload(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, test := range []struct {
+			name       string
+			model      string
+			callerText string
+			params     map[string]any
+			wantText   string
+		}{
+			{name: "original Fable", model: "claude-fable-5-1", callerText: "caller guidance", wantText: "caller guidance"},
+			{name: "Payload selects Fable", model: "claude-sonnet-5", callerText: "caller guidance", params: map[string]any{"model": "claude-fable-5-1"}, wantText: "caller guidance"},
+			{name: "caller reporting text", model: "claude-fable-5-1", callerText: claudeCodeFableReportingOutcomes, wantText: claudeCodeFableReportingOutcomes},
+			{name: "Payload reporting text", model: "claude-fable-5-1", callerText: "caller guidance", params: map[string]any{"system.2.text": claudeCodeFableReportingOutcomes}, wantText: claudeCodeFableReportingOutcomes},
+		} {
+			t.Run(fmt.Sprintf("%s/stream=%t", test.name, stream), func(t *testing.T) {
+				type capturedRequest struct {
+					body    []byte
+					headers http.Header
+				}
+				captured := make(chan capturedRequest, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Error(errRead)
+					}
+					captured <- capturedRequest{body: body, headers: r.Header.Clone()}
+					if stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_relaxed\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-fable-5-1\",\"content\":[]}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"msg_relaxed","type":"message","role":"assistant","model":"claude-fable-5-1","content":[]}`)
+				}))
+				defer server.Close()
+
+				enabled := true
+				cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+					APIKey:  "sk-ant-oat-relaxed-fable",
+					BaseURL: server.URL,
+					Cloak:   &config.CloakConfig{RelaxedSystemPrompt: &enabled},
+				}}}
+				if test.params != nil {
+					cfg.Payload.Override = []config.PayloadRule{{
+						Models: []config.PayloadModelRule{{Name: "*", Protocol: "claude"}},
+						Params: test.params,
+					}}
+				}
+				auth := &cliproxyauth.Auth{
+					ID:       t.Name(),
+					Metadata: claudeOAuthTestMetadata(),
+					Attributes: map[string]string{
+						"api_key":  "sk-ant-oat-relaxed-fable",
+						"base_url": server.URL,
+					},
+				}
+				payload, errMarshal := json.Marshal(map[string]any{
+					"model":      test.model,
+					"max_tokens": 1024,
+					"thinking":   map[string]any{"type": "adaptive"},
+					"system": []any{map[string]any{
+						"type": "text", "text": test.callerText,
+						"cache_control": map[string]any{"type": "ephemeral", "ttl": "1h"},
+					}},
+					"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+				})
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				executor := NewClaudeExecutor(cfg)
+				request := cliproxyexecutor.Request{Model: test.model, Payload: payload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+				if stream {
+					result, errExecute := executor.ExecuteStream(context.Background(), auth, request, opts)
+					if errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatal(chunk.Err)
+						}
+					}
+				} else if _, errExecute := executor.Execute(context.Background(), auth, request, opts); errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				seen := <-captured
+				blocks := gjson.GetBytes(seen.body, "system").Array()
+				if len(blocks) != 3 || blocks[1].Get("text").String() != claudeCodeCLIIdentity || blocks[2].Get("text").String() != test.wantText {
+					t.Fatalf("relaxed system layout changed: %s", gjson.GetBytes(seen.body, "system").Raw)
+				}
+				if !strings.HasPrefix(blocks[0].Get("text").String(), "x-anthropic-billing-header:") {
+					t.Fatalf("missing billing identity: %s", blocks[0].Raw)
+				}
+				if got, want := gjson.GetBytes(seen.body, "messages").Raw, gjson.GetBytes(payload, "messages").Raw; got != want {
+					t.Fatalf("relaxed messages changed: got %s, want %s", got, want)
+				}
+				if countCacheControls(seen.body) != 1 || blocks[2].Get("cache_control.ttl").String() != "1h" {
+					t.Fatalf("caller cache ownership changed: %s", seen.body)
+				}
+				if gjson.GetBytes(seen.body, "fallbacks.0.model").String() != "claude-opus-5" || gjson.GetBytes(seen.body, "thinking.display").String() != "updates" {
+					t.Fatalf("existing Fable transport fields were lost: %s", seen.body)
+				}
+				for _, beta := range []string{"server-side-fallback-2026-06-01", "thinking-display-updates-2026-08-18", "extended-cache-ttl-2025-04-11"} {
+					if !strings.Contains(seen.headers.Get("Anthropic-Beta"), beta) {
+						t.Fatalf("missing existing beta %q: %s", beta, seen.headers.Get("Anthropic-Beta"))
+					}
+				}
+				if _, ok := claudeBillingCCHDigitsOffset(seen.body); !ok {
+					t.Fatalf("final body is missing the CCH signature: %s", seen.body)
+				}
+				signed, errSign := signAnthropicMessagesBody(seen.body)
+				if errSign != nil || !bytes.Equal(signed, seen.body) {
+					t.Fatalf("final body CCH is not stable: %v", errSign)
+				}
+			})
+		}
+	}
+}

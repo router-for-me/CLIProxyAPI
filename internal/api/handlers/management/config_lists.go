@@ -746,10 +746,11 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 			entry.Cloak = nil
 		} else {
 			type cloakPatch struct {
-				Mode           *string   `json:"mode"`
-				StrictMode     *bool     `json:"strict-mode"`
-				SensitiveWords *[]string `json:"sensitive-words"`
-				CacheUserID    *bool     `json:"cache-user-id"`
+				Mode                *string   `json:"mode"`
+				StrictMode          *bool     `json:"strict-mode"`
+				RelaxedSystemPrompt *bool     `json:"relaxed-system-prompt"`
+				SensitiveWords      *[]string `json:"sensitive-words"`
+				CacheUserID         *bool     `json:"cache-user-id"`
 			}
 			var p cloakPatch
 			if errCloak := json.Unmarshal(body.Value.Cloak, &p); errCloak != nil {
@@ -777,6 +778,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 			}
 			if p.StrictMode != nil {
 				entry.Cloak.StrictMode = *p.StrictMode
+			}
+			if p.RelaxedSystemPrompt != nil {
+				entry.Cloak.RelaxedSystemPrompt = p.RelaxedSystemPrompt
 			}
 			if p.SensitiveWords != nil {
 				entry.Cloak.SensitiveWords = *p.SensitiveWords
