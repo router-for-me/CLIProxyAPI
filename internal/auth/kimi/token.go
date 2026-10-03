@@ -114,7 +114,7 @@ func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(authFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
@@ -123,6 +123,9 @@ func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
 			log.Errorf("kimi token storage: close token file error: %v", errClose)
 		}
 	}()
+	if errChmod := f.Chmod(0o600); errChmod != nil {
+		return fmt.Errorf("failed to restrict token file permissions: %w", errChmod)
+	}
 
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
