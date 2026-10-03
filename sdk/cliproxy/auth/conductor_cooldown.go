@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
 	"io"
 	"net"
 	"net/http"
@@ -1704,7 +1705,7 @@ func isUnauthorizedError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if statusCodeFromError(err) == http.StatusUnauthorized {
+	if refreshdiagnostic.Reason(err) != "" || statusCodeFromError(err) == http.StatusUnauthorized {
 		return true
 	}
 	raw := strings.ToLower(err.Error())
@@ -1716,7 +1717,7 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
 		return false
 	}
 	if auth.Unavailable && auth.Status == StatusError && auth.NextRefreshAfter.IsZero() && auth.NextRetryAfter.IsZero() &&
-		(auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized")) {
+		(auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized") || refreshdiagnostic.IsReason(auth.LastError.Code)) {
 		return true
 	}
 	return false
@@ -1758,6 +1759,11 @@ func refreshErrorFromError(err error) *Error {
 	authErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
 	if statusCode == http.StatusUnauthorized {
 		authErr.Code = "unauthorized"
+		authErr.Retryable = false
+	}
+	if reason := refreshdiagnostic.Reason(err); reason != "" {
+		authErr.Code = reason
+		authErr.Message = refreshdiagnostic.Message
 		authErr.Retryable = false
 	}
 	return authErr

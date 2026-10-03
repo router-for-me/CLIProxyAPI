@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
 	"os"
 	"path/filepath"
 	"sort"
@@ -666,6 +667,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
+	}
+	if auth.LastError != nil && refreshdiagnostic.IsReason(auth.LastError.Code) {
+		entry["reauth_required"] = true
+		entry["reauth_reason"] = auth.LastError.Code
 	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed

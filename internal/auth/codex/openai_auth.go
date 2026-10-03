@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
 	"io"
 	"net/http"
 	"net/url"
@@ -245,7 +246,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, refreshdiagnostic.FromResponse(resp.StatusCode, body)
 	}
 
 	var tokenResp struct {
@@ -328,7 +329,6 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 			return tokenData, nil
 		}
 		if isNonRetryableRefreshErr(err) {
-			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
 			return nil, err
 		}
 
@@ -343,8 +343,7 @@ func isNonRetryableRefreshErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused")
+	return refreshdiagnostic.Reason(err) != "" || strings.Contains(strings.ToLower(err.Error()), "invalid_grant")
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
