@@ -8,10 +8,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// The canonicalizer runs on every Responses reply, so the unchanged case is
-// measured too. On an M5 Max it costs roughly 450ns and 700B per document,
-// which is negligible next to the upstream round trip; the scanner itself
-// allocates nothing, the remainder is gjson/sjson bookkeeping.
+// Measure both unchanged and rewritten documents for the Codex policy.
 func BenchmarkCanonicalizeNoop(b *testing.B) {
 	body := []byte(`{"output":[{"type":"reasoning","summary":[]},{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\",\"yield_time_ms\":2500}"}]}`)
 	b.ReportAllocs()
@@ -108,7 +105,7 @@ func TestCanonicalizeCodexToolArgumentsStream(t *testing.T) {
 		{
 			name: "output item added",
 			in:   `{"type":"response.output_item.added","item":{"type":"function_call","name":"exec_command","arguments":"{\"yield_time_ms\":2500.0}"}}`,
-			want: `{"type":"response.output_item.added","item":{"type":"function_call","name":"exec_command","arguments":"{\"yield_time_ms\":2500}"}}`,
+			want: `{"type":"response.output_item.added","item":{"type":"function_call","name":"exec_command","arguments":"{\"yield_time_ms\":2500.0}"}}`,
 		},
 		{
 			name: "argument delta is not rewritten",
@@ -123,7 +120,7 @@ func TestCanonicalizeCodexToolArgumentsStream(t *testing.T) {
 		{
 			name: "custom tool call input",
 			in:   `{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500.0}"}}`,
-			want: `{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500}"}}`,
+			want: `{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500.0}"}}`,
 		},
 		{
 			name: "custom tool call untouched without integral float",
@@ -170,12 +167,12 @@ func TestCanonicalizeCodexToolArgumentsNonStream(t *testing.T) {
 		{
 			name: "custom tool call input",
 			in:   `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500.0}"}]}`,
-			want: `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500}"}]}`,
+			want: `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":"{\"count\":2500.0}"}]}`,
 		},
 		{
 			name: "custom tool call inline object input",
 			in:   `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":{"count":2500.0}}]}`,
-			want: `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":{"count":2500}}]}`,
+			want: `{"output":[{"type":"custom_tool_call","name":"apply_patch","input":{"count":2500.0}}]}`,
 		},
 		{
 			name: "no output array",
@@ -225,7 +222,7 @@ func registerCodexArgumentResponders(r *Registry, to Format) {
 }
 
 func TestRegistryCanonicalizesResponsesTargets(t *testing.T) {
-	ctx := context.Background()
+	ctx := WithCodexToolArgumentNormalization(context.Background(), true)
 	// FormatOpenAIResponse is what the Codex client actually receives:
 	// OpenAIResponsesAPIHandler serves both /v1/responses and
 	// /backend-api/codex/responses and reports openai-response as its type.
@@ -251,7 +248,7 @@ func TestRegistryCanonicalizesResponsesTargets(t *testing.T) {
 }
 
 func TestRegistryLeavesNonCodexTargetsAlone(t *testing.T) {
-	ctx := context.Background()
+	ctx := WithCodexToolArgumentNormalization(context.Background(), true)
 	r := NewRegistry()
 	registerCodexArgumentResponders(r, FormatOpenAI)
 

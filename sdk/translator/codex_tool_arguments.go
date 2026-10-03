@@ -35,38 +35,97 @@ func isResponsesClientFormat(format Format) bool {
 // every other byte are left untouched. The input is returned unchanged when
 // there is nothing to rewrite.
 //
-// Codex clients parse function-call arguments from the complete item carried
-// by response.output_item.done and ignore both
-// response.function_call_arguments.delta and
-// response.function_call_arguments.done, so no cross-chunk state is needed.
+// Only complete, valid JSON arguments are rewritten. Initial items and deltas
+// remain untouched, as do all custom tool inputs. Complete argument events and
+// terminal output snapshots use the same representation without cross-chunk
+// state. Registry additionally requires the explicit client context policy.
 func CanonicalizeCodexToolArguments(body []byte, stream bool) []byte {
 	if len(body) == 0 {
 		return body
 	}
 	if stream {
-		switch gjson.GetBytes(body, "type").String() {
-		case "response.output_item.added", "response.output_item.done":
-			return canonicalizeCodexStreamItem(body)
+		if gjson.ValidBytes(body) {
+			return canonicalizeCodexStreamEvent(body)
 		}
+		return canonicalizeCodexSSEData(body)
+	}
+	if !gjson.ValidBytes(body) {
 		return body
 	}
 	return canonicalizeCodexResponseBody(body)
 }
 
-// canonicalizeCodexStreamItem rewrites the tool payload of one output item
-// event. Function calls carry it in arguments, custom tool calls in input.
-// Custom input events (response.custom_tool_call_input.delta/.done) are left
-// alone: Codex clients ignore function-call argument delta events the same
-// way, and there is no client-side evidence that these carry the parsed form.
-func canonicalizeCodexStreamItem(event []byte) []byte {
-	itemType := gjson.GetBytes(event, "item.type").String()
-	switch itemType {
-	case "function_call":
-		if updated := canonicalizeCodexArguments(event, "item.arguments"); updated != nil {
+// canonicalizeCodexSSEData handles complete JSON data lines while preserving
+// every envelope byte. A translator may return multiple events in one chunk.
+// Incomplete JSON remains untouched and never creates cross-chunk state.
+func canonicalizeCodexSSEData(body []byte) []byte {
+	var out []byte
+	for start := 0; start < len(body); {
+		end := len(body)
+		if newline := bytes.IndexByte(body[start:], '\n'); newline >= 0 {
+			end = start + newline + 1
+		}
+		line := body[start:end]
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("data:")) {
+			payload := bytes.TrimSpace(trimmed[len("data:"):])
+			if len(payload) > 0 && gjson.ValidBytes(payload) {
+				updated := canonicalizeCodexStreamEvent(payload)
+				if !bytes.Equal(updated, payload) {
+					offset := bytes.Index(line, payload)
+					if out == nil {
+						out = make([]byte, 0, len(body))
+						out = append(out, body[:start+offset]...)
+					} else {
+						out = append(out, line[:offset]...)
+					}
+					out = append(out, updated...)
+					out = append(out, line[offset+len(payload):]...)
+					start = end
+					continue
+				}
+			}
+		}
+		if out != nil {
+			out = append(out, line...)
+		}
+		start = end
+	}
+	if out == nil {
+		return body
+	}
+	return out
+}
+
+func canonicalizeCodexStreamEvent(event []byte) []byte {
+	switch gjson.GetBytes(event, "type").String() {
+	case "response.output_item.done":
+		return canonicalizeCodexStreamItem(event)
+	case "response.function_call_arguments.done":
+		if updated := canonicalizeCodexArguments(event, "arguments"); updated != nil {
 			return updated
 		}
-	case "custom_tool_call":
-		if updated := canonicalizeCodexArguments(event, "item.input"); updated != nil {
+	case "response.completed", "response.incomplete", "response.failed":
+		response := gjson.GetBytes(event, "response")
+		if !response.IsObject() {
+			return event
+		}
+		updated := canonicalizeCodexResponseBody([]byte(response.Raw))
+		if bytes.Equal(updated, []byte(response.Raw)) {
+			return event
+		}
+		if out, errSet := sjson.SetRawBytes(event, "response", updated); errSet == nil {
+			return out
+		}
+	}
+	return event
+}
+
+// canonicalizeCodexStreamItem rewrites complete function-call arguments.
+// Custom tool input is opaque text even when it happens to contain valid JSON.
+func canonicalizeCodexStreamItem(event []byte) []byte {
+	if gjson.GetBytes(event, "item.type").String() == "function_call" {
+		if updated := canonicalizeCodexArguments(event, "item.arguments"); updated != nil {
 			return updated
 		}
 	}
@@ -74,8 +133,7 @@ func canonicalizeCodexStreamItem(event []byte) []byte {
 }
 
 // canonicalizeCodexResponseBody rewrites every function-call item in a
-// non-streaming Codex response. Custom tool calls carry their payload in
-// input rather than arguments and are rewritten the same way.
+// complete response snapshot. All other item types remain unchanged.
 func canonicalizeCodexResponseBody(body []byte) []byte {
 	output := gjson.GetBytes(body, "output")
 	if !output.IsArray() {
@@ -83,16 +141,10 @@ func canonicalizeCodexResponseBody(body []byte) []byte {
 	}
 	out := body
 	for index, item := range output.Array() {
-		var argumentsPath string
-		switch gjson.Get(item.Raw, "type").String() {
-		case "function_call":
-			argumentsPath = "arguments"
-		case "custom_tool_call":
-			argumentsPath = "input"
-		default:
+		if gjson.Get(item.Raw, "type").String() != "function_call" {
 			continue
 		}
-		updated := canonicalizeCodexArguments([]byte(item.Raw), argumentsPath)
+		updated := canonicalizeCodexArguments([]byte(item.Raw), "arguments")
 		if updated == nil {
 			continue
 		}
@@ -117,6 +169,9 @@ func canonicalizeCodexArguments(document []byte, argumentsPath string) []byte {
 	switch raw.Type {
 	case gjson.String:
 		value := raw.String()
+		if !gjson.Valid(value) {
+			return nil
+		}
 		canonicalized := canonicalizeIntegralFloats([]byte(value))
 		if bytes.Equal(canonicalized, []byte(value)) {
 			return nil
@@ -127,6 +182,9 @@ func canonicalizeCodexArguments(document []byte, argumentsPath string) []byte {
 		}
 		return out
 	case gjson.JSON:
+		if !gjson.Valid(raw.Raw) {
+			return nil
+		}
 		canonicalized := canonicalizeIntegralFloats([]byte(raw.Raw))
 		if bytes.Equal(canonicalized, []byte(raw.Raw)) {
 			return nil

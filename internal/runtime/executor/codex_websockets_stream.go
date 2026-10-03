@@ -474,6 +474,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					payload = completedPayload
 				}
 				downstreamPayload := helps.EnsureResponsesUsageDetails(payload)
+				downstreamPayload = sdktranslator.NormalizeCodexToolArgumentsForClient(ctx, downstreamPayload, true)
 				currentChunks = [][]byte{downstreamPayload}
 			} else {
 				payload = normalizeCodexWebsocketCompletion(payload)
@@ -707,6 +708,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					payload = completedPayload
 				}
 				downstreamPayload := helps.EnsureResponsesUsageDetails(payload)
+				downstreamPayload = sdktranslator.NormalizeCodexToolArgumentsForClient(ctx, downstreamPayload, true)
 				if !send(cliproxyexecutor.StreamChunk{Payload: downstreamPayload}) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
