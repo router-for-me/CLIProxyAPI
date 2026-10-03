@@ -161,3 +161,23 @@ accepts legacy, new, or mixed layouts, normalizing v8 documents on save.
 
 Plugin OAuth uses the shared v8 login endpoint. Other plugin-defined HTTP
 extensions retain their declared `/v0/management` routes.
+
+## Shared client key display names
+
+`GET /v8/management/access/api-key-names` returns `{"names": {"<sha256>": "Team"}}`.
+`PATCH` accepts the same `names` object and optional `only_if_absent: true`.
+Fingerprints are lowercase SHA-256 hex of the full client key. All operations
+use management authentication; these names do not change keys, access policy,
+revocation or configuration-file contents.
+
+Metadata is stored separately in `api-key-names.json` next to the configuration
+file. Patches merge under the handler lock and use a private temporary file
+with atomic replacement. Each name is trimmed, limited to 128 Unicode
+characters, and rejects control/format characters and configured client key
+values. Requests are limited to 1 MiB and the merged map to 10000 entries.
+
+An empty name is a retained tombstone. `only_if_absent` can import existing
+browser names without overwriting server names or resurrecting a cleared name.
+Historical fingerprints may retain labels after revocation, but never restore
+authentication. Invalid stored metadata returns an error rather than replacing
+it. An embedded handler without a configuration path cannot persist names.
