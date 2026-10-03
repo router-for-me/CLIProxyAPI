@@ -1,13 +1,19 @@
 package helps
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"math/big"
-	"strconv"
+	"net/http"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	toolschema "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/tool-schema"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const (
@@ -16,57 +22,79 @@ const (
 	codexComplexUnionBranchThreshold = 8
 )
 
+// IsCodexUserAgent reports whether headers contain a User-Agent indicating a Codex client.
+func IsCodexUserAgent(headers http.Header) bool {
+	return toolschema.IsCodexUserAgent(headers)
+}
+
+// NormalizeCodexToolIntegerTypes normalizes specified tool parameter declarations
+// from number to integer for Codex clients across supported tool formats.
+func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
+	return toolschema.NormalizeCodexToolIntegerTypes(body, headers)
+}
+
 // NormalizeCodexToolSchemas inspects function tools in a Codex request payload
 // and simplifies pure constant union combinations (e.g. large oneOf branch sets
 // representing enums with descriptions, as emitted by MCP servers) into semantically
-// equivalent enum lists.
-// Only unions mathematically proven to be semantically equivalent to enum definitions
-// are modified; all other structures, property names, types, and constraints remain untouched.
+// equivalent enum lists, and sanitizes unsupported schema patterns.
+// It does not normalize tool integer types because upstream OpenAI Codex models
+// strictly validate reserved tool schemas (e.g. collaboration.wait_agent).
 func NormalizeCodexToolSchemas(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() || len(tools.Array()) == 0 {
+	if len(body) == 0 {
 		return body
 	}
+	updatedTools, changed := normalizeCodexToolList(gjson.GetBytes(body, "tools"))
+	if !changed {
+		return body
+	}
+	out, errSet := sjson.SetRawBytes(body, "tools", updatedTools)
+	if errSet != nil {
+		return body
+	}
+	log.Debugf("codex: normalized tool schemas to prevent upstream failure")
+	return out
+}
 
-	toolsArray := tools.Array()
-	changed := false
-	for i, tool := range toolsArray {
-		updatedTool, toolChanged := normalizeCodexTool(tool)
-		if toolChanged {
-			var errSet error
-			body, errSet = sjson.SetRawBytes(body, "tools."+strconv.Itoa(i), updatedTool)
-			if errSet == nil {
-				changed = true
-			}
+// normalizeCodexToolList batches changed elements so a long request (or a wide
+// namespace) is copied once rather than once per tool. Copy the gaps verbatim
+// to retain array formatting and unchanged declarations.
+func normalizeCodexToolList(tools gjson.Result) ([]byte, bool) {
+	if !tools.IsArray() {
+		return nil, false
+	}
+	var out []byte
+	offset := 0
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		updated, changed := normalizeCodexTool(tool)
+		if !changed {
+			return true
 		}
+		if out == nil {
+			out = make([]byte, 0, len(tools.Raw))
+		}
+		// ForEach indexes share the source of the containing array's index.
+		start := tool.Index - tools.Index
+		out = append(out, tools.Raw[offset:start]...)
+		out = append(out, updated...)
+		offset = start + len(tool.Raw)
+		return true
+	})
+	if out == nil {
+		return nil, false
 	}
-	if changed {
-		log.Debugf("codex: normalized tool schemas to prevent upstream failure")
-	}
-	return body
+	return append(out, tools.Raw[offset:]...), true
 }
 
 func normalizeCodexTool(tool gjson.Result) ([]byte, bool) {
 	toolType := tool.Get("type").String()
 	// Handle namespace tools (e.g. multi-agent nested tools)
 	if toolType == "namespace" {
-		nestedTools := tool.Get("tools")
-		if nestedTools.IsArray() && len(nestedTools.Array()) > 0 {
-			changed := false
-			raw := []byte(tool.Raw)
-			for j, nestedTool := range nestedTools.Array() {
-				updatedNested, nestedChanged := normalizeCodexTool(nestedTool)
-				if nestedChanged {
-					var errSet error
-					raw, errSet = sjson.SetRawBytes(raw, "tools."+strconv.Itoa(j), updatedNested)
-					if errSet == nil {
-						changed = true
-					}
-				}
-			}
-			return raw, changed
+		updatedTools, changed := normalizeCodexToolList(tool.Get("tools"))
+		if !changed {
+			return nil, false
 		}
-		return nil, false
+		updated, errSet := sjson.SetRawBytes([]byte(tool.Raw), "tools", updatedTools)
+		return updated, errSet == nil
 	}
 
 	if toolType != "function" && toolType != "custom" {
@@ -89,13 +117,19 @@ func normalizeCodexTool(tool gjson.Result) ([]byte, bool) {
 		return nil, false
 	}
 
-	log.Debugf("codex: simplified complex schema unions for tool %s to avoid upstream abort", tool.Get("name").String())
+	log.Debugf("codex: normalized schema for tool %s to avoid upstream abort", tool.Get("name").String())
 	return updatedTool, true
 }
 
 func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 	rawParams := []byte(params.Raw)
 	changed := false
+
+	if sanitizedParams, patternChanged := stripIncompatiblePatternsFromJSON(rawParams); patternChanged {
+		rawParams = sanitizedParams
+		changed = true
+		params = gjson.ParseBytes(rawParams)
+	}
 
 	properties := params.Get("properties")
 	if properties.Exists() && properties.IsObject() {
@@ -113,6 +147,103 @@ func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 	}
 
 	return rawParams, changed
+}
+
+// stripIncompatiblePatternsFromJSON recursively removes pattern attributes that strict
+// upstream validators reject: unsupported Unicode property escapes (\p{...} / \P{...})
+// and the octal NUL escape (\0). See util.HasUnsupportedUnicodePropertyEscape for the
+// predicate and the upstream errors behind each one.
+// It is schema-aware: only subschemas under known JSON Schema keyword locations are visited,
+// preventing accidental deletion of 'pattern' keys inside user data (e.g. description, default, enum).
+func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
+	rawStr := string(raw)
+	// The fast path avoids parsing when no candidate escape is present. Patterns
+	// arrive JSON-escaped, so a literal backslash before '0' is `\\0` in the raw bytes.
+	if !strings.Contains(rawStr, `\p{`) && !strings.Contains(rawStr, `\P{`) && !strings.Contains(rawStr, `\u`) &&
+		!strings.Contains(rawStr, `\\0`) {
+		return raw, false
+	}
+	var root any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&root); err != nil || root == nil {
+		return raw, false
+	}
+	// Verify no trailing garbage
+	var dummy any
+	if err := dec.Decode(&dummy); err != io.EOF {
+		return raw, false
+	}
+	if !stripIncompatiblePatterns(root) {
+		return raw, false
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(root); err != nil {
+		return raw, false
+	}
+	return bytes.TrimSpace(buf.Bytes()), true
+}
+
+func stripIncompatiblePatterns(v any) bool {
+	changed := false
+	switch schema := v.(type) {
+	case map[string]any:
+		if patternVal, ok := schema["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(patternVal) {
+			delete(schema, "pattern")
+			changed = true
+		}
+
+		// Inspect regex keys under patternProperties
+		if patternProps, ok := schema["patternProperties"].(map[string]any); ok {
+			for patternKey, subSchema := range patternProps {
+				if util.HasUnsupportedUnicodePropertyEscape(patternKey) {
+					delete(patternProps, patternKey)
+					changed = true
+				} else if stripIncompatiblePatterns(subSchema) {
+					changed = true
+				}
+			}
+		}
+
+		for _, mapKey := range util.SchemaMapKeywords {
+			if mapKey == "patternProperties" {
+				continue
+			}
+			if subMap, ok := schema[mapKey].(map[string]any); ok {
+				for _, subSchema := range subMap {
+					if stripIncompatiblePatterns(subSchema) {
+						changed = true
+					}
+				}
+			}
+		}
+
+		for _, valKey := range util.SchemaValueKeywords {
+			if val, exists := schema[valKey]; exists {
+				switch sub := val.(type) {
+				case map[string]any:
+					if stripIncompatiblePatterns(sub) {
+						changed = true
+					}
+				case []any:
+					for _, item := range sub {
+						if stripIncompatiblePatterns(item) {
+							changed = true
+						}
+					}
+				}
+			}
+		}
+	case []any:
+		for _, item := range schema {
+			if stripIncompatiblePatterns(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func normalizeCodexPropertySchema(prop gjson.Result) ([]byte, bool) {

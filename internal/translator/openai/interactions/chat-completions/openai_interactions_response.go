@@ -7,24 +7,26 @@ import (
 	"strings"
 	"time"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type interactionsToOpenAIChatStreamState struct {
-	ID              string
-	Model           string
-	EnvironmentID   string
-	Created         int64
-	Started         bool
-	Completed       bool
-	SawToolCall     bool
-	StepTypes       map[int]string
-	ToolIDs         map[int]string
-	ToolNames       map[int]string
-	ToolArguments   map[int]*strings.Builder
-	TextByStepIndex map[int]*strings.Builder
+	ID                  string
+	Model               string
+	EnvironmentID       string
+	Created             int64
+	Started             bool
+	Completed           bool
+	SawToolCall         bool
+	StepTypes           map[int]string
+	ToolIDs             map[int]string
+	ToolNames           map[int]string
+	ToolArguments       map[int]*strings.Builder
+	TextByStepIndex     map[int]*strings.Builder
+	ToolCallIndexByStep map[int]int
+	NextToolCallIndex   int
 }
 
 func ConvertInteractionsResponseToOpenAI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
@@ -95,6 +97,13 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 		out, _ = sjson.SetBytes(out, "choices.0.message.content", nil)
 		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
 	}
+	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())
+	interactionFinishReason := firstNonEmpty(interaction.Get("finish_reason").String(), root.Get("finish_reason").String())
+	if interactionFinishReason == "content_filter" {
+		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "content_filter")
+	} else if status == "incomplete" || interactionFinishReason == "length" || interactionFinishReason == "max_tokens" {
+		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "length")
+	}
 	if envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String(), root.Get("interaction.environment_id").String()); envID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", envID)
 	}
@@ -130,6 +139,8 @@ func convertInteractionsEventToOpenAIChat(modelName string, rawJSON []byte, st *
 			st.EnvironmentID = envID
 		}
 		return appendOpenAIChatCompleted(nil, root, st)
+	case "response.failed", "interaction.failed":
+		return interactionsFailedToOpenAIChat(root)
 	case "done":
 		return nil
 	}
@@ -146,7 +157,14 @@ func interactionsStepStartToOpenAIChat(modelName string, root gjson.Result, st *
 	switch stepType {
 	case "function_call":
 		st.SawToolCall = true
-		st.ToolIDs[index] = firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), fmt.Sprintf("call_%d", index))
+		toolCallIndex := st.NextToolCallIndex
+		if existingIndex, ok := st.ToolCallIndexByStep[index]; ok {
+			toolCallIndex = existingIndex
+		} else {
+			st.ToolCallIndexByStep[index] = toolCallIndex
+			st.NextToolCallIndex++
+		}
+		st.ToolIDs[index] = firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), fmt.Sprintf("call_%d", toolCallIndex))
 		name := step.Get("name").String()
 		if isAntigravityModel(modelName) || (st != nil && isAntigravityModel(st.Model)) {
 			name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
@@ -216,10 +234,44 @@ func appendOpenAIChatCompleted(out [][]byte, root gjson.Result, st *interactions
 	if st.SawToolCall {
 		finishReason = "tool_calls"
 	}
+	interaction := root.Get("interaction")
+	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())
+	interactionFinishReason := firstNonEmpty(interaction.Get("finish_reason").String(), root.Get("finish_reason").String())
+	if interactionFinishReason == "content_filter" {
+		finishReason = "content_filter"
+	} else if status == "incomplete" || interactionFinishReason == "length" || interactionFinishReason == "max_tokens" {
+		finishReason = "length"
+	}
 	chunk, _ = sjson.SetBytes(chunk, "choices.0.finish_reason", finishReason)
 	chunk = setOpenAIChatUsageFromInteractions(chunk, "usage", translatorcommon.InteractionsUsage(root))
 	st.Completed = true
 	return append(out, chunk)
+}
+
+func interactionsFailedToOpenAIChat(root gjson.Result) [][]byte {
+	errNode := root.Get("error")
+	if !errNode.Exists() {
+		errNode = root.Get("interaction.error")
+	}
+	msg := errNode.Get("message").String()
+	if msg == "" {
+		msg = "upstream error occurred"
+	}
+	code := errNode.Get("code").String()
+	errType := errNode.Get("type").String()
+	if errType == "" {
+		errType = "server_error"
+	}
+
+	errorJSON := []byte(`{"error":{"message":"","type":"","code":""}}`)
+	errorJSON, _ = sjson.SetBytes(errorJSON, "error.message", msg)
+	errorJSON, _ = sjson.SetBytes(errorJSON, "error.type", errType)
+	if code != "" {
+		errorJSON, _ = sjson.SetBytes(errorJSON, "error.code", code)
+	} else {
+		errorJSON, _ = sjson.DeleteBytes(errorJSON, "error.code")
+	}
+	return [][]byte{errorJSON}
 }
 
 func openAIChatBaseChunk(st *interactionsToOpenAIChatStreamState) []byte {
@@ -241,9 +293,15 @@ func openAIChatDeltaChunk(st *interactionsToOpenAIChatStreamState, field, value 
 
 func openAIChatToolCallStartChunk(st *interactionsToOpenAIChatStreamState, index int) []byte {
 	chunk := openAIChatBaseChunk(st)
+	toolCallIndex := index
+	if st != nil && st.ToolCallIndexByStep != nil {
+		if idx, ok := st.ToolCallIndexByStep[index]; ok {
+			toolCallIndex = idx
+		}
+	}
 	toolCall := []byte(`{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`)
-	toolCall, _ = sjson.SetBytes(toolCall, "index", index)
-	toolCall, _ = sjson.SetBytes(toolCall, "id", firstNonEmpty(st.ToolIDs[index], fmt.Sprintf("call_%d", index)))
+	toolCall, _ = sjson.SetBytes(toolCall, "index", toolCallIndex)
+	toolCall, _ = sjson.SetBytes(toolCall, "id", firstNonEmpty(st.ToolIDs[index], fmt.Sprintf("call_%d", toolCallIndex)))
 	toolCall, _ = sjson.SetBytes(toolCall, "function.name", st.ToolNames[index])
 	chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.tool_calls.-1", toolCall)
 	return chunk
@@ -251,8 +309,14 @@ func openAIChatToolCallStartChunk(st *interactionsToOpenAIChatStreamState, index
 
 func openAIChatToolCallArgumentsChunk(st *interactionsToOpenAIChatStreamState, index int, arguments string) []byte {
 	chunk := openAIChatBaseChunk(st)
+	toolCallIndex := index
+	if st != nil && st.ToolCallIndexByStep != nil {
+		if idx, ok := st.ToolCallIndexByStep[index]; ok {
+			toolCallIndex = idx
+		}
+	}
 	toolCall := []byte(`{"index":0,"function":{"arguments":""}}`)
-	toolCall, _ = sjson.SetBytes(toolCall, "index", index)
+	toolCall, _ = sjson.SetBytes(toolCall, "index", toolCallIndex)
 	toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments)
 	chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.tool_calls.-1", toolCall)
 	return chunk
@@ -366,5 +430,8 @@ func (st *interactionsToOpenAIChatStreamState) ensureMaps() {
 	}
 	if st.TextByStepIndex == nil {
 		st.TextByStepIndex = make(map[int]*strings.Builder)
+	}
+	if st.ToolCallIndexByStep == nil {
+		st.ToolCallIndexByStep = make(map[int]int)
 	}
 }

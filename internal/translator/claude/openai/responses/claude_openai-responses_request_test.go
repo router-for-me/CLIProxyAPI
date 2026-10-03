@@ -1,12 +1,13 @@
 package responses
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
 
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -282,6 +283,32 @@ func TestConvertOpenAIResponsesRequestToClaude_ReasoningContentTextRebuildsThink
 	}
 	if got := thinking.Get("signature").String(); got != expectedSignature {
 		t.Fatalf("thinking signature = %q, want %q", got, expectedSignature)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SummarySetsThinkingDisplay(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+		want    string
+	}{
+		{name: "auto", summary: `"summary":"auto"`, want: "summarized"},
+		{name: "concise", summary: `"summary":"concise"`, want: "summarized"},
+		{name: "none", summary: `"summary":"none"`, want: "omitted"},
+		{name: "absent", summary: "", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reasoning := `"effort":"high"`
+			if test.summary != "" {
+				reasoning += "," + test.summary
+			}
+			raw := []byte(`{"model":"claude-opus-5-5","reasoning":{` + reasoning + `},"input":"hi"}`)
+			out := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", raw, false)
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.want {
+				t.Fatalf("thinking.display = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -572,6 +599,448 @@ func TestConvertOpenAIResponsesRequestToClaude_FunctionCallOutputPreservesInputI
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_StandaloneToolOutputBecomesUserText(t *testing.T) {
+	// Codex create_thread seeds a new thread with a function_call_output whose
+	// call_id never appears as a function_call in the same input. Claude
+	// rejects tool_result blocks without a matching tool_use, so it must
+	// degrade to text.
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{
+				"type":"function_call_output",
+				"call_id":"toolu_1789312108939888000_16",
+				"output":"<codex_delegation>Launched from another task.</codex_delegation>"
+			},
+			{
+				"type":"message",
+				"role":"user",
+				"content":[{"type":"input_text","text":"Reply with PROBE_OK."}]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	root.Get("messages").ForEach(func(_, msg gjson.Result) bool {
+		msg.Get("content").ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "tool_result" {
+				t.Fatalf("unexpected tool_result for standalone output. Output: %s", string(out))
+			}
+			return true
+		})
+		return true
+	})
+	if got := root.Get("messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.0.content.0.type").String(); got != "text" {
+		t.Fatalf("messages.0.content.0.type = %q, want text. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.0.content.0.text").String(); got != "<codex_delegation>Launched from another task.</codex_delegation>" {
+		t.Fatalf("messages.0.content.0.text = %q. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SynthesizesResultForDanglingToolUse(t *testing.T) {
+	// A session that died mid-tool leaves a function_call with no output.
+	// Anthropic requires a tool_result at the start of the next user message,
+	// so one is synthesized.
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run the tests."}]},
+			{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"cmd\":\"npm test\"}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Session was restarted; carry on."}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.#").Int(); got != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.content.0.type").String(); got != "tool_use" {
+		t.Fatalf("messages.1.content.0.type = %q, want tool_use. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages.2.content.0.type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.tool_use_id").String(); got != "call_1" {
+		t.Fatalf("synthesized tool_use_id = %q, want call_1. Output: %s", got, string(out))
+	}
+	if !root.Get("messages.2.content.0.is_error").Bool() {
+		t.Fatalf("synthesized tool_result should be is_error. Output: %s", string(out))
+	}
+	if got := root.Get("messages.2.content.1.text").String(); got != "Session was restarted; carry on." {
+		t.Fatalf("messages.2.content.1.text = %q, want 'Session was restarted; carry on.'. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SynthesizesResultForTrailingToolUse(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run ls."}]},
+			{"type":"function_call","call_id":"call_tail","name":"exec","arguments":"{}"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.#").Int(); got != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.role").String(); got != "user" {
+		t.Fatalf("messages.2.role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages.2.content.0.type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.tool_use_id").String(); got != "call_tail" {
+		t.Fatalf("messages.2.content.0.tool_use_id = %q, want call_tail. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MovesToolResultsAheadOfInjectedText(t *testing.T) {
+	// A heartbeat seed can land between a tool call and its output. Anthropic
+	// requires tool_result blocks to lead the user message.
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run ls."}]},
+			{"type":"function_call","call_id":"call_hb","name":"exec","arguments":"{}"},
+			{"type":"function_call_output","id":"fco_seed","name":"automation_update","namespace":"codex_app","output":"<heartbeat>tick</heartbeat>"},
+			{"type":"function_call_output","call_id":"call_hb","output":"a.txt"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Continue."}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.#").Int(); got != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", got, string(out))
+	}
+	blocks := root.Get("messages.2.content").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 blocks in messages.2, got %d. Output: %s", len(blocks), string(out))
+	}
+	if got := blocks[0].Get("type").String(); got != "tool_result" || blocks[0].Get("tool_use_id").String() != "call_hb" {
+		t.Fatalf("blocks[0] = %s, want tool_result for call_hb. Output: %s", blocks[0].Raw, string(out))
+	}
+	if got := blocks[0].Get("content").String(); got != "a.txt" {
+		t.Fatalf("blocks[0].content = %q, want a.txt", got)
+	}
+	if got := blocks[1].Get("text").String(); got != "<heartbeat>tick</heartbeat>" {
+		t.Fatalf("blocks[1].text = %q, want heartbeat text. Output: %s", got, string(out))
+	}
+	if got := blocks[2].Get("text").String(); got != "Continue." {
+		t.Fatalf("blocks[2].text = %q, want Continue. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SynthesizesResultForTrailingToolUseOnPrefillRejectingModel(t *testing.T) {
+	// Models that reject assistant prefill (fable/opus-5/sonnet-4-6) used to
+	// drop the trailing tool_use before repair could answer it, losing the
+	// call history entirely. The synthesized tool_result must survive instead.
+	raw := []byte(`{
+		"model":"claude-fable-5-1",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run ls."}]},
+			{"type":"function_call","call_id":"call_tail","name":"exec","arguments":"{}"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-fable-5-1", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.#").Int(); got != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.content.0.type").String(); got != "tool_use" {
+		t.Fatalf("messages.1.content.0.type = %q, want tool_use. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.role").String(); got != "user" {
+		t.Fatalf("messages.2.role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages.2.content.0.type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.tool_use_id").String(); got != "call_tail" {
+		t.Fatalf("messages.2.content.0.tool_use_id = %q, want call_tail. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_LateOrphanToolResultFoldsToText(t *testing.T) {
+	// An output can pass the emittedToolUses gate but still land after an
+	// intervening assistant message, where its tool_result no longer answers
+	// the immediately preceding tool_use. The repair must fold it into text
+	// and synthesize the missing answer for the real dangling call.
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run ls."}]},
+			{"type":"function_call","call_id":"call_a","name":"exec","arguments":"{}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"wait"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"interlude"}]},
+			{"type":"function_call_output","call_id":"call_a","output":"a.txt"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	// messages: user | assistant(tool_use call_a) | user | assistant(text) | user
+	if got := root.Get("messages.#").Int(); got != 5 {
+		t.Fatalf("message count = %d, want 5. Output: %s", got, string(out))
+	}
+	// The user message right after the dangling tool_use must lead with a
+	// synthesized error tool_result for call_a.
+	if got := root.Get("messages.2.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages.2.content.0.type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.tool_use_id").String(); got != "call_a" {
+		t.Fatalf("messages.2.content.0.tool_use_id = %q, want call_a. Output: %s", got, string(out))
+	}
+	if !root.Get("messages.2.content.0.is_error").Bool() {
+		t.Fatalf("synthesized tool_result should be is_error. Output: %s", string(out))
+	}
+	// The late real output must not remain a tool_result after the interlude
+	// assistant message; it folds into plain text.
+	last := root.Get("messages.4")
+	if got := last.Get("role").String(); got != "user" {
+		t.Fatalf("messages.4.role = %q, want user. Output: %s", got, string(out))
+	}
+	last.Get("content").ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "tool_result" {
+			t.Fatalf("late output must not remain a tool_result. Output: %s", string(out))
+		}
+		return true
+	})
+	if got := last.Get("content.0.text").String(); got != "a.txt" {
+		t.Fatalf("messages.4.content.0.text = %q, want a.txt. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_EmptyStandaloneToolOutputKeepsMarker(t *testing.T) {
+	// A standalone output with empty content must still produce a non-empty
+	// user message; Anthropic rejects empty content arrays too. Both the
+	// string form and the structured array form with an empty text part
+	// collapse to the marker text.
+	for _, output := range []string{`""`, `[{"type":"input_text","text":""}]`} {
+		raw := []byte(`{
+			"model":"claude-test",
+			"input":[
+				{"type":"function_call_output","call_id":"orphan","output":` + output + `}
+			]
+		}`)
+
+		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		root := gjson.ParseBytes(out)
+
+		if got := root.Get("messages.#").Int(); got != 1 {
+			t.Fatalf("message count = %d, want 1 for output %s. Output: %s", got, output, string(out))
+		}
+		content := root.Get("messages.0.content")
+		if content.IsArray() {
+			if len(content.Array()) == 0 {
+				t.Fatalf("empty content array in messages.0 for output %s. Output: %s", output, string(out))
+			}
+			if got := content.Get("0.type").String(); got != "text" {
+				t.Fatalf("messages.0.content.0.type = %q, want text for output %s. Output: %s", got, output, string(out))
+			}
+			if got := content.Get("0.text").String(); strings.TrimSpace(got) == "" {
+				t.Fatalf("empty text block in messages.0 for output %s. Output: %s", output, string(out))
+			}
+			continue
+		}
+		if got := content.String(); strings.TrimSpace(got) == "" {
+			t.Fatalf("empty string content in messages.0 for output %s. Output: %s", output, string(out))
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SanitizedIDCollisionKeepsOrphanAsText(t *testing.T) {
+	// "call.custom:1" and "call_custom_1" sanitize to the same Claude id, but
+	// they are distinct calls. The unpaired raw id must degrade to text while
+	// the real pairing stays a tool_result.
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run."}]},
+			{"type":"function_call","call_id":"call.custom:1","name":"exec","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_custom_1","output":"unrelated context"},
+			{"type":"function_call_output","call_id":"call.custom:1","output":"real result"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	blocks := root.Get("messages.2.content").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks in messages.2, got %d. Output: %s", len(blocks), string(out))
+	}
+	if got := blocks[0].Get("type").String(); got != "tool_result" {
+		t.Fatalf("blocks[0].type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := blocks[0].Get("content").String(); got != "real result" {
+		t.Fatalf("blocks[0].content = %q, want 'real result'. Output: %s", got, string(out))
+	}
+	if got := blocks[1].Get("type").String(); got != "text" {
+		t.Fatalf("blocks[1].type = %q, want text. Output: %s", got, string(out))
+	}
+	if got := blocks[1].Get("text").String(); got != "unrelated context" {
+		t.Fatalf("blocks[1].text = %q, want 'unrelated context'. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_EmptyLateOrphanToolResultKeepsNonEmptyUserMessage(t *testing.T) {
+	// An empty late orphan output folds to nothing; the user message must
+	// still carry a marker instead of degenerating to content:[] which
+	// Anthropic also rejects.
+	raw := []byte(`{
+		"model":"claude-fable-5-1",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run the tool."}]},
+			{"type":"function_call","call_id":"call_a","name":"exec","arguments":"{}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Wait."}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Interlude."}]},
+			{"type":"function_call_output","call_id":"call_a","output":""}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-fable-5-1", raw, false)
+	root := gjson.ParseBytes(out)
+
+	root.Get("messages").ForEach(func(_, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if content.IsArray() && len(content.Array()) == 0 {
+			t.Fatalf("empty content array in message. Output: %s", string(out))
+		}
+		content.ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "tool_result" && block.Get("tool_use_id").String() == "call_a" && !block.Get("is_error").Bool() {
+				t.Fatalf("late empty orphan must not remain a tool_result. Output: %s", string(out))
+			}
+			return true
+		})
+		return true
+	})
+	last := root.Get("messages.4")
+	if got := last.Get("role").String(); got != "user" {
+		t.Fatalf("messages.4.role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := last.Get("content.0.text").String(); got != "Tool result was empty." {
+		t.Fatalf("messages.4.content.0.text = %q, want marker text. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_LateOrphanToolResultArrayOfEmptyTextKeepsMarker(t *testing.T) {
+	// A late orphan result whose content is an array of empty text blocks
+	// must not emit empty text blocks; the whole result folds to the marker.
+	raw := []byte(`{
+		"model":"claude-fable-5-1",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Run."}]},
+			{"type":"function_call","call_id":"a","name":"exec","arguments":"{}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Wait."}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Interlude."}]},
+			{"type":"function_call_output","call_id":"a","output":[{"type":"input_text","text":""},{"type":"input_text","text":""}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-fable-5-1", raw, false)
+	root := gjson.ParseBytes(out)
+
+	root.Get("messages").ForEach(func(_, msg gjson.Result) bool {
+		msg.Get("content").ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "text" && strings.TrimSpace(block.Get("text").String()) == "" {
+				t.Fatalf("empty text block emitted. Output: %s", string(out))
+			}
+			if block.Get("type").String() == "tool_result" && block.Get("tool_use_id").String() == "a" && !block.Get("is_error").Bool() {
+				t.Fatalf("late orphan must not remain a tool_result. Output: %s", string(out))
+			}
+			return true
+		})
+		return true
+	})
+	last := root.Get("messages.4")
+	if got := last.Get("content.0.text").String(); got != "Tool result was empty." {
+		t.Fatalf("messages.4.content.0.text = %q, want marker text. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_StandaloneToolOutputDropsEmptyTextInMixedArray(t *testing.T) {
+	// A standalone output whose array mixes an empty text part with a real
+	// one must not carry the empty block into the user message.
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"function_call_output","call_id":"orphan","output":[{"type":"input_text","text":""},{"type":"input_text","text":"context"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	root.Get("messages").ForEach(func(_, msg gjson.Result) bool {
+		msg.Get("content").ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "text" && strings.TrimSpace(block.Get("text").String()) == "" {
+				t.Fatalf("empty text block emitted. Output: %s", string(out))
+			}
+			if block.Get("type").String() == "tool_result" {
+				t.Fatalf("standalone output must not remain a tool_result. Output: %s", string(out))
+			}
+			return true
+		})
+		return true
+	})
+	if got := root.Get("messages.0.content").String(); got != "context" {
+		t.Fatalf("messages.0.content = %q, want 'context'. Output: %s", got, string(out))
+	}
+}
+
+func TestClaudeMessageInvariantProblems(t *testing.T) {
+	msg := func(raw string) []byte { return []byte(raw) }
+	clean := [][]byte{
+		msg(`{"role":"user","content":"hi"}`),
+		msg(`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"exec","input":{}}]}`),
+		msg(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"},{"type":"text","text":"go on"}]}`),
+	}
+	if got := claudeMessageInvariantProblems(clean); len(got) != 0 {
+		t.Fatalf("clean history reported problems: %v", got)
+	}
+	broken := [][]byte{
+		msg(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":"orphan"}]}`),
+		msg(`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"exec","input":{}}]}`),
+		msg(`{"role":"user","content":[{"type":"text","text":"x"},{"type":"tool_result","tool_use_id":"t2","content":"ok"}]}`),
+	}
+	got := claudeMessageInvariantProblems(broken)
+	want := []string{"tool_result t0 has no tool_use", "tool_result after non-tool_result block", "tool_use t1 has no tool_result", "tool_result t2 has no tool_use"}
+	for _, fragment := range want {
+		found := false
+		for _, problem := range got {
+			if strings.Contains(problem, fragment) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected a problem containing %q, got %v", fragment, got)
+		}
+	}
+	firstNotUser := [][]byte{
+		msg(`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"exec","input":{}}]}`),
+	}
+	got = claudeMessageInvariantProblems(firstNotUser)
+	if len(got) == 0 || !strings.Contains(got[0], "first message is not user") {
+		t.Fatalf("expected first-message problem, got %v", got)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_KeepsToolUseAdjacentToToolResult(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-test",
@@ -621,7 +1090,7 @@ func TestConvertOpenAIResponsesRequestToClaude_KeepsToolUseAdjacentToToolResult(
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToClaude_DropsApplyPatchCustomTool(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToClaude_KeepsApplyPatchCustomTool(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-test",
 		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
@@ -644,14 +1113,17 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsApplyPatchCustomTool(t *test
 	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	root := gjson.ParseBytes(out)
 
-	if got := root.Get("tools.#").Int(); got != 1 {
-		t.Fatalf("tools count = %d, want 1. Output: %s", got, string(out))
+	if got := root.Get("tools.#").Int(); got != 2 {
+		t.Fatalf("tools count = %d, want 2. Output: %s", got, out)
 	}
-	if got := root.Get("tools.0.name").String(); got != "exec_command" {
-		t.Fatalf("tools.0.name = %q, want exec_command. Output: %s", got, string(out))
+	tool := root.Get(`tools.#(name=="apply_patch")`)
+	for _, instruction := range []string{"*** Begin Patch", "*** End Patch", "*** Add File:", "*** Delete File:", "*** Update File:", "*** Move to:", "*** End of File", "@@", "start: patch", "JSON object"} {
+		if !strings.Contains(tool.Get("description").String(), instruction) {
+			t.Errorf("missing patch instruction %q", instruction)
+		}
 	}
-	if got := root.Get("tools.#(name==\"apply_patch\")").Raw; got != "" {
-		t.Fatalf("apply_patch custom tool should be dropped. Output: %s", string(out))
+	if tool.Get("input_schema.additionalProperties").Bool() || !tool.Get("input_schema.additionalProperties").Exists() || tool.Get("input_schema.required.0").String() != "input" {
+		t.Fatalf("patch schema is not strict: %s", tool.Raw)
 	}
 }
 
@@ -1295,27 +1767,33 @@ func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesToolOutputs(t *testin
 		t.Fatalf("messages[3].content.1.id = %q, want toolu_parallel", got)
 	}
 
-	// Message 4: user tool_results: call_custom_dup (custom final), toolu_parallel (parallel result), and empty id output
+	// Message 4: toolu_parallel is a real tool_result and must lead the user
+	// message. call_custom_dup never had a matching tool_use, so its
+	// deduplicated final payload is emitted as user text (Claude rejects orphan
+	// tool_result blocks); the empty id output is also plain text.
 	msg4Blocks := messages[4].Get("content").Array()
 	if len(msg4Blocks) != 3 {
-		t.Fatalf("expected 3 tool_result blocks in message 4, got %d. Output: %s", len(msg4Blocks), string(out))
+		t.Fatalf("expected 3 blocks in message 4, got %d. Output: %s", len(msg4Blocks), string(out))
 	}
-	if got := msg4Blocks[0].Get("tool_use_id").String(); got != "call_custom_dup" {
-		t.Fatalf("msg4Blocks[0].tool_use_id = %q, want call_custom_dup", got)
+	if got := msg4Blocks[0].Get("tool_use_id").String(); got != "toolu_parallel" {
+		t.Fatalf("msg4Blocks[0].tool_use_id = %q, want toolu_parallel. Output: %s", got, string(out))
 	}
-	if got := msg4Blocks[0].Get("content").String(); got != "custom final" {
-		t.Fatalf("msg4Blocks[0].content = %q, want 'custom final'", got)
-	}
-
-	if got := msg4Blocks[1].Get("tool_use_id").String(); got != "toolu_parallel" {
-		t.Fatalf("msg4Blocks[1].tool_use_id = %q, want toolu_parallel", got)
-	}
-	if got := msg4Blocks[1].Get("content").String(); got != "parallel result" {
-		t.Fatalf("msg4Blocks[1].content = %q, want 'parallel result'", got)
+	if got := msg4Blocks[0].Get("content").String(); got != "parallel result" {
+		t.Fatalf("msg4Blocks[0].content = %q, want 'parallel result'", got)
 	}
 
-	if got := msg4Blocks[2].Get("content").String(); got != "empty id output" {
-		t.Fatalf("msg4Blocks[2].content = %q, want 'empty id output'", got)
+	if got := msg4Blocks[1].Get("type").String(); got != "text" {
+		t.Fatalf("msg4Blocks[1].type = %q, want text. Output: %s", got, string(out))
+	}
+	if got := msg4Blocks[1].Get("text").String(); got != "custom final" {
+		t.Fatalf("msg4Blocks[1].text = %q, want 'custom final'", got)
+	}
+
+	if got := msg4Blocks[2].Get("type").String(); got != "text" {
+		t.Fatalf("msg4Blocks[2].type = %q, want text. Output: %s", got, string(out))
+	}
+	if got := msg4Blocks[2].Get("text").String(); got != "empty id output" {
+		t.Fatalf("msg4Blocks[2].text = %q, want 'empty id output'", got)
 	}
 }
 
@@ -2051,5 +2529,301 @@ func TestConvertOpenAIResponsesRequestToClaude_MixedMissingAndExplicitParallelOu
 	}
 	if got := resultMap["call_b"]; got != "result_b" {
 		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_StringInput(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"input": "hi",
+		"max_output_tokens": 16,
+		"stream": false
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message in translated Claude request, got %d. Output: %s", len(messages), string(out))
+	}
+
+	msg := messages[0]
+	if got := msg.Get("role").String(); got != "user" {
+		t.Fatalf("expected message role %q, got %q", "user", got)
+	}
+
+	content := msg.Get("content")
+	var text string
+	if content.IsArray() {
+		parts := content.Array()
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 content part, got %d", len(parts))
+		}
+		if got := parts[0].Get("type").String(); got != "text" {
+			t.Fatalf("expected block type text, got %s", got)
+		}
+		text = parts[0].Get("text").String()
+	} else {
+		text = content.String()
+	}
+
+	if text != "hi" {
+		t.Fatalf("expected user message content %q, got %q", "hi", text)
+	}
+
+	// Also verify string input with instructions produces both system and user message.
+	withInstructions := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"instructions": "Be concise.",
+		"input": "hello world",
+		"max_output_tokens": 32,
+		"stream": false
+	}`)
+	outWithInstr := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", withInstructions, false)
+	system := gjson.GetBytes(outWithInstr, "system").Array()
+	if len(system) != 1 || system[0].Get("text").String() != "Be concise." {
+		t.Fatalf("expected system block with instructions, got %s", string(outWithInstr))
+	}
+	messagesWithInstr := gjson.GetBytes(outWithInstr, "messages").Array()
+	if len(messagesWithInstr) != 1 {
+		t.Fatalf("expected 1 message in translated Claude request with instructions, got %d. Output: %s", len(messagesWithInstr), string(outWithInstr))
+	}
+	if messagesWithInstr[0].Get("role").String() != "user" || messagesWithInstr[0].Get("content").String() != "hello world" {
+		t.Fatalf("unexpected user message in output: %s", string(outWithInstr))
+	}
+
+	// Also verify string input with quotes, newlines, and unicode.
+	complexInput := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"input": "line 1\n\"line 2\"\n你好，世界 🌍",
+		"max_output_tokens": 16,
+		"stream": false
+	}`)
+	outComplex := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", complexInput, false)
+	complexMsgs := gjson.GetBytes(outComplex, "messages").Array()
+	if len(complexMsgs) != 1 {
+		t.Fatalf("expected 1 message in translated Claude request with complex input, got %d. Output: %s", len(complexMsgs), string(outComplex))
+	}
+	if got := complexMsgs[0].Get("content").String(); got != "line 1\n\"line 2\"\n你好，世界 🌍" {
+		t.Fatalf("unexpected content for complex input, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_LongToolNamesUniqueAndReversible(t *testing.T) {
+	reqJSON := []byte(`{
+		"model": "claude-sonnet-5-5",
+		"input": "test",
+		"stream": false,
+		"tools": [{
+			"type": "namespace",
+			"name": "mcp__example_apps__acme_inventory_service",
+			"tools": [
+				{"type": "function", "name": "acme_inventory_service_get_item_prices", "description": "prices", "parameters": {"type": "object", "properties": {}}},
+				{"type": "function", "name": "acme_inventory_service_get_item_metrics", "description": "metrics", "parameters": {"type": "object", "properties": {}}}
+			]
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", reqJSON, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+
+	name0 := tools[0].Get("name").String()
+	name1 := tools[1].Get("name").String()
+
+	if len(name0) > 64 || len(name1) > 64 {
+		t.Fatalf("tool names must not exceed 64 chars, got %d and %d", len(name0), len(name1))
+	}
+	if name0 == name1 {
+		t.Fatalf("tool names must be unique, got duplicate name %q for both tools", name0)
+	}
+
+	child0, ns0 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name0)
+	if child0 != "acme_inventory_service_get_item_prices" || ns0 != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (%q, %q)",
+			name0, child0, ns0, "acme_inventory_service_get_item_prices", "mcp__example_apps__acme_inventory_service")
+	}
+
+	child1, ns1 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name1)
+	if child1 != "acme_inventory_service_get_item_metrics" || ns1 != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (%q, %q)",
+			name1, child1, ns1, "acme_inventory_service_get_item_metrics", "mcp__example_apps__acme_inventory_service")
+	}
+
+	// Verify non-stream response restores the original tool name and namespace
+	claudeResp := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_test_123","usage":{"input_tokens":10,"output_tokens":5}}}`,
+		fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_test_0","name":%q,"input":{}}}`, name0),
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"item_id\":\"42\"}"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+	translatedResp := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-sonnet-5-5", reqJSON, nil, claudeResp, nil)
+	outputItem := gjson.GetBytes(translatedResp, "output.0")
+	if outputItem.Get("type").String() != "function_call" {
+		t.Fatalf("output.0.type = %q, want function_call", outputItem.Get("type").String())
+	}
+	if outputItem.Get("name").String() != "acme_inventory_service_get_item_prices" {
+		t.Fatalf("output.0.name = %q, want acme_inventory_service_get_item_prices", outputItem.Get("name").String())
+	}
+	if outputItem.Get("namespace").String() != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("output.0.namespace = %q, want mcp__example_apps__acme_inventory_service", outputItem.Get("namespace").String())
+	}
+
+	// Verify stream response restores the original tool name and namespace
+	streamChunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_stream_123","usage":{"input_tokens":10,"output_tokens":5}}}`),
+		[]byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_test_1","name":%q,"input":{}}}`, name1)),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"metric\":\"latency\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+	var param any
+	var streamAdded, streamDone, streamCompleted gjson.Result
+	for _, chunk := range streamChunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-sonnet-5-5", reqJSON, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "function_call" {
+					streamAdded = data
+				}
+			case "response.output_item.done":
+				if data.Get("item.type").String() == "function_call" {
+					streamDone = data
+				}
+			case "response.completed":
+				streamCompleted = data
+			}
+		}
+	}
+	if !streamAdded.Exists() || streamAdded.Get("item.name").String() != "acme_inventory_service_get_item_metrics" || streamAdded.Get("item.namespace").String() != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("stream added event mismatch: name=%q, namespace=%q", streamAdded.Get("item.name").String(), streamAdded.Get("item.namespace").String())
+	}
+	if !streamDone.Exists() || streamDone.Get("item.name").String() != "acme_inventory_service_get_item_metrics" || streamDone.Get("item.namespace").String() != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("stream done event mismatch: name=%q, namespace=%q", streamDone.Get("item.name").String(), streamDone.Get("item.namespace").String())
+	}
+	if !streamCompleted.Exists() || streamCompleted.Get("response.output.0.name").String() != "acme_inventory_service_get_item_metrics" || streamCompleted.Get("response.output.0.namespace").String() != "mcp__example_apps__acme_inventory_service" {
+		t.Fatalf("stream completed event mismatch: name=%q, namespace=%q", streamCompleted.Get("response.output.0.name").String(), streamCompleted.Get("response.output.0.namespace").String())
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_SanitizationCollisions(t *testing.T) {
+	reqJSON := []byte(`{
+		"model": "claude-sonnet-5-5",
+		"input": "test",
+		"stream": false,
+		"tools": [
+			{"type": "function", "name": "a_b", "description": "ab", "parameters": {"type": "object", "properties": {}}},
+			{"type": "function", "name": "a.b", "description": "a.b", "parameters": {"type": "object", "properties": {}}}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", reqJSON, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+
+	name0 := tools[0].Get("name").String()
+	name1 := tools[1].Get("name").String()
+
+	if name0 == name1 {
+		t.Fatalf("tool names must not collide, got %q for both", name0)
+	}
+	if name0 != "a_b" {
+		t.Fatalf("tool 0 name = %q, want a_b", name0)
+	}
+	if !strings.HasPrefix(name1, "a_b_") {
+		t.Fatalf("tool 1 name = %q, want a_b_<hash>", name1)
+	}
+
+	child0, ns0 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name0)
+	if child0 != "a_b" || ns0 != "" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (a_b, \"\")", name0, child0, ns0)
+	}
+
+	child1, ns1 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name1)
+	if child1 != "a.b" || ns1 != "" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (a.b, \"\")", name1, child1, ns1)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_LongToolChoiceAndHistory(t *testing.T) {
+	reqJSON := []byte(`{
+		"model": "claude-sonnet-5-5",
+		"input": [
+			{"type": "message", "role": "user", "content": "check item"},
+			{"type": "function_call", "call_id": "call_123", "namespace": "mcp__example_apps__acme_inventory_service", "name": "acme_inventory_service_get_item_prices", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_123", "output": "{\"price\": 100}"}
+		],
+		"stream": false,
+		"tool_choice": {
+			"type": "function",
+			"namespace": "mcp__example_apps__acme_inventory_service",
+			"name": "acme_inventory_service_get_item_prices"
+		},
+		"tools": [{
+			"type": "namespace",
+			"name": "mcp__example_apps__acme_inventory_service",
+			"tools": [
+				{"type": "function", "name": "acme_inventory_service_get_item_prices", "description": "prices", "parameters": {"type": "object", "properties": {}}},
+				{"type": "function", "name": "acme_inventory_service_get_item_metrics", "description": "metrics", "parameters": {"type": "object", "properties": {}}}
+			]
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", reqJSON, false)
+
+	// Tool definition name for prices
+	declaredPricesName := gjson.GetBytes(out, "tools.0.name").String()
+
+	// tool_choice should have the exact same Claude name as the declared tool
+	toolChoiceName := gjson.GetBytes(out, "tool_choice.name").String()
+	if toolChoiceName != declaredPricesName {
+		t.Fatalf("tool_choice.name = %q, want %q", toolChoiceName, declaredPricesName)
+	}
+
+	// In messages history, the assistant tool_use block should have the exact same Claude name
+	messages := gjson.GetBytes(out, "messages").Array()
+	var foundHistoryToolUseName string
+	for _, msg := range messages {
+		if msg.Get("role").String() == "assistant" {
+			for _, part := range msg.Get("content").Array() {
+				if part.Get("type").String() == "tool_use" {
+					foundHistoryToolUseName = part.Get("name").String()
+				}
+			}
+		}
+	}
+	if foundHistoryToolUseName != declaredPricesName {
+		t.Fatalf("history tool_use.name = %q, want %q", foundHistoryToolUseName, declaredPricesName)
+	}
+}
+
+func TestApplyPatchClaudeRequestContractAndHistory(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch","description":"Edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.","format":{"type":"grammar","syntax":"lark","definition":"start: patch"},"cache_control":{"type":"ephemeral"}}]}],"input":[{"type":"custom_tool_call","namespace":"editor","name":"apply_patch","call_id":"c1","input":"*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"done"}]}`)
+	result := gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("test", request, false))
+	tool := result.Get("tools.0")
+	description := tool.Get("description").String()
+	schema := tool.Get("input_schema")
+	for _, instruction := range []string{"*** Begin Patch", "*** End Patch", "*** Add File:", "*** Delete File:", "*** Update File:", "*** Move to:", "*** End of File", "@@", "start: patch", "JSON object"} {
+		if !strings.Contains(description, instruction) {
+			t.Errorf("missing instruction %q", instruction)
+		}
+	}
+	if strings.Contains(description, "do not wrap the patch in JSON") {
+		t.Fatal("contradictory freeform instructions")
+	}
+	if schema.Get("additionalProperties").Bool() || !schema.Get("additionalProperties").Exists() || schema.Get("required.0").String() != "input" {
+		t.Fatalf("not strict schema: %s", schema.Raw)
+	}
+	call := result.Get("messages.0.content.0")
+	if tool.Get("cache_control.type").String() != "ephemeral" {
+		t.Fatalf("cache control lost: %s", tool.Raw)
+	}
+	if call.Get("name").String() != "editor__apply_patch" || call.Get("input.input").String() != "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch" || call.Get("id").String() != "c1" || result.Get("messages.1.content.0.tool_use_id").String() != "c1" || result.Get("messages.1.content.0.content").String() != "done" {
+		t.Fatalf("history mismatch: %s", result.Raw)
 	}
 }

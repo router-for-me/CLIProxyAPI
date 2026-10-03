@@ -13,7 +13,7 @@ import (
 	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 var (
@@ -63,6 +63,9 @@ func TranslateStreamWithClaudeInputTokens(
 		rawJSON,
 		param,
 	)
+	if param != nil && ApplyPatchTranslationError(*param) != nil {
+		return chunks
+	}
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		for i, chunk := range chunks {
 			chunks[i] = EnsureResponsesUsageDetails(chunk)

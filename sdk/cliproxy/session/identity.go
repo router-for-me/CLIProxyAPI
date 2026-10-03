@@ -2,7 +2,6 @@
 package session
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,9 +10,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -41,6 +40,15 @@ type canonicalPart struct {
 }
 
 var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// CandidateSessionPrefixes lists recognized protocol-specific session prefixes used in affinity lookup and routing.
+var CandidateSessionPrefixes = []string{
+	"lcp:v1:", "lcp:",
+	"codex:", "claude:", "header:", "session:",
+	"affinity:", "slot:", "task:", "conv:",
+	"thread:", "clientreq:", "geminicache:",
+	"pck:", "user:", "execution:", "agy:", "derived:",
+}
 
 // knownSessionPrefixes tracks legacy protocol-specific session prefixes that need to be
 // unwrapped before projecting to canonical UUIDv8.
@@ -218,10 +226,13 @@ func DerivedID(metadata map[string]any) string {
 }
 
 // Enrich derives a session identity once and places it in both request and option metadata.
+// When opts.OriginalRequest is unset, it shares req.Payload as the read-only original request
+// baseline to avoid multi-megabyte allocations on large payloads. Callers that mutate req.Payload
+// in-place after Enrich must explicitly provide an independent opts.OriginalRequest.
 func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	payload := opts.OriginalRequest
 	if len(payload) == 0 && len(req.Payload) > 0 {
-		opts.OriginalRequest = bytes.Clone(req.Payload)
+		opts.OriginalRequest = req.Payload
 		payload = opts.OriginalRequest
 	}
 	executionID := firstNormalizedMetadataID(cliproxyexecutor.ExecutionSessionMetadataKey, opts.Metadata, req.Metadata)
@@ -376,12 +387,12 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 	}
 	// Parsing without copying matters here: this runs on every request and the
 	// payload can be multiple megabytes.
-	root := util.ParseGJSONBytesNoCopy(payload)
+	root := newSessionObject(util.ParseGJSONBytesNoCopy(payload))
 	reqRoot := root
 	req := root.Get("request")
 	hasNestedReq := req.Exists() && !root.Get("contents").Exists()
 	if hasNestedReq {
-		reqRoot = req
+		reqRoot = newSessionObject(req)
 	}
 	for _, path := range []string{
 		"session_id",

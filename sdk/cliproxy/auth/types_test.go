@@ -150,6 +150,37 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	if geminiIndex != duplicateIndex {
 		t.Fatalf("same provider/key with different source should share auth_index, got %q vs %q", geminiIndex, duplicateIndex)
 	}
+
+	metaAuth1 := &Auth{
+		Provider: "meta",
+		ID:       "meta:apikey:token1",
+		Attributes: map[string]string{
+			"api_key":   "meta-secret",
+			"base_url":  "https://api.meta.ai/v1",
+			"proxy_url": "socks5://127.0.0.1:1080",
+			"prefix":    "fast-",
+			"source":    "config:meta[token1]",
+		},
+	}
+	metaAuth2 := &Auth{
+		Provider: "meta",
+		ID:       "meta:apikey:token2",
+		Attributes: map[string]string{
+			"api_key":   "meta-secret",
+			"base_url":  "https://api.meta.ai/v1",
+			"proxy_url": "",
+			"prefix":    "",
+			"source":    "config:meta[token2]",
+		},
+	}
+	metaIndex1 := metaAuth1.EnsureIndex()
+	metaIndex2 := metaAuth2.EnsureIndex()
+	if metaIndex1 == "" {
+		t.Fatal("meta index should not be empty")
+	}
+	if metaIndex1 != metaIndex2 {
+		t.Fatalf("meta auth index should remain stable across proxy/prefix changes, got %q vs %q", metaIndex1, metaIndex2)
+	}
 }
 
 func TestEnsureIndexUsesOAuthTypeAndAbsolutePath(t *testing.T) {
@@ -333,5 +364,32 @@ func TestAuth_ExpirationTime_JWTExp(t *testing.T) {
 	}
 	if authNoAccess.HasValidAccessToken(time.Now()) {
 		t.Fatal("HasValidAccessToken() should return false when access_token is missing")
+	}
+}
+
+func TestAuthClone_EmptyMapsIsolation(t *testing.T) {
+	orig := &Auth{
+		Attributes:  map[string]string{},
+		Metadata:    map[string]any{},
+		ModelStates: map[string]*ModelState{},
+	}
+
+	cloned := orig.Clone()
+	if cloned == nil {
+		t.Fatal("Clone() returned nil")
+	}
+
+	cloned.Attributes["test"] = "val"
+	cloned.Metadata["test"] = 123
+	cloned.ModelStates["test"] = &ModelState{}
+
+	if len(orig.Attributes) != 0 {
+		t.Errorf("orig.Attributes modified, len = %d", len(orig.Attributes))
+	}
+	if len(orig.Metadata) != 0 {
+		t.Errorf("orig.Metadata modified, len = %d", len(orig.Metadata))
+	}
+	if len(orig.ModelStates) != 0 {
+		t.Errorf("orig.ModelStates modified, len = %d", len(orig.ModelStates))
 	}
 }

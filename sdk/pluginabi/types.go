@@ -87,8 +87,15 @@ const (
 	MethodManagementRegister = "management.register"
 	MethodManagementHandle   = "management.handle"
 
+	MethodQuotaIdentifier = "quota.identifier"
+	MethodQuotaDescribe   = "quota.describe"
+	MethodQuotaFetch      = "quota.fetch"
+	MethodQuotaReset      = "quota.reset"
+
 	MethodHostHTTPDo             = "host.http.do"
 	MethodHostHTTPDoStream       = "host.http.do_stream"
+	MethodHostHTTPOperationOpen  = "host.http.operation_open"
+	MethodHostHTTPCancel         = "host.http.cancel"
 	MethodHostHTTPStreamRead     = "host.http.stream_read"
 	MethodHostHTTPStreamClose    = "host.http.stream_close"
 	MethodHostModelExecute       = "host.model.execute"
@@ -102,6 +109,9 @@ const (
 	MethodHostAuthGet            = "host.auth.get"
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
+	MethodHostAffinityLookup     = "host.affinity.lookup"
+
+	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
 )
 
 type Envelope struct {
@@ -111,8 +121,47 @@ type Envelope struct {
 }
 
 type Error struct {
-	Code       string `json:"code"`
-	Message    string `json:"message"`
-	Retryable  bool   `json:"retryable,omitempty"`
-	HTTPStatus int    `json:"http_status,omitempty"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable,omitempty"`
+	// HTTPStatus is the HTTP status code (e.g. 401, 403, 429) to surface to the client.
+	// When omitted or 0, CPA defaults to HTTP 500 (internal_server_error).
+	HTTPStatus int `json:"http_status,omitempty"`
+}
+
+// Error implements the error interface for Error.
+func (e *Error) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+// StatusCode returns the HTTP status code embedded in the Error, or 0 if unset.
+func (e *Error) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
+}
+
+// NewError creates an Error instance with an optional HTTP status code.
+func NewError(code, message string, httpStatus ...int) *Error {
+	status := 0
+	if len(httpStatus) > 0 {
+		status = httpStatus[0]
+	}
+	return &Error{
+		Code:       code,
+		Message:    message,
+		HTTPStatus: status,
+	}
+}
+
+// NewErrorEnvelope serializes a failed RPC Envelope containing an Error with an optional HTTP status code.
+func NewErrorEnvelope(code, message string, httpStatus ...int) ([]byte, error) {
+	return json.Marshal(Envelope{
+		OK:    false,
+		Error: NewError(code, message, httpStatus...),
+	})
 }

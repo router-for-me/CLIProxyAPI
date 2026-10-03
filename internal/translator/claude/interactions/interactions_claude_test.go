@@ -27,6 +27,16 @@ func TestConvertInteractionsRequestToClaudeWithToolMessagesDirect(t *testing.T) 
 	}
 }
 
+func TestConvertInteractionsRequestToClaudePropagatesIsError(t *testing.T) {
+	out := ConvertInteractionsRequestToClaude("claude-test", []byte(`{"model":"claude-test","input":[{"type":"function_result","name":"lookup","call_id":"toolu_err","result":"command failed","is_error":true}]}`), false)
+	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("content type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if !gjson.GetBytes(out, "messages.0.content.0.is_error").Bool() {
+		t.Fatalf("expected is_error = true. Output: %s", string(out))
+	}
+}
+
 func TestConvertInteractionsRequestToClaudeGroupsConsecutiveRoleTurns(t *testing.T) {
 	raw := []byte(`{
 		"input":[

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func (h *Host) hostConfigSummaryLocked() pluginapi.HostConfigSummary {
@@ -255,15 +255,19 @@ func pluginAuthParseResponseAuths(resp pluginapi.AuthParseResponse) []pluginapi.
 	return []pluginapi.AuthData{resp.Auth}
 }
 
-func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string) (pluginapi.AuthLoginStartResponse, bool, error) {
+func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string, metadata ...map[string]any) (pluginapi.AuthLoginStartResponse, bool, error) {
 	record := h.authProviderRecord(provider)
 	if record == nil {
 		return pluginapi.AuthLoginStartResponse{}, false, nil
 	}
-	return h.callStartLogin(ctx, *record, provider, baseURL)
+	var startMetadata map[string]any
+	if len(metadata) > 0 {
+		startMetadata = metadata[0]
+	}
+	return h.callStartLogin(ctx, *record, provider, baseURL, startMetadata)
 }
 
-func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, provider string, baseURL string) (resp pluginapi.AuthLoginStartResponse, handled bool, err error) {
+func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, provider string, baseURL string, metadata map[string]any) (resp pluginapi.AuthLoginStartResponse, handled bool, err error) {
 	authProvider := record.plugin.Capabilities.AuthProvider
 	if h == nil || authProvider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.AuthLoginStartResponse{}, false, nil
@@ -281,6 +285,7 @@ func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, prov
 		BaseURL:    strings.TrimSpace(baseURL),
 		Host:       h.hostConfigSummary(),
 		HTTPClient: h.newHTTPClient(nil),
+		Metadata:   cloneAnyMap(metadata),
 	}
 	resp, errStart := authProvider.StartLogin(ctx, req)
 	if errStart != nil {
@@ -383,8 +388,19 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		data.Metadata = cloneAnyMap(auth.Metadata)
 	}
 	if len(data.Attributes) == 0 {
-		data.Attributes = cloneStringMap(auth.Attributes)
+		if auth != nil {
+			data.Attributes = cloneStringMap(auth.Attributes)
+		}
+	} else if auth != nil {
+		attributes := cloneStringMap(data.Attributes)
+		for key, value := range auth.Attributes {
+			if _, exists := attributes[key]; !exists {
+				attributes[key] = value
+			}
+		}
+		data.Attributes = attributes
 	}
+	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}
@@ -393,7 +409,11 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	} else {
 		data.NextRefreshAfter = pluginResp.NextRefreshAfter
 	}
-	next := h.AuthDataToCoreAuth(data, "", data.FileName)
+	path := ""
+	if auth != nil && auth.Attributes != nil {
+		path = auth.Attributes[coreauth.AttributePath]
+	}
+	next := h.AuthDataToCoreAuth(data, path, data.FileName)
 	if next == nil {
 		return nil, true, fmt.Errorf("auth provider refresh returned invalid auth data")
 	}
@@ -401,6 +421,37 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	next.CreatedAt = auth.CreatedAt
 	next.UpdatedAt = auth.UpdatedAt
 	return next, true, nil
+}
+
+func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {
+	if data == nil || auth == nil || auth.Attributes[coreauth.AttributeSourceBackend] != coreauth.AuthSourceFile {
+		return
+	}
+	if data.Attributes == nil {
+		data.Attributes = make(map[string]string)
+	}
+	for _, key := range []string{coreauth.AttributePath, coreauth.AttributeSource, coreauth.AttributeSourceBackend, coreauth.AttributeFilePriority} {
+		if value, ok := auth.Attributes[key]; ok {
+			data.Attributes[key] = value
+		}
+	}
+	if auth.Attributes[coreauth.AttributeFilePriority] != "true" {
+		delete(data.Attributes, coreauth.AttributeFilePriority)
+		return
+	}
+	if priority, ok := auth.Attributes["priority"]; ok {
+		data.Attributes["priority"] = priority
+	} else {
+		delete(data.Attributes, "priority")
+	}
+	if data.Metadata == nil {
+		data.Metadata = make(map[string]any)
+	}
+	if priority, ok := auth.Metadata["priority"]; ok {
+		data.Metadata["priority"] = priority
+	} else {
+		delete(data.Metadata, "priority")
+	}
 }
 
 func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string) *coreauth.Auth {
@@ -420,6 +471,17 @@ type pluginTokenStorage struct {
 func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if s == nil {
 		return
+	}
+	if _, hadPriority := s.meta["priority"]; hadPriority {
+		if _, hasPriority := meta["priority"]; !hasPriority {
+			var raw map[string]any
+			if errUnmarshal := json.Unmarshal(s.rawJSON, &raw); errUnmarshal == nil {
+				delete(raw, "priority")
+				if cleaned, errMarshal := json.Marshal(raw); errMarshal == nil {
+					s.rawJSON = cleaned
+				}
+			}
+		}
 	}
 	s.meta = cloneAnyMap(meta)
 }
@@ -553,9 +615,15 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	}
 	path = strings.TrimSpace(path)
 	if path != "" {
-		attributes[coreauth.AttributePath] = path
-		attributes[coreauth.AttributeSource] = path
-		attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+		if attributes[coreauth.AttributePath] == "" {
+			attributes[coreauth.AttributePath] = path
+		}
+		if attributes[coreauth.AttributeSource] == "" {
+			attributes[coreauth.AttributeSource] = path
+		}
+		if attributes[coreauth.AttributeSourceBackend] == "" {
+			attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+		}
 	}
 	fileName = strings.TrimSpace(firstNonEmpty(data.FileName, fileName))
 	if fileName != "" && attributes[coreauth.AttributeSource] == "" {

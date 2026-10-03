@@ -554,22 +554,69 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang lld wget
+          sudo apt-get install -y clang lld curl
       - name: Build FreeBSD binary with CGO
         if: ${{ matrix.cgo_enabled }}
-        timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
-        with:
-          dir: .
-          packages: ./cmd/server/
-          targets: ${{ env.TARGET }}
-          out-dir: dist/${{ env.TARGET }}/bin
-          output: cli-proxy-api
-          flags: >-
-            -ldflags=-s -w
-            -X main.Version=${{ steps.metadata.outputs.release_version }}
-            -X main.Commit=${{ steps.metadata.outputs.commit }}
-            -X main.BuildDate=${{ steps.metadata.outputs.build_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${TARGET}/bin"
+          sysroot_dir="/tmp/freebsd-sysroot"
+          rm -rf "$sysroot_dir"
+          mkdir -p "$sysroot_dir"
+          trap 'sudo rm -rf "$sysroot_dir" /tmp/base.txz' EXIT
+
+          case "$TARGET_GOARCH" in
+            amd64)
+              freebsd_arch="amd64"
+              clang_target="x86_64-unknown-freebsd14"
+              ;;
+            arm64)
+              freebsd_arch="arm64"
+              clang_target="aarch64-unknown-freebsd14"
+              ;;
+            *)
+              echo "Unsupported FreeBSD architecture: $TARGET_GOARCH" >&2
+              exit 1
+              ;;
+          esac
+
+          urls=(
+            "https://download.freebsd.org/releases/${freebsd_arch}/14.4-RELEASE/base.txz"
+            "https://archive.freebsd.org/old-releases/${freebsd_arch}/14.4-RELEASE/base.txz"
+            "https://archive.freebsd.org/old-releases/${freebsd_arch}/14.3-RELEASE/base.txz"
+          )
+
+          downloaded=false
+          for url in "${urls[@]}"; do
+            echo "Attempting to download FreeBSD base.txz from ${url}..."
+            if curl -fsSL --retry 3 --retry-connrefused "$url" -o /tmp/base.txz; then
+              echo "Successfully downloaded FreeBSD base.txz from ${url}"
+              downloaded=true
+              break
+            else
+              echo "Download failed from ${url}, trying next candidate..."
+            fi
+          done
+
+          if [[ "$downloaded" != "true" ]]; then
+            echo "Error: Failed to download FreeBSD base.txz from all candidate mirrors" >&2
+            exit 1
+          fi
+
+          echo "Extracting FreeBSD sysroot to ${sysroot_dir}..."
+          sudo tar -xf /tmp/base.txz -C "$sysroot_dir"
+          rm -f /tmp/base.txz
+
+          echo "Building FreeBSD ${TARGET} binary with CGO..."
+          CGO_ENABLED=1 \
+          GOOS=freebsd \
+          GOARCH="$TARGET_GOARCH" \
+          CGO_LDFLAGS="-fuse-ld=lld" \
+          CC="clang --target=${clang_target} --sysroot=${sysroot_dir}" \
+          go build -buildvcs=false \
+            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+            -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
       - name: Build FreeBSD no-plugin binary
         if: ${{ !matrix.cgo_enabled }}
         shell: bash

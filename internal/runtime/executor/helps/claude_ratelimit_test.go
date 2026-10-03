@@ -113,7 +113,7 @@ func TestParseClaudeRateLimitReset_AllCases(t *testing.T) {
 		}
 	})
 
-	t.Run("fable-only rejection with 7d_oi reset and retry-after uses retry-after only", func(t *testing.T) {
+	t.Run("fable-only rejection with 7d_oi reset and retry-after returns nil for exponential backoff", func(t *testing.T) {
 		h := make(http.Header)
 		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
 		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
@@ -124,11 +124,8 @@ func TestParseClaudeRateLimitReset_AllCases(t *testing.T) {
 		h.Set("Retry-After", "60")
 
 		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
-		if got == nil {
-			t.Fatal("expected non-nil RetryAfter")
-		}
-		if *got != 60*time.Second {
-			t.Fatalf("expected 60s from Retry-After, got %v", *got)
+		if got != nil {
+			t.Fatalf("expected nil RetryAfter for fable-only rejection with retry-after, got %v", *got)
 		}
 	})
 
@@ -147,7 +144,7 @@ func TestParseClaudeRateLimitReset_AllCases(t *testing.T) {
 		}
 	})
 
-	t.Run("fable-only rejection with allowed_warning on shared window uses retry-after only", func(t *testing.T) {
+	t.Run("fable-only rejection with allowed_warning on shared window returns nil for exponential backoff", func(t *testing.T) {
 		h := make(http.Header)
 		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
 		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
@@ -158,11 +155,8 @@ func TestParseClaudeRateLimitReset_AllCases(t *testing.T) {
 		h.Set("Retry-After", "60")
 
 		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
-		if got == nil {
-			t.Fatal("expected non-nil RetryAfter")
-		}
-		if *got != 60*time.Second {
-			t.Fatalf("expected 60s from Retry-After, got %v", *got)
+		if got != nil {
+			t.Fatalf("expected nil RetryAfter for fable-only rejection with allowed_warning, got %v", *got)
 		}
 	})
 
@@ -301,6 +295,74 @@ func TestClaudeHeadersIndicateUnifiedRateLimitRejection_AllowedWarning(t *testin
 			got := ClaudeHeadersIndicateUnifiedRateLimitRejection(tt.headers)
 			if got != tt.expected {
 				t.Fatalf("ClaudeHeadersIndicateUnifiedRateLimitRejection() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestClaudeHeadersIndicateUnifiedRateLimitRejection_OverageRejection_Issue5915(t *testing.T) {
+	// Exact headers reported in Issue #5915:
+	// 5h window status is omitted by Anthropic because 5h utilization is 0.00.
+	// 7d window is allowed (0.69).
+	// Overage / 7d_oi is rejected due to org spend cap reached.
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":                  []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim":    []string{"seven_day_overage_included"},
+		"Anthropic-Ratelimit-Unified-7d-Status":               []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-7d-Utilization":          []string{"0.69"},
+		"Anthropic-Ratelimit-Unified-5h-Utilization":          []string{"0.00"},
+		"Anthropic-Ratelimit-Unified-7d_oi-Status":            []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-7d_oi-Utilization":       []string{"1.02"},
+		"Anthropic-Ratelimit-Unified-Overage-Status":          []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": []string{"org_spend_cap_reached"},
+		"Retry-After": []string{"121180"},
+	}
+
+	got := ClaudeHeadersIndicateUnifiedRateLimitRejection(headers)
+	if got != false {
+		t.Fatalf("ClaudeHeadersIndicateUnifiedRateLimitRejection() = true, want false for overage rejection with healthy 7d window (Issue #5915)")
+	}
+}
+
+func TestClaudeHeadersIndicateUnifiedRateLimitRejection_OverageRejection_UtilizationBoundaries(t *testing.T) {
+	baseHeaders := func() http.Header {
+		return http.Header{
+			"Anthropic-Ratelimit-Unified-Status":                  []string{"rejected"},
+			"Anthropic-Ratelimit-Unified-Representative-Claim":    []string{"seven_day_overage_included"},
+			"Anthropic-Ratelimit-Unified-7d-Status":               []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-7d-Utilization":          []string{"0.69"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Status":            []string{"rejected"},
+			"Anthropic-Ratelimit-Unified-Overage-Status":          []string{"rejected"},
+			"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": []string{"org_spend_cap_reached"},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		utilization string
+		wantUnified bool
+	}{
+		{name: "healthy zero utilization", utilization: "0.00", wantUnified: false},
+		{name: "healthy partial utilization", utilization: "0.50", wantUnified: false},
+		{name: "missing utilization", utilization: "", wantUnified: true},
+		{name: "invalid text", utilization: "invalid", wantUnified: true},
+		{name: "NaN", utilization: "NaN", wantUnified: true},
+		{name: "+Inf", utilization: "+Inf", wantUnified: true},
+		{name: "-Inf", utilization: "-Inf", wantUnified: true},
+		{name: "negative utilization", utilization: "-0.1", wantUnified: true},
+		{name: "exact 1.0 utilization", utilization: "1.0", wantUnified: true},
+		{name: "exceeded utilization", utilization: "1.05", wantUnified: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := baseHeaders()
+			if tt.utilization != "" {
+				h.Set("Anthropic-Ratelimit-Unified-5h-Utilization", tt.utilization)
+			}
+			got := ClaudeHeadersIndicateUnifiedRateLimitRejection(h)
+			if got != tt.wantUnified {
+				t.Fatalf("ClaudeHeadersIndicateUnifiedRateLimitRejection() with 5h-utilization %q = %v, want %v", tt.utilization, got, tt.wantUnified)
 			}
 		})
 	}

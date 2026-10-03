@@ -21,8 +21,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -1296,6 +1296,10 @@ func newAuthDispatchRequest(requestedModel string, sessionID string, parentSessi
 		values := append([]string{}, (*excludedAuthIDs)...)
 		excludedAuthIDsCopy = &values
 	}
+	nodeKind := strings.TrimSpace(headers.Get("X-Node-Kind"))
+	if nodeKind == "" {
+		nodeKind = strings.TrimSpace(headers.Get("x-node-kind"))
+	}
 	return authDispatchRequest{
 		Type:                "auth",
 		Model:               requestedModel,
@@ -1303,6 +1307,7 @@ func newAuthDispatchRequest(requestedModel string, sessionID string, parentSessi
 		ConcurrencyProtocol: 1,
 		SessionID:           strings.TrimSpace(sessionID),
 		ParentSessionID:     strings.TrimSpace(parentSessionID),
+		NodeKind:            nodeKind,
 		Headers:             headersToLowerMap(headers),
 		CredentialPolicy:    strings.TrimSpace(credentialPolicy),
 		ExcludedAuthIDs:     excludedAuthIDsCopy,

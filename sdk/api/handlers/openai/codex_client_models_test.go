@@ -3,9 +3,11 @@ package openai
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
@@ -27,7 +29,7 @@ func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
 		{name: "enabled", enabled: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			base.Cfg.CodexOptimizeMultiAgentV2 = tt.enabled
+			base.Cfg.Client.Codex.OptimizeMultiAgentV2 = tt.enabled
 			response := handler.codexClientModelsResponse()
 			models, ok := response["models"].([]map[string]any)
 			if !ok {
@@ -125,4 +127,260 @@ func TestCodexClientModelsResponseClientVersionFiltering(t *testing.T) {
 	if !hasUltra {
 		t.Fatal("0.149.1 expected ultra reasoning effort to be preserved")
 	}
+}
+
+func TestOpenAIModels_DoesNotExposeMetadataModelID(t *testing.T) {
+	clientID := "openai-models-no-metadata-id-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
+		{
+			ID:              "codex-main",
+			MetadataModelID: "gpt-6-astra",
+			DisplayName:     "GPT 6.0 Astra",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	openaiModels := modelRegistry.GetAvailableModels("openai")
+	for _, m := range openaiModels {
+		if _, exists := m["metadata_model_id"]; exists {
+			t.Fatalf("model map exposed internal metadata_model_id: %#v", m)
+		}
+		if _, exists := m["MetadataModelID"]; exists {
+			t.Fatalf("model map exposed internal MetadataModelID: %#v", m)
+		}
+	}
+}
+
+func testIntModelValue(model map[string]any, key string) int {
+	if model == nil {
+		return 0
+	}
+	switch value := model[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	}
+	return 0
+}
+
+func TestCodexClientModelsResponse_OAuthAliasesIntegration(t *testing.T) {
+	clientID := "codex-client-models-integration-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
+		{
+			ID:              "codex-main",
+			MetadataModelID: "gpt-6-astra",
+			DisplayName:     "GPT 6.0 Astra",
+		},
+		{
+			ID:              "codex-luna",
+			MetadataModelID: "gpt-5.6-luna",
+			DisplayName:     "GPT 5.6 Luna",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil)
+	handler := NewOpenAIAPIHandler(base)
+	resp := handler.codexClientModelsResponse("0.153.4")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	entries := make(map[string]map[string]any, len(models))
+	for _, entry := range models {
+		if slug, ok := entry["slug"].(string); ok {
+			entries[slug] = entry
+		}
+	}
+
+	if mainEntry := entries["codex-main"]; mainEntry == nil {
+		t.Fatal("missing codex-main entry")
+	} else {
+		if compHash, _ := mainEntry["comp_hash"].(string); compHash != "3000" {
+			t.Errorf("codex-main comp_hash = %q, want 3000", compHash)
+		}
+		if maxContext := testIntModelValue(mainEntry, "max_context_window"); maxContext != 872000 {
+			t.Errorf("codex-main max_context_window = %d, want 872000", maxContext)
+		}
+		if search, _ := mainEntry["supports_search_tool"].(bool); !search {
+			t.Errorf("codex-main supports_search_tool = %v, want true", search)
+		}
+	}
+
+	if lunaEntry := entries["codex-luna"]; lunaEntry == nil {
+		t.Fatal("missing codex-luna entry")
+	} else {
+		if compHash, _ := lunaEntry["comp_hash"].(string); compHash != "3000" {
+			t.Errorf("codex-luna comp_hash = %q, want 3000", compHash)
+		}
+		if maxContext := testIntModelValue(lunaEntry, "max_context_window"); maxContext != 872000 {
+			t.Errorf("codex-luna max_context_window = %d, want 872000", maxContext)
+		}
+		if search, _ := lunaEntry["supports_search_tool"].(bool); !search {
+			t.Errorf("codex-luna supports_search_tool = %v, want true", search)
+		}
+	}
+}
+
+func TestCodexClientModelsResponse_DevinDisplayName(t *testing.T) {
+	devinClientID := "test-sdk-devin-models"
+	openaiClientID := "test-sdk-openai-models"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(devinClientID, "devin", []*registry.ModelInfo{
+		{
+			ID:          "devin/swe-2",
+			Object:      "model",
+			OwnedBy:     "cognition",
+			Type:        "devin",
+			DisplayName: "SWE-2",
+		},
+		{
+			ID:          "devin/gpt-6-astra",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "devin",
+			DisplayName: "GPT-6 Astra",
+		},
+	})
+	modelRegistry.RegisterClient(openaiClientID, "openai", []*registry.ModelInfo{
+		{
+			ID:          "standard-model",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: "Standard Model",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(devinClientID)
+		modelRegistry.UnregisterClient(openaiClientID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil)
+	handler := NewOpenAIAPIHandler(base)
+	resp := handler.codexClientModelsResponse("0.153.4")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, entry := range models {
+		if slug, ok := entry["slug"].(string); ok {
+			bySlug[slug] = entry
+		}
+	}
+
+	if swe2 := bySlug["devin/swe-2"]; swe2 == nil {
+		t.Fatal("missing devin/swe-2 entry")
+	} else if got, _ := swe2["display_name"].(string); got != "SWE-2 (Devin)" {
+		t.Errorf("devin/swe-2 display_name = %q, want SWE-2 (Devin)", got)
+	}
+
+	if astra := bySlug["devin/gpt-6-astra"]; astra == nil {
+		t.Fatal("missing devin/gpt-6-astra entry")
+	} else if got, _ := astra["display_name"].(string); got != "GPT-6 Astra (Devin)" {
+		t.Errorf("devin/gpt-6-astra display_name = %q, want GPT-6 Astra (Devin)", got)
+	}
+
+	if std := bySlug["standard-model"]; std == nil {
+		t.Fatal("missing standard-model entry")
+	} else if got, _ := std["display_name"].(string); got != "Standard Model" {
+		t.Errorf("standard-model display_name = %q, want Standard Model", got)
+	}
+}
+
+// catalogUnknownExecutor preserves the required executor ABI without opting in.
+type catalogUnknownExecutor struct{ auth.ProviderExecutor }
+
+type catalogUnsupportedExecutor struct{ auth.ProviderExecutor }
+
+func (catalogUnsupportedExecutor) SupportsApplyPatch() bool { return false }
+
+func TestCodexClientModelsApplyPatchRouting(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	registrations := []struct {
+		provider string
+		models   []*registry.ModelInfo
+	}{
+		{"codex", []*registry.ModelInfo{{ID: "gpt-5.5"}, {ID: "gpt-reserve"}, {ID: "gpt-image-2"}, {ID: "catalog-patch-mixed"}, {ID: "catalog-patch-partial"}}},
+		{"catalog-custom", []*registry.ModelInfo{{ID: "catalog-patch-synthetic"}, {ID: "catalog-patch-mixed"}, {ID: "catalog-patch-alias", MetadataModelID: "gpt-5.5", SupportedInputModalities: []string{"text"}}}},
+		{"catalog-remote", []*registry.ModelInfo{{ID: "catalog-patch-partial"}, {ID: "catalog-patch-unknown", MetadataModelID: "gpt-5.5"}, {ID: "team/gpt-5.5"}}},
+		{"catalog-disabled", []*registry.ModelInfo{{ID: "catalog-patch-disabled"}}},
+	}
+	for _, registration := range registrations {
+		clientID := "sdk-patch-" + registration.provider
+		modelRegistry.RegisterClient(clientID, registration.provider, registration.models)
+		t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+	}
+	manager := auth.NewManager(nil, nil, nil)
+	handler := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&config.SDKConfig{}, manager))
+	assertPatch := func(t *testing.T, response map[string]any, id string, want any) {
+		t.Helper()
+		for _, entry := range response["models"].([]map[string]any) {
+			if entry["slug"] == id {
+				value, present := entry["apply_patch_tool_type"]
+				if !present || value != want {
+					t.Errorf("%s apply_patch_tool_type = %#v (present %v), want %#v", id, value, present, want)
+				}
+				return
+			}
+		}
+		t.Fatalf("missing model %q", id)
+	}
+	// Models that natively declare freeform apply_patch advertise it by default under pure Codex routes.
+	assertPatch(t, handler.codexClientModelsResponse("0.153.4"), "gpt-5.5", "freeform")
+	manager.RegisterExecutor(executor.NewCodexAutoExecutor(&config.Config{}))
+	manager.RegisterExecutor(executor.NewOpenAICompatExecutor("catalog-custom", &config.Config{}))
+	manager.RegisterExecutor(catalogUnknownExecutor{executor.NewOpenAICompatExecutor("catalog-remote", &config.Config{})})
+	manager.RegisterExecutor(catalogUnsupportedExecutor{executor.NewOpenAICompatExecutor("catalog-disabled", &config.Config{})})
+	enabledCfg := &config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{EnableApplyPatch: true}}}
+	for _, cfg := range []*config.SDKConfig{nil, {}, enabledCfg, {}} {
+		handler.UpdateClients(cfg)
+		for _, version := range []string{"", "0.137.0", "0.153.4", "cpa"} {
+			response := handler.codexClientModelsResponse(version)
+			for _, entry := range response["models"].([]map[string]any) {
+				want := any(nil)
+				if cfg == enabledCfg {
+					switch entry["slug"] {
+					case "gpt-5.5", "gpt-reserve", "catalog-patch-synthetic", "catalog-patch-alias", "catalog-patch-mixed":
+						want = "freeform"
+					}
+				} else {
+					switch entry["slug"] {
+					case "gpt-5.5", "gpt-reserve":
+						want = "freeform"
+					}
+				}
+				assertPatch(t, response, entry["slug"].(string), want)
+			}
+		}
+	}
+	handler.UpdateClients(enabledCfg)
+	for _, version := range []string{"", "0.137.0", "0.153.4", "cpa"} {
+		t.Run(version, func(t *testing.T) {
+			response := handler.codexClientModelsResponse(version)
+			for _, id := range []string{"gpt-5.5", "gpt-reserve", "catalog-patch-synthetic", "catalog-patch-alias", "catalog-patch-mixed"} {
+				assertPatch(t, response, id, "freeform")
+			}
+			for _, id := range []string{"gpt-image-2", "catalog-patch-partial", "catalog-patch-unknown", "team/gpt-5.5", "catalog-patch-disabled"} {
+				assertPatch(t, response, id, nil)
+			}
+		})
+	}
+	manager.RegisterExecutor(catalogUnknownExecutor{executor.NewCodexAutoExecutor(&config.Config{})})
+	assertPatch(t, handler.codexClientModelsResponse("0.153.4"), "gpt-5.5", nil)
+	withoutManager := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(enabledCfg, nil))
+	assertPatch(t, withoutManager.codexClientModelsResponse("0.153.4"), "catalog-patch-synthetic", nil)
+
 }

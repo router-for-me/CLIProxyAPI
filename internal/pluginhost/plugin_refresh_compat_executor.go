@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // pluginRefreshCompatExecutor keeps native OpenAI-compat inference while
@@ -68,6 +68,13 @@ func (e *pluginRefreshCompatExecutor) Identifier() string {
 		return e.inner.Identifier()
 	}
 	return ""
+}
+
+func (e pluginRefreshCompatExecutor) ForAPIKey() coreauth.ProviderExecutor {
+	if scoped, ok := e.inner.(coreauth.APIKeyConfigExecutor); ok {
+		e.inner = scoped.ForAPIKey()
+	}
+	return &e
 }
 
 func (e *pluginRefreshCompatExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -151,4 +158,13 @@ func authHasRefreshToken(auth *coreauth.Auth) bool {
 		return true
 	}
 	return false
+}
+
+// SupportsApplyPatch delegates only the inner executor's optional contract.
+func (e *pluginRefreshCompatExecutor) SupportsApplyPatch() bool {
+	if e == nil || e.inner == nil {
+		return false
+	}
+	support, okSupport := e.inner.(coreauth.ApplyPatchSupport)
+	return okSupport && support.SupportsApplyPatch()
 }

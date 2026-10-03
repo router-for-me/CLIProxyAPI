@@ -66,8 +66,11 @@ func TestConvertOpenAIRequestToInteractionsMapsToolCallsAndResults(t *testing.T)
 	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call" {
 		t.Fatalf("input.0.type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "input.0.call_id").String(); got != "call_1" {
-		t.Fatalf("call_id = %q, want call_1. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "input.0.id").String(); got != "call_1" {
+		t.Fatalf("id = %q, want call_1. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.0.call_id").Exists() {
+		t.Fatalf("function_call should not have call_id parameter. Output: %s", string(out))
 	}
 	if got := gjson.GetBytes(out, "input.0.arguments.q").String(); got != "x" {
 		t.Fatalf("arguments.q = %q, want x. Output: %s", got, string(out))
@@ -75,8 +78,51 @@ func TestConvertOpenAIRequestToInteractionsMapsToolCallsAndResults(t *testing.T)
 	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_result" {
 		t.Fatalf("input.1.type = %q, want function_result. Output: %s", got, string(out))
 	}
+	if got := gjson.GetBytes(out, "input.1.name").String(); got != "lookup" {
+		t.Fatalf("name = %q, want lookup. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.call_id").String(); got != "call_1" {
+		t.Fatalf("call_id = %q, want call_1. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.1.id").Exists() {
+		t.Fatalf("function_result should not have id parameter. Output: %s", string(out))
+	}
 	if got := gjson.GetBytes(out, "input.1.result").String(); got != "ok" {
 		t.Fatalf("result = %q, want ok. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToInteractionsInfersToolNamesForOutOfOrderResults(t *testing.T) {
+	raw := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [
+			{
+				"role": "assistant",
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"}},
+					{"id": "call_2", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":\"bj\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_2", "content": "sunny"},
+			{"role": "tool", "tool_call_id": "call_1", "content": "found"}
+		]
+	}`)
+	out := ConvertOpenAIRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	// input.0: function_call call_1 (lookup)
+	// input.1: function_call call_2 (weather)
+	// input.2: function_result call_2 (weather)
+	// input.3: function_result call_1 (lookup)
+	if got := gjson.GetBytes(out, "input.2.call_id").String(); got != "call_2" {
+		t.Fatalf("input.2.call_id = %q, want call_2. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.2.name").String(); got != "weather" {
+		t.Fatalf("input.2.name = %q, want weather. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.3.call_id").String(); got != "call_1" {
+		t.Fatalf("input.3.call_id = %q, want call_1. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.3.name").String(); got != "lookup" {
+		t.Fatalf("input.3.name = %q, want lookup. Output: %s", got, string(out))
 	}
 }
 

@@ -9,6 +9,7 @@ type authDispatchRequest struct {
 	ConcurrencyProtocol int               `json:"concurrency_protocol,omitempty"`
 	SessionID           string            `json:"session_id,omitempty"`
 	ParentSessionID     string            `json:"parent_session_id,omitempty"`
+	NodeKind            string            `json:"node_kind,omitempty"`
 	Headers             map[string]string `json:"headers,omitempty"`
 	CredentialPolicy    string            `json:"credential_policy,omitempty"`
 	RetryRound          *int              `json:"retry_round,omitempty"`

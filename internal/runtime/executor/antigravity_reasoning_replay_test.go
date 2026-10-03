@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -1140,6 +1140,17 @@ func TestAntigravityReasoningReplayScopePrefersStableSessionOverExecutionUUID(t 
 	}
 }
 
+func TestAntigravityReasoningReplayScopeSupportsUnderscoreSessionIDHeader(t *testing.T) {
+	opts := cliproxyexecutor.Options{
+		Headers:  http.Header{"Session_id": []string{"underscore-session"}},
+		Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "socket-uuid"},
+	}
+	scope := antigravityReasoningReplayScopeFromRequest(context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, opts, nil)
+	if got := scope.sessionKey; got != "responses:underscore-session" {
+		t.Fatalf("session key = %q, want stable Responses session from Session_id header", got)
+	}
+}
+
 func TestAntigravityReasoningReplayScopeKeepsExecutionAheadOfPromptCacheKey(t *testing.T) {
 	opts := cliproxyexecutor.Options{
 		OriginalRequest: []byte(`{"prompt_cache_key":"shared-cache-bucket"}`),
@@ -1941,5 +1952,33 @@ func TestPrepareAntigravityGeminiReasoningReplayStillRejectsBrokenPairing(t *tes
 	_, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload)
 	if errPrepare == nil || !strings.Contains(errPrepare.Error(), "invalid Gemini function call history") {
 		t.Fatalf("error = %v, want structural pairing rejection", errPrepare)
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.6-flash-high"
+	const args = `{"file_path":"/tmp/a"}`
+	payload := []byte(`{"sessionId":"sess-pairing-break","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(payload); err != nil {
+		t.Fatalf("original payload pairing invalid: %v", err)
+	}
+
+	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Write","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
+		t.Fatal("failed to cache replay item")
+	}
+	opts := cliproxyexecutor.Options{}
+
+	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload)
+	if errPrepare != nil {
+		t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v, want graceful degradation to original payload", errPrepare)
+	}
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("out = %s, want original payload %s", out, payload)
 	}
 }

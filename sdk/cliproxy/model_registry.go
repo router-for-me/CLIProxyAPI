@@ -1,6 +1,6 @@
 package cliproxy
 
-import "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+import "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 
 // ModelInfo re-exports the registry model info structure.
 type ModelInfo = registry.ModelInfo
@@ -24,6 +24,7 @@ type ModelRegistry interface {
 	GetModelsForClient(clientID string) []*ModelInfo
 	GetModelsAndEpochForClient(clientID string) ([]*ModelInfo, uint64)
 	ClientRegistrationEpoch(clientID string) uint64
+	ApplyClientModelCapabilities(clientID string, expectedEpoch uint64, mutate func(modelID string, info *ModelInfo)) bool
 }
 
 // GlobalModelRegistry returns the shared registry instance.

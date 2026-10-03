@@ -14,11 +14,11 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/tidwall/gjson"
 )
 
@@ -46,7 +46,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 	}
 
 	message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String()
-	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
+	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + gptImage25FlareModel + ", " + gptImage25SunburstModel + ", " + gptImage25Model + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
 	}
@@ -56,7 +56,24 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 }
 
 func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
-	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "grok-imagine-image", "xai/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality", "grok-imagine-image-2.0", "xai/grok-imagine-image-2.0"} {
+	for _, model := range []string{
+		"gpt-image-1.5",
+		"codex/gpt-image-1.5",
+		"gpt-image-2",
+		"codex/gpt-image-2",
+		"gpt-image-2.5-flare",
+		"codex/gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
+		"codex/gpt-image-2.5-sunburst",
+		"gpt-image-2.5",
+		"codex/gpt-image-2.5",
+		"grok-imagine-image",
+		"xai/grok-imagine-image",
+		"grok-imagine-image-quality",
+		"xai/grok-imagine-image-quality",
+		"grok-imagine-image-2.0",
+		"xai/grok-imagine-image-2.0",
+	} {
 		if !isSupportedImagesModel(model) {
 			t.Fatalf("expected %s to be supported", model)
 		}
@@ -121,11 +138,141 @@ func TestBuildXAIImagesGenerationsRequest(t *testing.T) {
 	}
 }
 
+func TestBuildXAIImagesGenerationsRequestPreservesQuality(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		rawJSON     string
+		wantQuality string
+		hasQuality  bool
+	}{
+		{
+			name:        "explicit medium",
+			rawJSON:     `{"model":"grok-imagine-image-2.0","prompt":"circle","quality":"medium"}`,
+			wantQuality: "medium",
+			hasQuality:  true,
+		},
+		{
+			name:        "explicit low",
+			rawJSON:     `{"model":"grok-imagine-image-2.0","prompt":"circle","quality":"low"}`,
+			wantQuality: "low",
+			hasQuality:  true,
+		},
+		{
+			name:        "trimmed whitespace",
+			rawJSON:     `{"model":"grok-imagine-image-2.0","prompt":"circle","quality":"  high  "}`,
+			wantQuality: "high",
+			hasQuality:  true,
+		},
+		{
+			name:       "empty quality omitted",
+			rawJSON:    `{"model":"grok-imagine-image-2.0","prompt":"circle","quality":""}`,
+			hasQuality: false,
+		},
+		{
+			name:       "blank quality omitted",
+			rawJSON:    `{"model":"grok-imagine-image-2.0","prompt":"circle","quality":"   "}`,
+			hasQuality: false,
+		},
+		{
+			name:       "omitted quality omitted",
+			rawJSON:    `{"model":"grok-imagine-image-2.0","prompt":"circle"}`,
+			hasQuality: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := buildXAIImagesGenerationsRequest([]byte(tc.rawJSON), "grok-imagine-image-2.0", "b64_json")
+			q := gjson.GetBytes(req, "quality")
+			if tc.hasQuality {
+				if !q.Exists() || q.String() != tc.wantQuality {
+					t.Fatalf("quality = %q (exists=%v), want %q; req = %s", q.String(), q.Exists(), tc.wantQuality, string(req))
+				}
+			} else {
+				if q.Exists() {
+					t.Fatalf("expected quality to be omitted, got %q; req = %s", q.String(), string(req))
+				}
+			}
+		})
+	}
+}
+
+func TestBuildXAIImagesGenerationsRequestNineByTwenty(t *testing.T) {
+	rawJSON := []byte(`{"model":"grok-imagine-image-quality","prompt":"kitten","aspect_ratio":"9:20","resolution":"2k","n":1,"response_format":"b64_json"}`)
+
+	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
+
+	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "9:20" {
+		t.Fatalf("aspect_ratio = %q, want 9:20", got)
+	}
+	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k", got)
+	}
+}
+
+func TestBuildXAIImagesGenerationsRequestNineByTwentyFromSize(t *testing.T) {
+	rawJSON := []byte(`{"model":"grok-imagine-image-quality","prompt":"kitten","size":"9:20","resolution":"2k"}`)
+
+	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
+
+	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "9:20" {
+		t.Fatalf("aspect_ratio from size = %q, want 9:20", got)
+	}
+	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k", got)
+	}
+}
+
+func TestBuildXAIImagesGenerationsRequestTwentyByNine(t *testing.T) {
+	rawJSON := []byte(`{"model":"grok-imagine-image-quality","prompt":"kitten","aspect_ratio":"20:9","resolution":"2k","n":1,"response_format":"b64_json"}`)
+
+	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
+
+	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "20:9" {
+		t.Fatalf("aspect_ratio = %q, want 20:9", got)
+	}
+	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k", got)
+	}
+}
+
+func TestBuildXAIImagesGenerationsRequestTwentyByNineFromSize(t *testing.T) {
+	rawJSON := []byte(`{"model":"grok-imagine-image-quality","prompt":"kitten","size":"20:9","resolution":"2k"}`)
+
+	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
+
+	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "20:9" {
+		t.Fatalf("aspect_ratio from size = %q, want 20:9", got)
+	}
+	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k", got)
+	}
+}
+
+func TestXAIImagesAspectRatioNineByTwenty(t *testing.T) {
+	if got := xaiImagesAspectRatio("9:20", "1:1"); got != "9:20" {
+		t.Fatalf("xaiImagesAspectRatio(9:20) = %q, want 9:20", got)
+	}
+	if got := xaiImagesAspectRatio("20:9", "1:1"); got != "20:9" {
+		t.Fatalf("xaiImagesAspectRatio(20:9) = %q, want 20:9", got)
+	}
+	if got := xaiImagesAspectRatio("9:21", "1:1"); got != "1:1" {
+		t.Fatalf("unknown ratio should keep fallback, got %q", got)
+	}
+	if got := xaiImagesAspectRatioFromSize("9:20", ""); got != "9:20" {
+		t.Fatalf("xaiImagesAspectRatioFromSize(9:20) = %q, want 9:20", got)
+	}
+	if got := xaiImagesAspectRatioFromSize("20:9", ""); got != "20:9" {
+		t.Fatalf("xaiImagesAspectRatioFromSize(20:9) = %q, want 20:9", got)
+	}
+}
+
 func TestBuildXAIImagesEditRequest(t *testing.T) {
-	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"data:image/png;base64,AA==", "https://example.com/image.png"}, "b64_json", "3:2", "1k", 0)
+	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"data:image/png;base64,AA==", "https://example.com/image.png"}, "b64_json", "3:2", "1k", "medium", 0)
 
 	if got := gjson.GetBytes(req, "model").String(); got != "grok-imagine-image" {
 		t.Fatalf("model = %q, want grok-imagine-image", got)
+	}
+	if got := gjson.GetBytes(req, "quality").String(); got != "medium" {
+		t.Fatalf("quality = %q, want medium", got)
 	}
 	if got := gjson.GetBytes(req, "images.0.type").String(); got != "image_url" {
 		t.Fatalf("images.0.type = %q, want image_url", got)
@@ -142,7 +289,7 @@ func TestBuildXAIImagesEditRequest(t *testing.T) {
 }
 
 func TestBuildXAIImagesEditRequestSingleImage(t *testing.T) {
-	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"https://example.com/image.png"}, "url", "", "", 0)
+	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"https://example.com/image.png"}, "url", "", "", "", 0)
 
 	if got := gjson.GetBytes(req, "image.type").String(); got != "image_url" {
 		t.Fatalf("image.type = %q, want image_url", got)
@@ -150,8 +297,32 @@ func TestBuildXAIImagesEditRequestSingleImage(t *testing.T) {
 	if got := gjson.GetBytes(req, "image.url").String(); got != "https://example.com/image.png" {
 		t.Fatalf("image.url = %q", got)
 	}
+	if gjson.GetBytes(req, "quality").Exists() {
+		t.Fatalf("empty quality should be omitted: %s", string(req))
+	}
 	if gjson.GetBytes(req, "images").Exists() {
 		t.Fatalf("single image edit must use image object: %s", string(req))
+	}
+}
+
+func TestXAIImagesEditOptionsFromJSONPreservesQuality(t *testing.T) {
+	aspectRatio, resolution, quality, n := xaiImagesEditOptionsFromJSON([]byte(`{"quality":"low","size":"1024x1024","resolution":"1k","n":1}`))
+	if quality != "low" {
+		t.Fatalf("quality = %q, want low", quality)
+	}
+	if aspectRatio != "1:1" {
+		t.Fatalf("aspectRatio = %q, want 1:1", aspectRatio)
+	}
+	if resolution != "1k" {
+		t.Fatalf("resolution = %q, want 1k", resolution)
+	}
+	if n != 1 {
+		t.Fatalf("n = %d, want 1", n)
+	}
+
+	_, _, emptyQuality, _ := xaiImagesEditOptionsFromJSON([]byte(`{"n":1}`))
+	if emptyQuality != "" {
+		t.Fatalf("emptyQuality = %q, want empty", emptyQuality)
 	}
 }
 

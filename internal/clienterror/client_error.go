@@ -92,6 +92,11 @@ func IsRequestFault(status int, err error) bool {
 	if status == http.StatusUnauthorized && hasAuthenticationErrorBody(err) {
 		return false
 	}
+	// Model not found indicates a credential-model capability mismatch rather than
+	// a caller request error. Preserve rotation and cooldown for the model.
+	if hasModelNotFoundErrorBody(err) {
+		return false
+	}
 	if hasRequestFaultBody(err) {
 		return true
 	}
@@ -122,6 +127,23 @@ func IsItemNotPersisted(message string) bool {
 	return strings.Contains(lower, "item with id") &&
 		strings.Contains(lower, "not found") &&
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+func hasModelNotFoundErrorBody(err error) bool {
+	if err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		if code == "model_not_found" || code == "model_not_found_error" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasAuthenticationErrorBody(err error) bool {

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) ([]byte, error) {
@@ -15,6 +15,9 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	}
 	if !req.Stream {
 		return nil, fmt.Errorf("host.model.execute_stream requires stream=true")
+	}
+	if errProxy := validateHostModelProxy(req.ProxyURL); errProxy != nil {
+		return nil, errProxy
 	}
 	executor := h.currentModelExecutor()
 	if executor == nil {

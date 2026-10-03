@@ -11,19 +11,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/tidwall/gjson"
 )
 
 func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundary(t *testing.T) {
 	t.Parallel()
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOptimizeMultiAgentV2: true}, nil)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{Client: sdkconfig.ClientConfig{Codex: sdkconfig.CodexClientConfig{OptimizeMultiAgentV2: true}}}, nil)
 	handler := NewOpenAIResponsesAPIHandler(base)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
@@ -123,7 +123,7 @@ func newResponsesMultiAgentTestHandler(t *testing.T, executor *responsesMultiAge
 		registry.GetGlobalRegistry().UnregisterClient(authID)
 	})
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOptimizeMultiAgentV2: true}, manager)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{Client: sdkconfig.ClientConfig{Codex: sdkconfig.CodexClientConfig{OptimizeMultiAgentV2: true}}}, manager)
 	return NewOpenAIResponsesAPIHandler(base), modelID
 }
 
@@ -142,7 +142,7 @@ func TestResponsesWebsocketPreparesCodexMultiAgentV2Tools(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOptimizeMultiAgentV2: true}, manager)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{Client: sdkconfig.ClientConfig{Codex: sdkconfig.CodexClientConfig{OptimizeMultiAgentV2: true}}}, manager)
 	handler := NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
 	router.GET("/v1/responses", handler.ResponsesWebsocket)
@@ -180,7 +180,7 @@ func TestResponsesWebsocketPreparesCodexMultiAgentV2Tools(t *testing.T) {
 func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundarySkipsOtherClients(t *testing.T) {
 	t.Parallel()
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOptimizeMultiAgentV2: true}, nil)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{Client: sdkconfig.ClientConfig{Codex: sdkconfig.CodexClientConfig{OptimizeMultiAgentV2: true}}}, nil)
 	handler := NewOpenAIResponsesAPIHandler(base)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	request.Header.Set("User-Agent", "curl/8.7.1")
@@ -195,6 +195,32 @@ func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundarySkipsOtherClients(t *te
 	}
 	if _, exists := ginContext.Get(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey); exists {
 		t.Fatal("other client unexpectedly received prepared marker")
+	}
+}
+
+func TestClientMultiAgentPreparationDoesNotWaitForOAuthCredential(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Client:                             sdkconfig.ClientConfig{Codex: sdkconfig.CodexClientConfig{OptimizeMultiAgentV2: true}},
+		CodexOrphanDelegationCompatibility: true,
+		OAuthOnlyFields:                    map[string]bool{"codex.orphan-delegation-compatibility": true},
+	}, nil)
+	handler := NewOpenAIResponsesAPIHandler(base)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
+	request.Header.Set("X-Openai-Subagent", "collab_spawn")
+	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginContext.Request = request
+	payload := []byte(`{"input":[{"type":"function_call_output","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>task</codex_delegation>"}],"tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}]}`)
+	got := handler.prepareCodexMultiAgentV2Tools(ginContext, payload)
+	got = handler.prepareCodexOrphanDelegation(ginContext, got)
+	if gjson.GetBytes(got, "tools.0.parameters.properties.message.encrypted").Exists() {
+		t.Fatalf("client preparation did not remove encryption: %s", got)
+	}
+	if gjson.GetBytes(got, "input.0.type").String() != "message" {
+		t.Fatalf("shared orphan preparation waited for credential selection: %s", got)
+	}
+	if _, exists := ginContext.Get(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey); !exists {
+		t.Fatal("client request did not receive prepared marker")
 	}
 }
 

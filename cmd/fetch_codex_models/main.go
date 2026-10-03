@@ -11,7 +11,7 @@
 //	--auths-dir       <path>  Directory containing auth JSON files (default: config auth-dir)
 //	--config          <path>  Config file path                 (default: "config.yaml")
 //	--output          <path>  Output JSON file path             (default: "codex_client_models.json")
-//	--client-version <ver>   Codex client_version query value  (default: "0.144.1")
+//	--client-version <ver>   Codex client_version query value  (default: "0.154.0")
 //	--pretty                 Pretty-print the output JSON      (default: true)
 package main
 
@@ -29,21 +29,21 @@ import (
 	"strings"
 	"time"
 
-	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
 	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
 	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.153.3"
-	defaultCodexUserAgent    = "codex_cli_rs/0.153.3 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	defaultClientVersion     = "0.159.0"
+	defaultCodexUserAgent    = "codex_cli_rs/0.159.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	defaultCodexOriginator   = "codex_cli_rs"
 	accessTokenRefreshLeeway = 30 * time.Second
 )
@@ -220,6 +220,21 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 	auth.Metadata["expired"] = tokenData.Expire
 	auth.Metadata["type"] = "codex"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+
+	planType := strings.TrimSpace(tokenData.PlanType)
+	if planType == "" && tokenData.IDToken != "" {
+		if claims, errParse := codexauth.ParseJWTToken(tokenData.IDToken); errParse == nil && claims != nil {
+			planType = claims.GetPlanType()
+		}
+	}
+	if planType == "" {
+		planType = codexauth.DefaultPlanType
+	}
+	auth.Metadata["plan_type"] = planType
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["plan_type"] = planType
 
 	if _, errSave := store.Save(ctx, auth); errSave != nil {
 		return "", false, fmt.Errorf("failed to save refreshed auth: %w", errSave)

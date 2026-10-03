@@ -54,3 +54,49 @@ func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) 
 		}
 	}
 }
+
+func TestParseConfigOAuthMetaChannel(t *testing.T) {
+	const yamlConfig = `
+oauth-model-alias:
+  meta:
+    - name: "muse-spark-1.3"
+      alias: "muse-latest"
+      fork: true
+      force-mapping: true
+oauth-excluded-models:
+  meta:
+    - "muse-spark-1.1"
+oauth-request-scoped-errors:
+  meta:
+    - status: 400
+      match:
+        - "context_length_exceeded"
+      action: "stop"
+`
+
+	cfg, err := ParseConfigBytes([]byte(yamlConfig))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes failed: %v", err)
+	}
+
+	aliases, ok := cfg.OAuthModelAlias["meta"]
+	if !ok || len(aliases) != 1 {
+		t.Fatalf("oauth-model-alias[meta] missing or len != 1: %#v", aliases)
+	}
+	if aliases[0].Name != "muse-spark-1.3" || aliases[0].Alias != "muse-latest" || !aliases[0].Fork || !aliases[0].ForceMapping {
+		t.Fatalf("unexpected meta alias: %+v", aliases[0])
+	}
+
+	excluded, ok := cfg.OAuthExcludedModels["meta"]
+	if !ok || len(excluded) != 1 || excluded[0] != "muse-spark-1.1" {
+		t.Fatalf("oauth-excluded-models[meta] = %#v, want [muse-spark-1.1]", excluded)
+	}
+
+	rules, ok := cfg.OAuthRequestScopedErrors["meta"]
+	if !ok || len(rules) != 1 {
+		t.Fatalf("oauth-request-scoped-errors[meta] missing or len != 1: %#v", rules)
+	}
+	if rules[0].Status != 400 || rules[0].Action != "stop" || len(rules[0].Match) != 1 || rules[0].Match[0] != "context_length_exceeded" {
+		t.Fatalf("unexpected meta request-scoped error rule: %+v", rules[0])
+	}
+}

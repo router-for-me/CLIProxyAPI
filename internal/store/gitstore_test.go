@@ -16,7 +16,7 @@ import (
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type testBranchSpec struct {
@@ -30,6 +30,45 @@ type callbackTokenStorage struct {
 
 func (s *callbackTokenStorage) SaveTokenToFile(path string) error {
 	return s.save(path)
+}
+
+func TestGitTokenStoreDisabledLoginReachesTokenStorage(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote default branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	errReachedStorage := errors.New("reached token storage")
+	storageReached := false
+	auth := &cliproxyauth.Auth{
+		ID:       "canonical-disabled.json",
+		FileName: "canonical-disabled.json",
+		Provider: "claude",
+		Disabled: true,
+		Storage: &callbackTokenStorage{save: func(string) error {
+			storageReached = true
+			return errReachedStorage
+		}},
+		Metadata: map[string]any{"type": "claude"},
+	}
+
+	savedPath, errSave := store.Save(context.Background(), auth)
+	if errSave != nil {
+		t.Fatalf("runtime Save() error = %v", errSave)
+	}
+	if savedPath != "" {
+		t.Fatalf("runtime Save() path = %q, want empty", savedPath)
+	}
+	if storageReached {
+		t.Fatal("runtime Save() reached token storage for a missing disabled credential")
+	}
+
+	ctx := cliproxyauth.WithAuthCreationIntent(context.Background())
+	_, errSave = store.Save(ctx, auth)
+	if !errors.Is(errSave, errReachedStorage) {
+		t.Fatalf("Save() error = %v, want token storage sentinel", errSave)
+	}
 }
 
 func TestEnsureRepositoryUsesRemoteDefaultBranchWhenBranchNotConfigured(t *testing.T) {

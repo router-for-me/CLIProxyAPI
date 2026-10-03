@@ -4,15 +4,94 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
+
+func TestClaudeErrorTypeFromStatus(t *testing.T) {
+	for _, tt := range []struct {
+		status int
+		want   string
+	}{
+		{http.StatusBadRequest, "invalid_request_error"},
+		{http.StatusRequestTimeout, "timeout_error"},
+		{http.StatusTooManyRequests, "rate_limit_error"},
+		{http.StatusInternalServerError, "api_error"},
+		{http.StatusGatewayTimeout, "timeout_error"},
+	} {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			if got := claudeErrorTypeFromStatus(tt.status); got != tt.want {
+				t.Fatalf("error.type = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeIncompleteStreamError(t *testing.T) {
+	const message = "stream error: stream disconnected before completion: stream closed before response.completed"
+	for _, streaming := range []bool{false, true} {
+		name := "JSON"
+		if streaming {
+			name = "committed SSE"
+		}
+		t.Run(name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+			msg := &interfaces.ErrorMessage{
+				StatusCode: http.StatusRequestTimeout,
+				Error:      errors.New(message),
+			}
+			wantStatus := http.StatusRequestTimeout
+			if streaming {
+				c.Header("Content-Type", "text/event-stream")
+				_, _ = c.Writer.Write([]byte("event: message_start\ndata: {}\n\n"))
+				c.Writer.Flush()
+				errs := make(chan *interfaces.ErrorMessage, 1)
+				errs <- msg
+				close(errs)
+				handler.forwardClaudeStream(c, c.Writer, func(err error) {
+					if err != msg.Error {
+						t.Errorf("cancel error = %v, want %v", err, msg.Error)
+					}
+				}, nil, errs)
+				wantStatus = http.StatusOK
+			} else {
+				handler.WriteErrorResponse(c, msg)
+			}
+			if recorder.Code != wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, wantStatus)
+			}
+			body := recorder.Body.String()
+			if streaming {
+				const prefix = "event: error\ndata: "
+				if strings.Count(body, prefix) != 1 {
+					t.Fatalf("expected one terminal error event; body=%s", body)
+				}
+				_, body, _ = strings.Cut(body, prefix)
+				body = strings.TrimSpace(body)
+			}
+			if got := gjson.Get(body, "type").String(); got != "error" {
+				t.Errorf("type = %q, want error", got)
+			}
+			if got := gjson.Get(body, "error.type").String(); got != "timeout_error" {
+				t.Errorf("error.type = %q, want timeout_error", got)
+			}
+			if got := gjson.Get(body, "error.message").String(); got != message {
+				t.Errorf("error.message = %q, want %q", got, message)
+			}
+		})
+	}
+}
 
 func TestClaudeErrorExtractsOpenAIStyleUpstreamJSON(t *testing.T) {
 	handler := &ClaudeCodeAPIHandler{}

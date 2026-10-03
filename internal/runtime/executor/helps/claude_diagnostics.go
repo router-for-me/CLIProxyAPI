@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -62,7 +63,11 @@ type ClaudeContinuityContext struct {
 	PreviousMessageID string
 	PreviousRequestID string
 	PromptID          string
-	Initialized       bool
+	// PinnedDate is the calendar date this session was first seen on. The
+	// cloaked currentDate reminder reuses it so the reminder text stays
+	// byte-stable within a session even when the local date flips mid-session.
+	PinnedDate  string
+	Initialized bool
 }
 
 // WithClaudeSessionID attaches a known Claude session ID to ctx.
@@ -107,6 +112,7 @@ type claudeDiagnosticsEntry struct {
 	previousMessageID string
 	previousRequestID string
 	promptID          string
+	pinnedDate        string
 	minimumSequence   uint64
 	committedSequence uint64
 	lastAccess        uint64
@@ -129,6 +135,20 @@ func IsValidClaudePromptID(id string) bool {
 	}
 	parsed, err := uuid.Parse(id)
 	return err == nil && parsed.Version() == 4 && parsed.Variant() == uuid.RFC4122
+}
+
+// ClaudeDeterministicPromptID generates a deterministic RFC 4122 UUIDv4 from a seed string.
+func ClaudeDeterministicPromptID(seed string) string {
+	digest := sha256.Sum256([]byte(seed))
+	digest[6] = (digest[6] & 0x0f) | 0x40 // Version 4
+	digest[8] = (digest[8] & 0x3f) | 0x80 // Variant RFC 4122
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		digest[0:4],
+		digest[4:6],
+		digest[6:8],
+		digest[8:10],
+		digest[10:16],
+	)
 }
 
 // BeginClaudeContinuity starts one request generation for a stable credential
@@ -175,6 +195,34 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 	entry.expiresAt = now.Add(claudeDiagnosticsTTL)
 	claudeDiagnosticsState.entries[key] = entry
 	return key, sequence, entry.previousMessageID, entry.previousRequestID, activePromptID
+}
+
+// PinClaudeSessionDate returns the calendar date pinned for this continuity
+// session, recording date on the first call of a session and returning the
+// pinned value on later calls. This keeps the cloaked currentDate reminder
+// byte-stable within a session so a local-midnight flip cannot invalidate the
+// prompt-cache prefix. TTL expiry resets the entry, which re-anchors the next
+// request of the same session to the then-current date. An unknown key (for
+// example after a process restart) returns date unchanged, matching the
+// per-request behaviour.
+func PinClaudeSessionDate(key, date string) string {
+	key = strings.TrimSpace(key)
+	date = strings.TrimSpace(date)
+	if key == "" || date == "" {
+		return date
+	}
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	entry, ok := claudeDiagnosticsState.entries[key]
+	if !ok {
+		return date
+	}
+	if entry.pinnedDate == "" {
+		entry.pinnedDate = date
+		claudeDiagnosticsState.entries[key] = entry
+		return date
+	}
+	return entry.pinnedDate
 }
 
 // BeginClaudeDiagnostics starts one request generation for a stable credential
@@ -393,6 +441,12 @@ func isClaudeTitleHelperInstruction(body []byte) bool {
 }
 
 func isClaudeTitleHelperRequest(body []byte) bool {
+	// Without an output_config key the request is a helper only if one of the
+	// system title instructions below appears, so skip the walks when none can.
+	if !jsonMayContainASCII(body, "output_config", "naming a coding session", "Return a short title",
+		"Write the title in the predominant language") {
+		return false
+	}
 	props := gjson.GetBytes(body, "output_config.format.schema.properties")
 	if props.Exists() {
 		if props.Get("title").Exists() && len(props.Map()) == 1 {
@@ -474,6 +528,64 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 		return true
 	}
 	return false
+}
+
+// ClaudePayloadHas1hTTL reports whether the request payload contains any cache_control
+// block with ttl set to "1h".
+func ClaudePayloadHas1hTTL(payload []byte) bool {
+	// A ttl of "1h" is the JSON string "1h"; its quotes are structural and never
+	// escaped, so a payload without that token cannot match.
+	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !gjson.ValidBytes(payload) {
+		return false
+	}
+	has1h := false
+	checkBlock := func(item gjson.Result) bool {
+		cc := item.Get("cache_control")
+		if cc.IsObject() && cc.Get("ttl").String() == "1h" {
+			has1h = true
+			return false
+		}
+		return true
+	}
+	if tools := gjson.GetBytes(payload, "tools"); tools.IsArray() {
+		tools.ForEach(func(_, item gjson.Result) bool {
+			return checkBlock(item)
+		})
+		if has1h {
+			return true
+		}
+	}
+	if system := gjson.GetBytes(payload, "system"); system.IsArray() {
+		system.ForEach(func(_, item gjson.Result) bool {
+			return checkBlock(item)
+		})
+		if has1h {
+			return true
+		}
+	}
+	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if content.IsArray() {
+				content.ForEach(func(_, item gjson.Result) bool {
+					return checkBlock(item)
+				})
+			}
+			return !has1h
+		})
+	}
+	return has1h
+}
+
+// ClaudeSubagentRequests1h reports whether a subagent request explicitly requests
+// 1h cache TTL either via a cache_control block with ttl="1h" in the payload or via
+// extended-cache-ttl-2025-04-11 in incoming Anthropic-Beta headers.
+func ClaudeSubagentRequests1h(headers http.Header, body []byte) bool {
+	if ClaudePayloadHas1hTTL(body) {
+		return true
+	}
+	betas := strings.Join(HeaderValuesCaseInsensitive(headers, "Anthropic-Beta"), ",")
+	return strings.Contains(betas, "extended-cache-ttl-2025-04-11")
 }
 
 // StripClaudeBillingTags removes cc_prev_req and cc_prompt_id from the billing header in body.

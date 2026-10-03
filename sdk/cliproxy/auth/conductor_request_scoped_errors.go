@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // Request-scoped error actions.
@@ -142,6 +142,10 @@ func extractRequestScopedErrorRules(auth *Auth, cfg *internalconfig.Config) []in
 	case "xai":
 		if index >= 0 && index < len(cfg.XAIKey) {
 			return cfg.XAIKey[index].RequestScopedErrors
+		}
+	case "meta":
+		if index >= 0 && index < len(cfg.MetaKey) {
+			return cfg.MetaKey[index].RequestScopedErrors
 		}
 	case "gemini":
 		if index >= 0 && index < len(cfg.GeminiKey) {

@@ -10,13 +10,14 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf16"
 
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -129,26 +130,26 @@ func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCac
 const fingerprintSalt = "59cf53e54c78"
 
 // computeFingerprint computes the 3-char build fingerprint that Claude Code embeds in cc_version.
-// Algorithm: SHA256(salt + messageText[4] + messageText[7] + messageText[20] + version)[:3]
+// Algorithm: SHA256(salt + messageText[4] + messageText[7] + messageText[20] + version)[:3].
+// JavaScript indexes UTF-16 code units; an isolated surrogate becomes U+FFFD
+// when Node encodes the sampled string as UTF-8 for hashing.
 func computeFingerprint(messageText, version string) string {
-	indices := [3]int{4, 7, 20}
-	runes := []rune(messageText)
-	var sb strings.Builder
-	for _, idx := range indices {
-		if idx < len(runes) {
-			sb.WriteRune(runes[idx])
-		} else {
-			sb.WriteRune('0')
+	units := utf16.Encode([]rune(messageText))
+	var sampled [3]uint16
+	for i, idx := range [...]int{4, 7, 20} {
+		sampled[i] = '0'
+		if idx < len(units) {
+			sampled[i] = units[idx]
 		}
 	}
-	input := fingerprintSalt + sb.String() + version
+	input := fingerprintSalt + string(utf16.Decode(sampled[:])) + version
 	h := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(h[:])[:3]
 }
 
 // generateBillingHeader creates the x-anthropic-billing-header text block that
 // Claude Code prepends to its system prompt. cch is present only on signed paths.
-func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string, isSubagent bool, prevReq, promptID string) string {
+func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string, isSubagent bool, prevReq, promptID string, turnOrigin ...string) string {
 	if entrypoint == "" {
 		entrypoint = "cli"
 	}
@@ -184,34 +185,97 @@ func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, wo
 			b.WriteString(promptID)
 			b.WriteByte(';')
 		}
+		if len(turnOrigin) > 0 && turnOrigin[0] == "human" {
+			b.WriteString(" cc_turn_origin=human;")
+		}
 	}
 	return b.String()
 }
 
+func resolveClaudeContinuityTags(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *cliproxyauth.Auth,
+	incomingHeaders http.Header,
+	payload []byte,
+	confirmedClaudeCode bool,
+	existingPrevReq, existingPromptID string,
+) (prevReq, promptID string, cCtx helps.ClaudeContinuityContext, ok bool) {
+	hasExecutionMetadata := helps.ClaudeExecutionMetadataFromContext(ctx)
+	sessionID := helps.ClaudeSessionIDFromContext(ctx)
+	if sessionID == "" && auth != nil {
+		sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
+	}
+	if sessionID == "" || auth == nil {
+		return "", "", helps.ClaudeContinuityContext{}, false
+	}
+
+	credIdentity := claudeDiagnosticsCredentialIdentity(auth)
+	isNewTurn := helps.IsClaudeNewPromptTurn(payload)
+	continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
+
+	// The currentDate reminder is pinned to the session on its first request so
+	// a local-midnight flip between requests cannot rewrite it and invalidate
+	// the prompt-cache prefix in front of the whole conversation.
+	pinnedDate := helps.PinClaudeSessionDate(continuityKey, claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth)))
+
+	if existingPromptID != "" {
+		promptID = existingPromptID
+	} else if prevMsgID != "" && storedPromptID != "" && (hasExecutionMetadata || !isNewTurn) {
+		promptID = storedPromptID
+	} else if !hasExecutionMetadata {
+		promptID = helps.ClaudeDeterministicPromptID("cpa:prompt:" + claudeBillingFingerprintMessageText(payload))
+	} else {
+		promptID = storedPromptID
+	}
+
+	if (hasExecutionMetadata || existingPrevReq != "") && storedPrevReq != "" {
+		prevReq = storedPrevReq
+	} else {
+		prevReq = existingPrevReq
+	}
+
+	cCtx = helps.ClaudeContinuityContext{
+		Key:         continuityKey,
+		Sequence:    seq,
+		PromptID:    promptID,
+		PinnedDate:  pinnedDate,
+		Initialized: true,
+	}
+	if hasExecutionMetadata || existingPrevReq != "" {
+		cCtx.PreviousMessageID = prevMsgID
+		cCtx.PreviousRequestID = storedPrevReq
+	} else {
+		cCtx.PreviousMessageID = ""
+		cCtx.PreviousRequestID = ""
+	}
+	return prevReq, promptID, cCtx, true
+}
+
 func claudeBillingFingerprintMessageText(payload []byte) string {
-	messageText := ""
-	gjson.GetBytes(payload, "messages").ForEach(func(_, message gjson.Result) bool {
-		if message.Get("role").String() != "user" {
-			return true
-		}
-		content := message.Get("content")
-		candidate := ""
-		if content.Type == gjson.String {
-			candidate = content.String()
-		} else if content.IsArray() {
-			content.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					candidate = part.Get("text").String()
+	idx := firstClaudeUserMessageIndex(payload)
+	if idx < 0 {
+		return ""
+	}
+	content := gjson.GetBytes(payload, fmt.Sprintf("messages.%d.content", idx))
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		messageText := ""
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				text := part.Get("text").String()
+				if !isClaudeCodeCurrentDateReminder(text) && !isClaudeCodeContextReminder(text) {
+					messageText = text
+					return false
 				}
-				return true
-			})
-		}
-		if candidate != "" {
-			messageText = candidate
-		}
-		return true
-	})
-	return messageText
+			}
+			return true
+		})
+		return messageText
+	}
+	return ""
 }
 
 func claudeCCHFallbackBillingHeader(ctx context.Context, cfg *config.Config, payload []byte, entrypoint string) string {
@@ -247,7 +311,7 @@ const claudeCodeFableReportingOutcomes = `# Reporting outcomes
 Report what actually happened, not what you intended. When you say something is done, sent, saved, fixed, or verified, that claim must rest on a result you observed in this session — tool output, the file as it now reads, the page as it now loads — not on what the step should have produced. If you did not check, say you did not check. If any step failed, was skipped, or came back different from what you expected, say so in the first sentence of your report, before anything else, even when the rest of the work succeeded. Never quietly work around a failure in a way that makes it look resolved; a problem the user can see is recoverable, one your summary hides is not. When you stop before the task is complete, your first line says so plainly and names what is left. Do not describe partial work as done, and do not let a summary read as more certain than the evidence behind it.`
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.258", "cli", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.280", "cli", "")
 }
 
 // checkSystemInstructionsWithSigningMode keeps the top-level system in Claude
@@ -256,7 +320,7 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // Claude models give it operator-level authority without changing the cached
 // top-level prefix.
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string) []byte {
-	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, time.Now(), false, "", "")
+	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "")
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
@@ -280,14 +344,15 @@ func checkSystemInstructionsWithSigningModeAt(
 	strictMode bool,
 	cchSigning bool,
 	version, entrypoint, workload string,
-	now time.Time,
+	currentDate string,
 	isSubagent bool,
 	prevReq, promptID string,
+	turnOrigin ...string,
 ) []byte {
 	system := gjson.GetBytes(payload, "system")
 	messageText := claudeBillingFingerprintMessageText(payload)
 
-	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID)
+	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID, turnOrigin...)
 	billingBlock := buildTextBlock(billingText, nil)
 	agentBlock := buildTextBlock(claudeCodeCLIIdentity, &claudeCodeCacheControl)
 
@@ -298,19 +363,19 @@ func checkSystemInstructionsWithSigningModeAt(
 	}
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 	if strictMode {
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, currentDate)
 	}
 
 	forwardedSystemBlocks := collectForwardedClaudeSystemPromptBlocks(system)
 	if len(forwardedSystemBlocks) == 0 {
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, currentDate)
 	}
 	if claudeHistoryHasAdvisorCallOrResult(payload) {
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildTextBlock(block, nil))
 		}
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, currentDate)
 	}
 	if claudeUsesLegacySystemReminder(payload) {
 		payload = prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
@@ -320,7 +385,7 @@ func checkSystemInstructionsWithSigningModeAt(
 		// stay on the user-reminder compatibility path.
 		payload = insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks)
 	}
-	return injectClaudeCodeCurrentDate(payload, now)
+	return injectClaudeCodeCurrentDate(payload, currentDate)
 }
 
 // relocateClaudeSystemPromptForCountTokens keeps a cloaked count_tokens request
@@ -642,7 +707,7 @@ func claudeCallerSystemReminder(text string) string {
 }
 
 // claudeHistoryHasAdvisorCallOrResult reports whether messages contains an advisor
-// tool invocation (server_tool_use / tool_use) or advisor result (advisor_tool_result /
+// tool invocation (server_tool_use) or advisor result (advisor_tool_result /
 // advisor_redacted_result). Anthropic cryptographically binds the encrypted
 // advisor result to the conversation layout; any mid-conversation system splice
 // shifts message indices and causes upstream 400 errors.
@@ -659,7 +724,7 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 				switch blockType {
 				case "advisor_tool_result", "advisor_redacted_result":
 					return true
-				case "server_tool_use", "tool_use":
+				case "server_tool_use":
 					if block.Get("name").String() == "advisor" {
 						return true
 					}
@@ -919,6 +984,20 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		return body
 	}
 	currentModel := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
+	// A model rewrite may change the native fallback target. Never override a
+	// caller or payload-rule fallback; only replace one inserted by the cloak.
+	if fableState.injectedFallbacks && !payloadTouchedFallbacks {
+		wantFallback := ""
+		switch {
+		case isClaudeFable51Model(currentModel):
+			wantFallback = "claude-opus-5"
+		case isClaudeOpus55Model(currentModel):
+			wantFallback = "claude-opus-4-8"
+		}
+		if gjson.GetBytes(body, "fallbacks.0.model").String() != wantFallback {
+			body, _ = sjson.DeleteBytes(body, "fallbacks")
+		}
+	}
 
 	if isClaudeFable51Model(currentModel) {
 		// Non-Fable rewritten to Fable 5.1 (or original Fable 5.1): attach Fable additions
@@ -959,16 +1038,24 @@ func reconcileClaudeCodeFableModelAfterPayload(
 				body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
 			}
 		}
+		if !isProbeOrHelper {
+			body = applyClaudeCloakThinkingDisplay(body, payloadTouchedDisplay)
+		}
 		return body
 	}
 
-	// Target model is Non-Fable 5.1:
-	// Only delete fallbacks if CPA automatically injected it and matching payload rules did NOT explicitly configure/modify it
-	if fableState.injectedFallbacks && !payloadTouchedFallbacks {
-		body, _ = sjson.DeleteBytes(body, "fallbacks")
+	if isClaudeOpus55Model(currentModel) && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
+		body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
 	}
-	if fableState.injectedDisplay && !payloadTouchedDisplay {
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	thinkingActive := thinkingType == "adaptive" || thinkingType == "enabled"
+	// Payload rules can disable thinking without touching display. Remove only
+	// CPA's injected value; explicit caller and operator choices remain owned.
+	if fableState.injectedDisplay && !payloadTouchedDisplay && (!thinkingActive || !claudeModelUsesProgressDisplay(currentModel)) {
 		body, _ = sjson.DeleteBytes(body, "thinking.display")
+	}
+	if !isProbeOrHelper {
+		body = applyClaudeCloakThinkingDisplay(body, payloadTouchedDisplay)
 	}
 
 	// Remove Reporting outcomes if CPA automatically injected it
@@ -1001,7 +1088,12 @@ func claudeCodeLocalDate(now time.Time) string {
 	return fmt.Sprintf("%04d-%02d-%02d", year, int(month), day)
 }
 
+var claudeCodeCurrentTimeFunc func(cfg *config.Config, auth *cliproxyauth.Auth) time.Time
+
 func claudeCodeCurrentTime(cfg *config.Config, auth *cliproxyauth.Auth) time.Time {
+	if claudeCodeCurrentTimeFunc != nil {
+		return claudeCodeCurrentTimeFunc(cfg, auth)
+	}
 	return time.Now().In(claudeCodeTimezone(cfg, auth))
 }
 
@@ -1037,7 +1129,7 @@ func claudeCredentialTimezone(auth *cliproxyauth.Auth) string {
 	return strings.TrimSpace(claudeauth.ReadMetadataString(&auth.Metadata, "timezone"))
 }
 
-func claudeCodeCurrentDateReminder(now time.Time) string {
+func claudeCodeCurrentDateReminder(date string) string {
 	return fmt.Sprintf(`<system-reminder>
 As you answer the user's questions, you can use the following context:
 # currentDate
@@ -1046,7 +1138,7 @@ Today's date is %s.
       IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
 </system-reminder>
 
-`, claudeCodeLocalDate(now))
+`, date)
 }
 
 func firstClaudeUserMessageIndex(payload []byte) int {
@@ -1074,7 +1166,11 @@ func isClaudeCodeCurrentDateReminder(text string) bool {
 	return strings.HasPrefix(text, "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ")
 }
 
-func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
+// injectClaudeCodeCurrentDate stamps the currentDate reminder into the first
+// user message. date is the already-resolved calendar date (the session-pinned
+// one whenever continuity is available) so the reminder text cannot change
+// between requests of one session.
+func injectClaudeCodeCurrentDate(payload []byte, date string) []byte {
 	firstUserIdx := firstClaudeUserMessageIndex(payload)
 	if firstUserIdx < 0 {
 		return payload
@@ -1082,7 +1178,7 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 
 	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
 	content := gjson.GetBytes(payload, contentPath)
-	dateText := claudeCodeCurrentDateReminder(now)
+	dateText := claudeCodeCurrentDateReminder(date)
 	dateBlock := buildTextBlock(dateText, nil)
 
 	if content.Type == gjson.String {
@@ -1236,6 +1332,9 @@ type claudeCloakSettings struct {
 }
 
 func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool) (claudeWirePolicy, claudeCloakSettings) {
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		cfg = cfg.ForAPIKey()
+	}
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
 	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
 
@@ -1337,43 +1436,33 @@ func applyCloakingInternal(
 	isSubagent := false
 	prevReq := ""
 	promptID := ""
+	pinnedDate := ""
+	var incomingHeaders http.Header
 	if !isProbeOrHelper {
-		incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+		incomingHeaders = resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
 		isSubagent = helps.IsClaudeSubagentRequest(incomingHeaders, payload)
 		existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(payload)
 
-		sessionID := helps.ClaudeSessionIDFromContext(ctx)
-		if sessionID == "" && auth != nil {
-			sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
-		}
-
-		if sessionID != "" && auth != nil {
-			credIdentity := claudeDiagnosticsCredentialIdentity(auth)
-			isNewTurn := helps.IsClaudeNewPromptTurn(payload)
-			continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
-
-			if existingPromptID != "" {
-				promptID = existingPromptID
-			} else {
-				promptID = storedPromptID
-			}
-			if storedPrevReq != "" {
-				prevReq = storedPrevReq
-			} else {
-				prevReq = existingPrevReq
-			}
-
+		var cCtx helps.ClaudeContinuityContext
+		var ok bool
+		prevReq, promptID, cCtx, ok = resolveClaudeContinuityTags(ctx, cfg, auth, incomingHeaders, payload, confirmedClaudeCode, existingPrevReq, existingPromptID)
+		if ok {
+			pinnedDate = cCtx.PinnedDate
 			if continuityCtx := helps.ClaudeContinuityContextFromContext(ctx); continuityCtx != nil {
-				continuityCtx.Key = continuityKey
-				continuityCtx.Sequence = seq
-				continuityCtx.PreviousMessageID = prevMsgID
-				continuityCtx.PreviousRequestID = prevReq
-				continuityCtx.PromptID = promptID
-				continuityCtx.Initialized = true
+				*continuityCtx = cCtx
 			}
 		}
 	}
+	// Without continuity state (probe/helper traffic, or no session identity)
+	// fall back to the per-request date, which is the pre-pinning behaviour.
+	if pinnedDate == "" {
+		pinnedDate = claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
+	}
 
+	turnOrigin := ""
+	if !isProbeOrHelper && !isSubagent {
+		turnOrigin = "human"
+	}
 	payload = checkSystemInstructionsWithSigningModeAt(
 		payload,
 		settings.strictMode,
@@ -1381,30 +1470,32 @@ func applyCloakingInternal(
 		billingVersion,
 		"cli",
 		workload,
-		claudeCodeCurrentTime(cfg, auth),
+		pinnedDate,
 		isSubagent,
 		prevReq,
 		promptID,
+		turnOrigin,
 	)
 
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
 	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
+	if isClaudeOpus55Model(model) && !isProbeOrHelper && !gjson.GetBytes(payload, "fallbacks").Exists() {
+		payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
+	}
 	if isClaudeFable51Model(model) && !isProbeOrHelper {
 		if !gjson.GetBytes(payload, "fallbacks").Exists() {
 			payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
 		}
-		if gjson.GetBytes(payload, "thinking").Exists() {
-			thinkingType := gjson.GetBytes(payload, "thinking.type").String()
-			if thinkingType == "adaptive" && !gjson.GetBytes(payload, "thinking.display").Exists() {
-				payload, _ = sjson.SetBytes(payload, "thinking.display", "updates")
-			}
-		}
+	}
+	if !isProbeOrHelper {
+		payload = applyClaudeCloakThinkingDisplay(payload, false)
 	}
 
-	// Probes and subagents never use 1h cache in native Claude Code; ensure any
-	// caller-supplied 1h ttl is stripped to match extended-cache-ttl beta suppression.
-	if isSubagent || isProbeOrHelper {
+	// Probes never use 1h cache in native Claude Code; ensure any caller-supplied
+	// 1h ttl is stripped to match extended-cache-ttl beta suppression. Subagents
+	// preserve caller-requested 1h cache TTL (e.g. subagentPromptCacheTtl: 1h).
+	if isProbeOrHelper || (isSubagent && !helps.ClaudeSubagentRequests1h(incomingHeaders, payload)) {
 		payload = stripClaudeCacheControlTTL(payload)
 	}
 

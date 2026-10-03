@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -138,5 +139,128 @@ func TestConvertAntigravityResponseToOpenAIResponses_RestoresAdditionalNamespace
 	}
 	if got := gjson.GetBytes(output, "output.0.input").String(); got != "pwd" {
 		t.Fatalf("output.0.input = %q, want pwd", got)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAIResponsesNonStream_WebSearch(t *testing.T) {
+	origReq := []byte(`{
+		"model": "gemini-3.8-flash-high",
+		"input": "Go release history",
+		"tools": [{"type": "web_search"}]
+	}`)
+
+	antigravityResp := []byte(`{
+		"response": {
+			"responseId": "ag-search-resp-1",
+			"candidates": [{
+				"content": {
+					"role": "model",
+					"parts": [{
+						"text": "Go 1.27 was released recently."
+					}]
+				},
+				"groundingMetadata": {
+					"webSearchQueries": ["Go release history"],
+					"groundingChunks": [
+						{"web": {"uri": "https://go.dev/doc/devel/release", "title": "Release History"}}
+					],
+					"groundingSupports": [{
+						"groundingChunkIndices": [0],
+						"segment": {"startIndex": 0, "endIndex": 7, "text": "Go 1.27"}
+					}]
+				}
+			}],
+			"usageMetadata": {
+				"promptTokenCount": 20,
+				"candidatesTokenCount": 10,
+				"totalTokenCount": 30
+			}
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToOpenAIResponsesNonStream(
+		context.Background(),
+		"gemini-3.8-flash-high",
+		origReq,
+		nil,
+		antigravityResp,
+		nil,
+	)
+
+	parsed := gjson.ParseBytes(output)
+	outputs := parsed.Get("output").Array()
+	if len(outputs) != 2 {
+		t.Fatalf("expected 2 outputs, got %d: %s", len(outputs), output)
+	}
+
+	ws := outputs[0]
+	if ws.Get("type").String() != "web_search_call" {
+		t.Fatalf("expected output.0.type web_search_call, got %q", ws.Get("type").String())
+	}
+	if ws.Get("action.query").String() != "Go release history" {
+		t.Fatalf("expected action.query 'Go release history', got %q", ws.Get("action.query").String())
+	}
+	if ws.Get("action.sources.0.url").String() != "https://go.dev/doc/devel/release" {
+		t.Fatalf("expected action.sources.0.url, got %q", ws.Get("action.sources.0.url").String())
+	}
+
+	msg := outputs[1]
+	if msg.Get("type").String() != "message" {
+		t.Fatalf("expected output.1.type message, got %q", msg.Get("type").String())
+	}
+	citation := msg.Get("content.0.annotations.0")
+	if citation.Get("type").String() != "url_citation" {
+		t.Fatalf("expected annotation type url_citation, got %q", citation.Get("type").String())
+	}
+	if citation.Get("url").String() != "https://go.dev/doc/devel/release" {
+		t.Fatalf("expected citation url, got %q", citation.Get("url").String())
+	}
+	if citation.Get("title").String() != "Release History" {
+		t.Fatalf("expected citation title, got %q", citation.Get("title").String())
+	}
+
+	if parsed.Get("tool_usage.web_search.num_requests").Int() != 1 {
+		t.Fatalf("expected tool_usage.web_search.num_requests = 1, got %d", parsed.Get("tool_usage.web_search.num_requests").Int())
+	}
+}
+
+func TestAntigravityApplyPatchReuse(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}],"input":"patch"}`)
+	translated := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.1-pro-preview", request, false)
+	declaration := gjson.GetBytes(translated, "request.tools.0.functionDeclarations.0")
+	if declaration.Get("name").String() != "functions__apply_patch" || !strings.Contains(declaration.Get("description").String(), "*** Begin Patch") || declaration.Get("parametersJsonSchema.properties.input.type").String() != "string" || !declaration.Get("parametersJsonSchema.additionalProperties").Exists() || declaration.Get("parametersJsonSchema.additionalProperties").Bool() {
+		t.Fatalf("missing declaration: %s", translated)
+	}
+	raw := []byte(`{"response":{"responseId":"patch","candidates":[{"content":{"parts":[{"functionCall":{"name":"functions__apply_patch","args":{"input":"  *** Begin Patch\n*** End Patch\n "}}}]},"finishReason":"STOP"}]}}`)
+	want := "  *** Begin Patch\n*** End Patch\n "
+	nonStream := ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini", request, translated, raw, nil)
+	if gjson.GetBytes(nonStream, "output.0.input").String() != want || gjson.GetBytes(nonStream, "output.0.namespace").String() != "functions" {
+		t.Fatalf("wrong input: %s", nonStream)
+	}
+	var param any
+	var delta strings.Builder
+	var done, item, final string
+	chunks := ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini", request, translated, raw, &param)
+	chunks = append(chunks, ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini", request, translated, []byte("[DONE]"), &param)...)
+	for _, chunk := range chunks {
+		for _, line := range strings.Split(string(chunk), "\n") {
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			ev := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			switch ev.Get("type").String() {
+			case "response.custom_tool_call_input.delta":
+				delta.WriteString(ev.Get("delta").String())
+			case "response.custom_tool_call_input.done":
+				done = ev.Get("input").String()
+			case "response.output_item.done":
+				item = ev.Get("item.input").String()
+			case "response.completed":
+				final = ev.Get("response.output.0.input").String()
+			}
+		}
+	}
+	if delta.String() != want || done != want || item != want || final != want {
+		t.Fatalf("inconsistent input: delta=%q done=%q item=%q final=%q", delta.String(), done, item, final)
 	}
 }

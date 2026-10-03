@@ -2,8 +2,10 @@ package translator
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/tidwall/gjson"
 )
 
@@ -366,6 +368,55 @@ func TestTranslateStream_PluginTranslatorUsedWhenNativeStreamMissing(t *testing.
 	}
 }
 
+func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
+	r := NewRegistry()
+	from := FormatOpenAIResponse
+	to := FormatAntigravity
+	modelInfo := &registry.ModelInfo{ID: "home-model"}
+
+	r.RegisterRequestEnvelope(from, to, func(_ context.Context, req RequestEnvelope) RequestEnvelope {
+		if req.ModelInfo == nil {
+			req.Body = []byte(`{"source":"native"}`)
+		} else {
+			req.Body = []byte(`{"source":"model-info"}`)
+		}
+		return req
+	})
+
+	withoutMetadata := r.TranslateRequest(from, to, "home-model", []byte(`{"input":"hello"}`), false)
+	if gjson.GetBytes(withoutMetadata, "source").String() != "native" {
+		t.Fatalf("without metadata used unexpected transform: %s", withoutMetadata)
+	}
+	withMetadata, err := NewPipeline(r).TranslateRequest(context.Background(), from, to, RequestEnvelope{
+		Format: from, Model: "home-model", Body: []byte(`{"input":"hello"}`), ModelInfo: modelInfo,
+	})
+	if err != nil {
+		t.Fatalf("pipeline translation failed: %v", err)
+	}
+	if gjson.GetBytes(withMetadata.Body, "source").String() != "model-info" {
+		t.Fatalf("envelope metadata was not used: %s", withMetadata.Body)
+	}
+	if withMetadata.ModelInfo != modelInfo {
+		t.Fatal("pipeline did not preserve request-scoped model info")
+	}
+
+	// A custom registration replaces the envelope-aware native route.
+	r.Register(from, to, func(string, []byte, bool) []byte {
+		return []byte(`{"source":"custom"}`)
+	}, ResponseTransform{})
+	for _, payload := range [][]byte{
+		[]byte(`{"input":"hello"}`),
+		[]byte(`{"input":"weather","tools":[{"type":"web_search"}]}`),
+	} {
+		customWithMetadata := r.TranslateRequestEnvelope(context.Background(), from, to, RequestEnvelope{
+			Format: from, Model: "home-model", Body: payload, ModelInfo: modelInfo,
+		})
+		if gjson.GetBytes(customWithMetadata.Body, "source").String() != "custom" {
+			t.Fatalf("request metadata bypassed custom transform for %s: %s", payload, customWithMetadata.Body)
+		}
+	}
+}
+
 func TestPluginNormalizersChainAfterNative(t *testing.T) {
 	ctx := context.Background()
 	r := NewRegistry()
@@ -415,5 +466,87 @@ func TestPluginNormalizersChainAfterNative(t *testing.T) {
 	}
 	if hasCall(hooks.calls, "translate-request") || hasCall(hooks.calls, "translate-response") {
 		t.Fatalf("plugin translators should not run when native transformers exist, calls=%v", hooks.calls)
+	}
+}
+
+func TestUnregisterRestoresFormatPair(t *testing.T) {
+	from := Format("unregister-default-from")
+	to := Format("unregister-default-to")
+	other := Format("unregister-default-other")
+	if HasRequestTransformer(from, to) || HasRequestTransformer(from, other) {
+		t.Fatal("test formats are already registered")
+	}
+	identity := func(_ string, rawJSON []byte, _ bool) []byte {
+		return append([]byte(nil), rawJSON...)
+	}
+	Register(from, to, identity, ResponseTransform{
+		NonStream: func(context.Context, string, []byte, []byte, []byte, *any) []byte {
+			return []byte(`{"removed":true}`)
+		},
+	})
+	Register(from, other, identity, ResponseTransform{})
+	t.Cleanup(func() {
+		Unregister(from, to)
+		Unregister(from, other)
+	})
+
+	if !HasRequestTransformer(from, to) || !HasNonStreamResponseTransformer(from, to) || !HasRequestTransformer(from, other) {
+		t.Fatal("register did not store transforms")
+	}
+	Unregister(from, to)
+	if HasRequestTransformer(from, to) || HasNonStreamResponseTransformer(from, to) || HasResponseTransformer(from, to) {
+		t.Fatal("unregister left transforms behind")
+	}
+	if !HasRequestTransformer(from, other) {
+		t.Fatal("unregister removed a different format pair")
+	}
+}
+
+type patchRegistryError struct{ err error }
+
+func (s *patchRegistryError) ToolInputError() error { return s.err }
+
+func TestApplyPatchRegistryNilAndRetainedFailure(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		r := NewRegistry()
+		r.SetPluginHooks(&fakePluginHooks{normalizeAfter: func([]byte) []byte { return []byte(`{"success":true}`) }})
+		if native {
+			r.Register(FormatOpenAI, FormatOpenAIResponse, nil, ResponseTransform{
+				Stream: func(_ context.Context, _ string, _, _, _ []byte, param *any) [][]byte {
+					*param = &patchRegistryError{errors.New("invalid")}
+					return nil
+				},
+				NonStream: func(_ context.Context, _ string, _, _, _ []byte, param *any) []byte {
+					*param = &patchRegistryError{errors.New("invalid")}
+					return nil
+				},
+			})
+		}
+		var param any = &patchRegistryError{errors.New("invalid")}
+		if got := r.TranslateStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param); got != nil {
+			t.Errorf("native=%v: stream failure recovered as %s", native, got)
+		}
+		if got := r.TranslateNonStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param); got != nil {
+			t.Errorf("native=%v: nonstream failure recovered as %s", native, got)
+		}
+	}
+}
+
+func TestApplyPatchRegistryNativeNilDoesNotInvokeRecovery(t *testing.T) {
+	r := NewRegistry()
+	r.SetPluginHooks(&fakePluginHooks{normalizeAfter: func([]byte) []byte {
+		t.Error("nil native output passed through plugin recovery")
+		return []byte(`{"success":true}`)
+	}})
+	r.Register(FormatOpenAI, FormatOpenAIResponse, nil, ResponseTransform{
+		Stream:    func(context.Context, string, []byte, []byte, []byte, *any) [][]byte { return nil },
+		NonStream: func(context.Context, string, []byte, []byte, []byte, *any) []byte { return nil },
+	})
+	var param any
+	if r.TranslateStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param) != nil {
+		t.Fatal("native stream nil became raw success")
+	}
+	if r.TranslateNonStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param) != nil {
+		t.Fatal("native nonstream nil became raw success")
 	}
 }

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 type recordingCooldownStateStore struct {
@@ -258,6 +258,69 @@ func TestManager_MarkResult_PersistsCooldownOnlyWhenStateChanges(t *testing.T) {
 	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "xai", Model: "grok-4", Success: true})
 	if got := store.saveCount.Load(); got != 2 {
 		t.Fatalf("clean success saved cooldown state %d times, want 2", got)
+	}
+}
+
+func TestManager_Update_ClearsPersistedCooldownWhenCredentialsChange(t *testing.T) {
+	store := &recordingCooldownStateStore{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+
+	auth := &Auth{
+		ID:       "auth-codex-1",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token-1",
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	// 1. Fail with 401 unauthorized
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "codex",
+		Model:    "gpt-6-astra",
+		Success:  false,
+		Error:    &Error{Message: "invalidated token", HTTPStatus: 401},
+	})
+	if len(store.savedRecords()) == 0 {
+		t.Fatal("expected cooldown record to be saved after unauthorized failure")
+	}
+
+	// 2. Update without credential change (e.g. metadata note update)
+	sameCredAuth := &Auth{
+		ID:       auth.ID,
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"note":         "updated note",
+		},
+	}
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), sameCredAuth); errUpdate != nil {
+		t.Fatalf("Update() returned error: %v", errUpdate)
+	}
+	if len(store.savedRecords()) == 0 {
+		t.Fatal("expected cooldown record to remain when credentials did not change")
+	}
+
+	// 3. Update with credential change (new access_token)
+	newCredAuth := &Auth{
+		ID:       auth.ID,
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token-2",
+		},
+	}
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), newCredAuth); errUpdate != nil {
+		t.Fatalf("Update() returned error: %v", errUpdate)
+	}
+	if len(store.savedRecords()) != 0 {
+		t.Fatalf("expected cooldown records to be cleared after credential change, got %d records", len(store.savedRecords()))
 	}
 }
 

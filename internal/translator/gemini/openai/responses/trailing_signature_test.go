@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -15,6 +15,7 @@ func TestGeminiResponsesLateSignaturePreservesSummary(t *testing.T) {
 		`data: {"candidates":[{"content":{"parts":[{"text":"Let me think.","thought":true}]}}],"responseId":"issue-5513"}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"The answer is 42."}]}}]}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}]}`,
+		`data: [DONE]`,
 	}
 	var state any
 	var completed gjson.Result
@@ -83,7 +84,9 @@ func TestGeminiResponsesTextSignatureCacheRejectsInvalidSignature(t *testing.T) 
 	var state any
 	line := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"answer"},{"text":"","thoughtSignature":"invalid"}]},"finishReason":"STOP"}],"responseId":"invalid-cache-fallback"}`)
 	var completed gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-test", nil, nil, line, &state) {
+	streamEvents := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-test", nil, nil, line, &state)
+	streamEvents = append(streamEvents, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-test", nil, nil, []byte("[DONE]"), &state)...)
+	for _, chunk := range streamEvents {
 		name, data := parseSSEEvent(t, chunk)
 		if name == "response.completed" {
 			completed = data.Get("response.output")
@@ -98,7 +101,9 @@ func TestGeminiResponsesLateSignatureReplayWithThinkingSuffix(t *testing.T) {
 	var state any
 	line := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"suffix answer"},{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"responseId":"issue-5513-suffix"}`)
 	var completed gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-pro(8192)", nil, nil, line, &state) {
+	streamEvents := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-pro(8192)", nil, nil, line, &state)
+	streamEvents = append(streamEvents, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-pro(8192)", nil, nil, []byte("[DONE]"), &state)...)
+	for _, chunk := range streamEvents {
 		name, data := parseSSEEvent(t, chunk)
 		if name == "response.completed" {
 			completed = data.Get("response.output")
@@ -135,6 +140,7 @@ func TestGeminiResponsesLateThoughtSignatureDoesNotBindEarlierMessage(t *testing
 		`data: {"candidates":[{"content":{"parts":[{"text":"earlier answer"}]}}],"responseId":"issue-5513-thought-boundary"}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"later thought","thought":true,"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}]}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}]}`,
+		`data: [DONE]`,
 	}
 	var state any
 	var completed gjson.Result
@@ -161,6 +167,7 @@ func TestGeminiResponsesCacheRecoveryPreservesFallbackSignatureOrder(t *testing.
 		`data: {"candidates":[{"content":{"parts":[{"text":"recovery answer"}]}}],"responseId":"issue-5513-cache-recovery"}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]}}]}`,
 		`data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}]}`,
+		`data: [DONE]`,
 	}
 	var state any
 	var completed gjson.Result

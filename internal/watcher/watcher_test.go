@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -71,14 +71,15 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 		ClaudeKey: []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:  []config.CodexKey{{APIKey: "c1"}, {APIKey: "c2"}},
 		XAIKey:    []config.XAIKey{{APIKey: "x1"}},
+		MetaKey:   []config.MetaKey{{APIKey: "m1"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
 			{APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "o1"}, {APIKey: "o2"}}},
 		},
 	}
 
-	gemini, vertex, claude, codex, xai, compat := BuildAPIKeyClients(cfg)
-	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || xai != 1 || compat != 2 {
-		t.Fatalf("unexpected counts: %d %d %d %d %d %d", gemini, vertex, claude, codex, xai, compat)
+	gemini, vertex, claude, codex, xai, meta, compat := BuildAPIKeyClients(cfg)
+	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || xai != 1 || meta != 1 || compat != 2 {
+		t.Fatalf("unexpected counts: %d %d %d %d %d %d %d", gemini, vertex, claude, codex, xai, meta, compat)
 	}
 }
 
@@ -1149,6 +1150,71 @@ func TestHandleEventRemoveUnknownFileIgnored(t *testing.T) {
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
 	if atomic.LoadInt32(&reloads) != 0 {
 		t.Fatalf("expected unknown remove to be ignored, got %d", reloads)
+	}
+}
+
+func TestHandleEventAtomicReplaceDelayedStatPreservesClient(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	authFile := filepath.Join(authDir, "token.json")
+	oldContent := []byte(`{"type":"demo","v":1}`)
+	newContent := []byte(`{"type":"demo","v":2}`)
+	oldSum := sha256.Sum256(oldContent)
+
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	normalized := w.normalizeAuthPath(authFile)
+	w.lastAuthHashes[normalized] = hexString(oldSum[:])
+
+	mockAuth := &coreauth.Auth{
+		ID:       "token.json",
+		FileName: "token.json",
+		Provider: "demo",
+		Status:   coreauth.StatusActive,
+	}
+	w.currentAuths = map[string]*coreauth.Auth{"token.json": mockAuth}
+	w.fileAuthsByPath = map[string]map[string]*coreauth.Auth{
+		normalized: {"token.json": mockAuth},
+	}
+
+	// Delay writing the new file until 60ms (after the initial 50ms check, within retry window)
+	errChan := make(chan error, 1)
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		errChan <- os.WriteFile(authFile, newContent, 0o644)
+	}()
+
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Rename})
+	if errWrite := <-errChan; errWrite != nil {
+		t.Fatalf("async WriteFile failed: %v", errWrite)
+	}
+
+	// If the retry loop settles and detects the replaced file, it should NOT have been removed.
+	w.clientsMutex.RLock()
+	_, stillKnown := w.lastAuthHashes[normalized]
+	_, stillInCurrent := w.currentAuths["token.json"]
+	pathAuths := w.fileAuthsByPath[normalized]
+	w.clientsMutex.RUnlock()
+
+	if !stillKnown {
+		t.Fatal("expected known auth file to survive atomic replace with delayed stat, but hash was removed")
+	}
+	if !stillInCurrent {
+		t.Fatal("expected client to remain registered in currentAuths, but was removed")
+	}
+	if len(pathAuths) == 0 {
+		t.Fatal("expected client to remain registered in fileAuthsByPath, but was removed")
 	}
 }
 
