@@ -25,6 +25,7 @@ var requestFaultCodes = map[string]struct{}{
 	"unsupported_value":           {},
 	"invalid_request_error":       {},
 	"previous_response_not_found": {},
+	"thread_not_found":            {},
 }
 
 var requestFaultTypes = map[string]struct{}{
@@ -170,7 +171,10 @@ func hasRequestFaultBody(err error) bool {
 	if body == "" || !json.Valid([]byte(body)) {
 		return false
 	}
-	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+	for _, path := range []string{
+		"error.code", "code", "response.error.code", "body.error.code",
+		"error.details.error_code", "details.error_code", "response.error.details.error_code", "body.error.details.error_code",
+	} {
 		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
 		if _, ok := requestFaultCodes[code]; ok {
 			return true
