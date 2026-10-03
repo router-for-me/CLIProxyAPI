@@ -25,6 +25,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if opts.Alt == "responses/compact" {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
+	var summaryCompaction bool
+	req, opts, summaryCompaction, err = e.prepareCodexWebsocketV1Compaction(auth, req, opts)
+	if err != nil {
+		return resp, err
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
@@ -69,6 +74,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if errReplay != nil {
 		return resp, errReplay
+	}
+	if summaryCompaction {
+		body = helps.PrepareV1CompactionPayload(body)
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -299,9 +307,14 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if len(payload) == 0 {
 			continue
 		}
+		upstreamEvent := payload
 		observeCodexTokenEvent(reporter, payload)
-		helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
-		helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+		eventType := gjson.GetBytes(payload, "type").String()
+		deferCompletionEvent := summaryCompaction && (eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete")
+		if !deferCompletionEvent {
+			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+		}
 		payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
 		if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
@@ -326,7 +339,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 
 		payload = normalizeCodexWebsocketCompletion(payload)
-		eventType := gjson.GetBytes(payload, "type").String()
+		eventType = gjson.GetBytes(payload, "type").String()
 		if helps.HasMeaningfulCodexOutputDelta(payload) {
 			sawOutputDelta = true
 		}
@@ -345,6 +358,25 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				return resp, streamErr
 			}
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+			if summaryCompaction {
+				scope, secrets := e.v1CompactionCredentials(auth)
+				var syntheticEvents [][]byte
+				payload, syntheticEvents, err = helps.ConvertResponsesCompactionTerminalEvent(payload, upstreamEvent, baseModel, scope, secrets)
+				if err != nil {
+					detail, _ := helps.ParseCodexUsage(upstreamEvent)
+					reporter.PublishFailureWithDetail(ctx, detail, err)
+					if sess != nil {
+						sess.clearActive(conn, readCh)
+					}
+					return resp, err
+				}
+				for _, event := range syntheticEvents {
+					helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, event)
+					helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, event)
+				}
+				helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			}
 			if eventType != "response.incomplete" {
 				cacheCodexReasoningReplayFromCompleted(replayScope, payload)
 			}
@@ -362,4 +394,25 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return resp, nil
 		}
 	}
+}
+
+func (e *CodexWebsocketsExecutor) prepareCodexWebsocketV1Compaction(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, bool, error) {
+	if opts.Alt != "" || (opts.SourceFormat != sdktranslator.FormatOpenAIResponse && opts.SourceFormat != sdktranslator.FormatCodex) || !e.usesV1Compaction(auth, req, opts) {
+		return req, opts, false, nil
+	}
+	summary := helps.HasResponsesCompactionTrigger(req.Payload)
+	scope, secrets := e.v1CompactionCredentials(auth)
+	payload, errExpand := helps.ExpandResponsesCompactionCapsules(req.Payload, scope, secrets)
+	if errExpand != nil {
+		return req, opts, false, errExpand
+	}
+	req.Payload = payload
+	if len(opts.OriginalRequest) > 0 {
+		original, errExpandOriginal := helps.ExpandResponsesCompactionCapsules(opts.OriginalRequest, scope, secrets)
+		if errExpandOriginal != nil {
+			return req, opts, false, errExpandOriginal
+		}
+		opts.OriginalRequest = original
+	}
+	return req, opts, summary, nil
 }

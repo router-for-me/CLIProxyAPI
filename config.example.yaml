@@ -605,6 +605,8 @@ upstream:
 #           is-compat: false
 #           # Optional: enable configuration_update for this API-key model; omitted defaults to false.
 #           support-configuration-update: false
+#           # Set true to convert /responses message summaries into compaction items.
+#           use-v1-compaction: false
 #           thinking:              # optional: exact thinking capability for this configured model
 #             levels: ["xhigh", "high", "medium", "low"]
 #       excluded-models:
@@ -833,6 +835,8 @@ upstream:
 #           output-modalities: [text]       # optional: declare output modalities when known
 #           is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
 #           use-max-completion-tokens: false # optional: default false (uses max_tokens); set true to use max_completion_tokens
+#           # Set true to convert /responses message summaries into compaction items.
+#           use-v1-compaction: false
 #           thinking:                      # optional: omit to default to levels ["low","medium","high"]. Exceeding levels (e.g. "max", "xhigh") are clamped to "high"; explicitly declare levels here if the upstream supports them
 #             levels: ["low", "medium", "high"]
 #         # You may repeat the same alias to build an internal model pool.

@@ -362,6 +362,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		reporter := initialReporter
 		firstResponse := true
 		responseActive := false
+		summaryTerminalSeen := false
 		outputItems := make(map[int64][]byte)
 		var outputFallback [][]byte
 		for {
@@ -421,6 +422,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				snapshot := *current
 				snapshot.originalPayload, snapshot.wsHeaders = nil, nil
 				snapshot.clientBody = []byte("{}")
+				snapshot.summaryCompaction = false
 				if reasoning := gjson.GetBytes(current.clientBody, "reasoning"); reasoning.Exists() {
 					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "reasoning", []byte(reasoning.Raw))
 				}
@@ -443,12 +445,24 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				firstResponse = false
 				responseActive = true
+				summaryTerminalSeen = false
 				outputItems = make(map[int64][]byte)
 				outputFallback = nil
 			}
+			upstreamEvent := payload
+			summaryCompaction := current.summaryCompaction && helps.HasResponsesCompactionTrigger(current.clientBody)
+			deferCompletionEvent := summaryCompaction && (eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete")
+			if deferCompletionEvent && summaryTerminalSeen {
+				errCompaction := helps.ResponsesCompactionError{Message: "compaction upstream returned duplicate terminal events"}
+				helps.RecordAPIResponseError(ctx, e.cfg, errCompaction)
+				send(cliproxyexecutor.StreamChunk{Err: errCompaction})
+				return
+			}
 			observeCodexTokenEvent(reporter, payload)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
-			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			if !deferCompletionEvent {
+				helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			}
 			// Steering acknowledgements, pending notifications and failures are opaque:
 			// preserve their IDs, input, sequence numbers and event types byte-for-byte.
 			if strings.HasPrefix(eventType, "response.steer.") {
@@ -572,6 +586,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			if eventType == "response.output_item.done" {
 				collectCodexOutputItemDone(payload, outputItems, &outputFallback)
 			}
+			var syntheticEvents [][]byte
 			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 				responseActive = false
 				metadataMu.Lock()
@@ -579,8 +594,27 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				metadataMu.Unlock()
 				wakeWriter()
 				payload = normalizeCodexWebsocketCompletion(payload)
-				if !current.preserveNativeOutput {
+				if !current.preserveNativeOutput || summaryCompaction {
 					payload = patchCodexCompletedOutput(payload, outputItems, outputFallback)
+				}
+				if summaryCompaction {
+					scope, secrets := e.v1CompactionCredentials(auth)
+					var errCompaction error
+					payload, syntheticEvents, errCompaction = helps.ConvertResponsesCompactionTerminalEvent(payload, upstreamEvent, req.Model, scope, secrets)
+					if errCompaction != nil {
+						detail, _ := helps.ParseCodexUsage(upstreamEvent)
+						reporter.PublishFailureWithDetail(ctx, detail, errCompaction)
+						helps.RecordAPIResponseError(ctx, e.cfg, errCompaction)
+						send(cliproxyexecutor.StreamChunk{Err: errCompaction})
+						return
+					}
+					summaryTerminalSeen = true
+					for _, event := range syntheticEvents {
+						helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, event)
+						helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, event)
+					}
+					helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+					helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 				}
 				if eventType != "response.incomplete" {
 					cacheCodexReasoningReplayFromCompleted(current.replayScope, payload)
@@ -589,6 +623,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					reporter.Publish(ctx, detail)
 				} else {
 					reporter.EnsurePublished(ctx)
+				}
+			}
+			for _, event := range syntheticEvents {
+				if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(event)}) {
+					return
 				}
 			}
 			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload)}) {
