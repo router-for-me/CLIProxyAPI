@@ -459,7 +459,7 @@ func claudeErrorTypeFromStatus(status int) string {
 		return "request_too_large"
 	case http.StatusTooManyRequests:
 		return "rate_limit_error"
-	case http.StatusGatewayTimeout:
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		return "timeout_error"
 	case 529:
 		return "overloaded_error"
