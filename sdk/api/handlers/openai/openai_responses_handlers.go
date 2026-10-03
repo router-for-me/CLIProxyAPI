@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
@@ -842,6 +843,78 @@ func isCodexResponsesClientRequest(c *gin.Context) bool {
 	}
 }
 
+var (
+	codexAppKeepAliveNowFunc                 = time.Now
+	codexAppKeepAliveIntervalOverrideForTest *time.Duration
+)
+
+func (h *OpenAIResponsesAPIHandler) configureResponsesKeepAlive(
+	c *gin.Context,
+	rawWriter io.Writer,
+	writeChunk func([]byte),
+) (*time.Duration, func(), func([]byte)) {
+	if !isCodexResponsesClientRequest(c) {
+		return nil, nil, writeChunk
+	}
+
+	appInterval := handlers.CodexAppKeepAliveInterval(h.Cfg)
+	if codexAppKeepAliveIntervalOverrideForTest != nil {
+		appInterval = *codexAppKeepAliveIntervalOverrideForTest
+	}
+	if appInterval <= 0 {
+		return nil, nil, writeChunk
+	}
+
+	globalInterval := handlers.StreamingKeepAliveInterval(h.Cfg)
+
+	var tickerInterval time.Duration
+	if globalInterval <= 0 {
+		tickerInterval = appInterval
+	} else {
+		tickerInterval = globalInterval
+		if appInterval < tickerInterval {
+			tickerInterval = appInterval
+		}
+	}
+
+	start := codexAppKeepAliveNowFunc()
+	lastChunkTime := start
+	lastAppKeepAlive := start
+
+	wrappedWriteChunk := func(chunk []byte) {
+		lastChunkTime = codexAppKeepAliveNowFunc()
+		if writeChunk != nil {
+			writeChunk(chunk)
+		}
+	}
+
+	tolerance := tickerInterval / 4
+	if tolerance > 100*time.Millisecond {
+		tolerance = 100 * time.Millisecond
+	}
+	if tolerance < 0 {
+		tolerance = 0
+	}
+
+	writeKeepAlive := func() {
+		if rawWriter == nil {
+			return
+		}
+		if globalInterval > 0 {
+			_, _ = rawWriter.Write([]byte(": keep-alive\n\n"))
+		}
+		now := codexAppKeepAliveNowFunc()
+		silentDuration := now.Sub(lastChunkTime)
+		sinceLastAppKeepAlive := now.Sub(lastAppKeepAlive)
+		if silentDuration+tolerance >= appInterval && sinceLastAppKeepAlive+tolerance >= appInterval {
+			_, _ = rawWriter.Write([]byte("data: {\"type\":\"codex.client.keepalive\"}\n\n"))
+			lastAppKeepAlive = now
+		}
+	}
+
+	return &tickerInterval, writeKeepAlive, wrappedWriteChunk
+}
+
 const (
 	responsesStreamErrorMessageLimit = 2048
 	responsesStreamErrorFieldLimit   = 256
@@ -1047,11 +1120,17 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
 	}
 
+	writeChunk := func(chunk []byte) {
+		framer.WriteChunk(c.Writer, chunk)
+	}
+
+	keepAliveInterval, writeKeepAlive, wrappedWriteChunk := h.configureResponsesKeepAlive(c, c.Writer, writeChunk)
+
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		KeepAliveInterval:      keepAliveInterval,
+		WriteKeepAlive:         writeKeepAlive,
 		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
-		WriteChunk: func(chunk []byte) {
-			framer.WriteChunk(c.Writer, chunk)
-		},
+		WriteChunk:             wrappedWriteChunk,
 		ChunkError: func() *interfaces.ErrorMessage {
 			if framer.terminalError != nil {
 				h.logResponsesStreamError(c, framer, framer.terminalError)
