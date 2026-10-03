@@ -64,7 +64,7 @@ type apiCallResponse struct {
 //   - auth_index / authIndex / AuthIndex (optional):
 //     The credential "auth_index" from GET /v0/management/auth-files (or other endpoints returning it).
 //     If omitted, credential-specific proxy selection is skipped.
-//     If "$TOKEN$" is present and the credential or token cannot be resolved, the request fails with HTTP 400.
+//     If "$TOKEN$" or "$COOKIE$" is present and cannot be resolved, the request fails with HTTP 400.
 //   - method (required): HTTP method, e.g. GET, POST, PUT, PATCH, DELETE.
 //   - url (required): Absolute URL including scheme and host, e.g. "https://api.example.com/v1/ping".
 //   - proxy_url (optional): Proxy used for this request. Supports HTTP, HTTPS, SOCKS5, SOCKS5H,
@@ -74,9 +74,13 @@ type apiCallResponse struct {
 //     1) metadata.access_token
 //     2) attributes.api_key
 //     3) metadata.token / metadata.id_token / metadata.cookie
-//     Example: {"Authorization":"Bearer $TOKEN$"}.
+//     Supports magic variable "$COOKIE$" which is replaced with the credential cookie:
+//     1) metadata.cookie
+//     2) attributes.cookie
+//     Example: {"Authorization":"Bearer $TOKEN$","X-Quota":"$COOKIE$"}.
 //     Note: if you need to override the HTTP Host header, set header["Host"].
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
+//     Both "$TOKEN$" and "$COOKIE$" are substituted in the body as well.
 //
 // Proxy selection (highest priority first):
 //  1. Request proxy_url (when set, lower-priority proxy settings are ignored)
@@ -162,15 +166,43 @@ func (h *Handler) APICall(c *gin.Context) {
 		return nil
 	}
 
+	var cookie string
+	var cookieResolved bool
+
+	resolveCookie := func() error {
+		if !cookieResolved {
+			cookie = cookieValueForAuth(auth)
+			cookieResolved = true
+		}
+		if cookie == "" {
+			if authIndex != "" && auth == nil {
+				return errors.New("auth credential not found for auth_index")
+			}
+			return errors.New("auth cookie not found")
+		}
+		return nil
+	}
+
 	for key, value := range reqHeaders {
-		if !strings.Contains(value, "$TOKEN$") {
+		if !strings.Contains(value, "$TOKEN$") && !strings.Contains(value, "$COOKIE$") {
 			continue
 		}
-		if errToken := resolveToken(); errToken != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errToken.Error()})
-			return
+		replacement := value
+		if strings.Contains(replacement, "$TOKEN$") {
+			if errToken := resolveToken(); errToken != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errToken.Error()})
+				return
+			}
+			replacement = strings.ReplaceAll(replacement, "$TOKEN$", token)
 		}
-		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
+		if strings.Contains(replacement, "$COOKIE$") {
+			if errCookie := resolveCookie(); errCookie != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errCookie.Error()})
+				return
+			}
+			replacement = strings.ReplaceAll(replacement, "$COOKIE$", cookie)
+		}
+		reqHeaders[key] = replacement
 	}
 
 	if strings.Contains(body.Data, "$TOKEN$") {
@@ -185,6 +217,20 @@ func (h *Handler) APICall(c *gin.Context) {
 			}
 		}
 		body.Data = strings.ReplaceAll(body.Data, "$TOKEN$", replacement)
+	}
+
+	if strings.Contains(body.Data, "$COOKIE$") {
+		if errCookie := resolveCookie(); errCookie != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errCookie.Error()})
+			return
+		}
+		replacement := cookie
+		if json.Valid([]byte(body.Data)) && strings.ContainsAny(cookie, "\"\\\r\n\t") {
+			if b, errMarshal := json.Marshal(cookie); errMarshal == nil && len(b) >= 2 {
+				replacement = string(b[1 : len(b)-1])
+			}
+		}
+		body.Data = strings.ReplaceAll(body.Data, "$COOKIE$", replacement)
 	}
 
 	var requestBody io.Reader
@@ -263,6 +309,23 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 			return v
 		}
 		if v := strings.TrimSpace(auth.Attributes["session_token"]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func cookieValueForAuth(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["cookie"].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["cookie"]); v != "" {
 			return v
 		}
 	}

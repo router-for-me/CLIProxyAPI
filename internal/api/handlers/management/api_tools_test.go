@@ -752,6 +752,208 @@ func TestAPICallRejectsUnresolvedTokenPlaceholder(t *testing.T) {
 	}
 }
 
+func TestAPICallReplacesCookiePlaceholder(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		metadata   map[string]any
+		attributes map[string]string
+		header     map[string]string
+		data       string
+		wantHeader map[string]string
+		wantBody   string
+	}{
+		{
+			name:       "metadata cookie in header",
+			metadata:   map[string]any{"cookie": "c=1"},
+			header:     map[string]string{"X-Quota": "$COOKIE$"},
+			wantHeader: map[string]string{"X-Quota": "c=1"},
+		},
+		{
+			name:       "token fallback resolves cookie-only credential",
+			metadata:   map[string]any{"cookie": "c=1"},
+			header:     map[string]string{"Authorization": "Bearer $TOKEN$"},
+			wantHeader: map[string]string{"Authorization": "Bearer c=1"},
+		},
+		{
+			name:       "attributes cookie in header",
+			attributes: map[string]string{"cookie": "c=2"},
+			header:     map[string]string{"X-Quota": "$COOKIE$"},
+			wantHeader: map[string]string{"X-Quota": "c=2"},
+		},
+		{
+			name:       "dual placeholder in single header value",
+			metadata:   map[string]any{"access_token": "tk", "cookie": "ck"},
+			header:     map[string]string{"X-Mix": "t=$TOKEN$;c=$COOKIE$"},
+			wantHeader: map[string]string{"X-Mix": "t=tk;c=ck"},
+		},
+		{
+			name:     "cookie in body data",
+			metadata: map[string]any{"cookie": "c=1"},
+			header:   map[string]string{"Content-Type": "application/json"},
+			data:     `{"quota":"$COOKIE$"}`,
+			wantBody: `{"quota":"c=1"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			received := map[string]string{}
+			var receivedBody string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for key := range r.Header {
+					received[key] = r.Header.Get(key)
+				}
+				b, _ := io.ReadAll(r.Body)
+				receivedBody = string(b)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer upstream.Close()
+
+			manager := coreauth.NewManager(nil, nil, nil)
+			auth := &coreauth.Auth{
+				ID:         "cookie-placeholder.json",
+				Provider:   "devin",
+				Attributes: tc.attributes,
+				Metadata:   tc.metadata,
+			}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			authIndex := auth.EnsureIndex()
+
+			h := &Handler{cfg: &config.Config{}, authManager: manager}
+			router := gin.New()
+			router.POST("/", h.APICall)
+
+			payload := map[string]any{
+				"auth_index": authIndex,
+				"method":     "POST",
+				"url":        upstream.URL + "/probe",
+				"header":     tc.header,
+			}
+			if tc.data != "" {
+				payload["data"] = tc.data
+			}
+			bodyBytes, errMarshal := json.Marshal(payload)
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(bodyBytes)))
+			req.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status code = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+			}
+			for key, want := range tc.wantHeader {
+				if got := received[key]; got != want {
+					t.Fatalf("upstream header %s = %q, want %q", key, got, want)
+				}
+			}
+			if tc.wantBody != "" && receivedBody != tc.wantBody {
+				t.Fatalf("upstream body = %q, want %q", receivedBody, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestAPICallRejectsUnresolvedCookiePlaceholder(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		metadata  map[string]any
+		authIndex string
+		wantErr   string
+	}{
+		{
+			name:     "credential without cookie",
+			metadata: map[string]any{"access_token": "plain-access-token"},
+			wantErr:  "auth cookie not found",
+		},
+		{
+			name:    "omitted auth_index",
+			wantErr: "auth cookie not found",
+		},
+		{
+			name:      "unmatched auth_index",
+			authIndex: "missing-cookie-index",
+			wantErr:   "auth credential not found for auth_index",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var upstreamHit atomic.Bool
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				upstreamHit.Store(true)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			manager := coreauth.NewManager(nil, nil, nil)
+			if tc.metadata != nil {
+				auth := &coreauth.Auth{
+					ID:       "cookie-missing.json",
+					Provider: "devin",
+					Metadata: tc.metadata,
+				}
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+			}
+
+			h := &Handler{cfg: &config.Config{}, authManager: manager}
+			router := gin.New()
+			router.POST("/", h.APICall)
+
+			payload := map[string]any{
+				"method": "GET",
+				"url":    upstream.URL + "/test",
+				"header": map[string]string{"X-Quota": "$COOKIE$"},
+			}
+			if tc.authIndex != "" {
+				payload["auth_index"] = tc.authIndex
+			}
+			bodyBytes, errMarshal := json.Marshal(payload)
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(bodyBytes)))
+			req.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status code = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			var errBody map[string]any
+			if errDecode := json.Unmarshal(recorder.Body.Bytes(), &errBody); errDecode != nil {
+				t.Fatalf("decode error body: %v; body = %s", errDecode, recorder.Body.String())
+			}
+			gotErr, _ := errBody["error"].(string)
+			if gotErr != tc.wantErr {
+				t.Fatalf("error = %q, want %q", gotErr, tc.wantErr)
+			}
+			if upstreamHit.Load() {
+				t.Fatal("upstream must not receive a request when $COOKIE$ cannot be resolved")
+			}
+		})
+	}
+}
+
 func TestAPICallReplacesXAIOAuthAccessToken(t *testing.T) {
 	t.Parallel()
 
