@@ -281,7 +281,11 @@ func interactionsStepStartToResponses(modelName string, root gjson.Result, st *i
 		if signature := interactionsReasoningEncryptedContent(st.ReasoningEncrypted[index]); signature != "" {
 			added, _ = sjson.SetBytes(added, "item.encrypted_content", signature)
 		}
-		return [][]byte{emitResponsesEvent("response.output_item.added", added)}
+		part := []byte(`{"type":"response.reasoning_summary_part.added","item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+		part, _ = sjson.SetBytes(part, "sequence_number", nextResponsesSeq(st))
+		part, _ = sjson.SetBytes(part, "item_id", itemID)
+		part, _ = sjson.SetBytes(part, "output_index", index)
+		return [][]byte{emitResponsesEvent("response.output_item.added", added), emitResponsesEvent("response.reasoning_summary_part.added", part)}
 	case "function_call":
 		if st.FunctionCalls[index] != nil {
 			return nil
@@ -346,8 +350,9 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 	case "thought_summary":
 		text := firstNonEmpty(delta.Get("content.text").String(), delta.Get("text").String())
 		recordResponsesReasoningSummary(st, index, text)
-		payload := []byte(`{"type":"response.reasoning_summary_text.delta","output_index":0,"delta":""}`)
+		payload := []byte(`{"type":"response.reasoning_summary_text.delta","item_id":"","output_index":0,"summary_index":0,"delta":""}`)
 		payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
+		payload, _ = sjson.SetBytes(payload, "item_id", st.ItemIDs[index])
 		payload, _ = sjson.SetBytes(payload, "output_index", index)
 		payload, _ = sjson.SetBytes(payload, "delta", text)
 		return [][]byte{emitResponsesEvent("response.reasoning_summary_text.delta", payload)}
@@ -481,6 +486,27 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 		done, _ = translatorcommon.SetStringWithoutHTMLEscape(done, "item.arguments", arguments)
 		call.ItemDoneEmitted = true
 		return append(events, emitResponsesEvent("response.output_item.done", done))
+	case "thought":
+		text := strings.Join(st.ReasoningSummaries[index], "")
+		textDone := []byte(`{"type":"response.reasoning_summary_text.done","item_id":"","output_index":0,"summary_index":0,"text":""}`)
+		textDone, _ = sjson.SetBytes(textDone, "sequence_number", nextResponsesSeq(st))
+		textDone, _ = sjson.SetBytes(textDone, "item_id", itemID)
+		textDone, _ = sjson.SetBytes(textDone, "output_index", index)
+		textDone, _ = sjson.SetBytes(textDone, "text", text)
+		partDone := []byte(`{"type":"response.reasoning_summary_part.done","item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+		partDone, _ = sjson.SetBytes(partDone, "sequence_number", nextResponsesSeq(st))
+		partDone, _ = sjson.SetBytes(partDone, "item_id", itemID)
+		partDone, _ = sjson.SetBytes(partDone, "output_index", index)
+		partDone, _ = sjson.SetBytes(partDone, "part.text", text)
+		done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{}}`)
+		done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
+		done, _ = sjson.SetBytes(done, "output_index", index)
+		done, _ = sjson.SetRawBytes(done, "item", responsesReasoningItem(index, st))
+		return [][]byte{
+			emitResponsesEvent("response.reasoning_summary_text.done", textDone),
+			emitResponsesEvent("response.reasoning_summary_part.done", partDone),
+			emitResponsesEvent("response.output_item.done", done),
+		}
 	default:
 		done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{}}`)
 		done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
@@ -697,21 +723,14 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 }
 
 func responsesReasoningItem(index int, st *interactionsToResponsesStreamState) []byte {
-	item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
+	item := []byte(`{"id":"","type":"reasoning","status":"completed","encrypted_content":"","summary":[]}`)
 	item, _ = sjson.SetBytes(item, "id", st.ItemIDs[index])
 	if signature := interactionsReasoningEncryptedContent(st.ReasoningEncrypted[index]); signature != "" {
 		item, _ = sjson.SetBytes(item, "encrypted_content", signature)
 	}
-	summaries := st.ReasoningSummaries[index]
-	if len(summaries) > 0 {
-		summaryBlocks := make([][]byte, 0, len(summaries))
-		for _, text := range summaries {
-			part := []byte(`{"type":"summary_text","text":""}`)
-			part, _ = sjson.SetBytes(part, "text", text)
-			summaryBlocks = append(summaryBlocks, part)
-		}
-		item = translatorcommon.SetRawArrayItems(item, "summary", summaryBlocks)
-	}
+	part := []byte(`{"type":"summary_text","text":""}`)
+	part, _ = sjson.SetBytes(part, "text", strings.Join(st.ReasoningSummaries[index], ""))
+	item = translatorcommon.SetRawArrayItems(item, "summary", [][]byte{part})
 	return item
 }
 
