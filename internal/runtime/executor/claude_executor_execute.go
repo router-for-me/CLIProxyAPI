@@ -178,10 +178,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// Initialize continuity and diagnostics if cloaked and eligible.
 		if cloaked {
 			existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(body)
-			prevReq, promptID, cCtx, ok := resolveClaudeContinuityTags(ctx, auth, incomingHeaders, body, confirmedClaudeCode, existingPrevReq, existingPromptID)
+			prevReq, promptID, cCtx, ok := resolveClaudeContinuityTags(ctx, e.cfg, auth, incomingHeaders, body, confirmedClaudeCode, existingPrevReq, existingPromptID)
 			if ok {
 				if continuityCtx != nil {
 					*continuityCtx = cCtx
+				}
+				if cCtx.PinnedDate != "" {
+					body = injectClaudeCodeCurrentDate(body, cCtx.PinnedDate)
 				}
 				body = helps.InjectClaudeBillingTags(body, prevReq, promptID)
 				if fp.InjectDiagnostics && isAnthropicUpstreamBase(baseURL) {
@@ -385,6 +388,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	var streamUsage helps.StreamUsageBuffer
 	if upstreamStream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
@@ -394,7 +398,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			commitClaudeContinuity(diagnosticsState, msgID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
 		}
 		lines := bytes.Split(data, []byte("\n"))
-		var streamUsage helps.StreamUsageBuffer
 		for i, line := range lines {
 			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)
@@ -407,12 +410,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			}
 			lines[i] = restoredLine
 		}
-		streamUsage.Publish(ctx, reporter)
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
 		commitClaudeContinuity(diagnosticsState, claudeMessageIDFromResponse(data), helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
 		reporter.ObserveResponseModel(data)
-		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 		var errRestore error
 		data, errRestore = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)
 		if errRestore != nil {
@@ -429,11 +430,19 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		to,
 		responseFormat,
 		req.Model,
-		opts.OriginalRequest,
+		helps.ApplyPatchOriginalRequest(req, opts),
 		bodyForTranslation,
 		data,
 		&param,
 	)
+	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	if upstreamStream {
+		streamUsage.Publish(ctx, reporter)
+	} else {
+		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
+	}
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}

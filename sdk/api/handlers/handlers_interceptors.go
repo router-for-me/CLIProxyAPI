@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -368,6 +370,7 @@ type requestAfterAuthCapture struct {
 	body                    []byte
 	originalRequest         []byte
 	originalRequestReplaced bool
+	path                    string
 }
 
 func (c *requestAfterAuthCapture) record(req coreexecutor.RequestAfterAuthInterceptRequest, resp coreexecutor.RequestAfterAuthInterceptResponse) {
@@ -383,6 +386,7 @@ func (c *requestAfterAuthCapture) record(req coreexecutor.RequestAfterAuthInterc
 		originalRequest = cloneBytes(resp.Body)
 		originalRequestReplaced = true
 	}
+	path := strings.TrimSpace(resp.Path)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -391,6 +395,7 @@ func (c *requestAfterAuthCapture) record(req coreexecutor.RequestAfterAuthInterc
 	c.body = body
 	c.originalRequest = originalRequest
 	c.originalRequestReplaced = originalRequestReplaced
+	c.path = path
 }
 
 func (c *requestAfterAuthCapture) apply(req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Request, coreexecutor.Options) {
@@ -407,6 +412,14 @@ func (c *requestAfterAuthCapture) apply(req coreexecutor.Request, opts coreexecu
 		opts.OriginalRequest = cloneBytes(c.originalRequest)
 	}
 	opts.Headers = cloneHeader(c.headers)
+	if c.path != "" {
+		if opts.Metadata == nil {
+			opts.Metadata = make(map[string]any, 1)
+		} else {
+			opts.Metadata = maps.Clone(opts.Metadata)
+		}
+		opts.Metadata[coreexecutor.RequestPathMetadataKey] = c.path
+	}
 	return req, opts
 }
 
@@ -487,6 +500,14 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 		req.Payload = cloneBytes(resp.Body)
 		opts.OriginalRequest = cloneBytes(resp.Body)
 	}
+	if strings.TrimSpace(resp.Path) != "" {
+		if opts.Metadata == nil {
+			opts.Metadata = make(map[string]any, 1)
+		} else {
+			opts.Metadata = maps.Clone(opts.Metadata)
+		}
+		opts.Metadata[coreexecutor.RequestPathMetadataKey] = strings.TrimSpace(resp.Path)
+	}
 	if resp.Terminate {
 		return req, opts, requestTerminationError(resp)
 	}
@@ -565,6 +586,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		Metadata:       req.Metadata,
 	}, skipPluginID)
 	return coreexecutor.RequestAfterAuthInterceptResponse{
+		Path:            strings.TrimSpace(resp.Path),
 		Headers:         resp.Headers,
 		Body:            resp.Body,
 		ClearHeaders:    resp.ClearHeaders,

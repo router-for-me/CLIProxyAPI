@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -218,7 +219,17 @@ func convertResponsesCustomToolToOpenAIChat(tool gjson.Result, overrideName stri
 	if description := responsesToolDescription(tool); description != "" {
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
 	}
+	if applypatch.IsCustomTool(tool) {
+		chatTool, _ = sjson.SetBytes(chatTool, "function.description", applypatch.Description(tool))
+		chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", applypatch.Parameters())
+	}
 	return chatTool, true
+}
+
+// isApplyPatch resolves only the original winning custom declaration.
+func (idx *responsesToolIndex) isApplyPatch(name string) bool {
+	d, ok := idx.byChat[name]
+	return ok && d.custom && applypatch.IsCustomTool(d.tool)
 }
 
 func convertResponsesFunctionToolToOpenAIChat(tool gjson.Result, overrideName string) ([]byte, bool) {

@@ -91,6 +91,13 @@ func TestConfigV8MigrationAndLegacyAPI(t *testing.T) {
 	if err != nil || loaded.RequestRetry != 5 {
 		t.Fatalf("v0 update to v8 config failed: %v", err)
 	}
+	saved, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = config.ValidateV8Config(saved); err != nil || !strings.Contains(string(saved), "config-version: 8") {
+		t.Fatalf("v0 did not preserve the existing v8 layout: %v", err)
+	}
 	request(http.MethodPut, "/v8/management/config/requests/proxy-url", `"direct"`, 200)
 	loaded, err = config.LoadConfig(path)
 	if err != nil || loaded.ProxyURL != "direct" {
@@ -224,7 +231,7 @@ func TestConfigV8CommentsUnknownNestedFieldsOnWrite(t *testing.T) {
 	if err != nil || string(unchanged) != string(saved) {
 		t.Fatalf("invalid new setting changed the config: %v", err)
 	}
-	request(http.MethodDelete, "/v8/management/config/oauth/providers/codex/disable-codex-cloaking", "", http.StatusOK)
+	request(http.MethodDelete, "/v8/management/config/upstream/codex/disable-codex-cloaking", "", http.StatusOK)
 	saved, err = os.ReadFile(path)
 	if err != nil || strings.Count(string(saved), "# oauth.providers.codex.retired-setting: false") != 1 {
 		t.Fatalf("deleting the neighboring setting lost the archived comment: %v\n%s", err, saved)
@@ -306,8 +313,17 @@ func TestV8MigrationReloadSnapshotMatchesDisk(t *testing.T) {
 					t.Fatal("reload snapshot has different OAuth scope from the saved file")
 				}
 				api := snapshot.ForAPIKey()
-				if api.Codex.DisableCodexCloaking == tc.migrated || api.XAI.InjectXSearch == tc.migrated {
+				if !api.Codex.DisableCodexCloaking || !api.XAI.InjectXSearch {
 					t.Fatal("reload snapshot applied the wrong API-key configuration")
+				}
+				if tc.migrated {
+					data, errRead := os.ReadFile(path)
+					if errRead != nil {
+						t.Fatal(errRead)
+					}
+					if errValidate := config.ValidateV8Config(data); errValidate != nil {
+						t.Fatal(errValidate)
+					}
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("missing config reload")
@@ -375,7 +391,7 @@ func TestConfigV8DeleteLastField(t *testing.T) {
 		{"websocket", "ws-auth: false\n", "oauth/providers/aistudio/ws-auth", func(cfg *config.Config) bool { return cfg.WebsocketAuth }},
 		{"debug", "debug: true\n", "observability/logs/debug", func(cfg *config.Config) bool { return !cfg.Debug }},
 		{"sibling", "routing: {strategy: fill-first, retry: {request-retry: 3}}\n", "routing/retry/request-retry", func(cfg *config.Config) bool { return cfg.RequestRetry == 0 && cfg.Routing.Strategy == "fill-first" }},
-		{"provider", "oauth: {providers: {codex: {disable-codex-cloaking: true}}}\n", "oauth/providers/codex/disable-codex-cloaking", func(cfg *config.Config) bool { return !cfg.Codex.DisableCodexCloaking }},
+		{"provider", "oauth: {providers: {codex: {disable-codex-cloaking: true}}}\n", "upstream/codex/disable-codex-cloaking", func(cfg *config.Config) bool { return !cfg.Codex.DisableCodexCloaking }},
 		{"excluded models", "oauth: {excluded-models: {codex: [blocked-model]}}\n", "oauth/excluded-models", func(cfg *config.Config) bool { return len(cfg.OAuthExcludedModels) == 0 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

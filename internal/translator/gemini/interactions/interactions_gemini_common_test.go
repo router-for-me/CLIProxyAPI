@@ -1320,3 +1320,64 @@ func TestConvertInteractionsRequestToGemini_ExplicitSignatureClearsPending(t *te
 		t.Fatalf("expected f2 thoughtSignature to be empty, got %q", sig)
 	}
 }
+
+func TestConvertInteractionsResponseToGemini_ResponseFailed(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    string
+		wantCode   int64
+		wantStatus string
+		wantMsg    string
+	}{
+		{
+			name:       "403_permission_denied",
+			payload:    `data: {"event_type":"response.failed","error":{"message":"devin upstream error: permission_denied","code":"403"}}`,
+			wantCode:   403,
+			wantStatus: "PERMISSION_DENIED",
+			wantMsg:    "permission_denied",
+		},
+		{
+			name:       "429_resource_exhausted",
+			payload:    `data: {"event_type":"interaction.failed","error":{"message":"quota exceeded","code":"resource_exhausted"}}`,
+			wantCode:   429,
+			wantStatus: "RESOURCE_EXHAUSTED",
+			wantMsg:    "quota exceeded",
+		},
+		{
+			name:       "503_unavailable_nested",
+			payload:    `data: {"event_type":"response.failed","interaction":{"error":{"message":"service unavailable","code":"503"}}}`,
+			wantCode:   503,
+			wantStatus: "UNAVAILABLE",
+			wantMsg:    "service unavailable",
+		},
+		{
+			name:       "default_fallback",
+			payload:    `data: {"event_type":"response.failed"}`,
+			wantCode:   500,
+			wantStatus: "INTERNAL",
+			wantMsg:    "upstream error occurred",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			events := ConvertInteractionsResponseToGemini(context.Background(), "devin/kimi-k3", nil, nil, []byte(tt.payload), &param)
+			if len(events) != 1 {
+				t.Fatalf("expected 1 event, got %d", len(events))
+			}
+			gotCode := gjson.GetBytes(events[0], "error.code").Int()
+			if gotCode != tt.wantCode {
+				t.Errorf("error.code = %d, want %d", gotCode, tt.wantCode)
+			}
+			gotStatus := gjson.GetBytes(events[0], "error.status").String()
+			if gotStatus != tt.wantStatus {
+				t.Errorf("error.status = %q, want %q", gotStatus, tt.wantStatus)
+			}
+			gotMsg := gjson.GetBytes(events[0], "error.message").String()
+			if !strings.Contains(gotMsg, tt.wantMsg) {
+				t.Errorf("error.message = %q, want containing %q", gotMsg, tt.wantMsg)
+			}
+		})
+	}
+}

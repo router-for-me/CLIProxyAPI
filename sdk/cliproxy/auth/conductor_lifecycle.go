@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // SetRetryConfig updates additional credential retry rounds, the per-round credential limit, and the cooldown wait interval.
@@ -115,16 +116,25 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Generation = 1
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	// Snapshot before unlocking: MarkResult mutates the published auth in place.
+	var schedulerSnapshot *Auth
+	if m.scheduler != nil {
+		schedulerSnapshot = authClone.Clone()
+	}
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone.Clone())
+		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
+	// Persist failures stay non-fatal, but must not be silent: a restart would
+	// lose the credential that only exists in memory.
+	if errPersist := m.persist(ctx, auth); errPersist != nil {
+		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist registered auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+	}
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
@@ -261,17 +271,26 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	// Snapshot before unlocking: MarkResult mutates the published auth in place.
+	var schedulerSnapshot *Auth
+	if m.scheduler != nil {
+		schedulerSnapshot = authClone.Clone()
+	}
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone.Clone())
+		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
 	if !persistMetaMint {
-		_ = m.persist(ctx, auth)
+		// Persist failures stay non-fatal, but must not be silent: after a token
+		// refresh the rotated credentials only exist in memory until persisted.
+		if errPersist := m.persist(ctx, auth); errPersist != nil {
+			log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist updated auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+		}
 	}
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if cooldownStateChanged {

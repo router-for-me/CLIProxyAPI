@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -25,6 +27,9 @@ var (
 type toolCallStreamState struct {
 	Index            int
 	ArgumentsEmitted bool
+	Patch            bool
+	InputStarted     bool
+	InputClosed      bool
 	Done             bool
 }
 
@@ -205,7 +210,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		// Increment index for this new tool call item.
 		p := (*param).(*ConvertCliToOpenAIParams)
 		p.FunctionCallIndex++
-		state := &toolCallStreamState{Index: p.FunctionCallIndex}
+		state := &toolCallStreamState{Index: p.FunctionCallIndex, Patch: isOriginalCustomPatch(originalRequestRawJSON, itemResult)}
 		registerToolCallState(p, rootResult, itemResult, state)
 
 		functionCallItemTemplate := []byte(`{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`)
@@ -233,6 +238,13 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			return [][]byte{}
 		}
 		state.ArgumentsEmitted = true
+		if state.Patch {
+			deltaValue = applypatch.EscapeInputFragment(deltaValue)
+			if !state.InputStarted {
+				deltaValue = `{"input":"` + deltaValue
+				state.InputStarted = true
+			}
+		}
 
 		functionCallItemTemplate := []byte(`{"index":0,"function":{"arguments":""}}`)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", state.Index)
@@ -244,8 +256,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	} else if dataType == "response.function_call_arguments.done" || dataType == "response.custom_tool_call_input.done" {
 		p := (*param).(*ConvertCliToOpenAIParams)
 		state := findToolCallState(p, rootResult, gjson.Result{})
-		if state == nil || state.Done || state.ArgumentsEmitted {
-			// Arguments were already streamed via delta events; nothing to emit.
+		if state == nil || state.Done || state.InputClosed || (state.ArgumentsEmitted && !state.Patch) {
 			return [][]byte{}
 		}
 
@@ -256,6 +267,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		state.ArgumentsEmitted = true
 		fullArgs := rootResult.Get(fullArgsField).String()
+		if state.Patch {
+			fullArgs = finishPatchChatArguments(state, fullArgs)
+		}
 		if fullArgs == "" {
 			return [][]byte{}
 		}
@@ -318,7 +332,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 				return [][]byte{}
 			}
 			state.Done = true
-			if state.ArgumentsEmitted {
+			if state.ArgumentsEmitted && (!state.Patch || state.InputClosed) {
 				return [][]byte{}
 			}
 
@@ -326,6 +340,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			// completed arguments so the id and name are not duplicated.
 			state.ArgumentsEmitted = true
 			fullArgs := codexToolCallArguments(itemResult)
+			if state.Patch {
+				fullArgs = finishPatchChatArguments(state, fullArgs)
+			}
 			if fullArgs == "" {
 				return [][]byte{}
 			}
@@ -339,7 +356,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 		// Fallback path: model skipped output_item.added, so emit the complete tool call now.
 		p.FunctionCallIndex++
-		state = &toolCallStreamState{Index: p.FunctionCallIndex, ArgumentsEmitted: true, Done: true}
+		state = &toolCallStreamState{Index: p.FunctionCallIndex, ArgumentsEmitted: true, Done: true, Patch: isOriginalCustomPatch(originalRequestRawJSON, itemResult)}
 		registerToolCallState(p, rootResult, itemResult, state)
 
 		functionCallItemTemplate := []byte(`{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`)
@@ -356,7 +373,11 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.name", name)
 
-		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", codexToolCallArguments(itemResult))
+		fullArgs := codexToolCallArguments(itemResult)
+		if state.Patch {
+			fullArgs = finishPatchChatArguments(state, fullArgs)
+		}
+		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", fullArgs)
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
@@ -504,7 +525,11 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", n)
 				}
 
-				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", codexToolCallArguments(outputItem))
+				fullArgs := codexToolCallArguments(outputItem)
+				if isOriginalCustomPatch(originalRequestRawJSON, outputItem) {
+					fullArgs = applypatch.WrapInput(fullArgs)
+				}
+				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", fullArgs)
 
 				toolCalls = append(toolCalls, functionCallTemplate)
 			case "image_generation_call":
@@ -686,4 +711,31 @@ func setCodexCacheWriteTokens(template []byte, usage gjson.Result) []byte {
 	template, _ = sjson.SetRawBytes(template, "usage.prompt_tokens_details.cache_write_tokens", []byte(value.Raw))
 	template, _ = sjson.SetRawBytes(template, "usage.prompt_tokens_details.cached_creation_tokens", []byte(value.Raw))
 	return template
+}
+
+// isOriginalCustomPatch never promotes an ordinary same-name function to custom.
+func isOriginalCustomPatch(original []byte, item gjson.Result) bool {
+	if item.Get("type").String() != "custom_tool_call" {
+		return false
+	}
+	name := util.QualifyResponsesNamespaceToolName(item.Get("namespace").String(), item.Get("name").String())
+	// Chat Completions prefers ordinary functions for ambiguous names, regardless of order.
+	for _, tool := range gjson.GetBytes(original, "tools").Array() {
+		if tool.Get("type").String() == "function" && tool.Get("function.name").String() == name {
+			return false
+		}
+	}
+	winner, ok := util.CollectResponsesToolWinners(gjson.ParseBytes(original))[name]
+	return ok && applypatch.IsCustomTool(winner.Tool)
+}
+
+func finishPatchChatArguments(state *toolCallStreamState, input string) string {
+	if state.InputClosed {
+		return ""
+	}
+	state.InputClosed = true
+	if state.InputStarted {
+		return `"}`
+	}
+	return applypatch.WrapInput(input)
 }

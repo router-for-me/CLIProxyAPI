@@ -1,15 +1,19 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2162,7 +2166,10 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		modelRegistry.UnregisterClient(clientID)
 	})
 
-	server := newTestServer(t)
+	cfg := &proxyconfig.Config{SDKConfig: sdkconfig.SDKConfig{APIKeys: []string{"test-key"}}}
+	cfg.Client.Codex.EnableApplyPatch = true
+	server := newTestServerWithConfig(t, cfg)
+	server.handlers.AuthManager.RegisterExecutor(executor.NewCodexAutoExecutor(&proxyconfig.Config{}))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -2202,6 +2209,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	}
 	if gpt55 == nil {
 		t.Fatal("expected gpt-5.5 codex catalog entry")
+	}
+	if got := gpt55["apply_patch_tool_type"]; got != "freeform" {
+		t.Fatalf("gpt-5.5 apply_patch_tool_type = %#v, want freeform", got)
 	}
 	if _, ok := gpt55["minimal_client_version"]; !ok {
 		t.Fatal("expected minimal_client_version in codex catalog")
@@ -2250,7 +2260,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if !ok || len(customServiceTiers) != 0 {
 		t.Fatalf("expected custom model service_tiers = [], got %#v", custom["service_tiers"])
 	}
-	assertCodexNullableCatalogField(t, custom, "apply_patch_tool_type")
+	if value, present := custom["apply_patch_tool_type"]; !present || value != "freeform" {
+		t.Fatalf("custom apply_patch_tool_type = %#v (present %v), want freeform", value, present)
+	}
 	assertCodexNullableCatalogField(t, custom, "upgrade")
 	assertCodexNullableCatalogField(t, custom, "availability_nux")
 
@@ -3350,5 +3362,273 @@ func assertSerializedCPAWebSearch(t *testing.T, model map[string]any, want bool)
 	}
 	if got, ok := capabilities["web_search"].(bool); !ok || got != want {
 		t.Fatalf("model %v web_search = %#v, want %v", model["slug"], capabilities["web_search"], want)
+	}
+}
+
+// modelCatalogUnknownExecutor implements only the mandatory provider contract.
+type modelCatalogUnknownExecutor struct{ auth.ProviderExecutor }
+
+type modelCatalogUnsupportedExecutor struct{ auth.ProviderExecutor }
+
+func (modelCatalogUnsupportedExecutor) SupportsApplyPatch() bool { return false }
+
+func TestHomeApplyPatchCapabilityForModel(t *testing.T) {
+	entries, errDecodeHomeModels := decodeHomeModels([]byte(`{
+		"codex":[{"id":"home-patch-native"},{"id":"home-patch-mixed"},{"id":"home-patch-partial"},{"id":"home-patch-blank"}],
+		"home-custom":[{"id":"home-patch-synthetic"},{"id":"home-patch-mixed"}],
+		"remote":[{"id":"home-patch-remote"},{"id":"home-patch-partial"}],
+		"plugin":[{"id":"home-patch-plugin"}],
+		"disabled":[{"id":"home-patch-disabled"}],
+		"":[{"id":"home-patch-blank"}]
+	}`))
+	if errDecodeHomeModels != nil {
+		t.Fatalf("decode Home models: %v", errDecodeHomeModels)
+	}
+	entries = append(entries, homeModelEntry{id: "home-patch-no-routes"})
+	manager := auth.NewManager(nil, nil, nil)
+	cfg := &proxyconfig.Config{}
+	manager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))
+	manager.RegisterExecutor(executor.NewOpenAICompatExecutor("home-custom", cfg))
+	manager.RegisterExecutor(modelCatalogUnknownExecutor{executor.NewOpenAICompatExecutor("remote", cfg)})
+	manager.RegisterExecutor(modelCatalogUnknownExecutor{executor.NewOpenAICompatExecutor("plugin", cfg)})
+	manager.RegisterExecutor(modelCatalogUnsupportedExecutor{executor.NewOpenAICompatExecutor("disabled", cfg)})
+	lookup := homeApplyPatchCapabilityForModel(entries, manager)
+	for _, tc := range []struct {
+		id   string
+		want bool
+	}{
+		{"home-patch-native", true}, {" home-patch-synthetic ", true}, {"home-patch-mixed", true},
+		{"home-patch-remote", false}, {"home-patch-plugin", false}, {"home-patch-partial", false},
+		{"home-patch-disabled", false}, {"home-patch-no-routes", false}, {"home-patch-blank", false},
+		{"team/home-patch-native", false}, {"home-patch-native(high)", false}, {"missing", false},
+	} {
+		if got := lookup(tc.id); got != tc.want {
+			t.Errorf("%q capability = %v, want %v", tc.id, got, tc.want)
+		}
+		if homeApplyPatchCapabilityForModel(entries, nil)(tc.id) {
+			t.Errorf("%q supported without a manager", tc.id)
+		}
+	}
+	// Multiple entries must never overwrite an unknown routing candidate.
+	duplicateLookup := homeApplyPatchCapabilityForModel([]homeModelEntry{
+		{id: "duplicate", providers: []string{"remote"}},
+		{id: "duplicate", providers: []string{"codex"}},
+	}, manager)
+	if duplicateLookup("duplicate") || homeApplyPatchCapabilityForModel(nil, manager)("home-patch-native") {
+		t.Fatal("unknown or absent route was advertised")
+	}
+}
+
+// newHomeCatalogClient serves the existing Home models protocol without new metadata.
+func newHomeCatalogClient(t *testing.T, payload string) *home.Client {
+	t.Helper()
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	done := make(chan struct{})
+	var connections sync.WaitGroup
+	go func() {
+		defer close(done)
+		for {
+			conn, errAccept := listener.Accept()
+			if errAccept != nil {
+				return
+			}
+			connections.Add(1)
+			go func() {
+				defer connections.Done()
+				defer func() {
+					if errClose := conn.Close(); errClose != nil {
+						t.Errorf("close Home test connection: %v", errClose)
+					}
+				}()
+				reader := bufio.NewReader(conn)
+				for {
+					args, errReadRESPArrayOfBulkStrings := readRESPArrayOfBulkStrings(reader)
+					if errReadRESPArrayOfBulkStrings != nil || len(args) == 0 {
+						return
+					}
+					response := "+OK\r\n"
+					switch strings.ToUpper(string(args[0])) {
+					case "HELLO":
+						response = "-ERR unknown command 'hello'\r\n"
+					case "GET":
+						var request struct {
+							Type string `json:"type"`
+						}
+						if len(args) != 2 {
+							t.Error("invalid Home GET request")
+							return
+						}
+						if errUnmarshal := json.Unmarshal(args[1], &request); errUnmarshal != nil || request.Type != "models" {
+							t.Errorf("unexpected Home request %q: %v", args[1], errUnmarshal)
+							return
+						}
+						response = fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+					}
+					if _, errWriteString := io.WriteString(conn, response); errWriteString != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	host, portText, errSplitHostPort := net.SplitHostPort(listener.Addr().String())
+	if errSplitHostPort != nil {
+		t.Fatalf("split Home test address: %v", errSplitHostPort)
+	}
+	port, errAtoi := strconv.Atoi(portText)
+	if errAtoi != nil {
+		t.Fatalf("parse Home test port: %v", errAtoi)
+	}
+	client := home.New(proxyconfig.HomeConfig{Enabled: true, Host: host, Port: port, DisableClusterDiscovery: true})
+	t.Cleanup(func() {
+		client.Close()
+		if errClose := listener.Close(); errClose != nil {
+			t.Errorf("close Home test listener: %v", errClose)
+		}
+		<-done
+		connections.Wait()
+	})
+	return client
+}
+
+func TestModelsWithClientVersionHomeApplyPatchRouting(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+	server.cfg.Client.Codex.EnableApplyPatch = true
+	// Exercise the production models router without unrelated heartbeat readiness.
+	engine := gin.New()
+	engine.GET("/v1/models", server.unifiedModelsHandler(nil, nil))
+	manager := server.handlers.AuthManager
+	cfg := &proxyconfig.Config{}
+	manager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))
+	manager.RegisterExecutor(executor.NewOpenAICompatExecutor("home-custom", cfg))
+	manager.RegisterExecutor(modelCatalogUnknownExecutor{executor.NewOpenAICompatExecutor("remote", cfg)})
+	modelRegistry := registry.GetGlobalRegistry()
+	// These local routes intentionally disagree with the Home routing evidence.
+	modelRegistry.RegisterClient("home-patch-local-native", "codex", []*registry.ModelInfo{{ID: "home-patch-local-only"}})
+	modelRegistry.RegisterClient("home-patch-local-remote", "remote", []*registry.ModelInfo{{ID: "home-patch-supported"}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("home-patch-local-native")
+		modelRegistry.UnregisterClient("home-patch-local-remote")
+	})
+	client := newHomeCatalogClient(t, `{
+		"codex":[{"id":"gpt-5.5"},{"id":"gpt-reserve"},{"id":"gpt-image-2"},{"id":"home-patch-mixed"},{"id":"home-patch-partial"}],
+		"home-custom":[{"id":"home-patch-supported"},{"id":"home-patch-mixed"},{"id":"team/gpt-5.5"}],
+		"remote":[{"id":"home-patch-local-only"},{"id":"home-patch-partial"}]
+	}`)
+	previousHome := home.Current()
+	home.SetCurrent(client)
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+
+	for _, version := range []string{"", "0.137.0", "0.153.4", "cpa"} {
+		t.Run(version, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version="+version, nil)
+			req.Header.Set("Authorization", "Bearer test-key")
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+			}
+			if strings.Contains(recorder.Body.String(), "\n") {
+				t.Fatal("Home catalog is not compact JSON")
+			}
+			var response struct {
+				Models []map[string]any `json:"models"`
+			}
+			if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+				t.Fatalf("decode Home catalog: %v", errUnmarshal)
+			}
+			entries := make(map[string]map[string]any)
+			for _, entry := range response.Models {
+				entries[entry["slug"].(string)] = entry
+			}
+			for _, id := range []string{"gpt-5.5", "gpt-reserve", "home-patch-supported", "home-patch-mixed", "team/gpt-5.5"} {
+				if value, present := entries[id]["apply_patch_tool_type"]; !present || value != "freeform" {
+					t.Errorf("%s apply_patch_tool_type = %#v (present %v), want freeform", id, value, present)
+				}
+			}
+			for _, id := range []string{"gpt-image-2", "home-patch-local-only", "home-patch-partial"} {
+				assertCodexNullableCatalogField(t, entries[id], "apply_patch_tool_type")
+			}
+			// Home retains its existing template and synthesized protocol restrictions.
+			if search, _ := entries["gpt-5.5"]["supports_search_tool"].(bool); !search {
+				t.Error("legacy Home template search support changed")
+			}
+			for _, id := range []string{"home-patch-supported", "home-patch-mixed"} {
+				entry := entries[id]
+				if entry["supports_search_tool"] != false || entry["prefer_websockets"] != false || len(entry["service_tiers"].([]any)) != 0 {
+					t.Errorf("%s unrelated protocol capabilities widened", id)
+				}
+				assertCodexNullableCatalogField(t, entry, "upgrade")
+				assertCodexNullableCatalogField(t, entry, "availability_nux")
+			}
+		})
+	}
+	t.Run("missing-manager", func(t *testing.T) {
+		server.handlers.AuthManager = nil
+		defer func() { server.handlers.AuthManager = manager }()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+		engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Models []map[string]any `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+			t.Fatalf("decode Home catalog: %v", errUnmarshal)
+		}
+		for _, entry := range response.Models {
+			assertCodexNullableCatalogField(t, entry, "apply_patch_tool_type")
+		}
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"object":"list"`) || strings.Contains(recorder.Body.String(), "apply_patch_tool_type") {
+		t.Fatalf("ordinary Home catalog changed: %s", recorder.Body.String())
+	}
+}
+
+func TestModelsWithClientVersionApplyPatchRequiresExecutor(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "http-patch-missing-executor"
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{{ID: "gpt-5.5"}, {ID: "http-patch-synthetic"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+	server := newTestServer(t)
+	updatedCfg := *server.cfg
+	updatedCfg.Client.Codex.EnableApplyPatch = true
+	server.UpdateClients(&updatedCfg)
+	for _, version := range []string{"", "0.137.0", "0.153.4", "cpa"} {
+		request := httptest.NewRequest(http.MethodGet, "/v1/models?client_version="+version, nil)
+		request.Header.Set("Authorization", "Bearer test-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+		var response struct {
+			Models []map[string]any `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+			t.Fatalf("decode catalog: %v", errUnmarshal)
+		}
+		for _, entry := range response.Models {
+			assertCodexNullableCatalogField(t, entry, "apply_patch_tool_type")
+		}
+	}
+	server.handlers.AuthManager.RegisterExecutor(executor.NewCodexAutoExecutor(&proxyconfig.Config{}))
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"object":"list"`) || strings.Contains(recorder.Body.String(), "apply_patch_tool_type") {
+		t.Fatalf("ordinary local catalog changed: %s", recorder.Body.String())
 	}
 }

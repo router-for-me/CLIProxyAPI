@@ -3922,7 +3922,7 @@ func assertClaudeCodeCurrentDateBlockAt(t *testing.T, block gjson.Result, now ti
 	if got := block.Get("type").String(); got != "text" {
 		t.Fatalf("currentDate block type = %q, want text", got)
 	}
-	if got, want := block.Get("text").String(), claudeCodeCurrentDateReminder(now); got != want {
+	if got, want := block.Get("text").String(), claudeCodeCurrentDateReminder(claudeCodeLocalDate(now)); got != want {
 		t.Fatalf("currentDate reminder = %q, want %q", got, want)
 	}
 	if block.Get("cache_control").Exists() {
@@ -3972,7 +3972,7 @@ func TestClaudeCodeLocalDateMatchesNativeLocalCalendarAlgorithm(t *testing.T) {
 		t.Fatalf("GMT-12 local date = %q, want 2026-07-31", got)
 	}
 	wantReminder := "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-01.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
-	if got := claudeCodeCurrentDateReminder(instant.In(kiritimati)); got != wantReminder {
+	if got := claudeCodeCurrentDateReminder(claudeCodeLocalDate(instant.In(kiritimati))); got != wantReminder {
 		t.Fatalf("currentDate reminder = %q, want exact native text %q", got, wantReminder)
 	}
 }
@@ -4001,11 +4001,11 @@ func TestInjectClaudeCodeCurrentDateIsIdempotentAndAlignsFirstUserCache(t *testi
 	fixed := time.Date(2026, time.August, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
 
-	first := injectClaudeCodeCurrentDate(payload, fixed)
+	first := injectClaudeCodeCurrentDate(payload, claudeCodeLocalDate(fixed))
 	if !bytes.Contains(first, []byte(`<system-reminder>`)) || bytes.Contains(first, []byte(`\u003csystem-reminder`)) {
 		t.Fatalf("currentDate angle brackets must match JSON.stringify bytes: %s", first)
 	}
-	second := injectClaudeCodeCurrentDate(first, fixed)
+	second := injectClaudeCodeCurrentDate(first, claudeCodeLocalDate(fixed))
 	if !bytes.Equal(first, second) {
 		t.Fatalf("currentDate injection is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
@@ -4013,7 +4013,7 @@ func TestInjectClaudeCodeCurrentDateIsIdempotentAndAlignsFirstUserCache(t *testi
 	if len(content) != 2 {
 		t.Fatalf("first user content has %d blocks, want 2: %s", len(content), first)
 	}
-	if got := content[0].Get("text").String(); got != claudeCodeCurrentDateReminder(fixed) {
+	if got := content[0].Get("text").String(); got != claudeCodeCurrentDateReminder(claudeCodeLocalDate(fixed)) {
 		t.Fatalf("currentDate text = %q, want exact native reminder", got)
 	}
 	if content[0].Get("cache_control").Exists() {
@@ -4024,11 +4024,11 @@ func TestInjectClaudeCodeCurrentDateIsIdempotentAndAlignsFirstUserCache(t *testi
 
 func TestInjectClaudeCodeCurrentDateMovesExistingCopyToFirstBlock(t *testing.T) {
 	fixed := time.Date(2026, time.August, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
-	dateBlock := buildTextBlock(claudeCodeCurrentDateReminder(fixed), nil)
+	dateBlock := buildTextBlock(claudeCodeCurrentDateReminder(claudeCodeLocalDate(fixed)), nil)
 	payload := []byte(`{"messages":[{"role":"user","content":[` +
 		`{"type":"text","text":"hello"},` + dateBlock + `]}]}`)
 
-	out := injectClaudeCodeCurrentDate(payload, fixed)
+	out := injectClaudeCodeCurrentDate(payload, claudeCodeLocalDate(fixed))
 	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("content has %d blocks, want one currentDate and user text: %s", len(content), out)
@@ -4044,7 +4044,7 @@ func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
 		buildTextBlock(reminder, nil) + `,` +
 		`{"type":"text","text":"continue","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
 
-	out := injectClaudeCodeCurrentDate(payload, fixed)
+	out := injectClaudeCodeCurrentDate(payload, claudeCodeLocalDate(fixed))
 	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 3 {
 		t.Fatalf("content has %d blocks, want currentDate, reminder, and user text: %s", len(content), out)
@@ -4064,8 +4064,8 @@ func TestInjectClaudeCodeCurrentDateFollowsLeadingToolResults(t *testing.T) {
 		`{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},` +
 		`{"type":"text","text":"continue"}]}]}`)
 
-	first := injectClaudeCodeCurrentDate(payload, fixed)
-	second := injectClaudeCodeCurrentDate(first, fixed)
+	first := injectClaudeCodeCurrentDate(payload, claudeCodeLocalDate(fixed))
+	second := injectClaudeCodeCurrentDate(first, claudeCodeLocalDate(fixed))
 	if !bytes.Equal(first, second) {
 		t.Fatalf("currentDate injection is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
@@ -4094,7 +4094,7 @@ func TestInjectClaudeCodeCurrentDateFollowsAllLeadingToolResults(t *testing.T) {
 		`{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},` +
 		`{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}]}`)
 
-	out := injectClaudeCodeCurrentDate(payload, fixed)
+	out := injectClaudeCodeCurrentDate(payload, claudeCodeLocalDate(fixed))
 	content := gjson.GetBytes(out, "messages.1.content").Array()
 	if len(content) != 3 {
 		t.Fatalf("content has %d blocks, want two tool_results and currentDate: %s", len(content), out)
@@ -8138,6 +8138,11 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			name: "claude-sonnet-5 accepts role=system",
 			body: `{"model":"claude-sonnet-5"}`,
 			want: constants + ",mid-conversation-system-2026-04-07,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24",
+		},
+		{
+			name: "claude-sonnet-5-5 carries tool changes beta unlike sonnet-5",
+			body: `{"model":"claude-sonnet-5-5"}`,
+			want: constants + ",mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24",
 		},
 		{
 			name: "claude-opus-4-8 accepts role=system",

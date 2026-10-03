@@ -23,11 +23,13 @@ All paths below are relative to `/v8/management`.
 | `/config/<section>/<field>` | GET, PUT, PATCH, DELETE | Read or modify a section or field using its path in the v8 tree. |
 
 GET renders the persisted configuration in the v8 layout without migrating the
-file or adding omitted runtime defaults. A successful v8 configuration write
-migrates legacy settings; reads and rejected writes leave the file unchanged.
+file or adding omitted runtime defaults. Successful v8 configuration writes save
+the latest layout; reads and rejected writes leave the file unchanged.
+Historical v8 paths and request bodies remain accepted as aliases.
 
 JSON writes accept the value directly, without a `{ "value": ... }` envelope.
 PUT replaces its target. PATCH merges objects and replaces lists and scalars.
+Scalar field updates retain existing comments; complete replacements use the submitted document.
 DELETE removes a field. Paths identify mapping keys, not array indexes; replace
 an entire list to change its entries. Optional per-key `null` overrides inherit
 the corresponding group value. Legacy field names are rejected by v8 writes.
@@ -37,6 +39,7 @@ the corresponding group value. Legacy field names are rejected by v8 writes.
 | `/config/access/api-keys` | Client authentication keys, for example `["client-key"]`. |
 | `/config/api-keys` | All upstream provider groups. |
 | `/config/api-keys/codex` | Codex upstream groups. |
+| `/config/client/codex/optimize-multi-agent-v2` | Boolean, default `false`; applies to Codex clients across OAuth and API-key routes. |
 | `/config/observability/logs/debug` | A boolean, for example `true`. |
 | `/config/routing/retry/request-retry` | A number, for example `0`. |
 | `/config/plugins/configs/<id>` | A plugin configuration object. |
@@ -61,6 +64,22 @@ The Home-owned revision fields
 `credentials.concurrency.observation-barrier-revision`, and `plugins.auth-revision`
 cannot be changed through these endpoints.
 
+### Codex multi-agent configuration migration
+
+`client.codex.optimize-multi-agent-v2` is the sole runtime setting. Loading older
+YAML accepts `providers.codex.optimize-multi-agent-v2`,
+`oauth.providers.codex.optimize-multi-agent-v2`, and the flat
+`codex.optimize-multi-agent-v2` path. The client path always wins conflicts,
+including explicit `false` or `null`. If it is absent, the historical OAuth path
+wins over `providers`, which wins over the flat path.
+
+These aliases now have client-wide semantics, not OAuth-only scope. Loading does
+not rewrite legacy-only settings; normalization removes aliases conflicting with
+the client path. A successful v8 write migrates the aliases while preserving their
+comments. Historical API paths remain usable. Home configuration publishers
+need matching client schema support before emitting the new path; older YAML
+payloads remain readable.
+
 ## Operational endpoints
 
 All paths below are relative to `/v8/management`. Request and response bodies
@@ -68,6 +87,7 @@ retain the corresponding business operation's fields.
 
 | Path | Methods | Description |
 | --- | --- | --- |
+| `/config/upstream/<provider>` | GET, PUT, PATCH, DELETE | Manage shared provider settings. |
 | `/server/latest-version` | GET | Get latest release information. |
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
@@ -78,9 +98,6 @@ retain the corresponding business operation's fields.
 | `/observability/logs/requests/<id>` | GET | Get a request log. |
 | `/observability/usage/api-keys` | GET | Get API-key usage. |
 | `/observability/usage/queue` | GET | Get queued usage events. |
-| `/credentials/quota/providers` | GET | List quota providers. |
-| `/credentials/quota/fetch` | POST | Fetch credential quota. |
-| `/credentials/quota/reset` | POST | Reset credential quota. |
 | `/credentials` | GET, POST, DELETE | List, upload, or delete credential files. |
 | `/credentials/models` | GET | Get credential models. |
 | `/credentials/download` | GET | Download a credential file. |
@@ -137,9 +154,10 @@ equivalent is `/v8/management/config/access/api-keys`.
 
 Legacy-only configuration files keep their layout until a successful v8
 configuration write. When both layouts specify a field, the new field takes
-precedence and its legacy equivalent is removed. Individual v0 setters can
-update migrated fields. `PUT /v0/management/config.yaml` still replaces the
-complete file and accepts legacy, new, or mixed layouts.
+precedence and its legacy equivalent is removed. V0 setters keep legacy-only
+files in their original layout; existing v8 files are saved in the latest v8
+layout. `PUT /v0/management/config.yaml` still replaces the complete file and
+accepts legacy, new, or mixed layouts, normalizing v8 documents on save.
 
 Plugin OAuth uses the shared v8 login endpoint. Other plugin-defined HTTP
 extensions retain their declared `/v0/management` routes.

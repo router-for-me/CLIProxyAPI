@@ -253,3 +253,6 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *ClaudeExecutor) SupportsApplyPatch() bool { return e != nil }

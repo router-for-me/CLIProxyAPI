@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -346,6 +347,14 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 	if len(resp.Body) > 0 {
 		req.Payload = bytes.Clone(resp.Body)
 		opts.OriginalRequest = bytes.Clone(resp.Body)
+	}
+	if path := strings.TrimSpace(resp.Path); path != "" {
+		if opts.Metadata == nil {
+			opts.Metadata = make(map[string]any, 1)
+		} else {
+			opts.Metadata = maps.Clone(opts.Metadata)
+		}
+		opts.Metadata[cliproxyexecutor.RequestPathMetadataKey] = path
 	}
 	if resp.Terminate {
 		return req, opts, &cliproxyexecutor.RequestTerminatedError{
