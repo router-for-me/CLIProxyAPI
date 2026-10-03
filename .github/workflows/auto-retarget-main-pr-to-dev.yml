@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   retarget:
-    if: github.actor != 'github-actions[bot]'
+    if: github.repository == 'router-for-me/CLIProxyAPI' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Retarget PR base to dev

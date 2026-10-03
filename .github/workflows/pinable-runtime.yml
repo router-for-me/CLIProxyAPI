@@ -1,0 +1,206 @@
+name: Pinable desktop runtime
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/pinable-runtime.yml'
+      - 'scripts/pinable/runtime.py'
+      - 'scripts/pinable/test_runtime.py'
+      - 'scripts/pinable/test_publish_runtime.py'
+      - 'scripts/pinable/smoke_runtime.py'
+      - 'scripts/pinable/publish_runtime.py'
+      - 'docs/pinable/desktop-runtime.md'
+      - 'internal/watcher/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional version label; default is source timestamp + SHA'
+        type: string
+        required: false
+      publish_release:
+        description: 'Publish verified assets as a dedicated GitHub prerelease (main only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinable-runtime-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  RUNTIME_VERSION: ${{ inputs.version || '' }}
+
+jobs:
+  quality:
+    if: github.repository == 'PinableAgents/CLIProxyAPI'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Distribution and synchronization tool regressions
+        run: |
+          python -m unittest discover -s scripts/pinable -p 'test_*runtime.py' -v
+          python scripts/pinable/test_sync_upstream.py -v
+          bash -n scripts/pinable/sync-upstream.sh
+      - name: Full application suite (normal CGO profile)
+        run: go test ./...
+      - name: Repeat bootstrap ordering regressions
+        run: go test ./internal/runtime/executor -run 'TestCodex(Websockets)?Executor_BootstrapBuffering_(TimeBudgetReleasesStream|OverloadDirectlyAfterTimeoutDeliveredInStream|StatusBearingErrorAfterTimeoutDeliveredInStream)$' -count=20
+
+  package:
+    if: github.repository == 'PinableAgents/CLIProxyAPI'
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows/amd64
+            id: windows-amd64
+            runner: windows-2025
+          - target: windows/arm64
+            id: windows-arm64
+            runner: windows-11-arm
+          - target: darwin/amd64
+            id: darwin-amd64
+            runner: macos-15-intel
+          - target: darwin/arm64
+            id: darwin-arm64
+            runner: macos-15
+          - target: linux/amd64
+            id: linux-amd64
+            runner: ubuntu-22.04
+          - target: linux/arm64
+            id: linux-arm64
+            runner: ubuntu-22.04-arm
+    env:
+      CGO_ENABLED: '0'
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test host integration on the native architecture
+        shell: bash
+        run: |
+          python -m unittest discover -s scripts/pinable -p 'test_*runtime.py' -v
+          go test ./cmd/server ./internal/cmd ./internal/api ./internal/api/handlers/management ./sdk/access ./sdk/cliproxy ./internal/watcher -run 'Test.*(Host|Runtime|Ephemeral|Parent|Version|SafeMode)' -count=1
+      - name: Build pinned portable runtime (no catalog refresh)
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/pinable-runtime-${{ matrix.id }}
+        shell: bash
+        run: python scripts/pinable/runtime.py build --target "$TARGET" --version "$RUNTIME_VERSION" --output "$ARTIFACT_DIR"
+      - name: Exercise the actual packaged executable
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/pinable-runtime-${{ matrix.id }}
+        shell: bash
+        run: python scripts/pinable/smoke_runtime.py --artifact-dir "$ARTIFACT_DIR"
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: pinable-runtime-${{ matrix.id }}
+          path: ${{ runner.temp }}/pinable-runtime-${{ matrix.id }}/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Record platform download
+        shell: bash
+        env:
+          DOWNLOAD_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: printf '%s\n' "### $TARGET" "[Download native-verified runtime]($DOWNLOAD_URL)" >> "$GITHUB_STEP_SUMMARY"
+
+  assemble:
+    name: Verify complete runtime set
+    needs: [quality, package]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pinable-runtime-*
+          path: ${{ runner.temp }}/runtime-input
+      - name: Verify every archive and assemble index/checksums
+        env:
+          INPUT_DIR: ${{ runner.temp }}/runtime-input
+          OUTPUT_DIR: ${{ runner.temp }}/runtime-downloads
+        run: |
+          python scripts/pinable/runtime.py index --input "$INPUT_DIR" --output "$OUTPUT_DIR" --expected-commit "$SOURCE_SHA"
+          python - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path(os.environ['INPUT_DIR'])
+          reports = [json.loads(p.read_text()) for p in root.rglob('smoke-report.json')]
+          expected = {f'{s}/{a}' for s in ['windows','darwin','linux'] for a in ['amd64','arm64']}
+          assert len(reports) == 6 and {r['target'] for r in reports} == expected
+          assert all(r['status'] == 'passed' and r['source_commit'] == os.environ['SOURCE_SHA'] for r in reports)
+          output = pathlib.Path(os.environ['OUTPUT_DIR'])
+          index = json.loads((output / 'runtime-index.json').read_text())
+          hashes = {m['target']: m['binary']['sha256'] for m in index['targets']}
+          assert all(r['binary_sha256'] == hashes[r['target']] for r in reports)
+          (output / 'validation.json').write_text(json.dumps({'source_commit':os.environ['SOURCE_SHA'],'quality':'passed','native_smoke':reports}, indent=2)+'\n')
+          import hashlib
+          with (output / 'SHA256SUMS').open('a') as sums:
+              sums.write(hashlib.sha256((output / 'validation.json').read_bytes()).hexdigest() + '  validation.json\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: pinable-runtime-all
+          path: ${{ runner.temp }}/runtime-downloads/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+      - name: Record the complete download
+        env:
+          DOWNLOAD_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          printf '%s\n' '## Pinable Desktop runtime set' "Source: \`$SOURCE_SHA\`" "[Download all six verified platforms, index and SHA256SUMS]($DOWNLOAD_URL)" 'No Desktop component lock has been modified.' >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish explicitly requested runtime prerelease
+    if: github.repository == 'PinableAgents/CLIProxyAPI' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_release
+    needs: [assemble]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: pinable-runtime-all
+          path: ${{ runner.temp }}/runtime-release
+      - name: Publish immutable assets without replacing the upstream latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_DIR: ${{ runner.temp }}/runtime-release
+        run: python scripts/pinable/publish_runtime.py --directory "$RELEASE_DIR" --expected-commit "$SOURCE_SHA"

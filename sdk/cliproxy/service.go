@@ -93,6 +93,9 @@ type Service struct {
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
+	// runtimeAccessProviders contains process-memory credentials preserved across config reloads.
+	runtimeAccessProviders []sdkaccess.Provider
+
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
