@@ -1,6 +1,7 @@
 name: release
 
 on:
+  workflow_dispatch:
   push:
     # run only against tags
     tags:
@@ -426,9 +427,14 @@ jobs:
           rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
-          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -buildvcs=false \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "$archive_dir/cli-proxy-api" ./cmd/server/
+          make release \
+            GOOS=linux \
+            GOARCH="$GOARCH" \
+            CGO_ENABLED=0 \
+            VERSION="${RELEASE_VERSION}" \
+            COMMIT="${COMMIT}" \
+            BUILD_DATE="${BUILD_DATE}" \
+            OUTPUT="$archive_dir/cli-proxy-api" 
 
           if readelf -l "$archive_dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
             readelf -l "$archive_dir/cli-proxy-api" >&2

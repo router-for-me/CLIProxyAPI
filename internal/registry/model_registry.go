@@ -259,6 +259,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	if modelID == "" {
 		return nil
 	}
+	modelID = normalizeAntigravityModelID(modelID)
 
 	p := ""
 	if len(provider) > 0 {

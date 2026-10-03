@@ -84,7 +84,7 @@ func GetKimiModels() []*ModelInfo {
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Antigravity)
+	return WithAntigravityBuiltins(cloneModelInfos(getModels().Antigravity))
 }
 
 var staticDevinModels = []*ModelInfo{
@@ -536,6 +536,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	if modelID == "" {
 		return nil
 	}
+	modelID = normalizeAntigravityModelID(modelID)
 
 	data := getModels()
 	allModels := [][]*ModelInfo{
@@ -560,4 +561,146 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	}
 
 	return nil
+}
+
+// WithAntigravityBuiltins injects standard non-suffixed Antigravity Gemini model definitions
+// (e.g. gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro) that should
+// not depend on remote models.json updates.
+func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(m.ID))
+		if id == "gemini-3.8-flash-high" || id == "gemini-3.8-flash-medium" || id == "gemini-3.8-flash-low" ||
+			id == "gemini-3.7-flash-high" || id == "gemini-3.7-flash-medium" || id == "gemini-3.7-flash-low" ||
+			id == "gemini-3.6-flash-high" || id == "gemini-3.6-flash-medium" || id == "gemini-3.6-flash-low" ||
+			id == "gemini-3.1-pro-low" || id == "gemini-3.1-pro-high" || id == "gemini-3.1-pro-medium" ||
+			id == "gemini-pro-agent" {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return upsertModelInfos(filtered,
+		antigravityBuiltinGemini38FlashModelInfo(),
+		antigravityBuiltinGemini37FlashModelInfo(),
+		antigravityBuiltinGemini36FlashModelInfo(),
+		antigravityBuiltinGemini31ProModelInfo(),
+	)
+}
+
+func normalizeAntigravityModelID(modelID string) string {
+	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low":
+		return "gemini-3.8-flash"
+	case "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low":
+		return "gemini-3.7-flash"
+	case "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low":
+		return "gemini-3.6-flash"
+	case "gemini-3.1-pro-low", "gemini-3.1-pro-high", "gemini-3.1-pro-medium", "gemini-pro-agent":
+		return "gemini-3.1-pro"
+	default:
+		return modelID
+	}
+}
+
+func antigravityBuiltinGemini38FlashModelInfo() *ModelInfo {
+	webSearch := true
+	return &ModelInfo{
+		ID:                  "gemini-3.8-flash",
+		Object:              "model",
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		DisplayName:         "Gemini 3.8 Flash",
+		Name:                "gemini-3.8-flash",
+		Description:         "Gemini 3.8 Flash",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		SupportsWebSearch:   true,
+		Thinking: &ThinkingSupport{
+			Min:            0,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		NativeCapabilities: &NativeCapabilities{
+			WebSearch: &webSearch,
+		},
+	}
+}
+
+func antigravityBuiltinGemini37FlashModelInfo() *ModelInfo {
+	webSearch := true
+	return &ModelInfo{
+		ID:                  "gemini-3.7-flash",
+		Object:              "model",
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		DisplayName:         "Gemini 3.7 Flash",
+		Name:                "gemini-3.7-flash",
+		Description:         "Gemini 3.7 Flash",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		SupportsWebSearch:   true,
+		Thinking: &ThinkingSupport{
+			Min:            0,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		NativeCapabilities: &NativeCapabilities{
+			WebSearch: &webSearch,
+		},
+	}
+}
+
+func antigravityBuiltinGemini36FlashModelInfo() *ModelInfo {
+	webSearch := true
+	return &ModelInfo{
+		ID:                  "gemini-3.6-flash",
+		Object:              "model",
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		DisplayName:         "Gemini 3.6 Flash",
+		Name:                "gemini-3.6-flash",
+		Description:         "Gemini 3.6 Flash",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		SupportsWebSearch:   true,
+		Thinking: &ThinkingSupport{
+			Min:            0,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		NativeCapabilities: &NativeCapabilities{
+			WebSearch: &webSearch,
+		},
+	}
+}
+
+func antigravityBuiltinGemini31ProModelInfo() *ModelInfo {
+	webSearch := true
+	return &ModelInfo{
+		ID:                  "gemini-3.1-pro",
+		Object:              "model",
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		DisplayName:         "Gemini 3.1 Pro",
+		Name:                "gemini-3.1-pro",
+		Description:         "Gemini 3.1 Pro",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		SupportsWebSearch:   true,
+		Thinking: &ThinkingSupport{
+			Min:            0,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		NativeCapabilities: &NativeCapabilities{
+			WebSearch: &webSearch,
+		},
+	}
 }
