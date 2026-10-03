@@ -123,7 +123,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("token exchange request failed: %w", err)
+		return nil, sanitizedOAuthIOError("token exchange request failed", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -131,12 +131,12 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read token response: %w", err)
+		return nil, sanitizedOAuthIOError("failed to read token response", err)
 	}
 	// log.Debugf("Token response: %s", string(body))
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, sanitizedOAuthError("token exchange", resp.StatusCode, body)
 	}
 
 	// Parse token response
@@ -149,13 +149,13 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	}
 
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to parse token response: %w", err)
+		return nil, fmt.Errorf("failed to parse token response")
 	}
 
 	// Extract account ID from ID token
 	claims, err := ParseJWTToken(tokenResp.IDToken)
 	if err != nil {
-		log.Warnf("Failed to parse ID token: %v", err)
+		log.Warn("Failed to parse ID token")
 	}
 
 	accountID := ""
@@ -231,21 +231,21 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
-		return nil, fmt.Errorf("token refresh request failed: %w", errDo)
+		return nil, sanitizedOAuthIOError("token refresh request failed", errDo)
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("token refresh response body close error: %v", errClose)
+			log.Error("token refresh response body close error")
 		}
 	}()
 
 	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
-		return nil, fmt.Errorf("failed to read refresh response: %w", errRead)
+		return nil, sanitizedOAuthIOError("failed to read refresh response", errRead)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, sanitizedOAuthError("token refresh", resp.StatusCode, body)
 	}
 
 	var tokenResp struct {
@@ -257,13 +257,13 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 	}
 
 	if errUnmarshal := json.Unmarshal(body, &tokenResp); errUnmarshal != nil {
-		return nil, fmt.Errorf("failed to parse refresh response: %w", errUnmarshal)
+		return nil, fmt.Errorf("failed to parse refresh response")
 	}
 
 	// Extract account ID from ID token
 	claims, errParseJWT := ParseJWTToken(tokenResp.IDToken)
 	if errParseJWT != nil {
-		log.Warnf("Failed to parse refreshed ID token: %v", errParseJWT)
+		log.Warn("Failed to parse refreshed ID token")
 	}
 
 	accountID := ""
