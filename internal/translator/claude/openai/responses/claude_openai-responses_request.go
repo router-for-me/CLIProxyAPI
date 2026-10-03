@@ -726,12 +726,39 @@ func stripTrailingClaudeThinkingBlocks(messages [][]byte) [][]byte {
 // disallows trailing assistant prefill in its conversation history.
 func claudeModelRejectsAssistantPrefill(modelName string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(modelName))
-	for _, family := range []string{"fable", "opus-5", "sonnet-4-6"} {
-		if strings.Contains(normalized, family) {
-			return true
-		}
+	// Provider namespaces are not part of the model family.
+	if index := strings.LastIndexByte(normalized, '/'); index >= 0 {
+		normalized = normalized[index+1:]
 	}
-	return false
+	normalized = strings.TrimPrefix(normalized, "claude-")
+	tokens := strings.Split(strings.ReplaceAll(normalized, ".", "-"), "-")
+	if tokens[0] == "fable" {
+		return true
+	}
+	if len(tokens) < 2 || (tokens[0] != "opus" && tokens[0] != "sonnet") {
+		return false
+	}
+	parseVersion := func(token string) int {
+		// Eight-digit snapshot dates must never be treated as versions.
+		if token == "" || len(token) >= 8 {
+			return -1
+		}
+		for _, digit := range token {
+			if digit < '0' || digit > '9' {
+				return -1
+			}
+		}
+		version, errAtoi := strconv.Atoi(token)
+		if errAtoi != nil {
+			return -1
+		}
+		return version
+	}
+	major := parseVersion(tokens[1])
+	if major >= 5 {
+		return true
+	}
+	return tokens[0] == "sonnet" && major == 4 && len(tokens) > 2 && parseVersion(tokens[2]) >= 6
 }
 
 // responsesSystemUnsupportedBlock represents a system-level content part that
