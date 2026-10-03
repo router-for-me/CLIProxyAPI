@@ -7,7 +7,7 @@ commits were ported onto our `main` **and** `verify-absorb.sh` exited 0.
 | --- | --- | --- | --- | --- | --- |
 | v8.0.7 | 2026-10-01 | `82f8e92b` `a8ffd5a8` `67cb32b6` `9e71c20d` `97f244b8` | none | PASS | 2026-10-01 |
 
-| v8.0.13 | 2026-10-03 | 17 commits (mapping below) | 18 commits, including 3 merge commits (decisions below) | PASS; effective on main | 2026-10-03 |
+| v8.0.13 | 2026-10-03 | 28 substantive ports + 1 test-only port (initial and follow-up mappings below) | 6 entries, including 3 merge wrappers (final decisions below) | PASS; follow-up effective on merge to main | 2026-10-03 |
 
 ## Comparison baseline
 
@@ -157,7 +157,10 @@ upstream provenance in the commit messages remains the durable lookup key.
 | `2c1dcc7c` | `b4b711ce` | fix(claude): include web search sources in codex request when search tool is present |
 | `d7914afd` | `5ee5ed04` | fix(codex): expand integer field normalization mappings for tools |
 
-#### Skipped commits and reasons
+#### Initially skipped commits and reasons
+
+These are the initial assessment decisions. The deep reassessment below
+supersedes twelve entries while retaining this record of the first intake.
 
 | Upstream | Decision |
 | --- | --- |
@@ -224,6 +227,84 @@ both stream and buffered responses; candidate passed both, including normalized
 These are credential-free HTTP/translator fixtures, not production client
 traffic. **Real client turn replay: not performed.** The gate and fixture replay
 do not prove live xAI, Claude, Devin or Antigravity provider availability.
+
+### v8.0.13 — deep reassessment of deferred work, 2026-10-03
+
+The owner requested individual deep analysis and absorption of valuable deferred
+work. The same release and one-off age waiver remain in scope; the permanent
+72-hour policy is unchanged. This follow-up begins on clean `main`
+`8bbcd48215e61ad3929fb1276e3544f90520d840` (PR #18). Its entries become effective
+when the verified follow-up branch reaches `main`.
+
+Eleven more upstream commits contribute substantive code, and one contributes
+tests for already-satisfied native catalog behavior. Together with the first
+intake, this accounts for 28 substantive ports, one test-only port, and six
+remaining entries from the original 35-commit release range. **Partial ports do
+not claim complete adoption of their upstream feature.**
+
+| Upstream | Reviewed local | Final decision |
+| --- | --- | --- |
+| `3ebee065` | `76641cda` | Partial: patch instructions and Unicode fidelity in the canonical generic custom bridge. Preserve namespace/history/response identity and attempt budgets; do not add a second executor bridge or automatic catalog capability. Reject malformed UTF-8/UTF-16 before outer JSON decoding can alter executable input. |
+| `63c04b4b` | `45846cc9`, `b413ba52` | Partial: canonical `client.codex.optimize-multi-agent-v2`, historical YAML aliases and client-wide behavior. Preserve old programmatic SDK fields, effective runtime settings and snapshot/save projection. Exclude the separate apply_patch catalog switch. |
+| `f3fd2f23` | `1dd07538` | Adapt jointly with the follow-up: deterministic first-seen per-request aggregation; omit the suppression that upstream subsequently reverted. |
+| `9f35c1dc` | `1dd07538` | Adapt final aggregate diagnostics while retaining structured fields and signature secrecy. Adjust the translate-once assertion to the aggregate event. |
+| `5ec31442` | `497c7b11` | Partial: residual AI Studio HTTPResp terminal/error handling and acceptance of all 2xx starts. Keep the existing Gemini/Vertex usage, MAX_TOKENS, EOF and read-error implementation. |
+| `30aa1f12` | `7376080e` | Port robust connection-test bounds. Production pool settings are unchanged; a disabled-pool control opens 24 connections and still fails the bound of 16. |
+| `d7c3c0aa` | `4e6d8656` | Port debug connection reuse tracing, redirect coverage and idle cleanup forwarding; preserve the outbound tool-contract guard. |
+| `52d5507d` | `b12b011f` | Port shared `upstream.*` configuration and API-key applicability, preserving OAuth-only headers and the fork's `executorDuplexInput`. |
+| `3be5fa44` | `4dddd5c2`, `b413ba52` | Adapt historical v8 projection, PATCH/PUT/DELETE, comments and canonical save behavior. Reject invalid alias containers before rewriting. Exclude the deprecated endpoint-specific writer change and its test. |
+| `8348923a` | `e4f2de87`, `4483c8cc` | Port additive `host.routing.reset_cooldown` callback and add terminal-401/closed-instance controls. Token files are not saved; separate cooldown-state persistence follows existing manager behavior. |
+| `d306f2c5` | `242d601f` | Test-only: nine native templates retain freeform by default and a non-template control remains null. No catalog implementation change is needed. |
+| `0fb50a18` | `2dc89686` | Port v8 auth-index synthesis and live-index preference across provider groups; remove transient auth-index fields from update payloads and persistence. |
+| `fd48ea68` | existing first intake | Merge wrapper around the already-ported xAI fix. |
+| `028f6a19` | retained README | Promotional README/model refresh; keep the neutral fork documentation. |
+| `2783e10c` | existing executor | No upstream StreamUsageBuffer in the retained executor; usage is already published before EnsurePublished. |
+| `6fecc6e5` | no local merge | Merge wrapper without additional behavior. |
+| `e2bff010` | `4e6d8656` substantive port | Merge wrapper; its connection tracing was ported separately. |
+| `a3b77566` | existing executor | Main Codex usage already precedes image-tool usage. |
+
+Reviewed local SHAs identify the intake branch source and attribution, not a
+promise that a squash merge preserves those SHAs on `main`.
+
+#### Follow-up verification
+
+The clean baseline and candidate source `242d601faf63d759258e0cb42111d95a313fe4d2`
+both pass the complete gate with `GOTOOLCHAIN=go1.26.4`: maintenance tooling,
+tracked formatting, vet, responses-tools invariants, full suite, race-sensitive
+packages and server build. The candidate additionally passes offline Codex model
+catalog validation.
+
+The task evidence is retained under
+`.git/task-evidence/upstream-v8.0.13-deep-review/`:
+
+- `baseline-gate.log`, `candidate-gate.log`, `catalog-validation.log`;
+- `aistudio-baseline-replay.log` and `aistudio-candidate-replay.log`: the same
+  five buffered-response cases fail on baseline and pass on candidate;
+- `custom-baseline-replay.log`, `custom-candidate-tests.log` and
+  `sdk-custom-tests.log`: instruction/Unicode controls, exact valid input,
+  namespace identity and programmatic compatibility;
+- `alias-boundary-before.log`: the unadapted alias normalizer incorrectly
+  accepts a canonical scalar container; candidate rejects it;
+- `alias-auth-config-tests.log`, `auth-index-race.log` and
+  `connection-terminal-race.log`: config/index compatibility, terminal auth
+  protection and extra race checks;
+- `transport-unpooled-control.log`: a disabled pool produces 24 connections
+  and fails the healthy-pool limit of 16. Normal tests passed 15 repeated runs;
+  connection/terminal race cases passed three repeated runs;
+- `native-catalog-tests.log`, `source-review.json`: retained template behavior
+  and recorded correctness/architecture/security/performance review.
+
+Some earlier exploratory logs record compile or assertion failures corrected
+before the final gate; they are not acceptance evidence. Baseline replay failures
+and negative controls are intentional regression demonstrations.
+
+**Real client/provider replay: not performed.** These are credential-free
+protocol, HTTP/WebSocket and configuration fixtures. No release, tap,
+installation, production config or service restart was performed. No dependency,
+module-path, workflow or permanent intake-gate change was made.
+
+The detailed owner-facing Chinese report is
+[upstream-v8.0.13-deep-review.zh-CN.md](../../docs/upstream-v8.0.13-deep-review.zh-CN.md).
 
 ## How to fill this in
 

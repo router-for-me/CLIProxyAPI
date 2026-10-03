@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -187,6 +188,41 @@ func TestSanitizeAntigravityGeminiRequestSignaturesFinalizesParallelCalls(t *tes
 				t.Fatalf("functionResponse role = %q, want native Antigravity model role; output=%s", got, output)
 			}
 		})
+	}
+}
+
+func TestAntigravityGeminiSignatureNormalizationDoesNotRepeatLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	payload := []byte(`{"contents":[{"role":"model","parts":[` +
+		`{"functionCall":{"name":"first","args":{}},"thoughtSignature":"` + issue4959GeminiThoughtSignature() + `"},` +
+		`{"functionCall":{"name":"second","args":{}},"thoughtSignature":"skip_thought_signature_validator"},` +
+		`{"functionCall":{"name":"third","args":{}},"thoughtSignature":"google#skip_thought_signature_validator"}]}]}`)
+	translationReq := sdktranslator.RequestEnvelope{Model: "gemini-3.8-flash-high", Stream: true}
+	original, working := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(t.Context(), nil, &config.Config{},
+		sdktranslator.FormatGemini, sdktranslator.FormatAntigravity, translationReq, payload, payload)
+	working = sanitizeAntigravityGeminiRequestSignatures(translationReq.Model, working)
+
+	if got := gjson.GetBytes(working, "request.contents.0.parts.0.thoughtSignature").String(); got != issue4959GeminiThoughtSignature() {
+		t.Fatalf("native signature changed: %s", working)
+	}
+	for _, body := range [][]byte{original, working} {
+		for _, index := range []int{1, 2} {
+			if gjson.GetBytes(body, fmt.Sprintf("request.contents.0.parts.%d.thoughtSignature", index)).Exists() {
+				t.Fatalf("sibling bypass was not removed: %s", body)
+			}
+		}
+	}
+	sanitizeLogs := 0
+	for _, entry := range hook.AllEntries() {
+		if strings.HasPrefix(entry.Message, "gemini request: suppressed repeated thoughtSignature sanitizations") {
+			t.Fatalf("suppressed repeated log should no longer be emitted: %q", entry.Message)
+		}
+		if strings.HasPrefix(entry.Message, "gemini request: sanitized ") {
+			sanitizeLogs++
+		}
+	}
+	if sanitizeLogs != 1 {
+		t.Fatalf("expected exactly 1 aggregate log entry, got %d", sanitizeLogs)
 	}
 }
 

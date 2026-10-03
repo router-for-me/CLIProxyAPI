@@ -539,7 +539,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	httpReq.Header.Set("User-Agent", userAgent)
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "credits_query").Do(httpReq)
 	if errDo != nil {
 		log.Debugf("antigravity executor: loadCodeAssist request error: %v", errDo)
 		return

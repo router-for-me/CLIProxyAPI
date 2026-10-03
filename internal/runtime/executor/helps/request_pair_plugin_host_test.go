@@ -49,9 +49,8 @@ func TestRequestPairWithEmptyPluginHostSanitizesSignaturesOnce(t *testing.T) {
 				} else {
 					base, work = helps.TranslateRequestPairWithAPIKeyModelCompatibility(t.Context(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, "gemini-3.6-flash-high", payload, payload, stream, route == "api-key-compat")
 				}
-				// The fork retains structured sanitizer logs; count the detail event
-				// to detect duplicate translation independently of its field format.
-				const message = "gemini request: sanitized thoughtSignature before upstream"
+				// Count the per-request aggregate to detect duplicate translation.
+				const message = "gemini request: sanitized "
 				if count := strings.Count(logs.String(), message); count != 1 {
 					t.Fatalf("host=%T stream=%v route=%s: sanitation logs = %d, want 1; logs=%s", host, stream, route, count, logs.String())
 				}

@@ -149,7 +149,7 @@ func (f *StreamFeed) Feed(frame []byte) ([][]byte, error) {
 			return nil, nil
 		}
 	}
-	event, payload, ok, err := parseStreamFrame(frame)
+	event, payload, ok, err := parseStreamFrame(frame, f.bridge != nil && len(f.bridge.aliasByID) > 0)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +236,7 @@ func (f *StreamFeed) feedSSEFrame(frame []byte) ([][]byte, error) {
 	if len(bytes.TrimSpace(frame)) == 0 {
 		return nil, nil
 	}
-	event, payload, ok, err := parseStreamFrame(frame)
+	event, payload, ok, err := parseStreamFrame(frame, f.bridge != nil && len(f.bridge.aliasByID) > 0)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +285,7 @@ func (f *StreamFeed) feedPayload(frame []byte, event string, payload map[string]
 	}
 }
 
-func parseStreamFrame(frame []byte) (string, map[string]any, bool, error) {
+func parseStreamFrame(frame []byte, strictUnicode bool) (string, map[string]any, bool, error) {
 	trimmed := bytes.TrimSpace(frame)
 	if len(trimmed) == 0 {
 		return "", nil, false, nil
@@ -325,6 +325,11 @@ func parseStreamFrame(frame []byte) (string, map[string]any, bool, error) {
 	value, ok := decodeValue(trimmed)
 	if !ok {
 		return "", nil, false, nil
+	}
+	if strictUnicode {
+		if err := validateCustomArgumentUnicode(string(trimmed)); err != nil {
+			return "", nil, false, upstreamError(ReasonUpstreamContract, err)
+		}
 	}
 	payload, ok := value.(map[string]any)
 	if !ok {

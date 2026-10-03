@@ -70,7 +70,7 @@ func TestCodexExecutorOptimizeMultiAgentV2(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			upstreamBody = nil
-			executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: tt.enabled}})
+			executor := NewCodexExecutor(&config.Config{SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: tt.enabled}}}})
 			ctx := codexSpawnAgentTestContext()
 			headers := http.Header{"User-Agent": []string{"overridden-client/1.0"}}
 			req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payload}
@@ -119,7 +119,7 @@ func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
 
 	payload := codexSpawnAgentTestPayload()
 	baseCfg := config.Config{
-		Codex: config.CodexConfig{OptimizeMultiAgentV2: true},
+		SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: true}}},
 		CodexKey: []config.CodexKey{{
 			APIKey:  "test",
 			BaseURL: server.URL,
@@ -180,7 +180,7 @@ func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			upstreamBody = nil
 			cfg := baseCfg
-			cfg.Codex.OptimizeMultiAgentV2 = tt.enabled
+			cfg.Client.Codex.OptimizeMultiAgentV2 = tt.enabled
 			executor := NewCodexExecutor(&cfg)
 			ctx := codexSpawnAgentTestContext()
 			req := cliproxyexecutor.Request{Model: tt.model, Payload: payload}
@@ -266,7 +266,7 @@ func TestCodexExecutorsMultiAgentV2UsesSelectedHomeModel(t *testing.T) {
 	} {
 		for _, mode := range []string{"execute", "stream", "compact", "websocket execute", "websocket stream"} {
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
-				cfg := &config.Config{Home: config.HomeConfig{Enabled: true}, Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+				cfg := &config.Config{Home: config.HomeConfig{Enabled: true}, SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: true}}}}
 				var executor cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
 				if strings.HasPrefix(mode, "websocket") {
 					executor = NewCodexWebsocketsExecutor(cfg)
@@ -341,7 +341,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 
 	payload := codexSpawnAgentTestPayload()
 	baseCfg := config.Config{
-		Codex: config.CodexConfig{OptimizeMultiAgentV2: true},
+		SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: true}}},
 		CodexKey: []config.CodexKey{{
 			APIKey:  "test",
 			BaseURL: server.URL,
@@ -456,7 +456,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 	t.Run("is-compat true with optimize-multi-agent-v2 false converts agent_message and strips metadata", func(t *testing.T) {
 		upstreamBody = nil
 		cfg := baseCfg
-		cfg.Codex.OptimizeMultiAgentV2 = false
+		cfg.Client.Codex.OptimizeMultiAgentV2 = false
 		executor := NewCodexExecutor(&cfg)
 		ctx := codexSpawnAgentTestContext()
 		req := cliproxyexecutor.Request{Model: "compat-model", Payload: payload}
@@ -514,7 +514,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 	})
 }
 
-func TestCodexExecutor_IsCompat_V8Layout_OAuthOnlyScope_Issue6233(t *testing.T) {
+func TestCodexExecutor_IsCompat_V8Layout_ClientScope_Issue6233(t *testing.T) {
 	var upstreamBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var errRead error
@@ -529,20 +529,21 @@ func TestCodexExecutor_IsCompat_V8Layout_OAuthOnlyScope_Issue6233(t *testing.T) 
 	defer server.Close()
 
 	payload := codexSpawnAgentTestPayload()
-	// Simulate v8 layout where optimize-multi-agent-v2 is under oauth.providers.codex (OAuth-only).
-	// ForAPIKey() zeroes it out.
-	baseCfg := config.Config{
-		Codex: config.CodexConfig{OptimizeMultiAgentV2: true},
-		CodexKey: []config.CodexKey{{
-			APIKey:  "test",
-			BaseURL: server.URL,
-			Models: []config.CodexModel{
-				{Name: "compat-model", Alias: "compat-alias", IsCompat: true},
-			},
-		}},
+	// The historical OAuth spelling now migrates to client-wide optimization.
+	parsed, errParse := config.ParseConfigBytes([]byte("oauth: {providers: {codex: {optimize-multi-agent-v2: true, orphan-delegation-compatibility: true}}}"))
+	if errParse != nil {
+		t.Fatalf("parse historical config: %v", errParse)
 	}
-	baseCfg.OAuthOnlyFields = map[string]bool{
-		"codex.optimize-multi-agent-v2": true,
+	baseCfg := *parsed
+	baseCfg.CodexKey = []config.CodexKey{{
+		APIKey:  "test",
+		BaseURL: server.URL,
+		Models: []config.CodexModel{
+			{Name: "compat-model", Alias: "compat-alias", IsCompat: true},
+		},
+	}}
+	if !baseCfg.ForAPIKey().Client.Codex.OptimizeMultiAgentV2 {
+		t.Fatal("API-key scoping cleared client optimization")
 	}
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
@@ -552,7 +553,7 @@ func TestCodexExecutor_IsCompat_V8Layout_OAuthOnlyScope_Issue6233(t *testing.T) 
 		},
 	}
 
-	t.Run("Execute converts agent_message under v8 oauth-only scope", func(t *testing.T) {
+	t.Run("Execute converts agent_message under client scope", func(t *testing.T) {
 		upstreamBody = nil
 		cfg := baseCfg
 		executor := NewCodexExecutor(&cfg)
@@ -578,7 +579,7 @@ func TestCodexExecutor_IsCompat_V8Layout_OAuthOnlyScope_Issue6233(t *testing.T) 
 		}
 	})
 
-	t.Run("ExecuteStream converts agent_message under v8 oauth-only scope", func(t *testing.T) {
+	t.Run("ExecuteStream converts agent_message under client scope", func(t *testing.T) {
 		upstreamBody = nil
 		cfg := baseCfg
 		executor := NewCodexExecutor(&cfg)
@@ -725,7 +726,7 @@ func TestCodexExecutorOptimizeMultiAgentV2RestoresDottedFlatToolName(t *testing.
 		"api_key":  "test",
 	}}
 
-	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
+	executor := NewCodexExecutor(&config.Config{SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: true}}}})
 	ctx := codexSpawnAgentTestContext()
 	headers := http.Header{"User-Agent": []string{"overridden-client/1.0"}}
 	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payload}

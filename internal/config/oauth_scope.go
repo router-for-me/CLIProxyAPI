@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,19 +16,11 @@ func (cfg *Config) ForAPIKey() *Config {
 	}
 	filtered := *cfg
 	value := reflect.ValueOf(&filtered).Elem()
-	for path, scoped := range cfg.OAuthOnlyFields {
-		if indexes, ok := v8FieldIndexes[path]; ok && scoped {
-			value.FieldByIndex(indexes).SetZero()
+	for _, path := range v8Paths {
+		if !strings.HasPrefix(path.current, "oauth.providers.") || !cfg.OAuthOnlyFields[path.old] {
+			continue
 		}
-	}
-	if cfg.OAuthOnlyFields["codex.optimize-multi-agent-v2"] {
-		filtered.CodexOptimizeMultiAgentV2 = false
-	}
-	if cfg.OAuthOnlyFields["codex.orphan-delegation-compatibility"] {
-		filtered.CodexOrphanDelegationCompatibility = false
-	}
-	if cfg.OAuthOnlyFields["codex.response-steering"] {
-		filtered.CodexResponseSteering = false
+		value.FieldByIndex(v8FieldIndexes[path.old]).SetZero()
 	}
 	filtered.OAuthOnlyFields = nil
 	return &filtered
@@ -37,13 +30,14 @@ func (cfg *Config) ForAPIKey() *Config {
 // legacy-only Config still produces its original layout. Persistence explicitly
 // marshals legacyConfig before reconciling the on-disk layout.
 func (cfg Config) MarshalYAML() (any, error) {
+	cfg.Client.Codex.OptimizeMultiAgentV2 = cfg.CodexMultiAgentV2Enabled()
 	var root yaml.Node
 	if err := root.Encode(legacyConfig(cfg)); err != nil {
 		return nil, err
 	}
 	value := reflect.ValueOf(cfg)
 	for _, path := range v8Paths {
-		if !cfg.OAuthOnlyFields[path.old] {
+		if !strings.HasPrefix(path.current, "oauth.providers.") || !cfg.OAuthOnlyFields[path.old] {
 			continue
 		}
 		field := yamlPath(&root, path.old)

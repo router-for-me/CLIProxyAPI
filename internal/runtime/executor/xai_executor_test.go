@@ -335,7 +335,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessage(t *testing.T) {
 	t.Parallel()
 
-	exec := NewXAIExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
+	exec := NewXAIExecutor(&config.Config{SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: true}}}})
 	payload := []byte(`{
 		"model":"grok-4.5",
 		"input":[{

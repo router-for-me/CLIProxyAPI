@@ -37,6 +37,7 @@ type Prepared struct {
 // network or tool execution. Unchanged requests return the original slice
 // with no state.
 func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (Prepared, error) {
+	originalBody := body
 	// Replayed tool items are repaired before anything else looks at the
 	// request. The migration is pure id bookkeeping, so it must not depend on
 	// whether this route builds an attempt, and it must not re-encode the body.
@@ -48,6 +49,11 @@ func Prepare(body []byte, policy RoutePolicy, limits Limits, limiter *Limiter) (
 	contract := ParseContract(body)
 	customDeclarations := hasCustomDeclarations(body)
 	customHistory := hasCustomHistory(body)
+	if policy.CustomTools == CustomToolsFunction && (customDeclarations || customHistory) {
+		if err := validateCustomArgumentUnicode(string(originalBody)); err != nil {
+			return Prepared{}, unprocessableError(ReasonInvalidCustomInput, err)
+		}
+	}
 	needsCustomHistory := (policy.CustomTools == CustomToolsFunction || policy.CustomTools == CustomToolsStrip) && customHistory
 	if contract == nil && !customHistory {
 		return Prepared{Body: body}, nil
@@ -375,6 +381,11 @@ func (a *Attempt) RewriteResponse(body []byte) ([]byte, error) {
 	value, ok := decodeValue(body)
 	if !ok {
 		return body, nil
+	}
+	if a.bridge != nil && len(a.bridge.aliasByID) > 0 {
+		if err := validateCustomArgumentUnicode(string(body)); err != nil {
+			return nil, upstreamError(ReasonUpstreamContract, err)
+		}
 	}
 	changed, err := RewriteResponseBodyChecked(value, a.contract, a.bridge)
 	if err != nil {

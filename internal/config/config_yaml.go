@@ -11,9 +11,15 @@ import (
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
-// A successful v8 migration also synchronizes cfg's OAuth scope for runtime snapshots.
+// Existing v8 documents are saved in the latest layout. Successful migration
+// also synchronizes cfg's OAuth scope for runtime snapshots.
 func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...bool) error {
 	persistCfg := cfg
+	if cfg != nil {
+		copy := *cfg
+		copy.Client.Codex.OptimizeMultiAgentV2 = cfg.CodexMultiAgentV2Enabled()
+		persistCfg = &copy
+	}
 	migrating := len(migrateV8) > 0 && migrateV8[0]
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
@@ -38,6 +44,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	}
 	original.Content[0] = flat
 	layout = expandConfigAliases(layout)
+	migrating = migrating || IsV8ConfigLayout(layout)
 
 	// Marshal the current cfg to YAML, then unmarshal to a yaml.Node we can merge from.
 	rendered, err := yaml.Marshal((*legacyConfig)(persistCfg))
@@ -73,6 +80,18 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
 	if err = restoreV8Layout(original.Content[0], layout, data, generated.Content[0]); err != nil {
 		return err
+	}
+	if !migrating {
+		// Keep historical client fields at their original legacy paths. Otherwise
+		// the generated client path makes the next v0 save look like a v8 file.
+		for _, alias := range v8ClientPaths {
+			if yamlPath(layout, alias.old) == nil || yamlPath(layout, alias.current) != nil || yamlPath(original.Content[0], alias.current) == nil {
+				continue
+			}
+			copy := copyYAMLPathValue(original.Content[0], alias.current)
+			deleteYAMLPath(original.Content[0], alias.current)
+			setYAMLPathWithComments(original.Content[0], alias.old, copy)
+		}
 	}
 	normalizeCollectionNodeStyles(original.Content[0])
 

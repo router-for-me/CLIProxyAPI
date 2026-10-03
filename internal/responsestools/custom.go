@@ -379,6 +379,9 @@ func wrapCustomDeclarationInNamespace(tool map[string]any, inheritedNamespace st
 		return nil, unprocessableError(ReasonAmbiguousIdentity, fmt.Errorf("custom tool %q has no bridge alias", name))
 	}
 	description := strings.TrimSpace(stringField(tool, "description"))
+	if name == "apply_patch" {
+		description = customPatchDescription(description)
+	}
 	format, _ := tool["format"].(map[string]any)
 	if len(format) > 0 {
 		switch stringField(format, "type") {
@@ -561,6 +564,9 @@ func rewriteCustomHistoryItem(item map[string]any, bridge *CustomBridge) (bool, 
 // fields, trailing values, and non-string inputs are rejected so a malformed
 // model output can never silently become a different custom input.
 func UnpackCustomArguments(arguments string) (string, error) {
+	if err := validateCustomArgumentUnicode(arguments); err != nil {
+		return "", unprocessableError(ReasonInvalidCustomInput, err)
+	}
 	trimmed := bytes.TrimSpace([]byte(arguments))
 	if len(trimmed) == 0 {
 		return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("empty custom arguments"))

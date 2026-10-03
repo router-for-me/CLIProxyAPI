@@ -32,7 +32,8 @@ func TestMetaStreamPreservesDeclaredToolName(t *testing.T) {
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", completion)
 	}))
 	defer server.Close()
-	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	cfg := &config.Config{}
+	cfg.Client.Codex.OptimizeMultiAgentV2 = true
 	e := NewMetaExecutor(cfg)
 	auth := &cliproxyauth.Auth{ID: "strict-review-meta", Provider: "meta", Attributes: map[string]string{"api_key": "test-token", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{Model: "muse-spark-1.3", Payload: body}

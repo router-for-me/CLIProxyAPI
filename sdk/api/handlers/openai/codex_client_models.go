@@ -10,7 +10,7 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 	if len(clientVersion) > 0 {
 		version = clientVersion[0]
 	}
-	optimizeMultiAgentV2 := h != nil && h.Cfg != nil && h.Cfg.CodexOptimizeMultiAgentV2
+	optimizeMultiAgentV2 := h != nil && h.Cfg != nil && h.Cfg.CodexMultiAgentV2Enabled()
 	var resolver codexmodels.SearchToolCapabilityForModelFunc
 	if h != nil && h.BaseAPIHandler != nil && h.AuthManager != nil {
 		manager := h.AuthManager

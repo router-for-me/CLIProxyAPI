@@ -211,7 +211,7 @@ func TestManagementV8PluginOperationMigratesConfiguration(t *testing.T) {
 	}
 	select {
 	case next := <-reloads:
-		if next.ForAPIKey().Codex.DisableCodexCloaking || !next.Codex.DisableCodexCloaking {
+		if !next.ForAPIKey().Codex.DisableCodexCloaking || !next.Codex.DisableCodexCloaking {
 			t.Fatal("plugin operation published an incorrect configuration scope")
 		}
 	case <-time.After(5 * time.Second):

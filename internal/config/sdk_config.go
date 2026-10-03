@@ -6,6 +6,13 @@ package config
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
+	// Client configures client-facing compatibility behavior.
+	Client ClientConfig `yaml:"client" json:"client"`
+
+	// Deprecated: use Client.Codex.OptimizeMultiAgentV2 for programmatic SDK configuration.
+	// YAML and JSON aliases are normalized at the configuration boundary.
+	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
+
 	// OAuthOnlyFields records v8 provider settings that must wait for credential
 	// selection and must not affect API-key credentials. Config YAML snapshots
 	// preserve the corresponding v8 paths instead of serializing this metadata.
@@ -50,9 +57,6 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
-	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
-	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
-
 	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
 	CodexOrphanDelegationCompatibility bool `yaml:"-" json:"-"`
 
@@ -72,6 +76,23 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// CodexMultiAgentV2Enabled includes the historical SDK field for source compatibility.
+func (cfg *SDKConfig) CodexMultiAgentV2Enabled() bool {
+	return cfg != nil && (cfg.Client.Codex.OptimizeMultiAgentV2 || cfg.CodexOptimizeMultiAgentV2)
+}
+
+// ClientConfig configures client-facing compatibility behavior.
+type ClientConfig struct {
+	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+}
+
+// CodexClientConfig configures Codex client compatibility and the model catalog.
+type CodexClientConfig struct {
+	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests across providers.
+	// Default false leaves the client's multi-agent behavior unchanged.
+	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.
