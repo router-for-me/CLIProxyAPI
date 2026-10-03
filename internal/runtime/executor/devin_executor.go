@@ -963,21 +963,14 @@ func (e *DevinExecutor) streamDevinFrames(
 			}
 		}
 
-		// Emit content text delta
+		// Emit content as soon as the upstream frame arrives. Holding it until the
+		// thinking step closes delays the whole answer until EOS when reasoning
+		// stays open for the rest of the stream.
 		if frameRes.ContentText != "" {
 			accumulatedContent.WriteString(frameRes.ContentText)
 			chunk := contentBuf.Feed([]byte(frameRes.ContentText))
-			if chunk != "" {
-				if thoughtStarted {
-					capturedChunk := chunk
-					pendingActions = append(pendingActions, func() bool {
-						return emitContentChunk(capturedChunk)
-					})
-				} else {
-					if !emitContentChunk(chunk) {
-						return
-					}
-				}
+			if chunk != "" && !emitContentChunk(chunk) {
+				return
 			}
 		}
 	}
