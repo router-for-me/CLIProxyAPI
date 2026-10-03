@@ -68,9 +68,13 @@ func RequestLoggingMiddleware(logger logging.RequestLogger, sink BodyCaptureSink
 		wrapper.bodySink = sink
 		wrapper.captureEnabled = func() bool { return storeRequestBodiesRequested(c) }
 		if sink != nil {
-			// Bounded request-body tee, independent of the file-logging
-			// heuristic: captures up to one section cap while the handler
-			// still reads the full stream.
+			// Bounded request-body tee, installed whenever a sink exists (i.e.
+			// any PG deploy), even for capture-OFF providers. This is an
+			// accepted cost: the gate is unknown at middleware start (it is set
+			// by the resolved executor during routing), and making the tee
+			// gate-aware risks losing capture when the body is read before the
+			// gate is resolved. The tee copies at most one section cap (1 MiB)
+			// into memory and is never persisted unless the gate turns on.
 			wrapper.capturedRequestBody = &captureBuffer{max: bodyCaptureSectionMaxBytes}
 			attachRequestBodyCapture(c.Request, wrapper.capturedRequestBody)
 		}

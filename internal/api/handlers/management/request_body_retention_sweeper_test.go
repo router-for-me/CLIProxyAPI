@@ -150,6 +150,26 @@ func TestRequestBodyRetentionSweeper_StopTerminates(t *testing.T) {
 	}
 }
 
+// TestRequestBodyRetentionSweeper_StopBeforeStartDoesNotLeak verifies the
+// lifecycle regression: a Stop() before Start() must still close done, so a
+// later Start() exits immediately instead of leaking a goroutine that the
+// already-consumed stopOnce can never stop.
+func TestRequestBodyRetentionSweeper_StopBeforeStartDoesNotLeak(t *testing.T) {
+	stub := &requestBodyStub{count: 1}
+	s := newRequestBodyRetentionSweeper(stub, time.Hour)
+
+	s.Stop()  // before Start: no goroutine to wait on, but done must close
+	s.Start() // run() observes the closed done and returns at once
+	s.Stop()  // stopOnce already fired: must return without deadlocking
+
+	select {
+	case <-s.stopped:
+		// good: the started goroutine exited
+	case <-time.After(2 * time.Second):
+		t.Fatal("goroutine leaked after Stop-before-Start lifecycle")
+	}
+}
+
 // TestRequestBodyRetentionSweeper_NilReceiverSweep verifies sweep() on a nil
 // receiver is a safe no-op (the panic guard also protects a nil receiver).
 func TestRequestBodyRetentionSweeper_NilReceiverSweep(t *testing.T) {

@@ -96,18 +96,19 @@ func (s *RequestBodyRetentionSweeper) Start() {
 }
 
 // Stop terminates the sweep loop and blocks until the goroutine has exited. It
-// is idempotent, and safe to call before Start (no-op). An in-flight tick
-// completes first; the loop observes the closed done channel and exits.
+// is idempotent and safe to call before Start: a Stop before Start still closes
+// done (so a later Start exits immediately instead of leaking a goroutine), it
+// just has no goroutine to wait on. An in-flight tick completes first; the loop
+// observes the closed done channel and exits.
 func (s *RequestBodyRetentionSweeper) Stop() {
 	if s == nil {
 		return
 	}
 	s.stopOnce.Do(func() {
-		if !s.started.Load() {
-			return // never started: nothing to stop
-		}
 		close(s.done)
-		<-s.stopped
+		if s.started.Load() {
+			<-s.stopped
+		}
 	})
 }
 

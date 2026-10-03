@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -17,6 +18,12 @@ import (
 const (
 	bodyCaptureSectionMaxBytes = 1 << 20
 	bodyCaptureTotalMaxBytes   = 4 << 20
+
+	// bodyCaptureSinkTimeout bounds the best-effort persistence call so a hung
+	// sink cannot stall request finalization. The context is deliberately
+	// detached from the client request: a client disconnect must not cancel an
+	// insert of an already-captured body.
+	bodyCaptureSinkTimeout = 10 * time.Second
 )
 
 // BodyCaptureRequest is one assembled request/response capture. Header maps are

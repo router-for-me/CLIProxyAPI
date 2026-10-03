@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ type ResponseWriterWrapper struct {
 	bodySink            BodyCaptureSink // bodySink persists captured pairs; nil disables capture.
 	captureEnabled      func() bool     // captureEnabled reports whether this request opted into capture.
 	capturedStreamBuf   *bytes.Buffer   // capturedStreamBuf tees streaming response chunks for capture.
+	capturedResponseBuf *captureBuffer  // capturedResponseBuf tees non-streaming response bytes for capture (bounded).
 	captureTruncated    bool            // captureTruncated records that a captured section was capped.
 	capturedRequestBody *captureBuffer  // capturedRequestBody holds the bounded client request body tee.
 }
@@ -77,6 +79,20 @@ func (w *ResponseWriterWrapper) appendCapturedStream(data []byte) {
 		return
 	}
 	w.capturedStreamBuf.Write(data)
+}
+
+// appendCapturedResponse tees a non-streaming response chunk into a bounded
+// buffer. This keeps capture memory proportional to the section cap even when a
+// provider opted in to body capture; the full response is never accumulated for
+// capture alone. Overflow is recorded as truncation by the buffer itself.
+func (w *ResponseWriterWrapper) appendCapturedResponse(data []byte) {
+	if w == nil {
+		return
+	}
+	if w.capturedResponseBuf == nil {
+		w.capturedResponseBuf = &captureBuffer{max: bodyCaptureSectionMaxBytes}
+	}
+	_, _ = w.capturedResponseBuf.Write(data)
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -112,9 +128,14 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.Write(data)
 
-	// Tee streaming response chunks into the bounded capture buffer.
-	if w.isStreaming && w.captureOn() {
-		w.appendCapturedStream(data)
+	// Tee response chunks into the bounded capture buffer: streaming and
+	// non-streaming alike. The full body is never accumulated for capture.
+	if w.captureOn() {
+		if w.isStreaming {
+			w.appendCapturedStream(data)
+		} else {
+			w.appendCapturedResponse(data)
+		}
 	}
 
 	// THEN: Handle logging based on response type
@@ -142,11 +163,9 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if w.logger != nil && w.logger.IsEnabled() {
 		return true
 	}
-	// Streaming responses rely solely on the bounded capturedStreamBuf tee;
-	// never accumulate them in w.body (which is unbounded).
-	if w.captureOn() && !w.isStreaming {
-		return true
-	}
+	// Capture never buffers into w.body (which is unbounded): streaming and
+	// non-streaming responses rely on the bounded capture tee instead. w.body
+	// is reserved for the file logger, which needs the full body.
 	if !w.logOnErrorOnly {
 		return false
 	}
@@ -170,9 +189,14 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.WriteString(data)
 
-	// Tee streaming response chunks into the bounded capture buffer.
-	if w.isStreaming && w.captureOn() {
-		w.appendCapturedStream([]byte(data))
+	// Tee response chunks into the bounded capture buffer: streaming and
+	// non-streaming alike. The full body is never accumulated for capture.
+	if w.captureOn() {
+		if w.isStreaming {
+			w.appendCapturedStream([]byte(data))
+		} else {
+			w.appendCapturedResponse([]byte(data))
+		}
 	}
 
 	// THEN: Capture for logging
@@ -464,9 +488,17 @@ func (w *ResponseWriterWrapper) captureToSink(c *gin.Context) {
 		req.ClientRequestBody = w.capturedRequestBody.buf.Bytes()
 	}
 	req.ClientResponseHeaders = w.cloneHeaders()
-	if w.isStreaming && w.capturedStreamBuf != nil {
+	switch {
+	case w.isStreaming && w.capturedStreamBuf != nil:
 		req.ClientResponseBody = w.capturedStreamBuf.Bytes()
-	} else if w.body != nil {
+	case w.capturedResponseBuf != nil:
+		// Non-streaming capture: use the bounded tee, not the (possibly full)
+		// w.body reserved for the file logger. Overflow marks the row truncated.
+		req.ClientResponseBody = w.capturedResponseBuf.buf.Bytes()
+		if w.capturedResponseBuf.truncated {
+			w.captureTruncated = true
+		}
+	case w.body != nil:
 		req.ClientResponseBody = w.body.Bytes()
 	}
 
@@ -489,7 +521,12 @@ func (w *ResponseWriterWrapper) captureToSink(c *gin.Context) {
 	req.UpstreamRequest = upReq
 	req.UpstreamResponse = upResp
 
-	w.bodySink.Capture(c.Request.Context(), req)
+	// Detach from the client request context: a client disconnect cancels it and
+	// would drop the insert for an already-assembled capture. Use a short-lived
+	// background context so a hung sink cannot stall finalization either.
+	sinkCtx, cancelSinkCtx := context.WithTimeout(context.Background(), bodyCaptureSinkTimeout)
+	defer cancelSinkCtx()
+	w.bodySink.Capture(sinkCtx, req)
 }
 
 func requestIDFromRequestInfo(info *RequestInfo) string {

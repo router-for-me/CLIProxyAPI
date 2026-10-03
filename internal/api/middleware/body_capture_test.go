@@ -194,6 +194,47 @@ func TestBodyCaptureStreamingDoesNotBufferBody(t *testing.T) {
 	}
 }
 
+func TestBodyCaptureBoundsNonStreamingResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	sink := &recordingSink{}
+	w := NewResponseWriterWrapper(c.Writer, nil, &RequestInfo{RequestID: "r1"})
+	w.bodySink = sink
+	w.captureEnabled = func() bool { return true }
+	// Mirrors RequestLoggingMiddleware with the file logger disabled: without
+	// the bounded tee this path would accumulate the full response in w.body.
+	w.logOnErrorOnly = true
+
+	payload := bytes.Repeat([]byte("x"), bodyCaptureSectionMaxBytes+4096)
+	if _, errWrite := w.Write(payload); errWrite != nil {
+		t.Fatalf("write: %v", errWrite)
+	}
+	if w.body.Len() != 0 {
+		t.Fatalf("non-streaming capture buffered %d bytes into w.body; want 0", w.body.Len())
+	}
+	if w.capturedResponseBuf == nil {
+		t.Fatal("capturedResponseBuf was not populated")
+	}
+	if w.capturedResponseBuf.buf.Len() != bodyCaptureSectionMaxBytes {
+		t.Fatalf("bounded tee holds %d bytes, want %d", w.capturedResponseBuf.buf.Len(), bodyCaptureSectionMaxBytes)
+	}
+
+	if errFinalize := w.Finalize(c); errFinalize != nil {
+		t.Fatalf("finalize: %v", errFinalize)
+	}
+	if len(sink.got) != 1 {
+		t.Fatalf("want 1 capture, got %d", len(sink.got))
+	}
+	got := sink.got[0]
+	if len(got.ClientResponseBody) != bodyCaptureSectionMaxBytes {
+		t.Fatalf("captured %d response bytes, want %d", len(got.ClientResponseBody), bodyCaptureSectionMaxBytes)
+	}
+	if !got.Truncated {
+		t.Fatal("expected Truncated for oversized non-streaming response")
+	}
+}
+
 func TestBodyCaptureSinkTruncatesOversizedClientBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	sink := &recordingSink{}
