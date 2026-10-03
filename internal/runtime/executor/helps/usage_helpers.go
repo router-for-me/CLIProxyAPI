@@ -702,8 +702,13 @@ func (r *UsageReporter) setTTFT(ttft time.Duration) {
 	if r == nil {
 		return
 	}
-	if ttft < 0 {
-		ttft = 0
+	if ttft <= 0 {
+		// Guard against zero or negative wall-clock deltas. Under high-concurrency
+		// httptest loopback, two time.Now samples may land on the same clock tick,
+		// causing time.Since to return 0 and a usage record to be published with a
+		// non-positive TTFT. Clamp to a minimal positive duration so a published
+		// TTFT is always > 0.
+		ttft = 1 * time.Nanosecond
 	}
 	r.ttftMu.Lock()
 	if r.ttftSet {
