@@ -259,6 +259,25 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			if payload == nil {
 				continue
 			}
+			// An explicit upstream error payload must surface as a terminal
+			// stream error. Dropping it here would let the clean-EOF tail
+			// below report the failed stream as a successful completion.
+			if errNode := gjson.GetBytes(payload, "error"); errNode.IsObject() {
+				status := int(errNode.Get("code").Int())
+				if status <= 0 {
+					status = http.StatusBadGateway
+				}
+				// Assign the outer streamErr so the settlement deferred at
+				// goroutine exit publishes the failure; publishing here as
+				// well would race that defer's success settlement.
+				streamErr = newAntigravityStatusErr(status, payload)
+				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+				case <-ctx.Done():
+				}
+				return
+			}
 			reporter.ObserveResponseModel(payload)
 
 			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
