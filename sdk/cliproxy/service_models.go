@@ -149,6 +149,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		default:
 			models = registry.GetCodexProModels()
 		}
+		// Daybreak tiers are approved per account: "daybreak": ["blue", "red"] in the auth file.
+		tiers, _ := a.Metadata["daybreak"].([]any)
+		for _, tier := range tiers {
+			if name, ok := tier.(string); ok {
+				if model := registry.GetCodexDaybreakModel(name); model != nil {
+					models = append(models, model)
+				}
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()

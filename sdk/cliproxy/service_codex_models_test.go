@@ -371,3 +371,37 @@ func openAIModelIDSet(models []map[string]any) map[string]struct{} {
 	}
 	return ids
 }
+
+func TestRegisterModelsForAuthCodexDaybreakTiers(t *testing.T) {
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	for index, testCase := range []struct {
+		daybreak any
+		want     map[string]bool
+	}{
+		{daybreak: nil, want: map[string]bool{"gpt-daybreak-blue-latest": false, "gpt-daybreak-red-latest": false}},
+		{daybreak: []any{"blue"}, want: map[string]bool{"gpt-daybreak-blue-latest": true, "gpt-daybreak-red-latest": false}},
+		{daybreak: []any{"Blue", "red", "purple"}, want: map[string]bool{"gpt-daybreak-blue-latest": true, "gpt-daybreak-red-latest": true}},
+	} {
+		id := fmt.Sprintf("codex-daybreak-%d", index)
+		modelRegistry.UnregisterClient(id)
+		t.Cleanup(func() { modelRegistry.UnregisterClient(id) })
+
+		(&Service{cfg: &config.Config{}}).registerModelsForAuth(context.Background(), &coreauth.Auth{
+			ID: id, Provider: "codex", Status: coreauth.StatusActive,
+			Attributes: map[string]string{"plan_type": "pro"},
+			Metadata:   map[string]any{"daybreak": testCase.daybreak},
+		})
+
+		got := map[string]bool{"gpt-daybreak-blue-latest": false, "gpt-daybreak-red-latest": false}
+		for _, model := range modelRegistry.GetModelsForClient(id) {
+			if _, ok := got[model.ID]; ok {
+				got[model.ID] = true
+			}
+		}
+		for modelID, want := range testCase.want {
+			if got[modelID] != want {
+				t.Fatalf("daybreak=%v: %s registered=%t, want %t", testCase.daybreak, modelID, got[modelID], want)
+			}
+		}
+	}
+}
