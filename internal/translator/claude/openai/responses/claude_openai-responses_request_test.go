@@ -2827,3 +2827,51 @@ func TestApplyPatchClaudeRequestContractAndHistory(t *testing.T) {
 		t.Fatalf("history mismatch: %s", result.Raw)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolChoiceNone(t *testing.T) {
+	t.Run("string none produces type none and retains tools", func(t *testing.T) {
+		reqJSON := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"input": "Answer without calling tools.",
+			"tool_choice": "none",
+			"tools": [
+				{"type": "function", "name": "lookup_weather", "description": "weather lookup", "parameters": {"type": "object", "properties": {}}}
+			]
+		}`)
+		out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", reqJSON, false)
+		gotChoiceType := gjson.GetBytes(out, "tool_choice.type").String()
+		if gotChoiceType != "none" {
+			t.Fatalf("expected tool_choice.type to be 'none', got %q. Output: %s", gotChoiceType, string(out))
+		}
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool in output, got %d. Output: %s", len(tools), string(out))
+		}
+		if gotName := tools[0].Get("name").String(); gotName != "lookup_weather" {
+			t.Fatalf("expected tool name 'lookup_weather', got %q", gotName)
+		}
+	})
+
+	t.Run("object none produces type none and retains tools", func(t *testing.T) {
+		reqJSON := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"input": "Answer without calling tools.",
+			"tool_choice": {"type": "none"},
+			"tools": [
+				{"type": "function", "name": "lookup_weather", "description": "weather lookup", "parameters": {"type": "object", "properties": {}}}
+			]
+		}`)
+		out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", reqJSON, false)
+		gotChoiceType := gjson.GetBytes(out, "tool_choice.type").String()
+		if gotChoiceType != "none" {
+			t.Fatalf("expected tool_choice.type to be 'none', got %q. Output: %s", gotChoiceType, string(out))
+		}
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool in output, got %d. Output: %s", len(tools), string(out))
+		}
+		if gotName := tools[0].Get("name").String(); gotName != "lookup_weather" {
+			t.Fatalf("expected tool name 'lookup_weather', got %q", gotName)
+		}
+	})
+}
