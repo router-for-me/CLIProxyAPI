@@ -64,6 +64,17 @@ type Result struct {
 	RetryAfter *time.Duration
 	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
 	CredentialScope bool
+	// QuotaGroup names the upstream quota group an exhausted window belongs to
+	// (e.g. Antigravity's "Gemini Models" window). When set, the 429 cooldown is
+	// applied to every model of that group on the credential, not just Model. Empty
+	// keeps the per-model behavior. Set only by providers that meter quota by group.
+	QuotaGroup string
+	// QuotaResetDeadline marks RetryAfter as a hard upstream quota-window reset
+	// deadline reported by the provider, not a speculative backoff hint. Such a
+	// deadline is honored even when cooldown scheduling is globally disabled: it
+	// states when the window reopens, so honoring it only avoids re-selecting a
+	// credential that is known to still be exhausted.
+	QuotaResetDeadline bool
 	// Error describes the failure when Success is false.
 	Error *Error
 	// Options carries execution request options (headers, metadata, etc.) for result tracking.

@@ -158,6 +158,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			return nil, err
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
+		var quotaResetDelay *time.Duration
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			decision := decideAntigravity429(bodyBytes)
 
@@ -172,11 +173,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
 				}
 			case antigravity429DecisionFullQuotaExhausted:
-				closeAntigravityAuthIdleTransports(auth)
-				if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
-					markAntigravityCreditsPermanentlyDisabled(auth)
-				}
-				// No credits logic - just fall through to error return below
+				// The exhausted window resets on a schedule reported by upstream. Hand that
+				// deadline to the conductor so this model cools down until the reset instead
+				// of the credential being re-selected seconds later.
+				quotaResetDelay = antigravityHandleFullQuotaExhausted(auth, bodyBytes, useCredits, e.cfg)
 			}
 		}
 
@@ -184,7 +184,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// Report the upstream failure rather than the cleanup failure.
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = withAntigravityQuotaResetDelay(newAntigravityStatusErr(httpResp.StatusCode, bodyBytes), quotaResetDelay, antigravityQuotaExhaustedGroup(baseModel, useCredits))
 		return nil, err
 	}
 

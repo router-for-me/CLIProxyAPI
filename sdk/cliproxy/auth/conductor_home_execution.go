@@ -266,10 +266,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return response, nil
 			}
 			result.Error = resultErrorFromError(errExecute)
-			result.RetryAfter = retryAfterFromError(errExecute)
-			if isCredentialScopedError(errExecute) {
-				result.CredentialScope = true
-			}
+			applyQuotaRetryHint(&result, errExecute)
 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)

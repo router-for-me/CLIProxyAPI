@@ -893,7 +893,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									backoffLevel = auth.Quota.BackoffLevel
 								}
 							}
-							if !disableCooling {
+							// A provider-reported quota-window reset deadline is honored even
+							// when cooldown scheduling is disabled. It states when an exhausted
+							// window actually reopens, so honoring it cannot cause a blackout
+							// any sooner than the credential would have been usable anyway -
+							// it only stops selection from re-picking the same exhausted
+							// credential for the rest of its (multi-hour) window.
+							coolingFor429 := !disableCooling || result.QuotaResetDeadline
+							if coolingFor429 {
 								if result.RetryAfter != nil {
 									cooldown := *result.RetryAfter
 									if cooldown < minQuotaCooldownFloor {
@@ -924,7 +931,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
 							})
-							if result.CredentialScope && !disableCooling {
+							if result.CredentialScope && coolingFor429 {
 								for _, otherState := range auth.ModelStates {
 									if otherState != nil && otherState != state {
 										otherState.Unavailable = true
@@ -961,6 +968,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									auth.Quota.BackoffLevel = backoffLevel
 									auth.NextRetryAfter = authNext
 								}
+							}
+							// Providers that meter quota by group (Antigravity's "Gemini
+							// Models" and "Claude and GPT models" windows) exhaust the whole
+							// group when one model reports QUOTA_EXHAUSTED, so cool every
+							// sibling to the same reset deadline.
+							if coolingFor429 && next.After(now) {
+								m.coolQuotaGroupLocked(auth, result.QuotaGroup, modelKey, next, now)
 							}
 						case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
 							state.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, result.RetryAfter, disableCooling)
@@ -1780,6 +1794,112 @@ func retryAfterFromError(err error) *time.Duration {
 	}
 	value := *retryAfter
 	return &value
+}
+
+// quotaResetDeadlineFromError reports whether err carries a provider-supplied
+// quota-window reset deadline, as opposed to a speculative retry hint.
+func quotaResetDeadlineFromError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type quotaResetDeadlineProvider interface {
+		IsQuotaResetDeadline() bool
+	}
+	var provider quotaResetDeadlineProvider
+	return errors.As(err, &provider) && provider != nil && provider.IsQuotaResetDeadline()
+}
+
+// applyQuotaRetryHint copies the provider's retry hint, quota group, and
+// credential scope onto result. Every execution path must go through it so a
+// provider-reported quota-window reset deadline is classified the same way
+// regardless of which conductor branch produced the result.
+func applyQuotaRetryHint(result *Result, err error) {
+	if result == nil || err == nil {
+		return
+	}
+	if ra := retryAfterFromError(err); ra != nil {
+		result.RetryAfter = ra
+		result.QuotaResetDeadline = quotaResetDeadlineFromError(err)
+	}
+	result.QuotaGroup = quotaGroupFromError(err)
+	if isCredentialScopedError(err) {
+		result.CredentialScope = true
+	}
+}
+
+// quotaGroupFromError extracts the upstream quota group an error reports as exhausted.
+func quotaGroupFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	type quotaGroupProvider interface {
+		QuotaGroup() string
+	}
+	var qgp quotaGroupProvider
+	if !errors.As(err, &qgp) || qgp == nil {
+		return ""
+	}
+	return strings.TrimSpace(qgp.QuotaGroup())
+}
+
+// coolQuotaGroupLocked applies a group-wide cooldown for exhausted quota windows that
+// providers meter by group rather than by model (Antigravity reports separate windows
+// for "Gemini Models" and "Claude and GPT models"). Every model of the group this
+// credential serves is cooled to the same reset deadline, including models that have
+// never run and therefore have no ModelState yet; the other group is untouched.
+//
+// The deadline only ever extends an existing one, so a sibling that already fails for
+// another reason keeps its own later recovery time.
+func (m *Manager) coolQuotaGroupLocked(auth *Auth, group, excludeModelKey string, next, now time.Time) {
+	if auth == nil || group == "" || next.IsZero() {
+		return
+	}
+	keys := make([]string, 0, len(auth.ModelStates))
+	for key := range auth.ModelStates {
+		keys = append(keys, key)
+	}
+	// Models registered for this credential cover ones that never ran, so an unseen
+	// sibling of the group is skipped by selection too.
+	if models, _ := registry.GetGlobalRegistry().GetModelsAndEpochForClient(auth.ID); len(models) > 0 {
+		for _, model := range models {
+			if model == nil || strings.TrimSpace(model.ID) == "" {
+				continue
+			}
+			key := m.selectionModelKeyForAuth(auth, model.ID)
+			if key == "" {
+				key = canonicalModelKey(model.ID)
+			}
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+	}
+	for _, key := range keys {
+		if key == "" || key == excludeModelKey || AntigravityQuotaGroup(key) != group {
+			continue
+		}
+		state := ensureModelState(auth, key)
+		if state == nil {
+			continue
+		}
+		state.Unavailable = true
+		state.Status = StatusError
+		state.UpdatedAt = now
+		recoverAt := next
+		if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(recoverAt) {
+			recoverAt = state.Quota.NextRecoverAt
+		}
+		retryAfter := recoverAt
+		if state.NextRetryAfter.After(retryAfter) {
+			retryAfter = state.NextRetryAfter
+		}
+		state.NextRetryAfter = retryAfter
+		applyCooldownFields(&state.Quota, QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: recoverAt,
+		})
+	}
 }
 
 func isCredentialScopedError(err error) bool {
