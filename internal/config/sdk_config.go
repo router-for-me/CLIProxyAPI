@@ -103,6 +103,14 @@ type StreamingConfig struct {
 	// <= 0 disables keep-alives. Default is 0.
 	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
 
+	// CodexAppKeepAliveSeconds controls how often an application-level keepalive
+	// (`data: {"type":"codex.client.keepalive"}\n\n`) is emitted for official Codex clients
+	// on Responses SSE streams while silent. Defaults to 30 seconds when unset (0).
+	CodexAppKeepAliveSeconds int `yaml:"codex-app-keepalive-seconds,omitempty" json:"codex-app-keepalive-seconds,omitempty"`
+
+	// DisableCodexAppKeepAlive disables application-level keepalives for Codex Responses streams.
+	DisableCodexAppKeepAlive bool `yaml:"disable-codex-app-keepalive,omitempty" json:"disable-codex-app-keepalive,omitempty"`
+
 	// BootstrapRetries controls how many times the server may retry a streaming request before any bytes are sent,
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.

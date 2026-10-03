@@ -55,8 +55,9 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds         = 0
+	defaultCodexResponsesAppKeepAliveSeconds = 30
+	defaultStreamingBootstrapRetries         = 0
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -171,6 +172,23 @@ func NonStreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := 0
 	if cfg != nil {
 		seconds = cfg.NonStreamKeepAliveInterval
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// CodexAppKeepAliveInterval returns the interval for application-level keepalives
+// emitted for official Codex clients on Responses SSE streams while silent.
+// Returning 0 disables application keepalives. Defaults to 30 seconds.
+func CodexAppKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
+	if cfg != nil && cfg.Streaming.DisableCodexAppKeepAlive {
+		return 0
+	}
+	seconds := defaultCodexResponsesAppKeepAliveSeconds
+	if cfg != nil && cfg.Streaming.CodexAppKeepAliveSeconds > 0 {
+		seconds = cfg.Streaming.CodexAppKeepAliveSeconds
 	}
 	if seconds <= 0 {
 		return 0
