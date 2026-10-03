@@ -3264,6 +3264,46 @@ func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T
 	}
 }
 
+const cloakedFourBreakpointMessages = `"system": [
+		{"type":"text","text":"billing"},
+		{"type":"text","text":"identity","cache_control":{"type":"ephemeral"}}
+	],
+	"messages": [
+		{"role":"user","content":[{"type":"text","text":"u1"}]},
+		{"role":"system","content":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]},
+		{"role":"system","content":[{"type":"text","text":"s2","cache_control":{"type":"ephemeral"}}]},
+		{"role":"system","content":[{"type":"text","text":"s3"},{"type":"text","text":"s4","cache_control":{"type":"ephemeral"}}]}
+	]`
+
+func TestEnforceCacheControlLimit_ThreadReservesOneBreakpoint(t *testing.T) {
+	payload := []byte(`{"thread":{"type":"create"},` + cloakedFourBreakpointMessages + `}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 3 {
+		t.Fatalf("cache_control count = %d, want 3 when thread is set", got)
+	}
+	if gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists() {
+		t.Fatalf("earliest message cache_control should be removed first")
+	}
+	if !gjson.GetBytes(out, "system.1.cache_control").Exists() {
+		t.Fatalf("last system cache_control should be preserved")
+	}
+	if !gjson.GetBytes(out, "messages.3.content.1.cache_control").Exists() {
+		t.Fatalf("latest message cache_control should be preserved")
+	}
+}
+
+func TestEnforceCacheControlLimit_WithoutThreadKeepsFourBreakpoints(t *testing.T) {
+	payload := []byte(`{` + cloakedFourBreakpointMessages + `}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4 without thread", got)
+	}
+}
+
 func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

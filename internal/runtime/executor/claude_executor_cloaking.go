@@ -1826,7 +1826,9 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 }
 
 // enforceCacheControlLimit removes excess cache_control blocks from a payload
-// so the total does not exceed the Anthropic API limit (currently 4).
+// so the total does not exceed the Anthropic API limit (currently 4). A request
+// that sets "thread" gets one breakpoint fewer: Anthropic reserves that slot for
+// the marker it places on the thread itself and rejects a fourth client marker.
 //
 // Anthropic evaluates cache breakpoints in order: tools → system → messages.
 // The most valuable breakpoints are:
@@ -1844,6 +1846,9 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload
+	}
+	if gjson.GetBytes(payload, "thread").Exists() {
+		maxBlocks--
 	}
 
 	total := countCacheControls(payload)
