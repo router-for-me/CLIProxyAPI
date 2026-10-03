@@ -391,6 +391,72 @@ func TestResolveDevinSessionAndCascadeIDs(t *testing.T) {
 	}
 }
 
+func TestDevinStreamEmitsContentBeforeThinkingCloses(t *testing.T) {
+	reader, writer := io.Pipe()
+	out := make(chan cliproxyexecutor.StreamChunk, 32)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		NewDevinExecutor(nil).streamDevinFrames(
+			context.Background(),
+			reader,
+			cliproxyexecutor.Request{Model: "devin/swe-2"},
+			cliproxyexecutor.Options{},
+			"swe-2-medium",
+			sdktranslator.FormatInteractions,
+			nil,
+			out,
+		)
+	}()
+	defer func() {
+		_ = writer.Close()
+		<-done
+	}()
+
+	writeFrame := func(payload []byte) {
+		t.Helper()
+		if _, err := writer.Write(helps.WrapConnectEnvelope(payload)); err != nil {
+			t.Fatalf("write frame: %v", err)
+		}
+	}
+	var thinking []byte
+	thinking = appendDevinFieldBytes(thinking, 9, []byte("先想一下"))
+	writeFrame(thinking)
+
+	waitFor := func(substr string) {
+		t.Helper()
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case chunk := <-out:
+				if strings.Contains(string(chunk.Payload), substr) {
+					return
+				}
+			case <-timer.C:
+				t.Fatalf("timed out waiting for %q", substr)
+			}
+		}
+	}
+	waitFor(`"type":"thought"`)
+
+	var first []byte
+	first = appendDevinFieldBytes(first, 3, []byte("甲"))
+	writeFrame(first)
+	waitFor(`"text":"甲"`)
+
+	var second []byte
+	second = appendDevinFieldBytes(second, 3, []byte("乙"))
+	writeFrame(second)
+	waitFor(`"text":"乙"`)
+
+	if _, err := writer.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`))); err != nil {
+		t.Fatalf("write eos: %v", err)
+	}
+	_ = writer.Close()
+	<-done
+}
+
 func TestConsumeDevinFramesToInteractions(t *testing.T) {
 	// Synthesize a Connect stream with 2 data frames and 1 EOS trailer
 	var streamBuf bytes.Buffer
