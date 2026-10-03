@@ -67,7 +67,22 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	m.mu.Unlock()
 
 	loop.rebuild(time.Now())
+	go m.refreshProviderOnStartup(ctx, "github-copilot")
 	go loop.run(ctx)
+}
+
+func (m *Manager) refreshProviderOnStartup(ctx context.Context, provider string) {
+	m.mu.RLock()
+	ids := make([]string, 0)
+	for id, auth := range m.auths {
+		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), provider) && !auth.Disabled {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.refreshAuth(ctx, id)
+	}
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.

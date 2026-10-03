@@ -222,6 +222,20 @@ func TestAccountIdentityAndQuota(t *testing.T) {
 	}
 }
 
+func TestQuotaSignals(t *testing.T) {
+	signals := QuotaSignals(json.RawMessage(`{"copilot_plan":"individual","quota_snapshots":{"premium_interactions":{"entitlement":300,"remaining":225,"percent_remaining":75}}}`))
+	for key, want := range map[string]string{
+		"GitHub-Copilot-Plan":                                   "individual",
+		"GitHub-Copilot-premium-interactions-Entitlement":       "300",
+		"GitHub-Copilot-premium-interactions-Remaining":         "225",
+		"GitHub-Copilot-premium-interactions-Percent-Remaining": "75",
+	} {
+		if signals[key] != want {
+			t.Fatalf("signal %s = %q, want %q", key, signals[key], want)
+		}
+	}
+}
+
 func TestModelDiscoveryCapabilitiesAndEndpoints(t *testing.T) {
 	for _, tc := range []struct {
 		endpoints []string

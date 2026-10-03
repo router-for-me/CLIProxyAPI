@@ -134,11 +134,15 @@ func (e *CopilotExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*co
 	if err != nil {
 		return nil, err
 	}
-	githubToken, _ := auth.Metadata["access_token"].(string)
-	if _, errQuota := copilot.NewClient(e.cfg, auth.ProxyURL).Quota(ctx, githubToken); errQuota != nil {
-		log.WithError(errQuota).Debugf("github-copilot: quota refresh failed for auth %s", auth.ID)
-	}
 	updated := auth.Clone()
+	githubToken, _ := auth.Metadata["access_token"].(string)
+	quota, errQuota := copilot.NewClient(e.cfg, auth.ProxyURL).Quota(ctx, githubToken)
+	if errQuota != nil {
+		log.WithError(errQuota).Debugf("github-copilot: quota refresh failed for auth %s", auth.ID)
+	} else {
+		updated.Quota.Signals = copilot.QuotaSignals(quota)
+		updated.Quota.ObservedAt = time.Now().UTC()
+	}
 	updated.Metadata["expired"] = time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	updated.LastRefreshedAt = time.Now().UTC()
 	return updated, nil

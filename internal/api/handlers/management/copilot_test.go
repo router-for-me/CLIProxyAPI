@@ -31,3 +31,15 @@ func TestCopilotQuotaValidatesAccountBeforeRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestCopilotV8LoginDispatch(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	requestContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?provider=github-copilot", nil).WithContext(requestContext)
+	(&Handler{}).StartOAuthV8(c)
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+}

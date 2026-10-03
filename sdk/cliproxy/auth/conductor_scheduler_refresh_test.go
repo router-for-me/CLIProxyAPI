@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +41,43 @@ func (e schedulerProviderTestExecutor) HttpRequest(ctx context.Context, auth *Au
 
 type unauthorizedRefreshTestExecutor struct {
 	schedulerProviderTestExecutor
+}
+
+type startupRefreshTestExecutor struct {
+	schedulerProviderTestExecutor
+	called chan struct{}
+	once   sync.Once
+}
+
+func (e *startupRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	e.once.Do(func() { close(e.called) })
+	return auth, nil
+}
+
+func TestManager_StartAutoRefreshRefreshesCopilotAtStartup(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &startupRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "github-copilot"},
+		called:                        make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{
+		ID:              "copilot-startup-refresh",
+		Provider:        "github-copilot",
+		LastRefreshedAt: time.Now(),
+		Metadata:        map[string]any{"expired": time.Now().Add(time.Hour).Format(time.RFC3339)},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.StartAutoRefresh(context.Background(), time.Hour)
+	defer manager.StopAutoRefresh()
+	select {
+	case <-executor.called:
+	case <-time.After(time.Second):
+		t.Fatal("GitHub Copilot auth was not refreshed at startup")
+	}
 }
 
 func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {

@@ -45,6 +45,45 @@ type Token struct {
 	} `json:"endpoints"`
 }
 
+// QuotaSignals extracts the stable quota values displayed by the management API.
+func QuotaSignals(raw json.RawMessage) map[string]string {
+	var snapshot struct {
+		CopilotPlan    string `json:"copilot_plan"`
+		QuotaSnapshots map[string]struct {
+			Entitlement      json.Number `json:"entitlement"`
+			Remaining        json.Number `json:"remaining"`
+			PercentRemaining json.Number `json:"percent_remaining"`
+		} `json:"quota_snapshots"`
+	}
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return nil
+	}
+	signals := make(map[string]string)
+	if strings.TrimSpace(snapshot.CopilotPlan) != "" {
+		signals["GitHub-Copilot-Plan"] = strings.TrimSpace(snapshot.CopilotPlan)
+	}
+	for name, quota := range snapshot.QuotaSnapshots {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		prefix := "GitHub-Copilot-" + strings.NewReplacer("_", "-", " ", "-").Replace(name)
+		if quota.Entitlement != "" {
+			signals[prefix+"-Entitlement"] = quota.Entitlement.String()
+		}
+		if quota.Remaining != "" {
+			signals[prefix+"-Remaining"] = quota.Remaining.String()
+		}
+		if quota.PercentRemaining != "" {
+			signals[prefix+"-Percent-Remaining"] = quota.PercentRemaining.String()
+		}
+	}
+	if len(signals) == 0 {
+		return nil
+	}
+	return signals
+}
+
 func (t Token) BaseURL() string {
 	if t.Endpoints.API != "" {
 		return strings.TrimRight(t.Endpoints.API, "/")

@@ -16,6 +16,8 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 		h.RequestAnthropicToken(c)
 	case "codex":
 		h.RequestCodexToken(c)
+	case "github-copilot":
+		h.RequestCopilotToken(c)
 	case "antigravity":
 		h.RequestAntigravityToken(c)
 	case "kimi":
