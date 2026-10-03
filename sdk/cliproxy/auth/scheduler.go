@@ -1585,14 +1585,22 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		sort.Slice(entries, func(i, j int) bool {
 			// Registration (config list) order first: fill-first must consume keys in
 			// the order they appear in config.yaml, and ID order is a content hash that
-			// shuffles that order. Authers without the synthesizer-stamped indices
-			// (OAuth etc.) fall back to ID for determinism.
+			// shuffles that order. Total order (both indexed -> packed compare, one
+			// indexed -> indexed first, neither -> ID); a partial fallback to ID on
+			// mixed pairs would make the comparator non-transitive.
 			li, okLi := registrationOrderOf(entries[i])
 			lj, okLj := registrationOrderOf(entries[j])
-			if okLi && okLj && li != lj {
-				return li < lj
+			switch {
+			case okLi && okLj:
+				if li != lj {
+					return li < lj
+				}
+				return entries[i].auth.ID < entries[j].auth.ID
+			case okLi != okLj:
+				return okLi
+			default:
+				return entries[i].auth.ID < entries[j].auth.ID
 			}
-			return entries[i].auth.ID < entries[j].auth.ID
 		})
 		bucket := buildReadyBucket(entries)
 		if cursorState, ok := cursorStates[priority]; ok && bucket != nil {
@@ -1625,16 +1633,21 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 }
 
 // registrationOrderOf encodes the synthesizer-stamped (config_index, key_index)
-// attribute pair into a single comparable value. ok is false when either index
-// is missing, so callers can fall back to ID ordering.
+// attribute pair into a single comparable value. ok is false when config_index
+// is missing; key_index defaults to 0 because the per-provider synthesizers
+// stamp only config_index (one auth per config entry), while openai-compat
+// APIKeyEntries stamp both.
 func registrationOrderOf(entry *scheduledAuth) (int, bool) {
 	if entry == nil || entry.auth == nil || entry.auth.Attributes == nil {
 		return 0, false
 	}
 	ci, errCi := strconv.Atoi(entry.auth.Attributes["config_index"])
-	ki, errKi := strconv.Atoi(entry.auth.Attributes["key_index"])
-	if errCi != nil || errKi != nil {
+	if errCi != nil {
 		return 0, false
+	}
+	ki := 0
+	if parsed, errKi := strconv.Atoi(entry.auth.Attributes["key_index"]); errKi == nil {
+		ki = parsed
 	}
 	return ci<<20 | ki, true
 }

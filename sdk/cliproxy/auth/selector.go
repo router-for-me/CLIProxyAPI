@@ -820,19 +820,21 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	// The pipeline hands us ID-sorted candidates (see availableAuthsFromPriorityBuckets),
 	// but fill-first promises config list order: the first listed key is used until it
 	// fails or exhausts, then the next takes over. Restore that order from the indices
-	// stamped at registration; authers without them (e.g. OAuth) keep their input order.
+	// stamped at registration; authers without them (e.g. OAuth) keep their input
+	// order (stable sort treats the pair as equal). key_index defaults to 0: the
+	// per-provider synthesizers stamp only config_index.
 	if len(available) > 1 {
 		sort.SliceStable(available, func(a, b int) bool {
 			ci, okA := authIndexAttr(available[a], "config_index")
-			ki, okA2 := authIndexAttr(available[a], "key_index")
 			cj, okB := authIndexAttr(available[b], "config_index")
-			kj, okB2 := authIndexAttr(available[b], "key_index")
-			if !okA || !okA2 || !okB || !okB2 {
+			if !okA || !okB {
 				return false
 			}
 			if ci != cj {
 				return ci < cj
 			}
+			ki, _ := authIndexAttr(available[a], "key_index")
+			kj, _ := authIndexAttr(available[b], "key_index")
 			return ki < kj
 		})
 	}

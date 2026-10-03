@@ -51,10 +51,13 @@ func (h *Handler) runAgentsExe(args ...string) (int, string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, args...)
 	out, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		return http.StatusGatewayTimeout, `{"error":"timeout","message":"cli-agents did not finish in time"}`
-	}
+	// Check err before the deadline: a run that finished successfully just as
+	// the 60s limit fired already mutated config files and must report 200,
+	// not a retry-bait 504.
 	if err != nil {
+		if ctx.Err() != nil {
+			return http.StatusGatewayTimeout, `{"error":"timeout","message":"cli-agents did not finish in time"}`
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			// The exe already wrote a JSON error payload on stdout.
 			_ = exitErr
@@ -115,7 +118,12 @@ func (h *Handler) PostCodingAgentsRevert(c *gin.Context) {
 	var body struct {
 		Stamp string `json:"stamp"`
 	}
-	_ = c.ShouldBindJSON(&body) // empty body = revert latest
+	// Empty body = revert latest; malformed JSON must NOT silently become the
+	// destructive revert-latest default.
+	if err := c.ShouldBindJSON(&body); err != nil && c.Request.ContentLength > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body", "message": err.Error()})
+		return
+	}
 	args := []string{"--json", "--revert"}
 	if body.Stamp != "" {
 		if !agentStampRe.MatchString(body.Stamp) {
