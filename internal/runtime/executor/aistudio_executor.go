@@ -317,7 +317,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			if ctx.Err() != nil {
 				return
 			}
-			tail := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, originalRequest, translatedReq, []byte("[DONE]"), &param, claudeInputTokens)
+			tail := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, opts.OriginalRequest, translatedReq, []byte("[DONE]"), &param, claudeInputTokens)
 			for _, line := range tail {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(line)}:
