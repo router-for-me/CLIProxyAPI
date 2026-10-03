@@ -117,6 +117,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Timestamp:        timestamp,
 		LatencyMs:        record.Latency.Milliseconds(),
 		TTFTMs:           record.TTFT.Milliseconds(),
+		UpstreamTTFBMs:   record.UpstreamTTFB.Milliseconds(),
+		FirstPacketMs:    record.FirstPacket.Milliseconds(),
+		ConnSetupMs:      record.ConnSetup.Milliseconds(),
+		ConnReused:       record.ConnReused,
 		Source:           record.Source,
 		AuthIndex:        record.AuthIndex,
 		AccessTokenHash:  record.AccessTokenSHA256,
@@ -191,6 +195,10 @@ type requestDetail struct {
 	Timestamp        time.Time   `json:"timestamp"`
 	LatencyMs        int64       `json:"latency_ms"`
 	TTFTMs           int64       `json:"ttft_ms"`
+	UpstreamTTFBMs   int64       `json:"upstream_ttfb_ms,omitempty"`
+	FirstPacketMs    int64       `json:"first_packet_ms,omitempty"`
+	ConnSetupMs      int64       `json:"conn_setup_ms,omitempty"`
+	ConnReused       bool        `json:"conn_reused,omitempty"`
 	Source           string      `json:"source"`
 	AuthIndex        string      `json:"auth_index"`
 	AccessTokenHash  string      `json:"access_token_sha256,omitempty"`

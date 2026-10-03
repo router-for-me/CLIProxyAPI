@@ -3,10 +3,12 @@ package helps
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"reflect"
 	"strings"
 	"sync"
@@ -54,6 +56,10 @@ type UsageReporter struct {
 	ttftStart           time.Time
 	ttftSet             bool
 	once                sync.Once
+
+	upstreamMu        sync.Mutex
+	upstreamTiming    upstreamAttemptTiming
+	upstreamTimingSet bool
 
 	responseModelMu sync.RWMutex
 	// responseModel holds the latest model name reported by the upstream response.
@@ -509,7 +515,26 @@ func (r *UsageReporter) MarkFirstResponseByte() {
 	if start.IsZero() {
 		return
 	}
-	r.setTTFT(time.Since(start))
+	elapsed := time.Since(start)
+	r.recordFirstPacket(elapsed)
+	r.setTTFT(elapsed)
+}
+
+// recordFirstPacket stores the first response body byte duration exactly once so
+// usage sinks can expose it next to the effective TTFT.
+func (r *UsageReporter) recordFirstPacket(elapsed time.Duration) {
+	if r == nil {
+		return
+	}
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	r.ttftMu.Lock()
+	if !r.firstPacketSet {
+		r.firstPacketDuration = elapsed
+		r.firstPacketSet = true
+	}
+	r.ttftMu.Unlock()
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -658,6 +683,10 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
 		TTFT:                r.ttftDuration(),
+		UpstreamTTFB:        r.upstreamTimings().upstreamTTFB,
+		FirstPacket:         r.firstPacketElapsed(),
+		ConnSetup:           r.upstreamTimings().connSetup,
+		ConnReused:          r.upstreamTimings().connReused,
 		Failed:              failed,
 		Fail:                fail,
 		Detail:              detail,
@@ -731,6 +760,135 @@ func (r *UsageReporter) ttftDuration() time.Duration {
 	return 0
 }
 
+// upstreamAttemptTiming captures transport-level timings of one upstream HTTP attempt.
+type upstreamAttemptTiming struct {
+	// upstreamTTFB spans request dispatch until the first response header byte.
+	upstreamTTFB time.Duration
+	// connSetup accumulates DNS + TCP connect + TLS handshake durations.
+	connSetup time.Duration
+	// connReused reports whether a pooled connection was reused.
+	connReused bool
+}
+
+// upstreamTraceCollector gathers httptrace callbacks for one upstream attempt.
+type upstreamTraceCollector struct {
+	mu           sync.Mutex
+	start        time.Time
+	dnsStart     time.Time
+	connectStart time.Time
+	tlsStart     time.Time
+	timing       upstreamAttemptTiming
+	headerSet    bool
+}
+
+func newUpstreamTraceCollector() *upstreamTraceCollector {
+	return &upstreamTraceCollector{start: time.Now()}
+}
+
+// trace returns the httptrace.ClientTrace wired into the upstream request context.
+func (c *upstreamTraceCollector) trace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		DNSStart: func(httptrace.DNSStartInfo) {
+			c.mu.Lock()
+			c.dnsStart = time.Now()
+			c.mu.Unlock()
+		},
+		DNSDone: func(httptrace.DNSDoneInfo) {
+			c.mu.Lock()
+			if !c.dnsStart.IsZero() {
+				c.timing.connSetup += time.Since(c.dnsStart)
+				c.dnsStart = time.Time{}
+			}
+			c.mu.Unlock()
+		},
+		ConnectStart: func(string, string) {
+			c.mu.Lock()
+			c.connectStart = time.Now()
+			c.mu.Unlock()
+		},
+		ConnectDone: func(string, string, error) {
+			c.mu.Lock()
+			if !c.connectStart.IsZero() {
+				c.timing.connSetup += time.Since(c.connectStart)
+				c.connectStart = time.Time{}
+			}
+			c.mu.Unlock()
+		},
+		TLSHandshakeStart: func() {
+			c.mu.Lock()
+			c.tlsStart = time.Now()
+			c.mu.Unlock()
+		},
+		TLSHandshakeDone: func(tls.ConnectionState, error) {
+			c.mu.Lock()
+			if !c.tlsStart.IsZero() {
+				c.timing.connSetup += time.Since(c.tlsStart)
+				c.tlsStart = time.Time{}
+			}
+			c.mu.Unlock()
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			c.mu.Lock()
+			c.timing.connReused = info.Reused
+			c.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			c.mu.Lock()
+			if !c.headerSet {
+				c.timing.upstreamTTFB = time.Since(c.start)
+				c.headerSet = true
+			}
+			c.mu.Unlock()
+		},
+	}
+}
+
+// snapshot returns the timings collected so far.
+func (c *upstreamTraceCollector) snapshot() upstreamAttemptTiming {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.timing
+}
+
+// ObserveUpstreamAttempt records transport-level timings of one upstream HTTP
+// attempt. The first observed attempt wins so credential retries cannot
+// overwrite the recorded timings.
+func (r *UsageReporter) ObserveUpstreamAttempt(timing upstreamAttemptTiming) {
+	if r == nil {
+		return
+	}
+	r.upstreamMu.Lock()
+	defer r.upstreamMu.Unlock()
+	if r.upstreamTimingSet {
+		return
+	}
+	r.upstreamTiming = timing
+	r.upstreamTimingSet = true
+}
+
+// upstreamTimings returns the recorded upstream attempt timings.
+func (r *UsageReporter) upstreamTimings() upstreamAttemptTiming {
+	if r == nil {
+		return upstreamAttemptTiming{}
+	}
+	r.upstreamMu.Lock()
+	defer r.upstreamMu.Unlock()
+	return r.upstreamTiming
+}
+
+// firstPacketElapsed returns the recorded first response body byte duration.
+func (r *UsageReporter) firstPacketElapsed() time.Duration {
+	if r == nil {
+		return 0
+	}
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	if r.firstPacketSet {
+		return r.firstPacketDuration
+	}
+	return 0
+}
+
 type usageTTFTRoundTripper struct {
 	base       http.RoundTripper
 	reporter   *UsageReporter
@@ -740,7 +898,10 @@ type usageTTFTRoundTripper struct {
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
+	collector := newUpstreamTraceCollector()
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), collector.trace()))
 	resp, errRoundTrip := t.base.RoundTrip(req)
+	t.reporter.ObserveUpstreamAttempt(collector.snapshot())
 	if errRoundTrip != nil {
 		return resp, errRoundTrip
 	}
