@@ -625,7 +625,7 @@ func scanAPIKeyRows(row *sql.Rows) (*APIKey, *Policy, error) {
 		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
 		&maxParallel,
 		&allowedModels, &blockedModels, &modelRoutes, &modelGroupID,
-		&allowedIPs, &blockedIPs, &policyUpdatedAt, &storeBodies,
+		&allowedIPs, &blockedIPs, &storeBodies, &policyUpdatedAt,
 	); err != nil {
 		return nil, nil, err
 	}
@@ -705,7 +705,7 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
 		&maxParallel,
 		&allowedModels, &blockedModels, &modelRoutes, &modelGroupID,
-		&allowedIPs, &blockedIPs, &policyUpdatedAt, &storeBodies,
+		&allowedIPs, &blockedIPs, &storeBodies, &policyUpdatedAt,
 	); err != nil {
 		return nil, nil, err
 	}
