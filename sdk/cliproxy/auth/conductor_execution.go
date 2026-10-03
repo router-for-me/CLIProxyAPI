@@ -126,6 +126,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	opts = withPromptCacheKeyLabels(normalized, req, opts)
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
 		return resp, unwrapExecutionBoundaryError(errHome)
@@ -186,6 +187,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	opts = withPromptCacheKeyLabels(normalized, req, opts)
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, true)
 		return resp, unwrapExecutionBoundaryError(errHome)
@@ -244,6 +246,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	opts = withPromptCacheKeyLabels(normalized, req, opts)
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1607,7 +1610,31 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 		ctx = coreusage.WithGenerate(ctx, generate)
 	}
 	ctx = coreusage.WithStream(ctx, opts.Stream)
+	if source := cliproxyexecutor.PromptCacheKeySourceFromMetadata(opts.Metadata); source != "" {
+		ctx = coreusage.WithPromptCacheKey(ctx, coreusage.PromptCacheKeyInfo{
+			Source: source,
+			ID:     cliproxyexecutor.PromptCacheKeyIDFromMetadata(opts.Metadata),
+		})
+	}
 	return ctx
+}
+
+// withPromptCacheKeyLabels resolves the prompt-cache routing identity once per request and
+// records its source and id in opts.Metadata for usage sinks. It is observation only: the
+// request body, the upstream headers and credential selection do not read these labels.
+// A metadata map that already carries a source is returned as is, so retries and nested
+// executions do not resolve again.
+func withPromptCacheKeyLabels(providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	if cliproxyexecutor.PromptCacheKeySourceFromMetadata(opts.Metadata) != "" {
+		return opts
+	}
+	payload := req.Payload
+	if len(payload) == 0 {
+		payload = opts.OriginalRequest
+	}
+	res := cliproxyexecutor.ResolvePromptCacheKey(strings.Join(providers, ","), payload, opts.Headers, opts.Metadata)
+	opts.Metadata = cliproxyexecutor.ApplyPromptCacheKeyMetadata(opts.Metadata, res)
+	return opts
 }
 
 func requestedModelAliasFromOptions(opts cliproxyexecutor.Options, fallback string) string {
