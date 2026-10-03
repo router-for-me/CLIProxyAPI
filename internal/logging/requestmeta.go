@@ -5,11 +5,30 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type endpointKey struct{}
 type responseStatusKey struct{}
 type responseHeadersKey struct{}
+type quotaObserverKey struct{}
+type QuotaObserver func(http.Header, time.Time, string)
+
+func WithQuotaObserver(ctx context.Context, observer QuotaObserver) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, quotaObserverKey{}, observer)
+}
+func ObserveQuota(ctx context.Context, h http.Header, source string) {
+	if ctx == nil || len(h) == 0 {
+		return
+	}
+	if fn, ok := ctx.Value(quotaObserverKey{}).(QuotaObserver); ok && fn != nil {
+		fn(h, time.Now(), source)
+	}
+}
+
 type clientRequestMetadataKey struct{}
 
 // ClientRequestMetadata stores immutable downstream request metadata for asynchronous consumers.
@@ -113,6 +132,7 @@ func SetResponseStatus(ctx context.Context, status int) {
 }
 
 func SetResponseHeaders(ctx context.Context, headers http.Header) {
+	ObserveQuota(ctx, headers, "api_response_headers")
 	if ctx == nil {
 		return
 	}

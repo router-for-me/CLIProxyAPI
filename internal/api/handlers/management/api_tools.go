@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -33,6 +34,7 @@ type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
 	AuthIndexCamel  *string           `json:"authIndex"`
 	AuthIndexPascal *string           `json:"AuthIndex"`
+	QuotaSource     string            `json:"quota_source,omitempty"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	ProxyURL        string            `json:"proxy_url"`
@@ -232,6 +234,13 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	if auth != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && ((auth.Provider == "codex" && parsedURL.Hostname() == "chatgpt.com" && parsedURL.Path == "/backend-api/wham/usage") || (auth.Provider == "claude" && parsedURL.Hostname() == "api.anthropic.com" && parsedURL.Path == "/api/oauth/usage")) {
+		source := "manual_provider_query"
+		if body.QuotaSource == "scheduled" {
+			source = "scheduled_provider_query"
+		}
+		quotatraffic.CaptureQuery(auth.Index, auth.Provider, respBody, time.Now(), source)
+	}
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,

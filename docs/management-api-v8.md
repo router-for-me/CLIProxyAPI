@@ -161,3 +161,26 @@ accepts legacy, new, or mixed layouts, normalizing v8 documents on save.
 
 Plugin OAuth uses the shared v8 login endpoint. Other plugin-defined HTTP
 extensions retain their declared `/v0/management` routes.
+
+## Cached quota observations
+
+`GET /v8/management/quota/observations` returns `{"items": [...]}` from a
+bounded, memory-only cache of Codex and Claude quota observations. This route
+uses the existing management authentication and does not query providers.
+Disabled or removed credentials and observations belonging to a credential's
+previous provider are excluded.
+
+Each item contains `auth_index`, `provider`, `window`, allowlisted numeric
+`headers`, `observed_at` (RFC3339), and `source`. Sources are
+`api_response_headers`, `websocket_event`, `manual_provider_query`, and
+`scheduled_provider_query`. Successful management API calls to the supported
+provider usage endpoints also update this cache; `quota_source: "scheduled"`
+marks an existing scheduled query. Raw bodies, credential material, unrelated
+headers, reset-credit operations, and generation requests are not retained.
+
+Observations are ordered per account, provider and quota window. Late or equal
+timestamps do not replace existing data; reads do not advance capture times.
+The cache retains at most 4096 windows, evicts the oldest observation when full,
+and is empty after restart. Consumers must evaluate capture/reset times and
+display missing or stale observations explicitly. Accounts without supported
+traffic still need the existing manual or scheduled quota queries.

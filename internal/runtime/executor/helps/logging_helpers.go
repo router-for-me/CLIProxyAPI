@@ -403,7 +403,9 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 // AppendCodexAPIWebsocketResponse stores a codex upstream websocket response frame and merges any
 // quota event headers carried by the frame into the request log.
 func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
-	logging.MergeResponseHeaders(ctx, ParseCodexQuotaEventHeaders(payload))
+	quotaHeaders := ParseCodexQuotaEventHeaders(payload)
+	logging.ObserveQuota(ctx, quotaHeaders, "websocket_event")
+	logging.MergeResponseHeaders(ctx, quotaHeaders)
 	AppendAPIWebsocketResponse(ctx, cfg, payload)
 }
 
