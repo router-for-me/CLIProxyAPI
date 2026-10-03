@@ -42,6 +42,9 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
@@ -130,6 +133,8 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 waitForCallback:
 	for {
 		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		case result = <-callbackCh:
 			break waitForCallback
 		case err = <-callbackErrCh:

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	"golang.org/x/net/context"
 )
@@ -195,6 +196,28 @@ func (h *BaseAPIHandler) ExecuteProtocolWithAuthManager(ctx context.Context, req
 	}, nil
 }
 
+// CountProtocolWithAuthManager counts tokens for a route-level request with an
+// explicit provider and a separate model used only for auth selection.
+func (h *BaseAPIHandler) CountProtocolWithAuthManager(ctx context.Context, req ProtocolExecutionRequest) (ModelExecutionResponse, *interfaces.ErrorMessage) {
+	if req.Stream {
+		return ModelExecutionResponse{}, modelExecutionModeError("CountProtocolWithAuthManager requires Stream=false")
+	}
+	body, headers, errMsg := h.executeCountWithAuthManager(ctx, req.EntryProtocol, req.Model, cloneBytes(req.Body), req.Alt, modelExecutionOptions{
+		Headers:            req.Headers,
+		Query:              req.Query,
+		ForcedProvider:     req.ForcedProvider,
+		AuthSelectionModel: req.AuthSelectionModel,
+	})
+	if errMsg != nil {
+		return ModelExecutionResponse{}, errMsg
+	}
+	return ModelExecutionResponse{
+		StatusCode: http.StatusOK,
+		Headers:    cloneHeader(headers),
+		Body:       cloneBytes(body),
+	}, nil
+}
+
 // ExecuteProtocolStreamWithAuthManager executes a route-level streaming request with explicit protocols.
 func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Context, req ProtocolExecutionRequest) (ModelExecutionStream, *interfaces.ErrorMessage) {
 	if !req.Stream {
@@ -208,7 +231,15 @@ func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Contex
 		AuthSelectionModel: req.AuthSelectionModel,
 		Path:               strings.TrimSpace(req.Path),
 	})
-	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
+	var chunks <-chan ModelExecutionChunk
+	var errMsg *interfaces.ErrorMessage
+	if _, native := coreexecutor.NativeClaudeProtocolHeadersFromContext(ctx); native && dataChan != nil && req.EntryProtocol == "claude" && modelExecutionResponseProtocol(req.EntryProtocol, req.ExitProtocol) == "claude" {
+		// The native HTTP executor resolves non-success statuses synchronously.
+		// Keep successful headers available without consuming a body chunk.
+		chunks = wrapModelExecutionChunks(ctx, dataChan, errChan, nil)
+	} else {
+		chunks, errMsg = prepareModelExecutionStream(ctx, dataChan, errChan)
+	}
 	if errMsg != nil {
 		return ModelExecutionStream{}, errMsg
 	}

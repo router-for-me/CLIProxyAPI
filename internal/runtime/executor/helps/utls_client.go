@@ -255,6 +255,15 @@ var claudeCodeRoundTripperCache = internalcache.NewBoundedLRU[string, http.Round
 	},
 )
 
+var rawClaudeCodeRoundTripperCache = internalcache.NewBoundedLRU[string, http.RoundTripper](
+	claudeCodeRoundTripperCacheCapacity,
+	func(_ string, roundTripper http.RoundTripper) {
+		if transport, ok := roundTripper.(interface{ CloseIdleConnections() }); ok {
+			transport.CloseIdleConnections()
+		}
+	},
+)
+
 var claudeCodeMessagesHeaderOrder = []string{
 	"Accept",
 	"Authorization",
@@ -313,11 +322,25 @@ func claudeCodeRequestHeaderOrder(_, requestTarget string) []string {
 
 func cachedClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	return claudeCodeRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
-		return newClaudeCodeRoundTripper(proxyURL)
+		return newClaudeCodeRoundTripperWithCompression(proxyURL, false)
 	})
 }
 
 func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
+	return newClaudeCodeRoundTripperWithCompression(proxyURL, false)
+}
+
+func cachedRawClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
+	return rawClaudeCodeRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
+		return newClaudeCodeRoundTripperWithCompression(proxyURL, true)
+	})
+}
+
+func newRawClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
+	return newClaudeCodeRoundTripperWithCompression(proxyURL, true)
+}
+
+func newClaudeCodeRoundTripperWithCompression(proxyURL string, disableCompression bool) http.RoundTripper {
 	// The cache is scoped to this round tripper, which is already keyed by proxy,
 	// so resumption never crosses proxy boundaries.
 	sessionCache := tls.NewLRUClientSessionCache(claudeCodeSessionCacheCapacity)
@@ -332,7 +355,8 @@ func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	}
 
 	transport := &http.Transport{
-		ForceAttemptHTTP2: false,
+		ForceAttemptHTTP2:  false,
+		DisableCompression: disableCompression,
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var (
 				conn net.Conn
@@ -396,6 +420,17 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
 // fallback for other hosts.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	return newUtlsHTTPClient(ctx, cfg, auth, timeout, false)
+}
+
+// NewRawUtlsHTTPClient creates the same provider-specific client while disabling
+// Go's implicit gzip negotiation and decoding on Anthropic requests. Callers use
+// it when response representation bytes and Content-Encoding must stay intact.
+func NewRawUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	return newUtlsHTTPClient(ctx, cfg, auth, timeout, true)
+}
+
+func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration, rawAnthropic bool) *http.Client {
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	var ctxRoundTripper http.RoundTripper
@@ -405,6 +440,9 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 
 	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
+	if rawAnthropic {
+		anthropicRT = cachedRawClaudeCodeRoundTripper(proxyURL)
+	}
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {

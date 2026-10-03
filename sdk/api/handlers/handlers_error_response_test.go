@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -41,6 +42,18 @@ type responseBodyOnlyTestError struct {
 func (e responseBodyOnlyTestError) Error() string        { return string(e.body) }
 func (e responseBodyOnlyTestError) StatusCode() int      { return e.status }
 func (e responseBodyOnlyTestError) ResponseBody() []byte { return e.body }
+
+type directResponseHeadersTestError struct {
+	status  int
+	body    []byte
+	headers http.Header
+}
+
+func (e directResponseHeadersTestError) Error() string                { return string(e.body) }
+func (e directResponseHeadersTestError) StatusCode() int              { return e.status }
+func (e directResponseHeadersTestError) DirectResponse() bool         { return true }
+func (e directResponseHeadersTestError) ResponseBody() []byte         { return e.body }
+func (e directResponseHeadersTestError) ResponseHeaders() http.Header { return e.headers.Clone() }
 
 func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -145,6 +158,30 @@ func TestExecutionErrorMessagePreservesMarkedResponseBodyExactly(t *testing.T) {
 				t.Fatalf("Content-Type = %q, want %q", got, tt.contentType)
 			}
 		})
+	}
+}
+
+func TestExecutionErrorMessagePreservesMarkedResponseHeaders(t *testing.T) {
+	body := []byte(`{"error":"limited"}`)
+	headers := http.Header{
+		"Content-Type":              {"application/problem+json"},
+		"X-Anthropic-Future-Header": {"one", "two"},
+		"Set-Cookie":                {"cookie-a", "cookie-b"},
+	}
+	msg := executionErrorMessage(fmt.Errorf("wrapped: %w", directResponseHeadersTestError{
+		status:  http.StatusTooManyRequests,
+		body:    body,
+		headers: headers,
+	}))
+	if msg == nil || !msg.DirectResponse || msg.StatusCode != http.StatusTooManyRequests || !bytes.Equal(msg.Body, body) {
+		t.Fatalf("direct response changed: %#v", msg)
+	}
+	if !reflect.DeepEqual(msg.Headers, headers) {
+		t.Fatalf("direct response headers = %v, want %v", msg.Headers, headers)
+	}
+	msg.Headers.Add("X-Anthropic-Future-Header", "three")
+	if got := headers.Values("X-Anthropic-Future-Header"); !reflect.DeepEqual(got, []string{"one", "two"}) {
+		t.Fatalf("execution message aliased provider headers: %v", got)
 	}
 }
 

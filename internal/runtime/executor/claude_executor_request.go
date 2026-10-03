@@ -657,7 +657,7 @@ func withClaudeAdvisorToolBeta(betas string) string {
 // request shape combined with the account's entitlements, not of the credential's
 // health. The auth manager must neither rotate nor cool down on these.
 type claudeEntitlementError struct {
-	statusErr
+	claudeStatusErrorWithHeaders
 }
 
 func (claudeEntitlementError) IsRequestScoped() bool {
@@ -669,7 +669,7 @@ func (claudeEntitlementError) IsCredentialScoped() bool {
 }
 
 type claudeRateLimitError struct {
-	statusErr
+	claudeStatusErrorWithHeaders
 	credentialScoped bool
 }
 
@@ -680,6 +680,14 @@ func (e claudeRateLimitError) IsCredentialScoped() bool {
 func (e claudeRateLimitError) IsRequestScoped() bool {
 	return false
 }
+
+// Preserve concrete statusErr traversal used by compatible-provider thinking
+// replay cleanup, as well as the direct Headers interface used by SDK handlers.
+type claudeStatusErrorWithHeaders struct {
+	statusErrWithHeaders
+}
+
+func (e claudeStatusErrorWithHeaders) Unwrap() error { return e.statusErr }
 
 // classifyClaudeUpstreamError promotes upstream refusals that no other credential
 // can satisfy into request-scoped errors.
@@ -700,16 +708,22 @@ func classifyClaudeUpstreamErrorWithCooling(statusCode int, headers http.Header,
 	if statusCode == http.StatusTooManyRequests || (statusCode >= 400 && statusCode < 600) {
 		retryAfter = helps.ParseClaudeRateLimitReset(headers, time.Now())
 	}
-	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter}
+	// Keep response protocol signals on every error variant. The SDK's error
+	// path reads Headers directly, so wrapping only ordinary status errors
+	// would still lose retry/rate-limit metadata on classified Claude 429s.
+	err := claudeStatusErrorWithHeaders{statusErrWithHeaders{
+		statusErr: statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter},
+		headers:   headers.Clone(),
+	}}
 	if statusCode == http.StatusTooManyRequests {
 		if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
-			return claudeRateLimitError{statusErr: err, credentialScoped: true}
+			return claudeRateLimitError{claudeStatusErrorWithHeaders: err, credentialScoped: true}
 		}
 		if claudeBodyIndicatesFastModeCredits(body) {
 			return claudeEntitlementError{err}
 		}
 		// Ordinary model-level Claude 429 (not a unified 5h/7d rejection)
-		return claudeRateLimitError{statusErr: err, credentialScoped: false}
+		return claudeRateLimitError{claudeStatusErrorWithHeaders: err, credentialScoped: false}
 	}
 	return err
 }
@@ -1475,6 +1489,21 @@ func applyClaudeHeadersWithNativeProfile(
 // for one of the three request paths to drift away from the others, which is
 // exactly how the streaming and non-streaming beta sets diverged before.
 func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+	if native, ok := cliproxyexecutor.NativeClaudeProtocolHeadersFromContext(req.Context()); ok {
+		// Only the in-process native adapter opts in. The executor has already
+		// resolved the selected OAuth identity. Never reuse master credentials;
+		// the resolved request session below replaces the native header snapshot.
+		if !isAnthropicUpstreamURL(req.URL) {
+			return nil, fmt.Errorf("native Claude protocol headers require the Anthropic origin")
+		}
+		for _, key := range []string{"Authorization", "X-Api-Key", "X-Claude-Code-Session-Id"} {
+			if values := req.Header.Values(key); len(values) != 0 {
+				native[key] = append([]string(nil), values...)
+			}
+		}
+		native.Set("Content-Type", "application/json")
+		req.Header = native
+	}
 	applyClaudeWireHeaderCasing(req)
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	return client.Do(req)

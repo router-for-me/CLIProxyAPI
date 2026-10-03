@@ -1,5 +1,10 @@
 # CLI Proxy API
 
+This fork adds an experimental, account-pinned Claude Code launcher. See
+[Claude master with separate inference profiles](docs/claude-master.md) for its
+architecture, security boundaries, setup, and verification status. The original
+CLIProxyAPI server remains available unchanged.
+
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
 If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.

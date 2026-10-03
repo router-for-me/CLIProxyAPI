@@ -28,6 +28,7 @@ type authAutoRefreshLoop struct {
 
 	wakeCh chan struct{}
 	jobs   chan *authRefreshJob
+	done   chan struct{}
 }
 
 type authRefreshJob struct {
@@ -57,6 +58,7 @@ func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrenc
 		dirty:       make(map[string]struct{}),
 		wakeCh:      make(chan struct{}, 1),
 		jobs:        make(chan *authRefreshJob, jobBuffer),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -74,7 +76,11 @@ func (l *authAutoRefreshLoop) queueReschedule(authID string) {
 }
 
 func (l *authAutoRefreshLoop) run(ctx context.Context) {
-	if l == nil || l.manager == nil {
+	if l == nil {
+		return
+	}
+	defer close(l.done)
+	if l.manager == nil {
 		return
 	}
 
@@ -84,19 +90,33 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 	if workers <= 0 {
 		workers = refreshMaxConcurrency
 	}
+	var pending sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go l.worker(ctx)
+		pending.Add(1)
+		go func() {
+			defer pending.Done()
+			l.worker(ctx)
+		}()
 	}
 
 	l.loop(ctx)
+	// A provider may finish credential rotation after cancellation. Keep the
+	// lifecycle open until the worker also persists the returned credential.
+	pending.Wait()
 }
 
 func (l *authAutoRefreshLoop) worker(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case job := <-l.jobs:
+			if ctx.Err() != nil {
+				return
+			}
 			if job == nil {
 				continue
 			}

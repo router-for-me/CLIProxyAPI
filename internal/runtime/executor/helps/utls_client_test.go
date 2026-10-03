@@ -288,6 +288,16 @@ func TestClaudeCodeTLSClientHelloSpecMatches220Capture(t *testing.T) {
 	}
 }
 
+func TestRawClaudeCodeRoundTripperDisablesTransparentCompression(t *testing.T) {
+	transport, ok := newRawClaudeCodeRoundTripper("").(*http.Transport)
+	if !ok {
+		t.Fatalf("raw Claude Code transport type = %T, want *http.Transport", newRawClaudeCodeRoundTripper(""))
+	}
+	if !transport.DisableCompression {
+		t.Fatal("raw Claude Code transport permits implicit gzip decoding")
+	}
+}
+
 func TestClaudeCodeTLSResumptionIsWireSafe(t *testing.T) {
 	t.Parallel()
 
