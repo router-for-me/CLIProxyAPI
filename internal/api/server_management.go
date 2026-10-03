@@ -82,8 +82,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/reset-quota", s.mgmt.ResetQuota)
 
 		mgmt.GET("/quota/providers", s.mgmt.GetQuotaProviders)
+		mgmt.GET("/quota/api-keys", s.mgmt.GetOpenAICompatQuota)
 		mgmt.POST("/quota/fetch", s.mgmt.FetchCredentialQuota)
 		mgmt.POST("/quota/reset", s.mgmt.ResetCredentialQuota)
+
+		// coding-agents routes live only under /v8/management (v0 is deprecated).
 
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)

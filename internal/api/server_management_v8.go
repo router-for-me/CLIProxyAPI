@@ -39,6 +39,12 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/logs/requests/:id", s.mgmt.GetRequestLogByID)
 	v8.GET("/observability/usage/api-keys", s.mgmt.GetAPIKeyUsage)
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
+	v8.GET("/observability/quota/api-keys", s.mgmt.GetOpenAICompatQuota)
+	v8.GET("/coding-agents/status", s.mgmt.GetCodingAgentsStatus)
+	v8.GET("/coding-agents/backups", s.mgmt.GetCodingAgentsBackups)
+	v8.GET("/coding-agents/plan", s.mgmt.GetCodingAgentsPlan)
+	v8.POST("/coding-agents/apply", s.mgmt.PostCodingAgentsApply)
+	v8.POST("/coding-agents/revert", s.mgmt.PostCodingAgentsRevert)
 
 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
 	v8.POST("/credentials", s.mgmt.UploadAuthFile)
