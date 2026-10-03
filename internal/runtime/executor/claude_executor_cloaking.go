@@ -370,7 +370,7 @@ func checkSystemInstructionsWithSigningModeAt(
 	if len(forwardedSystemBlocks) == 0 {
 		return injectClaudeCodeCurrentDate(payload, currentDate)
 	}
-	if claudeHistoryHasAdvisorCallOrResult(payload) {
+	if claudeHistoryHasAdvisorCallOrResult(payload) || claudeMidConversationSystemWouldFollowNewestContent(payload) {
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildTextBlock(block, nil))
 		}
@@ -751,6 +751,22 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+// Anthropic accepts a role=system turn only before an assistant turn or at the
+// end of the array.
+func claudeMidConversationSystemWouldFollowNewestContent(payload []byte) bool {
+	firstUserIdx := firstClaudeUserMessageIndex(payload)
+	messages := gjson.GetBytes(payload, "messages").Array()
+	if firstUserIdx < 0 || firstUserIdx+1 >= len(messages) {
+		return false
+	}
+	for _, message := range messages[firstUserIdx+1:] {
+		if message.Get("role").String() != "user" {
+			return false
+		}
+	}
+	return true
 }
 
 func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) []byte {
