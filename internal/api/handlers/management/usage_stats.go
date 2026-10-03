@@ -267,6 +267,69 @@ func (h *Handler) GetUsageTotals(c *gin.Context) {
 	})
 }
 
+// GetProviderPerformance handles GET /v0/management/usage-stats/provider-performance.
+//
+// Query parameters:
+//   - group_by: "provider" (default) | "model"
+//   - provider, model, api_key_id, from, to, limit
+//
+// Returns per-upstream-provider (or per-model) latency and throughput metrics
+// aggregated from usage_events: average and p50/p95 latency and TTFT, token
+// generation speed (output tokens per generation-second), and request
+// throughput. Failed attempts are folded in from usage_errors as ErrorCount /
+// ErrorRate. When neither bound is supplied the window defaults to the last
+// 24h so the scan stays bounded and never competes with the proxy write path.
+func (h *Handler) GetProviderPerformance(c *gin.Context) {
+	_, usage, _, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	q := parseUsageStatsQuery(c)
+	if q.From.IsZero() && q.To.IsZero() {
+		q.To = time.Now().UTC()
+		q.From = q.To.Add(-24 * time.Hour)
+	}
+	groupBy := c.DefaultQuery("group_by", "provider")
+	filter := filterFromQuery(q)
+	perf, err := usage.SelectProviderPerformance(c.Request.Context(), filter, groupBy)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+		return
+	}
+	// Failed attempts are stored in usage_errors (usage_events holds successes
+	// only), so fold their per-dimension counts onto the success rows to derive
+	// the true error rate over total attempts.
+	errFilter := filter
+	errFilter.GroupBy = groupBy
+	errAggs, err := usage.SelectErrorAggregate(c.Request.Context(), errFilter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	failedByKey := make(map[string]int64, len(errAggs))
+	for _, a := range errAggs {
+		failedByKey[a.Bucket] = a.FailedCount
+	}
+	for i := range perf {
+		key := perf[i].Provider
+		if groupBy == "model" {
+			key = perf[i].Model
+		}
+		if n := failedByKey[key]; n > 0 {
+			perf[i].ErrorCount = n
+			if total := perf[i].RequestCount + n; total > 0 {
+				perf[i].ErrorRate = float64(n) / float64(total)
+			}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"entries":  perf,
+		"group_by": groupBy,
+		"from":     q.From,
+		"to":       q.To,
+	})
+}
+
 // filterFromQuery converts the parsed query struct into a store.UsageFilter,
 // trimming empty values so they are not added as WHERE clauses.
 func filterFromQuery(q usageStatsQuery) store.UsageFilter {

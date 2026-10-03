@@ -679,3 +679,125 @@ func TestInsertEventPersistsEnergyAndProviderMetadata(t *testing.T) {
 		t.Fatalf("provider_metadata = %s; want {} for event without metadata", metadata)
 	}
 }
+
+// TestProviderPerformanceWindowSeconds covers the pure window-resolution
+// helper without a database: an explicit filter range wins, otherwise the
+// observed MIN..MAX span is used, and a sub-second span is floored to 1s so a
+// dense burst is never divided by ~zero.
+func TestProviderPerformanceWindowSeconds(t *testing.T) {
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := from.Add(30 * time.Second)
+
+	if got := performanceWindowSeconds(UsageFilter{From: from, To: to}, 5); !approxEqual(got, 30) {
+		t.Errorf("explicit range window = %v; want 30", got)
+	}
+	if got := performanceWindowSeconds(UsageFilter{}, 12.5); !approxEqual(got, 12.5) {
+		t.Errorf("observed span window = %v; want 12.5", got)
+	}
+	if got := performanceWindowSeconds(UsageFilter{}, 0.2); !approxEqual(got, 1) {
+		t.Errorf("sub-second span window = %v; want 1", got)
+	}
+	if got := performanceWindowSeconds(UsageFilter{}, 0); !approxEqual(got, 1) {
+		t.Errorf("zero span window = %v; want 1", got)
+	}
+}
+
+// TestUsageStoreSelectProviderPerformance exercises the per-provider latency /
+// throughput aggregate over real usage_events rows: counts, average and
+// percentile latency/TTFT, token generation speed, and request throughput.
+func TestUsageStoreSelectProviderPerformance(t *testing.T) {
+	store := newTestPostgresStore(t, "usage_provider_perf")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	events := []UsageEvent{
+		{RequestID: "a1", Provider: "anthropic", Model: "m1", LatencyMs: 1000, TTFTMs: 200, OutputTokens: 800, TotalTokens: 1000, RequestedAt: base},
+		{RequestID: "a2", Provider: "anthropic", Model: "m1", LatencyMs: 3000, TTFTMs: 500, OutputTokens: 1500, TotalTokens: 2000, RequestedAt: base.Add(10 * time.Second)},
+		{RequestID: "a3", Provider: "anthropic", Model: "m2", LatencyMs: 2000, TTFTMs: 400, OutputTokens: 1000, TotalTokens: 1200, RequestedAt: base.Add(20 * time.Second)},
+		{RequestID: "o1", Provider: "openai", Model: "m1", LatencyMs: 500, TTFTMs: 100, OutputTokens: 200, TotalTokens: 300, RequestedAt: base.Add(5 * time.Second)},
+	}
+	for _, e := range events {
+		if err := us.InsertEvent(ctx, e); err != nil {
+			t.Fatalf("InsertEvent(%s): %v", e.RequestID, err)
+		}
+	}
+
+	filter := UsageFilter{From: base, To: base.Add(30 * time.Second)}
+	rows, err := us.SelectProviderPerformance(ctx, filter, "provider")
+	if err != nil {
+		t.Fatalf("SelectProviderPerformance: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d provider rows; want 2 (%+v)", len(rows), rows)
+	}
+	var anthropic *ProviderPerformance
+	for i := range rows {
+		if rows[i].Provider == "anthropic" {
+			anthropic = &rows[i]
+		}
+	}
+	if anthropic == nil {
+		t.Fatalf("anthropic row missing: %+v", rows)
+	}
+	if anthropic.RequestCount != 3 {
+		t.Errorf("request_count = %d; want 3", anthropic.RequestCount)
+	}
+	if !approxEqual(anthropic.AvgLatencyMs, 2000) {
+		t.Errorf("avg_latency_ms = %v; want 2000", anthropic.AvgLatencyMs)
+	}
+	if !approxEqual(anthropic.P50LatencyMs, 2000) {
+		t.Errorf("p50_latency_ms = %v; want 2000", anthropic.P50LatencyMs)
+	}
+	if !approxEqual(anthropic.P95LatencyMs, 2900) {
+		t.Errorf("p95_latency_ms = %v; want 2900", anthropic.P95LatencyMs)
+	}
+	if anthropic.MaxLatencyMs != 3000 {
+		t.Errorf("max_latency_ms = %d; want 3000", anthropic.MaxLatencyMs)
+	}
+	if !approxEqual(anthropic.AvgTTFTMs, 1100.0/3.0) {
+		t.Errorf("avg_ttft_ms = %v; want %v", anthropic.AvgTTFTMs, 1100.0/3.0)
+	}
+	if anthropic.OutputTokens != 3300 {
+		t.Errorf("output_tokens = %d; want 3300", anthropic.OutputTokens)
+	}
+	if !approxEqual(anthropic.WindowSeconds, 30) {
+		t.Errorf("window_seconds = %v; want 30", anthropic.WindowSeconds)
+	}
+	if !approxEqual(anthropic.RequestsPerSec, 0.1) {
+		t.Errorf("requests_per_second = %v; want 0.1", anthropic.RequestsPerSec)
+	}
+	// Generation window = (1000-200)+(3000-500)+(2000-400) = 4900ms.
+	// 3300 tokens / 4.9s = 673.47 tokens/s.
+	if !approxEqual(anthropic.TokensPerSecond, 3300.0/4.9) {
+		t.Errorf("tokens_per_second = %v; want %v", anthropic.TokensPerSecond, 3300.0/4.9)
+	}
+
+	// Drill-down by model within one provider.
+	perModel, err := us.SelectProviderPerformance(ctx, UsageFilter{Provider: "anthropic", From: base, To: base.Add(30 * time.Second)}, "model")
+	if err != nil {
+		t.Fatalf("SelectProviderPerformance(model): %v", err)
+	}
+	if len(perModel) != 2 {
+		t.Fatalf("got %d model rows; want 2 (%+v)", len(perModel), perModel)
+	}
+	var m1 *ProviderPerformance
+	for i := range perModel {
+		if perModel[i].Model == "m1" {
+			m1 = &perModel[i]
+		}
+	}
+	if m1 == nil {
+		t.Fatalf("m1 row missing: %+v", perModel)
+	}
+	if m1.RequestCount != 2 {
+		t.Errorf("m1 request_count = %d; want 2", m1.RequestCount)
+	}
+	if !approxEqual(m1.AvgLatencyMs, 2000) {
+		t.Errorf("m1 avg_latency_ms = %v; want 2000", m1.AvgLatencyMs)
+	}
+	// m1 generation window = (1000-200)+(3000-500) = 3300ms; 2300 tokens / 3.3s.
+	if !approxEqual(m1.TokensPerSecond, 2300.0/3.3) {
+		t.Errorf("m1 tokens_per_second = %v; want %v", m1.TokensPerSecond, 2300.0/3.3)
+	}
+}

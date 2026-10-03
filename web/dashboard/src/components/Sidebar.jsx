@@ -440,6 +440,7 @@ const NAV_GROUPS = [
     label: 'Analysis',
     items: [
       { to: '/usage', label: 'Usage Stats', icon: 'chart' },
+      { to: '/provider-performance', label: 'Provider Performance', icon: 'gauge' },
       { to: '/recent-events', label: 'Recent Events', icon: 'list' },
       { to: '/errors', label: 'Errors', icon: 'bug' },
       { to: '/cooldown-providers', label: 'Cooldown Providers', icon: 'snow' },
@@ -568,4 +569,5 @@ const ICON_MAP = {
   chat: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 11H6.5L4 13.5V11H4a1.5 1.5 0 0 1-1.5-1.5v-5z" /><path d="M5.5 6.5h5M5.5 8.5h3" /></svg>,
   terminal: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2" /><path d="M4 6l2.5 2.5L4 11M8.5 11h3.5" /></svg>,
   meter: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2.5 13A5.5 5.5 0 0 1 13.5 13" /><path d="M8 13L10.5 7" strokeLinejoin="round" /><circle cx="8" cy="13" r="0.8" fill="currentColor" stroke="none" /></svg>,
+  gauge: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2 12.5a6 6 0 1 1 12 0" /><path d="M8 12.5l3.5-4" strokeLinejoin="round" /><circle cx="8" cy="12.5" r="0.9" fill="currentColor" stroke="none" /><path d="M2.2 9.5h1.4M12.4 9.5h1.4M4.4 5.6l1 1M11.6 5.6l-1 1" /></svg>,
 };

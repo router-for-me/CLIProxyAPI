@@ -10,6 +10,7 @@ import LoginPage from './pages/LoginPage.jsx';
 import ApiKeysPage from './pages/ApiKeysPage.jsx';
 import ApiKeyDetailPage from './pages/ApiKeyDetailPage.jsx';
 import UsageStatsPage from './pages/UsageStatsPage.jsx';
+import ProviderPerformancePage from './pages/ProviderPerformancePage.jsx';
 import RecentEventsPage from './pages/RecentEventsPage.jsx';
 import ErrorsPage from './pages/ErrorsPage.jsx';
 import InternalUsersPage from './pages/InternalUsersPage.jsx';
@@ -346,6 +347,7 @@ export default function App() {
             <Route path="/api-keys" element={<ApiKeysPage />} />
             <Route path="/api-keys/:id" element={<ApiKeyDetailPage />} />
   <Route path="/usage" element={<UsageStatsPage />} />
+  <Route path="/provider-performance" element={<ProviderPerformancePage />} />
   <Route path="/recent-events" element={<RecentEventsPage />} />
   <Route path="/errors" element={<ErrorsPage />} />
   <Route path="/analysis/auto-routers" element={<AutoRouterAnalysisPage />} />

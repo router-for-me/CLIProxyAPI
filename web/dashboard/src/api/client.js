@@ -257,6 +257,17 @@ export async function getUsageTop({
   return fetchJSON(`/usage-stats/top${qs}`);
 }
 
+// Provider performance — per-upstream-provider latency / throughput metrics
+// (avg & p50/p95 latency and TTFT, tokens/sec, requests/sec, error rate)
+// aggregated over usage_events. groupBy is 'provider' (default) or 'model'.
+export async function getProviderPerformance({
+  groupBy = 'provider',
+  ...filter
+} = {}) {
+  const qs = toUsageQS({ ...filter, group_by: groupBy });
+  return fetchJSON(`/usage-stats/provider-performance${qs}`);
+}
+
 function toUsageQS(params) {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {

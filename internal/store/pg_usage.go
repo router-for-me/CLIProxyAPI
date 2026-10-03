@@ -168,6 +168,38 @@ type UsageAggregate struct {
 	CostUSD         float64 `json:"cost_usd"`
 }
 
+// ProviderPerformance is one aggregated request-timing/throughput row for an
+// upstream provider (or, when grouped by model, for a served model). Timing is
+// derived from successful usage_events rows; failed attempts are counted from
+// usage_errors by the caller and merged in as ErrorCount/ErrorRate.
+//
+// All latency and TTFT values are milliseconds. TokensPerSecond is output
+// tokens divided by the observed generation time (latency minus
+// time-to-first-token) — the same definition model_health uses. RequestsPerSec
+// is the request count divided by WindowSeconds, the wall-clock span the rows
+// were observed over (the filter range when both bounds are set, otherwise the
+// MIN..MAX requested_at span of the group, floored at one second).
+type ProviderPerformance struct {
+	Provider        string  `json:"provider,omitempty"`
+	Model           string  `json:"model,omitempty"`
+	RequestCount    int64   `json:"request_count"`
+	ErrorCount      int64   `json:"error_count"`
+	ErrorRate       float64 `json:"error_rate"`
+	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+	P50LatencyMs    float64 `json:"p50_latency_ms"`
+	P95LatencyMs    float64 `json:"p95_latency_ms"`
+	MaxLatencyMs    int64   `json:"max_latency_ms"`
+	AvgTTFTMs       float64 `json:"avg_ttft_ms"`
+	P50TTFTMs       float64 `json:"p50_ttft_ms"`
+	P95TTFTMs       float64 `json:"p95_ttft_ms"`
+	OutputTokens    int64   `json:"output_tokens"`
+	TotalTokens     int64   `json:"total_tokens"`
+	TokensPerSecond float64 `json:"tokens_per_second"`
+	RequestsPerSec  float64 `json:"requests_per_second"`
+	CostUSD         float64 `json:"cost_usd"`
+	WindowSeconds   float64 `json:"window_seconds"`
+}
+
 // AutoRouterTierStat is one aggregated row per complexity tier for a router.
 type AutoRouterTierStat struct {
 	Tier         string  `json:"tier"`
@@ -1598,6 +1630,112 @@ func (s *UsageStore) SelectTop(ctx context.Context, filter UsageFilter, dimensio
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// SelectProviderPerformance returns per-provider (or per-model) latency and
+// throughput metrics over the filtered usage_events window. groupBy selects
+// the grouping dimension: "provider" (default) or "model". It is a single
+// grouped scan over the same indexes as SelectTop; callers should keep the
+// window bounded (the management handler defaults to the last 24h) so the scan
+// stays cheap and never competes with the proxy's write path.
+//
+// ErrorCount/ErrorRate are left at zero here: failed attempts live in
+// usage_errors (not usage_events), so the caller merges them from
+// SelectErrorAggregate.
+func (s *UsageStore) SelectProviderPerformance(ctx context.Context, filter UsageFilter, groupBy string) ([]ProviderPerformance, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	groupBy = strings.ToLower(strings.TrimSpace(groupBy))
+	var dimCol string
+	switch groupBy {
+	case "", "provider":
+		groupBy = "provider"
+		dimCol = "e.provider"
+	case "model":
+		dimCol = "e.model"
+	default:
+		return nil, fmt.Errorf("postgres store: unsupported group_by %q (use provider|model)", groupBy)
+	}
+	var b strings.Builder
+	b.WriteString(`SELECT `)
+	b.WriteString(dimCol)
+	b.WriteString(` AS key,
+		COUNT(*) AS request_count,
+		COALESCE(AVG(e.latency_ms), 0),
+		COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY e.latency_ms), 0),
+		COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY e.latency_ms), 0),
+		COALESCE(MAX(e.latency_ms), 0),
+		COALESCE(AVG(e.ttft_ms), 0),
+		COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY e.ttft_ms), 0),
+		COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY e.ttft_ms), 0),
+		COALESCE(SUM(e.total_tokens), 0),
+		COALESCE(SUM(e.output_tokens), 0),
+		COALESCE(SUM(e.cost_usd), 0),
+		COALESCE(SUM(GREATEST(e.latency_ms - e.ttft_ms, 0)), 0),
+		COALESCE(EXTRACT(EPOCH FROM (MAX(e.requested_at) - MIN(e.requested_at))), 0)
+	FROM `)
+	b.WriteString(s.eventsTable)
+	b.WriteString(" e")
+	args := buildWhereClause(&b, filter)
+	b.WriteString(" GROUP BY ")
+	b.WriteString(dimCol)
+	b.WriteString(" ORDER BY COUNT(*) DESC, key ASC")
+	if filter.Limit > 0 {
+		args = append(args, filter.Limit)
+		b.WriteString(" LIMIT $")
+		b.WriteString(itoa(len(args)))
+	}
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: select provider performance: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ProviderPerformance, 0, 16)
+	for rows.Next() {
+		var (
+			key                    string
+			genMsSum, observedSpan float64
+			p                      ProviderPerformance
+		)
+		if err = rows.Scan(&key, &p.RequestCount,
+			&p.AvgLatencyMs, &p.P50LatencyMs, &p.P95LatencyMs, &p.MaxLatencyMs,
+			&p.AvgTTFTMs, &p.P50TTFTMs, &p.P95TTFTMs,
+			&p.TotalTokens, &p.OutputTokens, &p.CostUSD,
+			&genMsSum, &observedSpan); err != nil {
+			return nil, fmt.Errorf("postgres store: scan provider performance row: %w", err)
+		}
+		if groupBy == "model" {
+			p.Model = key
+		} else {
+			p.Provider = key
+		}
+		p.WindowSeconds = performanceWindowSeconds(filter, observedSpan)
+		p.RequestsPerSec = float64(p.RequestCount) / p.WindowSeconds
+		if genMsSum > 0 {
+			p.TokensPerSecond = float64(p.OutputTokens) / (genMsSum / 1000)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// performanceWindowSeconds resolves the wall-clock denominator for a
+// requests-per-second figure. The explicit filter range wins when both bounds
+// are set (an average throughput over the operator's selected window); it
+// otherwise falls back to the observed MIN..MAX requested_at span. The result
+// is floored at one second so a dense burst is never divided by a near-zero
+// span.
+func performanceWindowSeconds(filter UsageFilter, observedSpan float64) float64 {
+	if !filter.From.IsZero() && !filter.To.IsZero() {
+		if w := filter.To.Sub(filter.From).Seconds(); w >= 1 {
+			return w
+		}
+	}
+	if observedSpan >= 1 {
+		return observedSpan
+	}
+	return 1
 }
 
 // SelectTotals returns roll-up counts across the same filtered window. Useful
