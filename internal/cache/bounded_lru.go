@@ -65,6 +65,35 @@ func (cache *BoundedLRU[K, V]) GetOrAdd(key K, create func() V) V {
 	return value
 }
 
+// Set stores value under key, replacing any existing value, and evicts the least
+// recently used value when a new key crosses the bound. The optional eviction
+// callback runs for an evicted value after the cache lock is released; a replaced
+// value is not passed to it.
+func (cache *BoundedLRU[K, V]) Set(key K, value V) {
+	cache.mu.Lock()
+	if element, ok := cache.entries[key]; ok {
+		element.Value = boundedLRUEntry[K, V]{key: key, value: value}
+		cache.order.MoveToFront(element)
+		cache.mu.Unlock()
+		return
+	}
+	cache.entries[key] = cache.order.PushFront(boundedLRUEntry[K, V]{key: key, value: value})
+	var evicted boundedLRUEntry[K, V]
+	didEvict := false
+	if cache.order.Len() > cache.capacity {
+		oldest := cache.order.Back()
+		evicted = oldest.Value.(boundedLRUEntry[K, V])
+		delete(cache.entries, evicted.key)
+		cache.order.Remove(oldest)
+		didEvict = true
+	}
+	cache.mu.Unlock()
+
+	if didEvict && cache.onEvict != nil {
+		cache.onEvict(evicted.key, evicted.value)
+	}
+}
+
 func (cache *BoundedLRU[K, V]) Get(key K) (V, bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()

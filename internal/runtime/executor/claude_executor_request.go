@@ -7,6 +7,8 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -1648,17 +1651,22 @@ func isClaudeOAuthToken(apiKey string) bool {
 
 type claudeMCPAliasOptions struct {
 	secret string
+	// keyed marks a secret that is the caller's own API key. Only keyed callers
+	// get produced tool-name records (see claudeProducedToolNames).
+	keyed bool
 }
 
+// resolveClaudeMCPAliasOptions returns the MCP alias options for the downstream
+// caller in ctx. Only a caller with its own API key is keyed.
 func resolveClaudeMCPAliasOptions(ctx context.Context) claudeMCPAliasOptions {
 	// Alias identity belongs to the downstream caller, not to the selected
 	// upstream credential. This keeps names stable across OAuth refresh and auth
 	// failover while giving one caller a shared virtual MCP server component.
 	secret := strings.TrimSpace(helps.APIKeyFromContext(ctx))
 	if secret == "" {
-		secret = "cpa-claude-mcp-default-caller"
+		return claudeMCPAliasOptions{secret: "cpa-claude-mcp-default-caller"}
 	}
-	return claudeMCPAliasOptions{secret: secret}
+	return claudeMCPAliasOptions{secret: secret, keyed: true}
 }
 
 // prepareClaudeOAuthToolNamesForUpstream applies one request-local MCP symbol
@@ -1667,12 +1675,16 @@ func prepareClaudeOAuthToolNamesForUpstream(body []byte, mcpAliases claudeMCPAli
 	return remapOAuthToolNamesWithOptions(body, mcpAliases)
 }
 
-func restoreClaudeOAuthToolNamesFromResponse(body []byte, reverseMap map[string]string) ([]byte, error) {
-	return reverseRemapOAuthToolNames(body, reverseMap)
+// restoreClaudeOAuthToolNamesFromResponse restores client tool names in a
+// non-stream response and updates the caller's produced tool-name records.
+func restoreClaudeOAuthToolNamesFromResponse(body []byte, reverseMap map[string]string, mcpAliases claudeMCPAliasOptions) ([]byte, error) {
+	return reverseRemapOAuthToolNamesForCaller(body, reverseMap, mcpAliases)
 }
 
-func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string]string) ([]byte, error) {
-	return reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+// restoreClaudeOAuthToolNamesFromStreamLine restores client tool names in one
+// SSE line and updates the caller's produced tool-name records.
+func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string]string, mcpAliases claudeMCPAliasOptions) ([]byte, error) {
+	return reverseRemapOAuthToolNamesFromStreamLineForCaller(line, reverseMap, mcpAliases)
 }
 
 // remapOAuthToolNames represents every declared third-party client tool as a
@@ -1883,7 +1895,13 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 				case "tool_use":
 					nameResult := part.Get("name")
 					name := nameResult.String()
-					if newName, renamed := rewriteName(name); renamed {
+					if produced, ok := claudeProducedToolName(mcpAliases, part.Get("id").String(), name); ok {
+						quoted, _ := json.Marshal(produced)
+						if !appendRawEdit(nameResult, string(quoted)) {
+							validOffsets = false
+							return false
+						}
+					} else if newName, renamed := rewriteName(name); renamed {
 						if !appendStringEdit(nameResult, newName) {
 							validOffsets = false
 							return false
@@ -2148,7 +2166,10 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if newName, renamed := rewriteName(name); renamed {
+					if produced, ok := claudeProducedToolName(mcpAliases, part.Get("id").String(), name); ok {
+						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, produced)
+					} else if newName, renamed := rewriteName(name); renamed {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
 						recordRename(name, newName)
@@ -2247,6 +2268,7 @@ type claudeMCPAliasEntry struct {
 
 type claudeMCPAliasResolver struct {
 	exact        map[string]string
+	canonical    map[string]string // client name -> the alias the request-side remap writes
 	aliases      []claudeMCPAliasEntry
 	servers      map[string]struct{}
 	passthroughs []string
@@ -2264,9 +2286,12 @@ func (claudeMCPAliasRestoreError) IsRequestScoped() bool {
 	return true
 }
 
+// newClaudeMCPAliasResolver indexes a request's reverse alias map for restoring
+// tool names in the response.
 func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResolver {
 	resolver := claudeMCPAliasResolver{
 		exact:        reverseMap,
+		canonical:    make(map[string]string, len(reverseMap)),
 		aliases:      make([]claudeMCPAliasEntry, 0, len(reverseMap)),
 		servers:      make(map[string]struct{}),
 		passthroughs: make([]string, 0),
@@ -2279,6 +2304,7 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 			resolver.passthroughs = append(resolver.passthroughs, original)
 			continue
 		}
+		resolver.canonical[original] = alias
 		parts, ok := parseClaudeMCPAlias(alias)
 		if !ok {
 			continue
@@ -2291,6 +2317,76 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 		resolver.servers[parts.server] = struct{}{}
 	}
 	return resolver
+}
+
+// claudeProducedToolNames keeps tool_use names the model produced that the
+// request-side remap would not write back: a non-canonical alias the restore
+// resolved to the client's name, or a bare client name. Writing the produced name
+// back on replay keeps the replayed turn identical to the model's response, which
+// matters for a latest assistant turn that carries signed thinking.
+//
+// This is best effort, not a guarantee. Records live in this process only: after a
+// restart, on another replica, or once a record is evicted, the replay writes the
+// canonical alias, as it did before this record existed. Only callers with their
+// own API key get records, keyed by a hash of that key plus the tool_use id;
+// keyless callers have nothing that keeps their records apart, so their replay
+// keeps the canonical alias. Every Claude response of a keyed caller, cloaked or
+// not, replaces or drops the record for each tool_use id it carries. Records hold
+// owned copies of at most claudeProducedToolRecordMaxBytes, and the least recently
+// used of claudeProducedToolNamesMax records is evicted first, which bounds the
+// stored names and ids to 5 MiB.
+var claudeProducedToolNames = internalcache.NewBoundedLRU[claudeProducedToolKey, claudeProducedToolRecord](claudeProducedToolNamesMax, nil)
+
+const (
+	claudeProducedToolNamesMax       = 10240
+	claudeProducedToolRecordMaxBytes = 512
+)
+
+type claudeProducedToolKey struct {
+	caller [sha256.Size]byte
+	id     string
+}
+
+type claudeProducedToolRecord struct {
+	produced string // the name the model wrote
+	restored string // the name the client was given
+}
+
+// claudeProducedToolKeyFor returns the record key for a caller's tool_use id.
+func claudeProducedToolKeyFor(caller claudeMCPAliasOptions, id string) claudeProducedToolKey {
+	return claudeProducedToolKey{caller: sha256.Sum256([]byte(caller.secret)), id: id}
+}
+
+// remember replaces or drops the record for a restored tool_use of a keyed caller.
+func (resolver claudeMCPAliasResolver) remember(caller claudeMCPAliasOptions, id, produced, restored string) {
+	if !caller.keyed || id == "" {
+		return
+	}
+	key := claudeProducedToolKeyFor(caller, id)
+	replay := restored
+	if alias, ok := resolver.canonical[restored]; ok {
+		replay = alias
+	}
+	if replay == produced || len(id)+len(produced)+len(restored) > claudeProducedToolRecordMaxBytes {
+		claudeProducedToolNames.Delete(key)
+		return
+	}
+	// Owned copies: the arguments point into the whole response or request buffer.
+	key.id = strings.Clone(id)
+	claudeProducedToolNames.Set(key, claudeProducedToolRecord{produced: strings.Clone(produced), restored: strings.Clone(restored)})
+}
+
+// claudeProducedToolName returns the recorded produced name for a history
+// tool_use block that still carries the name the client was given.
+func claudeProducedToolName(caller claudeMCPAliasOptions, id, current string) (string, bool) {
+	if !caller.keyed {
+		return "", false
+	}
+	record, ok := claudeProducedToolNames.Get(claudeProducedToolKeyFor(caller, id))
+	if !ok || record.restored != current {
+		return "", false
+	}
+	return record.produced, true
 }
 
 func parseClaudeMCPAlias(name string) (claudeMCPAliasParts, bool) {
@@ -2484,7 +2580,15 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 // using the per-request map produced by remapOAuthToolNames. Names outside the
 // request-local generated MCP server are passed through unchanged.
 func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]byte, error) {
-	if len(reverseMap) == 0 {
+	return reverseRemapOAuthToolNamesForCaller(body, reverseMap, claudeMCPAliasOptions{})
+}
+
+// reverseRemapOAuthToolNamesForCaller also records produced names for the caller
+// (see claudeProducedToolNames).
+func reverseRemapOAuthToolNamesForCaller(body []byte, reverseMap map[string]string, caller claudeMCPAliasOptions) ([]byte, error) {
+	// Without aliases nothing is restored, but a keyed caller's tool_use still
+	// drops any older record for its id.
+	if len(reverseMap) == 0 && !caller.keyed {
 		return body, nil
 	}
 	content := gjson.GetBytes(body, "content")
@@ -2506,7 +2610,10 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 			if matched {
 				path := fmt.Sprintf("content.%d.name", index.Int())
 				body, _ = sjson.SetBytes(body, path, origName)
+			} else {
+				origName = name
 			}
+			resolver.remember(caller, part.Get("id").String(), name, origName)
 		case "tool_reference":
 			toolName := part.Get("tool_name").String()
 			origName, matched, errResolve := resolver.resolve(toolName)
@@ -2567,7 +2674,15 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 // reverseRemapOAuthToolNamesFromStreamLine reverses the tool name mapping for SSE
 // stream lines, using the per-request reverseMap produced by remapOAuthToolNames.
 func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string]string) ([]byte, error) {
-	if len(reverseMap) == 0 {
+	return reverseRemapOAuthToolNamesFromStreamLineForCaller(line, reverseMap, claudeMCPAliasOptions{})
+}
+
+// reverseRemapOAuthToolNamesFromStreamLineForCaller also records produced names
+// for the caller (see claudeProducedToolNames).
+func reverseRemapOAuthToolNamesFromStreamLineForCaller(line []byte, reverseMap map[string]string, caller claudeMCPAliasOptions) ([]byte, error) {
+	// Without aliases nothing is restored, but a keyed caller's tool_use still
+	// drops any older record for its id.
+	if len(reverseMap) == 0 && !caller.keyed {
 		return line, nil
 	}
 	payload := helps.JSONPayload(line)
@@ -2593,8 +2708,10 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string
 			return line, errResolve
 		}
 		if !matched {
+			resolver.remember(caller, contentBlock.Get("id").String(), name, name)
 			return line, nil
 		}
+		resolver.remember(caller, contentBlock.Get("id").String(), name, origName)
 		updated, err = sjson.SetBytes(payload, "content_block.name", origName)
 	case "tool_reference":
 		toolName := contentBlock.Get("tool_name").String()
