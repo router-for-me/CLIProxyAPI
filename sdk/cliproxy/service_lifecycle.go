@@ -7,10 +7,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -123,7 +125,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	serverOptions := append([]api.ServerOption(nil), s.serverOptions...)
+	serverOptions = append(serverOptions, api.WithMiddleware(s.readinessMiddleware()))
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, serverOptions...)
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.syncPluginModelRuntime(ctx)
@@ -202,10 +206,25 @@ func (s *Service) Run(ctx context.Context) error {
 			return fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
 		}
 		log.Info("file watcher started for config and auth directory changes")
+		// Watcher updates are asynchronous. Register the initial snapshot inline
+		// so readiness does not depend on when its dispatch queue is scheduled.
+		var initialUpdates []watcher.AuthUpdate
+		for _, auth := range watcherWrapper.SnapshotAuths() {
+			if auth != nil {
+				initialUpdates = append(initialUpdates, watcher.AuthUpdate{Action: watcher.AuthUpdateActionAdd, ID: auth.ID, Auth: auth})
+			}
+		}
+		s.handleAuthUpdates(coreauth.WithSkipPersist(ctx), initialUpdates)
 		s.syncPluginModelRuntime(ctx)
 	}
 
 	s.registerModelRefreshCallback()
+	if !homeEnabled {
+		if errWait := registry.WaitForStartupModelRefresh(ctx); errWait != nil {
+			return errWait
+		}
+	}
+	s.requestReady.Store(true)
 
 	select {
 	case <-ctx.Done():
@@ -213,6 +232,17 @@ func (s *Service) Run(ctx context.Context) error {
 		return ctx.Err()
 	case errServer := <-s.serverErr:
 		return errServer
+	}
+}
+
+func (s *Service) readinessMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !s.requestReady.Load() {
+			c.Header("Retry-After", "1")
+			c.AbortWithStatusJSON(503, gin.H{"error": gin.H{"message": "proxy is initializing or shutting down", "type": "server_error", "code": "service_unavailable"}})
+			return
+		}
+		c.Next()
 	}
 }
 
@@ -231,6 +261,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	var shutdownErr error
 	s.shutdownOnce.Do(func() {
+		s.requestReady.Store(false)
 		if ctx == nil {
 			ctx = context.Background()
 		}

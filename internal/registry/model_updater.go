@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -36,6 +37,8 @@ type modelStore struct {
 var modelsCatalogStore = &modelStore{}
 
 var updaterOnce sync.Once
+var updaterStarted atomic.Bool
+var startupRefreshDone = make(chan struct{})
 
 // ModelRefreshCallback is invoked when startup or periodic model refresh detects changes.
 // changedProviders contains the provider names whose model definitions changed.
@@ -77,12 +80,29 @@ func init() {
 // Safe to call multiple times; only one updater will run.
 func StartModelsUpdater(ctx context.Context) {
 	updaterOnce.Do(func() {
+		updaterStarted.Store(true)
 		go runModelsUpdater(ctx)
 	})
 }
 
+// WaitForStartupModelRefresh waits for the initial remote fetch, including its
+// model-registration callback. Embedded-only SDK users have nothing to wait for.
+// A failed fetch still completes startup using the embedded catalog.
+func WaitForStartupModelRefresh(ctx context.Context) error {
+	if !updaterStarted.Load() {
+		return nil
+	}
+	select {
+	case <-startupRefreshDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func runModelsUpdater(ctx context.Context) {
 	tryStartupRefresh(ctx)
+	close(startupRefreshDone)
 	periodicRefresh(ctx)
 }
 
