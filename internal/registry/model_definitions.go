@@ -18,6 +18,9 @@ const (
 	xaiBuiltinVideoModelID             = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID           = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewID         = "grok-imagine-video-1.5-preview"
+	// Chat-proxy id for Grok 4.7 Fast. The public API id is grok-4.7, and the
+	// remote models.json catalog does not carry this one.
+	xaiBuiltinGrok47BuildFastModelID = "grok-4.7-build-fast"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -255,10 +258,10 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	)
 }
 
-// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
+// WithXAIBuiltins injects hard-coded xAI model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinGrok47BuildFastModelInfo())
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -326,6 +329,29 @@ func codexBuiltinImage25ModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2.5",
 		Version:     codexBuiltinImage25ModelID,
+	}
+}
+
+func xaiBuiltinGrok47BuildFastModelInfo() *ModelInfo {
+	webSearch := true
+	return &ModelInfo{
+		ID:                  xaiBuiltinGrok47BuildFastModelID,
+		Object:              "model",
+		Created:             1789948800, // 2026-09-21
+		OwnedBy:             "xai",
+		Type:                "xai",
+		DisplayName:         "Grok 4.7 Build Fast",
+		Name:                xaiBuiltinGrok47BuildFastModelID,
+		Description:         "Grok 4.7 Fast as served by the Grok Build chat-proxy. Same model as grok-4.7 on the faster tier.",
+		ContextLength:       500000,
+		MaxCompletionTokens: 500000,
+		Thinking: &ThinkingSupport{
+			ZeroAllowed: false,
+			Levels:      []string{"low", "medium", "high", "xhigh"},
+		},
+		NativeCapabilities:        &NativeCapabilities{WebSearch: &webSearch},
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"text"},
 	}
 }
 
