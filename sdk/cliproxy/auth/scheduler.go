@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1582,6 +1583,15 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 	}
 	for priority, entries := range priorityBuckets {
 		sort.Slice(entries, func(i, j int) bool {
+			// Registration (config list) order first: fill-first must consume keys in
+			// the order they appear in config.yaml, and ID order is a content hash that
+			// shuffles that order. Authers without the synthesizer-stamped indices
+			// (OAuth etc.) fall back to ID for determinism.
+			li, okLi := registrationOrderOf(entries[i])
+			lj, okLj := registrationOrderOf(entries[j])
+			if okLi && okLj && li != lj {
+				return li < lj
+			}
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
 		bucket := buildReadyBucket(entries)
@@ -1612,6 +1622,21 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 		return left.nextRetryAt.Before(right.nextRetryAt)
 	})
+}
+
+// registrationOrderOf encodes the synthesizer-stamped (config_index, key_index)
+// attribute pair into a single comparable value. ok is false when either index
+// is missing, so callers can fall back to ID ordering.
+func registrationOrderOf(entry *scheduledAuth) (int, bool) {
+	if entry == nil || entry.auth == nil || entry.auth.Attributes == nil {
+		return 0, false
+	}
+	ci, errCi := strconv.Atoi(entry.auth.Attributes["config_index"])
+	ki, errKi := strconv.Atoi(entry.auth.Attributes["key_index"])
+	if errCi != nil || errKi != nil {
+		return 0, false
+	}
+	return ci<<20 | ki, true
 }
 
 // buildReadyBucket prepares the general and websocket-only ready views for one priority bucket.
