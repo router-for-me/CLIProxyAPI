@@ -8065,6 +8065,52 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *
 	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance", "")
 }
 
+func TestCheckSystemInstructionsWithMode_UserOnlyRunKeepsCallerSystemTopLevel(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-5","system":[` +
+		`{"type":"text","text":"You are a security monitor.","cache_control":{"type":"ephemeral"}}` +
+		`],"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"user configuration","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"user","content":[{"type":"text","text":"<transcript>"},{"type":"text","text":"latest action","cache_control":{"type":"ephemeral"}}]}` +
+		`]}`)
+
+	out := enforceCacheControlLimit(ensureCacheControl(checkSystemInstructionsWithMode(payload, false)), 4)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("message count = %d, want 2 (no role=system turn after the newest content): %s", got, out)
+	}
+	for idx, role := range gjson.GetBytes(out, "messages.#.role").Array() {
+		if role.String() != "user" {
+			t.Fatalf("messages[%d].role = %q, want user: %s", idx, role.String(), out)
+		}
+	}
+	system := gjson.GetBytes(out, "system").Array()
+	last := system[len(system)-1]
+	if got := last.Get("text").String(); got != "You are a security monitor." {
+		t.Fatalf("last system block = %q, want the caller system prompt: %s", got, out)
+	}
+	if !gjson.GetBytes(out, `messages.0.content.#(cache_control)`).Exists() {
+		t.Fatalf("a breakpoint before the transcript should cache the caller system prompt: %s", out)
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_UserRunBeforeAssistantKeepsMidConversationSystem(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-5","system":"guidance","messages":[` +
+		`{"role":"user","content":"first"},` +
+		`{"role":"user","content":"second"},` +
+		`{"role":"assistant","content":"answer"},` +
+		`{"role":"user","content":"next"}` +
+		`]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "system" {
+		t.Fatalf("messages[2].role = %q, want system: %s", got, out)
+	}
+	if got := len(gjson.GetBytes(out, "system").Array()); got != 2 {
+		t.Fatalf("system has %d blocks, want billing and identity only: %s", got, out)
+	}
+}
+
 func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	texts := []string{"first guidance", "second guidance"}
