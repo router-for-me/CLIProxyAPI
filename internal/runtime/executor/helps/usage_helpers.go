@@ -117,16 +117,25 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authIndex = auth.EnsureIndex()
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
 	}
-	// Set the per-request body-capture gate only when the resolved auth carries
-	// the provider's store_request_bodies toggle. The middleware reads the
-	// provider and upstream provider id from the same gin context to attribute
-	// the body without re-resolving the auth.
-	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeStoreRequestBodies]), "true") {
+	// Set the per-request body-capture gate when either the resolved provider
+	// carries store_request_bodies or the client API key's policy opts in.
+	// The middleware reads the provider and upstream provider id from the same
+	// gin context to attribute the body without re-resolving the auth.
+	providerBodies := auth != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeStoreRequestBodies]), "true")
+	keyBodies := false
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		if v, okKey := ginCtx.Get(internallogging.APIKeyStoreRequestBodiesContextKey); okKey {
+			keyBodies, _ = v.(bool)
+		}
+	}
+	if providerBodies || keyBodies {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
 			var upstreamID int64
-			if raw := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeUpstreamProviderID]); raw != "" {
-				if parsed, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
-					upstreamID = parsed
+			if auth != nil {
+				if raw := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeUpstreamProviderID]); raw != "" {
+					if parsed, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
+						upstreamID = parsed
+					}
 				}
 			}
 			ginCtx.Set(internallogging.StoreRequestBodiesContextKey, true)

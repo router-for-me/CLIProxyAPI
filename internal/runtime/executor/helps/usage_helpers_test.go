@@ -41,6 +41,33 @@ func TestNewUsageReporterSetsCaptureGate(t *testing.T) {
 	}
 }
 
+func TestNewUsageReporterOrsAPIKeyStoreRequestBodies(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Provider toggle OFF, key toggle ON: capture must still be enabled.
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ginCtx.Set(internallogging.APIKeyStoreRequestBodiesContextKey, true)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	auth := &cliproxyauth.Auth{Provider: "claude", Attributes: map[string]string{}}
+	_ = NewUsageReporter(ctx, "claude", "claude-opus", auth)
+	if v, ok := ginCtx.Get(internallogging.StoreRequestBodiesContextKey); !ok || v != true {
+		t.Fatalf("gate not set from key toggle: %v %v", v, ok)
+	}
+	if v, _ := ginCtx.Get(internallogging.StoreRequestBodiesProviderContextKey); v != "claude" {
+		t.Fatalf("provider not attributed: %v", v)
+	}
+
+	// Both toggles OFF: no capture.
+	ginCtx2, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx2.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ctx2 := context.WithValue(context.Background(), "gin", ginCtx2)
+	_ = NewUsageReporter(ctx2, "claude", "claude-opus", &cliproxyauth.Auth{Provider: "claude"})
+	if _, ok := ginCtx2.Get(internallogging.StoreRequestBodiesContextKey); ok {
+		t.Fatalf("gate set with both toggles off")
+	}
+}
+
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)
