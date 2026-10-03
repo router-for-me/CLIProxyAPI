@@ -1312,7 +1312,10 @@ func TestCodexWebsocketsExecutor_BootstrapOverload_DoesNotNotifyDownstreamDiscon
 }
 
 // A non-overload terminal failure is delivered in-stream and genuinely ends the session, so it
-// must keep signalling the disconnect exactly as it did before buffering existed.
+// must keep signalling the disconnect exactly as it did before buffering existed. This is the
+// buffered-mode pin for that notifying teardown; the unbuffered counterpart is
+// TestCodexWebsocketsExecutor_RequestScopedRuleAbsent_StillNotifiesDownstreamDisconnect in
+// codex_stream_request_scoped_failover_test.go.
 func TestCodexWebsocketsExecutor_BootstrapNonOverload_StillNotifiesDownstreamDisconnect(t *testing.T) {
 	notified, err := executeWebsocketStreamInSession(t, codexCreatedEvent, codexInProgressEvent, codexInvalidEvent)
 

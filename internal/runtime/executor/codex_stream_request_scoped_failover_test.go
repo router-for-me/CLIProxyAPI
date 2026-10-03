@@ -80,46 +80,45 @@ func runCodexRequestScopedSession(t *testing.T, buffering bool, action string, f
 
 // A rejection matched by a request-scoped continue rule is answered by retrying on another
 // credential, so the downstream disconnect must not be published: publishing it closes the
-// client websocket before the retry can deliver anything. Both continue actions share the
-// same executor decision.
+// client websocket before the retry can deliver anything. Only the continue action is exercised
+// here: this layer's predicate treats both continue actions identically, and the action
+// distinction is pinned by TestCodexWSRequestScopedFlaggedCredentialFailsOverWithinDownstreamSession
+// in test/codex_ws_request_scoped_failover_test.go.
 func TestCodexWebsocketsExecutor_RequestScopedContinue_DoesNotNotifyDownstreamDisconnect(t *testing.T) {
 	frames := map[string]string{
 		"terminal_failure": codexInvalidPromptEvent,
 		"upstream_error":   codexInvalidPromptStatusEvent,
 	}
-	for _, action := range []string{cliproxyauth.RequestScopedActionContinueAndCooldown, cliproxyauth.RequestScopedActionContinue} {
-		for _, buffering := range []bool{true, false} {
-			for name, frame := range frames {
-				t.Run(fmt.Sprintf("%s/buffering=%t/%s", action, buffering, name), func(t *testing.T) {
-					notified, err := runCodexRequestScopedSession(t, buffering, action, frame)
-					if err == nil {
-						t.Fatal("expected the request-scoped rejection to fail the attempt so the conductor can retry")
-					}
-					if got := statusCodeFromTestError(t, err); got != http.StatusBadRequest {
-						t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
-					}
-					if notified {
-						t.Fatal("request-scoped continue rejection must not signal a downstream disconnect")
-					}
-				})
-			}
+	for _, buffering := range []bool{true, false} {
+		for name, frame := range frames {
+			t.Run(fmt.Sprintf("buffering=%t/%s", buffering, name), func(t *testing.T) {
+				notified, err := runCodexRequestScopedSession(t, buffering, cliproxyauth.RequestScopedActionContinue, frame)
+				if err == nil {
+					t.Fatal("expected the request-scoped rejection to fail the attempt so the conductor can retry")
+				}
+				if got := statusCodeFromTestError(t, err); got != http.StatusBadRequest {
+					t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+				}
+				if notified {
+					t.Fatal("request-scoped continue rejection must not signal a downstream disconnect")
+				}
+			})
 		}
 	}
 }
 
 // Without the rule the same rejection stays a request fault: nothing will rotate the
 // credential, so the disconnect must keep being published and the client is told to retry.
-// This is asserted for both buffering modes so the unbuffered notifying teardown stays pinned.
+// Only the unbuffered mode is exercised here, as the pin for the unbuffered notifying teardown;
+// the buffered counterpart is asserted by
+// TestCodexWebsocketsExecutor_BootstrapNonOverload_StillNotifiesDownstreamDisconnect in
+// codex_stream_bootstrap_buffering_test.go.
 func TestCodexWebsocketsExecutor_RequestScopedRuleAbsent_StillNotifiesDownstreamDisconnect(t *testing.T) {
-	for _, buffering := range []bool{true, false} {
-		t.Run(fmt.Sprintf("buffering=%t", buffering), func(t *testing.T) {
-			notified, err := runCodexRequestScopedSession(t, buffering, "", codexInvalidPromptEvent)
-			if err == nil {
-				t.Fatal("expected the unmatched rejection to fail the attempt")
-			}
-			if !notified {
-				t.Fatal("a rejection with no request-scoped continue rule must still signal the downstream disconnect")
-			}
-		})
+	notified, err := runCodexRequestScopedSession(t, false, "", codexInvalidPromptEvent)
+	if err == nil {
+		t.Fatal("expected the unmatched rejection to fail the attempt")
+	}
+	if !notified {
+		t.Fatal("a rejection with no request-scoped continue rule must still signal the downstream disconnect")
 	}
 }
