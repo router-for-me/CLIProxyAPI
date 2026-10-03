@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
 	"net/http"
 	"strconv"
 	"strings"
@@ -382,7 +384,9 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 }
 
 type authRefreshLock struct {
-	mu sync.Mutex
+	mu               sync.Mutex
+	diagnosticReason string
+	diagnosticEpoch  uint64
 }
 
 func authAccessToken(auth *Auth) string {
@@ -642,6 +646,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		reauthReason := refreshdiagnostic.Reason(err)
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
 		shouldReschedule := false
@@ -657,6 +662,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				m.mu.Unlock()
 				return nil, err
 			}
+			if reauthReason != "" && (lock.diagnosticReason != reauthReason || lock.diagnosticEpoch != current.RegistrationEpoch) {
+				fingerprint := sha256.Sum256([]byte(current.ID))
+				log.WithFields(log.Fields{"provider": "codex", "credential_ref": fmt.Sprintf("%x", fingerprint[:6]), "upstream_status": statusCodeFromError(err), "reason": reauthReason, "reauth_required": true, "retryable": false}).Warn("OAuth refresh requires sign-in; use OAuth Login")
+				lock.diagnosticReason = reauthReason
+				lock.diagnosticEpoch = current.RegistrationEpoch
+			}
 			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
 			if wasTerminalUnauthorized {
 				current.Generation++
@@ -666,8 +677,15 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.NextRefreshAfter = time.Time{}
 				current.NextRetryAfter = time.Time{}
 				if isUnauthorizedError(err) || isInvalidGrantError(err) {
-					current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+					current.LastError = refreshErrorFromError(err)
+					if reauthReason == "" {
+						current.LastError.Code = "unauthorized"
+						current.LastError.HTTPStatus = http.StatusUnauthorized
+					}
 					current.StatusMessage = "unauthorized (refresh token invalid)"
+					if reauthReason != "" {
+						current.StatusMessage = refreshdiagnostic.Message
+					}
 				}
 				m.auths[id] = current
 				if m.scheduler != nil {
@@ -686,7 +704,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			// failedAccessToken is set only when upstream rejected this exact access
 			// token. Its expiry time no longer proves it is usable.
 			accessTokenRejected := failedAccessToken != "" && authAccessToken(current) == failedAccessToken
-			if isDisabled && invalidGrant {
+			if isDisabled && (invalidGrant || reauthReason != "") {
 				current.Unavailable = true
 				current.Status = StatusDisabled
 				current.NextRefreshAfter = time.Time{}
@@ -701,7 +719,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 					current.StatusMessage = "disabled"
 				}
 				shouldReschedule = true
-			} else if accessTokenRejected && invalidGrant {
+			} else if accessTokenRejected && (invalidGrant || reauthReason != "") {
 				// Neither token can recover without a new login. Stop selecting the
 				// credential until its tokens change instead of retrying it after
 				// every cooldown and returning the same 401 to clients.
@@ -710,8 +728,15 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.NextRefreshAfter = time.Time{}
 				current.NextRetryAfter = time.Time{}
 				current.RefreshFailures = 0
-				current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+				current.LastError = refreshErrorFromError(err)
+				if reauthReason == "" {
+					current.LastError.Code = "unauthorized"
+					current.LastError.HTTPStatus = http.StatusUnauthorized
+				}
 				current.StatusMessage = "unauthorized (refresh token invalid)"
+				if reauthReason != "" {
+					current.StatusMessage = refreshdiagnostic.Message
+				}
 				shouldUnschedule = true
 			} else if !hasValidAccessToken {
 				current.Unavailable = true
@@ -744,12 +769,20 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
 					nextRetry = exp
 				}
+				// A terminal refresh token cannot recover through repeated scheduled
+				// refreshes. Keep the usable access token until its known expiry.
+				if exp, ok := current.AccessTokenExpirationTime(); reauthReason != "" && ok && exp.After(now) {
+					nextRetry = exp
+				}
 				current.NextRefreshAfter = nextRetry
 				shouldReschedule = true
 
-				if !current.Unavailable {
+				if !current.Unavailable && reauthReason == "" {
 					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
 				}
+			}
+			if reauthReason != "" {
+				current.StatusMessage = refreshdiagnostic.Message
 			}
 			m.auths[id] = current
 			if m.scheduler != nil {
@@ -795,6 +828,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if saved == nil {
 		return nil, fmt.Errorf("auth %s not found", id)
 	}
+	if lock.diagnosticReason != "" {
+		if lock.diagnosticEpoch == saved.RegistrationEpoch {
+			fingerprint := sha256.Sum256([]byte(saved.ID))
+			log.WithFields(log.Fields{"provider": "codex", "credential_ref": fmt.Sprintf("%x", fingerprint[:6])}).Info("OAuth refresh recovered")
+		}
+		lock.diagnosticReason = ""
+	}
 	targetAuth := saved
 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
 	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
@@ -834,9 +874,12 @@ func (m *Manager) refreshWorkers() int {
 
 // ForceRefreshResult records the outcome of a forced refresh for one credential.
 type ForceRefreshResult struct {
-	ID      string `json:"id"`
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+	ID             string `json:"id"`
+	Success        bool   `json:"success"`
+	Error          string `json:"error,omitempty"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	ReauthRequired bool   `json:"reauth_required,omitempty"`
 }
 
 // ForceRefreshAll triggers an immediate refresh for all credentials that have refresh tokens or custom refresh evaluators.
@@ -899,6 +942,12 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 				res := ForceRefreshResult{ID: job.authID, Success: err == nil}
 				if err != nil {
 					res.Error = err.Error()
+					if reason := refreshdiagnostic.Reason(err); reason != "" {
+						res.Error = refreshdiagnostic.Message
+						res.ErrorCode = refreshdiagnostic.Code
+						res.Reason = reason
+						res.ReauthRequired = true
+					}
 				}
 				results[job.index] = res
 			}

@@ -2,6 +2,7 @@ package management
 
 import (
 	"errors"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
 	"io"
 	"net/http"
 	"strings"
@@ -63,6 +64,10 @@ func (h *Handler) RefreshAuthFiles(c *gin.Context) {
 
 	refreshed, err := h.authManager.ForceRefreshAuth(ctx, targetAuth.ID)
 	if err != nil {
+		if reason := refreshdiagnostic.Reason(err); reason != "" {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": refreshdiagnostic.Code, "message": refreshdiagnostic.Message, "provider": "codex", "reason": reason, "reauth_required": true, "retryable": false})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": err.Error(),
 		})

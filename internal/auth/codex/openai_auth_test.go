@@ -67,6 +67,18 @@ func resetCodexRefreshGroupForTest() {
 	codexRefreshGroup = singleflight.Group{}
 }
 
+func TestRefreshTokensWithRetry_ExpiredOnlyAttemptsOnceAndRedactsBody(t *testing.T) {
+	var calls int
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"refresh_token_expired","message":"secret@example.com token-secret"}}`)), Header: make(http.Header), Request: req}, nil
+	})}}
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "fixture-expired", 3)
+	if err == nil || calls != 1 || !strings.Contains(err.Error(), "refresh_token_expired") || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("calls=%d error=%v", calls, err)
+	}
+}
+
 func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	var calls int32
 	auth := &CodexAuth{
