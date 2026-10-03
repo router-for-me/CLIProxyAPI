@@ -829,6 +829,56 @@ func TestListLiteLLMSpendLogsCompat(t *testing.T) {
 	}
 }
 
+// TestListLiteLLMSpendLogsCompatAPIKeyFilter verifies the api_key filter accepts
+// the same non-secret label the endpoint projects (key_alias, falling back to
+// the key name) as well as the raw internal key id. Regression: filtering by
+// the returned api_key value previously matched api_key_id only and returned an
+// empty array.
+func TestListLiteLLMSpendLogsCompatAPIKeyFilter(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_logs_keyfilter")
+	ctx := context.Background()
+	// One key with an alias and one with only a name, so both label fallbacks
+	// are exercised alongside the raw internal id.
+	aliased := seedCompatKey(t, h, "prod", "prod-key")
+	named := seedCompatKey(t, h, "playground", "")
+	for _, key := range []*store.APIKey{aliased, named} {
+		ev := store.UsageEvent{
+			RequestID:   "req-keyfilter-" + key.Name,
+			APIKeyID:    key.ID,
+			UserID:      "team-a",
+			Provider:    "litellm",
+			Model:       "gpt-4o",
+			TotalTokens: 150,
+			CostUSD:     1.25,
+			RequestedAt: time.Now().Add(-time.Hour).UTC(),
+		}
+		if err := h.pgUsage.InsertEvent(ctx, ev); err != nil {
+			t.Fatalf("InsertEvent: %v", err)
+		}
+	}
+	// One event per key, so filtering by any single key's label yields exactly one.
+	for _, key := range []*store.APIKey{aliased, named} {
+		label := key.KeyAlias
+		if label == "" {
+			label = key.Name
+		}
+		for _, param := range []string{label, key.ID} {
+			rec := doCompat(h.ListLiteLLMSpendLogsCompat, http.MethodGet,
+				"/v0/management/litellm/spend/logs?api_key="+param, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("api_key=%s status = %d; want 200; body=%s", param, rec.Code, rec.Body.String())
+			}
+			var rows []map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+				t.Fatalf("api_key=%s unmarshal: %v; body=%s", param, err, rec.Body.String())
+			}
+			if len(rows) != 1 {
+				t.Errorf("api_key=%s rows = %d; want 1; body=%s", param, len(rows), rec.Body.String())
+			}
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Spend reports
 // ---------------------------------------------------------------------------

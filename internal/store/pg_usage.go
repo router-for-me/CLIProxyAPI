@@ -126,8 +126,15 @@ type Pricing struct {
 type UsageFilter struct {
 	APIKeyID  string
 	Principal string
-	Provider  string
-	Model     string
+	// KeyLabel matches the non-secret key label that read endpoints surface as
+	// key_alias (api_keys.key_alias, falling back through litellm_api_keys and
+	// the key name) OR the raw api_key_id. It exists so the LiteLLM compat
+	// /spend/logs api_key filter accepts the same value the endpoint itself
+	// returns. Events-only: it references the api_keys/litellm_api_keys joins
+	// and must not be set by usage_errors callers.
+	KeyLabel string
+	Provider string
+	Model    string
 	// RouterID narrows to events routed by a specific Auto Router id. Exact
 	// match against usage_events.router_id; empty means no constraint.
 	RouterID string
@@ -2264,6 +2271,14 @@ func buildWhereClause(b *strings.Builder, filter UsageFilter) []any {
 		args = append(args, filter.APIKeyID)
 		b.WriteString(" AND e.api_key_id = $")
 		b.WriteString(itoa(len(args)))
+	}
+	if filter.KeyLabel != "" {
+		// Match either the raw key id or the same non-secret label the read
+		// path projects as key_alias. Both parameter references share one arg.
+		args = append(args, filter.KeyLabel)
+		n := itoa(len(args))
+		b.WriteString(" AND (e.api_key_id = $" + n +
+			" OR COALESCE(NULLIF(k.key_alias, ''), NULLIF(lk.key_alias, ''), lk.name, k.name, '') = $" + n + ")")
 	}
 	if filter.UserID != "" {
 		args = append(args, filter.UserID)

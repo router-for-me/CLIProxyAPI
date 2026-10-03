@@ -1023,8 +1023,12 @@ func (h *Handler) ListLiteLLMSpendLogsCompat(c *gin.Context) {
 		Model:     c.Query("model"),
 		RequestID: c.Query("request_id"),
 	}
-	if ks := c.Query("api_key"); ks != "" {
-		filter.APIKeyID = ks
+	if ks := strings.TrimSpace(c.Query("api_key")); ks != "" {
+		// Accept the same value the endpoint returns as api_key (the key_alias,
+		// falling back to the key name) as well as the raw internal key id. The
+		// store matches either against usage_events.api_key_id or the projected
+		// non-secret label.
+		filter.KeyLabel = ks
 	}
 	if from, err := time.Parse(time.RFC3339, c.Query("start_date")); err == nil {
 		filter.From = from
