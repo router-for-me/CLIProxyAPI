@@ -344,14 +344,18 @@ func TestFromStorePolicyPreservesFields(t *testing.T) {
 	if *p.BudgetMonthlyUSD != monthly {
 		t.Errorf("monthly budget lost: %v", p.BudgetMonthlyUSD)
 	}
+	if !p.StoreRequestBodies {
+		t.Errorf("StoreRequestBodies lost: %v", p.StoreRequestBodies)
+	}
 }
 
 // storePolicy is a tiny builder used to keep test assertions concise.
 func storePolicy(rpm int, monthly float64) store.Policy {
 	return store.Policy{
-		APIKeyID:         "k1",
-		RPMLimit:         &rpm,
-		BudgetMonthlyUSD: &monthly,
+		APIKeyID:           "k1",
+		RPMLimit:           &rpm,
+		BudgetMonthlyUSD:   &monthly,
+		StoreRequestBodies: true,
 	}
 }
 

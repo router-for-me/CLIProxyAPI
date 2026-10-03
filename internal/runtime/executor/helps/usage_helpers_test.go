@@ -68,6 +68,24 @@ func TestNewUsageReporterOrsAPIKeyStoreRequestBodies(t *testing.T) {
 	}
 }
 
+func TestNewUsageReporterKeyToggleWithNilAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Nil auth, key toggle ON: capture must still be enabled and the upstream
+	// id must default to 0 (nil-guard path).
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ginCtx.Set(internallogging.APIKeyStoreRequestBodiesContextKey, true)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	_ = NewUsageReporter(ctx, "claude", "claude-opus", nil)
+	if v, ok := ginCtx.Get(internallogging.StoreRequestBodiesContextKey); !ok || v != true {
+		t.Fatalf("gate not set from key toggle with nil auth: %v %v", v, ok)
+	}
+	if v, _ := ginCtx.Get(internallogging.StoreRequestBodiesUpstreamIDContextKey); v != int64(0) {
+		t.Fatalf("upstream id = %v, want 0 for nil auth", v)
+	}
+}
+
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)

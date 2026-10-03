@@ -88,8 +88,8 @@ func resolveDiscount(p *store.Policy, model string) float64 {
 }
 
 // Policy is a store-level policy snapshot cached in memory to avoid a DB
-// round-trip on every request. Mirrors store.Policy but inlined here so the
-// policy package does not need to extend the struct when adding fields.
+// round-trip on every request. It mirrors the subset of store.Policy that the
+// model-access evaluator consumes, held here as a package-local type.
 type Policy struct {
 	APIKeyID         string
 	RPMLimit         *int

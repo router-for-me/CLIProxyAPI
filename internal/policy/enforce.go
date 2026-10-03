@@ -718,9 +718,9 @@ func (s *service) snapshot(ctx context.Context, principal string) (APIKeySnapsho
 	return snap, nil
 }
 
-// fromStorePolicy widens a store.Policy to the local Policy alias. The two
-// structs are intentionally identical in shape; this helper exists only so
-// the model access evaluator can take the package-local type.
+// fromStorePolicy widens a store.Policy to the local Policy alias. The mirror
+// carries the fields the model-access evaluator needs; it is not a claim of
+// full parity with the store struct.
 func fromStorePolicy(p store.Policy) Policy {
 	return Policy{
 		APIKeyID:           p.APIKeyID,

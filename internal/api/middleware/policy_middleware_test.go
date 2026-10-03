@@ -284,6 +284,25 @@ func TestPolicyMiddlewareStashesKeyStoreRequestBodies(t *testing.T) {
 	}
 }
 
+func TestPolicyMiddlewareDoesNotStashKeyToggleWhenFalse(t *testing.T) {
+	svc := &mockPolicyService{active: true, checkDecision: policy.Decision{Allow: true}, storeBodies: false}
+	var present bool
+	r := gin.New()
+	gin.SetMode(gin.TestMode)
+	r.Use(func(c *gin.Context) { c.Set("userApiKey", "p"); c.Next() })
+	r.Use(PolicyMiddleware(svc))
+	r.POST("/v1/chat", func(c *gin.Context) {
+		_, present = c.Get(internallogging.APIKeyStoreRequestBodiesContextKey)
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat", bytes.NewBufferString(`{"model":"gpt-4o"}`))
+	r.ServeHTTP(w, req)
+	if present {
+		t.Fatalf("did not expect key store_request_bodies stashed when false")
+	}
+}
+
 func TestParseModelFieldHandlesAnthropicEnvelope(t *testing.T) {
 	body := []byte(`{"request":{"model":"claude-3"}}`)
 	if got := parseModelField(body); got != "claude-3" {
