@@ -3,6 +3,7 @@ package diff
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -99,7 +100,7 @@ func SummarizeCodexModels(models []config.CodexModel) CodexModelsSummary {
 			if model.IsCompat {
 				isCompat = "true"
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|force-mapping=" + forceMapping + "|is-compat=" + isCompat + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|force-mapping=" + forceMapping + "|is-compat=" + isCompat + fmt.Sprintf("|use-v1-compaction=%t", model.UseV1Compaction) + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return CodexModelsSummary{

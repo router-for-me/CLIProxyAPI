@@ -690,6 +690,9 @@ func (k CodexKey) GetProxyURL() string { return k.ProxyURL }
 
 // CodexModel describes a mapping between an alias and the actual upstream model name.
 type CodexModel struct {
+	// UseV1Compaction converts /responses message summaries into compaction items.
+	UseV1Compaction bool `yaml:"use-v1-compaction,omitempty" json:"use-v1-compaction,omitempty"`
+
 	// Name is the upstream model identifier used when issuing requests.
 	Name string `yaml:"name" json:"name"`
 
@@ -728,6 +731,7 @@ func (m CodexModel) GetDisplayName() string   { return m.DisplayName }
 func (m CodexModel) GetMaxContextLength() int { return m.MaxContextLength }
 func (m CodexModel) GetForceMapping() bool    { return m.ForceMapping }
 func (m CodexModel) GetIsCompat() bool        { return m.IsCompat }
+func (m CodexModel) GetUseV1Compaction() bool { return m.UseV1Compaction }
 
 func (m CodexModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
@@ -890,6 +894,9 @@ type OpenAICompatibilityAPIKey struct {
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,
 // including the actual model name and its alias for API routing.
 type OpenAICompatibilityModel struct {
+	// UseV1Compaction converts /responses message summaries into compaction items.
+	UseV1Compaction bool `yaml:"use-v1-compaction,omitempty" json:"use-v1-compaction,omitempty"`
+
 	// Name is the actual model name used by the external provider.
 	Name string `yaml:"name" json:"name"`
 
@@ -937,5 +944,6 @@ func (m OpenAICompatibilityModel) GetMaxContextLength() int        { return m.Ma
 func (m OpenAICompatibilityModel) GetForceMapping() bool           { return m.ForceMapping }
 func (m OpenAICompatibilityModel) GetIsCompat() bool               { return m.IsCompat }
 func (m OpenAICompatibilityModel) GetUseMaxCompletionTokens() bool { return m.UseMaxCompletionTokens }
+func (m OpenAICompatibilityModel) GetUseV1Compaction() bool        { return m.UseV1Compaction }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
