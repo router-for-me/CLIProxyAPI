@@ -11,7 +11,6 @@ import (
 	"crypto/sha256"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
@@ -34,21 +33,6 @@ type toolCallStreamState struct {
 	Done             bool
 }
 
-type partKey struct {
-	outputIndex  int64
-	contentIndex int64
-}
-
-type citationDedupKey struct {
-	outputIndex  int64
-	contentIndex int64
-	url          string
-	startIndex   int64
-	endIndex     int64
-	hasStart     bool
-	hasEnd       bool
-}
-
 // ConvertCliToOpenAIParams holds parameters for response conversion.
 type ConvertCliToOpenAIParams struct {
 	ServiceTier           string
@@ -59,104 +43,6 @@ type ConvertCliToOpenAIParams struct {
 	toolCallStates        map[string]*toolCallStreamState
 	currentToolCall       *toolCallStreamState
 	LastImageHashByItemID map[string][32]byte
-	partRuneStarts        map[partKey]int
-	totalJoinedRunes      int
-	emittedCitations      map[citationDedupKey]struct{}
-}
-
-func (p *ConvertCliToOpenAIParams) ensureCitationsState() {
-	if p.partRuneStarts == nil {
-		p.partRuneStarts = make(map[partKey]int)
-	}
-	if p.emittedCitations == nil {
-		p.emittedCitations = make(map[citationDedupKey]struct{})
-	}
-}
-
-func projectCitation(ann gjson.Result, offset int, outIdx, contentIdx int64) ([]byte, citationDedupKey, bool) {
-	annType := ann.Get("type").String()
-	nested := ann.Get("url_citation")
-
-	if annType != "" && annType != "url_citation" {
-		return nil, citationDedupKey{}, false
-	}
-	if annType == "" && !nested.Exists() {
-		return nil, citationDedupKey{}, false
-	}
-
-	var url string
-	if nested.Exists() && nested.Get("url").Exists() && nested.Get("url").String() != "" {
-		url = nested.Get("url").String()
-	} else if ann.Get("url").Exists() {
-		url = ann.Get("url").String()
-	}
-	if url == "" {
-		return nil, citationDedupKey{}, false
-	}
-
-	var titleResult gjson.Result
-	if nested.Exists() && nested.Get("title").Exists() {
-		titleResult = nested.Get("title")
-	} else if ann.Get("title").Exists() {
-		titleResult = ann.Get("title")
-	}
-	hasTitle := titleResult.Type == gjson.String
-
-	var startResult gjson.Result
-	if nested.Exists() && nested.Get("start_index").Exists() {
-		startResult = nested.Get("start_index")
-	} else if ann.Get("start_index").Exists() {
-		startResult = ann.Get("start_index")
-	}
-
-	var endResult gjson.Result
-	if nested.Exists() && nested.Get("end_index").Exists() {
-		endResult = nested.Get("end_index")
-	} else if ann.Get("end_index").Exists() {
-		endResult = ann.Get("end_index")
-	}
-
-	hasStart := startResult.Type == gjson.Number
-	hasEnd := endResult.Type == gjson.Number
-	var shiftedStart, shiftedEnd int64
-	if hasStart {
-		shiftedStart = startResult.Int() + int64(offset)
-	}
-	if hasEnd {
-		shiftedEnd = endResult.Int() + int64(offset)
-	}
-
-	payload := []byte(`{"type":"url_citation","url_citation":{"url":""}}`)
-	payload, _ = sjson.SetBytes(payload, "url_citation.url", url)
-	if hasTitle {
-		payload, _ = sjson.SetBytes(payload, "url_citation.title", titleResult.String())
-	}
-	if hasStart {
-		payload, _ = sjson.SetBytes(payload, "url_citation.start_index", shiftedStart)
-	}
-	if hasEnd {
-		payload, _ = sjson.SetBytes(payload, "url_citation.end_index", shiftedEnd)
-	}
-
-	dedupKey := citationDedupKey{
-		outputIndex:  outIdx,
-		contentIndex: contentIdx,
-		url:          url,
-		startIndex:   shiftedStart,
-		endIndex:     shiftedEnd,
-		hasStart:     hasStart,
-		hasEnd:       hasEnd,
-	}
-
-	return payload, dedupKey, true
-}
-
-func citationArray(citation []byte) []byte {
-	out := make([]byte, 0, len(citation)+2)
-	out = append(out, '[')
-	out = append(out, citation...)
-	out = append(out, ']')
-	return out
 }
 
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
@@ -182,8 +68,6 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			FunctionCallIndex:     -1,
 			toolCallStates:        make(map[string]*toolCallStreamState),
 			LastImageHashByItemID: make(map[string][32]byte),
-			partRuneStarts:        make(map[partKey]int),
-			emittedCitations:      make(map[citationDedupKey]struct{}),
 		}
 	}
 
@@ -215,12 +99,6 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		(*param).(*ConvertCliToOpenAIParams).Model = rootResult.Get("response.model").String()
 		if (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID == nil {
 			(*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID = make(map[string][32]byte)
-		}
-		if (*param).(*ConvertCliToOpenAIParams).partRuneStarts == nil {
-			(*param).(*ConvertCliToOpenAIParams).partRuneStarts = make(map[partKey]int)
-		}
-		if (*param).(*ConvertCliToOpenAIParams).emittedCitations == nil {
-			(*param).(*ConvertCliToOpenAIParams).emittedCitations = make(map[citationDedupKey]struct{})
 		}
 		return [][]byte{}
 	}
@@ -270,87 +148,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", "\n\n")
 	} else if dataType == "response.output_text.delta" {
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
-			p.ensureCitationsState()
-			outIdx := rootResult.Get("output_index").Int()
-			contentIdx := rootResult.Get("content_index").Int()
-			key := partKey{outputIndex: outIdx, contentIndex: contentIdx}
-			if _, ok := p.partRuneStarts[key]; !ok {
-				p.partRuneStarts[key] = p.totalJoinedRunes
-			}
-			p.totalJoinedRunes += utf8.RuneCountInString(deltaResult.String())
-
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.content", deltaResult.String())
 		}
-	} else if dataType == "response.output_text.annotation.added" {
-		p.ensureCitationsState()
-		outIdx := rootResult.Get("output_index").Int()
-		contentIdx := rootResult.Get("content_index").Int()
-		key := partKey{outputIndex: outIdx, contentIndex: contentIdx}
-		offset, ok := p.partRuneStarts[key]
-		if !ok {
-			offset = p.totalJoinedRunes
-			p.partRuneStarts[key] = offset
-		}
-
-		ann := rootResult.Get("annotation")
-		if !ann.Exists() {
-			ann = rootResult
-		}
-
-		citationBytes, dedupKey, valid := projectCitation(ann, offset, outIdx, contentIdx)
-		if !valid {
-			return [][]byte{}
-		}
-
-		if _, seen := p.emittedCitations[dedupKey]; seen {
-			return [][]byte{}
-		}
-		if len(p.emittedCitations) >= 1024 {
-			return [][]byte{}
-		}
-		p.emittedCitations[dedupKey] = struct{}{}
-
-		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
-		template, _ = sjson.SetRawBytes(template, "choices.0.delta.annotations", citationArray(citationBytes))
-		return [][]byte{template}
-	} else if dataType == "response.content_part.done" {
-		p.ensureCitationsState()
-		outIdx := rootResult.Get("output_index").Int()
-		contentIdx := rootResult.Get("content_index").Int()
-		key := partKey{outputIndex: outIdx, contentIndex: contentIdx}
-		offset, ok := p.partRuneStarts[key]
-		if !ok {
-			offset = p.totalJoinedRunes
-			p.partRuneStarts[key] = offset
-		}
-
-		partResult := rootResult.Get("part")
-		annArray := partResult.Get("annotations").Array()
-		var chunks [][]byte
-		for _, ann := range annArray {
-			citationBytes, dedupKey, valid := projectCitation(ann, offset, outIdx, contentIdx)
-			if !valid {
-				continue
-			}
-			if _, seen := p.emittedCitations[dedupKey]; seen {
-				continue
-			}
-			if len(p.emittedCitations) >= 1024 {
-				continue
-			}
-			p.emittedCitations[dedupKey] = struct{}{}
-
-			chunk := make([]byte, len(template))
-			copy(chunk, template)
-			chunk, _ = sjson.SetBytes(chunk, "choices.0.delta.role", "assistant")
-			chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.annotations", citationArray(citationBytes))
-			chunks = append(chunks, chunk)
-		}
-		if len(chunks) == 0 {
-			return [][]byte{}
-		}
-		return chunks
 	} else if dataType == "response.image_generation_call.partial_image" {
 		itemID := rootResult.Get("item_id").String()
 		b64 := rootResult.Get("partial_image_b64").String()
@@ -522,55 +322,6 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			return [][]byte{template}
 		}
 		if !isCodexToolCallType(itemType) {
-			if itemType == "message" {
-				role := itemResult.Get("role").String()
-				if role == "" || role == "assistant" {
-					p.ensureCitationsState()
-					outIdx := rootResult.Get("output_index").Int()
-					var chunks [][]byte
-					contentResult := itemResult.Get("content")
-					if contentResult.IsArray() {
-						for cIdx, contentPart := range contentResult.Array() {
-							if contentPart.Get("type").String() != "output_text" {
-								continue
-							}
-							contentIndex := int64(cIdx)
-							if ci := contentPart.Get("content_index"); ci.Exists() {
-								contentIndex = ci.Int()
-							}
-							key := partKey{outputIndex: outIdx, contentIndex: contentIndex}
-							offset, ok := p.partRuneStarts[key]
-							if !ok {
-								offset = p.totalJoinedRunes
-								p.partRuneStarts[key] = offset
-							}
-							for _, ann := range contentPart.Get("annotations").Array() {
-								citationBytes, dedupKey, valid := projectCitation(ann, offset, outIdx, contentIndex)
-								if !valid {
-									continue
-								}
-								if _, seen := p.emittedCitations[dedupKey]; seen {
-									continue
-								}
-								if len(p.emittedCitations) >= 1024 {
-									continue
-								}
-								p.emittedCitations[dedupKey] = struct{}{}
-
-								chunk := make([]byte, len(template))
-								copy(chunk, template)
-								chunk, _ = sjson.SetBytes(chunk, "choices.0.delta.role", "assistant")
-								chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.annotations", citationArray(citationBytes))
-								chunks = append(chunks, chunk)
-							}
-						}
-					}
-					if len(chunks) == 0 {
-						return [][]byte{}
-					}
-					return chunks
-				}
-			}
 			return [][]byte{}
 		}
 
@@ -715,7 +466,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		outputArray := outputResult.Array()
 		var contentText string
 		var reasoningText string
-		var projectedAnnotations [][]byte
 
 		for _, outputItem := range outputArray {
 			outputType := outputItem.Get("type").String()
@@ -751,17 +501,10 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 					contentArray := contentResult.Array()
 					for _, contentItem := range contentArray {
 						if contentItem.Get("type").String() == "output_text" {
-							offset := utf8.RuneCountInString(contentText)
-							if annResult := contentItem.Get("annotations"); annResult.IsArray() {
-								for _, ann := range annResult.Array() {
-									if proj, _, ok := projectCitation(ann, offset, 0, 0); ok {
-										projectedAnnotations = append(projectedAnnotations, proj)
-									}
-								}
-							}
 							if text := contentItem.Get("text").String(); text != "" {
 								contentText += text
 							}
+							break
 						}
 					}
 				}
@@ -808,10 +551,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		// Set content and reasoning content if found
 		if contentText != "" {
 			template, _ = sjson.SetBytes(template, "choices.0.message.content", contentText)
-		}
-
-		if len(projectedAnnotations) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.annotations", translatorcommon.JoinRawArray(projectedAnnotations))
 		}
 
 		if reasoningText != "" {
