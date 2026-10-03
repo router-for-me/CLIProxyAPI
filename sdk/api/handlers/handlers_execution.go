@@ -113,6 +113,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	passthroughHeaders := executionPassthroughHeaders(h.Cfg, execOptions.InternalSource)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
+	responseHeaders = restoreVoiceContentType(alt, rawResponseHeaders, responseHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
@@ -233,8 +234,25 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	passthroughHeaders := executionPassthroughHeaders(h.Cfg, execOptions.InternalSource)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(execCtx, lifecycle.requestID(), responseProtocol, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
+	responseHeaders = restoreVoiceContentType(alt, rawResponseHeaders, responseHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
+}
+
+// restoreVoiceContentType keeps the upstream MIME type for Voice responses
+// even when general response-header passthrough is disabled. This applies to
+// both normal auth-manager and plugin-executor routes.
+func restoreVoiceContentType(alt string, rawResponseHeaders, responseHeaders http.Header) http.Header {
+	if !strings.HasPrefix(alt, "voice/") || responseHeaders.Get("Content-Type") != "" {
+		return responseHeaders
+	}
+	if contentType := rawResponseHeaders.Get("Content-Type"); contentType != "" {
+		if responseHeaders == nil {
+			responseHeaders = make(http.Header)
+		}
+		responseHeaders.Set("Content-Type", contentType)
+	}
+	return responseHeaders
 }
 
 func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerType, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
