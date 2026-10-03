@@ -120,14 +120,16 @@ plugins:
 When a plugin executor encounters an upstream failure (such as `401 Unauthorized` for invalid credentials, `403 Forbidden` for model permission/quota limits, or `429 Too Many Requests` for rate limits), it should report the HTTP status code in the error envelope:
 
 - In the JSON RPC error envelope, set the `http_status` field inside the `error` object (`pluginabi.Error.HTTPStatus`).
-- If `http_status` is omitted or `0`, CPA defaults to returning HTTP `500 Internal Server Error` (`server_error` / `internal_server_error`), which clients typically treat as a temporary gateway outage and retry with backoff.
-- When `http_status` is set, CPA maps the status into client-visible error responses:
+- If `http_status` is omitted or `0`, an executor failure defaults to HTTP `500 Internal Server Error`.
+- For a plain-text message on OpenAI-compatible handlers, CPA maps the status into a client-visible error response:
   - `401` -> HTTP 401 with `type: "authentication_error"`, `code: "invalid_api_key"`
   - `403` -> HTTP 403 with `type: "permission_error"`, `code: "insufficient_quota"`
   - `429` -> HTTP 429 with `type: "rate_limit_error"`, `code: "rate_limit_exceeded"`
   - `404` -> HTTP 404 with `type: "invalid_request_error"`, `code: "model_not_found"`
   - `>=500` -> HTTP 5xx with `type: "server_error"`, `code: "internal_server_error"`
-- **Important**: Both non-streaming (`executor.execute`) and streaming (`executor.execute_stream`) call sites must include `http_status` so failures are classified consistently.
+- Error-body handling is protocol-specific. Structured and streaming handlers may forward, normalize, or sanitize the message, so plugins should not rely on byte-for-byte preservation of the body.
+- For streaming, wait until the upstream accepts or rejects the initial request before returning success from `executor.execute_stream`. After success, asynchronous `host.stream.emit` and `host.stream.close` calls can carry only a string error, not an HTTP status; later failures therefore use HTTP 500 even when no output has reached the client. Once headers or chunks reach the client, the HTTP status cannot change in any case.
+- `error.retryable` is currently informational. The host does not use it for executor retry decisions.
 - Because native dynamic library plugins communicate across the C ABI via serialized JSON buffers, the status code must be encoded in the serialized JSON envelope (e.g. using `pluginabi.NewErrorEnvelope` or a custom envelope struct with an `http_status` field). Returning an unmarshaled Go error does not traverse the C ABI boundary.
 
 Go plugins can import `github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi` and use `pluginabi.NewErrorEnvelope(code, message, httpStatus)`:
