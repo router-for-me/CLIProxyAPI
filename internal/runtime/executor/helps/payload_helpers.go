@@ -2,8 +2,10 @@ package helps
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -98,7 +100,8 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				for path, value := range rule.Params {
+				for _, path := range slices.Sorted(maps.Keys(rule.Params)) {
+					value := rule.Params[path]
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
@@ -126,7 +129,8 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				for path, value := range rule.Params {
+				for _, path := range slices.Sorted(maps.Keys(rule.Params)) {
+					value := rule.Params[path]
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
@@ -158,7 +162,8 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				for path, value := range rule.Params {
+				for _, path := range slices.Sorted(maps.Keys(rule.Params)) {
+					value := rule.Params[path]
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
@@ -178,7 +183,8 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
-				for path, value := range rule.Params {
+				for _, path := range slices.Sorted(maps.Keys(rule.Params)) {
+					value := rule.Params[path]
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
