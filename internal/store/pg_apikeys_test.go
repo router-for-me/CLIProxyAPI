@@ -442,3 +442,50 @@ func cancelableTestCtx(t *testing.T) context.Context {
 	t.Cleanup(cancel)
 	return ctx
 }
+
+func TestAPIKeyPolicyStoreRequestBodiesRoundTrip(t *testing.T) {
+	store := newTestPostgresStore(t, "policy_bodies_test")
+	ctx := cancelableTestCtx(t)
+	apiKeys := NewAPIKeyStore(store)
+
+	key, _, err := apiKeys.Create(ctx, "bodieskey", "", "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Default OFF when a policy is first written with the zero value.
+	if err := apiKeys.UpdatePolicy(ctx, key.ID, Policy{AllowedModels: []string{"gpt-4o"}}); err != nil {
+		t.Fatalf("UpdatePolicy (default): %v", err)
+	}
+	_, p, err := apiKeys.LookupByID(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("LookupByID: %v", err)
+	}
+	if p == nil || p.StoreRequestBodies {
+		t.Fatalf("expected StoreRequestBodies=false; got %+v", p)
+	}
+
+	// Round-trip true.
+	if err := apiKeys.UpdatePolicy(ctx, key.ID, Policy{StoreRequestBodies: true}); err != nil {
+		t.Fatalf("UpdatePolicy (true): %v", err)
+	}
+	_, p2, err := apiKeys.LookupByHash(ctx, HashSecret("bodieskey"))
+	if err != nil {
+		t.Fatalf("LookupByHash: %v", err)
+	}
+	if p2 == nil || !p2.StoreRequestBodies {
+		t.Fatalf("expected StoreRequestBodies=true; got %+v", p2)
+	}
+
+	// Full replace clears it back to false.
+	if err := apiKeys.UpdatePolicy(ctx, key.ID, Policy{}); err != nil {
+		t.Fatalf("UpdatePolicy (clear): %v", err)
+	}
+	_, p3, err := apiKeys.LookupByID(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("LookupByID (clear): %v", err)
+	}
+	if p3 == nil || p3.StoreRequestBodies {
+		t.Fatalf("expected StoreRequestBodies=false after clear; got %+v", p3)
+	}
+}

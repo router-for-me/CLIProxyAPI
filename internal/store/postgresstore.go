@@ -1295,6 +1295,13 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter api_key_policies add blocked_ips: %w", err)
 	}
+	// Backfill store_request_bodies on api_key_policies (per-API-key privacy
+	// opt-in controlling request/response body capture). Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS store_request_bodies BOOLEAN NOT NULL DEFAULT FALSE`, policiesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter api_key_policies add store_request_bodies: %w", err)
+	}
 
 	usageEventsTable := s.fullTableName(s.cfg.UsageEventsTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`

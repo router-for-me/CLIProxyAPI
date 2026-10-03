@@ -117,9 +117,13 @@ type Policy struct {
 	// denies the request even when AllowedIPs would also match. When
 	// AllowedIPs is non-empty, the client IP must match at least one entry;
 	// an empty AllowedIPs means "all IPs allowed" (subject to BlockedIPs).
-	AllowedIPs []string  `json:"allowed_ips,omitempty"`
-	BlockedIPs []string  `json:"blocked_ips,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	AllowedIPs []string `json:"allowed_ips,omitempty"`
+	BlockedIPs []string `json:"blocked_ips,omitempty"`
+	// StoreRequestBodies permits persisting this key's request/response
+	// bodies (privacy opt-in). Capture happens when either the serving
+	// provider's toggle or this key's toggle is ON. Default false.
+	StoreRequestBodies bool      `json:"store_request_bodies"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // ModelRoute pins a single model ID to a set of upstream providers. Requests
@@ -489,7 +493,7 @@ func (s *APIKeyStore) LookupByHash(ctx context.Context, hash string) (*APIKey, *
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.max_parallel_requests,
 		       p.allowed_models, p.blocked_models, p.model_routes, p.model_group_id,
-		       p.allowed_ips, p.blocked_ips, p.updated_at
+		       p.allowed_ips, p.blocked_ips, p.store_request_bodies, p.updated_at
 		FROM %s k
 		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
@@ -518,7 +522,7 @@ func (s *APIKeyStore) LookupByID(ctx context.Context, id string) (*APIKey, *Poli
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.max_parallel_requests,
 		       p.allowed_models, p.blocked_models, p.model_routes, p.model_group_id,
-		       p.allowed_ips, p.blocked_ips, p.updated_at
+		       p.allowed_ips, p.blocked_ips, p.store_request_bodies, p.updated_at
 		FROM %s k
 		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
@@ -554,7 +558,7 @@ func (s *APIKeyStore) LookupByAlias(ctx context.Context, alias string) (*APIKey,
 		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
 		       p.budget_monthly_usd, p.max_parallel_requests,
 		       p.allowed_models, p.blocked_models, p.model_routes, p.model_group_id,
-		       p.allowed_ips, p.blocked_ips, p.updated_at
+		       p.allowed_ips, p.blocked_ips, p.store_request_bodies, p.updated_at
 		FROM %s k
 		LEFT JOIN %s u ON u.id = k.user_id
 		LEFT JOIN %s p ON p.api_key_id = k.id
@@ -611,6 +615,7 @@ func scanAPIKeyRows(row *sql.Rows) (*APIKey, *Policy, error) {
 		allowedIPs      []byte
 		blockedIPs      []byte
 		policyUpdatedAt sql.NullTime
+		storeBodies     sql.NullBool
 	)
 	if err := row.Scan(
 		&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
@@ -620,7 +625,7 @@ func scanAPIKeyRows(row *sql.Rows) (*APIKey, *Policy, error) {
 		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
 		&maxParallel,
 		&allowedModels, &blockedModels, &modelRoutes, &modelGroupID,
-		&allowedIPs, &blockedIPs, &policyUpdatedAt,
+		&allowedIPs, &blockedIPs, &policyUpdatedAt, &storeBodies,
 	); err != nil {
 		return nil, nil, err
 	}
@@ -667,6 +672,7 @@ func scanAPIKeyRows(row *sql.Rows) (*APIKey, *Policy, error) {
 		}
 		p.AllowedIPs = decodeStringArray(allowedIPs)
 		p.BlockedIPs = decodeStringArray(blockedIPs)
+		p.StoreRequestBodies = storeBodies.Valid && storeBodies.Bool
 		policy = &p
 	}
 	return &key, policy, nil
@@ -689,6 +695,7 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		allowedIPs      []byte
 		blockedIPs      []byte
 		policyUpdatedAt sql.NullTime
+		storeBodies     sql.NullBool
 	)
 	if err := row.Scan(
 		&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
@@ -698,7 +705,7 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
 		&maxParallel,
 		&allowedModels, &blockedModels, &modelRoutes, &modelGroupID,
-		&allowedIPs, &blockedIPs, &policyUpdatedAt,
+		&allowedIPs, &blockedIPs, &policyUpdatedAt, &storeBodies,
 	); err != nil {
 		return nil, nil, err
 	}
@@ -745,6 +752,7 @@ func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
 		}
 		p.AllowedIPs = decodeStringArray(allowedIPs)
 		p.BlockedIPs = decodeStringArray(blockedIPs)
+		p.StoreRequestBodies = storeBodies.Valid && storeBodies.Bool
 		policy = &p
 	}
 	return &key, policy, nil
@@ -1005,8 +1013,8 @@ func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, polic
 			budget_hourly_usd, budget_weekly_usd, budget_monthly_usd,
 			max_parallel_requests,
 			allowed_models, blocked_models, model_routes, model_group_id,
-			allowed_ips, blocked_ips, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12::jsonb, $13::jsonb, NOW())
+			allowed_ips, blocked_ips, store_request_bodies, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12::jsonb, $13::jsonb, $14, NOW())
 		ON CONFLICT (api_key_id) DO UPDATE SET
 			rpm_limit = EXCLUDED.rpm_limit,
 			hourly_rate_limit = EXCLUDED.hourly_rate_limit,
@@ -1020,13 +1028,14 @@ func upsertPolicyTx(ctx context.Context, tx *sql.Tx, policiesTable string, polic
 			model_group_id = EXCLUDED.model_group_id,
 			allowed_ips = EXCLUDED.allowed_ips,
 			blocked_ips = EXCLUDED.blocked_ips,
+			store_request_bodies = EXCLUDED.store_request_bodies,
 			updated_at = NOW()
 	`, policiesTable),
 		policy.APIKeyID, policy.RPMLimit, policy.HourlyRateLimit,
 		policy.BudgetHourlyUSD, policy.BudgetWeeklyUSD, policy.BudgetMonthlyUSD,
 		policy.MaxParallelRequests,
 		string(allowed), string(blocked), string(routes), modelGroupIDArg,
-		string(allowedIPs), string(blockedIPs),
+		string(allowedIPs), string(blockedIPs), policy.StoreRequestBodies,
 	); err != nil {
 		return fmt.Errorf("postgres store: upsert policy: %w", err)
 	}
