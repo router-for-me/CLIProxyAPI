@@ -371,3 +371,26 @@ func openAIModelIDSet(models []map[string]any) map[string]struct{} {
 	}
 	return ids
 }
+
+func TestRegisterModelsForAuthCodexDaybreakOptIn(t *testing.T) {
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	for _, daybreak := range []bool{false, true} {
+		id := fmt.Sprintf("codex-daybreak-%t", daybreak)
+		modelRegistry.UnregisterClient(id)
+		t.Cleanup(func() { modelRegistry.UnregisterClient(id) })
+
+		(&Service{cfg: &config.Config{}}).registerModelsForAuth(context.Background(), &coreauth.Auth{
+			ID: id, Provider: "codex", Status: coreauth.StatusActive,
+			Attributes: map[string]string{"plan_type": "pro"},
+			Metadata:   map[string]any{"daybreak": daybreak},
+		})
+
+		found := false
+		for _, model := range modelRegistry.GetModelsForClient(id) {
+			found = found || model.ID == "gpt-daybreak-blue-latest"
+		}
+		if found != daybreak {
+			t.Fatalf("daybreak=%t: gpt-daybreak-blue-latest registered=%t", daybreak, found)
+		}
+	}
+}

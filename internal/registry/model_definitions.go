@@ -77,6 +77,25 @@ func GetCodexProModels() []*ModelInfo {
 	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
 }
 
+// GetCodexDaybreakModels returns Codex models served only to accounts enrolled in OpenAI Daybreak.
+func GetCodexDaybreakModels() []*ModelInfo {
+	return []*ModelInfo{{
+		ID:                       "gpt-daybreak-blue-latest",
+		Object:                   "model",
+		Created:                  1790035200,
+		OwnedBy:                  "openai",
+		Type:                     "openai",
+		DisplayName:              "Daybreak Blue",
+		Version:                  "gpt-daybreak-blue-latest",
+		Description:              "Latest frontier agentic coding model for broad defensive cybersecurity work.",
+		ContextLength:            872000,
+		MaxCompletionTokens:      128000,
+		SupportedParameters:      []string{"tools"},
+		Thinking:                 &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
+		SupportedInputModalities: []string{"text", "image"},
+	}}
+}
+
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)

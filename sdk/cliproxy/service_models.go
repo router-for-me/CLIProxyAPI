@@ -149,6 +149,10 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		default:
 			models = registry.GetCodexProModels()
 		}
+		// Daybreak access is granted per account, so it is opt-in via the auth file.
+		if daybreak, _ := a.Metadata["daybreak"].(bool); daybreak {
+			models = append(models, registry.GetCodexDaybreakModels()...)
+		}
 		models = applyExcludedModels(models, excluded)
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()
