@@ -56,7 +56,7 @@ func TestGetOAuthCallbackWritesPluginProviderCallback(t *testing.T) {
 	if errRegister := RegisterPluginOAuthSession(state, "gemini-cli", nil); errRegister != nil {
 		t.Fatalf("register plugin oauth session: %v", errRegister)
 	}
-	defer CompleteOAuthSession(state)
+	t.Cleanup(func() { CancelOAuthSession(state) })
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
 	router := gin.New()
@@ -92,7 +92,7 @@ func TestGetOAuthCallbackDoesNotAliasPluginProvider(t *testing.T) {
 	if errRegister := RegisterPluginOAuthSession(state, "openai", nil); errRegister != nil {
 		t.Fatalf("register plugin oauth session: %v", errRegister)
 	}
-	defer CompleteOAuthSession(state)
+	t.Cleanup(func() { CancelOAuthSession(state) })
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
 	router := gin.New()

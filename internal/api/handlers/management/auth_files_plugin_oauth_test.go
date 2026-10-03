@@ -302,10 +302,12 @@ func TestServePluginAuthURLPassesQueryParamsAsMetadata(t *testing.T) {
 		startLogin: func(ctx context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
 			callCount++
 			capturedReq = req
+			state := fmt.Sprintf("state-1234567890-%d", callCount)
+			t.Cleanup(func() { CancelOAuthSession(state) })
 			return pluginapi.AuthLoginStartResponse{
 				Provider:  req.Provider,
 				URL:       "https://login.example.com",
-				State:     fmt.Sprintf("state-1234567890-%d", callCount),
+				State:     state,
 				ExpiresAt: time.Now().Add(time.Hour),
 			}, nil
 		},
