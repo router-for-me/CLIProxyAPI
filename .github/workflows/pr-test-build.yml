@@ -19,6 +19,16 @@ jobs:
           cache: true
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Check gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files are not formatted with gofmt:"
+            echo "$unformatted"
+            echo
+            echo "Run 'gofmt -w .' and commit the result."
+            exit 1
+          fi
       - name: Build
         run: |
           go build -o test-output ./cmd/server
