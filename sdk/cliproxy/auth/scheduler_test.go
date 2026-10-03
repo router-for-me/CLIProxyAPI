@@ -978,6 +978,60 @@ func TestManagerPluginSchedulerSelectsAuthID(t *testing.T) {
 	}
 }
 
+func TestManagerPluginSchedulerReceivesQuotaObservation(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["claude"] = schedulerTestExecutor{provider: "claude"}
+	observedAt := time.Date(2026, 10, 3, 14, 0, 0, 0, time.UTC)
+	observed := &Auth{ID: "observed", Provider: "claude", Quota: QuotaState{
+		ObservedAt: observedAt,
+		Signals: map[string]string{
+			"Anthropic-Ratelimit-Unified-7d-Reset":       "1791900000",
+			"Anthropic-Ratelimit-Unified-7d-Utilization": "0.53",
+		},
+	}}
+	for _, auth := range []*Auth{observed, {ID: "unobserved", Provider: "claude"}} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	scheduler := &fakePluginScheduler{}
+	manager.SetPluginScheduler(scheduler)
+	if _, _, errPick := manager.pickNext(context.Background(), "claude", "", cliproxyexecutor.Options{}, nil); errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want 1", len(scheduler.requests))
+	}
+	quotas := make(map[string]*pluginapi.SchedulerQuotaObservation)
+	for _, candidate := range scheduler.requests[0].Candidates {
+		quotas[candidate.ID] = candidate.Quota
+	}
+	got := quotas["observed"]
+	if got == nil || !got.ObservedAt.Equal(observedAt) || got.Signals["Anthropic-Ratelimit-Unified-7d-Reset"] != "1791900000" {
+		t.Fatalf("observed candidate quota = %+v, want the registered snapshot", got)
+	}
+	if quotas["unobserved"] != nil {
+		t.Fatalf("unobserved candidate quota = %+v, want nil", quotas["unobserved"])
+	}
+
+	// The snapshot is a copy: a plugin-side change must not reach the auth.
+	got.Signals["Anthropic-Ratelimit-Unified-7d-Utilization"] = "0"
+	manager.mu.RLock()
+	stored := manager.auths["observed"].Quota.Signals["Anthropic-Ratelimit-Unified-7d-Utilization"]
+	manager.mu.RUnlock()
+	if stored != "0.53" {
+		t.Fatalf("auth quota signal = %q after candidate mutation, want %q", stored, "0.53")
+	}
+}
+
+func TestSchedulerQuotaObservationSkipsUnsupportedProviders(t *testing.T) {
+	auth := &Auth{ID: "g", Provider: "gemini", Quota: QuotaState{ObservedAt: time.Now(), Signals: map[string]string{"Retry-After": "5"}}}
+	if got := schedulerQuotaObservation(auth); got != nil {
+		t.Fatalf("schedulerQuotaObservation(gemini) = %+v, want nil", got)
+	}
+}
+
 func TestManagerPluginSchedulerAcrossPriorities(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["gemini"] = schedulerTestExecutor{}

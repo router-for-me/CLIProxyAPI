@@ -862,9 +862,24 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 			Priority:   authPriority(auth),
 			Status:     string(auth.Status),
 			Attributes: schedulerSafeAttributes(auth.Attributes),
+			Quota:      schedulerQuotaObservation(auth),
 		})
 	}
 	return out
+}
+
+// schedulerQuotaObservation copies the passive quota snapshot for a scheduler
+// candidate. It returns nil for providers without quota observation and for
+// auths with nothing observed yet, matching the Management API credential view.
+func schedulerQuotaObservation(auth *Auth) *pluginapi.SchedulerQuotaObservation {
+	if auth == nil || !ProviderSupportsQuotaObservation(auth.Provider) {
+		return nil
+	}
+	if auth.Quota.ObservedAt.IsZero() && len(auth.Quota.Signals) == 0 {
+		return nil
+	}
+	quota := auth.Quota.Clone()
+	return &pluginapi.SchedulerQuotaObservation{ObservedAt: quota.ObservedAt, Signals: quota.Signals}
 }
 
 func schedulerProviders(provider string, providers []string) []string {
@@ -956,13 +971,18 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if providerKey == "mixed" {
 		requestProvider = ""
 	}
+	// Candidates are live auth records; snapshot them under the read lock, since
+	// result handling replaces their quota observation under the write lock.
+	m.mu.RLock()
+	pickCandidates := schedulerAuthCandidates(candidates)
+	m.mu.RUnlock()
 	req := pluginapi.SchedulerPickRequest{
 		Provider:   requestProvider,
 		Providers:  schedulerProviders(providerKey, providers),
 		Model:      model,
 		Stream:     opts.Stream,
 		Options:    schedulerOptions(opts),
-		Candidates: schedulerAuthCandidates(candidates),
+		Candidates: pickCandidates,
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
 	if errPick != nil {
