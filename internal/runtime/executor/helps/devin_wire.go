@@ -623,6 +623,11 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 	}
 	normalized := strings.ReplaceAll(prompt, "\r\n", "\n")
 	lines := strings.Split(normalized, "\n")
+	// The security-policy line filter below is meant for Claude Code's own
+	// system prompt. Its patterns are generic wording, so only apply it when the
+	// prompt identifies itself as Claude Code; other clients keep their policy
+	// lines intact.
+	isClaudeCodePrompt := isClaudeCodeSystemPrompt(lines)
 	var kept []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -632,7 +637,7 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 		if strings.HasPrefix(trimmed, "You are Claude Code") {
 			continue
 		}
-		if strings.Contains(trimmed, "authorized security testing") || strings.Contains(trimmed, "destructive techniques, DoS attacks") {
+		if isClaudeCodePrompt && (strings.Contains(trimmed, "authorized security testing") || strings.Contains(trimmed, "destructive techniques, DoS attacks")) {
 			continue
 		}
 		if strings.Contains(trimmed, "Claude Code is available as a CLI") {
@@ -657,6 +662,18 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 		res = matcher.ObfuscateText(res)
 	}
 	return res
+}
+
+// isClaudeCodeSystemPrompt reports whether the prompt carries Claude Code's
+// identity or attribution block.
+func isClaudeCodeSystemPrompt(lines []string) bool {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if util.IsClaudeCodeAttributionSystemText(trimmed) || strings.HasPrefix(trimmed, "You are Claude Code") || strings.Contains(trimmed, "Claude Code") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
