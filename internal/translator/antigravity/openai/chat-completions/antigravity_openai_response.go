@@ -33,6 +33,11 @@ type convertCliResponseToOpenAIChatParams struct {
 	ResponseID           string
 	PendingUsageMetadata []byte
 	SanitizedNameMap     map[string]string
+	VisibleText          strings.Builder
+	FlushedVisible       int
+	FinishMessage        string
+	DeclaredTools        map[string]string
+	ToolsLoaded          bool
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -64,14 +69,16 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	if params.SanitizedNameMap == nil {
 		params.SanitizedNameMap = util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	}
+	if !params.ToolsLoaded {
+		params.DeclaredTools = recoveryAllowedTools(originalRequestRawJSON)
+		params.ToolsLoaded = true
+	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		// Never finalize a stream that produced no response at all: an empty
 		// upstream body must stay detectable as a failure rather than be reported
 		// as a successful empty completion.
 		if params.SawResponse && !params.SawFinishReason {
-			params.SawFinishReason = true
-			finishReason, nativeFinishReason := resolveOpenAIFinishReason(params)
 			template := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop","native_finish_reason":"stop"}]}`)
 			template, _ = sjson.SetBytes(template, "created", params.UnixTimestamp)
 			if params.ModelVersion != "" {
@@ -83,8 +90,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			if len(params.PendingUsageMetadata) > 0 {
 				template = setOpenAIUsageMetadata(template, gjson.ParseBytes(params.PendingUsageMetadata))
 			}
-			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
+			template = finalizeStreamChunk(params, template, true)
 			return [][]byte{template}
 		}
 		return [][]byte{}
@@ -123,6 +129,9 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	// Cache the finish reason - do NOT set it in output yet (will be set on final chunk)
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
 		params.UpstreamFinishReason = strings.ToUpper(finishReasonResult.String())
+	}
+	if finishMessageResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishMessage"); finishMessageResult.Exists() {
+		params.FinishMessage = finishMessageResult.String()
 	}
 
 	// Extract and set usage metadata (token counts). FilterSSEUsageMetadata renames
@@ -169,7 +178,9 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				if partResult.Get("thought").Bool() {
 					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
 				} else {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
+					// Visible text is buffered. A call suffix stays held until
+					// the terminal chunk decides whether it is a tool call.
+					params.VisibleText.WriteString(textContent)
 				}
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
@@ -229,13 +240,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	// finishReason at all, the [DONE] branch synthesizes the terminal chunk.
 	usageMetadata := gjson.GetBytes(rawJSON, "response.usageMetadata")
 	isFinalChunk := params.UpstreamFinishReason != "" && usageMetadata.Exists()
-
-	if isFinalChunk {
-		finishReason, nativeFinishReason := resolveOpenAIFinishReason(params)
-		template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
-		params.SawFinishReason = true
-	}
+	template = finalizeStreamChunk(params, template, isFinalChunk)
 
 	return [][]byte{template}
 }
@@ -262,25 +267,6 @@ func hasAntigravityResponsePayload(rawJSON []byte) bool {
 		}
 	}
 	return false
-}
-
-// resolveOpenAIFinishReason maps the cached upstream state to the OpenAI
-// finish_reason and native_finish_reason pair. Both the terminal upstream chunk
-// and the synthesized [DONE] chunk must agree on this mapping.
-func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (finishReason, nativeFinishReason string) {
-	switch {
-	case params.SawToolCall:
-		finishReason = "tool_calls"
-	case params.UpstreamFinishReason == "MAX_TOKENS":
-		finishReason = "max_tokens"
-	default:
-		finishReason = "stop"
-	}
-	nativeFinishReason = "stop"
-	if params.UpstreamFinishReason != "" {
-		nativeFinishReason = strings.ToLower(params.UpstreamFinishReason)
-	}
-	return finishReason, nativeFinishReason
 }
 
 func setOpenAIUsageMetadata(template []byte, usageResult gjson.Result) []byte {
@@ -322,7 +308,8 @@ func ConvertAntigravityResponseToOpenAINonStream(ctx context.Context, modelName 
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		responseJSON := restoreAntigravityOpenAIFunctionNames([]byte(responseResult.Raw), originalRequestRawJSON)
-		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, responseJSON, param)
+		out := ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, responseJSON, param)
+		return promoteNonStreamMalformedFunctionCall(out, responseJSON, originalRequestRawJSON)
 	}
 	return []byte{}
 }
