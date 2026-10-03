@@ -17,6 +17,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -135,6 +136,13 @@ func PolicyMiddleware(svc policy.PolicyService) gin.HandlerFunc {
 		// Reuses the snapshot cache populated by Check (no extra DB round-trip).
 		if allowed, blocked := svc.ResolvedModelLists(c.Request.Context(), principalStr); len(allowed) > 0 || len(blocked) > 0 {
 			c.Set(CtxPolicyAllowedModels, policy.ModelLists{Allowed: allowed, Blocked: blocked})
+		}
+
+		// Stash the key's privacy toggle so the usage reporter can OR it with
+		// the provider's store_request_bodies attribute when setting the
+		// capture gate.
+		if svc.ResolvedStoreRequestBodies(c.Request.Context(), principalStr) {
+			c.Set(internallogging.APIKeyStoreRequestBodiesContextKey, true)
 		}
 
 		// Acquire an in-flight slot under the configured max_parallel_requests

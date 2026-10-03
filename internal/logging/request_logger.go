@@ -27,6 +27,11 @@ const (
 	StoreRequestBodiesContextKey           = "STORE_REQUEST_BODIES"
 	StoreRequestBodiesProviderContextKey   = "STORE_REQUEST_BODIES_PROVIDER"
 	StoreRequestBodiesUpstreamIDContextKey = "STORE_REQUEST_BODIES_UPSTREAM_ID"
+
+	// APIKeyStoreRequestBodiesContextKey carries the client API key's own
+	// privacy toggle (api_key_policies.store_request_bodies) into the request
+	// context. The capture gate is the OR of this and the provider toggle.
+	APIKeyStoreRequestBodiesContextKey = "API_KEY_STORE_REQUEST_BODIES"
 )
 
 // DeferredAPIRequest builds an upstream request log only when an error log needs it.

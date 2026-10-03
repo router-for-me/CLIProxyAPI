@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
@@ -258,6 +259,28 @@ func TestPolicyMiddlewareOmitsAllowedModelsWhenEmpty(t *testing.T) {
 	}
 	if present {
 		t.Errorf("ModelListsFor should return nil,nil when no lists are configured")
+	}
+}
+
+func TestPolicyMiddlewareStashesKeyStoreRequestBodies(t *testing.T) {
+	svc := &mockPolicyService{active: true, checkDecision: policy.Decision{Allow: true}, storeBodies: true}
+	var got bool
+	r := gin.New()
+	gin.SetMode(gin.TestMode)
+	r.Use(func(c *gin.Context) { c.Set("userApiKey", "p"); c.Next() })
+	r.Use(PolicyMiddleware(svc))
+	r.POST("/v1/chat", func(c *gin.Context) {
+		v, ok := c.Get(internallogging.APIKeyStoreRequestBodiesContextKey)
+		if ok {
+			got, _ = v.(bool)
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat", bytes.NewBufferString(`{"model":"gpt-4o"}`))
+	r.ServeHTTP(w, req)
+	if !got {
+		t.Fatalf("expected key store_request_bodies stashed true; got %v", got)
 	}
 }
 
