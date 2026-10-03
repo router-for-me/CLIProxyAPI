@@ -357,8 +357,17 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+				// A request-scoped continue rule answers this rejection on another credential,
+				// so the downstream disconnect must stay silent until the conductor has had the
+				// chance to retry. Notifying it first would close the client websocket with
+				// zero frames even though the retry succeeds.
+				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, wsErr)
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					if requestScopedFailover {
+						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
+					} else {
+						e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					}
 					sess.clearActive(conn, readCh)
 					unlockStreamSession()
 				} else {
@@ -380,19 +389,22 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return nil, wsErr
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
-				// A transient capacity rejection is retried on another credential, so the
+				// A transient capacity rejection, or any rejection a request-scoped rule answers
+				// by continuing on another credential, is retried on that credential, so the
 				// downstream websocket session must survive this upstream teardown. Notifying
 				// the disconnect here would close the client connection before the retry can
 				// deliver anything. Every other terminal failure is forwarded in-stream and
 				// legitimately terminates the session, so it keeps the notifying variant.
 				failoverPending := isCodexOverloadBootstrapFailure(terminalBody)
-				if failoverPending && timeoutReached {
+				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, streamErr)
+				if (failoverPending || requestScopedFailover) && timeoutReached {
 					failoverPending = false
+					requestScopedFailover = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 				}
 				if sess != nil {
 					unlockStreamSession()
-					if failoverPending {
+					if failoverPending || requestScopedFailover {
 						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "terminal_failure", streamErr)
 					} else {
 						e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
@@ -418,6 +430,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					// status the upstream refused to put on the wire.
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read, failing over", bufferedFrames)
 					return nil, newCodexBootstrapOverloadErr(terminalBody)
+				}
+				if requestScopedFailover {
+					if isEphemeralSession {
+						closeCodexWebsocketSession(sess, "bootstrap_request_scoped")
+					}
+					// Keep the upstream status and body so the conductor matches the same
+					// request-scoped rule this branch matched and retries on another credential.
+					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: request-scoped rejection matches a continue action after %d messages read, failing over", bufferedFrames)
+					return nil, streamErr
 				}
 				bootstrapTerminalErr = streamErr
 				break
@@ -624,7 +645,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					if e.shouldFailoverRequestScopedRejection(auth, wsErr) {
+						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
+					} else {
+						e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					}
 				}
 				if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
 					terminateErr = errClearReplay
@@ -643,7 +668,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateErr = streamErr
 				if sess != nil {
 					unlockStreamSession()
-					e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
+					if e.shouldFailoverRequestScopedRejection(auth, streamErr) {
+						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "terminal_failure", streamErr)
+					} else {
+						e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
+					}
 				}
 				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 					terminateErr = errClearReplay
@@ -732,6 +761,20 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
+}
+
+// shouldFailoverRequestScopedRejection reports whether err matches a configured
+// request-scoped rule on auth whose action keeps the request alive on another
+// credential (continue / continue-and-cooldown).
+//
+// The conductor answers such a rejection by retrying the request, so the executor
+// must not signal the downstream disconnect listener: that closes the client
+// websocket before the retry can deliver anything.
+func (e *CodexWebsocketsExecutor) shouldFailoverRequestScopedRejection(auth *cliproxyauth.Auth, err error) bool {
+	if e == nil {
+		return false
+	}
+	return cliproxyauth.IsRequestScopedContinueAction(auth, err, e.cfg)
 }
 
 // codexWebsocketPrepared contains the request pipeline output shared by the
