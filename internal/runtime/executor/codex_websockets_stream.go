@@ -361,7 +361,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// so the downstream disconnect must stay silent until the conductor has had the
 				// chance to retry. Notifying it first would close the client websocket with
 				// zero frames even though the retry succeeds.
-				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, wsErr)
+				// The bootstrap time budget is spent, so no retry follows: this rejection is
+				// delivered in-stream with the ordinary notifying teardown, exactly like the
+				// sibling terminal branch guards its request-scoped failover decision below.
+				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, wsErr) && !timeoutReached
 				if sess != nil {
 					if requestScopedFailover {
 						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
