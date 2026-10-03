@@ -131,7 +131,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
-		execCtx = newUpstreamAttemptContext(execCtx)
+		execCtx = newUpstreamAttemptContext(execCtx, auth)
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
@@ -169,7 +169,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			continue
 		}
 		for _, upstreamModel := range models {
-			execCtx = newUpstreamAttemptContext(execCtx)
+			execCtx = newUpstreamAttemptContext(execCtx, auth)
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
