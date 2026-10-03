@@ -429,6 +429,10 @@ func (r *recordingService) ResolvedIPLists(_ context.Context, _ string) ([]strin
 	return nil, nil
 }
 
+func (r *recordingService) ResolvedStoreRequestBodies(_ context.Context, _ string) bool {
+	return false
+}
+
 func TestUsagePluginForwardsCacheTokens(t *testing.T) {
 	rec := &recordingService{}
 	plugin := NewUsagePlugin(rec)
@@ -522,5 +526,15 @@ func TestResolveDiscount(t *testing.T) {
 				t.Fatalf("resolveDiscount(%+v, %q) = %v, want %v", tc.p, tc.model, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolvedStoreRequestBodiesInactiveServiceReturnsFalse(t *testing.T) {
+	svc := NewService(nil, nil, ServiceConfig{})
+	if svc.Active() {
+		t.Fatal("expected inactive service")
+	}
+	if got := svc.ResolvedStoreRequestBodies(context.Background(), "sk-whatever"); got {
+		t.Fatalf("ResolvedStoreRequestBodies = true; want false for inactive service")
 	}
 }

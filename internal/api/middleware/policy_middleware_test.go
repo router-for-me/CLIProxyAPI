@@ -28,6 +28,7 @@ type mockPolicyService struct {
 	routes        []store.ModelRoute
 	allowed       []string
 	blocked       []string
+	storeBodies   bool
 }
 
 func (m *mockPolicyService) Active() bool { return m.active }
@@ -74,6 +75,10 @@ func (m *mockPolicyService) ResolvedModelLists(_ context.Context, _ string) ([]s
 
 func (m *mockPolicyService) ResolvedIPLists(_ context.Context, _ string) ([]string, []string) {
 	return nil, nil
+}
+
+func (m *mockPolicyService) ResolvedStoreRequestBodies(_ context.Context, _ string) bool {
+	return m.storeBodies
 }
 
 func newTestRouter(svc policy.PolicyService) *gin.Engine {

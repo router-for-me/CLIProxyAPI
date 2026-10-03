@@ -111,6 +111,9 @@ type Policy struct {
 	// that take precedence over DiscountPct. Populated by the group-override
 	// snapshot path; never persisted on the policy row itself.
 	ModelDiscountPcts map[string]float64
+	// StoreRequestBodies mirrors store.Policy.StoreRequestBodies (per-key
+	// privacy opt-in for request/response body capture).
+	StoreRequestBodies bool
 }
 
 // ModelLists carries the resolved AllowedModels / BlockedModels for a
@@ -171,6 +174,13 @@ type PolicyService interface {
 	// this to enforce the per-API-key source IP allowlist/blocklist right
 	// after svc.Check, before AcquireParallel, without an extra DB round-trip.
 	ResolvedIPLists(ctx context.Context, principal string) (allowed, blocked []string)
+
+	// ResolvedStoreRequestBodies reports whether the principal's policy opts
+	// in to persisting request/response bodies (privacy toggle). Reuses the
+	// snapshot cache populated by Check. Returns false when the service is
+	// inactive, the principal is unknown (legacy/file-only key), or no policy
+	// is attached — callers then fall back to the per-provider toggle alone.
+	ResolvedStoreRequestBodies(ctx context.Context, principal string) bool
 
 	// Consume records tokens + cost against the budget windows. Called from
 	// the usage plugin sink after the upstream response has been parsed.

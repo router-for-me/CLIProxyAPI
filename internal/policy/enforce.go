@@ -379,6 +379,22 @@ func (s *service) ResolvedIPLists(ctx context.Context, principal string) (allowe
 	return snap.Policy.AllowedIPs, snap.Policy.BlockedIPs
 }
 
+// ResolvedStoreRequestBodies reports whether the principal's policy opts in to
+// persisting request/response bodies. Reuses the snapshot cache populated by
+// Check so the per-request hot path pays no extra DB round-trip. Returns false
+// when the service is inactive, the principal is unknown (legacy/file-only
+// key), or no policy is attached.
+func (s *service) ResolvedStoreRequestBodies(ctx context.Context, principal string) bool {
+	if !s.Active() || principal == "" {
+		return false
+	}
+	snap, err := s.snapshot(ctx, principal)
+	if err != nil || snap.Policy == nil {
+		return false
+	}
+	return snap.Policy.StoreRequestBodies
+}
+
 // checkModelCaps returns (decision, denied=true) when the requested model is
 // under an RPM or budget cap coming from the attached model group. Model
 // lookups are case-insensitive exact matches (caps only target concrete model
@@ -707,17 +723,18 @@ func (s *service) snapshot(ctx context.Context, principal string) (APIKeySnapsho
 // the model access evaluator can take the package-local type.
 func fromStorePolicy(p store.Policy) Policy {
 	return Policy{
-		APIKeyID:          p.APIKeyID,
-		RPMLimit:          p.RPMLimit,
-		HourlyRateLimit:   p.HourlyRateLimit,
-		BudgetHourlyUSD:   p.BudgetHourlyUSD,
-		BudgetWeeklyUSD:   p.BudgetWeeklyUSD,
-		BudgetMonthlyUSD:  p.BudgetMonthlyUSD,
-		AllowedModels:     p.AllowedModels,
-		BlockedModels:     p.BlockedModels,
-		ModelRoutes:       p.ModelRoutes,
-		DiscountPct:       p.DiscountPct,
-		ModelDiscountPcts: p.ModelDiscountPcts,
+		APIKeyID:           p.APIKeyID,
+		RPMLimit:           p.RPMLimit,
+		HourlyRateLimit:    p.HourlyRateLimit,
+		BudgetHourlyUSD:    p.BudgetHourlyUSD,
+		BudgetWeeklyUSD:    p.BudgetWeeklyUSD,
+		BudgetMonthlyUSD:   p.BudgetMonthlyUSD,
+		AllowedModels:      p.AllowedModels,
+		BlockedModels:      p.BlockedModels,
+		ModelRoutes:        p.ModelRoutes,
+		DiscountPct:        p.DiscountPct,
+		ModelDiscountPcts:  p.ModelDiscountPcts,
+		StoreRequestBodies: p.StoreRequestBodies,
 	}
 }
 
