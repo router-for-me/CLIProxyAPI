@@ -2,6 +2,7 @@ package quotatraffic
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -82,8 +83,16 @@ func Capture(index, provider string, headers http.Header, at time.Time, source s
 			if err != nil || !(number >= 0 && number <= maximum) {
 				continue
 			}
-		} else if number, err := strconv.ParseInt(value, 10, 64); err != nil || number < 0 {
-			continue
+		} else {
+			number, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || number < 0 {
+				continue
+			}
+			if (strings.HasSuffix(lower, "-reset-after-seconds") && number > math.MaxInt64/int64(time.Second)) ||
+				(strings.HasSuffix(lower, "-window-minutes") && number > math.MaxInt64/60) ||
+				((strings.HasSuffix(lower, "-reset-at") || strings.HasSuffix(lower, "-reset")) && number > 253402300799) {
+				continue
+			}
 		}
 		if groups[group] == nil {
 			groups[group] = http.Header{}

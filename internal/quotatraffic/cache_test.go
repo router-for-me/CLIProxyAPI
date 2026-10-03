@@ -109,3 +109,22 @@ func TestQueryAdditionalWindowsAndHeaderAllowlist(t *testing.T) {
 		}
 	}
 }
+
+func TestCaptureRejectsOverflowTimeFields(t *testing.T) {
+	resetCache()
+	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	h := headers("Primary", "10")
+	for _, suffix := range []string{"Reset-After-Seconds", "Window-Minutes", "Reset-At"} {
+		h.Set("X-Codex-Primary-"+suffix, "9223372036854775807")
+	}
+	Capture("synthetic", "codex", h, at, "api_response_headers")
+	rows := Read(map[string]bool{"synthetic": true})
+	if len(rows) != 1 {
+		t.Fatal("valid percentage lost")
+	}
+	for _, suffix := range []string{"Reset-After-Seconds", "Window-Minutes", "Reset-At"} {
+		if rows[0].Headers.Get("X-Codex-Primary-"+suffix) != "" {
+			t.Fatal("overflow time retained")
+		}
+	}
+}
