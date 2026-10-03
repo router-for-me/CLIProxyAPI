@@ -3979,13 +3979,13 @@
   ],
   "antigravity": [
     {
-      "id": "claude-opus-5-5-thinking",
+      "id": "claude-opus-5-5-high",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
-      "display_name": "Claude Opus 5.5 (Thinking)",
-      "name": "claude-opus-5-5-thinking",
-      "description": "Claude Opus 5.5 (Thinking)",
+      "display_name": "Claude Opus 5.5 (High)",
+      "name": "claude-opus-5-5-high",
+      "description": "Claude Opus 5.5 (High)",
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
@@ -4003,13 +4003,13 @@
       ]
     },
     {
-      "id": "claude-sonnet-5-5",
+      "id": "claude-sonnet-5-5-high",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
-      "display_name": "Claude Sonnet 5.5 (Thinking)",
-      "name": "claude-sonnet-5-5",
-      "description": "Claude Sonnet 5.5 (Thinking)",
+      "display_name": "Claude Sonnet 5.5 (High)",
+      "name": "claude-sonnet-5-5-high",
+      "description": "Claude Sonnet 5.5 (High)",
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
