@@ -1118,7 +1118,10 @@ func TestConvertCodexResponseToOpenAI_StreamURLCitationsProjected(t *testing.T) 
 				assembledText.WriteString(content.String())
 			}
 			if ann := delta.Get("annotations"); ann.Exists() {
-				assembledAnnotations = append(assembledAnnotations, ann)
+				if !ann.IsArray() {
+					t.Fatalf("delta.annotations must be an array, got %s", ann.Raw)
+				}
+				assembledAnnotations = append(assembledAnnotations, ann.Array()...)
 			}
 		}
 	}
@@ -1238,7 +1241,11 @@ func TestConvertCodexResponseToOpenAI_CitationsEdgeCases(t *testing.T) {
 	if len(chunks) != 1 {
 		t.Fatalf("expected 1 chunk from output_item.done, got %d", len(chunks))
 	}
-	if got := gjson.GetBytes(chunks[0], "choices.0.delta.annotations.url_citation.url").String(); got != "https://item-done.test/" {
+	ann := gjson.GetBytes(chunks[0], "choices.0.delta.annotations")
+	if !ann.IsArray() || len(ann.Array()) != 1 {
+		t.Fatalf("delta.annotations must be a one-element array, got %s", ann.Raw)
+	}
+	if got := ann.Array()[0].Get("url_citation.url").String(); got != "https://item-done.test/" {
 		t.Fatalf("expected https://item-done.test/, got %s", got)
 	}
 

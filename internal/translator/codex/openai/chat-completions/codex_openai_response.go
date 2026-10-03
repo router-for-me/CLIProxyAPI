@@ -151,6 +151,14 @@ func projectCitation(ann gjson.Result, offset int, outIdx, contentIdx int64) ([]
 	return payload, dedupKey, true
 }
 
+func citationArray(citation []byte) []byte {
+	out := make([]byte, 0, len(citation)+2)
+	out = append(out, '[')
+	out = append(out, citation...)
+	out = append(out, ']')
+	return out
+}
+
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
 // Codex API format to the OpenAI Chat Completions streaming format.
 // It processes various Codex event types and transforms them into OpenAI-compatible JSON responses.
@@ -304,7 +312,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		p.emittedCitations[dedupKey] = struct{}{}
 
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
-		template, _ = sjson.SetRawBytes(template, "choices.0.delta.annotations", citationBytes)
+		template, _ = sjson.SetRawBytes(template, "choices.0.delta.annotations", citationArray(citationBytes))
 		return [][]byte{template}
 	} else if dataType == "response.content_part.done" {
 		p.ensureCitationsState()
@@ -336,7 +344,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			chunk := make([]byte, len(template))
 			copy(chunk, template)
 			chunk, _ = sjson.SetBytes(chunk, "choices.0.delta.role", "assistant")
-			chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.annotations", citationBytes)
+			chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.annotations", citationArray(citationBytes))
 			chunks = append(chunks, chunk)
 		}
 		if len(chunks) == 0 {
@@ -552,7 +560,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 								chunk := make([]byte, len(template))
 								copy(chunk, template)
 								chunk, _ = sjson.SetBytes(chunk, "choices.0.delta.role", "assistant")
-								chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.annotations", citationBytes)
+								chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.annotations", citationArray(citationBytes))
 								chunks = append(chunks, chunk)
 							}
 						}
