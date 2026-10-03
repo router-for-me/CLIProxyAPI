@@ -401,13 +401,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// deliver anything. Every other terminal failure is forwarded in-stream and
 				// legitimately terminates the session, so it keeps the notifying variant.
 				failoverPending := isCodexOverloadBootstrapFailure(terminalBody)
-				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, streamErr)
 				// A spent bootstrap time budget only rules a transparent retry out once a payload
 				// frame has been buffered: the buffered handshake is released ahead of the
 				// rejection, so the conductor can no longer retry. With nothing buffered the
 				// rejection has not reached the client, so a request-scoped continue rule keeps the
 				// failover available even after the budget is spent.
-				if (failoverPending || (requestScopedFailover && len(bufferedChunks) > 0)) && timeoutReached {
+				requestScopedFailover := e.shouldFailoverRequestScopedRejection(auth, streamErr) && (!timeoutReached || len(bufferedChunks) == 0)
+				if failoverPending && timeoutReached {
 					failoverPending = false
 					requestScopedFailover = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
@@ -781,9 +781,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 // must not signal the downstream disconnect listener: that closes the client
 // websocket before the retry can deliver anything.
 func (e *CodexWebsocketsExecutor) shouldFailoverRequestScopedRejection(auth *cliproxyauth.Auth, err error) bool {
-	if e == nil {
-		return false
-	}
 	return cliproxyauth.IsRequestScopedContinueAction(auth, err, e.cfg)
 }
 
