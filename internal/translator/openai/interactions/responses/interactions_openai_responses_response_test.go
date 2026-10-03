@@ -235,6 +235,54 @@ func testGPTResponsesReasoningSignature() string {
 	return base64.URLEncoding.EncodeToString(payload)
 }
 
+func TestConvertInteractionsResponseToOpenAIResponsesStreamOpensReasoningSummary(t *testing.T) {
+	var param any
+	var out [][]byte
+	for _, raw := range [][]byte{
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"thought\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary\",\"text\":\"先\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary\",\"text\":\"想清楚\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+	} {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &param)...)
+	}
+	names := responsesEventNames(out)
+	got := strings.Join(names, ",")
+	for _, want := range []string{
+		"response.output_item.added",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.done",
+		"response.output_item.done",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("events = %s, missing %s", got, want)
+		}
+	}
+	deltas := 0
+	for _, frame := range out {
+		payload := findResponsesEventPayload([][]byte{frame}, "response.reasoning_summary_text.delta")
+		if payload == nil {
+			continue
+		}
+		deltas++
+		if gjson.GetBytes(payload, "summary_index").Int() != 0 {
+			t.Fatalf("summary_index = %d, want 0", gjson.GetBytes(payload, "summary_index").Int())
+		}
+	}
+	if deltas != 2 {
+		t.Fatalf("reasoning deltas = %d, want 2", deltas)
+	}
+	done := findResponsesEventPayload(out, "response.output_item.done")
+	if gjson.GetBytes(done, "item.status").String() != "completed" {
+		t.Fatalf("reasoning item status = %q", gjson.GetBytes(done, "item.status").String())
+	}
+	if gjson.GetBytes(done, "item.summary.0.text").String() != "先想清楚" {
+		t.Fatalf("summary = %q", gjson.GetBytes(done, "item.summary.0.text").String())
+	}
+}
+
 func TestConvertInteractionsResponseToOpenAIResponsesStreamPreservesThoughtSignature(t *testing.T) {
 	var param any
 	signature := testGPTResponsesReasoningSignature()
