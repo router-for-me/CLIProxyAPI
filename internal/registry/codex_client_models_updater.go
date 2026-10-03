@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -29,38 +28,27 @@ func StartCodexClientModelsUpdater(ctx context.Context) {
 }
 
 func runCodexClientModelsUpdater(ctx context.Context) {
-	tryRefreshCodexClientModels(ctx, "startup Codex client model refresh")
-
-	ticker := time.NewTicker(modelsRefreshInterval)
-	defer ticker.Stop()
-	log.Infof("periodic Codex client model refresh started (interval=%s)", modelsRefreshInterval)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tryRefreshCodexClientModels(ctx, "periodic Codex client model refresh")
-		}
-	}
+	runModelCatalogUpdater(ctx, "Codex client model refresh", tryRefreshCodexClientModels)
 }
 
-func tryRefreshCodexClientModels(ctx context.Context, label string) {
+func tryRefreshCodexClientModels(ctx context.Context, label string) bool {
 	data, sourceURL := fetchCodexClientModelsFromRemote(ctx)
 	if data == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
-		return
+		return false
 	}
 
 	changed, err := loadCodexClientModelsFromBytes(data, sourceURL)
 	if err != nil {
 		log.Warnf("%s: fetched catalog rejected, keeping current data: %v", label, err)
-		return
+		return false
 	}
 	if !changed {
 		log.Infof("%s completed from %s, no changes detected", label, sourceURL)
-		return
+		return true
 	}
 	log.Infof("%s completed from %s, catalog updated", label, sourceURL)
+	return true
 }
 
 func fetchCodexClientModelsFromRemote(ctx context.Context) ([]byte, string) {

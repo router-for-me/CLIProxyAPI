@@ -170,7 +170,9 @@ func TestRefreshCodexClientModelsKeepsLastValidSnapshot(t *testing.T) {
 
 			before, revision := GetCodexClientModelsSnapshot()
 			codexClientModelsURLs = urls
-			tryRefreshCodexClientModels(context.Background(), "test refresh")
+			if tryRefreshCodexClientModels(context.Background(), "test refresh") {
+				t.Fatal("failed refresh reported success")
+			}
 			after, afterRevision := GetCodexClientModelsSnapshot()
 			if string(after) != string(before) {
 				t.Fatal("failed remote refresh replaced last valid catalog")
@@ -195,6 +197,36 @@ func testCodexClientModel(slug string, priority int) map[string]any {
 		"priority":                   priority,
 		"default_reasoning_level":    "medium",
 		"supported_reasoning_levels": []map[string]any{{"effort": "medium", "description": "Balanced"}},
+	}
+}
+
+func TestRefreshCodexClientModelsSuccessAndUnchanged(t *testing.T) {
+	original, _ := GetCodexClientModelsSnapshot()
+	previousURLs := codexClientModelsURLs
+	t.Cleanup(func() {
+		codexClientModelsURLs = previousURLs
+		if _, err := loadCodexClientModelsFromBytes(original, "test cleanup"); err != nil {
+			t.Fatalf("restore original catalog: %v", err)
+		}
+	})
+	catalog := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1), testCodexClientModel("test-new-model", 2))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(catalog)
+	}))
+	defer server.Close()
+	codexClientModelsURLs = []string{server.URL}
+	if !tryRefreshCodexClientModels(context.Background(), "test refresh") {
+		t.Fatal("valid refresh reported failure")
+	}
+	after, revision := GetCodexClientModelsSnapshot()
+	if string(after) != string(catalog) {
+		t.Fatal("successful refresh did not publish the fetched catalog")
+	}
+	if !tryRefreshCodexClientModels(context.Background(), "test unchanged refresh") {
+		t.Fatal("unchanged catalog should count as a successful refresh")
+	}
+	if got := GetCodexClientModelsRevision(); got != revision {
+		t.Fatalf("unchanged catalog revision = %d, want %d", got, revision)
 	}
 }
 

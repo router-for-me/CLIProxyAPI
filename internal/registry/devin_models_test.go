@@ -164,7 +164,9 @@ func TestDevinModelsRemoteFetchFallback(t *testing.T) {
 	}
 
 	// Attempt refresh from failing remote
-	tryRefreshDevinModels(context.Background(), "test failing refresh")
+	if tryRefreshDevinModels(context.Background(), "test failing refresh") {
+		t.Fatal("failed refresh reported success")
+	}
 
 	afterCount := len(GetDevinModels())
 	if afterCount != initialCount {
@@ -189,7 +191,12 @@ func TestDevinModelsRemoteFetchFallback(t *testing.T) {
 	defer tsValid.Close()
 
 	devinModelsURLs = []string{tsValid.URL + "/devin_models.json"}
-	tryRefreshDevinModels(context.Background(), "test succeeding refresh")
+	if !tryRefreshDevinModels(context.Background(), "test succeeding refresh") {
+		t.Fatal("valid refresh reported failure")
+	}
+	if !tryRefreshDevinModels(context.Background(), "test unchanged refresh") {
+		t.Fatal("unchanged catalog should count as a successful refresh")
+	}
 
 	updatedModels := GetDevinModels()
 	foundCustom := false

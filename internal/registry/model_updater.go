@@ -18,6 +18,7 @@ import (
 const (
 	modelsFetchTimeout    = 30 * time.Second
 	modelsRefreshInterval = 3 * time.Hour
+	modelsRetryInterval   = 30 * time.Second
 )
 
 var modelsURLs = []string{
@@ -82,44 +83,41 @@ func StartModelsUpdater(ctx context.Context) {
 }
 
 func runModelsUpdater(ctx context.Context) {
-	tryStartupRefresh(ctx)
-	periodicRefresh(ctx)
+	runModelCatalogUpdater(ctx, "model refresh", tryRefreshModels)
 }
 
-func periodicRefresh(ctx context.Context) {
-	ticker := time.NewTicker(modelsRefreshInterval)
-	defer ticker.Stop()
-	log.Infof("periodic model refresh started (interval=%s)", modelsRefreshInterval)
-	for {
+// runModelCatalogUpdater keeps failed refreshes from leaving the fallback catalog
+// in use for the full refresh interval, including when networking is not ready at
+// startup. A successful fetch, even without changes, restores the normal cadence.
+func runModelCatalogUpdater(ctx context.Context, name string, refresh func(context.Context, string) bool) {
+	label := "startup " + name
+	for ctx.Err() == nil {
+		delay := modelsRefreshInterval
+		if !refresh(ctx, label) {
+			delay = modelsRetryInterval
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.WithField("next_refresh_after", delay).Debugf("%s scheduled", name)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
-			tryPeriodicRefresh(ctx)
+		case <-timer.C:
 		}
+		label = "periodic " + name
 	}
 }
 
-// tryPeriodicRefresh fetches models from remote, compares with the current
-// catalog, and notifies the registered callback if any provider changed.
-func tryPeriodicRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "periodic model refresh")
-}
-
-// tryStartupRefresh fetches models from remote in the background during
-// process startup. It uses the same change detection as periodic refresh so
-// existing auth registrations can be updated after the callback is registered.
-func tryStartupRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "startup model refresh")
-}
-
-func tryRefreshModels(ctx context.Context, label string) {
+func tryRefreshModels(ctx context.Context, label string) bool {
 	oldData := getModels()
 
 	parsed, url := fetchModelsFromRemote(ctx)
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
-		return
+		return false
 	}
 
 	if len(parsed.Meta) == 0 && oldData != nil && len(oldData.Meta) > 0 {
@@ -136,11 +134,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
-		return
+		return true
 	}
 
 	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
 	notifyModelRefresh(changed)
+	return true
 }
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
