@@ -381,6 +381,7 @@ func TestRegisterModelsForAuthCodexDaybreakTiers(t *testing.T) {
 		{daybreak: nil, want: map[string]bool{"gpt-daybreak-blue-latest": false, "gpt-daybreak-red-latest": false}},
 		{daybreak: []any{"blue"}, want: map[string]bool{"gpt-daybreak-blue-latest": true, "gpt-daybreak-red-latest": false}},
 		{daybreak: []any{"Blue", "red", "purple"}, want: map[string]bool{"gpt-daybreak-blue-latest": true, "gpt-daybreak-red-latest": true}},
+		{daybreak: []string{"red"}, want: map[string]bool{"gpt-daybreak-blue-latest": false, "gpt-daybreak-red-latest": true}},
 	} {
 		id := fmt.Sprintf("codex-daybreak-%d", index)
 		modelRegistry.UnregisterClient(id)

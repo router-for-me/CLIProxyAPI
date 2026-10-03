@@ -149,13 +149,21 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		default:
 			models = registry.GetCodexProModels()
 		}
-		// Daybreak tiers are approved per account: "daybreak": ["blue", "red"] in the auth file.
-		tiers, _ := a.Metadata["daybreak"].([]any)
-		for _, tier := range tiers {
-			if name, ok := tier.(string); ok {
-				if model := registry.GetCodexDaybreakModel(name); model != nil {
-					models = append(models, model)
+		// Daybreak tiers are approved per account and detected at login/refresh: "daybreak": ["blue"].
+		var tiers []string
+		switch v := a.Metadata["daybreak"].(type) {
+		case []string:
+			tiers = v
+		case []any:
+			for _, tier := range v {
+				if name, ok := tier.(string); ok {
+					tiers = append(tiers, name)
 				}
+			}
+		}
+		for _, tier := range tiers {
+			if model := registry.GetCodexDaybreakModel(tier); model != nil {
+				models = append(models, model)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
