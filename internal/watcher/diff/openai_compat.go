@@ -95,6 +95,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldModelCount != newModelCount {
 		details = append(details, fmt.Sprintf("models %d -> %d", oldModelCount, newModelCount))
 	}
+	if openAICompatCompactionHash(oldEntry.Models) != openAICompatCompactionHash(newEntry.Models) {
+		details = append(details, "use-v1-compaction settings updated")
+	}
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")
 	}
@@ -102,6 +105,19 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 		return ""
 	}
 	return "(" + strings.Join(details, ", ") + ")"
+}
+
+func openAICompatCompactionHash(models []config.OpenAICompatibilityModel) string {
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if model.UseV1Compaction && (name != "" || alias != "") {
+				out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+			}
+		}
+	})
+	return hashJoined(keys)
 }
 
 func countAPIKeys(entry config.OpenAICompatibility) int {

@@ -251,6 +251,7 @@ func lookupUnlistedCodexAPIKeyModelCapability(routing *apiKeyModelRoutingSnapsho
 			info := modelconfig.ResolveModelInfo(upstreamModel, "codex", configured.Thinking)
 			info.SupportConfigurationUpdate = configured.SupportConfigurationUpdate
 			info.IsCompat = configured.IsCompat
+			info.UseV1Compaction = configured.UseV1Compaction
 			return info, true
 		}
 	}
@@ -321,6 +322,9 @@ func attachResolvedHomeModelInfo(req cliproxyexecutor.Request, auth *Auth, route
 	}
 	if configured {
 		selected.IsCompat = options.IsCompat
+		selected.UseV1Compaction = options.UseV1Compaction
+	} else {
+		selected.UseV1Compaction = sameModel && local.UseV1Compaction
 	}
 
 	metadata[resolvedHomeModelInfoMetadataKey] = &selected
@@ -389,6 +393,7 @@ func compileAPIKeyModelCapabilitiesForAuth(cfg *internalconfig.Config, auth *Aut
 				info := addConfiguredModelCapability(out, configured.Name, configured.Alias, "codex", configured.Thinking, configured.IsCompat)
 				if info != nil {
 					info.SupportConfigurationUpdate = configured.SupportConfigurationUpdate
+					info.UseV1Compaction = configured.UseV1Compaction
 				}
 			}
 		}
@@ -440,7 +445,9 @@ func compileOpenAICompatibleModelCapabilities(out map[string][]apiKeyModelCapabi
 		if support == nil && !models[i].Image {
 			support = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
-		addConfiguredModelCapability(out, models[i].Name, models[i].Alias, "openai-compatibility", support, models[i].IsCompat)
+		if info := addConfiguredModelCapability(out, models[i].Name, models[i].Alias, "openai-compatibility", support, models[i].IsCompat); info != nil {
+			info.UseV1Compaction = models[i].UseV1Compaction
+		}
 	}
 }
 

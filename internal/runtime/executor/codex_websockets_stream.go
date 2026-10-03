@@ -43,6 +43,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	preserveNativeOutput := prepared.preserveNativeOutput
 	originalPayload := prepared.originalPayload
 	clientBody := prepared.clientBody
+	summaryCompaction := prepared.summaryCompaction && helps.HasResponsesCompactionTrigger(clientBody)
 	wsURL := prepared.wsURL
 	wsHeaders := prepared.wsHeaders
 	replayScope := prepared.replayScope
@@ -351,9 +352,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				continue
 			}
+			upstreamEvent := payload
 			observeCodexTokenEvent(reporter, payload)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
-			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			observedEventType := gjson.GetBytes(payload, "type").String()
+			deferCompletionEvent := summaryCompaction && (observedEventType == "response.completed" || observedEventType == "response.done" || observedEventType == "response.incomplete")
+			if !deferCompletionEvent {
+				helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			}
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
@@ -446,10 +452,36 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 			}
 			completedPayload := payload
+			var syntheticEvents [][]byte
 			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 				completedPayload = normalizeCodexWebsocketCompletion(completedPayload)
-				if !preserveNativeOutput {
+				if !preserveNativeOutput || summaryCompaction {
 					completedPayload = patchCodexCompletedOutput(completedPayload, outputItemsByIndex, outputItemsFallback)
+				}
+				if summaryCompaction {
+					scope, secrets := e.v1CompactionCredentials(auth)
+					var errCompaction error
+					completedPayload, syntheticEvents, errCompaction = helps.ConvertResponsesCompactionTerminalEvent(completedPayload, upstreamEvent, baseModel, scope, secrets)
+					if errCompaction != nil {
+						if sess != nil {
+							sess.clearActive(conn, readCh)
+							unlockStreamSession()
+							if isEphemeralSession {
+								closeCodexWebsocketSession(sess, "compaction_error")
+							}
+						} else if closer != nil {
+							_ = closer.Close()
+						}
+						detail, _ := helps.ParseCodexUsage(upstreamEvent)
+						reporter.PublishFailureWithDetail(ctx, detail, errCompaction)
+						return nil, errCompaction
+					}
+					for _, event := range syntheticEvents {
+						helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, event)
+						helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, event)
+					}
+					helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, completedPayload)
+					helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, completedPayload)
 				}
 				if eventType != "response.incomplete" {
 					cacheCodexReasoningReplayFromCompleted(replayScope, completedPayload)
@@ -465,16 +497,21 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
 				if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 					payload = completedPayload
+					for _, event := range syntheticEvents {
+						currentChunks = append(currentChunks, helps.EnsureResponsesUsageDetails(event))
+					}
 				}
 				downstreamPayload := helps.EnsureResponsesUsageDetails(payload)
-				currentChunks = [][]byte{downstreamPayload}
+				currentChunks = append(currentChunks, downstreamPayload)
 			} else {
 				payload = normalizeCodexWebsocketCompletion(payload)
 				if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 					payload = completedPayload
 				}
-				line := encodeCodexWebsocketAsSSE(payload)
-				currentChunks = helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)
+				for _, event := range append(syntheticEvents, payload) {
+					line := encodeCodexWebsocketAsSSE(event)
+					currentChunks = append(currentChunks, helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)...)
+				}
 			}
 
 			// !isTerminalEvent is redundant against the closed allow-list, which admits no terminal
@@ -615,9 +652,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if len(payload) == 0 {
 				continue
 			}
+			upstreamEvent := payload
 			observeCodexTokenEvent(reporter, payload)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
-			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			observedEventType := gjson.GetBytes(payload, "type").String()
+			deferCompletionEvent := summaryCompaction && (observedEventType == "response.completed" || observedEventType == "response.done" || observedEventType == "response.incomplete")
+			if !deferCompletionEvent {
+				helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+				helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			}
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
@@ -680,10 +722,31 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 			}
 			completedPayload := payload
+			var syntheticEvents [][]byte
 			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 				completedPayload = normalizeCodexWebsocketCompletion(completedPayload)
-				if !preserveNativeOutput {
+				if !preserveNativeOutput || summaryCompaction {
 					completedPayload = patchCodexCompletedOutput(completedPayload, outputItemsByIndex, outputItemsFallback)
+				}
+				if summaryCompaction {
+					scope, secrets := e.v1CompactionCredentials(auth)
+					var errCompaction error
+					completedPayload, syntheticEvents, errCompaction = helps.ConvertResponsesCompactionTerminalEvent(completedPayload, upstreamEvent, baseModel, scope, secrets)
+					if errCompaction != nil {
+						terminateReason = "compaction_error"
+						terminateErr = errCompaction
+						detail, _ := helps.ParseCodexUsage(upstreamEvent)
+						reporter.PublishFailureWithDetail(ctx, detail, errCompaction)
+						helps.RecordAPIResponseError(ctx, e.cfg, errCompaction)
+						_ = send(cliproxyexecutor.StreamChunk{Err: errCompaction})
+						return
+					}
+					for _, event := range syntheticEvents {
+						helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, event)
+						helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, event)
+					}
+					helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, completedPayload)
+					helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, completedPayload)
 				}
 				if eventType != "response.incomplete" {
 					cacheCodexReasoningReplayFromCompleted(replayScope, completedPayload)
@@ -698,6 +761,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
 				if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 					payload = completedPayload
+					for _, event := range syntheticEvents {
+						if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(event)}) {
+							terminateReason = "context_done"
+							terminateErr = ctx.Err()
+							return
+						}
+					}
 				}
 				downstreamPayload := helps.EnsureResponsesUsageDetails(payload)
 				if !send(cliproxyexecutor.StreamChunk{Payload: downstreamPayload}) {
@@ -716,13 +786,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				payload = completedPayload
 			}
 			eventType = gjson.GetBytes(payload, "type").String()
-			line := encodeCodexWebsocketAsSSE(payload)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)
-			for i := range chunks {
-				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-					terminateReason = "context_done"
-					terminateErr = ctx.Err()
-					return
+			for _, event := range append(syntheticEvents, payload) {
+				line := encodeCodexWebsocketAsSSE(event)
+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)
+				for i := range chunks {
+					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+						terminateReason = "context_done"
+						terminateErr = ctx.Err()
+						return
+					}
 				}
 			}
 			if isTerminalEvent || eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
@@ -746,17 +818,22 @@ type codexWebsocketPrepared struct {
 	wsURL                string
 	wsHeaders            http.Header
 	replayScope          codexReasoningReplayScope
+	summaryCompaction    bool
 	optimizeMultiAgentV2 bool
 	multiAgentV2Conflict bool
 }
 
 func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*codexWebsocketPrepared, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	var summaryCompaction bool
+	req, opts, summaryCompaction, err := e.prepareCodexWebsocketV1Compaction(auth, req, opts)
+	if err != nil {
+		return nil, err
+	}
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
-	var err error
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	preserveNativeOutput := helps.IsNativeCodexRequest(req.Payload, opts)
@@ -789,6 +866,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	if errReplay != nil {
 		return nil, errReplay
 	}
+	if summaryCompaction {
+		body = helps.PrepareV1CompactionPayload(body)
+	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -815,6 +895,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 		wsURL:                wsURL,
 		wsHeaders:            wsHeaders,
 		replayScope:          replayScope,
+		summaryCompaction:    summaryCompaction,
 		optimizeMultiAgentV2: optimizeMultiAgentV2,
 		multiAgentV2Conflict: multiAgentV2Conflict,
 	}, nil

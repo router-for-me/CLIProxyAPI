@@ -90,6 +90,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
+	if e.needsV1Responses(auth, req, opts) {
+		scope, secrets := e.v1CompactionCredentials(auth, req)
+		return e.executeV1Responses(ctx, auth, req, opts, scope, secrets)
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -315,6 +319,10 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if e.needsV1Responses(auth, req, opts) {
+		scope, secrets := e.v1CompactionCredentials(auth, req)
+		return e.executeV1ResponsesStream(ctx, auth, req, opts, scope, secrets)
+	}
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)

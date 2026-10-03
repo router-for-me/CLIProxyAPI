@@ -104,6 +104,10 @@ type ModelInfo struct {
 	// IsCompat enables compatibility handling for this configured API-key model.
 	// It is internal metadata and is not exposed in model listings.
 	IsCompat bool `json:"-"`
+
+	// UseV1Compaction enables summary-response compatibility for this execution route.
+	// It is internal metadata and is not exposed in model listings.
+	UseV1Compaction bool `json:"-"`
 }
 
 // ModelConfig holds optional runtime overrides for a model definition.

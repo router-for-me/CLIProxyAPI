@@ -29,6 +29,17 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if isCodexOpenAIImageRequest(opts) {
 		return e.executeOpenAIImageStream(ctx, auth, req, opts)
 	}
+	if e.usesV1Compaction(auth, req, opts) && helps.HasResponsesCompactionTrigger(req.Payload) && (opts.SourceFormat == sdktranslator.FormatOpenAIResponse || opts.SourceFormat == sdktranslator.FormatCodex) {
+		response, errExecute := e.Execute(ctx, auth, req, opts)
+		if errExecute != nil {
+			return nil, errExecute
+		}
+		return helps.ResponsesCompactionStreamResult(ctx, response), nil
+	}
+	req, _, errPrepare := e.prepareV1Compaction(ctx, auth, req, opts)
+	if errPrepare != nil {
+		return nil, errPrepare
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
