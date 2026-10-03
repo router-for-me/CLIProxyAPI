@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -15,11 +16,12 @@ import (
 // their declared name and the owning namespace, so reverse translation can
 // restore the split identity.
 type responsesToolDeclaration struct {
-	tool      gjson.Result
-	chatName  string
-	localName string
-	namespace string
-	custom    bool
+	tool       gjson.Result
+	chatName   string
+	localName  string
+	namespace  string
+	custom     bool
+	localShell bool
 }
 
 // walkResponsesToolDeclarations visits the tool declarations of a Responses
@@ -36,24 +38,32 @@ type responsesToolDeclaration struct {
 func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDeclaration) bool) {
 	var declarations []responsesToolDeclaration
 	emit := func(tool gjson.Result, namespaceName string) {
-		var custom bool
+		var custom, localShell bool
 		switch strings.TrimSpace(tool.Get("type").String()) {
 		case "", "function":
 		case "custom":
 			custom = true
+		case "shell":
+			if !isLocalResponsesShellTool(tool) || namespaceName != "" {
+				return
+			}
+			localShell = true
 		default:
 			return
 		}
 		localName := responsesToolName(tool)
-		if localName == "" {
+		if localShell {
+			localName = reservedLocalShellChatToolName
+		} else if localName == "" {
 			return
 		}
 		declarations = append(declarations, responsesToolDeclaration{
-			tool:      tool,
-			chatName:  qualifyResponsesNamespaceToolName(namespaceName, localName),
-			localName: localName,
-			namespace: namespaceName,
-			custom:    custom,
+			tool:       tool,
+			chatName:   qualifyResponsesNamespaceToolName(namespaceName, localName),
+			localName:  localName,
+			namespace:  namespaceName,
+			custom:     custom,
+			localShell: localShell,
 		})
 	}
 	scan := func(tools gjson.Result) {
@@ -86,6 +96,7 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 		})
 	}
 
+	reserveResponsesLocalShellChatNames(declarations)
 	disambiguateResponsesChatToolNames(declarations)
 
 	proceed := true
@@ -94,6 +105,48 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 			break
 		}
 		proceed = visit(declaration)
+	}
+}
+
+// reserveResponsesLocalShellChatNames gives the synthetic local-shell tool a
+// stable Chat name while preventing a client-defined function with the same
+// reserved name from being hijacked for shell translation.
+func reserveResponsesLocalShellChatNames(declarations []responsesToolDeclaration) {
+	reservedTaken := false
+	used := make(map[string]struct{}, len(declarations))
+	for _, declaration := range declarations {
+		if declaration.localShell {
+			continue
+		}
+		used[declaration.chatName] = struct{}{}
+		if declaration.localName == reservedLocalShellChatToolName {
+			reservedTaken = true
+		}
+	}
+	if !reservedTaken {
+		for i := range declarations {
+			if declarations[i].localShell {
+				declarations[i].chatName = reservedLocalShellChatToolName
+				declarations[i].localName = reservedLocalShellChatToolName
+			}
+		}
+		return
+	}
+
+	for i := range declarations {
+		if !declarations[i].localShell {
+			continue
+		}
+		candidate := reservedLocalShellChatToolName + "_1"
+		for suffix := 1; ; suffix++ {
+			candidate = reservedLocalShellChatToolName + "_" + strconv.Itoa(suffix)
+			if _, exists := used[candidate]; !exists {
+				break
+			}
+		}
+		declarations[i].chatName = candidate
+		declarations[i].localName = candidate
+		used[candidate] = struct{}{}
 	}
 }
 
@@ -455,4 +508,130 @@ func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 func applyResponsesFunctionCallNamespaceFields(item []byte, requestRawJSON []byte, qualifiedName string, itemPath string) []byte {
 	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON, qualifiedName)
 	return translatorcommon.SetResponsesToolCallIdentity(item, name, namespace, itemPath)
+}
+
+// reservedLocalShellChatToolName is the stable synthetic function name used to
+// carry a Responses local shell capability across providers that only speak
+// Chat Completions function tools.
+const reservedLocalShellChatToolName = "__cpa_local_shell"
+
+// isLocalResponsesShellTool reports whether a Responses shell declaration is
+// the client-executed local variant handled here.
+func isLocalResponsesShellTool(tool gjson.Result) bool {
+	if strings.TrimSpace(tool.Get("type").String()) != "shell" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(tool.Get("environment.type").String()), "local")
+}
+
+// convertResponsesLocalShellToolToOpenAIChat maps the native local shell tool
+// to a synthetic function declaration. The client remains the executor; the
+// provider only sees a schema-compatible command function.
+func convertResponsesLocalShellToolToOpenAIChat(tool gjson.Result, overrideName string) ([]byte, bool) {
+	if !isLocalResponsesShellTool(tool) {
+		return nil, false
+	}
+	name := strings.TrimSpace(overrideName)
+	if name == "" {
+		name = reservedLocalShellChatToolName
+	}
+	chatTool := []byte(`{"type":"function","function":{"name":"","description":"Execute a command in the client-provided local shell environment.","parameters":{"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}},"env":{"type":"object","additionalProperties":{"type":"string"}},"timeout_ms":{"type":"integer"},"working_directory":{"type":"string"}},"required":["command"]}}}`)
+	chatTool, _ = sjson.SetBytes(chatTool, "function.name", name)
+	if description := responsesToolDescription(tool); description != "" {
+		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
+	}
+	return chatTool, true
+}
+
+// buildResponsesLocalShellAction parses synthetic function arguments into the
+// Responses local_shell_call action object. Invalid or partial arguments return
+// false so callers can avoid emitting a misleading completed shell command.
+func buildResponsesLocalShellAction(arguments string) ([]byte, bool) {
+	if !gjson.Valid(arguments) {
+		return nil, false
+	}
+	root := gjson.Parse(arguments)
+	command := root.Get("command")
+	if !command.Exists() || !command.IsArray() || len(command.Array()) == 0 {
+		return nil, false
+	}
+	for _, part := range command.Array() {
+		if part.Type != gjson.String {
+			return nil, false
+		}
+	}
+	action := []byte(`{"type":"exec","command":[],"env":{}}`)
+	action, _ = sjson.SetRawBytes(action, "command", []byte(command.Raw))
+	if env := root.Get("env"); env.Exists() && env.IsObject() {
+		valid := true
+		env.ForEach(func(_, value gjson.Result) bool {
+			if value.Type != gjson.String {
+				valid = false
+				return false
+			}
+			return true
+		})
+		if !valid {
+			return nil, false
+		}
+		action, _ = sjson.SetRawBytes(action, "env", []byte(env.Raw))
+	}
+	if timeout := root.Get("timeout_ms"); timeout.Exists() {
+		if timeout.Type != gjson.Number || timeout.Int() <= 0 {
+			return nil, false
+		}
+		action, _ = sjson.SetBytes(action, "timeout_ms", timeout.Int())
+	}
+	if workingDirectory := root.Get("working_directory"); workingDirectory.Exists() {
+		if workingDirectory.Type != gjson.String {
+			return nil, false
+		}
+		action, _ = sjson.SetBytes(action, "working_directory", workingDirectory.String())
+	}
+	return action, true
+}
+
+// localShellActionToFunctionArguments converts a replayed Responses local shell
+// action into arguments matching the synthetic Chat function schema. It returns
+// an empty string only when the action cannot be represented safely.
+func localShellActionToFunctionArguments(action gjson.Result) string {
+	if !action.Exists() || !action.IsObject() || action.Get("type").String() != "exec" {
+		return ""
+	}
+	command := action.Get("command")
+	if !command.Exists() || !command.IsArray() {
+		return ""
+	}
+	for _, part := range command.Array() {
+		if part.Type != gjson.String {
+			return ""
+		}
+	}
+	arguments := []byte(`{"command":[]}`)
+	arguments, _ = sjson.SetRawBytes(arguments, "command", []byte(command.Raw))
+	if env := action.Get("env"); env.Exists() && env.IsObject() {
+		arguments, _ = sjson.SetRawBytes(arguments, "env", []byte(env.Raw))
+	}
+	if timeout := action.Get("timeout_ms"); timeout.Exists() {
+		arguments, _ = sjson.SetBytes(arguments, "timeout_ms", timeout.Int())
+	}
+	if workingDirectory := action.Get("working_directory"); workingDirectory.Exists() {
+		arguments, _ = sjson.SetBytes(arguments, "working_directory", workingDirectory.String())
+	}
+	return string(arguments)
+}
+
+// buildResponsesLocalShellCallItem materializes a Responses local shell call
+// from an upstream synthetic function call.
+func buildResponsesLocalShellCallItem(callID, arguments string, status string) ([]byte, bool) {
+	action, ok := buildResponsesLocalShellAction(arguments)
+	if !ok {
+		return nil, false
+	}
+	item := []byte(`{"id":"","type":"local_shell_call","call_id":"","status":"completed","action":{}}`)
+	item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("lsc_%s", callID))
+	item, _ = sjson.SetBytes(item, "call_id", callID)
+	item, _ = sjson.SetBytes(item, "status", status)
+	item, _ = sjson.SetRawBytes(item, "action", action)
+	return item, true
 }

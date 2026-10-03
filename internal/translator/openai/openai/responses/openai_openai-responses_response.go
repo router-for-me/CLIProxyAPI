@@ -50,14 +50,18 @@ type oaiToResponsesState struct {
 	MsgContentAdded map[int]bool // whether response.content_part.added emitted for message
 	MsgItemDone     map[int]bool // whether message done events were emitted
 	// function item state
-	FuncItemAdded  map[string]bool
-	FuncItemCustom map[string]bool
-	FuncArgsDone   map[string]bool
-	FuncItemDone   map[string]bool
+	FuncItemAdded      map[string]bool
+	FuncItemCustom     map[string]bool
+	FuncItemLocalShell map[string]bool
+	FuncArgsDone       map[string]bool
+	FuncItemDone       map[string]bool
 	// names of freeform ("custom") tools from the original request; calls to
 	// these are emitted as custom_tool_call items instead of function_call
 	CustomToolNames map[string]struct{}
-	FinishReason    string
+	// names of synthetic local-shell tools from the original request; calls to
+	// these are emitted as local_shell_call items
+	LocalShellToolNames map[string]struct{}
+	FinishReason        string
 	// usage aggregation
 	PromptTokens     int64
 	CachedTokens     int64
@@ -213,6 +217,14 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			if _, isInc := incompleteByFinishReason(st.FinishReason); isInc {
 				toolStatus = "incomplete"
 			}
+			if st.FuncItemLocalShell[key] {
+				item, ok := buildResponsesLocalShellCallItem(callID, args, toolStatus)
+				if !ok {
+					continue
+				}
+				outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
+				continue
+			}
 			if st.FuncItemCustom[key] {
 				item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
@@ -267,21 +279,22 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &oaiToResponsesState{
-			FuncArgsBuf:     make(map[string]*strings.Builder),
-			FuncNames:       make(map[string]string),
-			FuncCallIDs:     make(map[string]string),
-			FuncOutputIx:    make(map[string]int),
-			FuncArgsSent:    make(map[string]int),
-			MsgOutputIx:     make(map[int]int),
-			MsgTextBuf:      make(map[int]*strings.Builder),
-			MsgItemAdded:    make(map[int]bool),
-			MsgContentAdded: make(map[int]bool),
-			MsgItemDone:     make(map[int]bool),
-			FuncItemAdded:   make(map[string]bool),
-			FuncItemCustom:  make(map[string]bool),
-			FuncArgsDone:    make(map[string]bool),
-			FuncItemDone:    make(map[string]bool),
-			Reasonings:      make([]oaiToResponsesStateReasoning, 0),
+			FuncArgsBuf:        make(map[string]*strings.Builder),
+			FuncNames:          make(map[string]string),
+			FuncCallIDs:        make(map[string]string),
+			FuncOutputIx:       make(map[string]int),
+			FuncArgsSent:       make(map[string]int),
+			MsgOutputIx:        make(map[int]int),
+			MsgTextBuf:         make(map[int]*strings.Builder),
+			MsgItemAdded:       make(map[int]bool),
+			MsgContentAdded:    make(map[int]bool),
+			MsgItemDone:        make(map[int]bool),
+			FuncItemAdded:      make(map[string]bool),
+			FuncItemCustom:     make(map[string]bool),
+			FuncItemLocalShell: make(map[string]bool),
+			FuncArgsDone:       make(map[string]bool),
+			FuncItemDone:       make(map[string]bool),
+			Reasonings:         make([]oaiToResponsesStateReasoning, 0),
 		}
 	}
 	st := (*param).(*oaiToResponsesState)
@@ -389,7 +402,19 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 		outputIndex := st.FuncOutputIx[key]
 		_, isCustomTool := st.CustomToolNames[name]
+		_, isLocalShellTool := st.LocalShellToolNames[name]
 		st.FuncItemCustom[key] = isCustomTool
+		st.FuncItemLocalShell[key] = isLocalShellTool
+		if isLocalShellTool {
+			o := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"local_shell_call","status":"in_progress","call_id":"","action":{"type":"exec","command":[],"env":{}}}}`)
+			o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
+			o, _ = sjson.SetBytes(o, "output_index", outputIndex)
+			o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("lsc_%s", callID))
+			o, _ = sjson.SetBytes(o, "item.call_id", callID)
+			out = append(out, emitRespEvent("response.output_item.added", o))
+			st.FuncItemAdded[key] = true
+			return
+		}
 		if isCustomTool {
 			if st.ToolIndex.isApplyPatch(name) {
 				d := st.ToolIndex.byChat[name]
@@ -470,9 +495,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.MsgItemDone = make(map[int]bool)
 		st.FuncItemAdded = make(map[string]bool)
 		st.FuncItemCustom = make(map[string]bool)
+		st.FuncItemLocalShell = make(map[string]bool)
 		st.FuncArgsDone = make(map[string]bool)
 		st.FuncItemDone = make(map[string]bool)
 		st.CustomToolNames = st.ToolIndex.custom
+		st.LocalShellToolNames = st.ToolIndex.localShell
 		st.PromptTokens = 0
 		st.CachedTokens = 0
 		st.CompletionTokens = 0
@@ -644,6 +671,20 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				toolStatus = "incomplete"
 			}
 
+			if st.FuncItemLocalShell[key] {
+				item, ok := buildResponsesLocalShellCallItem(callID, args, toolStatus)
+				if !ok {
+					continue
+				}
+				itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
+				itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+				itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
+				itemDone, _ = sjson.SetRawBytes(itemDone, "item", item)
+				out = append(out, emitRespEvent("response.output_item.done", itemDone))
+				st.FuncItemDone[key] = true
+				st.FuncArgsDone[key] = true
+				continue
+			}
 			if st.FuncItemCustom[key] {
 				input := ""
 				if patchCall := st.ApplyPatchCalls[key]; patchCall != nil {
@@ -1043,6 +1084,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						toolStatus := "completed"
 						if isIncomplete {
 							toolStatus = "incomplete"
+						}
+						if _, isLocalShellTool := toolIndex.localShell[name]; isLocalShellTool {
+							item, ok := buildResponsesLocalShellCallItem(callID, args, toolStatus)
+							if !ok {
+								return true
+							}
+							outputItems = append(outputItems, item)
+							return true
 						}
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
 							item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)

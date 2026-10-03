@@ -44,6 +44,24 @@ func ExtractResponsesCallID(node gjson.Result) string {
 	return id
 }
 
+func IsResponsesFunctionLikeToolCall(itemType string) bool {
+	switch itemType {
+	case "function_call", "custom_tool_call", "local_shell_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func IsResponsesFunctionLikeToolOutput(itemType string) bool {
+	switch itemType {
+	case "function_call_output", "custom_tool_call_output", "local_shell_call_output":
+		return true
+	default:
+		return false
+	}
+}
+
 // NormalizeResponsesToolCallOutputs scans a slice of Responses input items,
 // pairs function_call_output / custom_tool_call_output with preceding pending tool calls,
 // and assigns missing call_ids to tool outputs using a multi-pass matching strategy:
@@ -63,7 +81,7 @@ func NormalizeResponsesToolCallOutputs(items []gjson.Result) []gjson.Result {
 	explicitOutputCounts := make(map[string]int)
 	for _, item := range items {
 		typ := item.Get("type").String()
-		if typ == "function_call_output" || typ == "custom_tool_call_output" {
+		if IsResponsesFunctionLikeToolOutput(typ) {
 			if id := ExtractResponsesCallID(item); id != "" {
 				explicitOutputCounts[id]++
 			}
@@ -79,18 +97,24 @@ func NormalizeResponsesToolCallOutputs(items []gjson.Result) []gjson.Result {
 		itemType := item.Get("type").String()
 
 		switch itemType {
-		case "function_call", "custom_tool_call":
+		case "function_call", "custom_tool_call", "local_shell_call":
 			callID := ExtractResponsesCallID(item)
 			if callID != "" {
 				pendingCallIDs = append(pendingCallIDs, callID)
 				name := item.Get("name").String()
+				// Native local shell calls have no Responses function name. Use
+				// the synthetic family name only for output normalization; each
+				// translator maps it to its provider-specific Chat tool name.
+				if itemType == "local_shell_call" {
+					name = "local_shell"
+				}
 				pendingCallNames[callID] = name
 			}
 			i++
 
-		case "function_call_output", "custom_tool_call_output":
+		case "function_call_output", "custom_tool_call_output", "local_shell_call_output":
 			start := i
-			for i < len(normalized) && (normalized[i].Get("type").String() == "function_call_output" || normalized[i].Get("type").String() == "custom_tool_call_output") {
+			for i < len(normalized) && IsResponsesFunctionLikeToolOutput(normalized[i].Get("type").String()) {
 				i++
 			}
 			outputs := normalized[start:i]

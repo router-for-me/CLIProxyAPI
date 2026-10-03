@@ -78,7 +78,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		missingIDOutputsCount := 0
 		for _, item := range rawInputArray {
 			itemType := item.Get("type").String()
-			if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+			if translatorcommon.IsResponsesFunctionLikeToolOutput(itemType) {
 				id := translatorcommon.ExtractResponsesCallID(item)
 				if id != "" {
 					explicitOutputCounts[id]++
@@ -91,7 +91,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		unclaimedCalls := make(map[string]bool)
 		for _, item := range rawInputArray {
 			itemType := item.Get("type").String()
-			if itemType == "function_call" || itemType == "custom_tool_call" {
+			if translatorcommon.IsResponsesFunctionLikeToolCall(itemType) {
 				id := translatorcommon.ExtractResponsesCallID(item)
 				if id != "" && explicitOutputCounts[id] == 0 {
 					unclaimedCalls[id] = true
@@ -103,7 +103,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		if missingIDOutputsCount > 1 || (missingIDOutputsCount > 0 && len(unclaimedCalls) > 1) {
 			for idx, item := range inputItems {
 				itemType := item.Get("type").String()
-				if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+				if translatorcommon.IsResponsesFunctionLikeToolOutput(itemType) {
 					if idx < len(rawInputArray) && translatorcommon.ExtractResponsesCallID(rawInputArray[idx]) == "" {
 						raw := []byte(item.Raw)
 						raw, _ = sjson.DeleteBytes(raw, "call_id")
@@ -235,7 +235,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			if itemType == "" && item.Get("role").String() != "" {
 				itemType = "message"
 			}
-			if itemType != "function_call" && itemType != "custom_tool_call" {
+			if !translatorcommon.IsResponsesFunctionLikeToolCall(itemType) {
 				flushPendingToolCalls()
 			}
 
@@ -351,6 +351,25 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					pendingToolCallIDs = append(pendingToolCallIDs, callID)
 				}
 
+			case "local_shell_call":
+				rc := item.Get("reasoning_content").String()
+				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, rc)
+				if isUsableResponsesReasoning(rc) {
+					latestReasoningContent = rc
+				}
+				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+				if callId := translatorcommon.ExtractResponsesCallID(item); callId != "" {
+					toolCall, _ = sjson.SetBytes(toolCall, "id", callId)
+				}
+				toolCall, _ = sjson.SetBytes(toolCall, "function.name", toolIndex.canonicalName(reservedLocalShellChatToolName))
+				if arguments := localShellActionToFunctionArguments(item.Get("action")); arguments != "" {
+					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments)
+				}
+				pendingToolCalls = append(pendingToolCalls, gjson.ParseBytes(toolCall).Value())
+				if callID := translatorcommon.ExtractResponsesCallID(item); callID != "" {
+					pendingToolCallIDs = append(pendingToolCallIDs, callID)
+				}
+
 			case "function_call_output":
 				mergeableAssistantIndex = -1
 				callID := translatorcommon.ExtractResponsesCallID(item)
@@ -364,6 +383,27 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					// Orphan outputs (empty call_id or no matching assistant
 					// tool_calls, e.g. Codex send_message_to_thread cards) must
 					// not become tool messages. Emit as user text instead.
+					appendStandaloneResponsesToolOutputAsUser(item.Get("output"), setFunctionCallOutputContent, appendRegularMessage)
+				} else {
+					toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
+					delete(awaitingToolOutputs, callID)
+					if output := item.Get("output"); output.Exists() {
+						toolMessage = setFunctionCallOutputContent(toolMessage, output)
+					}
+					appendMessage(toolMessage)
+				}
+
+			case "local_shell_call_output":
+				mergeableAssistantIndex = -1
+				callID := translatorcommon.ExtractResponsesCallID(item)
+				if callID != "" {
+					outputCounts[callID]++
+					if outputCounts[callID] > 1 {
+						duplicateOutputIDs[callID] = struct{}{}
+					}
+				}
+				if _, awaiting := awaitingToolOutputs[callID]; !awaiting {
 					appendStandaloneResponsesToolOutputAsUser(item.Get("output"), setFunctionCallOutputContent, appendRegularMessage)
 				} else {
 					toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
@@ -482,6 +522,14 @@ func convertResponsesToolChoiceWithIndex(toolChoice gjson.Result, toolIndex *res
 	}
 
 	choiceType := toolChoice.Get("type").String()
+	if choiceType == "shell" {
+		if !isLocalResponsesShellTool(toolChoice) {
+			return []byte(toolChoice.Raw)
+		}
+		converted := []byte(`{"type":"function","function":{"name":""}}`)
+		converted, _ = sjson.SetBytes(converted, "function.name", toolIndex.canonicalName(reservedLocalShellChatToolName))
+		return converted
+	}
 	if choiceType != "function" && choiceType != "custom" {
 		return []byte(toolChoice.Raw)
 	}
