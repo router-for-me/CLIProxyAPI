@@ -428,33 +428,16 @@ func TestCodexWSRequestScopedFlaggedCredentialKeepsDownstreamSessionAlive(t *tes
 				t.Fatalf("write downstream request: %v", errWrite)
 			}
 
-			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-			var eventTypes []string
-			var responseIDs []string
-			for {
-				_, payload, errRead := conn.ReadMessage()
-				if errRead != nil {
-					t.Fatalf("downstream session was torn down instead of failing over: %v", errRead)
-				}
-				eventType := gjson.GetBytes(payload, "type").String()
-				if eventType == "error" {
-					t.Fatalf("downstream received an error instead of a transparent failover: %s", payload)
-				}
-				eventTypes = append(eventTypes, eventType)
-				if id := gjson.GetBytes(payload, "response.id").String(); id != "" {
-					responseIDs = append(responseIDs, id)
-				}
-				if eventType == "response.completed" {
-					break
-				}
+			read := readCodexWSDownstreamFrames(t, conn)
+			if len(read.errorFrames) != 0 {
+				t.Fatalf("downstream received an error instead of a transparent failover: %v", read.errorFrames)
 			}
-
-			if len(eventTypes) != 2 || eventTypes[0] != "response.created" || eventTypes[1] != "response.completed" {
-				t.Fatalf("downstream event sequence = %v, want exactly [response.created response.completed]", eventTypes)
+			if len(read.eventTypes) != 2 || read.eventTypes[0] != "response.created" || read.eventTypes[1] != "response.completed" {
+				t.Fatalf("downstream event sequence = %v, want exactly [response.created response.completed]", read.eventTypes)
 			}
-			for _, id := range responseIDs {
+			for _, id := range read.responseIDs {
 				if id != "resp_ws_scoped_account-ok" {
-					t.Fatalf("downstream saw a response id from the rejected attempt: %q (all ids: %v)", id, responseIDs)
+					t.Fatalf("downstream saw a response id from the rejected attempt: %q (all ids: %v)", id, read.responseIDs)
 				}
 			}
 
@@ -480,8 +463,8 @@ func TestCodexWSRequestScopedAllCandidatesFlaggedSurfacesError(t *testing.T) {
 			defer server.Close()
 
 			manager, exec := newCodexWSScopedManager(t, buffering)
-			registerCodexWSTestAuth(t, manager, "ws-scoped-flagged-a", 100, server.URL, "account-flagged", cliproxyauth.RequestScopedActionContinueAndCooldown)
-			registerCodexWSTestAuth(t, manager, "ws-scoped-flagged-b", 0, server.URL, "account-flagged", cliproxyauth.RequestScopedActionContinueAndCooldown)
+			registerCodexWSTestAuth(t, manager, "ws-scoped-flagged-a", 100, server.URL, "account-flagged-a", cliproxyauth.RequestScopedActionContinueAndCooldown)
+			registerCodexWSTestAuth(t, manager, "ws-scoped-flagged-b", 0, server.URL, "account-flagged-b", cliproxyauth.RequestScopedActionContinueAndCooldown)
 
 			const sessionID = "ws-request-scoped-exhausted"
 			disconnectCh := exec.UpstreamDisconnectChan(sessionID)
@@ -502,8 +485,8 @@ func TestCodexWSRequestScopedAllCandidatesFlaggedSurfacesError(t *testing.T) {
 			mu.Lock()
 			gotAttempts := append([]string(nil), attempts...)
 			mu.Unlock()
-			if len(gotAttempts) != 2 || gotAttempts[0] != "account-flagged" || gotAttempts[1] != "account-flagged" {
-				t.Fatalf("each credential must be attempted exactly once, got %v", gotAttempts)
+			if len(gotAttempts) != 2 || gotAttempts[0] != "account-flagged-a" || gotAttempts[1] != "account-flagged-b" {
+				t.Fatalf("each credential must be attempted exactly once in priority order, got %v", gotAttempts)
 			}
 
 			select {
