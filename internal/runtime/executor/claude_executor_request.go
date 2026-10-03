@@ -673,6 +673,14 @@ type claudeRateLimitError struct {
 	credentialScoped bool
 }
 
+type claudeThreadNotFoundError struct {
+	statusErr
+}
+
+func (claudeThreadNotFoundError) IsRequestScoped() bool {
+	return true
+}
+
 func (e claudeRateLimitError) IsCredentialScoped() bool {
 	return e.credentialScoped
 }
@@ -696,6 +704,19 @@ func classifyClaudeUpstreamError(statusCode int, headers http.Header, body []byt
 }
 
 func classifyClaudeUpstreamErrorWithCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) error {
+	if statusCode == http.StatusNotFound {
+		message := gjson.GetBytes(body, "error.message").String()
+		if gjson.GetBytes(body, "error.type").String() == "thread_not_found" ||
+			gjson.GetBytes(body, "error.details.error_code").String() == "thread_not_found" ||
+			(strings.Contains(message, "No thread state was found") && strings.Contains(message, "previous_message_id")) {
+			if !strings.Contains(message, "thread_not_found") {
+				message = "thread_not_found: " + message
+			}
+			body, _ = sjson.SetBytes(body, "error.message", message)
+			body, _ = sjson.SetBytes(body, "error.details.error_code", "thread_not_found")
+			return claudeThreadNotFoundError{statusErr{code: statusCode, msg: string(body)}}
+		}
+	}
 	var retryAfter *time.Duration
 	if statusCode == http.StatusTooManyRequests || (statusCode >= 400 && statusCode < 600) {
 		retryAfter = helps.ParseClaudeRateLimitReset(headers, time.Now())
