@@ -44,3 +44,36 @@ func TestGeminiModelsResponseUsesConfiguredDisplayName(t *testing.T) {
 	}
 	t.Fatalf("model %q not found in response", modelID)
 }
+
+func TestGeminiModelsResponseIncludesContextLength(t *testing.T) {
+	const clientID = "gemini-context-catalog-test"
+	const modelID = "gemini-context-catalog-test"
+	registryRef := registry.GetGlobalRegistry()
+	registryRef.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{{
+		ID: modelID, Name: modelID, ContextLength: 1048576,
+	}})
+	t.Cleanup(func() { registryRef.UnregisterClient(clientID) })
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	NewGeminiAPIHandler(&handlers.BaseAPIHandler{}).GeminiModels(ctx)
+
+	var response struct {
+		Models []struct {
+			Name            string `json:"name"`
+			InputTokenLimit int    `json:"inputTokenLimit"`
+		} `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v", errUnmarshal)
+	}
+	for _, model := range response.Models {
+		if model.Name == "models/"+modelID {
+			if model.InputTokenLimit != 1048576 {
+				t.Fatalf("inputTokenLimit = %d, want 1048576", model.InputTokenLimit)
+			}
+			return
+		}
+	}
+	t.Fatalf("model %q not found in response", modelID)
+}
