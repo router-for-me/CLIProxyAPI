@@ -207,6 +207,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var streamErr error
 		var pendingJSON []byte
 		var replayCommitted bool
+		var terminalDelivered bool
 		var param any
 		commitReplay := func() {
 			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && helps.ApplyPatchTranslationError(param) == nil {
@@ -225,6 +226,13 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			close(out)
 			if streamErr == nil {
 				streamErr = ctx.Err()
+			}
+			if terminalDelivered && streamErr != nil && errors.Is(streamErr, context.Canceled) {
+				// The client disconnected after the terminal chunk was
+				// delivered: the upstream response itself completed, so settle
+				// accounting as success. Genuine delivery failures are still
+				// honored by WaitStreamDelivery below.
+				streamErr = nil
 			}
 			if deliveryErr, tracked := usage.WaitStreamDelivery(ctx); tracked {
 				if streamErr == nil || errors.Is(streamErr, context.Canceled) {
@@ -294,6 +302,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 			reporter.ObserveResponseModel(payload)
 
+			// A non-empty upstream finishReason marks the terminal frame. The
+			// client-facing terminal counts as delivered once the translated
+			// chunks of this frame have been forwarded below.
+			frameTerminal := gjson.GetBytes(payload, "response.candidates.0.finishReason").String() != ""
+
 			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bytes.Clone(payload), &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
@@ -314,6 +327,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				case <-ctx.Done():
 					return
 				}
+			}
+			if frameTerminal {
+				terminalDelivered = true
 			}
 			if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 				return
