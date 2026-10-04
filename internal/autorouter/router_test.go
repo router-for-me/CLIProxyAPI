@@ -257,6 +257,162 @@ func TestResolveTargetRoutingWins(t *testing.T) {
 	}
 }
 
+// TestResolveWeightedFailoverPopulatesFailoverTargets verifies that
+// weighted-failover resolution picks one primary target and carries the
+// remaining targets in FailoverTargets.
+func TestResolveWeightedFailoverPopulatesFailoverTargets(t *testing.T) {
+	c := &Config{
+		Mappings: []TierMapping{
+			{
+				Tier:           TierComplex,
+				TargetStrategy: "weighted-failover",
+				Targets: []TierTarget{
+					{Model: "claude-sonnet-4-5", Weight: 7},
+					{Model: "gpt-4o", Weight: 3},
+					{Model: "gemini-2-5-pro", Weight: 5},
+				},
+				Providers: []string{"anthropic", "openai", "google"},
+				Strategy:  "failover",
+			},
+		},
+	}
+
+	rng := seededRand()
+	res, ok := resolveWithRand(TierComplex, c, rng)
+	if !ok || res == nil {
+		t.Fatal("expected resolution")
+	}
+	if res.TargetStrategy != "weighted-failover" {
+		t.Fatalf("TargetStrategy = %q, want weighted-failover", res.TargetStrategy)
+	}
+	if len(res.FailoverTargets) != 2 {
+		t.Fatalf("FailoverTargets length = %d, want 2 (3 targets minus primary)", len(res.FailoverTargets))
+	}
+	// The primary must not appear in FailoverTargets.
+	for _, ft := range res.FailoverTargets {
+		if ft.Model == res.Model {
+			t.Fatalf("FailoverTargets includes the primary model %q", res.Model)
+		}
+	}
+	// Routing from the tier mapping should be carried through.
+	if res.Providers == nil || len(res.Providers) != 3 {
+		t.Fatalf("Providers not carried through: %v", res.Providers)
+	}
+	if res.Strategy != "failover" {
+		t.Fatalf("Strategy = %q, want failover", res.Strategy)
+	}
+}
+
+// TestResolveWeightedFailoverProducesAllPermutations verifies that over many
+// trials every target appears as both the primary pick and somewhere in the
+// failover chain, confirming that weighted sampling without replacement covers
+// the full candidate set.
+func TestResolveWeightedFailoverProducesAllPermutations(t *testing.T) {
+	c := &Config{
+		Mappings: []TierMapping{
+			{
+				Tier:           TierComplex,
+				TargetStrategy: "weighted-failover",
+				Targets: []TierTarget{
+					{Model: "a", Weight: 1},
+					{Model: "b", Weight: 1},
+					{Model: "c", Weight: 1},
+				},
+			},
+		},
+	}
+	rng := seededRand()
+	primarySeen := map[string]int{}
+	chainSeen := map[string]int{}
+	const trials = 300
+	for i := 0; i < trials; i++ {
+		res, ok := resolveWithRand(TierComplex, c, rng)
+		if !ok || res == nil {
+			t.Fatal("expected resolution")
+		}
+		primarySeen[res.Model]++
+		for _, ft := range res.FailoverTargets {
+			chainSeen[ft.Model]++
+		}
+	}
+	for _, model := range []string{"a", "b", "c"} {
+		if primarySeen[model] == 0 {
+			t.Errorf("model %q never appeared as primary pick", model)
+		}
+		if chainSeen[model] == 0 {
+			t.Errorf("model %q never appeared in failover chain", model)
+		}
+	}
+}
+
+// TestResolveWeightedFailoverSingleTarget verifies that weighted-failover with
+// a single target produces no FailoverTargets.
+func TestResolveWeightedFailoverSingleTarget(t *testing.T) {
+	c := &Config{
+		Mappings: []TierMapping{
+			{
+				Tier:           TierSimple,
+				TargetStrategy: "weighted-failover",
+				Model:          "claude-haiku",
+			},
+		},
+	}
+	res, ok := resolveWithRand(TierSimple, c, seededRand())
+	if !ok || res == nil {
+		t.Fatal("expected resolution")
+	}
+	if len(res.FailoverTargets) != 0 {
+		t.Fatalf("FailoverTargets = %v, want empty for single target", res.FailoverTargets)
+	}
+}
+
+// TestResolveWeightedFailoverSingleTargetList verifies weighted-failover with
+// exactly one target in the Targets list produces no FailoverTargets.
+func TestResolveWeightedFailoverSingleTargetList(t *testing.T) {
+	c := &Config{
+		Mappings: []TierMapping{
+			{
+				Tier:           TierSimple,
+				TargetStrategy: "weighted-failover",
+				Targets: []TierTarget{
+					{Model: "claude-haiku", Weight: 1},
+				},
+			},
+		},
+	}
+	res, ok := resolveWithRand(TierSimple, c, seededRand())
+	if !ok || res == nil {
+		t.Fatal("expected resolution")
+	}
+	if len(res.FailoverTargets) != 0 {
+		t.Fatalf("FailoverTargets = %v, want empty for single target list", res.FailoverTargets)
+	}
+}
+
+// TestPickWeightedOrderDeterministicWeight verifies pickWeightedOrder produces
+// a full ordered list (same length as input) and that a high-weight target is
+// overwhelmingly likely to appear early.
+func TestPickWeightedOrderDeterministicWeight(t *testing.T) {
+	targets := []TierTarget{
+		{Model: "light", Weight: 1},
+		{Model: "heavy", Weight: 99},
+	}
+	rng := seededRand()
+	earlySeen := map[string]int{}
+	const trials = 1000
+	for i := 0; i < trials; i++ {
+		order := pickWeightedOrder(targets, rng)
+		if len(order) != 2 {
+			t.Fatalf("pickWeightedOrder length = %d, want 2", len(order))
+		}
+		earlySeen[order[0].Model]++
+	}
+	// "heavy" (weight 99/100) should be first >95% of the time.
+	if earlySeen["heavy"] < trials*95/100 {
+		t.Fatalf("heavy picked first only %d/%d times", earlySeen["heavy"], trials)
+	}
+}
+
 // TestResolveTargetRoutingInheritsTier verifies that a picked target with no
 // per-target routing inherits the tier-level routing unchanged.
 func TestResolveTargetRoutingInheritsTier(t *testing.T) {

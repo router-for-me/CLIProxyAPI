@@ -89,9 +89,10 @@ type ProviderPriority struct {
 }
 
 // TierTarget is one candidate upstream model within a tier's multi-target set.
-// Weight drives the "weighted" target strategy: higher numbers are picked more
-// often (proportionally). A missing or non-positive weight defaults to 1 (equal
-// share), so an operator leaving weights blank gets a uniform distribution.
+// Weight drives the "weighted" and "weighted-failover" target strategies: higher
+// numbers are picked more often (proportionally). A missing or non-positive
+// weight defaults to 1 (equal share), so an operator leaving weights blank gets
+// a uniform distribution.
 //
 // A target may carry its own per-model routing (providers/strategy/priorities),
 // mirroring a Model Route exactly like Models Group. When it configures none,
@@ -137,10 +138,13 @@ type TierMapping struct {
 	// Targets optionally lists multiple candidate upstream models for this tier,
 	// selected per TargetStrategy. Empty falls back to the single Model.
 	Targets []TierTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
-	// TargetStrategy picks among Targets: "" inherits the default, "weighted"
-	// (the default for multiple targets) selects randomly weighted by each
-	// target's Weight, and "priority" deterministically selects the highest
-	// weight (ties broken by list order). Ignored for a single target.
+	// TargetStrategy picks among Targets: "" inherits the default,
+	// "weighted" (the default for multiple targets) selects randomly weighted by
+	// each target's Weight, "weighted-failover" picks the first target via
+	// weighted random and carries the rest as a failover chain (weighted
+	// sampling without replacement), and "priority" deterministically selects
+	// the highest weight (ties broken by list order). Ignored for a single
+	// target.
 	TargetStrategy string `json:"target_strategy,omitempty" yaml:"target_strategy,omitempty"`
 	// Providers pins the tier's target model(s) to a subset of upstream provider
 	// keys. Empty inherits the model's default providers.

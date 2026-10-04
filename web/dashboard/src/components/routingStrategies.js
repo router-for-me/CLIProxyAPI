@@ -113,13 +113,13 @@ export function routeStrategyOptions(allowWeighted) {
 }
 
 // TARGET_STRATEGY_OPTIONS is an auto-router tier's multi-target selection
-// strategy. "" is weighted-random; a single target is unaffected.
+// strategy. "" is weighted-random failover; a single target is unaffected.
 export const TARGET_STRATEGY_OPTIONS = [
   {
     value: '',
-    label: 'Weighted',
-    short: 'weighted',
-    blurb: 'Pick a target model at random, weighted by each model\u2019s weight (higher weight = more requests).',
+    label: 'Weighted failover',
+    short: 'weighted-failover',
+    blurb: 'Pick a target model at random weighted by weight, then try the next target if the first fails (failover chain).',
   },
   {
     value: 'priority',

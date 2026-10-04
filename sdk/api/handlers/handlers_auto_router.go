@@ -189,6 +189,45 @@ type autoRouterResolved struct {
 
 // resolveFailureError builds the explicit 503 for an auto-router match whose
 // tier mapping could not resolve. tier may be empty for legacy zero values.
+// popFailoverTarget returns an autoRouterResolved for the next failover
+// target (the first element of the route's FailoverTargets), or the zero
+// value and false when the chain is exhausted. The returned resolved
+// carries the failover target's own routing (providers/strategy/priorities)
+// and omits FailoverTargets so further pop calls return false.
+func (r autoRouterResolved) popFailoverTarget() (autoRouterResolved, bool) {
+	if !r.matched || r.route == nil || len(r.route.FailoverTargets) == 0 {
+		return autoRouterResolved{}, false
+	}
+	ft := r.route.FailoverTargets[0]
+
+	var providers []string
+	if len(ft.Providers) > 0 {
+		providers = make([]string, len(ft.Providers))
+		copy(providers, ft.Providers)
+	}
+	var priorities []autorouter.ProviderPriority
+	if len(ft.Priorities) > 0 {
+		priorities = make([]autorouter.ProviderPriority, len(ft.Priorities))
+		copy(priorities, ft.Priorities)
+	}
+
+	routeCopy := autorouter.Resolved{
+		Model:           ft.Model,
+		Providers:       providers,
+		Strategy:        ft.Strategy,
+		Priorities:      priorities,
+		TargetStrategy:  r.route.TargetStrategy,
+		MappingTier:     r.route.MappingTier,
+		FallbackChain:   r.route.FallbackChain,
+		FailoverTargets: nil,
+	}
+
+	r2 := r
+	r2.targetModel = ft.Model
+	r2.route = &routeCopy
+	return r2, true
+}
+
 func (r autoRouterResolved) resolveFailureError() *interfaces.ErrorMessage {
 	return &interfaces.ErrorMessage{
 		StatusCode: http.StatusServiceUnavailable,

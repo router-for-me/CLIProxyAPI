@@ -4159,8 +4159,8 @@ button.ghost:hover:not(:disabled) {
 
 /* Multi-target editor: one block per target model (a top row with rank glyph +
    combobox + optional weight + status/actions, then the target's own route
-   editor when expanded), an "add target" action, and the weighted/priority
-   strategy control that appears once a tier has more than one target. */
+    editor when expanded), an "add target" action, and the weighted-failover/priority
+    strategy control that appears once a tier has more than one target. */
 .ar-targets {
   display: flex;
   flex-direction: column;

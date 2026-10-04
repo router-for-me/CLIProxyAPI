@@ -97,11 +97,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
 	// Auto Router: if the requested model is an Auto Router id, score the
-	// request and forward it to the tier-appropriate upstream model. The
-	// original requested model (the router id) is preserved for attribution
-	// and logging, while execution uses the resolved target model. The tier's
-	// per-model routing (providers/strategy/priorities) is applied after
-	// provider resolution so it overrides the target model's default routing.
+	// request and forward it to the tier-appropriate upstream model.
 	executionModel := modelName
 	var autoRoute *autorouter.Resolved
 	var resolvedAR autoRouterResolved
@@ -110,99 +106,126 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		executionModel = resolvedAR.targetModel
 		autoRoute = resolvedAR.route
 		ctx = resolvedAR.withDecisionContext(ctx)
+		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
 	} else if rr.resolveFailed {
-		// The request targeted an enabled auto-router whose tier mapping cannot
-		// resolve: an explicit 503 beats auth_not_found from the synthetic
-		// auto-router provider (or an unknown model forwarded upstream).
 		errMsg := rr.resolveFailureError()
 		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, modelName, errMsg)
 		return nil, nil, errMsg
 	}
-	if resolvedAR.matched {
-		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
-	}
-	providers, normalizedModel, errMsg := h.providersForExecution(ctx, executionModel, originalRequestedModel, allowImageModel, routeDecision, execOptions)
-	if errMsg != nil {
-		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, errMsg)
-		return nil, nil, errMsg
-	}
-	if autoRoute != nil {
-		var routeErr *interfaces.ErrorMessage
-		providers, routeErr = h.applyAutoRouterRoute(ctx, providers, autoRoute)
-		if routeErr != nil {
-			recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, routeErr)
-			return nil, nil, routeErr
+	currentModel := executionModel
+	currentRoute := autoRoute
+	currentJSON := rawJSON
+	for {
+		providers, normalizedModel, pErr := h.providersForExecution(ctx, currentModel, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+		if pErr != nil {
+			recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, pErr)
+			if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+				resolvedAR = nextAR
+				currentModel = nextAR.targetModel
+				currentRoute = nextAR.route
+				currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+				continue
+			}
+			return nil, nil, pErr
 		}
-	}
-	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
-	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
-	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
-	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
-	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
-	setServiceTierMetadata(reqMeta, rawJSON)
-	setGenerateMetadata(reqMeta, rawJSON)
-	setRouteStrategyMetadata(ctx, reqMeta)
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
-	afterAuthCapture := &requestAfterAuthCapture{}
-	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
-	opts := coreexecutor.Options{
-		Stream:                      false,
-		Alt:                         alt,
-		OriginalRequest:             rawJSON,
-		SourceFormat:                sdktranslator.FromString(entryProtocol),
-		ResponseFormat:              sdktranslator.FromString(responseProtocol),
-		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
-		Query:                       modelExecutionQuery(ctx, execOptions.Query),
-		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
-	}
-	opts.Metadata = reqMeta
-	var interceptErr *interfaces.ErrorMessage
-	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
-	if interceptErr != nil {
-		lifecycle.completeError(ctx, interceptErr)
-		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, interceptErr)
-		return nil, nil, interceptErr
-	}
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
-	if err != nil {
-		// providers can be empty when upstream resolution (e.g., an Auto Router
-		// tier pin with no intersecting upstream) leaves the slice nil; in that
-		// case AuthManager returns provider_not_found. Fall back to the routing
-		// decision's provider so we still attribute the pre-execution failure
-		// instead of panicking on providers[0].
-		providerForRecord := routeDecision.Provider
-		if len(providers) > 0 {
-			providerForRecord = providers[0]
+		if currentRoute != nil {
+			var routeErr *interfaces.ErrorMessage
+			providers, routeErr = h.applyAutoRouterRoute(ctx, providers, currentRoute)
+			if routeErr != nil {
+				recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, routeErr)
+				if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+					resolvedAR = nextAR
+					currentModel = nextAR.targetModel
+					currentRoute = nextAR.route
+					currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+					continue
+				}
+				return nil, nil, routeErr
+			}
 		}
-		recordAuthManagerFailure(ctx, providerForRecord, originalRequestedModel, normalizedModel, err)
-		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
-		errMsg := executionErrorMessage(err)
-		lifecycle.completeError(ctx, errMsg)
-		return nil, nil, errMsg
-	}
-	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
-	if resolvedAR.matched {
-		// A routed request that hit the token cap with zero visible content is
-		// an upstream/config fault, not an empty success: surface it explicitly
-		// so clients see the cause instead of an empty 200.
-		if emptyErr := autoRouterEmptyCompletionError(resp.Payload); emptyErr != nil {
-			lifecycle.completeError(ctx, emptyErr)
-			return nil, nil, emptyErr
+		providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
+		reqMeta := requestExecutionMetadata(ctx)
+		reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+		addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
+		addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
+		setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, currentJSON)
+		setServiceTierMetadata(reqMeta, currentJSON)
+		setGenerateMetadata(reqMeta, currentJSON)
+		setRouteStrategyMetadata(ctx, reqMeta)
+		payload := currentJSON
+		if len(payload) == 0 {
+			payload = nil
 		}
+		req := coreexecutor.Request{
+			Model:   normalizedModel,
+			Payload: payload,
+		}
+		afterAuthCapture := &requestAfterAuthCapture{}
+		lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
+		opts := coreexecutor.Options{
+			Stream:                      false,
+			Alt:                         alt,
+			OriginalRequest:             currentJSON,
+			SourceFormat:                sdktranslator.FromString(entryProtocol),
+			ResponseFormat:              sdktranslator.FromString(responseProtocol),
+			Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
+			Query:                       modelExecutionQuery(ctx, execOptions.Query),
+			RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		}
+		opts.Metadata = reqMeta
+		var interceptErr *interfaces.ErrorMessage
+		req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+		if interceptErr != nil {
+			lifecycle.completeError(ctx, interceptErr)
+			recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, interceptErr)
+			if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+				resolvedAR = nextAR
+				currentModel = nextAR.targetModel
+				currentRoute = nextAR.route
+				currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+				continue
+			}
+			return nil, nil, interceptErr
+		}
+		resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+		if err != nil {
+			providerForRecord := routeDecision.Provider
+			if len(providers) > 0 {
+				providerForRecord = providers[0]
+			}
+			recordAuthManagerFailure(ctx, providerForRecord, originalRequestedModel, normalizedModel, err)
+			err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
+			errMsg := executionErrorMessage(err)
+			lifecycle.completeError(ctx, errMsg)
+			if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+				resolvedAR = nextAR
+				currentModel = nextAR.targetModel
+				currentRoute = nextAR.route
+				currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+				continue
+			}
+			return nil, nil, errMsg
+		}
+		executedReq, executedOpts := afterAuthCapture.apply(req, opts)
+		if resolvedAR.matched {
+			if emptyErr := autoRouterEmptyCompletionError(resp.Payload); emptyErr != nil {
+				lifecycle.completeError(ctx, emptyErr)
+				if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+					resolvedAR = nextAR
+					currentModel = nextAR.targetModel
+					currentRoute = nextAR.route
+					currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+					continue
+				}
+				return nil, nil, emptyErr
+			}
+		}
+		rawResponseHeaders := cloneHeader(resp.Headers)
+		responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
+		body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+		lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
+		return body, responseHeaders, nil
 	}
-	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
-	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
-	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
-	return body, responseHeaders, nil
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -233,74 +256,104 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if resolvedAR.matched {
 		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(ctx, executionModel, originalRequestedModel, false, routeDecision, execOptions)
-	if errMsg != nil {
-		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, errMsg)
-		return nil, nil, errMsg
-	}
-	if autoRoute != nil {
-		var routeErr *interfaces.ErrorMessage
-		providers, routeErr = h.applyAutoRouterRoute(ctx, providers, autoRoute)
-		if routeErr != nil {
-			recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, routeErr)
-			return nil, nil, routeErr
+	currentModel := executionModel
+	currentRoute := autoRoute
+	currentJSON := rawJSON
+	for {
+		providers, normalizedModel, pErr := h.providersForExecution(ctx, currentModel, originalRequestedModel, false, routeDecision, execOptions)
+		if pErr != nil {
+			recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, pErr)
+			if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+				resolvedAR = nextAR
+				currentModel = nextAR.targetModel
+				currentRoute = nextAR.route
+				currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+				continue
+			}
+			return nil, nil, pErr
 		}
-	}
-	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
-	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
-	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
-	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
-	setServiceTierMetadata(reqMeta, rawJSON)
-	setGenerateMetadata(reqMeta, rawJSON)
-	setRouteStrategyMetadata(ctx, reqMeta)
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
-	afterAuthCapture := &requestAfterAuthCapture{}
-	lifecycle := h.newRequestLifecycleTracker(ctx, handlerType, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
-	opts := coreexecutor.Options{
-		Stream:                      false,
-		Alt:                         alt,
-		OriginalRequest:             rawJSON,
-		SourceFormat:                sdktranslator.FromString(handlerType),
-		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
-		Query:                       modelExecutionQuery(ctx, execOptions.Query),
-		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
-	}
-	opts.Metadata = reqMeta
-	var interceptErr *interfaces.ErrorMessage
-	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
-	if interceptErr != nil {
-		lifecycle.completeError(ctx, interceptErr)
-		return nil, nil, interceptErr
-	}
-	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
-	if err != nil {
-		// See executeWithAuthManagerFormats: providers may be empty when an
-		// Auto Router tier pin yields no intersection; fall back to the
-		// routing decision's provider instead of panicking on providers[0].
-		providerForRecord := routeDecision.Provider
-		if len(providers) > 0 {
-			providerForRecord = providers[0]
+		if currentRoute != nil {
+			var routeErr *interfaces.ErrorMessage
+			providers, routeErr = h.applyAutoRouterRoute(ctx, providers, currentRoute)
+			if routeErr != nil {
+				recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, routeErr)
+				if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+					resolvedAR = nextAR
+					currentModel = nextAR.targetModel
+					currentRoute = nextAR.route
+					currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+					continue
+				}
+				return nil, nil, routeErr
+			}
 		}
-		recordAuthManagerFailure(ctx, providerForRecord, originalRequestedModel, normalizedModel, err)
-		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
-		errMsg := executionErrorMessage(err)
-		lifecycle.completeError(ctx, errMsg)
-		return nil, nil, errMsg
+		providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
+		reqMeta := requestExecutionMetadata(ctx)
+		reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+		addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
+		setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, currentJSON)
+		setServiceTierMetadata(reqMeta, currentJSON)
+		setGenerateMetadata(reqMeta, currentJSON)
+		setRouteStrategyMetadata(ctx, reqMeta)
+		payload := currentJSON
+		if len(payload) == 0 {
+			payload = nil
+		}
+		req := coreexecutor.Request{
+			Model:   normalizedModel,
+			Payload: payload,
+		}
+		afterAuthCapture := &requestAfterAuthCapture{}
+		lifecycle := h.newRequestLifecycleTracker(ctx, handlerType, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
+		opts := coreexecutor.Options{
+			Stream:                      false,
+			Alt:                         alt,
+			OriginalRequest:             currentJSON,
+			SourceFormat:                sdktranslator.FromString(handlerType),
+			Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
+			Query:                       modelExecutionQuery(ctx, execOptions.Query),
+			RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		}
+		opts.Metadata = reqMeta
+		var interceptErr *interfaces.ErrorMessage
+		req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
+		if interceptErr != nil {
+			lifecycle.completeError(ctx, interceptErr)
+			if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+				resolvedAR = nextAR
+				currentModel = nextAR.targetModel
+				currentRoute = nextAR.route
+				currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+				continue
+			}
+			return nil, nil, interceptErr
+		}
+		resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
+		if err != nil {
+			providerForRecord := routeDecision.Provider
+			if len(providers) > 0 {
+				providerForRecord = providers[0]
+			}
+			recordAuthManagerFailure(ctx, providerForRecord, originalRequestedModel, normalizedModel, err)
+			err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
+			errMsg := executionErrorMessage(err)
+			lifecycle.completeError(ctx, errMsg)
+			if nextAR, ok := resolvedAR.popFailoverTarget(); ok {
+				resolvedAR = nextAR
+				currentModel = nextAR.targetModel
+				currentRoute = nextAR.route
+				currentJSON = h.autoRouterRequestAdjustments(ctx, nextAR, currentJSON)
+				continue
+			}
+			return nil, nil, errMsg
+		}
+		executedReq, executedOpts := afterAuthCapture.apply(req, opts)
+		rawResponseHeaders := cloneHeader(resp.Headers)
+		responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
+		body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+		lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
+		return body, responseHeaders, nil
 	}
-	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
-	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
-	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
-	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
-	return body, responseHeaders, nil
 }
 
 func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {

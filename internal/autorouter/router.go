@@ -5,17 +5,67 @@ import (
 	"strings"
 )
 
+// resolveTargetRouting resolves the providers, strategy, and priorities for a
+// single TierTarget given the tier-level default routing from the mapping.
+// Returns copies so the caller can mutate freely.
+func resolveTargetRouting(t TierTarget, tierProviders []string, tierStrategy string, tierPriorities []ProviderPriority) ([]string, string, []ProviderPriority) {
+	providers := tierProviders
+	strategy := tierStrategy
+	priorities := tierPriorities
+	if hasTargetRouting(t) {
+		providers = t.Providers
+		strategy = strings.TrimSpace(t.Strategy)
+		priorities = t.Priorities
+	}
+	return copyProviders(providers), strategy, copyPriorities(priorities)
+}
+
+// copyProviders returns a shallow copy of providers, or nil.
+func copyProviders(p []string) []string {
+	if len(p) == 0 {
+		return nil
+	}
+	out := make([]string, len(p))
+	copy(out, p)
+	return out
+}
+
+// copyPriorities returns a shallow copy of priorities, or nil.
+func copyPriorities(p []ProviderPriority) []ProviderPriority {
+	if len(p) == 0 {
+		return nil
+	}
+	out := make([]ProviderPriority, len(p))
+	copy(out, p)
+	return out
+}
+
+// FailoverTarget is a fully-resolved failover candidate with model id and
+// per-model routing, ready to use for execution without further lookup into
+// the tier mapping.
+type FailoverTarget struct {
+	Model      string
+	Providers  []string
+	Strategy   string
+	Priorities []ProviderPriority
+}
+
 // Resolved is the outcome of resolving a classified tier to a concrete upstream
 // target: the picked target model id plus its per-model routing (providers +
 // strategy + priorities), mirroring a Model Route. The provider list may be
 // empty, in which case the target model's default providers apply.
+//
+// When the tier mapping's TargetStrategy is "weighted-failover", FailoverTargets
+// carries the remaining candidates (weighted-random order, no replacement)
+// so the caller can retry with a different model on upstream failure.
+// FailoverTargets is nil for all other strategies.
 type Resolved struct {
 	Model      string
 	Providers  []string
 	Strategy   string
 	Priorities []ProviderPriority
 	// TargetStrategy is the tier's target-selection strategy
-	// (""/"weighted"/"priority"), kept for observability.
+	// (""/"weighted"/"weighted-failover"/"priority"), kept for observability.
 	TargetStrategy string
 	// MappingTier is the tier mapping that supplied the selected target. It may
 	// be lower than the requested tier when resolution falls back.
@@ -23,6 +73,12 @@ type Resolved struct {
 	// FallbackChain lists the requested tier followed by each lower tier checked
 	// before MappingTier resolved. It is empty only for legacy zero values.
 	FallbackChain []Tier
+	// FailoverTargets holds the remaining candidate targets in weighted-random
+	// order (sampling without replacement) when TargetStrategy is
+	// "weighted-failover". Each entry carries its own resolved routing so the
+	// caller can execute against it without re-resolving the tier mapping.
+	// Nil for all other strategies.
+	FailoverTargets []FailoverTarget
 }
 
 // Resolve maps a classified tier to a concrete upstream target model for the
@@ -134,6 +190,9 @@ func mappingTargets(m *TierMapping) []TierTarget {
 // pickTargetIndex returns the index of the selected candidate among candidates
 // per the given strategy:
 //   - "priority": the highest weight wins; ties fall back to list order.
+//   - "weighted-failover": weighted random (same as "weighted") — the caller
+//     uses the result plus the remaining candidates (sampled without
+//     replacement) as a failover chain.
 //   - anything else ("" or "weighted"): weighted random, weights <= 0 default
 //     to 1 so an all-blank list picks uniformly.
 //
@@ -195,36 +254,93 @@ func randFloat(rng *rand.Rand) float64 {
 // Routing precedence: when the picked target configures its own per-model
 // routing (any of providers/strategy/priorities), that routing wins; otherwise
 // the mapping's tier-level routing applies as the fallback.
+//
+// When the mapping's TargetStrategy is "weighted-failover", the primary pick
+// is selected via weighted random and FailoverTargets carries the remaining
+// candidates in weighted-random order (sampling without replacement).
 func resolvedFromMapping(m *TierMapping, targets []TierTarget, rng *rand.Rand) *Resolved {
 	if m == nil || len(targets) == 0 {
 		return nil
 	}
-	idx := pickTargetIndex(targets, strings.ToLower(strings.TrimSpace(m.TargetStrategy)), rng)
-	if idx < 0 {
-		return nil
+	strategy := strings.ToLower(strings.TrimSpace(m.TargetStrategy))
+	var picked TierTarget
+	var allPicks []TierTarget
+	if strategy == "weighted-failover" && len(targets) > 1 {
+		allPicks = pickWeightedOrder(targets, rng)
+		picked = allPicks[0]
+	} else {
+		idx := pickTargetIndex(targets, strategy, rng)
+		if idx < 0 {
+			return nil
+		}
+		picked = targets[idx]
 	}
-	picked := targets[idx]
-	providers := m.Providers
-	strategy := strings.TrimSpace(m.Strategy)
-	priorities := m.Priorities
-	if hasTargetRouting(picked) {
-		providers = picked.Providers
-		strategy = strings.TrimSpace(picked.Strategy)
-		priorities = picked.Priorities
-	}
+
+	tierProviders := m.Providers
+	tierStrategy := strings.TrimSpace(m.Strategy)
+	tierPriorities := m.Priorities
+
+	providers, routeStrategy, priorities := resolveTargetRouting(picked, tierProviders, tierStrategy, tierPriorities)
 	r := &Resolved{
 		Model:          picked.Model,
-		Strategy:       strategy,
+		Providers:      providers,
+		Strategy:       routeStrategy,
+		Priorities:     priorities,
 		TargetStrategy: strings.TrimSpace(m.TargetStrategy),
 	}
-	if len(providers) > 0 {
-		r.Providers = append([]string(nil), providers...)
-	}
-	if len(priorities) > 0 {
-		r.Priorities = make([]ProviderPriority, len(priorities))
-		copy(r.Priorities, priorities)
+
+	// Pre-resolve failover targets so each carries its complete routing.
+	if len(allPicks) > 1 {
+		ft := make([]FailoverTarget, 0, len(allPicks)-1)
+		for _, t := range allPicks[1:] {
+			p, s, pr := resolveTargetRouting(t, tierProviders, tierStrategy, tierPriorities)
+			ft = append(ft, FailoverTarget{
+				Model:      t.Model,
+				Providers:  p,
+				Strategy:   s,
+				Priorities: pr,
+			})
+		}
+		r.FailoverTargets = ft
 	}
 	return r
+}
+
+// pickWeightedOrder performs weighted sampling without replacement on targets
+// and returns them in selection order. The first element is the weighted-random
+// primary pick; subsequent elements are the remaining picks in weighted-random
+// order. Non-positive weights are treated as weight 1. Returns a copy so the
+// caller may mutate freely.
+func pickWeightedOrder(targets []TierTarget, rng *rand.Rand) []TierTarget {
+	if len(targets) == 0 {
+		return nil
+	}
+	if len(targets) == 1 {
+		return []TierTarget{targets[0]}
+	}
+	// Copy so we can pop picks without mutating the caller's slice.
+	remaining := make([]TierTarget, len(targets))
+	copy(remaining, targets)
+	out := make([]TierTarget, 0, len(targets))
+	for len(remaining) > 0 {
+		total := 0
+		for _, t := range remaining {
+			total += effectiveTargetWeight(t.Weight)
+		}
+		roll := randFloat(rng) * float64(total)
+		cumulative := 0.0
+		chosen := 0
+		for i, t := range remaining {
+			cumulative += float64(effectiveTargetWeight(t.Weight))
+			if roll < cumulative {
+				chosen = i
+				break
+			}
+		}
+		out = append(out, remaining[chosen])
+		remaining = append(remaining[:chosen], remaining[chosen+1:]...)
+	}
+	return out
 }
 
 // hasTargetRouting reports whether a target configures its own per-model
