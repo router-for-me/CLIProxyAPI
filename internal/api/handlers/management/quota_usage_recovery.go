@@ -28,7 +28,7 @@ func quotaUsageHasCapacity(provider string, body []byte, auth *coreauth.Auth) bo
 			var limits []struct {
 				Kind    string   `json:"kind"`
 				Percent *float64 `json:"percent"`
-				Scope   struct {
+				Scope   *struct {
 					Model struct {
 						ID   string `json:"id"`
 						Name string `json:"display_name"`
@@ -39,7 +39,13 @@ func quotaUsageHasCapacity(provider string, body []byte, auth *coreauth.Auth) bo
 				return false
 			}
 			for _, limit := range limits {
-				if limit.Kind != "weekly_scoped" || !quotaModelFamily(limit.Scope.Model.ID, limit.Scope.Model.Name) || limit.Percent == nil || *limit.Percent < 0 || *limit.Percent >= 100 {
+				if limit.Percent == nil || *limit.Percent < 0 || *limit.Percent >= 100 {
+					return false
+				}
+				if limit.Kind != "session" && limit.Kind != "weekly_all" && limit.Kind != "weekly_scoped" {
+					return false
+				}
+				if (limit.Kind == "weekly_scoped" || limit.Scope != nil) && (limit.Scope == nil || !quotaModelFamily(limit.Scope.Model.ID, limit.Scope.Model.Name)) {
 					return false
 				}
 			}

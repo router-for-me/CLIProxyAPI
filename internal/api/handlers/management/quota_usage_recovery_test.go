@@ -14,6 +14,9 @@ func TestQuotaUsageHasCapacity(t *testing.T) {
 		model                string
 	}{
 		{"claude_restored", "claude", `{` + claude + `}`, true, "claude-sonnet-4-5"},
+		{"claude_normal_limits", "claude", `{` + claude + `,"limits":[{"kind":"session","percent":10},{"kind":"weekly_all","percent":20},{"kind":"weekly_scoped","percent":30,"scope":{"model":{"id":null,"display_name":"Fable 5"}}}]}`, true, "claude-fable-5-1"},
+		{"claude_session_exhausted", "claude", `{` + claude + `,"limits":[{"kind":"session","percent":100}]}`, false, ""},
+		{"claude_weekly_all_exhausted", "claude", `{` + claude + `,"limits":[{"kind":"weekly_all","percent":100}]}`, false, ""},
 		{"claude_missing_base", "claude", `{"five_hour":{"utilization":1}}`, false, ""},
 		{"claude_model_exhausted", "claude", `{` + claude + `,"seven_day_opus":{"utilization":100}}`, false, ""},
 		{"claude_extra_cannot_override", "claude", `{"five_hour":{"utilization":100},"seven_day":{"utilization":20},"extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":0}}`, false, ""},
