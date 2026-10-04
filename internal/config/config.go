@@ -82,10 +82,6 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
-	// QuotaRetryIntervalSeconds optionally bounds quota cooldowns before normal requests retry upstream.
-	// Non-positive values preserve upstream deadlines. Positive values have a ten-second floor.
-	QuotaRetryIntervalSeconds int `yaml:"quota-retry-interval-seconds" json:"quota-retry-interval-seconds"`
-
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh and manual refresh-all worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
