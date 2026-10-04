@@ -623,6 +623,9 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 	return body, responseHeaders
 }
 
+// ModelDetailIDContextKey requests selection from the final, plugin-filtered catalog.
+const ModelDetailIDContextKey = "cliproxy.model_detail_id"
+
 // WriteModelListResponse serializes the model-list payload, applies plugin response interceptors
 // if a plugin host is configured, and writes the resulting headers and body to the Gin context.
 func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat string, payload any) {
@@ -646,6 +649,7 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		"Content-Type": []string{"application/json; charset=utf-8"},
 	}
 
+	var lifecycle *requestLifecycleTracker
 	host := h.interceptorHost()
 	if host != nil {
 		ctx := context.Background()
@@ -656,7 +660,7 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 				ctx = reqCtx
 			}
 		}
-		lifecycle := h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, nil, "")
+		lifecycle = h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, nil, "")
 		resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
 			RequestID:       lifecycle.requestID(),
 			SourceFormat:    sourceFormat,
@@ -679,9 +683,44 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 				c.Writer.Header()[key] = append([]string(nil), values...)
 			}
 		}
-		lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	}
 
+	if modelID, detail := c.Get(ModelDetailIDContextKey); detail {
+		c.Writer.Header().Del("Content-Length")
+		var catalog struct {
+			Data   []json.RawMessage `json:"data"`
+			Models []json.RawMessage `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(body, &catalog); errUnmarshal != nil {
+			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusBadGateway, errUnmarshal)
+			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "Invalid model catalog", "type": "api_error"}})
+			return
+		}
+		var selected json.RawMessage
+		for _, model := range append(catalog.Data, catalog.Models...) {
+			var entry struct {
+				ID   string `json:"id"`
+				Slug string `json:"slug"`
+			}
+			if errUnmarshal := json.Unmarshal(model, &entry); errUnmarshal != nil {
+				continue
+			}
+			if entry.ID == "" {
+				entry.ID = entry.Slug
+			}
+			if entry.ID != "" && entry.ID == modelID {
+				selected = model
+				break
+			}
+		}
+		if selected == nil {
+			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusNotFound, nil)
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Model not found", "type": "invalid_request_error", "code": "model_not_found"}})
+			return
+		}
+		body = selected
+	}
+	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	if c.Writer.Header().Get("Content-Type") == "" {
 		c.Header("Content-Type", "application/json; charset=utf-8")
 	}

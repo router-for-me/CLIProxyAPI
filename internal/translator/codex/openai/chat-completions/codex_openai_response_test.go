@@ -77,6 +77,109 @@ func TestConvertCodexResponseToOpenAI_FirstChunkUsesRequestModelName(t *testing.
 	}
 }
 
+func TestConvertCodexResponseToOpenAI_PreservesURLCitations(t *testing.T) {
+	t.Run("non-stream", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_citation","model":"gpt-5.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"前🙂"},{"type":"output_text","text":"引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2},{"type":"file_citation","file_id":"file_1","index":0}]}]}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(t.Context(), "gpt-5.5", nil, nil, raw, nil)
+
+		if got := gjson.GetBytes(out, "choices.0.message.content").String(); got != "前🙂引用" {
+			t.Fatalf("content = %q, want %q; response=%s", got, "前🙂引用", out)
+		}
+		annotation := gjson.GetBytes(out, "choices.0.message.annotations.0")
+		if !annotation.Exists() {
+			t.Fatalf("expected message annotation, response=%s", out)
+		}
+		if got := gjson.GetBytes(out, "choices.0.message.annotations.#").Int(); got != 1 {
+			t.Fatalf("annotation count = %d, want 1 after filtering unsupported types; response=%s", got, out)
+		}
+		if got := annotation.Get("type").String(); got != "url_citation" {
+			t.Fatalf("annotation type = %q, want url_citation; response=%s", got, out)
+		}
+		if got := annotation.Get("url").String(); got != "https://example.com" {
+			t.Fatalf("annotation url = %q, want https://example.com; response=%s", got, out)
+		}
+		if got := annotation.Get("title").String(); got != "Example" {
+			t.Fatalf("annotation title = %q, want Example; response=%s", got, out)
+		}
+		if got := annotation.Get("start_index").Int(); got != 2 {
+			t.Fatalf("annotation start_index = %d, want 2; response=%s", got, out)
+		}
+		if got := annotation.Get("end_index").Int(); got != 4 {
+			t.Fatalf("annotation end_index = %d, want 4; response=%s", got, out)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		var param any
+		if out := ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"前🙂"}`), &param); len(out) != 1 {
+			t.Fatalf("expected text delta chunk, got %d", len(out))
+		}
+
+		annotationEvent := []byte(`data: {"type":"response.output_text.annotation.added","annotation_index":0,"annotation":{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":1}}`)
+		out := ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, annotationEvent, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected citation chunk, got %d", len(out))
+		}
+		annotation := gjson.GetBytes(out[0], "choices.0.delta.annotations.0")
+		if !annotation.Exists() {
+			t.Fatalf("expected delta annotation, chunk=%s", out[0])
+		}
+		if got := annotation.Get("type").String(); got != "url_citation" {
+			t.Fatalf("annotation type = %q, want url_citation; chunk=%s", got, out[0])
+		}
+		if got := annotation.Get("start_index").Int(); got != 2 {
+			t.Fatalf("annotation start_index = %d, want 2; chunk=%s", got, out[0])
+		}
+		if got := annotation.Get("end_index").Int(); got != 3 {
+			t.Fatalf("annotation end_index = %d, want 3; chunk=%s", got, out[0])
+		}
+
+		if out = ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"引用"}`), &param); len(out) != 1 {
+			t.Fatalf("expected second text delta chunk, got %d", len(out))
+		}
+		updatedAnnotationEvent := []byte(`data: {"type":"response.output_text.annotation.added","annotation_index":0,"annotation":{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}}`)
+		if out = ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, updatedAnnotationEvent, &param); len(out) != 0 {
+			t.Fatalf("expected duplicate citation to be suppressed after more text, got %d chunks", len(out))
+		}
+	})
+
+	t.Run("stream completion annotation", func(t *testing.T) {
+		var param any
+		for _, delta := range []string{"前🙂", "引用"} {
+			if out := ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":`+string(mustJSONMarshal(t, delta))+`}`), &param); len(out) != 1 {
+				t.Fatalf("expected text delta chunk, got %d", len(out))
+			}
+		}
+
+		doneEvent := []byte(`data: {"type":"response.output_text.done","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}]}`)
+		out := ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, doneEvent, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected citation completion chunk, got %d", len(out))
+		}
+		annotation := gjson.GetBytes(out[0], "choices.0.delta.annotations.0")
+		if got := annotation.Get("start_index").Int(); got != 4 {
+			t.Fatalf("annotation start_index = %d, want 4; chunk=%s", got, out[0])
+		}
+		if got := annotation.Get("end_index").Int(); got != 6 {
+			t.Fatalf("annotation end_index = %d, want 6; chunk=%s", got, out[0])
+		}
+
+		contentPartDoneEvent := []byte(`data: {"type":"response.content_part.done","part":{"type":"output_text","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://other.example","title":"Other","start_index":0,"end_index":1}]}}`)
+		out = ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, contentPartDoneEvent, &param)
+		if len(out) != 1 || gjson.GetBytes(out[0], "choices.0.delta.annotations.0.url").String() != "https://other.example" {
+			t.Fatalf("expected content-part citation chunk, got %d: %s", len(out), out)
+		}
+		if got := gjson.GetBytes(out[0], "choices.0.delta.annotations.0.start_index").Int(); got != 4 {
+			t.Fatalf("content-part annotation start_index = %d, want 4; chunk=%s", got, out[0])
+		}
+
+		itemDoneEvent := []byte(`data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}]}]}}`)
+		if out = ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, itemDoneEvent, &param); len(out) != 0 {
+			t.Fatalf("expected duplicate completion citation to be suppressed, got %d chunks", len(out))
+		}
+	})
+}
+
 func TestConvertCodexResponseToOpenAI_ToolCallChunkOmitsNullContentFields(t *testing.T) {
 	ctx := context.Background()
 	var param any
