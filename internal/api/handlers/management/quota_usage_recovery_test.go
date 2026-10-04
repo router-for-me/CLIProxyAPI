@@ -1,8 +1,9 @@
 package management
 
 import (
-	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"testing"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestQuotaUsageHasCapacity(t *testing.T) {
@@ -33,6 +34,10 @@ func TestQuotaUsageHasCapacity(t *testing.T) {
 		{"codex_additional_exhausted", "codex", `{"rate_limit":{` + windows + `},"additional_rate_limits":[{"metered_feature":"model","rate_limit":{"primary_window":{"used_percent":100},"secondary_window":{"used_percent":1}}}]}`, false, ""},
 		{"codex_review_exhausted", "codex", `{"rate_limit":{` + windows + `},"code_review_rate_limit":{"primary_window":{"used_percent":1},"secondary_window":{"used_percent":100}}}`, false, ""},
 		{"codex_aliases", "codex", `{"rateLimit":{"primaryWindow":{"usedPercent":0},"secondaryWindow":{"usedPercent":1},"limitReached":false},"additionalRateLimits":[]}`, true, ""},
+		{"codex_conflicting_alias", "codex", `{"rate_limit":{"primary_window":{"used_percent":20,"usedPercent":100},"secondary_window":{"used_percent":1}}}`, false, ""},
+		{"codex_conflicting_alias_reverse", "codex", `{"rate_limit":{"primary_window":{"used_percent":100,"usedPercent":20},"secondary_window":{"used_percent":1}}}`, false, ""},
+		{"codex_conflicting_flag", "codex", `{"rate_limit":{` + windows + `,"limit_reached":false,"limitReached":true}}`, false, ""},
+		{"claude_unknown_limit_kind", "claude", `{` + claude + `,"limits":[{"kind":"unknown","percent":20}]}`, false, ""},
 		{"invalid_json", "claude", `{`, false, ""},
 		{"unknown_provider", "other", `{` + claude + `}`, false, ""},
 	}

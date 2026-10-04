@@ -1,9 +1,11 @@
 package management
 
 import (
+	"bytes"
 	"encoding/json"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"strings"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // quotaUsageHasCapacity requires current provider observations, never reset timestamps.
@@ -93,12 +95,16 @@ func quotaModelFamily(id, name string) bool {
 	return false
 }
 func quotaRawAlias(record map[string]json.RawMessage, keys ...string) json.RawMessage {
+	var chosen json.RawMessage
 	for _, key := range keys {
 		if value, ok := record[key]; ok {
-			return value
+			if chosen != nil && !bytes.Equal(bytes.TrimSpace(chosen), bytes.TrimSpace(value)) {
+				return json.RawMessage(`!`)
+			}
+			chosen = value
 		}
 	}
-	return nil
+	return chosen
 }
 func quotaPercentCapacity(raw json.RawMessage, keys ...string) bool {
 	var record map[string]json.RawMessage
