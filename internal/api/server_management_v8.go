@@ -18,11 +18,11 @@ func (s *Server) registerManagementV8Routes() {
 	v8.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
 		c.Set(management.ConfigV8ContextKey, true)
 	})
-	v8.GET("/access/api-key-names", s.mgmt.GetAPIKeyNames)
-	v8.PATCH("/access/api-key-names", s.mgmt.PatchAPIKeyNames)
 	v8.GET("/config", s.mgmt.ConfigV8)
 	v8.PUT("/config", s.mgmt.ConfigV8)
 	v8.PATCH("/config", s.mgmt.ConfigV8)
+	v8.GET("/access/api-key-names", s.mgmt.GetAPIKeyNames)
+	v8.PATCH("/access/api-key-names", s.mgmt.PatchAPIKeyNames)
 	v8.GET("/config.yaml", s.mgmt.ConfigV8)
 	v8.PUT("/config.yaml", s.mgmt.ConfigV8)
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete} {
