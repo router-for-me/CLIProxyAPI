@@ -371,7 +371,14 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 		if provider == "openai-compatibility" {
 			item := deepCopyNode(group)
 			deleteYAMLPath(item, "keys")
-			setYAMLPath(item, "api-key-entries", keys)
+			deleteYAMLPath(item, "auth_index")
+			deleteYAMLPath(item, "auth-index")
+			cleanKeys := deepCopyNode(keys)
+			for _, k := range cleanKeys.Content {
+				deleteYAMLPath(k, "auth_index")
+				deleteYAMLPath(k, "auth-index")
+			}
+			setYAMLPath(item, "api-key-entries", cleanKeys)
 			out.Content = append(out.Content, item)
 			continue
 		}
@@ -396,6 +403,9 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 				}
 			}
 			for i := 0; i < len(key.Content); i += 2 {
+				if key.Content[i].Value == "auth_index" || key.Content[i].Value == "auth-index" {
+					continue
+				}
 				if key.Content[i+1].Tag != "!!null" {
 					setYAMLPath(item, key.Content[i].Value, key.Content[i+1])
 				}

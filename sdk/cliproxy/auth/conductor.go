@@ -158,6 +158,7 @@ type Manager struct {
 	syncedVersion             atomic.Uint64
 	auths                     map[string]*Auth
 	authEpochs                map[string]uint64
+	authChangeWatchers        map[string]map[chan struct{}]struct{}
 	scheduler                 *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler

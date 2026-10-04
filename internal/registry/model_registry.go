@@ -434,6 +434,27 @@ func (r *ModelRegistry) triggerModelsUnregistered(provider, clientID string) {
 func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models []*ModelInfo) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+	r.registerClientLocked(clientID, clientProvider, models, false)
+}
+
+// ReplaceClientModels replaces a client's models only if its registration epoch matches.
+// Epoch zero and epochs for empty catalogs are valid. A successful replacement advances
+// the epoch and preserves quota, suspension state and the projection generation
+// watermark for an existing registration with the same provider.
+// Empty models unregister the client; a mismatched epoch leaves the registry unchanged.
+// The successful epoch is returned under the same lock as the replacement.
+func (r *ModelRegistry) ReplaceClientModels(clientID, clientProvider string, expectedEpoch uint64, models []*ModelInfo) (uint64, bool) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.clientEpochs[clientID] != expectedEpoch {
+		return 0, false
+	}
+	r.registerClientLocked(clientID, clientProvider, models, true)
+	return r.clientEpochs[clientID], true
+}
+
+// registerClientLocked reconciles a client's models while the registry mutex is held.
+func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, models []*ModelInfo, preserveState bool) {
 	r.ensureAvailableModelsCacheLocked()
 
 	if r.clientGenerations == nil {
@@ -472,16 +493,19 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		return
 	}
 
-	// Monotonically increment client registration epoch and reset generation to 0.
-	r.clientEpochs[clientID]++
-	r.clientGenerations[clientID] = uint64(0)
-	r.registrationEpoch.Add(1)
-
-	now := time.Now()
-
 	oldModels, hadExisting := r.clientModels[clientID]
 	oldProvider := r.clientProviders[clientID]
 	providerChanged := oldProvider != provider
+
+	// Retaining scheduling state also retains its projection watermark. An older
+	// request result may read the new epoch after capturing its auth snapshot.
+	r.clientEpochs[clientID]++
+	if !preserveState || !hadExisting || providerChanged {
+		r.clientGenerations[clientID] = uint64(0)
+	}
+	r.registrationEpoch.Add(1)
+
+	now := time.Now()
 	if !hadExisting {
 		// Pure addition path.
 		for _, modelID := range rawModelIDs {
@@ -562,7 +586,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	for _, id := range removed {
 		oldCount := oldCounts[id]
 		for i := 0; i < oldCount; i++ {
-			r.removeModelRegistration(clientID, id, oldProvider, now)
+			r.removeModelRegistration(clientID, id, oldProvider, now, false)
 		}
 	}
 
@@ -573,7 +597,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		}
 		overage := oldCount - newCount
 		for i := 0; i < overage; i++ {
-			r.removeModelRegistration(clientID, id, oldProvider, now)
+			r.removeModelRegistration(clientID, id, oldProvider, now, preserveState && !providerChanged)
 		}
 	}
 
@@ -613,13 +637,10 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 				reg.InfoByProvider[oldProvider].SupportsWebSearch = r.hasClientSupportingWebSearchLocked(id, oldProvider, clientID)
 			}
 			reg.LastUpdated = now
-			// Re-registering an existing client/model binding starts a fresh registry
-			// snapshot for that binding. Cooldown and suspension are transient
-			// scheduling state and must not survive this reconciliation step.
-			if reg.QuotaExceededClients != nil {
+			// Only conditional replacements preserve scheduling state for retained
+			// bindings with the same provider. Ordinary registration starts fresh.
+			if !preserveState || providerChanged || oldCounts[id] == 0 {
 				delete(reg.QuotaExceededClients, clientID)
-			}
-			if reg.SuspendedClients != nil {
 				delete(reg.SuspendedClients, clientID)
 			}
 			if providerChanged && provider != "" {
@@ -713,17 +734,16 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 	log.Debugf("Registered new model %s from provider %s", modelID, provider)
 }
 
-func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider string, now time.Time) {
+// removeModelRegistration may preserve state when only a duplicate binding is removed.
+func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider string, now time.Time, preserveState bool) {
 	registration, exists := r.models[modelID]
 	if !exists {
 		return
 	}
 	registration.Count--
 	registration.LastUpdated = now
-	if registration.QuotaExceededClients != nil {
+	if !preserveState {
 		delete(registration.QuotaExceededClients, clientID)
-	}
-	if registration.SuspendedClients != nil {
 		delete(registration.SuspendedClients, clientID)
 	}
 	if registration.Count < 0 {

@@ -52,6 +52,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 					deleteConfigV8Path(server, []string{"credential"})
 				}
 			}
+			h.injectV8APIKeyAuthIndexesLocked(root, data)
 		}
 		value := configV8Node(root, parts)
 		if value == nil {
@@ -97,6 +98,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body"})
 			return
 		}
+		stripAPIKeysAuthIndexesFromUpdate(parts, &update)
 		if len(parts) == 0 && update.Content[0].Kind != yaml.MappingNode {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "config_must_be_object"})
 			return
@@ -155,6 +157,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			return
 		}
 	}
+	stripAPIKeysAuthIndexesFromRoot(root)
 	data, err = yaml.Marshal(&doc)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})

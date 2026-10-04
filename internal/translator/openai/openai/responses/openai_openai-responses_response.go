@@ -213,6 +213,13 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			if _, isInc := incompleteByFinishReason(st.FinishReason); isInc {
 				toolStatus = "incomplete"
 			}
+			if st.ToolIndex.isShell(name) {
+				item, errShellCallItem := shellCallItem(callID, args, toolStatus)
+				if errShellCallItem == nil {
+					outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
+				}
+				continue
+			}
 			if st.FuncItemCustom[key] {
 				item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
@@ -359,7 +366,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	failToolInput := func(err error) {
 		if st.ToolInputError() == nil {
 			st.SetToolInputError(err)
-			out = append(out, emitRespEvent("response.failed", translatorcommon.ApplyPatchFailure(st.ResponseID, nextSeq())))
+			out = append(out, emitRespEvent("response.failed", responsesToolInputFailure(st.ResponseID, nextSeq(), err)))
 		}
 	}
 	emitToolItem := func(key string, force bool) {
@@ -390,7 +397,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		outputIndex := st.FuncOutputIx[key]
 		_, isCustomTool := st.CustomToolNames[name]
 		st.FuncItemCustom[key] = isCustomTool
-		if isCustomTool {
+		if st.ToolIndex.isShell(name) {
+			o := []byte(`{"type":"response.output_item.added"}`)
+			o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
+			o, _ = sjson.SetBytes(o, "output_index", outputIndex)
+			o, _ = sjson.SetRawBytes(o, "item", shellCallPlaceholder(callID))
+			out = append(out, emitRespEvent("response.output_item.added", o))
+		} else if isCustomTool {
 			if st.ToolIndex.isApplyPatch(name) {
 				d := st.ToolIndex.byChat[name]
 				st.ApplyPatchCalls[key] = &translatorcommon.ApplyPatchCallState{
@@ -417,7 +430,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FuncItemAdded[key] = true
 	}
 	emitPendingFunctionArgs := func(key string) {
-		if !st.FuncItemAdded[key] || st.ToolInputError() != nil {
+		if !st.FuncItemAdded[key] || st.ToolInputError() != nil || st.ToolIndex.isShell(st.FuncNames[key]) {
 			return
 		}
 		argsBuf := st.FuncArgsBuf[key]
@@ -642,6 +655,22 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			}
 			if isIncomplete {
 				toolStatus = "incomplete"
+			}
+
+			if st.ToolIndex.isShell(name) {
+				item, errShellCallItem := shellCallItem(callID, args, toolStatus)
+				if errShellCallItem != nil {
+					failToolInput(errShellCallItem)
+					return
+				}
+				event := []byte(`{"type":"response.output_item.done"}`)
+				event, _ = sjson.SetBytes(event, "sequence_number", nextSeq())
+				event, _ = sjson.SetBytes(event, "output_index", outputIndex)
+				event, _ = sjson.SetRawBytes(event, "item", item)
+				out = append(out, emitRespEvent("response.output_item.done", event))
+				st.FuncItemDone[key] = true
+				st.FuncArgsDone[key] = true
+				continue
 			}
 
 			if st.FuncItemCustom[key] {
@@ -1044,6 +1073,15 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						if isIncomplete {
 							toolStatus = "incomplete"
 						}
+						if toolIndex.isShell(name) {
+							item, errShellCallItem := shellCallItem(callID, args, toolStatus)
+							if errShellCallItem != nil {
+								st.SetToolInputError(errShellCallItem)
+								return false
+							}
+							outputItems = append(outputItems, item)
+							return true
+						}
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
 							item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 							item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
@@ -1081,7 +1119,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		})
 	}
 	if st.ToolInputError() != nil {
-		return []byte(gjson.GetBytes(translatorcommon.ApplyPatchFailure(id, 0), "response").Raw)
+		return []byte(gjson.GetBytes(responsesToolInputFailure(id, 0, st.ToolInputError()), "response").Raw)
 	}
 	if len(outputItems) > 0 {
 		resp, _ = sjson.SetRawBytes(resp, "output", translatorcommon.JoinRawArray(outputItems))

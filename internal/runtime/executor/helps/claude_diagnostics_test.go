@@ -441,3 +441,35 @@ func TestClaudeSubagentRequests1h(t *testing.T) {
 		t.Fatal("ClaudeSubagentRequests1h() = false, want true when header has extended-cache-ttl beta")
 	}
 }
+
+func TestPinClaudeSessionDateAnchorsFirstRequestAndReanchorsAfterTTL(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	key, _, _ := BeginClaudeDiagnostics("credential", "session")
+	if got := PinClaudeSessionDate(key, "2026-08-01"); got != "2026-08-01" {
+		t.Fatalf("first pin = %q, want 2026-08-01", got)
+	}
+	// Later requests of the same session keep the anchor even when the
+	// candidate date has flipped past local midnight.
+	if got := PinClaudeSessionDate(key, "2026-08-02"); got != "2026-08-01" {
+		t.Fatalf("second pin = %q, want anchored 2026-08-01", got)
+	}
+
+	// TTL expiry resets the entry, so the session re-anchors to the current date.
+	claudeDiagnosticsState.Lock()
+	entry := claudeDiagnosticsState.entries[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.entries[key] = entry
+	claudeDiagnosticsState.Unlock()
+	BeginClaudeDiagnostics("credential", "session")
+	if got := PinClaudeSessionDate(key, "2026-08-02"); got != "2026-08-02" {
+		t.Fatalf("post-TTL pin = %q, want re-anchored 2026-08-02", got)
+	}
+
+	// Unknown keys (no continuity entry) fall back to the candidate date,
+	// preserving the pre-pinning per-request behaviour.
+	if got := PinClaudeSessionDate("unknown-key", "2026-08-03"); got != "2026-08-03" {
+		t.Fatalf("unknown key pin = %q, want candidate 2026-08-03", got)
+	}
+}

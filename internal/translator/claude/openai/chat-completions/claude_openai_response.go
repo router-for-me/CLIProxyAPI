@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -338,6 +339,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+	rawJSON, _ = translatorcommon.ClaudeMessagesJSONToSSE(rawJSON)
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))
