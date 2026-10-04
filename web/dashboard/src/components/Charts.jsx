@@ -165,3 +165,131 @@ function shortLabel(label) {
   if (label.length > 8) return label.slice(-8);
   return label;
 }
+
+// DonutChart — proportional segments for categorical cost/volume breakdown.
+// `segments` is an array of { label, value, color }. The center shows the
+// total. Segments under ~3% get merged into "other" to keep the ring readable.
+export function DonutChart({ segments, size = 160, innerRadius = 0.6 }) {
+  const total = useMemo(() => segments.reduce((s, seg) => s + seg.value, 0), [segments]);
+  const merged = useMemo(() => {
+    if (total === 0) return [];
+    const threshold = total * 0.03;
+    const main = segments.filter((s) => s.value >= threshold);
+    const other = segments.filter((s) => s.value < threshold);
+    const otherSum = other.reduce((s, o) => s + o.value, 0);
+    const out = [...main];
+    if (otherSum > 0) out.push({ label: 'other', value: otherSum, color: 'var(--text-dim)' });
+    return out;
+  }, [segments, total]);
+
+  const r = size / 2;
+  const ir = r * innerRadius;
+  const cx = r, cy = r;
+
+  const arcs = useMemo(() => {
+    if (merged.length === 0) return [];
+    let startAngle = -Math.PI / 2;
+    return merged.map((seg) => {
+      const frac = seg.value / total;
+      const angle = frac * 2 * Math.PI;
+      const endAngle = startAngle + angle;
+      const x1 = cx + r * Math.cos(startAngle);
+      const y1 = cy + r * Math.sin(startAngle);
+      const x2 = cx + r * Math.cos(endAngle);
+      const y2 = cy + r * Math.sin(endAngle);
+      const large = angle > Math.PI ? 1 : 0;
+      const path = [
+        `M ${cx + ir * Math.cos(startAngle)} ${cy + ir * Math.sin(startAngle)}`,
+        `L ${x1} ${y1}`,
+        `A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`,
+        `L ${cx + ir * Math.cos(endAngle)} ${cy + ir * Math.sin(endAngle)}`,
+        `A ${ir} ${ir} 0 ${large} 0 ${cx + ir * Math.cos(startAngle)} ${cy + ir * Math.sin(startAngle)}`,
+        'Z',
+      ].join(' ');
+      const arc = { path, label: seg.label, value: seg.value, color: seg.color, frac };
+      startAngle = endAngle;
+      return arc;
+    });
+  }, [merged, r, ir, cx, cy, total]);
+
+  if (merged.length === 0) {
+    return <div className="dim" style={{ fontSize: 12, padding: 20, textAlign: 'center' }}>No data</div>;
+  }
+
+  const fmt = (v) => {
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+    return v.toFixed(2);
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+      <svg width={size} height={size} style={{ flexShrink: 0 }}>
+        {arcs.map((a, i) => (
+          <path key={i} d={a.path} fill={a.color} opacity={0.85}>
+            <title>{`${a.label}: ${fmt(a.value)}`}</title>
+          </path>
+        ))}
+        <text x={cx} y={cy - 4} textAnchor="middle" fill="var(--text)" fontSize="14" fontWeight="bold">
+          {fmt(total)}
+        </text>
+        <text x={cx} y={cy + 12} textAnchor="middle" fill="var(--text-dim)" fontSize="10">
+          total
+        </text>
+      </svg>
+      <div>
+        {arcs.map((a, i) => (
+          <div key={i} className="row gap-sm" style={{ fontSize: 12, marginBottom: 3 }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: a.color, flexShrink: 0 }} />
+            <span className="mono" style={{ color: 'var(--text-dim)' }}>{a.label}</span>
+            <span className="mono">{fmt(a.value)}</span>
+            <span className="dim" style={{ fontSize: 11 }}>({(a.frac * 100).toFixed(1)}%)</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// HorizontalBarChart — ranked horizontal bars for categorical data.
+// `data` is an array of { label, value, color? } objects, sorted by value descending.
+export function HorizontalBarChart({ data, color = 'var(--accent)', height = 12, maxBars = 10 }) {
+  const visible = useMemo(() => {
+    if (!data || data.length === 0) return [];
+    const sorted = [...data].sort((a, b) => b.value - a.value);
+    return sorted.slice(0, maxBars);
+  }, [data, maxBars]);
+  const max = useMemo(() => Math.max(...(visible.map((d) => d.value) || [1]), 1), [visible]);
+  if (visible.length === 0) {
+    return <div className="dim" style={{ fontSize: 12, padding: 20 }}>No data</div>;
+  }
+  const fmt = (v) => {
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+    return v.toFixed(2);
+  };
+  return (
+    <div>
+      {visible.map((d, i) => (
+        <div key={i} className="row gap-sm" style={{ marginBottom: 4, alignItems: 'center' }}>
+          <span className="mono dim" style={{ width: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, textAlign: 'right' }} title={d.label}>
+            {d.label}
+          </span>
+          <div style={{ flex: 1, background: 'var(--surface-2)', borderRadius: 4, height }}>
+            <div
+              style={{
+                width: `${(d.value / max) * 100}%`,
+                height,
+                background: d.color || color,
+                borderRadius: 4,
+                opacity: 0.85,
+                minWidth: d.value > 0 ? 2 : 0,
+              }}
+            />
+          </div>
+          <span className="mono" style={{ width: 80, textAlign: 'right', fontSize: 12 }}>{fmt(d.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}

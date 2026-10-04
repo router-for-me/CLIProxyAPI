@@ -308,8 +308,12 @@ export async function getUsageEvent(id) {
 // upstream provider). Returns { available, reason?, provider, truncated,
 // client_request?, client_response?, upstream_request?, upstream_response? }.
 // available:false with a reason means capture was off / not captured.
-export async function getUsageEventBodies(id) {
-  return fetchJSON(`/usage-stats/events/${encodeURIComponent(id)}/bodies`);
+export async function getUsageEventBodies(id, options = {}) {
+  let url = `/usage-stats/events/${encodeURIComponent(id)}/bodies`;
+  const params = [];
+  if (options.redact === false) params.push('redact=false');
+  if (params.length > 0) url += '?' + params.join('&');
+  return fetchJSON(url);
 }
 
 // Paginated list of raw failed-attempt records (usage_errors table). Mirrors

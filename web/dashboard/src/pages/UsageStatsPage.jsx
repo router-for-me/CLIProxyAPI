@@ -1,13 +1,14 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import {
   getUsageTotals, getUsageTimeSeries, getUsageTop, getUsageFilterOptions,
+  getProviderPerformance,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import {
   Spinner, ErrorBanner, EmptyState,
 } from '../components/Primitives.jsx';
-import { Sparkline, BarChart, MultiBarChart } from '../components/Charts.jsx';
+import { Sparkline, BarChart, MultiBarChart, DonutChart, HorizontalBarChart } from '../components/Charts.jsx';
 import { useToast } from '../components/Toast.jsx';
 import {
   PRESETS, presetToRange, toUTCFromTZ,
@@ -18,6 +19,32 @@ import {
 
 const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
 const AUTOREFRESH_STORAGE = 'nixllm.dashboard.usageAutorefresh';
+
+// Palette for the donut chart segments (cost by model). Cycles for models
+// beyond the first 8 entries.
+const MODEL_COLORS = [
+  'var(--accent)',
+  '#a78bfa',
+  '#38bdf8',
+  '#f472b6',
+  '#34d399',
+  '#fb923c',
+  '#e879f9',
+  '#22d3ee',
+];
+
+// Provider color map for the cost-by-provider bars. Falls back to var(--accent)
+// for providers not in this list.
+const PROVIDER_COLORS = {
+  openai: '#10a37f',
+  anthropic: '#d97706',
+  google: '#4285f4',
+  gemini: '#4285f4',
+  deepseek: '#4f46e5',
+  groq: '#f97316',
+  mistral: '#e11d48',
+  cohere: '#0891b2',
+};
 
 function readAutoRefresh() {
   try { return localStorage.getItem(AUTOREFRESH_STORAGE) !== '0'; }
@@ -76,6 +103,8 @@ export default function UsageStatsPage() {
   const topModels = useAsync(() => getUsageTop({ dimension: 'model', metric: 'cost_usd', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
   const topKeys = useAsync(() => getUsageTop({ dimension: 'api_key_id', metric: 'request_count', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
   const topProviders = useAsync(() => getUsageTop({ dimension: 'provider', metric: 'request_count', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
+  const topCostProviders = useAsync(() => getUsageTop({ dimension: 'provider', metric: 'cost_usd', limit: 10, ...baseFilter }), [JSON.stringify(baseFilter)]);
+  const providerPerf = useAsync(() => getProviderPerformance(baseFilter), [JSON.stringify(baseFilter)]);
 
   // Filter dropdown options. Refetched whenever the time range changes so the
   // operator sees only values that actually appear in the window.
@@ -90,8 +119,10 @@ export default function UsageStatsPage() {
     topModels.reload();
     topKeys.reload();
     topProviders.reload();
+    topCostProviders.reload();
+    providerPerf.reload();
     filterOptions.reload();
-  }, [totals, ts, topModels, topKeys, topProviders, filterOptions]);
+  }, [totals, ts, topModels, topKeys, topProviders, topCostProviders, providerPerf, filterOptions]);
 
   // Auto-refresh: re-fetch every metric every 60s while the page is visible
   // and the toggle is on. Mirrors the Models Catalog auto-refresh pattern.
@@ -335,6 +366,86 @@ export default function UsageStatsPage() {
         {!ts.loading && tsData.length === 0 && (
           <EmptyState title="No cost data for this window" />
         )}
+      </div>
+
+      {/* Advanced charts row 1: donut + latency */}
+      <div className="grid grid--2" style={{ marginTop: 16 }}>
+        <div className="card">
+          <div className="row row--between" style={{ marginBottom: 12 }}>
+            <h3 className="card__title" style={{ margin: 0 }}>Cost by model</h3>
+          </div>
+          {topModels.loading && <ChartSkeleton />}
+          {!topModels.loading && topModels.error && <ErrorBanner error={topModels.error} />}
+          {!topModels.loading && !topModels.error && (
+            <DonutChart
+              segments={(topModels.data?.entries || []).map((e, i) => ({
+                label: e.key || '—',
+                value: Number(e.cost_usd || 0),
+                color: MODEL_COLORS[i % MODEL_COLORS.length],
+              }))}
+            />
+          )}
+        </div>
+        <div className="card">
+          <div className="row row--between" style={{ marginBottom: 12 }}>
+            <h3 className="card__title" style={{ margin: 0 }}>Provider latency</h3>
+          </div>
+          {providerPerf.loading && <ChartSkeleton />}
+          {!providerPerf.loading && providerPerf.error && <ErrorBanner error={providerPerf.error} />}
+          {!providerPerf.loading && !providerPerf.error && providerPerf.data && providerPerf.data.length > 0 && (
+            <HorizontalBarChart
+              data={providerPerf.data.map((p) => ({
+                label: p.official_provider || p.provider,
+                value: p.avg_latency_ms,
+                color: 'var(--warning)',
+              }))}
+            />
+          )}
+          {!providerPerf.loading && !providerPerf.error && (!providerPerf.data || providerPerf.data.length === 0) && (
+            <EmptyState title="No latency data" />
+          )}
+          {providerPerf.data && providerPerf.data.length > 0 && (
+            <div className="dim" style={{ fontSize: 11, marginTop: 8, textAlign: 'right' }}>
+              avg latency ms
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Advanced charts row 2: cost by provider + daily cost */}
+      <div className="grid grid--2" style={{ marginTop: 16 }}>
+        <div className="card">
+          <div className="row row--between" style={{ marginBottom: 12 }}>
+            <h3 className="card__title" style={{ margin: 0 }}>Cost by provider</h3>
+          </div>
+          {topCostProviders.loading && <ChartSkeleton />}
+          {!topCostProviders.loading && topCostProviders.error && <ErrorBanner error={topCostProviders.error} />}
+          {!topCostProviders.loading && !topCostProviders.error && topCostProviders.data?.entries?.length > 0 && (
+            <HorizontalBarChart
+              data={topCostProviders.data.entries.map((e) => ({
+                label: e.key || '—',
+                value: Number(e.cost_usd || 0),
+                color: PROVIDER_COLORS[e.key] || 'var(--accent)',
+              }))}
+            />
+          )}
+          {!topCostProviders.loading && !topCostProviders.error && (!topCostProviders.data?.entries || topCostProviders.data.entries.length === 0) && (
+            <EmptyState title="No cost data for this window" />
+          )}
+        </div>
+        <div className="card">
+          <div className="row row--between" style={{ marginBottom: 12 }}>
+            <h3 className="card__title" style={{ margin: 0 }}>Daily cost</h3>
+            <span className="dim" style={{ fontSize: 12 }}>day</span>
+          </div>
+          {ts.loading && <ChartSkeleton />}
+          {!ts.loading && tsData.length > 0 && (
+            <BarChart data={tsData.map((d) => ({ label: d.label, value: d.cost }))} color="var(--success)" />
+          )}
+          {!ts.loading && tsData.length === 0 && (
+            <EmptyState title="No cost data" />
+          )}
+        </div>
       </div>
 
       {/* Leaderboards */}

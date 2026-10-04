@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pii"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
 
@@ -82,6 +83,9 @@ func (h *Handler) GetUsageEventBodies(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
+	// Default to redacting PII unless the caller explicitly passes redact=false.
+	doRedact := c.DefaultQuery("redact", "true") != "false"
+
 	capturedAt := rb.CreatedAt
 	resp := eventBodiesResponse{
 		Available:          true,
@@ -89,14 +93,36 @@ func (h *Handler) GetUsageEventBodies(c *gin.Context) {
 		UpstreamProviderID: rb.UpstreamProviderID,
 		CapturedAt:         &capturedAt,
 		Truncated:          rb.Truncated,
-		UpstreamRequest:    rb.UpstreamRequest,
-		UpstreamResponse:   rb.UpstreamResponse,
 	}
-	if rb.ClientRequestHeaders != "" || rb.ClientRequestBody != "" {
-		resp.ClientRequest = &bodySection{Headers: decodeHeaderJSON(rb.ClientRequestHeaders), Body: rb.ClientRequestBody}
-	}
-	if rb.ClientResponseHeaders != "" || rb.ClientResponseBody != "" {
-		resp.ClientResponse = &bodySection{Headers: decodeHeaderJSON(rb.ClientResponseHeaders), Body: rb.ClientResponseBody}
+
+	if doRedact {
+		resp.ClientRequest = redactSection(rb.ClientRequestHeaders, rb.ClientRequestBody)
+		resp.ClientResponse = redactSection(rb.ClientResponseHeaders, rb.ClientResponseBody)
+		resp.UpstreamRequest = pii.RedactPII(rb.UpstreamRequest)
+		resp.UpstreamResponse = pii.RedactPII(rb.UpstreamResponse)
+	} else {
+		resp.UpstreamRequest = rb.UpstreamRequest
+		resp.UpstreamResponse = rb.UpstreamResponse
+		if rb.ClientRequestHeaders != "" || rb.ClientRequestBody != "" {
+			resp.ClientRequest = &bodySection{Headers: decodeHeaderJSON(rb.ClientRequestHeaders), Body: rb.ClientRequestBody}
+		}
+		if rb.ClientResponseHeaders != "" || rb.ClientResponseBody != "" {
+			resp.ClientResponse = &bodySection{Headers: decodeHeaderJSON(rb.ClientResponseHeaders), Body: rb.ClientResponseBody}
+		}
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func redactSection(headersRaw, body string) *bodySection {
+	out := &bodySection{}
+	if headersRaw != "" {
+		out.Headers = pii.RedactHeaders(decodeHeaderJSON(headersRaw))
+	}
+	if body != "" {
+		out.Body = pii.RedactPII(body)
+	}
+	if out.Headers == nil && out.Body == "" {
+		return nil
+	}
+	return out
 }

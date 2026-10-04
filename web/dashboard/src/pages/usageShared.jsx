@@ -937,12 +937,54 @@ export function EventBodiesContent({ data, loading, error }) {
   );
 }
 
+const REDACT_STORAGE = 'nixllm.dashboard.redactPII';
+
+function loadRedactPref() {
+  try { return localStorage.getItem(REDACT_STORAGE) !== '0'; }
+  catch { return true; }
+}
+
+function saveRedactPref(v) {
+  try { localStorage.setItem(REDACT_STORAGE, v ? '1' : '0'); } catch { /* ignore */ }
+}
+
 // EventBodiesSection lazily loads captured request/response payloads for one
 // event. Capture is opt-in per upstream provider, so available:false is a
 // normal state, not an error.
 export function EventBodiesSection({ id }) {
-  const detail = useAsync(() => getUsageEventBodies(id), [id]);
-  return <EventBodiesContent data={detail.data} loading={detail.loading} error={detail.error} />;
+  const [redactPII, setRedactPII] = useState(() => loadRedactPref());
+  const detail = useAsync(() => getUsageEventBodies(id, { redact: redactPII }), [id, redactPII]);
+  function toggleRedact() {
+    setRedactPII((v) => {
+      const next = !v;
+      saveRedactPref(next);
+      return next;
+    });
+  }
+  const toolCalls = useMemo(
+    () => parseToolCallsFromBodies(detail.data),
+    [detail.data],
+  );
+  return (
+    <>
+      <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <label className="row gap-sm" style={{ cursor: 'pointer', fontSize: 12, margin: 0 }}>
+          <input
+            type="checkbox"
+            checked={redactPII}
+            onChange={toggleRedact}
+            style={{ width: 'auto' }}
+          />
+          <span className="form__label" style={{ margin: 0 }}>Redact PII</span>
+        </label>
+        <span className="dim" style={{ fontSize: 11 }}>
+          {redactPII ? 'API keys, tokens, IPs, and emails will be masked' : 'Showing raw captured data'}
+        </span>
+      </div>
+      <ToolCallInspector calls={toolCalls} />
+      <EventBodiesContent data={detail.data} loading={detail.loading} error={detail.error} />
+    </>
+  );
 }
 
 // EventDetailContent renders a fetched usage event inside the modal shell.
@@ -1059,5 +1101,159 @@ export function EventDetailModal({ id, timezone, onClose }) {
       )}
       {!detail.loading && !detail.error && !e && <EmptyState title="Event not found" />}
     </Modal>
+  );
+}
+
+// parseToolCallsFromBodies extracts tool/function calls from captured request
+// and response bodies. Returns an array of { name, args, issues[] } objects
+// where issues describes any validation problems found.
+export function parseToolCallsFromBodies(data) {
+  if (!data?.available) return [];
+  const reqBody = data.client_request?.body || data.upstream_request || '';
+  const resBody = data.client_response?.body || data.upstream_response || '';
+  if (!reqBody && !resBody) return [];
+
+  // Extract known tool/function definitions from the request body.
+  const knownFunctions = new Set();
+  try {
+    const req = JSON.parse(reqBody);
+    const tools = req.tools || req.functions || [];
+    if (req.messages) {
+      // OpenAI chat completions: tools at top level
+    }
+    if (req.anthropic_version || req.anthropic_beta) {
+      // Anthropic: tools at top level
+    }
+    for (const t of tools) {
+      if (t.function?.name) knownFunctions.add(t.function.name);
+      else if (t.name) knownFunctions.add(t.name);
+    }
+  } catch { /* body not parseable as JSON — skip */ }
+
+  const calls = [];
+  // Parse tool_use blocks from response body (Anthropic format).
+  try {
+    const res = JSON.parse(resBody);
+    const items = res.content || [];
+    if (res.choices) {
+      // OpenAI chat completions format.
+      for (const c of res.choices) {
+        const delta = c.delta || c.message || {};
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const name = tc.function?.name || '';
+            const args = tc.function?.arguments || '';
+            calls.push(analyzeToolCall(name, args, knownFunctions));
+          }
+        }
+        if (delta.function_call) {
+          const fc = delta.function_call;
+          calls.push(analyzeToolCall(fc.name || '', fc.arguments || '', knownFunctions));
+        }
+      }
+    }
+    if (res.type === 'response.completed' && res.response?.output) {
+      // OpenAI Responses API format.
+      for (const item of res.response.output) {
+        if (item.type === 'function_call' || item.type === 'custom_tool_call') {
+          calls.push(analyzeToolCall(item.name || '', item.arguments || item.input || '', knownFunctions));
+        }
+      }
+    }
+    if (Array.isArray(items)) {
+      // Anthropic tool_use blocks in content array.
+      for (const block of items) {
+        if (block.type === 'tool_use' || block.type === 'tool_result') {
+          const name = block.name || '';
+          const args = typeof block.input === 'string' ? block.input : JSON.stringify(block.input || '');
+          calls.push(analyzeToolCall(name, args, knownFunctions));
+        }
+      }
+    }
+    // Top-level tool_calls (OpenAI streaming assembled).
+    if (res.tool_calls) {
+      for (const tc of res.tool_calls) {
+        const name = tc.function?.name || '';
+        const args = tc.function?.arguments || '';
+        calls.push(analyzeToolCall(name, args, knownFunctions));
+      }
+    }
+  } catch { /* response not parseable — skip */ }
+
+  return calls;
+}
+
+function analyzeToolCall(name, argsRaw, knownFunctions) {
+  const issues = [];
+  if (!name) {
+    issues.push('missing function name');
+  } else if (knownFunctions.size > 0 && !knownFunctions.has(name)) {
+    issues.push(`unknown function: ${name}`);
+  }
+  if (argsRaw) {
+    try {
+      JSON.parse(argsRaw);
+    } catch {
+      issues.push('invalid JSON arguments');
+    }
+  }
+  return { name: name || '(unnamed)', args: argsRaw || '', issues, argCount: countArgs(argsRaw) };
+}
+
+function countArgs(argsRaw) {
+  if (!argsRaw) return 0;
+  try {
+    const o = JSON.parse(argsRaw);
+    if (typeof o === 'object' && o !== null) return Object.keys(o).length;
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+// ToolCallInspector renders a collapsible section listing tool calls found in
+// captured request/response bodies, with validation status per call.
+function ToolCallInspector({ calls, loading }) {
+  if (loading) return null;
+  if (!calls || calls.length === 0) return null;
+  const totalIssues = calls.reduce((s, c) => s + c.issues.length, 0);
+  return (
+    <details className="card" style={{ marginTop: 10 }}>
+      <summary style={{ cursor: 'pointer', userSelect: 'none' }}>
+        <span className="row gap-sm" style={{ display: 'inline-flex', alignItems: 'center' }}>
+          <span>Tool calls</span>
+          <span className="badge">{calls.length}</span>
+          {totalIssues > 0 && (
+            <span className="badge badge--warn">{totalIssues} issue{totalIssues > 1 ? 's' : ''}</span>
+          )}
+          {totalIssues === 0 && (
+            <span className="badge badge--ok" style={{ background: 'var(--success)', color: '#fff' }}>all valid</span>
+          )}
+        </span>
+      </summary>
+      <div style={{ marginTop: 8 }}>
+        {calls.map((c, i) => (
+          <div key={i} className="detail-row__block" style={{ marginBottom: 8 }}>
+            <div className="row gap-sm" style={{ alignItems: 'center', marginBottom: 4 }}>
+              <span className="mono" style={{ fontWeight: 600 }}>{c.name}</span>
+              {c.issues.length === 0 && (
+                <span className="badge badge--ok" style={{ background: 'var(--success)', color: '#fff', fontSize: 10 }}>ok</span>
+              )}
+              {c.issues.map((iss, j) => (
+                <span key={j} className="badge badge--warn" style={{ fontSize: 10 }} title={iss}>
+                  {iss}
+                </span>
+              ))}
+              <span className="dim" style={{ fontSize: 11, marginLeft: 'auto' }}>{c.argCount} arg{c.argCount !== 1 ? 's' : ''}</span>
+            </div>
+            {c.args && (
+              <pre className="mono" style={{ fontSize: 11, maxHeight: 100, overflow: 'auto', margin: 0, padding: '4px 6px', background: 'var(--surface-2)', borderRadius: 4 }}>
+                {c.args.length > 200 ? c.args.slice(0, 200) + '…' : c.args}
+              </pre>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
