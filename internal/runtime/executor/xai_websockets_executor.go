@@ -583,7 +583,18 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = sess.activate(conn)
+		ch, errActivate := sess.activate(conn)
+		if errActivate != nil {
+			// The read loop exited before activation: the connection is dead. Fail fast
+			// so the client replays on a fresh connection instead of blocking forever.
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "activate", errActivate)
+			unlockStreamSession()
+			if isEphemeralSession {
+				closeXAIWebsocketSession(sess, "activate_error")
+			}
+			return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+		}
+		readCh = ch
 	}
 
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
@@ -627,7 +638,14 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				closeWebsocketAfterBindFailure(sess, conn, closer)
 				return nil, errBind
 			}
-			readCh = sess.activate(conn)
+			chRetry, errActivateRetry := sess.activate(conn)
+			if errActivateRetry != nil {
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "activate_retry", errActivateRetry)
+				clearRetryActiveState(sess, previousConn, previousReadCh)
+				sess.reqMu.Unlock()
+				return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+			}
+			readCh = chRetry
 			wsReqBodyRetry := buildXAIWebsocketRequestBody(prepared.body, prepared.finalizePayload)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
@@ -1361,8 +1379,7 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			}
 			invalidated := false
-			ch, done := sess.activeForConn(conn)
-			if ch != nil {
+			if ch, done, active := sess.failActiveConn(conn, errRead); active {
 				invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead}, invalidate)
 				if sess.clearActive(conn, ch) {
 					close(ch)
@@ -1381,8 +1398,7 @@ func (e *XAIWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, co
 					e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				}
 				invalidated := false
-				ch, done := sess.activeForConn(conn)
-				if ch != nil {
+				if ch, done, active := sess.failActiveConn(conn, errBinary); active {
 					invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errBinary}, invalidate)
 					if sess.clearActive(conn, ch) {
 						close(ch)

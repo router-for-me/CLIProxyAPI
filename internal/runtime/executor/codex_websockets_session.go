@@ -71,6 +71,11 @@ type codexWebsocketSession struct {
 	activeCh     chan codexWebsocketRead
 	activeDone   <-chan struct{}
 	activeCancel context.CancelFunc
+	// activeTerminalConn/activeTerminalErr record the terminal read failure of a
+	// connection whose read loop exited before any request activated it, so a later
+	// activate fails fast instead of blocking forever on a channel nobody feeds.
+	activeTerminalConn *websocket.Conn
+	activeTerminalErr  error
 
 	readerConn *websocket.Conn
 
@@ -92,33 +97,57 @@ type codexWebsocketRead struct {
 	err     error
 }
 
-func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWebsocketRead) {
-	if s == nil {
-		return
+// failActiveConn reports a terminal read failure for conn. When a request is
+// currently activated on conn the failure is handed back through the returned
+// channel pair for delivery; otherwise it is recorded so a later activate on the
+// same dead connection fails fast. Atomic under activeMu: exactly one side wins.
+func (s *codexWebsocketSession) failActiveConn(conn *websocket.Conn, err error) (chan codexWebsocketRead, <-chan struct{}, bool) {
+	if s == nil || conn == nil {
+		return nil, nil, false
 	}
 	s.activeMu.Lock()
-	if s.activeCancel != nil {
-		s.activeCancel()
-		s.activeCancel = nil
-		s.activeDone = nil
+	if s.activeConn == conn && s.activeCh != nil {
+		ch, done := s.activeCh, s.activeDone
+		s.activeMu.Unlock()
+		return ch, done, true
 	}
-	s.activeConn = conn
-	s.activeCh = ch
-	if conn != nil && ch != nil {
-		activeCtx, activeCancel := context.WithCancel(context.Background())
-		s.activeDone = activeCtx.Done()
-		s.activeCancel = activeCancel
+	if s.activeTerminalConn != conn {
+		s.activeTerminalConn = conn
+		s.activeTerminalErr = err
+	} else if s.activeTerminalErr == nil {
+		s.activeTerminalErr = err
 	}
 	s.activeMu.Unlock()
+	return nil, nil, false
 }
 
-func (s *codexWebsocketSession) activate(conn *websocket.Conn) chan codexWebsocketRead {
+// activate registers conn as the active read target and returns its read channel.
+// It fails fast when the connection already recorded a terminal read failure.
+func (s *codexWebsocketSession) activate(conn *websocket.Conn) (chan codexWebsocketRead, error) {
 	if s == nil || conn == nil {
-		return nil
+		return nil, nil
+	}
+	s.activeMu.Lock()
+	if s.activeTerminalConn == conn && s.activeTerminalErr != nil {
+		err := s.activeTerminalErr
+		s.activeMu.Unlock()
+		return nil, err
+	}
+	if s.activeTerminalConn != conn {
+		s.activeTerminalConn = nil
+		s.activeTerminalErr = nil
+	}
+	if s.activeCancel != nil {
+		s.activeCancel()
 	}
 	ch := make(chan codexWebsocketRead, 4096)
-	s.setActive(conn, ch)
-	return ch
+	s.activeConn = conn
+	s.activeCh = ch
+	activeCtx, activeCancel := context.WithCancel(context.Background())
+	s.activeDone = activeCtx.Done()
+	s.activeCancel = activeCancel
+	s.activeMu.Unlock()
+	return ch, nil
 }
 
 func (s *codexWebsocketSession) activeForConn(conn *websocket.Conn) (chan codexWebsocketRead, <-chan struct{}) {
@@ -674,8 +703,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			}
 			invalidated := false
-			ch, done := sess.activeForConn(conn)
-			if ch != nil {
+			if ch, done, active := sess.failActiveConn(conn, errRead); active {
 				invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead}, invalidate)
 				if sess.clearActive(conn, ch) {
 					close(ch)
@@ -694,8 +722,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 					e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				}
 				invalidated := false
-				ch, done := sess.activeForConn(conn)
-				if ch != nil {
+				if ch, done, active := sess.failActiveConn(conn, errBinary); active {
 					invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errBinary}, invalidate)
 					if sess.clearActive(conn, ch) {
 						close(ch)

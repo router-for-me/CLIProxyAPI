@@ -3150,7 +3150,7 @@ func TestCodexWebsockets_ChunkedWriteAllowsPongInterleaving(t *testing.T) {
 
 	sess := &codexWebsocketSession{sessionID: "session-chunked-test"}
 	sess.configureConn(clientConn)
-	_ = sess.activate(clientConn)
+	_, _ = sess.activate(clientConn)
 	exec := NewCodexWebsocketsExecutor(&config.Config{})
 	go exec.readUpstreamLoop(sess, clientConn)
 

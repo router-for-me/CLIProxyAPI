@@ -184,7 +184,14 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = sess.activate(conn)
+		ch, errActivate := sess.activate(conn)
+		if errActivate != nil {
+			// The read loop exited before activation: the connection is dead. Fail fast
+			// so the client replays on a fresh connection instead of blocking forever.
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "activate", errActivate)
+			return resp, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+		}
+		readCh = ch
 		defer func() {
 			sess.clearActive(conn, readCh)
 		}()
@@ -223,7 +230,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					closeWebsocketAfterBindFailure(sess, conn, closer)
 					return resp, errBind
 				}
-				readCh = sess.activate(conn)
+				chRetry, errActivateRetry := sess.activate(conn)
+				if errActivateRetry != nil {
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "activate_retry", errActivateRetry)
+					clearRetryActiveState(sess, previousConn, previousReadCh)
+					return resp, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+				}
+				readCh = chRetry
 				restoreMultiAgentV2 = !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 				wsReqBodyRetry := frameCodexWebsocketRequestBody(body)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{

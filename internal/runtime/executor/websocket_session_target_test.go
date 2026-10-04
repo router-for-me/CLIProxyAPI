@@ -42,15 +42,19 @@ func TestCodexWebsocketSessionActiveChannelBelongsToConnection(t *testing.T) {
 	sess := &codexWebsocketSession{}
 	oldConn := &websocket.Conn{}
 	newConn := &websocket.Conn{}
-	oldCh := make(chan codexWebsocketRead, 1)
-	newCh := make(chan codexWebsocketRead, 1)
 
-	sess.setActive(oldConn, oldCh)
+	oldCh, errActivateOld := sess.activate(oldConn)
+	if errActivateOld != nil {
+		t.Fatalf("activate(oldConn) error = %v", errActivateOld)
+	}
 	if ch, _ := sess.activeForConn(oldConn); ch != oldCh {
 		t.Fatal("old connection did not own its active channel")
 	}
 
-	sess.setActive(newConn, newCh)
+	newCh, errActivateNew := sess.activate(newConn)
+	if errActivateNew != nil {
+		t.Fatalf("activate(newConn) error = %v", errActivateNew)
+	}
 	if sess.clearActive(oldConn, oldCh) {
 		t.Fatal("old connection cleared the new active channel")
 	}
@@ -64,12 +68,18 @@ func TestCodexWebsocketSessionActiveChannelBelongsToConnection(t *testing.T) {
 		t.Fatal("new connection could not clear its active channel")
 	}
 
-	closedOldCh := sess.activate(oldConn)
+	closedOldCh, errActivateRetryOld := sess.activate(oldConn)
+	if errActivateRetryOld != nil {
+		t.Fatalf("activate(oldConn) retry error = %v", errActivateRetryOld)
+	}
 	if !sess.clearActive(oldConn, closedOldCh) {
 		t.Fatal("old connection could not clear its active channel before retry")
 	}
 	close(closedOldCh)
-	retryCh := sess.activate(newConn)
+	retryCh, errActivateRetry := sess.activate(newConn)
+	if errActivateRetry != nil {
+		t.Fatalf("activate(newConn) retry error = %v", errActivateRetry)
+	}
 	if retryCh == closedOldCh {
 		t.Fatal("retry reused the old connection's read channel")
 	}
@@ -120,7 +130,10 @@ func (l *trackedWebsocketLifecycle) End(string) {
 func TestClearRetryActiveStateClearsOriginalConnection(t *testing.T) {
 	sess := &codexWebsocketSession{}
 	originalConn := &websocket.Conn{}
-	originalCh := sess.activate(originalConn)
+	originalCh, errActivate := sess.activate(originalConn)
+	if errActivate != nil {
+		t.Fatalf("activate(originalConn) error = %v", errActivate)
+	}
 	if !clearRetryActiveState(sess, originalConn, originalCh) {
 		t.Fatal("clearRetryActiveState() = false, want true")
 	}
