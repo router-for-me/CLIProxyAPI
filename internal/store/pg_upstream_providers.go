@@ -171,6 +171,11 @@ type UpstreamProviderAPIKey struct {
 	// INTEGER like MaxConcurrent.
 	MaxWaitMs *int `json:"max_wait_ms,omitempty"`
 
+	// BudgetUSD is the optional per-entry USD budget cap. NULL = unlimited /
+	// not tracked. The Provider Budget dashboard queries entries with a non-
+	// nil budget_usd and compares against actual usage_events spend.
+	BudgetUSD *float64 `json:"budget_usd,omitempty"`
+
 	// AutoDisabled is the runtime-written (not operator input) auto-disable
 	// flag. The sink sets it when an upstream error matches the provider's
 	// auto_disable_error_codes; the renderer then skips the entry exactly like
@@ -615,7 +620,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	// API-key entries (openai-compatibility only).
 	aRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled, retry_max_attempts, retry_max_time_ms, retry_backoff_ms,
-		       max_concurrent, max_wait_ms, auto_disabled, auto_disabled_at, auto_disabled_reason
+		       max_concurrent, max_wait_ms, auto_disabled, auto_disabled_at, auto_disabled_reason, budget_usd
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.entries), p.ID)
 	if err != nil {
@@ -626,8 +631,9 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		var entryName, proxyURL, autoDisabledReason sql.NullString
 		var weight, priority, entryPoolID, retryMaxAttempts, retryMaxTimeMS, retryBackoffMS, maxConcurrent, maxWaitMS sql.NullInt64
 		var autoDisabledAt sql.NullTime
+		var budgetUSD sql.NullFloat64
 		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &entryPoolID, &e.SortOrder, &weight, &priority, &e.Disabled, &retryMaxAttempts, &retryMaxTimeMS, &retryBackoffMS,
-			&maxConcurrent, &maxWaitMS, &e.AutoDisabled, &autoDisabledAt, &autoDisabledReason); err != nil {
+			&maxConcurrent, &maxWaitMS, &e.AutoDisabled, &autoDisabledAt, &autoDisabledReason, &budgetUSD); err != nil {
 			aRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider api key entry: %w", err)
 		}
@@ -663,6 +669,9 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		}
 		if autoDisabledReason.Valid {
 			e.AutoDisabledReason = autoDisabledReason.String
+		}
+		if budgetUSD.Valid {
+			e.BudgetUSD = &budgetUSD.Float64
 		}
 		p.APIKeyEntries = append(p.APIKeyEntries, e)
 	}
@@ -825,11 +834,11 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 		if entry.ID == 0 {
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 				INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled, retry_max_attempts, retry_max_time_ms, retry_backoff_ms,
-				                max_concurrent, max_wait_ms, auto_disabled, auto_disabled_at, auto_disabled_reason)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+				                max_concurrent, max_wait_ms, auto_disabled, auto_disabled_at, auto_disabled_reason, budget_usd)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 				RETURNING id
 			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS),
-				nullableInt(entry.MaxConcurrent), nullableInt(entry.MaxWaitMs), entry.AutoDisabled, nullableTime(entry.AutoDisabledAt), nullableString(entry.AutoDisabledReason)).Scan(&entry.ID); err != nil {
+				nullableInt(entry.MaxConcurrent), nullableInt(entry.MaxWaitMs), entry.AutoDisabled, nullableTime(entry.AutoDisabledAt), nullableString(entry.AutoDisabledReason), nullableFloat64(entry.BudgetUSD)).Scan(&entry.ID); err != nil {
 				return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
 			}
 		} else {
@@ -840,13 +849,14 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 				    max_concurrent = $12, max_wait_ms = $13,
 				    auto_disabled = $14,
 				    auto_disabled_at = $15,
-				    auto_disabled_reason = $16
+				    auto_disabled_reason = $16,
+				    budget_usd = $19
 				WHERE id = $17 AND provider_id = $18
 				RETURNING id
 			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS),
 				nullableInt(entry.MaxConcurrent), nullableInt(entry.MaxWaitMs),
 				entry.AutoDisabled, nullableTime(entry.AutoDisabledAt), nullableString(entry.AutoDisabledReason),
-				entry.ID, providerID).Scan(&persistedID); err != nil {
+				entry.ID, providerID, nullableFloat64(entry.BudgetUSD)).Scan(&persistedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
 				}
@@ -1158,6 +1168,15 @@ func nullableInt(i *int) any {
 		return nil
 	}
 	return *i
+}
+
+// nullableFloat64 binds a *float64 as nil when unset, used for optional
+// NUMERIC columns whose zero value is meaningful (e.g. budget_usd).
+func nullableFloat64(f *float64) any {
+	if f == nil {
+		return nil
+	}
+	return *f
 }
 
 // nullableUint16 mirrors nullableInt but for uint16 (used by the SMALLINT

@@ -1145,7 +1145,8 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		`ALTER TABLE %s
 			ADD COLUMN IF NOT EXISTS auto_disabled BOOLEAN NOT NULL DEFAULT FALSE,
 			ADD COLUMN IF NOT EXISTS auto_disabled_at TIMESTAMPTZ,
-			ADD COLUMN IF NOT EXISTS auto_disabled_reason TEXT`,
+			ADD COLUMN IF NOT EXISTS auto_disabled_reason TEXT,
+			ADD COLUMN IF NOT EXISTS budget_usd NUMERIC(12,6)`,
 		upstreamEntriesTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: migrate upstream entries auto-disable columns: %w", err)

@@ -63,5 +63,3 @@ func RedactHeaders(headers map[string][]string) map[string][]string {
 	}
 	return out
 }
-
-

@@ -8,9 +8,9 @@ func TestClaudeStopReasonToOpenAIFinishReason(t *testing.T) {
 		{"tool_use", "tool_calls"},
 		{"max_tokens", "length"},
 		{"stop_sequence", "stop"},
-		{"content_filter", "stop"},    // no direct equivalent
-		{"unknown_reason", "stop"},    // fallback
-		{"", "stop"},                  // empty fallback
+		{"content_filter", "stop"}, // no direct equivalent
+		{"unknown_reason", "stop"}, // fallback
+		{"", "stop"},               // empty fallback
 	}
 	for _, tc := range tests {
 		got := ClaudeStopReasonToOpenAIFinishReason(tc.in)
@@ -22,9 +22,9 @@ func TestClaudeStopReasonToOpenAIFinishReason(t *testing.T) {
 
 func TestOpenAIFinishReasonToClaudeStopReason(t *testing.T) {
 	tests := []struct {
-		in         string
+		in          string
 		hasToolCall bool
-		want       string
+		want        string
 	}{
 		{"stop", false, "end_turn"},
 		{"stop", true, "tool_use"},
@@ -96,7 +96,7 @@ func TestCodexStopReasonToClaudeStopReason(t *testing.T) {
 		{"end_turn", false, "end_turn"},
 		{"stop_sequence", false, "stop_sequence"},
 		{"refusal", false, "refusal"},
-		{"stop", true, "tool_use"}, // hasToolCall wins
+		{"stop", true, "tool_use"},       // hasToolCall wins
 		{"max_tokens", true, "tool_use"}, // hasToolCall wins
 		{"unknown", false, "end_turn"},
 	}

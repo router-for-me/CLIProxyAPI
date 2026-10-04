@@ -2507,6 +2507,20 @@ export async function getAuthQuota(authID) {
 // across one pool (identified by the round-1 (channel:rowID) compound key,
 // matching PoolBreaker / PoolStrategyForProviderKeys). Returns { pool_key,
 // windows[], models[], auths[], partial }.
+// --- Provider Budget ------------------------------------------------------
+
+// getProviderBudget returns per-entry budget vs spend for every upstream
+// provider API key entry with a budget_usd set. Optional from/to params
+// (RFC3339) scope the time window; the default is the current calendar month.
+// Response: { rows: ProviderBudgetRow[], from, to }.
+export async function getProviderBudget({ from, to } = {}) {
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  const qs = params.toString();
+  return fetchJSON(`/provider-budget${qs ? '?' + qs : ''}`);
+}
+
 export async function getPoolQuota(poolKey) {
   return fetchJSON(`/pools/${encodeURIComponent(poolKey)}/quota`);
 }

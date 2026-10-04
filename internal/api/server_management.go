@@ -410,6 +410,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/upstream-providers/:id/quota", s.mgmt.UpstreamProviderQuota)
 		mgmt.GET("/upstream-providers/live-status", s.mgmt.GetUpstreamProvidersLiveStatus)
 
+		// Provider Budget: per-entry USD budget vs actual spend over a time
+		// window, computed from upstream_provider_api_key_entries.budget_usd
+		// joined against usage_events. Returns 503 without PGSTORE_DSN.
+		mgmt.GET("/provider-budget", s.mgmt.GetProviderBudget)
+
 		// Named egress-proxy pools (9router-derived Proxy Pools workflow).
 		// Returns 503 when the PG store is not configured. Binding lives on
 		// upstream_providers(.proxy_pool_id) rows/entries; mutations here

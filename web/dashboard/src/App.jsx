@@ -41,6 +41,7 @@ import UpstreamProviderTestTab from './pages/upstream-provider-editor/TestTab.js
 import UpstreamProviderLogsTab from './pages/upstream-provider-editor/LogsTab.jsx';
 import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
+import ProviderBudgetPage from './pages/ProviderBudgetPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
 import SessionAffinityPage from './pages/SessionAffinityPage.jsx';
 import AlertsPage from './pages/AlertsPage.jsx';
@@ -353,6 +354,7 @@ export default function App() {
   <Route path="/analysis/auto-routers" element={<AutoRouterAnalysisPage />} />
             <Route path="/cooldown-providers" element={<CooldownProvidersPage />} />
             <Route path="/session-affinity" element={<SessionAffinityPage />} />
+            <Route path="/provider-budget" element={<ProviderBudgetPage />} />
             <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/upstream-sync-log" element={<UpstreamSyncLogPage />} />
             <Route path="/model-health" element={<ModelHealthPage />} />
