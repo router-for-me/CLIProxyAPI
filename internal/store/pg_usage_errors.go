@@ -56,6 +56,7 @@ type UsageError struct {
 	OriginalCostUSD float64   `json:"original_cost_usd,omitempty"`
 	LatencyMs       int64     `json:"latency_ms,omitempty"`
 	TTFTMs          int64     `json:"ttft_ms,omitempty"`
+	NetworkRTTMs    int64     `json:"network_rtt_ms,omitempty"`
 	FailStatusCode  int       `json:"fail_status_code,omitempty"`
 	ErrorMessage    string    `json:"error_message,omitempty"`
 	Generate        bool      `json:"generate,omitempty"`
@@ -119,6 +120,7 @@ type UsageErrorRow struct {
 	AppliedPricing *Pricing  `json:"applied_pricing,omitempty"`
 	LatencyMs      int64     `json:"latency_ms,omitempty"`
 	TTFTMs         int64     `json:"ttft_ms,omitempty"`
+	NetworkRTTMs   int64     `json:"network_rtt_ms,omitempty"`
 	FailStatusCode int       `json:"fail_status_code,omitempty"`
 	ErrorMessage   string    `json:"error_message"`
 	Generate       bool      `json:"generate,omitempty"`
@@ -134,12 +136,12 @@ const usageErrorColumnList = `
 	alias, route_model, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort,
 	service_tier, response_service_tier, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
-	ttft_ms, fail_status_code, error_message, generate, requested_at
+	ttft_ms, network_rtt_ms, fail_status_code, error_message, generate, requested_at
 `
 
 // usageErrorColumnCount is the number of columns in usageErrorColumnList. It
 // must stay in sync with the list; mirrors usageEventColumnCount.
-const usageErrorColumnCount = 33
+const usageErrorColumnCount = 34
 
 // errorRowSelectColumns is the column list used by SelectErrors and GetError.
 // The api_key_principal column is intentionally not projected; KeyAlias is
@@ -236,7 +238,7 @@ func (s *UsageStore) InsertError(ctx context.Context, e UsageError) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33)
+			$26, $27, $28, $29, $30, $31, $32, $33, $34)
 	`, s.errorsTable, usageErrorColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
@@ -246,6 +248,7 @@ func (s *UsageStore) InsertError(ctx context.Context, e UsageError) error {
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
 		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.OriginalCostUSD, e.LatencyMs, e.TTFTMs,
+		e.NetworkRTTMs,
 		e.FailStatusCode, e.ErrorMessage, e.Generate, e.RequestedAt,
 	)
 	if err != nil {
@@ -300,6 +303,7 @@ func (s *UsageStore) BatchInsertErrors(ctx context.Context, errors []UsageError)
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
+			ev.NetworkRTTMs,
 			ev.FailStatusCode, ev.ErrorMessage, ev.Generate, ev.RequestedAt)
 	}
 	if _, err := s.db.ExecContext(ctx, b.String(), args...); err != nil {
@@ -405,6 +409,7 @@ func (s *UsageStore) ImportLiteLLMErrors(ctx context.Context, errs []UsageError)
 				ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 				ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 				ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
+				ev.NetworkRTTMs,
 				ev.FailStatusCode, ev.ErrorMessage, ev.Generate, ev.RequestedAt)
 		}
 		res, err := s.db.ExecContext(ctx, b.String(), args...)

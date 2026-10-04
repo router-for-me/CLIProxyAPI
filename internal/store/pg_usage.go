@@ -104,6 +104,7 @@ type UsageEvent struct {
 	ProviderMetadata map[string]any `json:"provider_metadata,omitempty"`
 	LatencyMs        int64          `json:"latency_ms,omitempty"`
 	TTFTMs           int64          `json:"ttft_ms,omitempty"`
+	NetworkRTTMs     int64          `json:"network_rtt_ms,omitempty"`
 	Failed           bool           `json:"failed"`
 	FailStatusCode   int            `json:"fail_status_code,omitempty"`
 	Generate         bool           `json:"generate,omitempty"`
@@ -198,6 +199,7 @@ type ProviderPerformance struct {
 	RequestsPerSec  float64 `json:"requests_per_second"`
 	CostUSD         float64 `json:"cost_usd"`
 	WindowSeconds   float64 `json:"window_seconds"`
+	NetworkRTTMs    int64   `json:"network_rtt_ms"`
 }
 
 // AutoRouterTierStat is one aggregated row per complexity tier for a router.
@@ -618,9 +620,9 @@ const usageEventColumnList = `
 	response_service_tier, tier, router_id, scored_tier, effective_tier, mapping_tier, decision_cause,
 	profile_version, profile_hash, auto_router_decision, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
-	ttft_ms, failed, fail_status_code, generate, requested_at, energy_joules, provider_metadata
+	ttft_ms, network_rtt_ms, failed, fail_status_code, generate, requested_at, energy_joules, provider_metadata
 `
-const usageEventColumnCount = 43
+const usageEventColumnCount = 44
 
 // InsertEvent records a single usage event. The api_key_principal field is
 // sealed at rest via the configured Sealer before being bound. When the
@@ -642,7 +644,7 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43)
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
@@ -655,6 +657,7 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 		nullableInt64(e.ProfileVersion), nullableString(e.ProfileHash), nullableJSONB(e.AutoRouterDecision),
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
 		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.OriginalCostUSD, e.LatencyMs, e.TTFTMs,
+		e.NetworkRTTMs,
 		e.Failed, e.FailStatusCode, e.Generate, e.RequestedAt,
 		nullableFloat64Ptr(e.EnergyJoules), providerMetadataJSONB(e.ProviderMetadata),
 	)
@@ -715,6 +718,7 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 			nullableInt64(ev.ProfileVersion), nullableString(ev.ProfileHash), nullableJSONB(ev.AutoRouterDecision),
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
+			ev.NetworkRTTMs,
 			ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt,
 			nullableFloat64Ptr(ev.EnergyJoules), providerMetadataJSONB(ev.ProviderMetadata))
 	}
@@ -787,6 +791,7 @@ func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageE
 				nullableInt64(ev.ProfileVersion), nullableString(ev.ProfileHash), nullableJSONB(ev.AutoRouterDecision),
 				ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 				ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
+				ev.NetworkRTTMs,
 				ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt,
 				nullableFloat64Ptr(ev.EnergyJoules), providerMetadataJSONB(ev.ProviderMetadata))
 		}
@@ -1673,6 +1678,7 @@ func (s *UsageStore) SelectProviderPerformance(ctx context.Context, filter Usage
 		COALESCE(SUM(e.output_tokens), 0),
 		COALESCE(SUM(e.cost_usd), 0),
 		COALESCE(SUM(GREATEST(e.latency_ms - e.ttft_ms, 0)), 0),
+		COALESCE(AVG(e.network_rtt_ms), 0),
 		COALESCE(EXTRACT(EPOCH FROM (MAX(e.requested_at) - MIN(e.requested_at))), 0)
 	FROM `)
 	b.WriteString(s.eventsTable)
@@ -1696,13 +1702,14 @@ func (s *UsageStore) SelectProviderPerformance(ctx context.Context, filter Usage
 		var (
 			key                    string
 			genMsSum, observedSpan float64
+			networkRTT             float64
 			p                      ProviderPerformance
 		)
 		if err = rows.Scan(&key, &p.RequestCount,
 			&p.AvgLatencyMs, &p.P50LatencyMs, &p.P95LatencyMs, &p.MaxLatencyMs,
 			&p.AvgTTFTMs, &p.P50TTFTMs, &p.P95TTFTMs,
 			&p.TotalTokens, &p.OutputTokens, &p.CostUSD,
-			&genMsSum, &observedSpan); err != nil {
+			&genMsSum, &observedSpan, &networkRTT); err != nil {
 			return nil, fmt.Errorf("postgres store: scan provider performance row: %w", err)
 		}
 		if groupBy == "model" {
@@ -1715,6 +1722,7 @@ func (s *UsageStore) SelectProviderPerformance(ctx context.Context, filter Usage
 		if genMsSum > 0 {
 			p.TokensPerSecond = float64(p.OutputTokens) / (genMsSum / 1000)
 		}
+		p.NetworkRTTMs = int64(networkRTT)
 		out = append(out, p)
 	}
 	return out, rows.Err()

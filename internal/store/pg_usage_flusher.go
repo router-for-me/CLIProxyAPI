@@ -383,6 +383,7 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		ProviderMetadata:    maps.Clone(record.ProviderMetadata),
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
+		NetworkRTTMs:        record.NetworkRTTMs,
 		Failed:              false, // success path; failed attempts go to usage_errors
 		FailStatusCode:      0,
 		Generate:            generateEnabled(record.Generate),
@@ -478,6 +479,7 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 		OriginalCostUSD:     originalCost,
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
+		NetworkRTTMs:        record.NetworkRTTMs,
 		FailStatusCode:      failStatus,
 		ErrorMessage:        record.Fail.Body,
 		Generate:            generateEnabled(record.Generate),

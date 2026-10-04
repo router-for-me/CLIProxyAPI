@@ -1356,6 +1356,16 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		return fmt.Errorf("postgres store: alter usage_events add provider_metadata: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS network_rtt_ms BIGINT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add network_rtt_ms: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS network_rtt_ms BIGINT`, s.fullTableName(s.cfg.UsageErrorsTable),
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_errors add network_rtt_ms: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_usage_events_api_key ON %s(api_key_id, requested_at)`, usageEventsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events api_key index: %w", err)

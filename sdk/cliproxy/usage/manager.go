@@ -120,7 +120,10 @@ type Record struct {
 	// kept separately so multi-hop proxy chains remain auditable even when
 	// gin collapses the chained addresses into a single ClientIP.
 	ForwardedFor string
-	// EnergyJoules is the upstream-reported energy consumption for this
+	// NetworkRTTMs records the measured network round-trip time to the
+	// upstream provider (TCP connect + TLS handshake) in milliseconds.
+	// Zero means unmeasured (pre-execution failure or non-HTTP executor).
+	NetworkRTTMs int64
 	// request, when the provider measures it. Zero means unmeasured.
 	EnergyJoules float64
 	// ProviderMetadata carries provider-specific billing/attribution data

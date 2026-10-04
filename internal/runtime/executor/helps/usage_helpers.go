@@ -3,9 +3,11 @@ package helps
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"reflect"
 	"strconv"
 	"strings"
@@ -66,6 +68,14 @@ type UsageReporter struct {
 	ttftStart   time.Time
 	ttftSet     bool
 	once        sync.Once
+
+	// networkRTTMu guards the HTTP-traced network round-trip timing. Measured
+	// via httptrace.ClientTrace embedded in TrackHTTPClient. Zero means
+	// unmeasured (pre-execution failure, non-HTTP executor).
+	networkRTTMu    sync.Mutex
+	networkRTTStart time.Time
+	networkRTT      time.Duration
+	networkRTTSet   bool
 }
 
 type usageExecutor interface {
@@ -279,7 +289,95 @@ func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
 		base:     transport,
 		reporter: r,
 	}
+	// Embed the httptrace ClientTrace into the tracked transport so the TCP
+	// connect + TLS handshake latency can be broken out of TTFT. The trace is
+	// wrapped on top of the round-tripper so it fires before the TTFT clock
+	// starts — connect happens before RoundTrip returns the response.
+	tracked.Transport = &networkRTTTripper{
+		base:     tracked.Transport,
+		reporter: r,
+	}
 	return &tracked
+}
+
+// networkRTTTripper wraps an http.RoundTripper and measures the network
+// round-trip time (TCP connect + TLS handshake) via httptrace.ClientTrace.
+// The measurement is stored on the UsageReporter and surfaced as
+// usage_events.network_rtt_ms.
+type networkRTTTripper struct {
+	base     http.RoundTripper
+	reporter *UsageReporter
+}
+
+func (n *networkRTTTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	n.reporter.startNetworkRTT()
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(_, _ string) {
+			n.reporter.markConnectStart()
+		},
+		ConnectDone: func(_, _ string, err error) {
+			if err == nil {
+				n.reporter.markConnectDone()
+			}
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err == nil {
+				n.reporter.markTLSHandshakeDone()
+			}
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	return n.base.RoundTrip(req)
+}
+
+func (r *UsageReporter) startNetworkRTT() {
+	if r == nil {
+		return
+	}
+	r.networkRTTMu.Lock()
+	r.networkRTTStart = time.Now()
+	r.networkRTTMu.Unlock()
+}
+
+func (r *UsageReporter) markConnectStart() {
+	if r == nil {
+		return
+	}
+	r.networkRTTMu.Lock()
+	r.networkRTTStart = time.Now()
+	r.networkRTTMu.Unlock()
+}
+
+func (r *UsageReporter) markConnectDone() {
+	if r == nil {
+		return
+	}
+	r.networkRTTMu.Lock()
+	if !r.networkRTTSet {
+		r.networkRTT = time.Since(r.networkRTTStart)
+	}
+	r.networkRTTMu.Unlock()
+}
+
+func (r *UsageReporter) markTLSHandshakeDone() {
+	if r == nil {
+		return
+	}
+	r.networkRTTMu.Lock()
+	if !r.networkRTTSet {
+		r.networkRTT = time.Since(r.networkRTTStart)
+		r.networkRTTSet = true
+	}
+	r.networkRTTMu.Unlock()
+}
+
+func (r *UsageReporter) networkRTTMs() int64 {
+	if r == nil {
+		return 0
+	}
+	r.networkRTTMu.Lock()
+	defer r.networkRTTMu.Unlock()
+	return r.networkRTT.Milliseconds()
 }
 
 func (r *UsageReporter) ObserveResponse(resp *http.Response) {
@@ -512,6 +610,7 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		RequestedAt:              r.requestedAt,
 		Latency:                  r.latency(),
 		TTFT:                     r.ttftDuration(),
+		NetworkRTTMs:             r.networkRTTMs(),
 		Failed:                   failed,
 		Fail:                     fail,
 		Detail:                   detail,
