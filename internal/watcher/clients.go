@@ -171,6 +171,10 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
 	w.observeAuthFile(path)
+	normalized := w.normalizeAuthPath(path)
+	w.clientsMutex.RLock()
+	observation := w.fileObservations[normalized]
+	w.clientsMutex.RUnlock()
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
@@ -183,7 +187,6 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 
 	sum := sha256.Sum256(data)
 	curHash := hex.EncodeToString(sum[:])
-	normalized := w.normalizeAuthPath(path)
 
 	// Parse new auth content for diff comparison
 	var newAuth coreauth.Auth
@@ -261,6 +264,13 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	}
 	newByID := authSliceToMap(generated)
 	w.clientsMutex.Lock()
+	if observation != w.fileObservations[normalized] {
+		// A persisted update superseded this read. Allow a later file edit to
+		// restore the same bytes without being skipped by the cached hash.
+		delete(w.lastAuthHashes, normalized)
+		w.clientsMutex.Unlock()
+		return
+	}
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
