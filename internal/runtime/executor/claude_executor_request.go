@@ -804,6 +804,73 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	return body
 }
 
+// disableThinkingForCustomClaudeCompat works around Claude-compatible upstreams that
+// reject tool-use history unless every assistant tool_call message carries reasoning.
+// Real Anthropic endpoints accept native thinking blocks, so only apply this fallback
+// for non-Anthropic base URLs when the history already contains assistant tool_use
+// messages that do not start with thinking/redacted_thinking.
+func disableThinkingForCustomClaudeCompat(body []byte, baseURL string) []byte {
+	if !customClaudeCompatNeedsThinkingDisabled(body, baseURL) {
+		return body
+	}
+	log.Debugf("claude executor: disabling thinking for custom Claude-compatible upstream %s because assistant tool_use history lacks a leading thinking block", baseURL)
+	body, _ = sjson.DeleteBytes(body, "thinking")
+	body, _ = sjson.DeleteBytes(body, "output_config.effort")
+	if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+		body, _ = sjson.DeleteBytes(body, "output_config")
+	}
+	return body
+}
+
+func customClaudeCompatNeedsThinkingDisabled(body []byte, baseURL string) bool {
+	if len(body) == 0 || !gjson.ValidBytes(body) || isAnthropicUpstreamBase(baseURL) {
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())) {
+	case "enabled", "adaptive", "auto":
+	default:
+		return false
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return false
+	}
+
+	missingThinking := false
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "assistant" {
+			return true
+		}
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+
+		firstType := ""
+		hasToolUse := false
+		content.ForEach(func(idx, part gjson.Result) bool {
+			partType := part.Get("type").String()
+			if idx.Int() == 0 {
+				firstType = partType
+			}
+			if partType == "tool_use" {
+				hasToolUse = true
+			}
+			return true
+		})
+
+		if hasToolUse && firstType != "thinking" && firstType != "redacted_thinking" {
+			missingThinking = true
+			return false
+		}
+		return true
+	})
+
+	return missingThinking
+}
+
 // normalizeClaudeSamplingForUpstream keeps Anthropic message requests valid.
 //
 // Translated and cloaked callers keep the conservative normalization: their
