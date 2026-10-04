@@ -101,6 +101,15 @@ type apiCallResponse struct {
 //	  -H "Content-Type: application/json" \
 //	  -d '{"auth_index":"<AUTH_INDEX>","method":"POST","url":"https://api.example.com/v1/fetchAvailableModels","header":{"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","User-Agent":"cliproxyapi"},"data":"{}"}'
 func (h *Handler) APICall(c *gin.Context) {
+	h.apiCall(c, false)
+}
+
+// APICallV8 also reconciles local quota cooldowns after a trusted usage refresh.
+func (h *Handler) APICallV8(c *gin.Context) {
+	h.apiCall(c, true)
+}
+
+func (h *Handler) apiCall(c *gin.Context, recoverQuota bool) {
 	var body apiCallRequest
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -209,8 +218,26 @@ func (h *Handler) APICall(c *gin.Context) {
 		req.Host = hostOverride
 	}
 
+	var recoverySnapshot *coreauth.Auth
+	if recoverQuota && auth != nil && h.authManager != nil {
+		// Token acquisition can update the credential. Inspect its current state
+		// immediately before issuing the usage request, not the older lookup.
+		if current, ok := h.authManager.GetByID(auth.ID); ok && quotaUsageRequestMatches(req, current) && coreauth.QuotaRecoveryCandidate(current) {
+			recoverySnapshot = current
+		}
+	}
+	redirected := false
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
+	}
+	if recoverySnapshot != nil {
+		httpClient.CheckRedirect = func(_ *http.Request, via []*http.Request) error {
+			redirected = true
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		}
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
@@ -230,6 +257,12 @@ func (h *Handler) APICall(c *gin.Context) {
 	if errReadAll != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
+	}
+
+	if recoverySnapshot != nil && !redirected && resp.StatusCode == http.StatusOK && quotaUsageHasCapacity(recoverySnapshot.Provider, respBody, recoverySnapshot) {
+		if _, _, errReset := h.authManager.ResetQuotaIfUnchanged(c.Request.Context(), recoverySnapshot); errReset != nil {
+			log.WithError(errReset).Debug("management usage refresh quota recovery failed")
+		}
 	}
 
 	c.JSON(http.StatusOK, apiCallResponse{
