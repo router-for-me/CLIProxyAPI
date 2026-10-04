@@ -28,6 +28,29 @@ func TestBoundedLRUEvictsLeastRecentlyUsed(t *testing.T) {
 	}
 }
 
+// TestBoundedLRUSetReplacesAndEvicts checks that Set replaces a value in place,
+// refreshes the key, and evicts the least recently used key on a new one.
+func TestBoundedLRUSetReplacesAndEvicts(t *testing.T) {
+	var evicted []string
+	cache := NewBoundedLRU[string, string](2, func(key, value string) {
+		evicted = append(evicted, key+"="+value)
+	})
+
+	cache.Set("a", "A")
+	cache.Set("b", "B")
+	cache.Set("a", "A2") // replacing a also makes it the most recently used
+	if got := cache.Len(); got != 2 || len(evicted) != 0 {
+		t.Fatalf("after replacing a: Len() = %d, evicted = %v; want 2 and none", got, evicted)
+	}
+	cache.Set("c", "C")
+	if _, found := cache.Get("b"); found || len(evicted) != 1 || evicted[0] != "b=B" {
+		t.Fatalf("Set(c): b found = %t, evicted = %v; want b evicted as [b=B]", found, evicted)
+	}
+	if got, found := cache.Get("a"); !found || got != "A2" {
+		t.Fatalf("Get(a) = %q/%t, want A2/true", got, found)
+	}
+}
+
 func TestBoundedLRUCreatesOneValuePerKeyConcurrently(t *testing.T) {
 	cache := NewBoundedLRU[string, int](2, nil)
 	started := make(chan struct{})
