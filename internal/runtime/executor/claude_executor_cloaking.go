@@ -1846,6 +1846,12 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 		return payload
 	}
 
+	thread := gjson.GetBytes(payload, "thread")
+	if thread.Exists() && thread.Type != gjson.Null && maxBlocks > 0 {
+		// Anthropic reserves one cache breakpoint for thread continuation.
+		maxBlocks--
+	}
+
 	total := countCacheControls(payload)
 	if total <= maxBlocks {
 		return payload

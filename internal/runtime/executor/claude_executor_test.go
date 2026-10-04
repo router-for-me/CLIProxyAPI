@@ -3240,6 +3240,27 @@ func TestEnforceCacheControlLimit_PreservesKeyOrderWhenModified(t *testing.T) {
 	}
 }
 
+func TestEnforceCacheControlLimit_ReservesThreadMarker(t *testing.T) {
+	payload := []byte(`{
+		"thread": {"type":"create"},
+		"tools": [{"name":"t1","cache_control":{"type":"ephemeral"}}],
+		"system": [
+			{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"s2","cache_control":{"type":"ephemeral"}}
+		],
+		"messages": [{"role":"user","content":[
+			{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}
+		]}]
+	}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 3 {
+		t.Fatalf("cache_control count = %d, want 3 when thread is present", got)
+	}
+}
+
 func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T) {
 	payload := []byte(`{
 		"tools": [
