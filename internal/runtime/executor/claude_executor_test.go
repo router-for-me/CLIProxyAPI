@@ -4329,6 +4329,52 @@ func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessage
 	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
 }
 
+func TestCheckSystemInstructionsWithMode_TerminalUserRunKeepsSystemTopLevel(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[` +
+		`{"type":"text","text":"first guidance"},` +
+		`{"type":"text","text":"second guidance"}],` +
+		`"messages":[{"role":"user","content":"first"},{"role":"user","content":"second"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 4 {
+		t.Fatalf("top-level system block count = %d, want 4 (2 identity + 2 caller blocks): %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("message count = %d, want 2 without trailing system turns: %s", got, out)
+	}
+	for idx, want := range []string{"first guidance", "second guidance"} {
+		if got := gjson.GetBytes(out, fmt.Sprintf("system.%d.text", idx+2)).String(); got != want {
+			t.Fatalf("system.%d.text = %q, want %q", idx+2, got, want)
+		}
+		if got := gjson.GetBytes(out, fmt.Sprintf("system.%d.cache_control.type", idx+2)).String(); got != "ephemeral" {
+			t.Fatalf("system.%d.cache_control.type = %q, want ephemeral", idx+2, got)
+		}
+	}
+}
+
+func TestRelocateClaudeSystemPromptForCountTokens_TerminalUserRunKeepsSystemTopLevel(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[` +
+		`{"type":"text","text":"first guidance"},` +
+		`{"type":"text","text":"second guidance"}],` +
+		`"messages":[{"role":"user","content":"first"},{"role":"user","content":"second"}]}`)
+
+	out := relocateClaudeSystemPromptForCountTokens(payload, false)
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+		t.Fatalf("top-level system block count = %d, want 2 caller blocks: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("message count = %d, want 2 without trailing system turns: %s", got, out)
+	}
+	for idx, want := range []string{"first guidance", "second guidance"} {
+		if got := gjson.GetBytes(out, fmt.Sprintf("system.%d.text", idx)).String(); got != want {
+			t.Fatalf("system.%d.text = %q, want %q", idx, got, want)
+		}
+		if got := gjson.GetBytes(out, fmt.Sprintf("system.%d.cache_control.type", idx)).String(); got != "ephemeral" {
+			t.Fatalf("system.%d.cache_control.type = %q, want ephemeral", idx, got)
+		}
+	}
+}
+
 func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.T) {
 	tests := []struct {
 		name   string

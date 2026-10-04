@@ -379,6 +379,11 @@ func checkSystemInstructionsWithSigningModeAt(
 	}
 	if claudeUsesLegacySystemReminder(payload) {
 		payload = prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
+	} else if claudeMidConversationSystemMessagesAtEnd(payload) {
+		for _, block := range forwardedSystemBlocks {
+			systemBlocks = append(systemBlocks, buildTextBlock(block, &claudeCodeCacheControl))
+		}
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 	} else {
 		// Unknown and future model IDs optimistically use the authoritative
 		// mid-conversation system role. Only empirically unsupported legacy IDs
@@ -429,6 +434,14 @@ func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool) [
 	payload = updated
 	if claudeUsesLegacySystemReminder(payload) {
 		return prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
+	}
+	if claudeMidConversationSystemMessagesAtEnd(payload) {
+		blocks := make([]string, 0, len(forwardedSystemBlocks))
+		for _, block := range forwardedSystemBlocks {
+			blocks = append(blocks, buildTextBlock(block, &claudeCodeCacheControl))
+		}
+		updated, _ := sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+		return updated
 	}
 	return insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks)
 }
@@ -751,6 +764,24 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
+	firstUserIdx := firstClaudeUserMessageIndex(payload)
+	if firstUserIdx < 0 {
+		return false
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return false
+	}
+	messageBlocks := messages.Array()
+	insertAt := firstUserIdx + 1
+	for insertAt < len(messageBlocks) && messageBlocks[insertAt].Get("role").String() == "user" {
+		insertAt++
+	}
+	return insertAt > firstUserIdx+1 && insertAt == len(messageBlocks)
 }
 
 func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) []byte {
