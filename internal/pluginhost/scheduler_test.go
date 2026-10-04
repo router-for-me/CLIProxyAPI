@@ -2,10 +2,13 @@ package pluginhost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -308,4 +311,44 @@ func schedulerRequest(ids ...string) pluginapi.SchedulerPickRequest {
 		req.Candidates = append(req.Candidates, pluginapi.SchedulerAuthCandidate{ID: id})
 	}
 	return req
+}
+
+func TestRPCSchedulerPickSendsCandidateQuota(t *testing.T) {
+	client := &capturePluginClient{}
+	adapter := &rpcPluginAdapter{id: "scheduler", client: client}
+	observedAt := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+
+	_, errPick := adapter.Pick(context.Background(), pluginapi.SchedulerPickRequest{
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "observed", Quota: &pluginapi.SchedulerQuotaObservation{
+				ObservedAt: observedAt,
+				Signals:    map[string]string{"Anthropic-Ratelimit-Unified-7d-Utilization": "0.65"},
+			}},
+			{ID: "unobserved"},
+		},
+	})
+	if errPick != nil {
+		t.Fatalf("Pick() error = %v", errPick)
+	}
+
+	var sent struct {
+		Candidates []struct {
+			ID    string
+			Quota *struct {
+				ObservedAt string
+				Signals    map[string]string
+			}
+		}
+	}
+	if errUnmarshal := json.Unmarshal(client.requests[pluginabi.MethodSchedulerPick], &sent); errUnmarshal != nil {
+		t.Fatalf("decode sent request: %v", errUnmarshal)
+	}
+	observed := sent.Candidates[0].Quota
+	if observed == nil || observed.ObservedAt != "2026-10-04T12:00:00Z" ||
+		observed.Signals["Anthropic-Ratelimit-Unified-7d-Utilization"] != "0.65" {
+		t.Fatalf("sent quota = %#v", observed)
+	}
+	if sent.Candidates[1].Quota != nil {
+		t.Fatalf("sent quota for unobserved candidate = %#v, want null", sent.Candidates[1].Quota)
+	}
 }

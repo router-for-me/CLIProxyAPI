@@ -865,9 +865,20 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 			Priority:   authPriority(auth),
 			Status:     string(auth.Status),
 			Attributes: schedulerSafeAttributes(auth.Attributes),
+			Quota:      schedulerQuotaObservation(auth),
 		})
 	}
 	return out
+}
+
+func schedulerQuotaObservation(auth *Auth) *pluginapi.SchedulerQuotaObservation {
+	if !ProviderSupportsQuotaObservation(auth.Provider) || auth.Quota.ObservedAt.IsZero() || len(auth.Quota.Signals) == 0 {
+		return nil
+	}
+	return &pluginapi.SchedulerQuotaObservation{
+		ObservedAt: auth.Quota.ObservedAt,
+		Signals:    auth.Quota.Clone().Signals,
+	}
 }
 
 func schedulerProviders(provider string, providers []string) []string {

@@ -10,6 +10,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -2452,5 +2453,66 @@ func TestManagerPluginSchedulerUnhandledWithRejectFlagFallsBack(t *testing.T) {
 	}
 	if got == nil || got.ID != "auth-a" {
 		t.Fatalf("SelectAuth() got = %v, want auth-a", got)
+	}
+}
+
+func TestManagerPluginSchedulerReceivesQuotaObservation(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["claude"] = schedulerTestExecutor{}
+	for _, id := range []string{"observed", "unobserved"} {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "claude"}); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", id, errRegister)
+		}
+	}
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeaders(ctx, http.Header{
+		"Anthropic-Ratelimit-Unified-7d-Utilization": []string{"0.65"},
+		"Anthropic-Ratelimit-Unified-7d-Reset":       []string{"1791100800"},
+	})
+	manager.MarkResult(ctx, Result{AuthID: "observed", Provider: "claude", Model: "claude-opus-5-5", Success: true})
+
+	scheduler := &fakePluginScheduler{}
+	manager.SetPluginScheduler(scheduler)
+	if _, _, errPick := manager.pickNext(context.Background(), "claude", "", cliproxyexecutor.Options{}, nil); errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+
+	quotas := map[string]*pluginapi.SchedulerQuotaObservation{}
+	for _, candidate := range scheduler.requests[0].Candidates {
+		quotas[candidate.ID] = candidate.Quota
+	}
+	observed := quotas["observed"]
+	if observed == nil || observed.ObservedAt.IsZero() ||
+		observed.Signals["Anthropic-Ratelimit-Unified-7d-Utilization"] != "0.65" ||
+		observed.Signals["Anthropic-Ratelimit-Unified-7d-Reset"] != "1791100800" {
+		t.Fatalf("observed candidate quota = %#v", observed)
+	}
+	if quotas["unobserved"] != nil {
+		t.Fatalf("unobserved candidate quota = %#v, want nil", quotas["unobserved"])
+	}
+}
+
+func TestManagerPluginSchedulerOmitsQuotaForProvidersWithoutObservation(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "persisted-signals",
+		Provider: "gemini",
+		Quota: QuotaState{
+			ObservedAt: time.Now(),
+			Signals:    map[string]string{"X-Ratelimit-Remaining-Requests": "10"},
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{}
+	manager.SetPluginScheduler(scheduler)
+	if _, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil); errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+
+	if quota := scheduler.requests[0].Candidates[0].Quota; quota != nil {
+		t.Fatalf("candidate quota = %#v, want nil for a provider without quota observation", quota)
 	}
 }
