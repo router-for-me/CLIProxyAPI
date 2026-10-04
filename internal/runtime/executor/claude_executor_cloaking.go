@@ -379,6 +379,11 @@ func checkSystemInstructionsWithSigningModeAt(
 	}
 	if claudeUsesLegacySystemReminder(payload) {
 		payload = prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
+	} else if claudeMidConversationSystemMessagesAtEnd(payload) {
+		for _, block := range forwardedSystemBlocks {
+			systemBlocks = append(systemBlocks, buildTextBlock(block, &claudeCodeCacheControl))
+		}
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 	} else {
 		// Unknown and future model IDs optimistically use the authoritative
 		// mid-conversation system role. Only empirically unsupported legacy IDs
@@ -429,6 +434,14 @@ func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool) [
 	payload = updated
 	if claudeUsesLegacySystemReminder(payload) {
 		return prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
+	}
+	if claudeMidConversationSystemMessagesAtEnd(payload) {
+		blocks := make([]string, 0, len(forwardedSystemBlocks))
+		for _, block := range forwardedSystemBlocks {
+			blocks = append(blocks, buildTextBlock(block, &claudeCodeCacheControl))
+		}
+		updated, _ := sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+		return updated
 	}
 	return insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks)
 }
@@ -751,6 +764,24 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
+	firstUserIdx := firstClaudeUserMessageIndex(payload)
+	if firstUserIdx < 0 {
+		return false
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return false
+	}
+	messageBlocks := messages.Array()
+	insertAt := firstUserIdx + 1
+	for insertAt < len(messageBlocks) && messageBlocks[insertAt].Get("role").String() == "user" {
+		insertAt++
+	}
+	return insertAt > firstUserIdx+1 && insertAt == len(messageBlocks)
 }
 
 func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) []byte {
@@ -1270,11 +1301,10 @@ type claudeCodeContextManagementState struct {
 	eligible              bool
 	callerOwned           bool
 	automaticallyInjected bool
-	payloadRuleTouched    bool
 }
 
-// reconcileClaudeCodeContextManagement resolves automatic ownership after all
-// payload rules and forced tool-choice processing have completed.
+// reconcileClaudeCodeContextManagement resolves built-in ownership after forced
+// tool-choice processing. User payload rules run later and never need reconciliation.
 func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContextManagementState) []byte {
 	contextManagement := gjson.GetBytes(payload, "context_management")
 
@@ -1283,7 +1313,7 @@ func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContex
 	// thinking field after injection, so this also covers a request that was
 	// still eligible when injectClaudeCodeContextManagement ran.
 	if !claudeThinkingAcceptsClearThinking(payload) {
-		if state.callerOwned || !state.automaticallyInjected || state.payloadRuleTouched {
+		if state.callerOwned || !state.automaticallyInjected {
 			return payload
 		}
 		if contextManagement.Raw != claudeCodeContextManagement {
@@ -1296,7 +1326,7 @@ func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContex
 		return updated
 	}
 
-	if !state.eligible || state.callerOwned || state.payloadRuleTouched || contextManagement.Exists() {
+	if !state.eligible || state.callerOwned || contextManagement.Exists() {
 		return payload
 	}
 	updated, err := sjson.SetRawBytes(payload, "context_management", []byte(claudeCodeContextManagement))
@@ -1844,6 +1874,12 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload
+	}
+
+	thread := gjson.GetBytes(payload, "thread")
+	if thread.Exists() && thread.Type != gjson.Null && maxBlocks > 0 {
+		// Anthropic reserves one cache breakpoint for thread continuation.
+		maxBlocks--
 	}
 
 	total := countCacheControls(payload)

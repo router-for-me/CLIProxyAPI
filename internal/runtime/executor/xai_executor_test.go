@@ -2675,10 +2675,13 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	if gotAccept != "application/json" {
 		t.Fatalf("Accept = %q, want application/json", gotAccept)
 	}
-	for _, field := range []string{"stream", "max_output_tokens", "temperature", "top_p", "top_k", "stop"} {
+	for _, field := range []string{"stream", "max_output_tokens", "temperature", "top_p", "stop"} {
 		if gjson.GetBytes(gotBody, field).Exists() {
 			t.Fatalf("%s exists in compact body: %s", field, string(gotBody))
 		}
+	}
+	if got := gjson.GetBytes(gotBody, "top_k").Int(); got != 10 {
+		t.Fatalf("payload override top_k = %d, want 10", got)
 	}
 	if got := gjson.GetBytes(gotBody, "input.0.encrypted_content").String(); got != validEncryptedContent {
 		t.Fatalf("input.0.encrypted_content = %q, want valid sample; body=%s", got, string(gotBody))
@@ -3092,6 +3095,7 @@ func TestXAIExecutorThinkingPayloadOverride(t *testing.T) {
 				if errPrepare != nil {
 					t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
 				}
+				prepared.body = prepared.finalizePayload(prepared.body)
 				if got := gjson.GetBytes(prepared.body, "reasoning.effort").String(); got != wantEffort {
 					t.Fatalf("reasoning.effort = %q, want %q; body=%s", got, wantEffort, prepared.body)
 				}
