@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -127,6 +128,63 @@ func TestClaudeErrorExtractsClaudeStyleUpstreamJSON(t *testing.T) {
 	}
 	if got.Error.Message != "This request would exceed your account's rate limit. Please try again later." {
 		t.Fatalf("error.message = %q", got.Error.Message)
+	}
+}
+
+type responseBodyOnlyClaudeError struct {
+	body []byte
+}
+
+func (e responseBodyOnlyClaudeError) Error() string        { return "wrapped upstream error" }
+func (e responseBodyOnlyClaudeError) ResponseBody() []byte { return e.body }
+
+func TestClaudeErrorMarksWrappedMissingThreadForClientReplay(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      responseBodyOnlyClaudeError{body: []byte(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}`)},
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := gjson.GetBytes(body, "error.details.error_code").String(); got != "thread_not_found" {
+		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+	}
+}
+
+func TestClaudeErrorMarksMissingThreadForClientReplay(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."}}`),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := gjson.GetBytes(body, "error.details.error_code").String(); got != "thread_not_found" {
+		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+	}
+}
+
+func TestWriteClaudeDirectErrorMarksMissingThreadForClientReplay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode:     http.StatusNotFound,
+		DirectResponse: true,
+		Body:           []byte(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."}}`),
+	}
+
+	handler.WriteErrorResponse(c, msg)
+
+	if got := gjson.GetBytes(recorder.Body.Bytes(), "error.details.error_code").String(); got != "thread_not_found" {
+		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, recorder.Body.Bytes())
 	}
 }
 

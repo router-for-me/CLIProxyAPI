@@ -444,6 +444,15 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 		cascadeID,
 	)
 
+	var errPayload error
+	protoBytes, logBody, errPayload = helps.FinalizeDevinPayload(protoBytes, func(body []byte) []byte {
+		original := helps.DevinPayloadDefaultsSource(body, payload)
+		return helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, "devin", "", original, req, opts)(body)
+	})
+	if errPayload != nil {
+		return nil, "", nil, errPayload
+	}
+
 	framed := helps.WrapConnectEnvelope(protoBytes)
 	url := strings.TrimRight(baseURL, "/") + helps.DevinChatPath
 

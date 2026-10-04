@@ -84,10 +84,6 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td>感谢 APIMart 赞助了本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 &#36;0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过<a href="https://go.apimart.ai/gh-cliproxyapi">此注册链接</a>注册即可开用。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.axisnow.io/zh"><img src="./assets/axisnow.png" alt="AxisNow" width="150"></a></td>
-<td>保护并加速网站与 API，兼顾中国大陆及全球的访问体验，并通过客户端 SDK，将加速与安全能力延伸至原生/移动 App — <b>自建私有部署 CDN｜订阅式高防 CDN｜自主可控、灵活组合的 CDN 网络。</b></td>
-</tr>
-<tr>
 <td width="180"><a href="https://www.swiftproxy.net/?code=PR67S9A95"><img src="./assets/swiftproxy.png" alt="Swiftproxy" width="150"></a></td>
 <td>Swiftproxy 提供 9000万+ 纯净住宅 IP，覆盖全球 220+ 个国家和地区，支持 HTTP(S)/SOCKS5、IP 轮换、Sticky Session 及精准地域定位。帮助 AI API 工具和自动化工作流从不同地区稳定访问在线服务，适用于 API 请求、网页访问、数据采集及地域测试等场景。住宅代理低至 &#36;0.7/GB，支持免费测试，使用优惠码 PROXY90 可享 9 折优惠。<a href="https://www.swiftproxy.net/?code=PR67S9A95">立即体验 Swiftproxy</a>。</td>
 </tr>

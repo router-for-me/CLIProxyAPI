@@ -231,10 +231,8 @@ func TestClaudeCloakedDateReminderSessionByteStability(t *testing.T) {
 	}
 }
 
-// TestClaudeCloakedDateReminderDeclassifiedProbePinsSessionDate verifies that when
-// a probe request is declassified into a normal request across midnight in an ongoing
-// session, the declassification branch re-applies the pinned session date.
-func TestClaudeCloakedDateReminderDeclassifiedProbePinsSessionDate(t *testing.T) {
+// Explicit max_tokens overrides must not rerun the built-in probe date policy.
+func TestClaudeCloakedDateReminderProbeOverrideDoesNotReinitializeSessionDate(t *testing.T) {
 	helps.ResetClaudeDiagnosticsForTest()
 	t.Cleanup(helps.ResetClaudeDiagnosticsForTest)
 
@@ -271,8 +269,7 @@ func TestClaudeCloakedDateReminderDeclassifiedProbePinsSessionDate(t *testing.T)
 		}, nil
 	})
 
-	// Use PayloadConfig to override max_tokens: 1 (which would classify as probe) to 100,
-	// triggering declassification via wasProbeOrHelper.
+	// Override max_tokens without reclassifying the original probe.
 	cfg := &config.Config{
 		Payload: config.PayloadConfig{
 			Override: []config.PayloadRule{
@@ -313,7 +310,7 @@ func TestClaudeCloakedDateReminderDeclassifiedProbePinsSessionDate(t *testing.T)
 	}
 
 	// Request 2: Across midnight, request initially has max_tokens: 1 and content: "probe",
-	// but PayloadOverride declassifies it into a normal request.
+	// and PayloadOverride changes only the final max_tokens field.
 	mockTime = time.Date(2026, 8, 2, 0, 1, 0, 0, time.UTC)
 	probePayload := `{
 		"model": "claude-opus-5",
@@ -335,11 +332,11 @@ func TestClaudeCloakedDateReminderDeclassifiedProbePinsSessionDate(t *testing.T)
 		t.Fatalf("expected 3 captured bodies, got %d", len(capturedBodies))
 	}
 
-	// Both declassified requests must carry the session's pinned date ("2026-08-01")
-	if got := extractClaudeCloakDate(t, capturedBodies[1]); got != "2026-08-01" {
-		t.Fatalf("declassified Execute request date = %q, want session pinned 2026-08-01", got)
+	// Payload does not reclassify probes or replay the prior session date.
+	if got := extractClaudeCloakDate(t, capturedBodies[1]); got != "2026-08-02" {
+		t.Fatalf("configured Execute request date = %q, want original probe date 2026-08-02", got)
 	}
-	if got := extractClaudeCloakDate(t, capturedBodies[2]); got != "2026-08-01" {
-		t.Fatalf("declassified ExecuteStream request date = %q, want session pinned 2026-08-01", got)
+	if got := extractClaudeCloakDate(t, capturedBodies[2]); got != "2026-08-02" {
+		t.Fatalf("configured ExecuteStream request date = %q, want original probe date 2026-08-02", got)
 	}
 }

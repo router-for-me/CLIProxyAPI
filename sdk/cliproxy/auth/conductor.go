@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"golang.org/x/sync/semaphore"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -208,6 +210,11 @@ type Manager struct {
 	refreshLocks sync.Map
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
 	persistLocks sync.Map
+	// authMutationLocks coordinate credential mutations without blocking unrelated readers.
+	authMutationLocks sync.Map
+	// authLoadGate allows concurrent credential transactions, but excludes whole-store reloads.
+	// Mutations acquire one permit; Load acquires all permits before reading the store.
+	authLoadGate *semaphore.Weighted
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -220,6 +227,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager := &Manager{
 		store:                 store,
+		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
 		selector:              selector,
 		hook:                  hook,

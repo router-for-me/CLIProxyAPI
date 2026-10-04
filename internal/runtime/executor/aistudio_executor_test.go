@@ -63,7 +63,7 @@ func TestAIStudioTranslateRequestNormalizesThinkingLevel(t *testing.T) {
 	}
 }
 
-func TestAIStudioTranslateRequestNormalizesThinkingLevelAfterPayloadOverride(t *testing.T) {
+func TestAIStudioTranslateRequestPayloadOverrideWinsThinkingNormalization(t *testing.T) {
 	executor := NewAIStudioExecutor(&config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
 		Models: []config.PayloadModelRule{{Name: "gemini-3.7-flash", Protocol: "gemini"}},
 		Params: map[string]any{"generationConfig.thinkingConfig.thinkingLevel": "medium"},
@@ -78,8 +78,8 @@ func TestAIStudioTranslateRequestNormalizesThinkingLevelAfterPayloadOverride(t *
 	if err != nil {
 		t.Fatalf("translateRequest() error = %v", err)
 	}
-	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "MEDIUM" {
-		t.Fatalf("thinkingLevel = %q, want MEDIUM; payload=%s", got, payload)
+	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "medium" {
+		t.Fatalf("thinkingLevel = %q, want medium; payload=%s", got, payload)
 	}
 }
 

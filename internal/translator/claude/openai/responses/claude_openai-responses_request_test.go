@@ -2036,6 +2036,18 @@ func TestConvertOpenAIResponsesRequestToClaude_UnsupportedPrefillModelsStripTrai
 		"claude-fable-5",
 		"claude-opus-5",
 		"claude-sonnet-4-6",
+		"fable",
+		"opus-5",
+		"sonnet-4.6",
+		"anthropic/claude-opus-5-thinking",
+		"claude-sonnet-4.6",
+		"claude-sonnet-4-7",
+		"claude-sonnet-4-10",
+		"claude-sonnet-5",
+		"claude-opus-6",
+		"claude-opus-5.1",
+		"claude-sonnet-4-6-20260217",
+		" ANTHROPIC/CLAUDE-OPUS-5-THINKING ",
 	}
 	for _, model := range unsupportedModels {
 		t.Run(model, func(t *testing.T) {
@@ -2065,6 +2077,20 @@ func TestConvertOpenAIResponsesRequestToClaude_SupportedPrefillModelsPreserveAss
 	supportedModels := []string{
 		"claude-sonnet-4-5",
 		"claude-haiku-4-5",
+		"claude-3-opus-20240229",
+		"claude-opus-20240229",
+		"claude-sonnet-4-20260217",
+		"claude-sonnet-4.5",
+		"not-a-fable-model",
+		"my-custom-opus-5-wrapper",
+		"my-sonnet-4-6-wrapper",
+		"claude-fabled-5",
+		"claude-opus-5foo",
+		"claude-sonnet-4-6foo",
+		"fable/gpt-4o",
+		"opus",
+		"sonnet",
+		"",
 	}
 	for _, model := range supportedModels {
 		t.Run(model, func(t *testing.T) {

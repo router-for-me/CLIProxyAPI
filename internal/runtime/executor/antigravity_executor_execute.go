@@ -92,9 +92,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, err
 	}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, "antigravity", "request", originalTranslated, req, opts))
 	translated = e.obfuscateSensitiveWords(translated)
 	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
@@ -302,9 +300,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, err
 	}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, "antigravity", "request", originalTranslated, req, opts))
 	translated = e.obfuscateSensitiveWords(translated)
 	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
