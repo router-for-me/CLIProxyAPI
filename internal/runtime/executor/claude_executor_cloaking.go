@@ -988,11 +988,13 @@ func reconcileClaudeCodeFableModelAfterPayload(
 	// caller or payload-rule fallback; only replace one inserted by the cloak.
 	if fableState.injectedFallbacks && !payloadTouchedFallbacks {
 		wantFallback := ""
-		switch {
-		case isClaudeFable51Model(currentModel):
-			wantFallback = "claude-opus-5"
-		case isClaudeOpus55Model(currentModel):
-			wantFallback = "claude-opus-4-8"
+		if !gjson.GetBytes(body, "thread").Exists() {
+			switch {
+			case isClaudeFable51Model(currentModel):
+				wantFallback = "claude-opus-5"
+			case isClaudeOpus55Model(currentModel):
+				wantFallback = "claude-opus-4-8"
+			}
 		}
 		if gjson.GetBytes(body, "fallbacks.0.model").String() != wantFallback {
 			body, _ = sjson.DeleteBytes(body, "fallbacks")
@@ -1002,7 +1004,7 @@ func reconcileClaudeCodeFableModelAfterPayload(
 	if isClaudeFable51Model(currentModel) {
 		// Non-Fable rewritten to Fable 5.1 (or original Fable 5.1): attach Fable additions
 		// unless matching payload rules explicitly configured or filtered them.
-		if !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
+		if !gjson.GetBytes(body, "thread").Exists() && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
 			body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
 		}
 		if gjson.GetBytes(body, "thinking").Exists() {
@@ -1044,7 +1046,7 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		return body
 	}
 
-	if isClaudeOpus55Model(currentModel) && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
+	if isClaudeOpus55Model(currentModel) && !gjson.GetBytes(body, "thread").Exists() && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
 		body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
 	}
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
@@ -1479,11 +1481,11 @@ func applyCloakingInternal(
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
 	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
-	if isClaudeOpus55Model(model) && !isProbeOrHelper && !gjson.GetBytes(payload, "fallbacks").Exists() {
+	if isClaudeOpus55Model(model) && !isProbeOrHelper && !gjson.GetBytes(payload, "thread").Exists() && !gjson.GetBytes(payload, "fallbacks").Exists() {
 		payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
 	}
 	if isClaudeFable51Model(model) && !isProbeOrHelper {
-		if !gjson.GetBytes(payload, "fallbacks").Exists() {
+		if !gjson.GetBytes(payload, "thread").Exists() && !gjson.GetBytes(payload, "fallbacks").Exists() {
 			payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
 		}
 	}

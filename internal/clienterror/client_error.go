@@ -103,6 +103,9 @@ func IsRequestFault(status int, err error) bool {
 	if err != nil && IsItemNotPersisted(err.Error()) {
 		return true
 	}
+	if status == http.StatusNotFound && err != nil && IsThreadNotFound(err.Error()) {
+		return true
+	}
 	switch status {
 	case http.StatusBadRequest,
 		http.StatusConflict,
@@ -127,6 +130,11 @@ func IsItemNotPersisted(message string) bool {
 	return strings.Contains(lower, "item with id") &&
 		strings.Contains(lower, "not found") &&
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+func IsThreadNotFound(message string) bool {
+	return gjson.Get(message, "error.details.error_code").String() == "thread_not_found" ||
+		strings.Contains(message, "No thread state was found for the requested `previous_message_id`")
 }
 
 func hasModelNotFoundErrorBody(err error) bool {

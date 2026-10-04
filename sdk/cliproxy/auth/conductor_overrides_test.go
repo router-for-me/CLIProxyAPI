@@ -16,6 +16,8 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
+const claudeThreadNotFoundMessage = `{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested ` + "`previous_message_id`" + `. Replay the full conversation."}}`
+
 const requestScopedNotFoundMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74' not found. Items are not persisted when `store` is set to false. Try again with `store` set to true, or remove this item from your input."
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
@@ -1507,6 +1509,10 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		{name: "non-streaming context length behind bad gateway", err: contextLengthErr, wantStatus: http.StatusBadGateway},
 		{name: "streaming context length behind bad gateway", stream: true, err: contextLengthErr, wantStatus: http.StatusBadGateway},
 		{name: "streaming invalid request type behind bad gateway", stream: true, err: invalidRequestTypeErr, wantStatus: http.StatusBadGateway},
+		{name: "non-streaming claude thread not found", provider: "claude", err: &Error{HTTPStatus: http.StatusNotFound, Message: claudeThreadNotFoundMessage}, wantStatus: http.StatusNotFound},
+		{name: "streaming claude thread not found", provider: "claude", stream: true, err: &Error{HTTPStatus: http.StatusNotFound, Message: claudeThreadNotFoundMessage}, wantStatus: http.StatusNotFound},
+		{name: "non-streaming claude thread not found code", provider: "claude", err: &Error{HTTPStatus: http.StatusNotFound, Message: `{"error":{"type":"not_found_error","details":{"error_code":"thread_not_found"}}}`}, wantStatus: http.StatusNotFound},
+		{name: "streaming claude thread not found code", provider: "claude", stream: true, err: &Error{HTTPStatus: http.StatusNotFound, Message: `{"error":{"type":"not_found_error","details":{"error_code":"thread_not_found"}}}`}, wantStatus: http.StatusNotFound},
 		{name: "non-streaming item not persisted", err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
 		{name: "streaming item not persisted", stream: true, err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
 		{name: "streaming item not persisted after payload", stream: true, streamAfterPayload: true, err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
@@ -1881,6 +1887,44 @@ func TestManager_MarkResult_RequestScopedNotFoundDoesNotCooldownAuth(t *testing.
 		Error: &Error{
 			HTTPStatus: http.StatusNotFound,
 			Message:    requestScopedNotFoundMessage,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Unavailable {
+		t.Fatalf("expected request-scoped 404 to keep auth available")
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected request-scoped 404 to keep auth cooldown unset, got %v", updated.NextRetryAfter)
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("expected request-scoped 404 to avoid model cooldown state, got %#v", state)
+	}
+}
+
+func TestManager_MarkResult_ClaudeThreadNotFoundDoesNotCooldownAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-opus-5-5"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusNotFound,
+			Message:    claudeThreadNotFoundMessage,
 		},
 	})
 
