@@ -161,7 +161,7 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 		m.homeSessionAliases.clear()
 	}
 	m.runtimeConfig.Store(cfg)
-	clearedCooldowns := m.clearDisabledCooldownStates(cfg)
+	clearedCooldowns := m.applyCooldownConfig(cfg)
 	if clearedCooldowns && oldCooldownStore != nil {
 		m.mu.Lock()
 		if m.cooldownStore == oldCooldownStore {
@@ -267,7 +267,7 @@ func (m *Manager) cooldownDisabledForAuth(auth *Auth) bool {
 	return quotaCooldownDisabledForAuthWithConfig(auth, cfg)
 }
 
-func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
+func (m *Manager) applyCooldownConfig(cfg *internalconfig.Config) bool {
 	if m == nil {
 		return false
 	}
@@ -279,6 +279,10 @@ func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
 			continue
 		}
 		if !quotaCooldownDisabledForAuthWithConfig(auth, cfg) && !auth.Disabled && auth.Status != StatusDisabled {
+			if boundAuthQuotaRetries(auth, cfg, now) {
+				auth.Generation++
+				snapshots = append(snapshots, auth.Clone())
+			}
 			continue
 		}
 		if clearCooldownStateForAuth(auth, now) {
@@ -287,8 +291,10 @@ func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
 	}
 	m.mu.Unlock()
 
-	if m.scheduler != nil {
-		for _, snapshot := range snapshots {
+	for _, snapshot := range snapshots {
+		if quotaRetryInterval(cfg) > 0 {
+			m.publishQuotaRetrySnapshot(snapshot, now)
+		} else if m.scheduler != nil {
 			m.scheduler.upsertAuth(snapshot)
 		}
 	}
@@ -340,11 +346,23 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 			}
 		}
 	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	for id := range snapshotsByID {
+		if auth := m.auths[id]; boundAuthQuotaRetries(auth, cfg, now) {
+			auth.Generation++
+			snapshotsByID[id] = auth.Clone()
+		}
+	}
 	m.mu.Unlock()
 
 	if m.scheduler != nil {
 		for _, snapshot := range snapshotsByID {
 			m.scheduler.upsertAuth(snapshot)
+		}
+	}
+	if quotaRetryInterval(cfg) > 0 {
+		for _, snapshot := range snapshotsByID {
+			m.publishQuotaRetrySnapshot(snapshot, now)
 		}
 	}
 	m.persistCooldownStates(context.Background())
@@ -767,6 +785,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	var authSnapshot *Auth
 	cooldownStateChanged := false
+	boundedQuotaRetries := false
 	now := time.Now()
 
 	releaseMutation := m.lockAuthMutation(result.AuthID)
@@ -1011,6 +1030,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.NextRetryAfter = time.Time{}
 		}
 
+		cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+		boundedQuotaRetries = boundAuthQuotaRetries(auth, cfg, now)
 		auth.Generation++
 		auth.UpdatedAt = now
 
@@ -1032,7 +1053,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	releaseMutation()
 	if m.scheduler != nil && authSnapshot != nil {
 		var targetModels []string
-		if !result.CredentialScope && modelKey != "" {
+		if !boundedQuotaRetries && !result.CredentialScope && modelKey != "" {
 			targetModels = append(targetModels, modelKey)
 			if routeKey := canonicalModelKey(result.RouteModel); routeKey != "" && routeKey != modelKey {
 				targetModels = append(targetModels, routeKey)
