@@ -288,6 +288,10 @@ Claude Code 状态栏，按当前 CPA 实例展示 Codex / Grok / Antigravity / 
 
 适用于 CLIProxyAPI 的跨平台 Electron 托盘仪表盘。展示 ChatGPT/Codex、Claude、Gemini/Antigravity、Grok、Kimi 和 Cursor 各账户的真实 OAuth 配额窗口，预估用量队列成本，并跟踪 OpenAI/Claude 服务状态。深色终端风格 UI；支持在 Windows 和 Linux 上运行。
 
+### [Oh My CPA](https://github.com/WizisCool/oh-my-cpa)
+
+面向 CLIProxyAPI v8+ 的自托管 Web 管理面板，支持提供商与 OAuth 管理、API 密钥管理、配额监控以及逐请求用量和成本分析。内置 Agent 和 MCP 服务器，可通过内嵌 React 界面与 SQLite 的单个 Go 二进制或 Docker 镜像部署。
+
 > [!NOTE]  
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
 

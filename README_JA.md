@@ -287,6 +287,10 @@ Claude Code のステータスライン。現在の CPA インスタンスに対
 
 CLIProxyAPI 向けのクロスプラットフォームな Electron トレイダッシュボード。ChatGPT/Codex、Claude、Gemini/Antigravity、Grok、Kimi、Cursor の各アカウントにおける実際の OAuth クォータウィンドウを表示し、利用キューコストを試算し、OpenAI/Claude のサービスステータスを追跡します。ダークなターミナル風 UI。Windows および Linux で動作します。
 
+### [Oh My CPA](https://github.com/WizisCool/oh-my-cpa)
+
+CLIProxyAPI v8+ 向けのセルフホスト型 Web コンソール。プロバイダーと OAuth、API キー、クォータの管理、およびリクエスト単位の使用量・コスト分析を提供します。組み込み Agent と MCP サーバーを備え、React UI と SQLite を内蔵した単一の Go バイナリ、または Docker イメージとして配布されています。
+
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
 

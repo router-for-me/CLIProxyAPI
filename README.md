@@ -295,6 +295,10 @@ Claude Code status line for CLIProxyAPI: per-account Codex / Grok / Antigravity 
 
 Cross-platform Electron tray dashboard for CLIProxyAPI. Shows the real OAuth quota windows per account across ChatGPT/Codex, Claude, Gemini/Antigravity, Grok, Kimi and Cursor, estimates usage-queue cost, and tracks OpenAI/Claude service status. Dark terminal-style UI; runs on Windows and Linux.
 
+### [Oh My CPA](https://github.com/WizisCool/oh-my-cpa)
+
+Self-hosted web console for CLIProxyAPI v8+ with provider and OAuth management, API keys, quotas, and request-level usage and cost analytics. Includes a built-in Agent and MCP server, and ships as a single Go binary with an embedded React UI and SQLite, or as a Docker image.
+
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
