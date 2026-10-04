@@ -245,7 +245,7 @@ func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
 	}
 }
 
-func TestGeminiExecutorAppliesPayloadRulesBeforeLeadingUserNormalization(t *testing.T) {
+func TestGeminiExecutorAppliesPayloadRulesAfterLeadingUserNormalization(t *testing.T) {
 	var upstreamBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)
@@ -281,11 +281,11 @@ func TestGeminiExecutorAppliesPayloadRulesBeforeLeadingUserNormalization(t *test
 	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
 		t.Fatalf("upstream roles malformed: %s", upstreamBody)
 	}
-	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != "" {
-		t.Fatalf("synthetic leading user changed: %s", upstreamBody)
+	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != "payload override" {
+		t.Fatalf("payload override did not target final leading user: %s", upstreamBody)
 	}
-	if got := contents[1].Get("parts.0.text").String(); got != "payload override" {
-		t.Fatalf("payload rule applied to %q, want original first model turn; body=%s", got, upstreamBody)
+	if got := contents[1].Get("parts.0.text").String(); got != "prior output" {
+		t.Fatalf("payload rule applied to %q, want unmodified original first model turn; body=%s", got, upstreamBody)
 	}
 }
 

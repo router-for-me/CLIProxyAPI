@@ -1532,15 +1532,10 @@ func interactionsToolIdentityMap(rawJSON []byte, forAntigravity bool) map[string
 	identities := make(map[string]util.ResponsesToolIdentity)
 	for name, descriptor := range util.CollectResponsesToolWinners(root) {
 		identity := util.ResponsesToolIdentity{Name: descriptor.LocalName, Namespace: descriptor.Namespace, Custom: descriptor.ToolType == "custom", ApplyPatch: applypatch.IsCustomTool(descriptor.Tool)}
-		identities[name] = identity
-	}
-	if forAntigravity {
-		for name, descriptor := range util.CollectResponsesToolWinners(root) {
-			upstreamName := translatorcommon.AntigravityToolNameToUpstream(name)
-			if _, exists := identities[upstreamName]; !exists {
-				identities[upstreamName] = util.ResponsesToolIdentity{Name: descriptor.LocalName, Namespace: descriptor.Namespace, Custom: descriptor.ToolType == "custom", ApplyPatch: applypatch.IsCustomTool(descriptor.Tool)}
-			}
+		if forAntigravity {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
 		}
+		identities[name] = identity
 	}
 	return identities
 }
