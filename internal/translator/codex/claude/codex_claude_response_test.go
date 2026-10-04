@@ -990,6 +990,59 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallReusesFallbackToolUseID
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamWebSearchCallActionSources(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
+		"messages":[{"role":"user","content":"search xai docs"}]
+	}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"id":"ws_123","type":"web_search_call","status":"in_progress"}}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"xAI web search docs","sources":[{"type":"url","url":"https://docs.x.ai/developers/tools/web-search","title":"xAI Docs"},{"type":"url","url":"https://example.com/notitle"},{"type":"url","url":""},{"type":"url","url":"   "}]}}}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":5,"output_tokens":10}}}`),
+	}
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	var webSearchResultBlock gjson.Result
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "web_search_tool_result" {
+				webSearchResultBlock = data.Get("content_block")
+			}
+		}
+	}
+
+	if !webSearchResultBlock.Exists() {
+		t.Fatalf("expected web_search_tool_result block in stream output")
+	}
+	content := webSearchResultBlock.Get("content").Array()
+	if len(content) != 2 {
+		t.Fatalf("web_search_tool_result.content length = %d, want 2; raw: %s", len(content), webSearchResultBlock.Get("content").Raw)
+	}
+	if got := content[0].Get("url").String(); got != "https://docs.x.ai/developers/tools/web-search" {
+		t.Errorf("content[0].url = %q, want https://docs.x.ai/developers/tools/web-search", got)
+	}
+	if got := content[0].Get("title").String(); got != "xAI Docs" {
+		t.Errorf("content[0].title = %q, want xAI Docs", got)
+	}
+	if got := content[1].Get("url").String(); got != "https://example.com/notitle" {
+		t.Errorf("content[1].url = %q, want https://example.com/notitle", got)
+	}
+	if got := content[1].Get("title").String(); got != "https://example.com/notitle" {
+		t.Errorf("content[1].title = %q, want https://example.com/notitle (fallback to url)", got)
+	}
+}
+
 func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 	longCallID := "call_" + strings.Repeat("a", 62)
 	if len(longCallID) <= 64 {
@@ -1185,6 +1238,70 @@ func TestConvertCodexResponseToClaudeNonStream_WebSearchDedupesEmptyOpenPageItem
 	}
 	if !strings.Contains(string(out), "weather") {
 		t.Fatalf("expected populated query item to be kept: %s", string(out))
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_WebSearchCallActionSources(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search xai docs"}]}`)
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_1",
+			"model":"grok-4",
+			"stop_reason":"stop",
+			"usage":{"input_tokens":5,"output_tokens":10},
+			"output":[
+				{
+					"type":"web_search_call",
+					"id":"ws_123",
+					"status":"completed",
+					"action":{
+						"type":"search",
+						"query":"xAI web search docs",
+						"sources":[
+							{"type":"url","url":"https://docs.x.ai/developers/tools/web-search","title":"xAI Docs"},
+							{"type":"url","url":"https://example.com/notitle"},
+							{"type":"url","url":""},
+							{"type":"url","url":"   "}
+						]
+					}
+				},
+				{
+					"type":"message",
+					"content":[{"type":"output_text","text":"here are the docs"}]
+				}
+			]
+		}
+	}`)
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := gjson.ParseBytes(out)
+	var resultContent gjson.Result
+	parsed.Get("content").ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "web_search_tool_result" {
+			resultContent = block.Get("content")
+			return false
+		}
+		return true
+	})
+	if !resultContent.Exists() {
+		t.Fatalf("missing web_search_tool_result in non-stream content: %s", string(out))
+	}
+	contentArray := resultContent.Array()
+	if len(contentArray) != 2 {
+		t.Fatalf("web_search_tool_result content length = %d, want 2; raw: %s", len(contentArray), resultContent.Raw)
+	}
+	if got := contentArray[0].Get("url").String(); got != "https://docs.x.ai/developers/tools/web-search" {
+		t.Errorf("content[0].url = %q, want https://docs.x.ai/developers/tools/web-search", got)
+	}
+	if got := contentArray[0].Get("title").String(); got != "xAI Docs" {
+		t.Errorf("content[0].title = %q, want xAI Docs", got)
+	}
+	if got := contentArray[1].Get("url").String(); got != "https://example.com/notitle" {
+		t.Errorf("content[1].url = %q, want https://example.com/notitle", got)
+	}
+	if got := contentArray[1].Get("title").String(); got != "https://example.com/notitle" {
+		t.Errorf("content[1].title = %q, want https://example.com/notitle (fallback to url)", got)
 	}
 }
 
