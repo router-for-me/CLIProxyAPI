@@ -2853,3 +2853,169 @@ func TestApplyPatchClaudeRequestContractAndHistory(t *testing.T) {
 		t.Fatalf("history mismatch: %s", result.Raw)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_PromptCacheBreakpoint(t *testing.T) {
+	tests := []struct {
+		name         string
+		inputJSON    string
+		wantPath     string
+		wantType     string
+		wantTTL      string
+		wantAttached bool
+	}{
+		{
+			name: "responses text part",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_text", "text": "cached prefix", "prompt_cache_breakpoint": {"mode": "explicit"}},
+							{"type": "input_text", "text": "fresh question"}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantType:     "ephemeral",
+			wantAttached: true,
+		},
+		{
+			name: "responses system part",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"input": [
+					{
+						"type": "message",
+						"role": "system",
+						"content": [
+							{"type": "input_text", "text": "cached system instructions", "prompt_cache_breakpoint": {"mode": "explicit"}}
+						]
+					},
+					{
+						"type": "message",
+						"role": "user",
+						"content": [{"type": "input_text", "text": "hello"}]
+					}
+				]
+			}`,
+			wantPath:     "system.0.cache_control",
+			wantType:     "ephemeral",
+			wantAttached: true,
+		},
+		{
+			name: "responses image part",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{
+								"type": "input_image",
+								"image_url": "data:image/png;base64,iVBORw0KGgo=",
+								"prompt_cache_breakpoint": {"mode": "explicit"}
+							}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantType:     "ephemeral",
+			wantAttached: true,
+		},
+		{
+			name: "cache_control precedence with ttl",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{
+								"type": "input_text",
+								"text": "cached block",
+								"cache_control": {"type": "ephemeral", "ttl": "15m"},
+								"prompt_cache_breakpoint": {"mode": "explicit"}
+							}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantType:     "ephemeral",
+			wantTTL:      "15m",
+			wantAttached: true,
+		},
+		{
+			name: "non-object string marker ignored",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_text", "text": "hello", "prompt_cache_breakpoint": "explicit"}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantAttached: false,
+		},
+		{
+			name: "non-object boolean marker ignored",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_text", "text": "hello", "prompt_cache_breakpoint": true}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantAttached: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", []byte(tc.inputJSON), false)
+			resultJSON := gjson.ParseBytes(result)
+
+			if strings.Contains(string(result), "prompt_cache_breakpoint") {
+				t.Fatalf("prompt_cache_breakpoint should not be present in output JSON: %s", string(result))
+			}
+
+			cc := resultJSON.Get(tc.wantPath)
+			if !tc.wantAttached {
+				if cc.Exists() {
+					t.Fatalf("expected no cache_control at %s; got %s. Output: %s", tc.wantPath, cc.Raw, string(result))
+				}
+				return
+			}
+			if !cc.Exists() {
+				t.Fatalf("expected cache_control at %s; output: %s", tc.wantPath, string(result))
+			}
+			if got := cc.Get("type").String(); got != tc.wantType {
+				t.Fatalf("%s.type = %q, want %q; output: %s", tc.wantPath, got, tc.wantType, string(result))
+			}
+			if tc.wantTTL != "" {
+				if got := cc.Get("ttl").String(); got != tc.wantTTL {
+					t.Fatalf("%s.ttl = %q, want %q; output: %s", tc.wantPath, got, tc.wantTTL, string(result))
+				}
+			} else if cc.Get("ttl").Exists() {
+				t.Fatalf("unexpected ttl at %s; output: %s", tc.wantPath, string(result))
+			}
+		})
+	}
+}

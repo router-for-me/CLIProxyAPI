@@ -1432,3 +1432,159 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchem
 		t.Fatalf("tool_choice.name = %q, want mcp_server_special_get_time. Output: %s", toolChoiceName, result)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_PromptCacheBreakpoint(t *testing.T) {
+	tests := []struct {
+		name         string
+		inputJSON    string
+		wantPath     string
+		wantType     string
+		wantTTL      string
+		wantAttached bool
+	}{
+		{
+			name: "chat text part",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"messages": [
+					{
+						"role": "user",
+						"content": [
+							{"type": "text", "text": "cached prefix", "prompt_cache_breakpoint": {"mode": "explicit"}},
+							{"type": "text", "text": "fresh question"}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantType:     "ephemeral",
+			wantAttached: true,
+		},
+		{
+			name: "chat image part",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"messages": [
+					{
+						"role": "user",
+						"content": [
+							{
+								"type": "image_url",
+								"image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+								"prompt_cache_breakpoint": {"mode": "explicit"}
+							}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantType:     "ephemeral",
+			wantAttached: true,
+		},
+		{
+			name: "chat system part",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"messages": [
+					{
+						"role": "system",
+						"content": [
+							{"type": "text", "text": "cached system prompt", "prompt_cache_breakpoint": {"mode": "explicit"}}
+						]
+					},
+					{"role": "user", "content": "hi"}
+				]
+			}`,
+			wantPath:     "system.0.cache_control",
+			wantType:     "ephemeral",
+			wantAttached: true,
+		},
+		{
+			name: "cache_control precedence with ttl",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"messages": [
+					{
+						"role": "user",
+						"content": [
+							{
+								"type": "text",
+								"text": "cached block",
+								"cache_control": {"type": "ephemeral", "ttl": "10m"},
+								"prompt_cache_breakpoint": {"mode": "explicit"}
+							}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantType:     "ephemeral",
+			wantTTL:      "10m",
+			wantAttached: true,
+		},
+		{
+			name: "non-object string marker ignored",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"messages": [
+					{
+						"role": "user",
+						"content": [
+							{"type": "text", "text": "hello", "prompt_cache_breakpoint": "explicit"}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantAttached: false,
+		},
+		{
+			name: "non-object boolean marker ignored",
+			inputJSON: `{
+				"model": "gpt-4.1",
+				"messages": [
+					{
+						"role": "user",
+						"content": [
+							{"type": "text", "text": "hello", "prompt_cache_breakpoint": true}
+						]
+					}
+				]
+			}`,
+			wantPath:     "messages.0.content.0.cache_control",
+			wantAttached: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(tc.inputJSON), false)
+			resultJSON := gjson.ParseBytes(result)
+
+			if strings.Contains(string(result), "prompt_cache_breakpoint") {
+				t.Fatalf("prompt_cache_breakpoint should not be present in output JSON: %s", string(result))
+			}
+
+			cc := resultJSON.Get(tc.wantPath)
+			if !tc.wantAttached {
+				if cc.Exists() {
+					t.Fatalf("expected no cache_control at %s; got %s. Output: %s", tc.wantPath, cc.Raw, string(result))
+				}
+				return
+			}
+			if !cc.Exists() {
+				t.Fatalf("expected cache_control at %s; output: %s", tc.wantPath, string(result))
+			}
+			if got := cc.Get("type").String(); got != tc.wantType {
+				t.Fatalf("%s.type = %q, want %q; output: %s", tc.wantPath, got, tc.wantType, string(result))
+			}
+			if tc.wantTTL != "" {
+				if got := cc.Get("ttl").String(); got != tc.wantTTL {
+					t.Fatalf("%s.ttl = %q, want %q; output: %s", tc.wantPath, got, tc.wantTTL, string(result))
+				}
+			} else if cc.Get("ttl").Exists() {
+				t.Fatalf("unexpected ttl at %s; output: %s", tc.wantPath, string(result))
+			}
+		})
+	}
+}

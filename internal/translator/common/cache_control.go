@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -16,6 +17,15 @@ func isValidCacheControl(cc gjson.Result) bool {
 	return typ.Type == gjson.String && typ.String() == "ephemeral"
 }
 
+// isValidPromptCacheBreakpoint checks if prompt_cache_breakpoint is an object with mode "explicit".
+func isValidPromptCacheBreakpoint(pcb gjson.Result) bool {
+	if !pcb.Exists() || pcb.Type == gjson.Null || !pcb.IsObject() {
+		return false
+	}
+	mode := pcb.Get("mode")
+	return mode.Type == gjson.String && strings.EqualFold(strings.TrimSpace(mode.String()), "explicit")
+}
+
 // AttachCacheControl copies a Claude-compatible cache_control object from src onto dst.
 // Returns dst unchanged when cache_control is missing or not an object.
 func AttachCacheControl(dst []byte, src gjson.Result) []byte {
@@ -28,6 +38,23 @@ func AttachCacheControl(dst []byte, src gjson.Result) []byte {
 		return dst
 	}
 	return out
+}
+
+// AttachPartCacheControl applies cache_control onto dst from a content part src.
+// Explicit, valid cache_control on src wins. Otherwise, an object-valued
+// prompt_cache_breakpoint (mode: "explicit") attaches cache_control: {"type":"ephemeral"}.
+func AttachPartCacheControl(dst []byte, src gjson.Result) []byte {
+	if cc := src.Get("cache_control"); isValidCacheControl(cc) {
+		return AttachCacheControl(dst, src)
+	}
+	if pcb := src.Get("prompt_cache_breakpoint"); isValidPromptCacheBreakpoint(pcb) {
+		out, err := sjson.SetRawBytes(dst, "cache_control", []byte(`{"type":"ephemeral"}`))
+		if err != nil {
+			return dst
+		}
+		return out
+	}
+	return dst
 }
 
 // AttachMessageCacheControl applies message-level cache_control onto the last content block.
@@ -126,6 +153,10 @@ func extractFirstPartCacheControl(src gjson.Result) string {
 				raw = cc.Raw
 				return false
 			}
+			if isValidPromptCacheBreakpoint(part.Get("prompt_cache_breakpoint")) {
+				raw = `{"type":"ephemeral"}`
+				return false
+			}
 			return true
 		})
 		return raw
@@ -133,6 +164,9 @@ func extractFirstPartCacheControl(src gjson.Result) string {
 	if content.IsObject() {
 		if cc := content.Get("cache_control"); isValidCacheControl(cc) {
 			return cc.Raw
+		}
+		if isValidPromptCacheBreakpoint(content.Get("prompt_cache_breakpoint")) {
+			return `{"type":"ephemeral"}`
 		}
 	}
 	return ""

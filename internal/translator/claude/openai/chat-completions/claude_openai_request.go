@@ -176,7 +176,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 						if part.Get("type").String() == "text" {
 							textPart := []byte(`{"type":"text","text":""}`)
 							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-							textPart = common.AttachCacheControl(textPart, part)
+							textPart = common.AttachPartCacheControl(textPart, part)
 							systemBlocks = append(systemBlocks, textPart)
 						}
 						return true
@@ -494,7 +494,7 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 	if len(claudePart) == 0 {
 		return ""
 	}
-	return string(common.AttachCacheControl(claudePart, part))
+	return string(common.AttachPartCacheControl(claudePart, part))
 }
 
 func convertOpenAIImageURLToClaudePart(imageURL string) string {
