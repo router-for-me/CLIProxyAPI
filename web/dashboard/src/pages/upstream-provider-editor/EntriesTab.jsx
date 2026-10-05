@@ -45,7 +45,7 @@ function APIKeyEntriesEditor({ entries, onChange, error = '', proxyPools = [], l
     onChange(safe.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
   }
   function add() {
-    onChange([...safe, { api_key: '', proxy_url: '', proxy_pool_id: '', name: '', id: 0, weight: '', priority: '', disabled: false, max_concurrent: '', max_wait_ms: '', auto_disabled: false, auto_disabled_at: '', auto_disabled_reason: '' }]);
+    onChange([...safe, { api_key: '', proxy_url: '', proxy_pool_id: '', name: '', id: 0, weight: '', priority: '', disabled: false, max_concurrent: '', max_wait_ms: '', budget_usd: '', auto_disabled: false, auto_disabled_at: '', auto_disabled_reason: '' }]);
   }
   function remove(idx) { onChange(safe.filter((_, i) => i !== idx)); }
 
@@ -197,6 +197,18 @@ function APIKeyEntriesEditor({ entries, onChange, error = '', proxyPools = [], l
                 aria-invalid={!!rowErr.max_wait_ms}
                 data-testid={`api-key-entry-max-wait-ms-${idx}`}
               />
+              <input
+                type="text"
+                inputMode="decimal"
+                value={e.budget_usd ?? ''}
+                onChange={(ev) => update(idx, { budget_usd: ev.target.value })}
+                placeholder="budget USD"
+                title="Optional USD budget cap for this entry. Tracked on the Provider Budget page against actual spend. Blank = no budget."
+                spellCheck={false}
+                aria-label="API key entry budget USD"
+                aria-invalid={!!rowErr.budget_usd}
+                data-testid={`api-key-entry-budget-usd-${idx}`}
+              />
               <button
                 type="button"
                 className="list-editor__remove"
@@ -245,6 +257,9 @@ function APIKeyEntriesEditor({ entries, onChange, error = '', proxyPools = [], l
             )}
             {rowErr.max_wait_ms && (
               <div className="form__error" role="alert">{rowErr.max_wait_ms}</div>
+            )}
+            {rowErr.budget_usd && (
+              <div className="form__error" role="alert">{rowErr.budget_usd}</div>
             )}
           </div>
         );

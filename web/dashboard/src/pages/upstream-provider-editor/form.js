@@ -85,6 +85,16 @@ export function validateAPIKeyEntries(entries) {
         errs.max_wait_ms = 'Max wait must be a non-negative whole number of milliseconds (blank = default).';
       }
     }
+    // BudgetUSD: blank = no budget. Anything else must be a finite,
+    // non-negative amount in USD (decimal values allowed).
+    const budgetRaw = e && e.budget_usd;
+    if (budgetRaw !== undefined && budgetRaw !== null && String(budgetRaw).trim() !== '') {
+      const s = String(budgetRaw).trim();
+      const n = Number(s);
+      if (!Number.isFinite(n) || n < 0) {
+        errs.budget_usd = 'Budget must be a non-negative number in USD (blank = no budget).';
+      }
+    }
     if (Object.keys(errs).length > 0) out[i] = errs;
     if (trimmed !== '' && !errs.name) {
       seenNames.set(normalised, i);
@@ -142,6 +152,9 @@ function hydrateEntries(src) {
     // them as blank strings so a cleared field round-trips to "unset".
     max_concurrent: e && e.max_concurrent !== undefined && e.max_concurrent !== null ? e.max_concurrent : '',
     max_wait_ms: e && e.max_wait_ms !== undefined && e.max_wait_ms !== null ? e.max_wait_ms : '',
+    // BudgetUSD is the optional per-entry USD budget cap surfaced by the
+    // Provider Budget page. null/undefined = no budget → blank input.
+    budget_usd: e && e.budget_usd !== undefined && e.budget_usd !== null ? e.budget_usd : '',
     // Auto-disabled runtime flags are read-only in the editor (written by the
     // server-side sink). Hydrated so the badge + Re-enable action can render.
     auto_disabled: !!(e && e.auto_disabled),
@@ -259,6 +272,7 @@ export function buildForm(providerType, initial, carryOver) {
       disabled: false,
       max_concurrent: '',
       max_wait_ms: '',
+      budget_usd: '',
       auto_disabled: false,
       auto_disabled_at: '',
       auto_disabled_reason: '',
@@ -456,6 +470,14 @@ export function buildPayload(form, providerType) {
         if (mwRaw !== undefined && mwRaw !== null && String(mwRaw).trim() !== '') {
           const n = Number(mwRaw);
           if (Number.isInteger(n) && n >= 0) entry.max_wait_ms = n;
+        }
+        // BudgetUSD: optional per-entry USD budget cap for the Provider
+        // Budget page. Emitted only when filled with a non-negative number;
+        // blank = no budget (the store leaves the column NULL).
+        const budgetRaw = e.budget_usd;
+        if (budgetRaw !== undefined && budgetRaw !== null && String(budgetRaw).trim() !== '') {
+          const n = Number(budgetRaw);
+          if (Number.isFinite(n) && n >= 0) entry.budget_usd = n;
         }
         // Auto-disabled runtime flags: a manual Re-enable needs the PUT to
         // carry auto_disabled=false so it survives the backend's COALESCE

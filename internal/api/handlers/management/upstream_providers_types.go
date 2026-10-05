@@ -112,6 +112,11 @@ type upstreamProviderEntryReq struct {
 	// store.UpstreamProviderAPIKey.MaxWaitMs.
 	MaxWaitMs *int `json:"max_wait_ms,omitempty"`
 
+	// BudgetUSD is the optional per-entry USD budget cap consumed by the
+	// Provider Budget dashboard. nil = unlimited / not tracked. Mirrors
+	// store.UpstreamProviderAPIKey.BudgetUSD.
+	BudgetUSD *float64 `json:"budget_usd,omitempty"`
+
 	// AutoDisabled is the runtime auto-disable flag. Plan decision #7: the
 	// dashboard re-enables an auto-disabled entry by PUTting false here; the
 	// store always writes it (false clears the runtime flag).

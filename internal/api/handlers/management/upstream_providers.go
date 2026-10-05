@@ -208,6 +208,10 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 			v := *e.MaxWaitMs
 			entry.MaxWaitMs = &v
 		}
+		if e.BudgetUSD != nil {
+			v := *e.BudgetUSD
+			entry.BudgetUSD = &v
+		}
 		if e.AutoDisabledAt != "" {
 			if t, ok := parseRFC3339(e.AutoDisabledAt); ok {
 				entry.AutoDisabledAt = &t
