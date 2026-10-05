@@ -58,6 +58,8 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	} else if isCodexWebsocketConnectionLimitError(payload) {
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
+	} else {
+		statusError.retryAfter = helps.ParseRetryAfterHeader(headers.Get("Retry-After"), time.Now())
 	}
 	return statusErrWithHeaders{
 		statusErr: statusError,

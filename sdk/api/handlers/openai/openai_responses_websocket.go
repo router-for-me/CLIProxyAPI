@@ -105,9 +105,10 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
 }
 
 type responsesWebsocketWriter struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
-	closing atomic.Bool
+	conn               *websocket.Conn
+	writeMu            sync.Mutex
+	closing            atomic.Bool
+	passthroughHeaders bool
 }
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
@@ -196,7 +197,7 @@ func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
 		_, _ = w.closeWithoutError()
 		return
 	}
-	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg, w.passthroughHeaders)
 	if errBuild != nil {
 		_, _ = w.closeWithoutError()
 		return
@@ -278,6 +279,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		duplexInput = readResponsesWebsocketInput(socketCtx, cancelSocket, conn)
 	}
 	writer := newResponsesWebsocketWriter(conn)
+	writer.passthroughHeaders = handlers.PassthroughHeadersEnabled(h.Cfg)
 	passthroughSessionID := uuid.NewString()
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
