@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategyGreedy             schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -166,6 +167,8 @@ func newAuthScheduler(selector Selector) *authScheduler {
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
 func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
+	case *GreedySelector:
+		return schedulerStrategyGreedy
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
@@ -517,6 +520,23 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
+	if strategy == schedulerStrategyGreedy {
+		var best *Auth
+		var provider string
+		for i, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
+			if picked != nil && (best == nil || greedyAuthLess(picked, best, now)) {
+				best, provider = picked, normalized[i]
+			}
+		}
+		if best != nil {
+			return best, provider, nil
+		}
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
 	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
@@ -1374,6 +1394,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	}
 	var picked *scheduledAuth
 	switch strategy {
+	case schedulerStrategyGreedy:
+		picked = view.pickGreedy(predicate)
 	case schedulerStrategyFillFirst:
 		picked = view.pickFirst(predicate)
 	case schedulerStrategyWeightedRoundRobin:
