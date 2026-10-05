@@ -61,11 +61,10 @@ func (h *Handler) GetProviderBudget(c *gin.Context) {
 			COALESCE(e.name, ''),
 			LEFT(e.api_key, 8),
 			e.budget_usd,
-			COALESCE(SUM(u.cost_usd) FILTER (WHERE u.failed = FALSE), 0)
+			COALESCE(SUM(u.cost_usd), 0)
 		FROM %s p
 		JOIN %s e ON e.provider_id = p.id
-		LEFT JOIN %s u ON (u.provider = p.name OR u.provider = p.provider_type)
-			AND u.api_key_principal = e.api_key
+		LEFT JOIN %s u ON substring(u.entry_provider_key from ':key-([0-9]+)$')::bigint = e.id
 			AND u.requested_at >= $1
 			AND u.requested_at <= $2
 			AND u.failed = FALSE

@@ -21,10 +21,11 @@ func TestUsageColumnCountsMatchLists(t *testing.T) {
 	if errorCols != usageErrorColumnCount {
 		t.Fatalf("usageErrorColumnList has %d columns, usageErrorColumnCount = %d", errorCols, usageErrorColumnCount)
 	}
-	// Positional coupling: served_model must sit immediately after model in
-	// both lists. The batch builders bind args positionally against this
-	// order, so the whole served-model feature rests on it. The lists wrap
-	// across lines with tabs, so compare on whitespace-normalized fields.
+	// Positional coupling: served_model must sit right after model's entry
+	// attribution (entry_provider_key) in both lists. The batch builders bind
+	// args positionally against this order, so the whole served-model feature
+	// rests on it. The lists wrap across lines with tabs, so compare on
+	// whitespace-normalized fields.
 	for _, tc := range []struct {
 		name string
 		list string
@@ -33,8 +34,8 @@ func TestUsageColumnCountsMatchLists(t *testing.T) {
 		{"usageErrorColumnList", usageErrorColumnList},
 	} {
 		normalized := strings.Join(strings.Fields(tc.list), " ")
-		if !strings.Contains(normalized, "model, served_model,") {
-			t.Fatalf("%s: expected served_model immediately after model, got: %s", tc.name, normalized)
+		if !strings.Contains(normalized, "model, entry_provider_key, served_model,") {
+			t.Fatalf("%s: expected served_model right after model/entry_provider_key, got: %s", tc.name, normalized)
 		}
 	}
 }

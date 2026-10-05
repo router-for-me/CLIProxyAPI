@@ -33,6 +33,13 @@ type Record struct {
 	APIKey    string
 	AuthID    string
 	AuthIndex string
+	// EntryProviderKey is the synthesizer's per-entry routing identity of the
+	// upstream auth that served the request
+	// (auth.Attributes[AttributeEntryProviderKey], "<provider-key>:key-<entryID>").
+	// It lets the Postgres flusher attribute spend to the exact upstream
+	// provider API-key entry (provider budget tracking). Empty when the auth
+	// has no per-entry identity (legacy YAML entries, oauth channels).
+	EntryProviderKey string
 	// AccessTokenSHA256 identifies the OAuth token version without exposing the token.
 	AccessTokenSHA256 string
 	AuthType          string

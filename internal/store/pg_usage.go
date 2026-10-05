@@ -32,9 +32,12 @@ type UsageEvent struct {
 	Provider        string `json:"provider"`
 	ExecutorType    string `json:"executor_type,omitempty"`
 	Model           string `json:"model"`
-	// ServedModel is the model the upstream response reported serving. It
-	// differs from Model when the provider silently substituted a different
-	// model; empty when the upstream did not report one.
+	// EntryProviderKey is the synthesizer's per-entry routing identity of the
+	// upstream auth that served the request ("<provider-key>:key-<entryID>").
+	// The provider-budget query uses it to attribute spend to the exact
+	// upstream provider API-key entry. Empty when the serving auth had no
+	// per-entry identity (legacy YAML entries, oauth channels, row-level auths).
+	EntryProviderKey    string `json:"entry_provider_key,omitempty"`
 	ServedModel         string `json:"served_model,omitempty"`
 	Alias               string `json:"alias,omitempty"`
 	Endpoint            string `json:"endpoint,omitempty"`
@@ -615,14 +618,14 @@ func (s *UsageStore) PricingTable() string {
 }
 
 const usageEventColumnList = `
-	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model, served_model,
+	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model, entry_provider_key, served_model,
 	alias, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort, service_tier,
 	response_service_tier, tier, router_id, scored_tier, effective_tier, mapping_tier, decision_cause,
 	profile_version, profile_hash, auto_router_decision, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
 	ttft_ms, network_rtt_ms, failed, fail_status_code, generate, requested_at, energy_joules, provider_metadata
 `
-const usageEventColumnCount = 44
+const usageEventColumnCount = 45
 
 // InsertEvent records a single usage event. The api_key_principal field is
 // sealed at rest via the configured Sealer before being bound. When the
@@ -644,11 +647,12 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
+			$41, $42, $43, $44, $45)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
-		e.Provider, e.ExecutorType, e.Model, e.ServedModel, e.Alias, e.Endpoint,
+		e.Provider, e.ExecutorType, e.Model, nullableString(e.EntryProviderKey), e.ServedModel, e.Alias, e.Endpoint,
 		nullableString(e.ClientIP), nullableString(e.ForwardedFor),
 		e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
@@ -709,7 +713,7 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 		}
 		args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 			nullableString(ev.UserID),
-			ev.Provider, ev.ExecutorType, ev.Model, ev.ServedModel, ev.Alias, ev.Endpoint,
+			ev.Provider, ev.ExecutorType, ev.Model, nullableString(ev.EntryProviderKey), ev.ServedModel, ev.Alias, ev.Endpoint,
 			nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
 			ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
@@ -782,7 +786,7 @@ func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageE
 			}
 			args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 				nullableString(ev.UserID),
-				ev.Provider, ev.ExecutorType, ev.Model, ev.ServedModel, ev.Alias, ev.Endpoint,
+				ev.Provider, ev.ExecutorType, ev.Model, nullableString(ev.EntryProviderKey), ev.ServedModel, ev.Alias, ev.Endpoint,
 				nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
 				ev.AuthType,
 				ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,

@@ -35,28 +35,29 @@ type UsageReporter struct {
 	// reporter has escaped into it. Race-free only while the setter and the
 	// publisher run on that same goroutine (unlike routeModel, which is set
 	// before any goroutine spawn).
-	servedModel     string
-	endpoint        string
-	clientIP        string
-	forwardedFor    string
-	authID          string
-	authIndex       string
-	authMu          sync.RWMutex
-	accessTokenHash string
-	authType        string
-	apiKey          string
-	source          string
-	reasoning       string
-	serviceTier     string
-	tier            string
-	routerID        string
-	scoredTier      string
-	mappingTier     string
-	decisionCause   string
-	profileVersion  int64
-	profileHash     string
-	decisionJSON    []byte
-	generate        bool
+	servedModel      string
+	endpoint         string
+	clientIP         string
+	forwardedFor     string
+	authID           string
+	authIndex        string
+	entryProviderKey string
+	authMu           sync.RWMutex
+	accessTokenHash  string
+	authType         string
+	apiKey           string
+	source           string
+	reasoning        string
+	serviceTier      string
+	tier             string
+	routerID         string
+	scoredTier       string
+	mappingTier      string
+	decisionCause    string
+	profileVersion   int64
+	profileHash      string
+	decisionJSON     []byte
+	generate         bool
 	// requestID is the per-request correlation identifier sourced from the
 	// logging context. Persisted on usage_events/usage_errors so a row can be
 	// traced back to its log entries and searched via the dashboard's Request
@@ -125,6 +126,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
+		reporter.entryProviderKey = auth.Attributes[cliproxyauth.AttributeEntryProviderKey]
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
 	}
 	// Set the per-request body-capture gate when either the resolved provider
@@ -593,6 +595,7 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		RequestID:                r.requestID,
 		AuthID:                   r.authID,
 		AuthIndex:                r.authIndex,
+		EntryProviderKey:         r.entryProviderKey,
 		AccessTokenSHA256:        r.accessTokenFingerprint(),
 		AuthType:                 r.authType,
 		ReasoningEffort:          r.reasoning,

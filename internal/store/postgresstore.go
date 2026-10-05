@@ -1314,6 +1314,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			provider                TEXT NOT NULL,
 			executor_type           TEXT,
 			model                   TEXT NOT NULL,
+			entry_provider_key      TEXT,
 			alias                   TEXT,
 			route_model             TEXT,
 			served_model            TEXT,
@@ -1345,6 +1346,15 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	`, usageEventsTable)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events table: %w", err)
 	}
+	// entry_provider_key is the synthesizer's per-entry routing identity of the
+	// upstream auth that served the request ("<provider-key>:key-<entryID>").
+	// The provider-budget query joins entries through it. Idempotent ADD COLUMN
+	// keeps pre-existing stores in sync; '' = no per-entry identity.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS entry_provider_key TEXT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add entry_provider_key: %w", err)
+	}
 	// Idempotent ADD COLUMN for deployments predating the Neuralwatt billing columns.
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS energy_joules NUMERIC(12,6)`, usageEventsTable,
@@ -1360,11 +1370,6 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS network_rtt_ms BIGINT`, usageEventsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter usage_events add network_rtt_ms: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
-		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS network_rtt_ms BIGINT`, s.fullTableName(s.cfg.UsageErrorsTable),
-	)); err != nil {
-		return fmt.Errorf("postgres store: alter usage_errors add network_rtt_ms: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_usage_events_api_key ON %s(api_key_id, requested_at)`, usageEventsTable,
@@ -1529,6 +1534,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			provider                TEXT NOT NULL,
 			executor_type           TEXT,
 			model                   TEXT NOT NULL,
+			entry_provider_key      TEXT,
 			alias                   TEXT,
 			route_model             TEXT,
 			served_model            TEXT,
@@ -1555,6 +1561,21 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		)
 	`, usageErrorsTable)); err != nil {
 		return fmt.Errorf("postgres store: create usage_errors table: %w", err)
+	}
+	// entry_provider_key mirrors usage_events so failed attempts stay
+	// attributable to the same upstream provider API-key entry. Idempotent.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS entry_provider_key TEXT`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_errors add entry_provider_key: %w", err)
+	}
+	// network_rtt_ms is the measured upstream network round-trip. This ALTER
+	// must run AFTER the CREATE TABLE above: fresh schemas previously hit
+	// "relation does not exist" because it ran before the table existed.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS network_rtt_ms BIGINT`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_errors add network_rtt_ms: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_usage_errors_api_key ON %s(api_key_id, requested_at)`, usageErrorsTable,

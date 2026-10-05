@@ -26,9 +26,9 @@ type UsageError struct {
 	Provider        string `json:"provider"`
 	ExecutorType    string `json:"executor_type,omitempty"`
 	Model           string `json:"model"`
-	// ServedModel is the model the upstream response reported serving. It
-	// differs from Model when the provider silently substituted a different
-	// model; empty when the upstream did not report one.
+	// EntryProviderKey mirrors UsageEvent.EntryProviderKey so failed attempts
+	// carry the same per-entry upstream identity as successful events.
+	EntryProviderKey    string  `json:"entry_provider_key,omitempty"`
 	ServedModel         string  `json:"served_model,omitempty"`
 	Alias               string  `json:"alias,omitempty"`
 	RouteModel          string  `json:"route_model,omitempty"`
@@ -132,7 +132,7 @@ type UsageErrorRow struct {
 // BatchInsertErrors, and with errorRowSelectColumns used by SelectErrors /
 // GetError (which additionally projects the joined key_alias).
 const usageErrorColumnList = `
-	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model, served_model,
+	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model, entry_provider_key, served_model,
 	alias, route_model, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort,
 	service_tier, response_service_tier, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
@@ -141,7 +141,7 @@ const usageErrorColumnList = `
 
 // usageErrorColumnCount is the number of columns in usageErrorColumnList. It
 // must stay in sync with the list; mirrors usageEventColumnCount.
-const usageErrorColumnCount = 34
+const usageErrorColumnCount = 35
 
 // errorRowSelectColumns is the column list used by SelectErrors and GetError.
 // The api_key_principal column is intentionally not projected; KeyAlias is
@@ -238,11 +238,11 @@ func (s *UsageStore) InsertError(ctx context.Context, e UsageError) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34)
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
 	`, s.errorsTable, usageErrorColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
-		e.Provider, e.ExecutorType, e.Model, e.ServedModel, e.Alias, nullableString(e.RouteModel), e.Endpoint,
+		e.Provider, e.ExecutorType, e.Model, nullableString(e.EntryProviderKey), e.ServedModel, e.Alias, nullableString(e.RouteModel), e.Endpoint,
 		nullableString(e.ClientIP), nullableString(e.ForwardedFor),
 		e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
@@ -297,7 +297,7 @@ func (s *UsageStore) BatchInsertErrors(ctx context.Context, errors []UsageError)
 		}
 		args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 			nullableString(ev.UserID),
-			ev.Provider, ev.ExecutorType, ev.Model, ev.ServedModel, ev.Alias, nullableString(ev.RouteModel), ev.Endpoint,
+			ev.Provider, ev.ExecutorType, ev.Model, nullableString(ev.EntryProviderKey), ev.ServedModel, ev.Alias, nullableString(ev.RouteModel), ev.Endpoint,
 			nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
 			ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
@@ -403,7 +403,7 @@ func (s *UsageStore) ImportLiteLLMErrors(ctx context.Context, errs []UsageError)
 			}
 			args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 				nullableString(ev.UserID),
-				ev.Provider, ev.ExecutorType, ev.Model, ev.ServedModel, ev.Alias, nullableString(ev.RouteModel), ev.Endpoint,
+				ev.Provider, ev.ExecutorType, ev.Model, nullableString(ev.EntryProviderKey), ev.ServedModel, ev.Alias, nullableString(ev.RouteModel), ev.Endpoint,
 				nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
 				ev.AuthType,
 				ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
