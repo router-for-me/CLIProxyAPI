@@ -50,6 +50,7 @@ type OutboxStats struct {
 }
 
 type Outbox struct {
+	prices      *PriceBook
 	db          *bolt.DB
 	unavailable bool
 	cfg         config.AccountingOutboxConfig
@@ -98,6 +99,7 @@ func OpenOutbox(cfg config.AccountingOutboxConfig) (*Outbox, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize accounting store: %w", err)
 	}
+	o.prices = loadPriceBook(cfg.Pricing, cfg.DataPath)
 	go o.run()
 	return o, nil
 }
@@ -107,6 +109,9 @@ func (o *Outbox) HandleAccountingEvent(event AccountingEvent) {
 	if o.unavailable {
 		o.dropped.Add(1)
 		return
+	}
+	if event.Estimate == nil {
+		event.Estimate = o.prices.Estimate(event)
 	}
 	if !boundedAccountingEvent(event) {
 		o.dropped.Add(1)
@@ -165,6 +170,9 @@ func (o *Outbox) run() {
 
 // Insert returns success only after bbolt's transaction and fsync complete.
 func (o *Outbox) Insert(event AccountingEvent) error {
+	if event.Estimate == nil {
+		event.Estimate = o.prices.Estimate(event)
+	}
 	raw, err := json.Marshal(event)
 	if err != nil {
 		return err

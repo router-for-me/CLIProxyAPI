@@ -13,6 +13,7 @@ const AccountingEventSchemaVersion = 1
 
 // AccountingEvent is the destination-independent, credential-safe attempt contract.
 type AccountingEvent struct {
+	Estimate             *CostEstimate     `json:"estimate,omitempty"`
 	SchemaVersion        int               `json:"schema_version"`
 	ExecutionID          string            `json:"execution_id"`
 	TraceID              string            `json:"trace_id,omitempty"`
