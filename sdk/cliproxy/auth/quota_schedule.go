@@ -29,7 +29,7 @@ func quotaScheduleIdentityMatches(a, b *Auth) bool {
 	return true
 }
 
-// EffectiveQuotaResetSchedule uses the newest available provider observation.
+// EffectiveQuotaResetSchedule merges the newest available provider observation.
 // Header observations arrive on ordinary requests and require no usage probe.
 func EffectiveQuotaResetSchedule(auth *Auth) QuotaResetSchedule {
 	if auth == nil {
@@ -46,6 +46,18 @@ func EffectiveQuotaResetSchedule(auth *Auth) QuotaResetSchedule {
 	observed := quotaScheduleFromHeaders(auth.Provider, headers, auth.Quota.ObservedAt)
 	if observed.WeeklyResetAt.IsZero() && observed.FiveHourResetAt.IsZero() {
 		return schedule
+	}
+	return mergeQuotaResetSchedule(schedule, observed)
+}
+
+// ObservedAt identifies the latest merged observation, not the age of every
+// reset field. A missing window retains its prior reset only until that reset.
+func mergeQuotaResetSchedule(previous, observed QuotaResetSchedule) QuotaResetSchedule {
+	if observed.WeeklyResetAt.IsZero() && previous.WeeklyResetAt.After(observed.ObservedAt) {
+		observed.WeeklyResetAt = previous.WeeklyResetAt
+	}
+	if observed.FiveHourResetAt.IsZero() && previous.FiveHourResetAt.After(observed.ObservedAt) {
+		observed.FiveHourResetAt = previous.FiveHourResetAt
 	}
 	return observed
 }
@@ -112,7 +124,7 @@ func (m *Manager) RecordQuotaResetScheduleIfUnchanged(ctx context.Context, expec
 		return nil
 	}
 	updated := current.Clone()
-	updated.QuotaResetSchedule = schedule
+	updated.QuotaResetSchedule = mergeQuotaResetSchedule(current.QuotaResetSchedule, schedule)
 	updated.Generation++
 	updated.UpdatedAt = schedule.ObservedAt
 	m.auths[updated.ID] = updated

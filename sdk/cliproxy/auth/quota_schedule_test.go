@@ -9,6 +9,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 )
 
 func TestQuotaResetScheduleHeaderFreshness(t *testing.T) {
@@ -40,6 +41,48 @@ func TestQuotaResetScheduleHeaderFreshness(t *testing.T) {
 	a.Quota.ObservedAt = now.Add(-time.Minute)
 	if got := EffectiveQuotaResetSchedule(a); !got.WeeklyResetAt.Equal(weekly.Add(time.Hour)) {
 		t.Fatalf("old headers replaced usage: %+v", got)
+	}
+}
+
+func TestQuotaResetSchedulePartialHeaders(t *testing.T) {
+	now := time.Date(2026, 10, 5, 1, 0, 0, 0, time.UTC)
+	for _, window := range []string{"weekly", "five_hour"} {
+		for _, expired := range []bool{false, true} {
+			t.Run(window+"/expired="+strconv.FormatBool(expired), func(t *testing.T) {
+				oldObservation := now.Add(-time.Hour)
+				stored := QuotaResetSchedule{WeeklyResetAt: now.Add(24 * time.Hour), FiveHourResetAt: now.Add(time.Hour), ObservedAt: oldObservation}
+				other := now.Add(2 * time.Hour)
+				if expired {
+					other = now
+				}
+				headers := map[string]string{}
+				if window == "weekly" {
+					stored.FiveHourResetAt = other
+					headers["Anthropic-Ratelimit-Unified-7d-Reset"] = strconv.FormatInt(now.Add(48*time.Hour).Unix(), 10)
+				} else {
+					stored.WeeklyResetAt = other
+					headers["Anthropic-Ratelimit-Unified-5h-Reset"] = strconv.FormatInt(now.Add(3*time.Hour).Unix(), 10)
+				}
+				got := EffectiveQuotaResetSchedule(&Auth{Provider: "claude", QuotaResetSchedule: stored, Quota: QuotaState{ObservedAt: now, Signals: headers}})
+				fresh, carried := got.WeeklyResetAt, got.FiveHourResetAt
+				if window == "five_hour" {
+					fresh, carried = got.FiveHourResetAt, got.WeeklyResetAt
+				}
+				wantFresh := now.Add(48 * time.Hour)
+				if window == "five_hour" {
+					wantFresh = now.Add(3 * time.Hour)
+				}
+				if !fresh.Equal(wantFresh) || !got.ObservedAt.Equal(now) {
+					t.Fatalf("fresh observation incorrect: %+v", got)
+				}
+				if expired && !carried.IsZero() {
+					t.Fatal("expired stored window revived")
+				}
+				if !expired && !carried.Equal(other) {
+					t.Fatalf("known other window discarded: %+v", got)
+				}
+			})
+		}
 	}
 }
 
@@ -126,5 +169,66 @@ func TestQuotaResetScheduleSurvivesSameAccountUpdate(t *testing.T) {
 		} else if updated.QuotaResetSchedule != schedule {
 			t.Fatal("same account lost schedule")
 		}
+	}
+}
+
+func TestQuotaResetScheduleObservationChronology(t *testing.T) {
+	now := time.Date(2026, 10, 5, 1, 0, 0, 0, time.UTC)
+	stored := QuotaResetSchedule{WeeklyResetAt: now.Add(24 * time.Hour), FiveHourResetAt: now.Add(time.Hour), ObservedAt: now}
+	for _, tc := range []struct {
+		name     string
+		observed time.Time
+		signals  map[string]string
+		want     QuotaResetSchedule
+	}{
+		{"malformed", now.Add(time.Minute), map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": "bad"}, stored},
+		{"older", now.Add(-time.Minute), map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": strconv.FormatInt(now.Add(48*time.Hour).Unix(), 10)}, stored},
+		{"equal", now, map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": strconv.FormatInt(now.Add(48*time.Hour).Unix(), 10)}, stored},
+		{"both", now.Add(time.Minute), map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": strconv.FormatInt(now.Add(48*time.Hour).Unix(), 10), "Anthropic-Ratelimit-Unified-5h-Reset": strconv.FormatInt(now.Add(3*time.Hour).Unix(), 10)}, QuotaResetSchedule{WeeklyResetAt: now.Add(48 * time.Hour), FiveHourResetAt: now.Add(3 * time.Hour), ObservedAt: now.Add(time.Minute)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EffectiveQuotaResetSchedule(&Auth{Provider: "claude", QuotaResetSchedule: stored, Quota: QuotaState{ObservedAt: tc.observed, Signals: tc.signals}})
+			if got != tc.want {
+				t.Fatalf("schedule=%+v want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuotaResetScheduleSequentialSparseResults(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	a, err := m.Register(WithSkipPersist(context.Background()), &Auth{ID: "sparse", Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	weekly, five := now.Add(24*time.Hour), now.Add(time.Hour)
+	for _, window := range []struct {
+		name  string
+		reset time.Time
+	}{{"Anthropic-Ratelimit-Unified-7d-Reset", weekly}, {"Anthropic-Ratelimit-Unified-5h-Reset", five}} {
+		ctx := internallogging.WithResponseHeadersHolder(WithSkipPersist(context.Background()))
+		h := http.Header{}
+		h.Set(window.name, strconv.FormatInt(window.reset.Unix(), 10))
+		internallogging.SetResponseHeaders(ctx, h)
+		m.MarkResult(ctx, Result{AuthID: a.ID, Provider: a.Provider, Success: true})
+	}
+	got, _ := m.GetByID(a.ID)
+	if !got.QuotaResetSchedule.WeeklyResetAt.Equal(weekly) || !got.QuotaResetSchedule.FiveHourResetAt.Equal(five) {
+		t.Fatalf("sparse observations not retained: %+v", got.QuotaResetSchedule)
+	}
+	if got.QuotaResetSchedule.ObservedAt != got.Quota.ObservedAt {
+		t.Fatal("latest merged observation not recorded")
+	}
+	if len(got.Quota.Signals) != 1 {
+		t.Fatal("passive quota signals were accumulated")
+	}
+	expected := got.Clone()
+	published := m.RecordQuotaResetScheduleIfUnchanged(context.Background(), expected, QuotaResetSchedule{WeeklyResetAt: weekly.Add(time.Hour), ObservedAt: got.QuotaResetSchedule.ObservedAt.Add(time.Second)})
+	if published == nil || !published.QuotaResetSchedule.FiveHourResetAt.Equal(five) {
+		t.Fatal("partial usage observation lost known header window")
+	}
+	if got.Unavailable || got.Quota.Exceeded || !got.NextRetryAfter.IsZero() {
+		t.Fatal("schedule observation changed availability")
 	}
 }
