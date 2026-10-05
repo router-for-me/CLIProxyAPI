@@ -80,6 +80,10 @@ func TestQuotaExhaustionIsIndependentOfAccounting(t *testing.T) {
 				if got := gjson.Get(first.Body, "error.type").String(); got != f.errorType {
 					t.Errorf("%s: error type = %q, want the provider's %q: %s", mode, got, f.errorType, first.Body)
 				}
+				// A provider that sends Retry-After has it forwarded verbatim on the first rejection too.
+				if got := first.Header.Get("Retry-After"); got != f.retryAfter {
+					t.Errorf("%s: first rejection Retry-After = %q, want the provider's %q", mode, got, f.retryAfter)
+				}
 				if f.contract.provider == "codex" && gjson.Get(first.Body, "error.resets_in_seconds").Int() != reset {
 					t.Errorf("%s: codex reset information was altered: %s", mode, first.Body)
 				}
