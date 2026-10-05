@@ -59,3 +59,27 @@ func TestQuotaUsageHasCapacity(t *testing.T) {
 		})
 	}
 }
+
+func TestQuotaVersionFirstClaudeModels(t *testing.T) {
+	for _, tt := range []struct {
+		name, model string
+		want        bool
+	}{
+		{"sonnet", "claude-3-7-sonnet-20250219", true},
+		{"haiku", "claude-3-5-haiku-20241022", true},
+		{"unknown_prefix", "other-3-7-sonnet-20250219", false},
+		{"prefixed", "fake-claude-3-7-sonnet-20250219", false},
+		{"nonnumeric_version", "claude-three-7-sonnet-20250219", false},
+		{"empty_version", "claude-3--sonnet-20250219", false},
+		{"unknown_family", "claude-3-7-unknown-20250219", false},
+		{"trailing_separator", "claude-3-7-sonnet-", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &coreauth.Auth{ModelStates: map[string]*coreauth.ModelState{tt.model: {Unavailable: true}}}
+			body := []byte(`{"five_hour":{"utilization":1},"seven_day":{"utilization":2},"limits":[{"kind":"weekly_scoped","percent":3,"scope":{"model":{"id":"` + tt.model + `"}}}]}`)
+			if got := quotaUsageHasCapacity("claude", body, auth); got != tt.want {
+				t.Fatalf("capacity=%v want %v", got, tt.want)
+			}
+		})
+	}
+}

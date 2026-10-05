@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -83,9 +84,14 @@ func quotaUsageHasCapacity(provider string, body []byte, auth *coreauth.Auth) bo
 	return false
 }
 
+var quotaVersionFirstClaudeModel = regexp.MustCompile(`^claude-([0-9]+-)+(opus|sonnet|haiku|fable)(-[a-z0-9]+)*$`)
+
 func quotaModelFamily(id, name string) bool {
 	for _, value := range []string{id, name} {
 		value = strings.ToLower(strings.TrimSpace(value))
+		if quotaVersionFirstClaudeModel.MatchString(value) {
+			return true
+		}
 		for _, family := range []string{"opus", "sonnet", "haiku", "fable"} {
 			if value == family || strings.HasPrefix(value, family+" ") || strings.HasPrefix(value, "claude-"+family+"-") || value == "claude-"+family {
 				return true
