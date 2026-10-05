@@ -54,6 +54,8 @@ type UsageReporter struct {
 	ttftStart           time.Time
 	ttftSet             bool
 	once                sync.Once
+	observedMu          sync.Mutex
+	observed            usage.Detail
 
 	responseModelMu sync.RWMutex
 	// responseModel holds the latest model name reported by the upstream response.
@@ -200,7 +202,11 @@ func (r *UsageReporter) accessTokenFingerprint() string {
 // ObserveResponseModel stores the model reported by an upstream response or event and
 // ignores payloads without one; the substitution warning is emitted at publish time.
 func (r *UsageReporter) ObserveResponseModel(payload []byte) {
-	if r == nil || r.responseModelFinal.Load() {
+	if r == nil {
+		return
+	}
+	r.ObserveUsagePayload(payload)
+	if r.responseModelFinal.Load() {
 		return
 	}
 	provider := ""
@@ -502,15 +508,26 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	}
 	rec := r.buildRecordForModel(model, detail, false, usage.Failure{})
 	rec.RequestID = uuid.NewString()
+	rec.AdditionalModel = true
 	return rec, true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
+	fail := failFromErrors(errs...)
+	r.ObserveResponseModel([]byte(fail.Body))
+	r.publishWithOutcome(ctx, usage.Detail{}, true, fail)
 }
 
 func (r *UsageReporter) PublishFailureWithDetail(ctx context.Context, detail usage.Detail, errs ...error) {
-	r.publishWithOutcome(ctx, detail, true, failFromErrors(errs...))
+	if r == nil {
+		return
+	}
+	fail := failFromErrors(errs...)
+	r.ObserveResponseModel([]byte(fail.Body))
+	if failureDetail := r.usageDetailFromPayload([]byte(fail.Body)); failureDetail.UsagePresent {
+		detail = failureDetail
+	}
+	r.publishWithOutcome(ctx, detail, true, fail)
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -526,6 +543,15 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
+	r.observedMu.Lock()
+	if !detail.UsagePresent && !hasNonZeroTokenUsage(detail) {
+		tier := detail.ResponseServiceTier
+		detail = r.observed
+		if tier != "" {
+			detail.ResponseServiceTier = tier
+		}
+	}
+	r.observedMu.Unlock()
 	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.once.Do(func() {
 		r.publishAttemptRecord(ctx, r.buildRecord(detail, failed, fail))
@@ -556,13 +582,19 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		r.publishAttemptRecord(ctx, r.buildRecord(usage.Detail{}, false, usage.Failure{}))
+		r.observedMu.Lock()
+		detail := r.observed
+		r.observedMu.Unlock()
+		r.publishAttemptRecord(ctx, r.buildRecord(detail, false, usage.Failure{}))
 	})
 }
 
 // publishAttemptRecord emits the record for one upstream attempt and the
 // observability warnings that belong to the attempt rather than to a single event.
 func (r *UsageReporter) publishAttemptRecord(ctx context.Context, record usage.Record) {
+	if record.Failed && ctx != nil && ctx.Err() != nil {
+		record.Interrupted = true
+	}
 	r.publishRecord(ctx, record)
 	r.warnModelSubstitution(ctx)
 }
@@ -616,6 +648,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		BaseURL:             r.baseURL,
 		ExecutorType:        r.executorType,
 		Model:               model,
+		ExecutedModel:       r.UpstreamModel(),
 		Alias:               r.alias,
 		Source:              r.source,
 		APIKey:              r.apiKey,
@@ -830,7 +863,7 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 		return
 	}
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
-	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) {
+	if responseServiceTier == "" || detail.UsagePresent || hasNonZeroTokenUsage(detail) {
 		preservedTier := b.detail.ResponseServiceTier
 		b.detail = detail
 		if b.detail.ResponseServiceTier == "" {
@@ -1004,10 +1037,13 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !outputNode.Exists() {
 		outputNode = usageNode.Get("output_tokens")
 	}
+	evidence := usage.CaptureTokenEvidence([]byte(usageNode.Raw))
 	detail := usage.Detail{
-		InputTokens:  inputNode.Int(),
-		OutputTokens: outputNode.Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
+		UsagePresent:  evidence != nil,
+		TokenEvidence: evidence,
+		InputTokens:   inputNode.Int(),
+		OutputTokens:  outputNode.Int(),
+		TotalTokens:   usageNode.Get("total_tokens").Int(),
 	}
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
@@ -1139,7 +1175,10 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		// is inconsistent.
 		nonReasoningOutput = 0
 	}
+	evidence := usage.CaptureTokenEvidence([]byte(usageNode.Raw))
 	detail := usage.Detail{
+		UsagePresent:        evidence != nil,
+		TokenEvidence:       evidence,
 		InputTokens:         usageNode.Get("input_tokens").Int(),
 		OutputTokens:        rawOutputTokens,
 		ReasoningTokens:     reasoningTokens,
@@ -1168,7 +1207,10 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	cachedTokens := node.Get("cachedContentTokenCount").Int()
 	toolUseTokens := firstExistingUsageNode(node, "toolUsePromptTokenCount", "tool_use_prompt_token_count").Int()
 	inputTokens, okInput := safeUsageTokenSum(node.Get("promptTokenCount").Int(), toolUseTokens)
+	evidence := usage.CaptureTokenEvidence([]byte(node.Raw))
 	detail := usage.Detail{
+		UsagePresent:    evidence != nil,
+		TokenEvidence:   evidence,
 		InputTokens:     inputTokens,
 		OutputTokens:    node.Get("candidatesTokenCount").Int(),
 		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
@@ -1207,7 +1249,10 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
 		toolUseTokens,
 	)
+	evidence := usage.CaptureTokenEvidence([]byte(node.Raw))
 	detail := usage.Detail{
+		UsagePresent:        evidence != nil,
+		TokenEvidence:       evidence,
 		InputTokens:         inputTokens,
 		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
 		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
@@ -1244,7 +1289,7 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 }
 
 func hasUsageDetail(detail usage.Detail) bool {
-	return hasNonZeroTokenUsage(detail)
+	return detail.UsagePresent || hasNonZeroTokenUsage(detail)
 }
 
 func ParseInteractionsUsage(data []byte) usage.Detail {

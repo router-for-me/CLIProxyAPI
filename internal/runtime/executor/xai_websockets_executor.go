@@ -720,7 +720,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			if sess != nil {
 				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, terminateReason, terminateErr)
 			}
-			reporter.PublishFailure(ctx, terminateErr)
+			streamUsage.PublishFailure(ctx, reporter, terminateErr)
 		}
 
 		claudeInputTokens := helps.NewClaudeInputTokenState(prepared.from, prepared.to, prepared.responseFormat, prepared.originalPayload)
@@ -765,7 +765,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				terminateReason = "read_error"
 				terminateErr = mappedErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
-				reporter.PublishFailure(ctx, mappedErr)
+				streamUsage.PublishFailure(ctx, reporter, mappedErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: mappedErr})
 				return
 			}
@@ -775,7 +775,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					terminateReason = "unexpected_binary"
 					terminateErr = errBinary
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "unexpected_binary", errBinary)
-					reporter.PublishFailure(ctx, errBinary)
+					streamUsage.PublishFailure(ctx, reporter, errBinary)
 					if sess != nil {
 						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 					}
@@ -793,11 +793,12 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 
+			reporter.ObserveUsagePayload(payload)
 			if wsErr, ok := parseXAIWebsocketError(payload); ok {
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
-				reporter.PublishFailure(ctx, wsErr)
+				streamUsage.PublishFailure(ctx, reporter, wsErr)
 				if sess != nil {
 					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
 				}
@@ -826,7 +827,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 							_ = send(cliproxyexecutor.StreamChunk{Payload: encodeCodexWebsocketAsSSE(event)})
 						}
 					}
-					reporter.PublishFailure(ctx, errBridge)
+					streamUsage.PublishFailure(ctx, reporter, errBridge)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errBridge})
 					return
 				}
