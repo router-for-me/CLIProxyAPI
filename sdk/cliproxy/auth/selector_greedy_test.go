@@ -82,6 +82,8 @@ func TestGreedySchedulerEligibilityAndMixed(t *testing.T) {
 			if got := pick(nil); got.ID != "a" {
 				t.Fatal("quota rank overrode priority")
 			}
+			a.Attributes = nil
+			s.upsertAuth(a)
 			b.Unavailable = true
 			b.NextRetryAfter = now.Add(time.Hour)
 			b.Quota.Exceeded = true
