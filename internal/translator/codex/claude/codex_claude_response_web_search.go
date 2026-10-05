@@ -127,9 +127,17 @@ func codexWebSearchQuery(root, item gjson.Result) string {
 }
 
 func codexWebSearchResultContent(root, item gjson.Result) []byte {
-	results := item.Get("results")
-	if !results.IsArray() {
-		results = root.Get("results")
+	var results gjson.Result
+	for _, candidate := range []gjson.Result{
+		item.Get("results"),
+		root.Get("results"),
+		item.Get("action.sources"),
+		root.Get("action.sources"),
+	} {
+		if candidate.IsArray() {
+			results = candidate
+			break
+		}
 	}
 	if !results.IsArray() {
 		return nil

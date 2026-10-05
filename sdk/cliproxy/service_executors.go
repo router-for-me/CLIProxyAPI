@@ -23,6 +23,11 @@ var pluginHostHasAuthProvider = func(host *pluginhost.Host, provider string) boo
 	return host != nil && host.HasAuthProvider(provider)
 }
 
+// pluginHostHasAuthModelProvider only checks declarations, never model discovery.
+var pluginHostHasAuthModelProvider = func(host *pluginhost.Host, provider string) bool {
+	return host != nil && host.HasAuthModelProvider(provider)
+}
+
 type openAICompatibilityRegistrationEntry struct {
 	providerKey string
 	models      []*ModelInfo
@@ -511,6 +516,9 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	}
 	if result.Err != nil {
 		return true
+	}
+	if s.coreManager != nil && strings.EqualFold(a.Provider, "antigravity") && !s.antigravityHomeEnabled() {
+		defer s.coreManager.ReconcileRegistryModelStates(ctx, a.ID)
 	}
 	activeAuth := a
 	providerKey := strings.ToLower(strings.TrimSpace(result.Provider))

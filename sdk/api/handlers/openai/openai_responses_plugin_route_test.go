@@ -85,13 +85,13 @@ func TestResponsesStreamTrueReachesPluginExecutorStream(t *testing.T) {
 }
 
 func TestResponsesWithoutStreamParsesPluginUsage(t *testing.T) {
-	plugin := &responsesUsageCapture{records: make(chan usage.Record, 4)}
+	plugin := &responsesUsageCapture{records: make(chan usage.Record, 4), model: "commandcode/deepseek/usage-test"}
 	usage.RegisterNamedPlugin("test-responses-plugin-route-usage", plugin)
 	t.Cleanup(func() {
 		usage.RegisterNamedPlugin("test-responses-plugin-route-usage", responsesUsageNop{})
 	})
 
-	handler, host, ctx := newResponsesPluginRouteContext(t, `{"model":"commandcode/deepseek/deepseek-v4.1-flash","input":[{"role":"user","type":"message","content":"Write me a poem"}]}`)
+	handler, host, ctx := newResponsesPluginRouteContext(t, `{"model":"commandcode/deepseek/usage-test","input":[{"role":"user","type":"message","content":"Write me a poem"}]}`)
 	host.execPayload = []byte(`{"id":"resp_1","object":"response","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`)
 	handler.Responses(ctx)
 	if host.executeCalls != 1 || host.streamCalls != 0 {
@@ -119,10 +119,12 @@ func TestResponsesWithoutStreamParsesPluginUsage(t *testing.T) {
 
 type responsesUsageCapture struct {
 	records chan usage.Record
+	model   string
 }
 
 func (p *responsesUsageCapture) HandleUsage(_ context.Context, record usage.Record) {
-	if record.Provider != "commandcode" {
+	// A previous streaming request may publish after this test has started.
+	if record.Provider != "commandcode" || record.Model != p.model {
 		return
 	}
 	select {

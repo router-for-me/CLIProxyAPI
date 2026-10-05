@@ -70,6 +70,68 @@ func collectAntigravityStream(t *testing.T, baseURL string, sourceFormat, respon
 	return chunks
 }
 
+func TestAntigravityStreamSurfacesTrailingBackendError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial"}]}}],"modelVersion":"gemini-3.7-flash"}}
+
+{
+  "error": {
+    "code": 503,
+    "message": "backend capacity exhausted",
+    "status": "UNAVAILABLE"
+  }
+}
+`)
+	}))
+	defer server.Close()
+
+	for _, format := range []sdktranslator.Format{sdktranslator.FormatClaude, sdktranslator.FormatOpenAI} {
+		t.Run(format.String(), func(t *testing.T) {
+			executor := NewAntigravityExecutor(&config.Config{
+				Antigravity:  config.AntigravityConfig{},
+				RequestRetry: 1,
+			})
+			result, errExecute := executor.ExecuteStream(context.Background(), &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"access_token": "token-123",
+					"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+					"project_id":   "project-1",
+				},
+				Attributes: map[string]string{"base_url": server.URL},
+			}, cliproxyexecutor.Request{
+				Model:   "gemini-3.7-flash",
+				Payload: []byte(`{"model":"gemini-3.7-flash","stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat:   format,
+				ResponseFormat: format,
+				Stream:         true,
+			})
+			if errExecute != nil {
+				t.Fatalf("ExecuteStream() error = %v", errExecute)
+			}
+
+			var streamErr error
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+					continue
+				}
+				if bytes.Contains(chunk.Payload, []byte("message_stop")) || bytes.Contains(chunk.Payload, []byte(`"finish_reason":"stop"`)) {
+					t.Fatalf("trailing backend error became successful completion: %s", chunk.Payload)
+				}
+			}
+			if streamErr == nil || !bytes.Contains([]byte(streamErr.Error()), []byte("backend capacity exhausted")) {
+				t.Fatalf("trailing backend error = %v, want surfaced backend message", streamErr)
+			}
+			statusError, ok := streamErr.(interface{ StatusCode() int })
+			if !ok || statusError.StatusCode() != http.StatusServiceUnavailable {
+				t.Fatalf("trailing backend status code = %v, want %d", streamErr, http.StatusServiceUnavailable)
+			}
+		})
+	}
+}
+
 // TestAntigravityStreamDoesNotEmitClaudeMessageStopOnReadError locks in the
 // executor ordering fix on the response format where it is observable: the
 // Claude translator has always synthesized a terminal event on [DONE], so

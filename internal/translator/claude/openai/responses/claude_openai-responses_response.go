@@ -1177,6 +1177,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 
 // ConvertClaudeResponseToOpenAIResponsesNonStream aggregates Claude SSE into a single OpenAI Responses JSON.
 func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+	rawJSON, nativeModel := translatorcommon.ClaudeMessagesJSONToSSE(rawJSON)
 	// Aggregate Claude SSE lines into a single OpenAI Responses JSON (non-stream)
 	// We follow the same aggregation logic as the streaming variant but produce
 	// one final object matching docs/out.json structure.
@@ -1496,6 +1497,12 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		if v := req.Get("metadata"); v.Exists() {
 			out, _ = sjson.SetBytes(out, "metadata", v.Value())
 		}
+	}
+
+	// A native response's model is authoritative; otherwise retain request echo
+	// behavior, including the existing SSE path.
+	if nativeModel != "" {
+		out, _ = sjson.SetBytes(out, "model", nativeModel)
 	}
 
 	// Build output array in the order of the original content blocks.

@@ -18,13 +18,17 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
+// ClaudeExecutor handles Anthropic Claude over the messages API and keeps bounded
+// in-memory thread alias state for OAuth continuations.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
 	cfg                     *config.Config
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
 	oauthProfileFetcher     claudeOAuthProfileFetcher
+	// oauthToolAliases is shared by every ForAPIKey copy of this executor;
+	// constructors allocate it so copies made per request reuse one store.
+	oauthToolAliases *claudeOAuthToolAliasStore
 }
 
 type claudeOAuthCancellationError struct {
@@ -136,7 +140,9 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
 
-func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
+func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
+	return &ClaudeExecutor{cfg: cfg, oauthToolAliases: &claudeOAuthToolAliasStore{}}
+}
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 

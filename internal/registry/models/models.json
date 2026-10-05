@@ -3979,6 +3979,54 @@
   ],
   "antigravity": [
     {
+      "id": "claude-opus-4-6-thinking",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Claude Opus 4.6 (Thinking)",
+      "name": "claude-opus-4-6-thinking",
+      "description": "Claude Opus 4.6 (Thinking)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Claude Sonnet 4.6 (Thinking)",
+      "name": "claude-sonnet-4-6",
+      "description": "Claude Sonnet 4.6 (Thinking)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-opus-5-5-high",
       "object": "model",
       "owned_by": "antigravity",
