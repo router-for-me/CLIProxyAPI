@@ -34,12 +34,10 @@ type PricingConfig struct {
 }
 
 type LiteLLMExporterConfig struct {
-	ReceiverProfile string                     `yaml:"receiver-profile" json:"receiver-profile"`
-	Enabled         bool                       `yaml:"enabled" json:"enabled"`
-	URL             string                     `yaml:"url" json:"url"`
-	Version         string                     `yaml:"version" json:"version"`
-	AdminKeyEnv     string                     `yaml:"admin-key-env" json:"admin-key-env"`
-	Clients         map[string]LiteLLMIdentity `yaml:"clients" json:"clients"`
+	Enabled     bool                       `yaml:"enabled" json:"enabled"`
+	URL         string                     `yaml:"url" json:"url"`
+	AdminKeyEnv string                     `yaml:"admin-key-env" json:"admin-key-env"`
+	Clients     map[string]LiteLLMIdentity `yaml:"clients" json:"clients"`
 }
 
 type LiteLLMIdentity struct {

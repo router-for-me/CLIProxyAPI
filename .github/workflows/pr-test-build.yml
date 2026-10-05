@@ -24,7 +24,7 @@ jobs:
           go build -o test-output ./cmd/server
           rm -f test-output
 
-  litellm-contract:
+  accounting:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,17 +32,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Accounting tests
         run: |
           go test -race ./sdk/cliproxy/usage ./internal/config
           go test -race ./sdk/cliproxy -run TestServiceAccounting
           go vet ./sdk/cliproxy/usage ./internal/config ./sdk/cliproxy
-      - name: Pinned LiteLLM contract
-        env:
-          LITELLM_LOCAL_MODEL_COST_MAP: "True"
-        run: |
-          python -m pip install -r test/litellm/requirements.txt
-          python -m pytest -q test/litellm/test_contract.py
