@@ -104,6 +104,7 @@ func buildV8Paths() []configPath {
 		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},
 		{"logs-max-total-size-mb", "observability.logs.logs-max-total-size-mb"}, {"request-log", "observability.logs.request-log"},
 		{"error-logs-max-files", "observability.logs.error-logs-max-files"},
+		{"accounting-outbox", "observability.accounting-outbox"},
 		{"usage-statistics-enabled", "observability.usage.usage-statistics-enabled"},
 		{"redis-usage-queue-retention-seconds", "observability.usage.redis-usage-queue-retention-seconds"}, {"pprof", "observability.pprof"},
 	}
@@ -251,6 +252,9 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	}
 	if errValidate := decoded.Models.Validate(); errValidate != nil {
 		return errValidate
+	}
+	if err := decoded.AccountingOutbox.Validate(); err != nil {
+		return err
 	}
 	*cfg = Config(decoded)
 	cfg.OAuthOnlyFields = nil
@@ -912,6 +916,9 @@ func ValidateV8Config(data []byte) error {
 	var cfg legacyConfig
 	if errDecode := decoder.Decode(&cfg); errDecode != nil {
 		return errDecode
+	}
+	if err := cfg.AccountingOutbox.Validate(); err != nil {
+		return err
 	}
 	return cfg.Models.Validate()
 }

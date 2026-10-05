@@ -65,6 +65,8 @@ type Config struct {
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
+	AccountingOutbox AccountingOutboxConfig `yaml:"accounting-outbox" json:"accounting-outbox"`
+
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
 	// RedisUsageQueueRetentionSeconds controls how long usage queue items are retained

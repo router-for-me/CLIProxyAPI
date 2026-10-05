@@ -18,6 +18,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 )
@@ -28,6 +29,11 @@ import (
 type Service struct {
 	// cfg holds the current application configuration.
 	cfg *config.Config
+
+	accountingMu              sync.Mutex
+	accountingOutbox          *usage.Outbox
+	accountingDetach          func()
+	accountingShutdownSeconds int
 
 	// cfgMu protects concurrent access to the configuration.
 	cfgMu sync.RWMutex

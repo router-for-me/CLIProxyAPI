@@ -1080,6 +1080,15 @@ multimedia:
 
 # Application logs, request logs, usage aggregation, and profiling.
 observability:
+  accounting-outbox:
+    enabled: false
+    data-path: "" # Required when enabled, one process per persistent volume path.
+    queue-capacity: 512
+    max-disk-mb: 256
+    max-events: 100000
+    retention-hours: 168
+    shutdown-seconds: 5
+
   logs:
     # Enable debug logging
     debug: false
