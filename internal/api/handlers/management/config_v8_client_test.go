@@ -48,12 +48,16 @@ func TestConfigV8ClientMultiAgentMigration(t *testing.T) {
 				t.Fatalf("GET canonical value = %s, want true", got)
 			}
 			request(http.MethodPut, canonical, `"invalid"`, http.StatusUnprocessableEntity)
-			for _, old := range []string{"providers/codex", "oauth/providers/codex", "codex"} {
-				request(http.MethodPut, "/v8/management/config/"+old+"/optimize-multi-agent-v2", "true", http.StatusBadRequest)
-			}
 			data, errRead := os.ReadFile(path)
 			if errRead != nil || !bytes.Equal(data, []byte(raw)) {
 				t.Fatalf("GET or rejected write changed legacy file: %v", errRead)
+			}
+			for _, old := range []string{"providers/codex", "oauth/providers/codex", "codex"} {
+				url := "/v8/management/config/" + old + "/optimize-multi-agent-v2"
+				request(http.MethodPut, url, "true", http.StatusOK)
+				if got := request(http.MethodGet, url, "", http.StatusOK); got != "true" {
+					t.Fatalf("historical client path returned %s", got)
+				}
 			}
 			for _, enabled := range []bool{false, true} {
 				body := "false"

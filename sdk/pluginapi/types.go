@@ -884,6 +884,20 @@ type HostAffinityLookupResponse struct {
 	Unavailable bool `json:"unavailable,omitempty"`
 }
 
+// HostRoutingResetCooldownRequest asks the host to clear quota and cooldown routing state for one credential.
+type HostRoutingResetCooldownRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+}
+
+// HostRoutingResetCooldownResponse reports the credential whose quota and cooldown state was cleared.
+type HostRoutingResetCooldownResponse struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// Models lists the model keys whose routing state was reset.
+	Models []string `json:"models,omitempty"`
+}
+
 // HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.
 type HTTPWireProfile struct {
 	// HTTP1Only forces the transport to use HTTP/1.1 and disables HTTP/2 negotiation.

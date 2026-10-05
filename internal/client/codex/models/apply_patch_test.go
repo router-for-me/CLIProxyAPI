@@ -71,6 +71,11 @@ func TestCodexCatalogApplyPatchCapability(t *testing.T) {
 						var want any
 						if capability.want {
 							want = "freeform"
+						} else if capability.get == nil && providerLookup.name == "nil" {
+							switch model.id {
+							case "gpt-5.5", "catalog-patch-alias", "team/gpt-5.5", "gpt-reserve":
+								want = "freeform"
+							}
 						}
 						if !present || value != want {
 							t.Fatalf("apply_patch_tool_type = %#v (present %v), want %#v", value, present, want)
@@ -97,7 +102,15 @@ func TestCodexCatalogApplyPatchLegacyEntryPointsUnknown(t *testing.T) {
 	}
 	for _, response := range responses {
 		for _, entry := range response["models"].([]map[string]any) {
-			assertCodexNullableFieldCleared(t, entry, "apply_patch_tool_type")
+			slug := stringModelValue(entry, "slug")
+			switch slug {
+			case "gpt-5.5", "gpt-reserve":
+				if got, _ := entry["apply_patch_tool_type"].(string); got != "freeform" {
+					t.Fatalf("model %s: apply_patch_tool_type = %#v, want freeform", slug, entry["apply_patch_tool_type"])
+				}
+			default:
+				assertCodexNullableFieldCleared(t, entry, "apply_patch_tool_type")
+			}
 		}
 	}
 }
@@ -137,4 +150,51 @@ func TestApplyPatchFieldModalities(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodexCatalogApplyPatch_TemplateModelsRetainFreeformByDefault_Issue6286(t *testing.T) {
+	// Models defined in codex_client_models.json with "apply_patch_tool_type": "freeform"
+	// must retain "freeform" under pure Codex providers even when enable-apply-patch is false (capability == nil).
+	canonicalTemplateModels := []string{
+		"gpt-6.1-sol",
+		"gpt-6-astra",
+		"gpt-6-sol",
+		"gpt-6-luna",
+		"gpt-reserve",
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.6-luna",
+		"gpt-5.5",
+	}
+
+	for _, modelID := range canonicalTemplateModels {
+		t.Run(modelID, func(t *testing.T) {
+			available := []map[string]any{{"id": modelID}}
+			// capability is nil (simulates client.codex.enable-apply-patch: false)
+			// providersForModel is nil (pure Codex default)
+			resp := BuildResponseForClientWithToolCapabilities(available, nil, nil, nil, false, "0.153.4")
+			entries, ok := resp["models"].([]map[string]any)
+			if !ok || len(entries) != 1 {
+				t.Fatalf("expected 1 model entry, got %v", resp["models"])
+			}
+			entry := entries[0]
+			if got, present := entry["apply_patch_tool_type"]; !present || got != "freeform" {
+				t.Fatalf("model %s: apply_patch_tool_type = %#v (present: %t), want %q", modelID, got, present, "freeform")
+			}
+		})
+	}
+
+	// Non-template models without freeform in template must still default to null when capability is nil.
+	t.Run("non-template model defaults to null", func(t *testing.T) {
+		available := []map[string]any{{"id": "non-template-custom-model"}}
+		resp := BuildResponseForClientWithToolCapabilities(available, nil, nil, nil, false, "0.153.4")
+		entries, ok := resp["models"].([]map[string]any)
+		if !ok || len(entries) != 1 {
+			t.Fatalf("expected 1 model entry, got %v", resp["models"])
+		}
+		entry := entries[0]
+		if got, present := entry["apply_patch_tool_type"]; !present || got != nil {
+			t.Fatalf("non-template model: apply_patch_tool_type = %#v (present: %t), want nil", got, present)
+		}
+	})
 }

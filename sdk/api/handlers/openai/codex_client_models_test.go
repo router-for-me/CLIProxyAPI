@@ -338,8 +338,8 @@ func TestCodexClientModelsApplyPatchRouting(t *testing.T) {
 		}
 		t.Fatalf("missing model %q", id)
 	}
-	// A provider label alone is not an executor capability claim.
-	assertPatch(t, handler.codexClientModelsResponse("0.153.4"), "gpt-5.5", nil)
+	// Models that natively declare freeform apply_patch advertise it by default under pure Codex routes.
+	assertPatch(t, handler.codexClientModelsResponse("0.153.4"), "gpt-5.5", "freeform")
 	manager.RegisterExecutor(executor.NewCodexAutoExecutor(&config.Config{}))
 	manager.RegisterExecutor(executor.NewOpenAICompatExecutor("catalog-custom", &config.Config{}))
 	manager.RegisterExecutor(catalogUnknownExecutor{executor.NewOpenAICompatExecutor("catalog-remote", &config.Config{})})
@@ -354,6 +354,11 @@ func TestCodexClientModelsApplyPatchRouting(t *testing.T) {
 				if cfg == enabledCfg {
 					switch entry["slug"] {
 					case "gpt-5.5", "gpt-reserve", "catalog-patch-synthetic", "catalog-patch-alias", "catalog-patch-mixed":
+						want = "freeform"
+					}
+				} else {
+					switch entry["slug"] {
+					case "gpt-5.5", "gpt-reserve":
 						want = "freeform"
 					}
 				}

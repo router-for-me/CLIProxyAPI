@@ -216,8 +216,8 @@ func TestClientMultiAgentPreparationDoesNotWaitForOAuthCredential(t *testing.T) 
 	if gjson.GetBytes(got, "tools.0.parameters.properties.message.encrypted").Exists() {
 		t.Fatalf("client preparation did not remove encryption: %s", got)
 	}
-	if gjson.GetBytes(got, "input.0.type").String() != "function_call_output" {
-		t.Fatalf("OAuth-only orphan preparation ran before credential selection: %s", got)
+	if gjson.GetBytes(got, "input.0.type").String() != "message" {
+		t.Fatalf("shared orphan preparation waited for credential selection: %s", got)
 	}
 	if _, exists := ginContext.Get(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey); !exists {
 		t.Fatal("client request did not receive prepared marker")

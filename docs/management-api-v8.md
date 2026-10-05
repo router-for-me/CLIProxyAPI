@@ -23,11 +23,13 @@ All paths below are relative to `/v8/management`.
 | `/config/<section>/<field>` | GET, PUT, PATCH, DELETE | Read or modify a section or field using its path in the v8 tree. |
 
 GET renders the persisted configuration in the v8 layout without migrating the
-file or adding omitted runtime defaults. A successful v8 configuration write
-migrates legacy settings; reads and rejected writes leave the file unchanged.
+file or adding omitted runtime defaults. Successful v8 configuration writes save
+the latest layout; reads and rejected writes leave the file unchanged.
+Historical v8 paths and request bodies remain accepted as aliases.
 
 JSON writes accept the value directly, without a `{ "value": ... }` envelope.
 PUT replaces its target. PATCH merges objects and replaces lists and scalars.
+Scalar field updates retain existing comments; complete replacements use the submitted document.
 DELETE removes a field. Paths identify mapping keys, not array indexes; replace
 an entire list to change its entries. Optional per-key `null` overrides inherit
 the corresponding group value. Legacy field names are rejected by v8 writes.
@@ -74,7 +76,7 @@ wins over `providers`, which wins over the flat path.
 These aliases now have client-wide semantics, not OAuth-only scope. Loading does
 not rewrite legacy-only settings; normalization removes aliases conflicting with
 the client path. A successful v8 write migrates the aliases while preserving their
-comments. New v8 writes must use the client path. Home configuration publishers
+comments. Historical API paths remain usable. Home configuration publishers
 need matching client schema support before emitting the new path; older YAML
 payloads remain readable.
 
@@ -85,6 +87,7 @@ retain the corresponding business operation's fields.
 
 | Path | Methods | Description |
 | --- | --- | --- |
+| `/config/upstream/<provider>` | GET, PUT, PATCH, DELETE | Manage shared provider settings. |
 | `/server/latest-version` | GET | Get latest release information. |
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
@@ -151,9 +154,10 @@ equivalent is `/v8/management/config/access/api-keys`.
 
 Legacy-only configuration files keep their layout until a successful v8
 configuration write. When both layouts specify a field, the new field takes
-precedence and its legacy equivalent is removed. Individual v0 setters can
-update migrated fields. `PUT /v0/management/config.yaml` still replaces the
-complete file and accepts legacy, new, or mixed layouts.
+precedence and its legacy equivalent is removed. V0 setters keep legacy-only
+files in their original layout; existing v8 files are saved in the latest v8
+layout. `PUT /v0/management/config.yaml` still replaces the complete file and
+accepts legacy, new, or mixed layouts, normalizing v8 documents on save.
 
 Plugin OAuth uses the shared v8 login endpoint. Other plugin-defined HTTP
 extensions retain their declared `/v0/management` routes.

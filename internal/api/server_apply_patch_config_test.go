@@ -74,7 +74,9 @@ func TestModelsApplyPatchClientConfigAndReload(t *testing.T) {
 						for _, entry := range response.Models {
 							var want any
 							switch entry["slug"] {
-							case "gpt-5.5", "config-patch-synthetic":
+							case "gpt-5.5":
+								want = "freeform"
+							case "config-patch-synthetic":
 								if tc.want {
 									want = "freeform"
 								}

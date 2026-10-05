@@ -7,10 +7,8 @@ import "strings"
 type ApplyPatchCapabilityForModelFunc func(string) bool
 
 func applyCodexClientApplyPatchCapability(entry map[string]any, id string, capability ApplyPatchCapabilityForModelFunc) {
+	templateSupported := entry["apply_patch_tool_type"] == "freeform"
 	entry["apply_patch_tool_type"] = nil
-	if capability == nil {
-		return
-	}
 	// Built-in image/video IDs can inherit a generic text template in Home.
 	// This classification is a model restriction, not routing capability evidence.
 	baseID := strings.ToLower(strings.TrimSpace(id))
@@ -42,6 +40,12 @@ func applyCodexClientApplyPatchCapability(entry map[string]any, id string, capab
 		}
 	}
 	if !supportsText && (hasModalities || entry["visibility"] == "hide") {
+		return
+	}
+	if capability == nil {
+		if templateSupported {
+			entry["apply_patch_tool_type"] = "freeform"
+		}
 		return
 	}
 	if capability(strings.TrimSpace(id)) {

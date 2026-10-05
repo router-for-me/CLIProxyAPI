@@ -117,9 +117,10 @@ func TestClientCodexOptimizeMultiAgentV2Migration(t *testing.T) {
 			}
 			// Force an actual scoped copy while ensuring the client field survives.
 			cfg.Codex.ResponseSteering = true
-			cfg.OAuthOnlyFields = map[string]bool{"codex.response-steering": true}
+			cfg.CodexHeaderDefaults.UserAgent = "oauth-agent"
+			cfg.OAuthOnlyFields = map[string]bool{"codex.response-steering": true, "codex-header-defaults.user-agent": true}
 			api := cfg.ForAPIKey()
-			if api.Client != cfg.Client || api.Codex.ResponseSteering || !cfg.Codex.ResponseSteering {
+			if api.Client != cfg.Client || !api.Codex.ResponseSteering || !cfg.Codex.ResponseSteering || api.CodexHeaderDefaults.UserAgent != "" || cfg.CodexHeaderDefaults.UserAgent != "oauth-agent" {
 				t.Fatal("API-key scope changed client configuration or shared state")
 			}
 			snapshot, errMarshal := yaml.Marshal(cfg)
