@@ -13,9 +13,20 @@ import (
 // QuotaResetSchedule is an in-memory observation from a provider usage endpoint.
 // It does not determine credential availability or release quota cooldowns.
 type QuotaResetSchedule struct {
-	WeeklyResetAt   time.Time
-	FiveHourResetAt time.Time
-	ObservedAt      time.Time
+	WeeklyResetAt   time.Time `json:"weekly_reset_at"`
+	FiveHourResetAt time.Time `json:"five_hour_reset_at"`
+	ObservedAt      time.Time `json:"observed_at"`
+}
+
+func quotaScheduleIdentityMatches(a, b *Auth) bool {
+	for _, key := range []string{"account_id", "email", "sub"} {
+		left, _ := a.Metadata[key].(string)
+		right, _ := b.Metadata[key].(string)
+		if left != right {
+			return false
+		}
+	}
+	return true
 }
 
 // EffectiveQuotaResetSchedule uses the newest available provider observation.
