@@ -36,4 +36,5 @@ jobs:
         run: |
           go test -race ./sdk/cliproxy/usage ./internal/config
           go test -race ./sdk/cliproxy -run TestServiceAccounting
+          go test -race ./test -run 'TestAccounting|TestCancellation|TestSlowOrFailed|TestQuota'
           go vet ./sdk/cliproxy/usage ./internal/config ./sdk/cliproxy
