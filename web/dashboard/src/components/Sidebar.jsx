@@ -448,6 +448,7 @@ const NAV_GROUPS = [
       { to: '/upstream-sync-log', label: 'Sync Log', icon: 'sync' },
       { to: '/model-health', label: 'Model Health', icon: 'pulse' },
       { to: '/quota', label: 'Quota', icon: 'meter' },
+      { to: '/provider-budget', label: 'Provider Budget', icon: 'wallet' },
       { to: '/analysis/auto-routers', label: 'Auto Router', icon: 'route' },
     ],
   },
@@ -570,4 +571,5 @@ const ICON_MAP = {
   terminal: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2" /><path d="M4 6l2.5 2.5L4 11M8.5 11h3.5" /></svg>,
   meter: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2.5 13A5.5 5.5 0 0 1 13.5 13" /><path d="M8 13L10.5 7" strokeLinejoin="round" /><circle cx="8" cy="13" r="0.8" fill="currentColor" stroke="none" /></svg>,
   gauge: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2 12.5a6 6 0 1 1 12 0" /><path d="M8 12.5l3.5-4" strokeLinejoin="round" /><circle cx="8" cy="12.5" r="0.9" fill="currentColor" stroke="none" /><path d="M2.2 9.5h1.4M12.4 9.5h1.4M4.4 5.6l1 1M11.6 5.6l-1 1" /></svg>,
+  wallet: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"><rect x="1.5" y="4" width="13" height="9" rx="1.5" /><path d="M1.5 6.5h5a2 2 0 0 1 0 4h-5" /><circle cx="11" cy="10" r="1" fill="currentColor" stroke="none" /></svg>,
 };
