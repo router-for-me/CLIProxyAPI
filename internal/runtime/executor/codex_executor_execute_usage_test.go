@@ -90,3 +90,74 @@ func TestCodexExecutorExecutePublishesMainUsageBeforeImageUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexExecutorRecordsPayloadOverrideReasoningEffort(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream_%t", stream), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/responses" {
+					t.Errorf("upstream request = %s %s, want POST /responses", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, errWrite := fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_usage\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-luna\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":10,\"total_tokens\":20}}}\n\n")
+				if errWrite != nil {
+					t.Errorf("write upstream response: %v", errWrite)
+				}
+			}))
+			defer server.Close()
+
+			alias := t.Name()
+			capture := &codexResponseModelUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
+			coreusage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				coreusage.RegisterNamedPlugin(t.Name(), codexResponseModelNoopUsagePlugin{})
+			})
+
+			ctx := coreusage.WithRequestedModelAlias(context.Background(), alias)
+			cfg := &config.Config{
+				Payload: config.PayloadConfig{
+					Override: []config.PayloadRule{
+						{
+							Models: []config.PayloadModelRule{{Name: "gpt-5.6-luna"}},
+							Params: map[string]any{"reasoning.effort": "high"},
+						},
+					},
+				},
+			}
+			executor := NewCodexExecutor(cfg)
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-5.6-luna",
+				Payload: []byte(`{"model":"gpt-5.6-luna","input":"hi"}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Stream:       stream,
+			}
+
+			if stream {
+				streamResult, errStream := executor.ExecuteStream(ctx, codexOAuthTestAuth(server.URL), req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream: %v", errStream)
+				}
+				for range streamResult.Chunks {
+				}
+			} else {
+				resp, errExecute := executor.Execute(ctx, codexOAuthTestAuth(server.URL), req, opts)
+				if errExecute != nil {
+					t.Fatalf("Execute: %v", errExecute)
+				}
+				if len(resp.Payload) == 0 {
+					t.Fatal("Execute returned an empty response")
+				}
+			}
+
+			mainRecord := capture.await(t)
+			if mainRecord.Model != "gpt-5.6-luna" || mainRecord.Failed {
+				t.Fatalf("main record model = %q, failed = %t", mainRecord.Model, mainRecord.Failed)
+			}
+			if got, want := mainRecord.ReasoningEffort, "high"; got != want {
+				t.Fatalf("mainRecord.ReasoningEffort = %q, want %q", got, want)
+			}
+		})
+	}
+}
