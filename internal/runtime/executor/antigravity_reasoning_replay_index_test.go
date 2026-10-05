@@ -1020,23 +1020,57 @@ func TestApplyAntigravityReasoningReplayItems_PreservesContextHashRejectionLoggi
 	}
 
 	detailCount := 0
-	suppressedCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if strings.HasPrefix(entry.Message, "antigravity replay: suppressed repeated context-hash rejections") {
+			t.Fatalf("standalone suppressed summary log should no longer be emitted: %q", entry.Message)
+		}
+		if strings.Contains(entry.Message, "rejected by context hash") {
+			detailCount++
+			if !strings.Contains(entry.Message, "suppressed 4 repeated context-hash rejections across 1 part in same request") {
+				t.Fatalf("expected merged suppression summary in single log, got: %q", entry.Message)
+			}
+		}
+	}
+
+	if detailCount != 1 {
+		t.Fatalf("expected exactly 1 merged rejection log, got %d", detailCount)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_SingleContextHashRejectionLogsWithoutSuppression(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	tracker := newAntigravityReplayContextHashLogTracker()
+	func() {
+		defer tracker.log()
+
+		payload := []byte(`{"request":{"contents":[
+			{"role":"user","parts":[{"text":"first prompt"}]},
+			{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
+			{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]}
+		]}}`)
+		index := newAntigravityReplayRequestIndexWithTracker(payload, tracker)
+		item := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+		index.functionCallPartLocationForReplayWithSchemas(gjson.ParseBytes(item), map[string]any{"exec": map[string]any{"type": "object"}})
+	}()
+
+	detailCount := 0
 	for _, entry := range hook.AllEntries() {
 		if entry.Level != log.DebugLevel {
 			continue
 		}
 		if strings.Contains(entry.Message, "rejected by context hash") {
 			detailCount++
-		}
-		if strings.Contains(entry.Message, "suppressed") && strings.Contains(entry.Message, "repeated context-hash rejections") {
-			suppressedCount++
+			if strings.Contains(entry.Message, "suppressed") {
+				t.Fatalf("single rejection should not mention suppression, got: %q", entry.Message)
+			}
 		}
 	}
 
 	if detailCount != 1 {
 		t.Fatalf("expected exactly 1 detailed rejection log, got %d", detailCount)
-	}
-	if suppressedCount != 1 {
-		t.Fatalf("expected exactly 1 suppressed summary log across rebuilds, got %d", suppressedCount)
 	}
 }
