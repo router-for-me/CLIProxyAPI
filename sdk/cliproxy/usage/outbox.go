@@ -524,3 +524,25 @@ func validateOutbox(tx *bolt.Tx) error {
 		return nil
 	})
 }
+
+// ReadyIDs selects bounded due deliveries without changing their state.
+func (o *Outbox) ReadyIDs(limit int) ([]string, error) {
+	ids := []string{}
+	if o.db == nil {
+		return ids, nil
+	}
+	err := o.view(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(deliveriesBucket).Cursor()
+		for key, raw := cursor.First(); key != nil && len(ids) < limit; key, raw = cursor.Next() {
+			var d Delivery
+			if err := json.Unmarshal(raw, &d); err != nil {
+				return err
+			}
+			if (d.State == DeliveryPending || d.State == DeliveryRetryable) && !d.NextAttemptAt.After(o.now()) {
+				ids = append(ids, string(key))
+			}
+		}
+		return nil
+	})
+	return ids, err
+}

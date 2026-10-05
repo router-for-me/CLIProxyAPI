@@ -33,6 +33,8 @@ func (s *Service) startAccountingOutbox() error {
 		return err
 	}
 	s.accountingOutbox, s.accountingDetach, s.accountingShutdownSeconds = outbox, detach, cfg.ShutdownSeconds
+	s.accountingExporter = usage.NewLiteLLMExporter(outbox, cfg.LiteLLM)
+	s.accountingExporter.Start()
 	return nil
 }
 
@@ -45,6 +47,11 @@ func (s *Service) stopAccountingOutbox(ctx context.Context) {
 	s.accountingDetach()
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.accountingShutdownSeconds)*time.Second)
 	defer cancel()
+	if s.accountingExporter != nil {
+		if err := s.accountingExporter.Stop(ctx); err != nil {
+			log.WithError(err).Warn("accounting exporter shutdown incomplete")
+		}
+	}
 	if err := s.accountingOutbox.Close(ctx); err != nil {
 		log.WithError(err).Warn("accounting shutdown incomplete, queued events are not durable")
 	}
@@ -61,4 +68,13 @@ func (s *Service) AccountingOutboxStats() (usage.OutboxStats, error) {
 		return usage.OutboxStats{}, nil
 	}
 	return outbox.Stats()
+}
+
+func (s *Service) AccountingExporterStatus() string {
+	s.accountingMu.Lock()
+	defer s.accountingMu.Unlock()
+	if s.accountingExporter == nil {
+		return "disabled"
+	}
+	return s.accountingExporter.Status()
 }

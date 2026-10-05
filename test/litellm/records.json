@@ -1,0 +1,102 @@
+{
+  "records": [
+    {
+      "status": "success",
+      "standard_logging_payload": {
+        "cache_hit": false,
+        "call_type": "acompletion",
+        "completionStartTime": 1700000001,
+        "completion_tokens": 5,
+        "custom_llm_provider": "openai",
+        "endTime": 1700000001,
+        "id": "succeeded",
+        "litellm_call_id": "succeeded",
+        "messages": [],
+        "metadata": {
+          "spend_logs_metadata": {
+            "accounting_schema": 1,
+            "cost_kind": "api_equivalent_estimate",
+            "producer": "ai-proxy-completed-v1"
+          },
+          "user_api_key_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "user_api_key_team_id": "accounting-team",
+          "user_api_key_user_id": "accounting-user"
+        },
+        "model": "gpt-4o",
+        "model_map_information": {},
+        "prompt_tokens": 10,
+        "response": {},
+        "response_cost": 0.000123456,
+        "startTime": 1700000000,
+        "status": "success",
+        "total_tokens": 15
+      }
+    },
+    {
+      "status": "failure",
+      "standard_logging_payload": {
+        "cache_hit": false,
+        "call_type": "acompletion",
+        "completionStartTime": 1700000001,
+        "completion_tokens": 5,
+        "custom_llm_provider": "openai",
+        "endTime": 1700000001,
+        "error_str": "proxy attempt failed",
+        "id": "failed",
+        "litellm_call_id": "failed",
+        "messages": [],
+        "metadata": {
+          "spend_logs_metadata": {
+            "accounting_schema": 1,
+            "cost_kind": "api_equivalent_estimate",
+            "producer": "ai-proxy-completed-v1"
+          },
+          "user_api_key_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "user_api_key_team_id": "accounting-team",
+          "user_api_key_user_id": "accounting-user"
+        },
+        "model": "gpt-4o",
+        "model_map_information": {},
+        "prompt_tokens": 10,
+        "response": {},
+        "response_cost": 0.000123456,
+        "startTime": 1700000000,
+        "status": "failure",
+        "total_tokens": 15
+      }
+    },
+    {
+      "status": "failure",
+      "standard_logging_payload": {
+        "cache_hit": false,
+        "call_type": "acompletion",
+        "completionStartTime": 1700000001,
+        "completion_tokens": 5,
+        "custom_llm_provider": "openai",
+        "endTime": 1700000001,
+        "error_str": "proxy attempt interrupted",
+        "id": "interrupted",
+        "litellm_call_id": "interrupted",
+        "messages": [],
+        "metadata": {
+          "spend_logs_metadata": {
+            "accounting_schema": 1,
+            "cost_kind": "api_equivalent_estimate",
+            "producer": "ai-proxy-completed-v1"
+          },
+          "user_api_key_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "user_api_key_team_id": "accounting-team",
+          "user_api_key_user_id": "accounting-user"
+        },
+        "model": "gpt-4o",
+        "model_map_information": {},
+        "prompt_tokens": 10,
+        "response": {},
+        "response_cost": 0.000123456,
+        "startTime": 1700000000,
+        "status": "failure",
+        "total_tokens": 15
+      }
+    }
+  ]
+}

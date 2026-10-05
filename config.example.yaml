@@ -1088,6 +1088,15 @@ observability:
     max-events: 100000
     retention-hours: 168
     shutdown-seconds: 5
+    litellm:
+      enabled: false
+      url: "" # LiteLLM base URL, use HTTPS outside a trusted local network.
+      version: "1.103.0"
+      receiver-profile: "ai-proxy-completed-v1" # Requires test/litellm/completed-failures.patch.
+      admin-key-env: "LITELLM_ACCOUNTING_ADMIN_KEY" # Inject through central deployment secrets.
+      # Map the local ClientKeyID to an existing LiteLLM virtual key's SHA-256 hash.
+      # Each entry also accepts user-id and team-id for the key's existing owners.
+      clients: {}
     pricing:
       # Import a locally supplied LiteLLM JSON catalog. Valid imports are cached in data-path.
       litellm-catalog-path: ""

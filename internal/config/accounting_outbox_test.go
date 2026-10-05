@@ -58,3 +58,16 @@ func TestAccountingPricingConfiguration(t *testing.T) {
 		t.Fatalf("%+v", rate)
 	}
 }
+
+func TestLiteLLMExporterConfiguration(t *testing.T) {
+	cfg := AccountingOutboxConfig{Enabled: true, DataPath: "/data/accounting", LiteLLM: LiteLLMExporterConfig{Enabled: true, URL: "https://accounting.example", AdminKeyEnv: "LITELLM_ACCOUNTING_ADMIN_KEY"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, url := range []string{"https://user:credential@accounting.example", "https://accounting.example?token=credential", "https://accounting.example#credential", "file:///credential"} {
+		cfg.LiteLLM.URL = url
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("unsafe URL accepted")
+		}
+	}
+}
