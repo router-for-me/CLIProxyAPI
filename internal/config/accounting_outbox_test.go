@@ -24,3 +24,37 @@ func TestAccountingOutboxConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountingPricingConfiguration(t *testing.T) {
+	var cfg Config
+	raw := `observability:
+  accounting-outbox:
+    pricing:
+      litellm-catalog-path: /prices/catalog.json
+      overrides:
+        - provider: openai
+          model: m
+          currency: USD
+          tier: priority
+          min-context: 101
+          max-context: 200
+          input: "0.000001"
+          cache-read: "0"
+      aliases:
+        - provider: codex
+          model: reported
+          target-provider: openai
+          target-model: m
+`
+	if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	pricing := cfg.AccountingOutbox.Pricing
+	if pricing.LiteLLMCatalogPath != "/prices/catalog.json" || len(pricing.Overrides) != 1 || len(pricing.Aliases) != 1 {
+		t.Fatalf("%+v", pricing)
+	}
+	rate := pricing.Overrides[0]
+	if rate.MinContext != 101 || rate.MaxContext != 200 || rate.Input == nil || *rate.Input != "0.000001" || rate.CacheRead == nil || *rate.CacheRead != "0" || rate.Output != nil {
+		t.Fatalf("%+v", rate)
+	}
+}

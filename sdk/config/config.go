@@ -11,6 +11,9 @@ type SDKConfig = internalconfig.SDKConfig
 type Config = internalconfig.Config
 
 type AccountingOutboxConfig = internalconfig.AccountingOutboxConfig
+type PricingConfig = internalconfig.PricingConfig
+type PriceRate = internalconfig.PriceRate
+type PriceAlias = internalconfig.PriceAlias
 
 type ModelCatalogs = internalconfig.ModelCatalogs
 

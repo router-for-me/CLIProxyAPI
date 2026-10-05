@@ -1088,6 +1088,27 @@ observability:
     max-events: 100000
     retention-hours: 168
     shutdown-seconds: 5
+    pricing:
+      # Import a locally supplied LiteLLM JSON catalog. Valid imports are cached in data-path.
+      litellm-catalog-path: ""
+      # Rates are decimal strings in currency units per token. Missing rates remain unpriced.
+      # Later matching overrides win. Context bounds are inclusive, max-context: 0 is unbounded.
+      # Example override entry:
+      # - provider: openai
+      #   model: gpt-5
+      #   tier: "" # Only the reported tier is used, empty selects standard/default.
+      #   currency: USD
+      #   input: "0.00000125"
+      #   output: "0.00001" # Reasoning uses output unless a reasoning rate is supplied.
+      #   cache-read: "0.000000125"
+      overrides: []
+      # Explicit provider/model mappings, including subscription providers such as codex.
+      # Example alias entry:
+      # - provider: codex
+      #   model: gpt-5
+      #   target-provider: openai
+      #   target-model: gpt-5
+      aliases: []
 
   logs:
     # Enable debug logging
