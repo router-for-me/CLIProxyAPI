@@ -26,6 +26,9 @@ func TestEffectiveCatalogSources(t *testing.T) {
 					if index == 0 && home {
 						want = "disabled"
 					}
+					if index == 2 && home {
+						want = "disabled"
+					}
 					if values[index] != want {
 						t.Fatalf("local=%v home=%v mask=%d catalog=%d: got %q want %q", local, home, mask, index, values[index], want)
 					}
