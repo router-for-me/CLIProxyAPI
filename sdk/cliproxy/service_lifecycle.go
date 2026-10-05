@@ -54,6 +54,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.startModelCatalogUpdaters(ctx)
 
+	if err := s.startAccountingOutbox(); err != nil {
+		return err
+	}
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
@@ -367,6 +370,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		usage.StopDefault()
+		s.stopAccountingOutbox(ctx)
 	})
 	return shutdownErr
 }

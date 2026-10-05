@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -313,6 +314,10 @@ type Manager struct {
 	queue  []queueItem
 	closed bool
 
+	accountingMu         sync.RWMutex
+	accounting           *Outbox
+	accountingGeneration uint64
+
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
 	named     map[string]int
@@ -410,6 +415,12 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 			record.TraceID = trID
 		}
 	}
+	m.accountingMu.RLock()
+	if m.accounting != nil && !record.AdditionalModel {
+		m.accounting.HandleAccountingEvent(NewAccountingEvent(ctx, record))
+	}
+	m.accountingMu.RUnlock()
+
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
@@ -483,3 +494,25 @@ func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+// AttachOutbox owns the accounting ingress independently of the shared dispatcher.
+func (m *Manager) AttachOutbox(outbox *Outbox) (func(), error) {
+	m.accountingMu.Lock()
+	defer m.accountingMu.Unlock()
+	if m.accounting != nil {
+		return nil, errors.New("an accounting outbox is already attached to this manager")
+	}
+	if outbox == nil {
+		return nil, errors.New("accounting outbox is nil")
+	}
+	m.accounting = outbox
+	m.accountingGeneration++
+	generation := m.accountingGeneration
+	return func() {
+		m.accountingMu.Lock()
+		defer m.accountingMu.Unlock()
+		if m.accounting == outbox && m.accountingGeneration == generation {
+			m.accounting = nil
+		}
+	}, nil
+}
