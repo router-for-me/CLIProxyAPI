@@ -251,10 +251,12 @@ func effectiveCatalogSources(sources CatalogSources, local, home bool) CatalogSo
 		return source
 	}
 	general := selectSource(sources.Catalog)
+	devin := selectSource(sources.DevinCatalog)
 	if home {
 		general = "disabled"
+		devin = "disabled"
 	}
-	return CatalogSources{Catalog: general, CodexCatalog: selectSource(sources.CodexCatalog), DevinCatalog: selectSource(sources.DevinCatalog)}
+	return CatalogSources{Catalog: general, CodexCatalog: selectSource(sources.CodexCatalog), DevinCatalog: devin}
 }
 
 func validateDevinCatalogBytes(data []byte) error {

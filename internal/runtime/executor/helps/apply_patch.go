@@ -30,6 +30,12 @@ func FinalizeApplyPatchStream(param any) [][]byte {
 	return state.FinalizeToolInput()
 }
 
+// CanFinalizeResponseStream reports whether EOF can safely synthesize the source terminator.
+func CanFinalizeResponseStream(param any) bool {
+	state, okState := param.(interface{ CanFinalizeResponseStream() bool })
+	return okState && state.CanFinalizeResponseStream()
+}
+
 // RecordApplyPatchStreamFailure records validation before delivery can be canceled.
 func RecordApplyPatchStreamFailure(ctx context.Context, param any, reporter *UsageReporter, gatewayErr error) bool {
 	if ApplyPatchTranslationError(param) == nil {

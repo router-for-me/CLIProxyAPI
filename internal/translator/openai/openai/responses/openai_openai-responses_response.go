@@ -30,6 +30,7 @@ type oaiToResponsesState struct {
 	Created            int64
 	Started            bool
 	CompletedEmitted   bool
+	CompletionPending  bool
 	ReasoningID        string
 	ReasoningIndex     int
 	// aggregation buffers for response.output
@@ -494,6 +495,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FinishReason = ""
 		st.UsageSeen = false
 		st.CompletedEmitted = false
+		st.CompletionPending = false
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
@@ -883,12 +885,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				return false
 			}
 
-			// finish_reason triggers item-level finalization. response.completed is
-			// deferred until the terminal [DONE] marker so late usage-only chunks can
-			// still populate response.usage.
+			// finish_reason triggers item-level finalization. The terminal event is
+			// deferred until [DONE] or transport finalization so late usage-only chunks
+			// can still populate response.usage.
 			if fr := choice.Get("finish_reason"); fr.Exists() && fr.String() != "" {
 				st.FinishReason = fr.String()
 				finalizeOpenItems()
+				st.CompletionPending = st.canFinalizeResponse()
 			}
 
 			return st.ToolInputError() == nil
@@ -1148,9 +1151,34 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	return resp
 }
 
+func (st *oaiToResponsesState) canFinalizeResponse() bool {
+	if st.ToolInputError() != nil || st.FinishReason == "" || (len(st.MsgItemAdded) == 0 && len(st.FuncItemAdded) == 0) {
+		return false
+	}
+	for idx := range st.MsgItemAdded {
+		if !st.MsgItemDone[idx] {
+			return false
+		}
+	}
+	for key := range st.FuncItemAdded {
+		if !st.FuncItemDone[key] {
+			return false
+		}
+	}
+	return st.ReasoningID == ""
+}
+
+// CanFinalizeResponseStream reports whether EOF can safely synthesize the source terminator.
+func (st *oaiToResponsesState) CanFinalizeResponseStream() bool {
+	return st.ToolInputError() == nil && !st.CompletedEmitted && st.CompletionPending
+}
+
 // FinalizeToolInput rejects a patch-enabled stream lacking its source terminator.
 func (st *oaiToResponsesState) FinalizeToolInput() [][]byte {
 	if st.ToolInputError() != nil || st.CompletedEmitted {
+		return nil
+	}
+	if st.CanFinalizeResponseStream() {
 		return nil
 	}
 	enabled := false

@@ -350,17 +350,19 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 	updated := payload
 	changed := false
 	tracker := newAntigravityReplayContextHashLogTracker()
-	defer func() {
-		if tracker != nil && tracker.rejections > 1 {
-			log.Debugf("antigravity replay: suppressed %d repeated context-hash rejections across %d parts in same request",
-				tracker.rejections-1, len(tracker.loggedKeys))
-		}
-	}()
+	defer tracker.log()
 	index := newAntigravityReplayRequestIndexWithTracker(payload, tracker)
 	for len(items) > 0 {
+		tracker.setPhase(antigravityReplayPhaseBatch)
 		batch := newAntigravityReplayBatch(index)
 		handled := 0
-		for handled < len(items) && batch.apply(items[handled], toolSchemas) {
+		contextHashStopped := false
+		for handled < len(items) {
+			rejectionsBefore := tracker.contextHashRejectionCount()
+			if !batch.apply(items[handled], toolSchemas) {
+				contextHashStopped = tracker.contextHashRejectionCount() > rejectionsBefore
+				break
+			}
 			handled++
 		}
 		if handled > 0 {
@@ -369,6 +371,7 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 				// A malformed or non-addressable part offset makes splicing unsafe.
 				// Nothing has been committed yet, so retain the exact legacy behavior
 				// for all remaining items.
+				tracker.setPhase(antigravityReplayPhaseSequential)
 				next, sequentialChanged := applyAntigravityReasoningReplayItemsSequential(index, updated, items, toolSchemas)
 				return next, changed || sequentialChanged
 			}
@@ -379,16 +382,20 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 				break
 			}
 			index = newAntigravityReplayRequestIndexWithTracker(updated, tracker)
-			// Retry the first unhandled item against the freshly flushed payload.
-			// It may only have rejected the batch because a prior stable-ID restore
-			// made the old context index stale.
-			continue
+			// Retry only when this batch restored a stable ID. That changes the
+			// context fingerprint, so the rejection may belong to the stale index.
+			// A context-hash mismatch on an unchanged identity cannot be repaired
+			// by rebuilding the same payload.
+			if !(contextHashStopped && !batch.identityChanged) {
+				continue
+			}
 		}
 
 		// Apply one structural or context-dependent item with the original
 		// sequential implementation, then start another safe batch. A rare
 		// fallback therefore cannot make every preceding signature rewrite the
 		// entire request again.
+		tracker.setPhase(antigravityReplayPhaseSequential)
 		next, itemChanged := applyAntigravityReasoningReplayItemsSequential(index, updated, items[:1], toolSchemas)
 		updated = next
 		changed = itemChanged || changed
@@ -418,7 +425,7 @@ func applyAntigravityReasoningReplayItemsSequential(index *antigravityReplayRequ
 		// mutation so later items observe exactly the same payload as before.
 		// The final item has no successor, so its rebuild would never be read.
 		if itemIndex+1 < len(items) {
-			index = newAntigravityReplayRequestIndex(updated)
+			index = newAntigravityReplayRequestIndexWithTracker(updated, index.logTracker)
 		}
 	}
 	return updated, changed
@@ -989,14 +996,12 @@ func (i *antigravityReplayRequestIndex) functionCallPartLocationForReplayWithSch
 		// identical. Only the surrounding context drifted, which invalidates the
 		// cached signature but not the tool identity.
 		key := antigravityReplayPartKey{contentIndex: location.contentIndex, partIndex: location.partIndex}
-		i.logTracker.rejections++
-		if !i.logTracker.loggedKeys[key] {
-			if len(i.logTracker.loggedKeys) == 0 {
-				log.Debugf("antigravity replay: exact tool ID match for %q at contents[%d].parts[%d] rejected by context hash (opaque_id=%t)",
-					name, location.contentIndex, location.partIndex, util.IsGeminiClaudeToolUseID(candidateID))
-			}
-			i.logTracker.loggedKeys[key] = true
-		}
+		i.logTracker.recordRejection(antigravityReplayContextHashSample{
+			name:         name,
+			contentIndex: location.contentIndex,
+			partIndex:    location.partIndex,
+			opaqueID:     util.IsGeminiClaudeToolUseID(candidateID),
+		}, key)
 		return antigravityReplayIndexedPart{}, false
 	}
 
@@ -1322,14 +1327,105 @@ type antigravityReplayIndexedContent struct {
 // alias the payload bytes and memoizes context fingerprints lazily, so it must
 // be discarded and rebuilt as soon as the payload changes, and it must never be
 // shared across goroutines.
+type antigravityReplayPhase int
+
+const (
+	antigravityReplayPhaseBatch antigravityReplayPhase = iota
+	antigravityReplayPhaseSequential
+)
+
+type antigravityReplayContextHashSample struct {
+	name         string
+	contentIndex int
+	partIndex    int
+	opaqueID     bool
+}
+
+type antigravityReplayContextHashGroupKey struct {
+	toolName string
+	opaqueID bool
+}
+
+type antigravityReplayContextHashGroup struct {
+	key                  antigravityReplayContextHashGroupKey
+	batchRejections      int
+	sequentialRejections int
+	loggedKeys           map[antigravityReplayPartKey]bool
+	sampleContentIndex   int
+	samplePartIndex      int
+}
+
 type antigravityReplayContextHashLogTracker struct {
-	rejections int
-	loggedKeys map[antigravityReplayPartKey]bool
+	phase                      antigravityReplayPhase
+	totalContextHashRejections int
+	groups                     map[antigravityReplayContextHashGroupKey]*antigravityReplayContextHashGroup
+	order                      []antigravityReplayContextHashGroupKey
 }
 
 func newAntigravityReplayContextHashLogTracker() *antigravityReplayContextHashLogTracker {
 	return &antigravityReplayContextHashLogTracker{
-		loggedKeys: make(map[antigravityReplayPartKey]bool),
+		groups: make(map[antigravityReplayContextHashGroupKey]*antigravityReplayContextHashGroup),
+	}
+}
+
+func (t *antigravityReplayContextHashLogTracker) setPhase(phase antigravityReplayPhase) {
+	if t != nil {
+		t.phase = phase
+	}
+}
+
+func (t *antigravityReplayContextHashLogTracker) contextHashRejectionCount() int {
+	if t == nil {
+		return 0
+	}
+	return t.totalContextHashRejections
+}
+
+func (t *antigravityReplayContextHashLogTracker) recordRejection(sample antigravityReplayContextHashSample, key antigravityReplayPartKey) {
+	if t == nil {
+		return
+	}
+	t.totalContextHashRejections++
+	groupKey := antigravityReplayContextHashGroupKey{
+		toolName: sample.name,
+		opaqueID: sample.opaqueID,
+	}
+	group, exists := t.groups[groupKey]
+	if !exists {
+		group = &antigravityReplayContextHashGroup{
+			key:                groupKey,
+			loggedKeys:         make(map[antigravityReplayPartKey]bool),
+			sampleContentIndex: sample.contentIndex,
+			samplePartIndex:    sample.partIndex,
+		}
+		t.groups[groupKey] = group
+		t.order = append(t.order, groupKey)
+	}
+	if t.phase == antigravityReplayPhaseSequential {
+		group.sequentialRejections++
+	} else {
+		group.batchRejections++
+	}
+	group.loggedKeys[key] = true
+}
+
+func (t *antigravityReplayContextHashLogTracker) log() {
+	if t == nil || len(t.groups) == 0 {
+		return
+	}
+	for _, groupKey := range t.order {
+		group := t.groups[groupKey]
+		if group == nil || (group.batchRejections == 0 && group.sequentialRejections == 0) {
+			continue
+		}
+		partsCount := len(group.loggedKeys)
+		partsNoun := "parts"
+		if partsCount == 1 {
+			partsNoun = "part"
+		}
+		log.Debugf("antigravity replay: context hash rejected %d %s (first=%q at contents[%d].parts[%d], opaque_id=%t, batch=%d, seq=%d)",
+			partsCount, partsNoun, group.key.toolName, group.sampleContentIndex, group.samplePartIndex, group.key.opaqueID,
+			group.batchRejections, group.sequentialRejections)
 	}
 }
 
@@ -1906,14 +2002,14 @@ func insertAntigravityReasoningReplayItemsWithSchemas(index *antigravityReplayRe
 				// antigravityRemoveThoughtSignatureFromOtherParts may already have
 				// rewritten out, so the index has to be refreshed regardless.
 				if hasSuccessor {
-					index = newAntigravityReplayRequestIndex(out)
+					index = newAntigravityReplayRequestIndexWithTracker(out, index.logTracker)
 				}
 				continue
 			}
 			out = updated
 			changed = true
 			if hasSuccessor {
-				index = newAntigravityReplayRequestIndex(out)
+				index = newAntigravityReplayRequestIndexWithTracker(out, index.logTracker)
 			}
 		case "function_call_part":
 			updated, ok := mergeAntigravityFunctionCallPartReplayWithSchemas(index, out, itemResult, toolSchemas)
@@ -1921,7 +2017,7 @@ func insertAntigravityReasoningReplayItemsWithSchemas(index *antigravityReplayRe
 				out = updated
 				changed = true
 				if hasSuccessor {
-					index = newAntigravityReplayRequestIndex(out)
+					index = newAntigravityReplayRequestIndexWithTracker(out, index.logTracker)
 				}
 			}
 		}

@@ -706,3 +706,123 @@ func TestConvertClaudeRequestToGemini_FunctionResponseJSONRef(t *testing.T) {
 		t.Fatalf("expected result to contain ref target, got %q", result.String())
 	}
 }
+
+func TestConvertClaudeRequestToGemini_Issue5960_DocumentPreservation(t *testing.T) {
+	// Case 1: basic user document with base64 PDF
+	pdfInput := []byte(`{
+		"model": "gemini-2.5-pro",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "document",
+						"source": {
+							"type": "base64",
+							"media_type": "application/pdf",
+							"data": "JVBERi0xLjQK"
+						}
+					}
+				]
+			}
+		]
+	}`)
+	pdfOut := ConvertClaudeRequestToGemini("gemini-2.5-pro", pdfInput, false)
+	pdfParts := gjson.GetBytes(pdfOut, "contents.0.parts").Array()
+	if len(pdfParts) == 0 {
+		t.Fatalf("expected non-empty parts for base64 document, got: %s", string(pdfOut))
+	}
+	if gotMime := gjson.GetBytes(pdfOut, "contents.0.parts.0.inline_data.mime_type").String(); gotMime != "application/pdf" {
+		t.Fatalf("expected inline_data.mime_type application/pdf, got %q (output: %s)", gotMime, string(pdfOut))
+	}
+	if gotData := gjson.GetBytes(pdfOut, "contents.0.parts.0.inline_data.data").String(); gotData != "JVBERi0xLjQK" {
+		t.Fatalf("expected inline_data.data JVBERi0xLjQK, got %q (output: %s)", gotData, string(pdfOut))
+	}
+
+	// Mixed text and PDF document preserves both in order
+	mixedInput := []byte(`{
+		"model": "gemini-2.5-pro",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Please summarize this document:"},
+					{
+						"type": "document",
+						"source": {
+							"type": "base64",
+							"media_type": "application/pdf",
+							"data": "JVBERi0xLjQK"
+						}
+					}
+				]
+			}
+		]
+	}`)
+	mixedOut := ConvertClaudeRequestToGemini("gemini-2.5-pro", mixedInput, false)
+	mixedParts := gjson.GetBytes(mixedOut, "contents.0.parts").Array()
+	if len(mixedParts) != 2 {
+		t.Fatalf("expected 2 parts for mixed text + document, got %d (output: %s)", len(mixedParts), string(mixedOut))
+	}
+	if mixedParts[0].Get("text").String() != "Please summarize this document:" {
+		t.Fatalf("expected first part to be text, got %s", mixedParts[0].Raw)
+	}
+	if mixedParts[1].Get("inline_data.mime_type").String() != "application/pdf" {
+		t.Fatalf("expected second part to be inline_data PDF, got %s", mixedParts[1].Raw)
+	}
+
+	// Multiple PDFs interleaved with text
+	interleavedInput := []byte(`{
+		"model": "gemini-2.5-pro",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "document",
+						"source": {
+							"type": "base64",
+							"media_type": "application/pdf",
+							"data": "PDF_ONE"
+						}
+					},
+					{"type": "text", "text": "compare with"},
+					{
+						"type": "document",
+						"source": {
+							"type": "base64",
+							"media_type": "application/pdf",
+							"data": "PDF_TWO"
+						}
+					}
+				]
+			}
+		]
+	}`)
+	interleavedOut := ConvertClaudeRequestToGemini("gemini-2.5-pro", interleavedInput, false)
+	interleavedParts := gjson.GetBytes(interleavedOut, "contents.0.parts").Array()
+	if len(interleavedParts) != 3 {
+		t.Fatalf("expected 3 parts for interleaved documents, got %d (output: %s)", len(interleavedParts), string(interleavedOut))
+	}
+	if interleavedParts[0].Get("inline_data.data").String() != "PDF_ONE" || interleavedParts[2].Get("inline_data.data").String() != "PDF_TWO" {
+		t.Fatalf("expected PDF data to be preserved in order, got: %s", string(interleavedOut))
+	}
+
+	// Prevent empty turn when all content parts are skipped/unsupported
+	unsupportedInput := []byte(`{
+		"model": "gemini-2.5-pro",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "unsupported_unknown_block", "foo": "bar"}
+				]
+			}
+		]
+	}`)
+	unsupportedOut := ConvertClaudeRequestToGemini("gemini-2.5-pro", unsupportedInput, false)
+	contents := gjson.GetBytes(unsupportedOut, "contents").Array()
+	if len(contents) != 0 {
+		t.Fatalf("expected 0 contents turns instead of empty parts turn, got: %s", string(unsupportedOut))
+	}
+}
