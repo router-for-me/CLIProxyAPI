@@ -20,8 +20,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const LiteLLMVersion = "1.103.0"
-
 type callbackRecord struct {
 	Status  string         `json:"status"`
 	Payload map[string]any `json:"standard_logging_payload"`
@@ -71,10 +69,6 @@ func (e *LiteLLMExporter) Start() {
 			e.setStatus("local_store_unavailable")
 			return
 		}
-		if e.cfg.Version != LiteLLMVersion || e.cfg.ReceiverProfile != "ai-proxy-completed-v1" {
-			e.setStatus("unsupported_version: verify LiteLLM 1.103.0 with completed-failures.patch and receiver-profile ai-proxy-completed-v1")
-			return
-		}
 		if e.key == "" {
 			e.setStatus("credential_unavailable: set the configured admin-key-env in central secrets")
 			return
@@ -92,7 +86,7 @@ func (e *LiteLLMExporter) Start() {
 				if err := e.ExportOnce(ctx); err != nil {
 					e.setStatus("local_store_failure")
 				}
-				if strings.HasPrefix(e.Status(), "callbacks_accepted") || e.Status() == "ready" {
+				if e.Status() == "exported" || e.Status() == "ready" {
 					delay = time.Second
 				} else {
 					delay = min(delay*2, time.Minute)
@@ -116,9 +110,9 @@ func (e *LiteLLMExporter) Stop(ctx context.Context) error {
 	}
 }
 
-func completedPayload(event AccountingEvent, identity config.LiteLLMIdentity) (callbackRecord, error) {
+func successPayload(event AccountingEvent, identity config.LiteLLMIdentity) (callbackRecord, error) {
 	hash, errHash := hex.DecodeString(identity.KeyHash)
-	if errHash != nil || len(hash) != 32 || event.Tokens == nil || !event.Tokens.Breakdown.Valid() || event.Tokens.Breakdown.Quality != TokenAccountingQualityComplete || event.Estimate == nil || event.Estimate.Status != "priced" || event.Estimate.Currency != "USD" || event.Estimate.Amount == nil {
+	if errHash != nil || len(hash) != 32 || event.Status != "succeeded" || event.Tokens == nil || !event.Tokens.Breakdown.Valid() || event.Tokens.Breakdown.Quality != TokenAccountingQualityComplete || event.Estimate == nil || event.Estimate.Status != "priced" || event.Estimate.Currency != "USD" || event.Estimate.Amount == nil {
 		return callbackRecord{}, errors.New("requires mapped identity, complete usage and priced USD estimate")
 	}
 	cost, err := strconv.ParseFloat(*event.Estimate.Amount, 64)
@@ -129,19 +123,12 @@ func completedPayload(event AccountingEvent, identity config.LiteLLMIdentity) (c
 		return callbackRecord{}, errors.New("invalid timestamps")
 	}
 
-	if event.Status != "succeeded" && event.Status != "failed" && event.Status != "interrupted" {
-		return callbackRecord{}, errors.New("invalid attempt status")
-	}
-	status := "success"
-	if event.Status != "succeeded" {
-		status = "failure"
-	}
 	b := event.Tokens.Breakdown
 	metadata := map[string]any{
 		"user_api_key_hash":    identity.KeyHash,
 		"user_api_key_user_id": identity.UserID,
 		"user_api_key_team_id": identity.TeamID,
-		"spend_logs_metadata":  map[string]any{"producer": "ai-proxy-completed-v1", "accounting_schema": event.SchemaVersion, "cost_kind": event.Estimate.Kind},
+		"spend_logs_metadata":  map[string]any{"accounting_schema": event.SchemaVersion, "cost_kind": event.Estimate.Kind},
 	}
 	payload := map[string]any{
 		"id": event.ExecutionID, "litellm_call_id": event.ExecutionID,
@@ -150,28 +137,19 @@ func completedPayload(event AccountingEvent, identity config.LiteLLMIdentity) (c
 		"completionStartTime": float64(event.CompletedAt.UnixNano()) / 1e9,
 		"response_cost":       cost, "prompt_tokens": b.Input.TotalTokens, "completion_tokens": b.Output.TotalTokens,
 		"total_tokens": b.TotalTokens, "metadata": metadata, "cache_hit": false,
-		"status": status, "messages": []any{}, "response": map[string]any{}, "model_map_information": map[string]any{},
+		"status": "success", "messages": []any{}, "response": map[string]any{}, "model_map_information": map[string]any{},
 	}
-	if status == "failure" {
-		payload["error_str"] = "proxy attempt " + event.Status
-	}
-	return callbackRecord{Status: status, Payload: payload}, nil
+	return callbackRecord{Status: "success", Payload: payload}, nil
 }
 
-// ExportOnce claims before I/O. Callback errors may follow partial side effects.
+// ExportOnce replays pending successful events through LiteLLM's stock callback route.
+// Delivery is at-least-once: spend-log rows deduplicate by ID, aggregate counters may double count a retry.
 func (e *LiteLLMExporter) ExportOnce(ctx context.Context) error {
 	if !e.cfg.Enabled {
 		return nil
 	}
-	if e.cfg.Version != LiteLLMVersion || e.cfg.ReceiverProfile != "ai-proxy-completed-v1" {
-		e.setStatus("unsupported_version: verify LiteLLM 1.103.0 and completed-failures.patch")
-		return nil
-	}
 	if e.key == "" {
 		e.setStatus("credential_unavailable: set the configured admin-key-env in central secrets")
-		return nil
-	}
-	if !e.verifyReceiver(ctx) {
 		return nil
 	}
 	ids, err := e.outbox.ReadyIDs(64)
@@ -189,7 +167,7 @@ func (e *LiteLLMExporter) ExportOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		record, errPayload := completedPayload(event, e.cfg.Clients[event.ClientKeyID])
+		record, errPayload := successPayload(event, e.cfg.Clients[event.ClientKeyID])
 		ok, err := e.outbox.Claim(id)
 		if err != nil {
 			return err
@@ -200,6 +178,13 @@ func (e *LiteLLMExporter) ExportOnce(ctx context.Context) error {
 		delivery, err := e.outbox.Delivery(id)
 		if err != nil {
 			return err
+		}
+		if event.Status != "succeeded" {
+			// Stock LiteLLM drops replayed failures, so there is nothing it could record.
+			if err := e.outbox.Resolve(id, delivery.Attempts, DeliveryRejected, time.Time{}); err != nil {
+				return err
+			}
+			continue
 		}
 		if errPayload != nil {
 			e.setStatus("mapping_required: verify client identity, complete usage and USD pricing")
@@ -225,69 +210,42 @@ func (e *LiteLLMExporter) ExportOnce(ctx context.Context) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+e.key)
 	req.Header.Set("Content-Type", "application/json")
+
+	state, hold := DeliveryRetryable, false
 	resp, err := e.client.Do(req)
 	if err != nil {
-		e.setStatus("transport_ambiguous: reconcile before replay")
-		return nil
+		e.setStatus("receiver_unavailable: check accounting service connectivity")
+	} else {
+		defer func() { _ = resp.Body.Close() }()
+		switch resp.StatusCode {
+		case 401, 403:
+			hold = true
+			e.setStatus("authorization_failure: verify proxy-admin secret")
+		case 404, 405:
+			hold = true
+			e.setStatus("unsupported_route: verify LiteLLM exposes /v1/rust_control_plane/logs")
+		case 422:
+			state = DeliveryRejected
+			e.setStatus("schema_failure")
+		case 429:
+			e.setStatus("rate_limited")
+		case 200:
+			state = DeliveryAcknowledged
+		default:
+			e.setStatus("service_failure")
+		}
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	state := DeliveryAmbiguous
-	switch resp.StatusCode {
-	case 401, 403:
-		state = DeliveryRetryable
-		e.setStatus("authorization_failure: verify proxy-admin secret")
-	case 404, 405:
-		state = DeliveryRetryable
-		e.setStatus("unsupported_route: verify LiteLLM 1.103.0 route availability")
-	case 422:
-		state = DeliveryRejected
-		e.setStatus("schema_failure")
-	case 429:
-		state = DeliveryRetryable
-		e.setStatus("rate_limited")
-	case 200:
-		e.setStatus("callbacks_accepted: persistence requires reconciliation")
-	default:
-		e.setStatus("service_failure_ambiguous: reconcile before replay")
-	}
 	outcomes := make([]DeliveryState, len(records))
 	for i := range outcomes {
 		outcomes[i] = state
 	}
-	if resp.StatusCode == 200 {
-		var result struct {
-			Processed int `json:"processed"`
-			Failed    int `json:"failed"`
-			Failures  []struct {
-				Index int `json:"index"`
-			} `json:"failures"`
-		}
-		if err := json.NewDecoder(io.LimitReader(resp.Body, 1024*1024)).Decode(&result); err != nil || result.Processed < 0 || result.Failed != len(result.Failures) || result.Processed+result.Failed != len(records) {
-			e.setStatus("response_ambiguous: reconcile before replay")
-		} else {
-			seen := map[int]bool{}
-			valid := true
-			for _, f := range result.Failures {
-				if f.Index < 0 || f.Index >= len(records) || seen[f.Index] {
-					valid = false
-					break
-				}
-				seen[f.Index] = true
-			}
-			if valid {
-				// Even successful callback completion is not a database commit acknowledgement.
-				if result.Failed > 0 {
-					e.setStatus("callback_failure_ambiguous: reconcile before replay")
-				}
-			} else {
-				e.setStatus("response_ambiguous: reconcile before replay")
-			}
-		}
+	if state == DeliveryAcknowledged {
+		e.applyCallbackResult(resp.Body, outcomes)
 	}
 	for i, id := range claimed {
 		delay := min(time.Second*time.Duration(1<<min(attempts[i], uint64(6))), time.Minute)
-		if state == DeliveryRetryable && resp.StatusCode != 429 {
+		if hold {
 			delay = time.Hour
 		}
 		if err := e.outbox.Resolve(id, attempts[i], outcomes[i], e.outbox.now().Add(delay)); err != nil {
@@ -297,38 +255,35 @@ func (e *LiteLLMExporter) ExportOnce(ctx context.Context) error {
 	return nil
 }
 
-func (e *LiteLLMExporter) verifyReceiver(ctx context.Context) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(e.cfg.URL, "/")+"/v1/rust_control_plane/logs/capabilities", nil)
-	if err != nil {
-		e.setStatus("invalid_configuration")
-		return false
+// applyCallbackResult downgrades the outcomes of records LiteLLM reports as failed.
+func (e *LiteLLMExporter) applyCallbackResult(body io.Reader, outcomes []DeliveryState) {
+	var result struct {
+		Processed int `json:"processed"`
+		Failed    int `json:"failed"`
+		Failures  []struct {
+			Index int `json:"index"`
+		} `json:"failures"`
 	}
-	req.Header.Set("Authorization", "Bearer "+e.key)
-	resp, err := e.client.Do(req)
-	if err != nil {
-		e.setStatus("receiver_unavailable: check accounting service connectivity")
-		return false
+	if err := json.NewDecoder(io.LimitReader(body, 1024*1024)).Decode(&result); err != nil || result.Processed < 0 || result.Failed != len(result.Failures) || result.Processed+result.Failed != len(outcomes) {
+		e.setStatus("response_invalid")
+		for i := range outcomes {
+			outcomes[i] = DeliveryRetryable
+		}
+		return
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		e.setStatus("authorization_failure: verify proxy-admin secret")
-		return false
+	for _, f := range result.Failures {
+		if f.Index < 0 || f.Index >= len(outcomes) {
+			e.setStatus("response_invalid")
+			for i := range outcomes {
+				outcomes[i] = DeliveryRetryable
+			}
+			return
+		}
+		outcomes[f.Index] = DeliveryRetryable
 	}
-	if resp.StatusCode == 429 {
-		e.setStatus("rate_limited")
-		return false
+	if result.Failed > 0 {
+		e.setStatus("callback_failure")
+		return
 	}
-	if resp.StatusCode >= 500 {
-		e.setStatus("receiver_unavailable: check accounting service health")
-		return false
-	}
-	var capability struct {
-		Version string `json:"version"`
-		Profile string `json:"profile"`
-	}
-	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&capability) != nil || capability.Version != LiteLLMVersion || capability.Profile != "ai-proxy-completed-v1" {
-		e.setStatus("unsupported_route: install completed-failures.patch on LiteLLM 1.103.0")
-		return false
-	}
-	return true
+	e.setStatus("exported")
 }

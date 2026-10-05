@@ -1,3 +1,0 @@
-litellm[proxy]==1.103.0
-pytest==9.1.1
-pytest-asyncio==1.4.0
