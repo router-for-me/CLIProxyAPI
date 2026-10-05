@@ -188,7 +188,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 							partItems = append(partItems, imagePart)
 						}
 
-					case "image":
+					case "image", "document":
 						source := contentResult.Get("source")
 						if source.Get("type").String() != "base64" {
 							return true
@@ -208,7 +208,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				if role == "user" {
 					partItems = translatorcommon.ReorderGeminiUserParts(partItems)
 				}
-				contentItems = append(contentItems, geminiContentWithParts(role, partItems))
+				if len(partItems) > 0 {
+					contentItems = append(contentItems, geminiContentWithParts(role, partItems))
+				}
 			} else if contentsResult.Type == gjson.String {
 				part := []byte(`{"text":""}`)
 				part, _ = sjson.SetBytes(part, "text", contentsResult.String())
