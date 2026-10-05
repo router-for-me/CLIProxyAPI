@@ -682,6 +682,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		var terminateErr error
 
 		defer close(out)
+		defer reporter.PublishInterrupted(ctx)
 		defer func() {
 			if sess != nil {
 				sess.clearActive(conn, readCh)

@@ -50,8 +50,7 @@ Compute the client key id with `printf 'client\0%s' "$KEY" | sha256sum`.
 ## Findings
 
 - Delivery to stock LiteLLM is at-least-once. The replayed record kept one spend row but counted twice in the identity aggregates (12 tokens, 0.000032 USD over-counted in the scenario). Compare aggregates with the unique spend rows to detect it. Failed and interrupted attempts are never exported, so LiteLLM does not see them.
-- Cancelling a Codex SSE stream publishes no usage record, so that attempt is not accounted (`codex_executor_stream.go`, the `ctx.Err() != nil` return). Inference is unaffected. Chat and Claude record cancelled attempts as failed.
-- The first 429 for a request passes the provider body through but does not forward the provider's `Retry-After` header. Only the cooldown answer that follows carries one.
+- Cancelled streams are recorded as interrupted for the Codex (SSE and WebSocket), xAI WebSocket, OpenAI-compatible and Claude executors. The Gemini, Vertex, Kimi, Devin and Meta streams still return on cancellation without a record.
 - Existing cooldown rules floor a provider reset hint at 10 s and add 1 to 30 s of jitter for Claude. A provider that resets in under 10 s keeps getting 429 from the proxy for up to 10 s (31 s for Claude). Real quota resets are far longer and are honoured.
 - No contract was found that stops a harness from waking after a quota reset, so no follow-up issue was opened.
 

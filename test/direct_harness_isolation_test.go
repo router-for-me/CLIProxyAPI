@@ -219,15 +219,6 @@ func TestCancellationReachesUpstreamAndIsAccounted(t *testing.T) {
 				if calls := upstream.snapshot(); len(calls) != 1 {
 					t.Errorf("%s: upstream attempts = %d, want 1", mode, len(calls))
 				}
-				if c.provider == "codex" {
-					// Known gap: CodexExecutor.ExecuteStream returns on client cancellation without
-					// publishing a usage record, so this attempt is never accounted. Inference is
-					// unaffected, which is the property this test pins.
-					recorded := recorder.tryEvents(1, 1500*time.Millisecond)
-					t.Logf("%s: codex SSE cancellation produced %d accounting events (gap documented in docs/direct-harness-cutover.md)", mode, len(recorded))
-					g.shutdown()
-					continue
-				}
 				recorded := recorder.waitEvents(t, 1)
 				if mode == accountingDisabled {
 					g.shutdown()

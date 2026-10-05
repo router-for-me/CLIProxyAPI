@@ -530,6 +530,16 @@ func (r *UsageReporter) PublishFailureWithDetail(ctx context.Context, detail usa
 	r.publishWithOutcome(ctx, detail, true, fail)
 }
 
+// PublishInterrupted records the attempt as interrupted when the downstream context ended
+// before a terminal record was published. A terminal record wins because the reporter
+// publishes once, and tokens observed so far are kept without inventing the rest.
+func (r *UsageReporter) PublishInterrupted(ctx context.Context) {
+	if r == nil || ctx == nil || ctx.Err() == nil {
+		return
+	}
+	r.PublishFailure(ctx, ctx.Err())
+}
+
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 	if r == nil || errPtr == nil {
 		return
