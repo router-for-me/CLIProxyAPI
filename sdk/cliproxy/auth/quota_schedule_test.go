@@ -232,3 +232,34 @@ func TestQuotaResetScheduleSequentialSparseResults(t *testing.T) {
 		t.Fatal("schedule observation changed availability")
 	}
 }
+
+func TestQuotaResetScheduleDuplicateCodexWindows(t *testing.T) {
+	now := time.Date(2026, 10, 5, 1, 0, 0, 0, time.UTC)
+	stored := QuotaResetSchedule{WeeklyResetAt: now.Add(24 * time.Hour), FiveHourResetAt: now.Add(time.Hour), ObservedAt: now.Add(-time.Minute)}
+	for _, duration := range []string{"10080", "300"} {
+		for _, missing := range []string{"neither", "primary", "secondary"} {
+			t.Run(duration+"/missing="+missing, func(t *testing.T) {
+				h := http.Header{}
+				for _, slot := range []string{"primary", "secondary"} {
+					prefix := "X-Codex-" + slot
+					h.Set(prefix+"-Window-Minutes", duration)
+					if slot != missing {
+						h.Set(prefix+"-Reset-At", strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10))
+					}
+				}
+				parsed := quotaScheduleFromHeaders("codex", h, now)
+				if !parsed.WeeklyResetAt.IsZero() || !parsed.FiveHourResetAt.IsZero() {
+					t.Fatalf("ambiguous duplicate observation accepted: %+v", parsed)
+				}
+				signals := map[string]string{}
+				for name := range h {
+					signals[name] = h.Get(name)
+				}
+				got := EffectiveQuotaResetSchedule(&Auth{Provider: "codex", QuotaResetSchedule: stored, Quota: QuotaState{ObservedAt: now, Signals: signals}})
+				if got != stored {
+					t.Fatalf("rejected duplicate replaced known schedule: %+v", got)
+				}
+			})
+		}
+	}
+}

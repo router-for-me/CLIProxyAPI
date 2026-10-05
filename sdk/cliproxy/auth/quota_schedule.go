@@ -76,12 +76,17 @@ func quotaScheduleFromHeaders(provider string, headers http.Header, observedAt t
 		schedule.WeeklyResetAt = reset("Anthropic-Ratelimit-Unified-7d-Reset")
 		schedule.FiveHourResetAt = reset("Anthropic-Ratelimit-Unified-5h-Reset")
 	case "codex":
+		seenWindows := make(map[int64]bool, 2)
 		for _, window := range []string{"primary", "secondary"} {
 			prefix := "X-Codex-" + window
 			minutes, err := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Window-Minutes")), 10, 64)
 			if err != nil || (minutes != 10080 && minutes != 300) {
 				continue
 			}
+			if seenWindows[minutes] {
+				return QuotaResetSchedule{}
+			}
+			seenWindows[minutes] = true
 			at := reset(prefix + "-Reset-At")
 			if at.IsZero() {
 				seconds, errSeconds := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Reset-After-Seconds")), 10, 64)
