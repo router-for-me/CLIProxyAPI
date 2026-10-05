@@ -129,10 +129,13 @@ func quotaCodexLimitCapacity(raw json.RawMessage) bool {
 			}
 		}
 	}
-	for _, keys := range [][]string{{"primary_window", "primaryWindow"}, {"secondary_window", "secondaryWindow"}} {
-		if !quotaPercentCapacity(quotaRawAlias(record, keys...), "used_percent", "usedPercent") {
-			return false
-		}
+	if !quotaPercentCapacity(quotaRawAlias(record, "primary_window", "primaryWindow"), "used_percent", "usedPercent") {
+		return false
+	}
+	secondary := quotaRawAlias(record, "secondary_window", "secondaryWindow")
+	// Explicit null is a provider observation that this plan has only one window.
+	if string(bytes.TrimSpace(secondary)) != "null" && !quotaPercentCapacity(secondary, "used_percent", "usedPercent") {
+		return false
 	}
 	return true
 }

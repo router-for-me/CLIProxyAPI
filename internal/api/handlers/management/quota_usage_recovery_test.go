@@ -38,6 +38,12 @@ func TestQuotaUsageHasCapacity(t *testing.T) {
 		{"codex_conflicting_alias_reverse", "codex", `{"rate_limit":{"primary_window":{"used_percent":100,"usedPercent":20},"secondary_window":{"used_percent":1}}}`, false, ""},
 		{"codex_conflicting_flag", "codex", `{"rate_limit":{` + windows + `,"limit_reached":false,"limitReached":true}}`, false, ""},
 		{"claude_unknown_limit_kind", "claude", `{` + claude + `,"limits":[{"kind":"unknown","percent":20}]}`, false, ""},
+		{"codex_single_window", "codex", `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":7,"limit_window_seconds":604800},"secondary_window":null}}`, true, ""},
+		{"codex_single_exhausted", "codex", `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":100},"secondary_window":null}}`, false, ""},
+		{"codex_single_disallowed", "codex", `{"rate_limit":{"allowed":false,"primary_window":{"used_percent":7},"secondary_window":null}}`, false, ""},
+		{"codex_single_reached", "codex", `{"rate_limit":{"limit_reached":true,"primary_window":{"used_percent":7},"secondary_window":null}}`, false, ""},
+		{"codex_secondary_malformed", "codex", `{"rate_limit":{"primary_window":{"used_percent":7},"secondary_window":{}}}`, false, ""},
+		{"codex_secondary_exhausted", "codex", `{"rate_limit":{"primary_window":{"used_percent":7},"secondary_window":{"used_percent":100}}}`, false, ""},
 		{"invalid_json", "claude", `{`, false, ""},
 		{"unknown_provider", "other", `{` + claude + `}`, false, ""},
 	}
