@@ -74,6 +74,7 @@ func TestRecordQuotaResetScheduleGuard(t *testing.T) {
 				cfg := &internalconfig.Config{}
 				cfg.Home.Enabled = true
 				m.SetConfig(cfg)
+				expected, _ = m.GetByID(a.ID)
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
