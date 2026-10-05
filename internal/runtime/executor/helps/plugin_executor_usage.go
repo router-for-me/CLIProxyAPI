@@ -163,22 +163,24 @@ func ObserveMergedStreamUsage(buffer *StreamUsageBuffer, update usage.Detail) {
 // MergeStreamUsageDetail merges existing stream usage with a newer update.
 func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	merged := update
-	if merged.InputTokens == 0 && existing.InputTokens > 0 {
+	merged.UsagePresent = existing.UsagePresent || update.UsagePresent
+	merged.TokenEvidence = usage.MergeTokenEvidence(existing.TokenEvidence, update.TokenEvidence)
+	if merged.InputTokens == 0 && existing.InputTokens > 0 && !hasReportedTokenField(update, "input_tokens") {
 		merged.InputTokens = existing.InputTokens
 	}
-	if merged.CachedTokens == 0 && existing.CachedTokens > 0 {
+	if merged.CachedTokens == 0 && existing.CachedTokens > 0 && !hasReportedTokenField(update, "cache_read_input_tokens", "cache_creation_input_tokens") {
 		merged.CachedTokens = existing.CachedTokens
 	}
-	if merged.CacheReadTokens == 0 && existing.CacheReadTokens > 0 {
+	if merged.CacheReadTokens == 0 && existing.CacheReadTokens > 0 && !hasReportedTokenField(update, "cache_read_input_tokens") {
 		merged.CacheReadTokens = existing.CacheReadTokens
 	}
-	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
+	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 && !hasReportedTokenField(update, "cache_creation_input_tokens") {
 		merged.CacheCreationTokens = existing.CacheCreationTokens
 	}
-	if merged.OutputTokens == 0 && existing.OutputTokens > 0 {
+	if merged.OutputTokens == 0 && existing.OutputTokens > 0 && !hasReportedTokenField(update, "output_tokens") {
 		merged.OutputTokens = existing.OutputTokens
 	}
-	if merged.ReasoningTokens == 0 && existing.ReasoningTokens > 0 {
+	if merged.ReasoningTokens == 0 && existing.ReasoningTokens > 0 && !hasReportedTokenField(update, "thinking_tokens", "output_tokens_details.thinking_tokens", "output_tokens_details.reasoning_tokens") {
 		merged.ReasoningTokens = existing.ReasoningTokens
 	}
 	if merged.ResponseServiceTier == "" {
@@ -237,4 +239,16 @@ func ExtractStreamJSONPayload(line []byte) []byte {
 		return nil
 	}
 	return trimmed
+}
+
+func hasReportedTokenField(detail usage.Detail, paths ...string) bool {
+	if detail.TokenEvidence == nil {
+		return false
+	}
+	for _, path := range paths {
+		if _, ok := detail.TokenEvidence.Fields[path]; ok {
+			return true
+		}
+	}
+	return false
 }

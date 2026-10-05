@@ -52,7 +52,10 @@ type Record struct {
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
 	// ResponseModel stores the model name reported by the upstream response, empty when unknown.
-	ResponseModel string
+	ResponseModel   string
+	ExecutedModel   string
+	AdditionalModel bool
+	Interrupted     bool
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.
@@ -77,6 +80,8 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
+	UsagePresent        bool
+	TokenEvidence       *TokenEvidence
 	InputTokens         int64
 	OutputTokens        int64
 	ReasoningTokens     int64
