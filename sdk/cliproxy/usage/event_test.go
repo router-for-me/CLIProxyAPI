@@ -73,3 +73,18 @@ func TestAccountingSinkIndependentDelivery(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountingTokenEvidencePreservesOnlyReportedFields(t *testing.T) {
+	evidence := CaptureTokenEvidence([]byte(`{"input_tokens":0,"output_tokens":0,"prompt_tokens_details":{"audio_tokens":3},"cache_creation":{"ephemeral_5m_input_tokens":4},"api_key":"private-key","prompt":"private-prompt"}`))
+	event := NewAccountingEvent(context.Background(), Record{Detail: Detail{TokenEvidence: evidence}})
+	if event.Tokens == nil || len(event.Tokens.Evidence) != 4 || event.Tokens.Evidence["prompt_tokens_details.audio_tokens"] != 3 || event.Tokens.Evidence["cache_creation.ephemeral_5m_input_tokens"] != 4 {
+		t.Fatalf("tokens = %+v", event.Tokens)
+	}
+	if _, ok := event.Tokens.Evidence["total_tokens"]; ok {
+		t.Fatal("manufactured reported total")
+	}
+	legacy := NewAccountingEvent(context.Background(), Record{Provider: "openai", Detail: Detail{InputTokens: 10, OutputTokens: 6, ReasoningTokens: 5, CacheReadTokens: 4}})
+	if legacy.Tokens.Breakdown.TotalTokens != 16 || legacy.Tokens.Evidence != nil {
+		t.Fatalf("legacy tokens = %+v", legacy.Tokens)
+	}
+}

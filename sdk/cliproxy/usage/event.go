@@ -121,7 +121,7 @@ func NewAccountingEvent(ctx context.Context, record Record) AccountingEvent {
 		event.Status = "interrupted"
 	}
 	detail := record.Detail
-	if detail.UsagePresent || detail.InputTokens != 0 || detail.OutputTokens != 0 || detail.TotalTokens != 0 || detail.ReasoningTokens != 0 || detail.CachedTokens != 0 || detail.CacheReadTokens != 0 || detail.CacheCreationTokens != 0 || detail.TokenBreakdown.TotalTokens != 0 {
+	if detail.UsagePresent || len(SafeTokenEvidence(detail.TokenEvidence)) > 0 || detail.InputTokens != 0 || detail.OutputTokens != 0 || detail.TotalTokens != 0 || detail.ReasoningTokens != 0 || detail.CachedTokens != 0 || detail.CacheReadTokens != 0 || detail.CacheCreationTokens != 0 || detail.TokenBreakdown.TotalTokens != 0 {
 		normalized := EnsureTokenBreakdownForProvider(detail, record.Provider, record.ExecutorType)
 		event.Tokens = &AccountingTokens{
 			Input:         detail.InputTokens,
