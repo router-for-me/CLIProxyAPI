@@ -992,10 +992,17 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	}
 	isBlocked := isCredentialBlocked(auth, modelCount, now)
 	credentialAvailabilityChanged := wasBlocked != isBlocked
+	greedyResetChanged := false
+	if s.strategy == schedulerStrategyGreedy && existingMeta != nil {
+		previous := EffectiveQuotaResetSchedule(existingMeta.auth)
+		current := EffectiveQuotaResetSchedule(auth)
+		greedyResetChanged = !previous.WeeklyResetAt.Equal(current.WeeklyResetAt) ||
+			!previous.FiveHourResetAt.Equal(current.FiveHourResetAt)
+	}
 
-	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 {
+	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || greedyResetChanged || len(targetModels) == 0 {
 		// Synchronize all shards when model sets change, when failures are credential-scoped,
-		// or when credential-level availability transitioned.
+		// when credential-level availability transitioned, or when greedy reset ranks changed.
 		providerState.upsertAuthForModelsLocked(meta, nil, true, now)
 	} else {
 		providerState.upsertAuthForModelsLocked(meta, targetModels, credentialScoped, now)

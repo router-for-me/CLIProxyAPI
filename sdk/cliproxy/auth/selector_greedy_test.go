@@ -2,7 +2,11 @@ package auth
 
 import (
 	"context"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"net/http"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -135,5 +139,82 @@ func TestGreedyWebsocketAndManagerFastPath(t *testing.T) {
 		if err != nil || got.ID != "a" {
 			t.Fatalf("manager used wrong strategy: %v %v", got, err)
 		}
+	}
+}
+
+func TestGreedyResultUpdatesExistingModelShards(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		greedy, five, changed bool
+	}{
+		{"weekly", true, false, true}, {"five_hour", true, true, true}, {"observation_only", true, false, false}, {"round_robin", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var selector Selector = &GreedySelector{}
+			if !tc.greedy {
+				selector = &RoundRobinSelector{}
+			}
+			m := NewManager(nil, selector, nil)
+			reg := registry.GetGlobalRegistry()
+			now := time.Now().UTC().Truncate(time.Second)
+			a := &Auth{ID: "greedy-shard-a-" + tc.name, Provider: "claude", Status: StatusActive, QuotaResetSchedule: QuotaResetSchedule{WeeklyResetAt: now.Add(2 * time.Hour), ObservedAt: now.Add(-time.Hour)}}
+			b := &Auth{ID: "greedy-shard-b-" + tc.name, Provider: "claude", Status: StatusActive, QuotaResetSchedule: QuotaResetSchedule{WeeklyResetAt: now.Add(3 * time.Hour), ObservedAt: now.Add(-time.Hour)}}
+			header := "Anthropic-Ratelimit-Unified-7d-Reset"
+			updatedReset := a.QuotaResetSchedule.WeeklyResetAt
+			if tc.changed {
+				updatedReset = now.Add(4 * time.Hour)
+			}
+			if tc.five {
+				a.QuotaResetSchedule.WeeklyResetAt = now.Add(24 * time.Hour)
+				b.QuotaResetSchedule.WeeklyResetAt = a.QuotaResetSchedule.WeeklyResetAt
+				a.QuotaResetSchedule.FiveHourResetAt = now.Add(time.Hour)
+				b.QuotaResetSchedule.FiveHourResetAt = now.Add(2 * time.Hour)
+				header = "Anthropic-Ratelimit-Unified-5h-Reset"
+				updatedReset = now.Add(3 * time.Hour)
+			}
+			for _, auth := range []*Auth{a, b} {
+				reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "model-a"}, {ID: "model-b"}})
+				id := auth.ID
+				t.Cleanup(func() { reg.UnregisterClient(id) })
+				if _, err := m.Register(WithSkipPersist(context.Background()), auth); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pick := func(model string) *Auth {
+				t.Helper()
+				got, err := m.scheduler.pickSingle(context.Background(), "claude", model, cliproxyexecutor.Options{}, nil)
+				if err != nil || got == nil {
+					t.Fatalf("pick %s: %v %v", model, got, err)
+				}
+				return got
+			}
+			for _, model := range []string{"model-a", "model-b"} {
+				if got := pick(model); tc.greedy && got.ID != a.ID {
+					t.Fatalf("initial %s winner=%s", model, got.ID)
+				}
+			}
+			m.scheduler.mu.Lock()
+			before := m.scheduler.providers["claude"].modelShards["model-b"].entries[a.ID].meta
+			m.scheduler.mu.Unlock()
+			ctx := internallogging.WithResponseHeadersHolder(WithSkipPersist(context.Background()))
+			h := http.Header{}
+			h.Set(header, strconv.FormatInt(updatedReset.Unix(), 10))
+			internallogging.SetResponseHeaders(ctx, h)
+			m.MarkResult(ctx, Result{AuthID: a.ID, Provider: "claude", Model: "model-a", Success: true})
+			m.scheduler.mu.Lock()
+			after := m.scheduler.providers["claude"].modelShards["model-b"].entries[a.ID].meta
+			m.scheduler.mu.Unlock()
+			if tc.greedy && tc.changed {
+				if got := pick("model-b"); got.ID != b.ID {
+					t.Fatalf("other model kept old reset rank: got=%s want=%s", got.ID, b.ID)
+				}
+			} else if after != before {
+				t.Fatal("unrelated shard refreshed without greedy reset change")
+			}
+			current, _ := m.GetByID(a.ID)
+			if !current.QuotaResetSchedule.ObservedAt.After(a.QuotaResetSchedule.ObservedAt) {
+				t.Fatal("ordinary observation did not advance")
+			}
+		})
 	}
 }
