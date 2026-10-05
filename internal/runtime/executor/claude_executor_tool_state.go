@@ -10,6 +10,11 @@ import (
 
 const claudeOAuthToolAliasStateLimit = 1024
 
+// claudeOAuthToolAliasStoreInitMu guards lazy allocation for executors built
+// without a constructor. It lives outside ClaudeExecutor because ForAPIKey
+// copies the executor by value, and a mutex field would be copied with it.
+var claudeOAuthToolAliasStoreInitMu sync.Mutex
+
 type claudeOAuthToolAliasStore struct {
 	mu      sync.Mutex
 	entries map[string]map[string]string
@@ -69,8 +74,8 @@ func cloneClaudeOAuthToolAliasMap(source map[string]string) map[string]string {
 }
 
 func (e *ClaudeExecutor) claudeOAuthToolAliasStore() *claudeOAuthToolAliasStore {
-	e.oauthToolAliasStoreMu.Lock()
-	defer e.oauthToolAliasStoreMu.Unlock()
+	claudeOAuthToolAliasStoreInitMu.Lock()
+	defer claudeOAuthToolAliasStoreInitMu.Unlock()
 	if e.oauthToolAliases == nil {
 		e.oauthToolAliases = &claudeOAuthToolAliasStore{}
 	}
