@@ -701,6 +701,10 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		var streamUsage helps.StreamUsageBuffer
 		defer streamUsage.Publish(ctx, reporter)
 		var param any
+		// upstreamCompleted marks the Gemini terminal frame (candidates.0.finishReason).
+		// Once seen, a client disconnect before upstream EOF is a completed stream:
+		// the settlement tail must publish the observed usage, not a failure record.
+		var upstreamCompleted bool
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -708,6 +712,9 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			reporter.ObserveResponseModel(line)
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				streamUsage.Observe(detail, true)
+			}
+			if finishReason := gjson.GetBytes(line, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+				upstreamCompleted = true
 			}
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
@@ -725,17 +732,22 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
+		// After the upstream terminal frame, scanner death by client disconnect
+		// (context.Canceled) is not an upstream failure: skip failure settlement
+		// and let the deferred streamUsage.Publish report the observed usage.
+		if !upstreamCompleted {
+			if errScan := scanner.Err(); errScan != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				reporter.PublishFailure(ctx, errScan)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+				case <-ctx.Done():
+				}
+				return
 			}
-			return
-		}
-		if ctx.Err() != nil {
-			return
+			if ctx.Err() != nil {
+				return
+			}
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
 		helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
@@ -869,6 +881,10 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		var streamUsage helps.StreamUsageBuffer
 		defer streamUsage.Publish(ctx, reporter)
 		var param any
+		// upstreamCompleted marks the Gemini terminal frame (candidates.0.finishReason).
+		// Once seen, a client disconnect before upstream EOF is a completed stream:
+		// the settlement tail must publish the observed usage, not a failure record.
+		var upstreamCompleted bool
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -876,6 +892,9 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			reporter.ObserveResponseModel(line)
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				streamUsage.Observe(detail, true)
+			}
+			if finishReason := gjson.GetBytes(line, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+				upstreamCompleted = true
 			}
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
@@ -893,17 +912,22 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
+		// After the upstream terminal frame, scanner death by client disconnect
+		// (context.Canceled) is not an upstream failure: skip failure settlement
+		// and let the deferred streamUsage.Publish report the observed usage.
+		if !upstreamCompleted {
+			if errScan := scanner.Err(); errScan != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				reporter.PublishFailure(ctx, errScan)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+				case <-ctx.Done():
+				}
+				return
 			}
-			return
-		}
-		if ctx.Err() != nil {
-			return
+			if ctx.Err() != nil {
+				return
+			}
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
 		helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
