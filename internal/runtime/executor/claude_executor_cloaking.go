@@ -53,12 +53,11 @@ func getWorkloadFromContext(ctx context.Context) string {
 }
 
 // getCloakConfigFromAuth extracts cloak configuration from the auth's attributes,
-// falling back to its stored metadata (the raw OAuth/token JSON). Returns
-// (cloakMode, strictMode, sensitiveWords, cacheUserID); an empty cloakMode means
-// the credential did not explicitly configure a mode.
-func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, sensitiveWords []string, cacheUserID bool) {
+// falling back to its stored metadata (the raw OAuth/token JSON). An empty mode
+// or nil relaxed option means the credential did not explicitly configure it.
+func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, relaxedSystemPrompt *bool, sensitiveWords []string, cacheUserID bool) {
 	if auth == nil {
-		return "", false, nil, false
+		return "", false, nil, nil, false
 	}
 
 	// lookupCloakAttr prefers the executor-facing Attributes, then falls back to the
@@ -81,6 +80,12 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 	cloakMode = lookupCloakAttr("cloak_mode")
 
 	strictMode = strings.EqualFold(lookupCloakAttr("cloak_strict_mode"), "true")
+	if value := lookupCloakAttr("cloak_relaxed_system_prompt"); value != "" {
+		enabled := strings.EqualFold(value, "true")
+		relaxedSystemPrompt = &enabled
+	} else if enabled, ok := claudeauth.ReadMetadataBool(&auth.Metadata, "cloak_relaxed_system_prompt"); ok {
+		relaxedSystemPrompt = &enabled
+	}
 
 	if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
 		sensitiveWords = strings.Split(wordsStr, ",")
@@ -91,7 +96,7 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 
 	cacheUserID = strings.EqualFold(lookupCloakAttr("cloak_cache_user_id"), "true")
 
-	return cloakMode, strictMode, sensitiveWords, cacheUserID
+	return cloakMode, strictMode, relaxedSystemPrompt, sensitiveWords, cacheUserID
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
@@ -716,7 +721,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cch
 
 func checkSystemInstructionsWithSigningModeDoc(doc *ojson.Doc, strictMode bool, cchSigning bool, version, entrypoint, workload string, keepCallerSystemTopLevel ...bool) bool {
 	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
-	return checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
+	return applyClaudeSystemInstructionPolicyDoc(doc, claudeCloakSettings{strictMode: strictMode}, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
@@ -806,15 +811,17 @@ func checkSystemInstructionsWithSigningModeAt(
 	turnOrigin ...string,
 ) []byte {
 	doc := ojson.NewDoc(payload)
-	if !checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, currentDate, isSubagent, prevReq, promptID, keepCallerSystemTopLevel, turnOrigin...) {
+	if !applyClaudeSystemInstructionPolicyDoc(doc, claudeCloakSettings{strictMode: strictMode}, cchSigning, version, entrypoint, workload, currentDate, isSubagent, prevReq, promptID, keepCallerSystemTopLevel, turnOrigin...) {
 		return payload
 	}
 	return doc.Bytes()
 }
 
-func checkSystemInstructionsWithSigningModeAtDoc(
+// applyClaudeSystemInstructionPolicyDoc preserves caller message placement when
+// relaxed mode is enabled, while retaining the required billing and identity.
+func applyClaudeSystemInstructionPolicyDoc(
 	doc *ojson.Doc,
-	strictMode bool,
+	settings claudeCloakSettings,
 	cchSigning bool,
 	version, entrypoint, workload string,
 	currentDate string,
@@ -840,12 +847,17 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 	agentBlock := buildTextBlock(claudeCodeCLIIdentity, agentCC)
 
 	systemBlocks := []string{billingBlock, agentBlock}
+	if settings.relaxedSystemPrompt && !settings.strictMode {
+		systemBlocks = append(systemBlocks, collectRelaxedClaudeSystemPromptBlocks(system)...)
+		_ = doc.SetRawBytes("system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
+		return true
+	}
 	model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
 	if isClaudeFable51Model(model) && !isClaudeProbeOrHelperRequestDoc(doc) {
 		systemBlocks = append(systemBlocks, buildTextBlock(claudeCodeFableReportingOutcomes, nil))
 	}
 	_ = doc.SetRawBytes("system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
-	if strictMode {
+	if settings.strictMode {
 		injectClaudeCodeCurrentDateInternalDoc(doc, currentDate, isExplicit)
 		return true
 	}
@@ -875,6 +887,26 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 	}
 	injectClaudeCodeCurrentDateInternalDoc(doc, currentDate, isExplicit)
 	return true
+}
+
+// collectRelaxedClaudeSystemPromptBlocks preserves the supplied fields and order
+// of nonempty caller text blocks, excluding already injected attribution.
+func collectRelaxedClaudeSystemPromptBlocks(system ojson.Result) []string {
+	var blocks []string
+	shouldForward := func(text string) bool {
+		return strings.TrimSpace(text) != "" && !util.IsClaudeCodeAttributionSystemText(text) && !isClaudeCodeIdentitySystemText(text)
+	}
+	if system.IsArray() {
+		system.ForEach(func(_, part ojson.Result) bool {
+			if part.Get("type").String() == "text" && shouldForward(part.Get("text").String()) {
+				blocks = append(blocks, part.Raw)
+			}
+			return true
+		})
+	} else if system.Type == ojson.String && shouldForward(system.String()) {
+		blocks = append(blocks, buildTextBlock(system.String(), nil))
+	}
+	return blocks
 }
 
 // relocateClaudeSystemPromptForCountTokens keeps a cloaked count_tokens request
@@ -2336,9 +2368,10 @@ type claudeWirePolicy struct {
 }
 
 type claudeCloakSettings struct {
-	strictMode     bool
-	sensitiveWords []string
-	cacheUserID    bool
+	relaxedSystemPrompt bool
+	strictMode          bool
+	sensitiveWords      []string
+	cacheUserID         bool
 }
 
 func isClaudeCodeIdentitySystemText(text string) bool {
@@ -2450,7 +2483,7 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		cfg = cfg.ForAPIKey()
 	}
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
+	attrMode, attrStrict, attrRelaxedSystemPrompt, attrWords, attrCache := getCloakConfigFromAuth(auth)
 
 	cloakMode := "auto"
 	if cfg != nil && cfg.DisableClaudeCloakMode {
@@ -2460,6 +2493,9 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		strictMode:     attrStrict,
 		sensitiveWords: attrWords,
 		cacheUserID:    attrCache,
+	}
+	if attrRelaxedSystemPrompt != nil {
+		settings.relaxedSystemPrompt = *attrRelaxedSystemPrompt
 	}
 	explicitMode := strings.ToLower(strings.TrimSpace(attrMode))
 	if attrMode != "" {
@@ -2473,6 +2509,9 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		if cloakCfg.StrictMode {
 			settings.strictMode = true
 		}
+		if cloakCfg.RelaxedSystemPrompt != nil {
+			settings.relaxedSystemPrompt = *cloakCfg.RelaxedSystemPrompt
+		}
 		if len(cloakCfg.SensitiveWords) > 0 {
 			settings.sensitiveWords = cloakCfg.SensitiveWords
 		}
@@ -2482,7 +2521,7 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 	}
 
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
-	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
+	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || attrRelaxedSystemPrompt != nil || len(attrWords) > 0 || attrCache
 	trimmedMode := strings.ToLower(strings.TrimSpace(cloakMode))
 	uncloak := !fp.ProfileClaudeCodeCLI && (explicitMode == "never" || explicitMode == "uncloak")
 	explicitNever := trimmedMode == "never" && !uncloak
@@ -2609,7 +2648,7 @@ func applyCloakingInternalDoc(
 	if pinnedDate == "" {
 		pinnedDate = claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
 	}
-	if !isProbeOrHelper && claudeSessionDatePinEnabled(cfg) {
+	if !isProbeOrHelper && (!settings.relaxedSystemPrompt || settings.strictMode) && claudeSessionDatePinEnabled(cfg) {
 		// Strip a string-form caller reminder before the pipeline turns the
 		// content into blocks, so user text is never dropped with it.
 		stripFirstUserClaudeCodeCurrentDateReminderDoc(doc)
@@ -2623,9 +2662,9 @@ func applyCloakingInternalDoc(
 	if isExplicit {
 		turnOriginArgs = append(turnOriginArgs, "explicit_cache_mode")
 	}
-	checkSystemInstructionsWithSigningModeAtDoc(
+	applyClaudeSystemInstructionPolicyDoc(
 		doc,
-		settings.strictMode,
+		settings,
 		cchSigning,
 		billingVersion,
 		"cli",
