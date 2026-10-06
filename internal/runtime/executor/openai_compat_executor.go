@@ -990,6 +990,9 @@ func (e statusErr) Error() string {
 	if e.msg != "" {
 		return e.msg
 	}
+	if e.code > 0 {
+		return fmt.Sprintf("upstream status %d (%s)", e.code, http.StatusText(e.code))
+	}
 	return fmt.Sprintf("status %d", e.code)
 }
 func (e statusErr) StatusCode() int            { return e.code }

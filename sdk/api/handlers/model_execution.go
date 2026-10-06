@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 
@@ -86,6 +87,9 @@ func (e *ModelExecutionStreamError) Error() string {
 	}
 	if e.Message != "" {
 		return e.Message
+	}
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("stream error: status %d (%s)", e.StatusCode, http.StatusText(e.StatusCode))
 	}
 	return http.StatusText(e.StatusCode)
 }

@@ -3127,9 +3127,13 @@ tr:focus-within .row-actions {
   margin-top: 2px;
   font-size: 11px;
   color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Show the whole upstream message instead of clipping it to one ellipsised
+     line; long payloads (HTML error pages, JSON blobs) scroll inside the box. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  max-height: 9em;
+  overflow-y: auto;
 }
 /* Small warning badge (e.g. model substitution). */
 .badge--warn {

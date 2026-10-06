@@ -140,19 +140,22 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 			keyBodies, _ = v.(bool)
 		}
 	}
-	if providerBodies || keyBodies {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
-			var upstreamID int64
-			if auth != nil {
-				if raw := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeUpstreamProviderID]); raw != "" {
-					if parsed, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
-						upstreamID = parsed
-					}
+	// Always set the provider attribution keys so failure auto-capture (triggered
+	// by response status >= 400) has attribution. The opt-in gate itself is set
+	// only when the provider or API key policy requested capture.
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		var upstreamID int64
+		if auth != nil {
+			if raw := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeUpstreamProviderID]); raw != "" {
+				if parsed, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
+					upstreamID = parsed
 				}
 			}
+		}
+		ginCtx.Set(internallogging.StoreRequestBodiesProviderContextKey, provider)
+		ginCtx.Set(internallogging.StoreRequestBodiesUpstreamIDContextKey, upstreamID)
+		if providerBodies || keyBodies {
 			ginCtx.Set(internallogging.StoreRequestBodiesContextKey, true)
-			ginCtx.Set(internallogging.StoreRequestBodiesProviderContextKey, provider)
-			ginCtx.Set(internallogging.StoreRequestBodiesUpstreamIDContextKey, upstreamID)
 		}
 	}
 	return reporter
@@ -518,7 +521,7 @@ func PublishPreExecutionFailure(ctx context.Context, provider, model, alias stri
 		if statusCode <= 0 {
 			return
 		}
-		failText = http.StatusText(statusCode)
+		failText = fmt.Sprintf("pre-execution failure: status %d (%s)", statusCode, http.StatusText(statusCode))
 	}
 	usage.PublishRecord(ctx, preExecutionFailureRecord(ctx, provider, model, alias, statusCode, failText))
 }

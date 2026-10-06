@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 )
 
@@ -262,5 +264,75 @@ func TestBodyCaptureSinkTruncatesOversizedClientBody(t *testing.T) {
 	}
 	if !got.Truncated {
 		t.Fatal("expected Truncated for oversized client body")
+	}
+}
+
+func TestBodyCaptureSinkAutoCapturesFailedRequestWithoutGate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := &recordingSink{}
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(nil, sink))
+	// No STORE_REQUEST_BODIES gate is set: capture is OFF for this provider.
+	engine.POST("/fail", func(c *gin.Context) {
+		c.Set(logging.StoreRequestBodiesProviderContextKey, "openai")
+		c.Set(logging.StoreRequestBodiesUpstreamIDContextKey, int64(7))
+		c.Set("API_REQUEST", []byte("upstream-req"))
+		c.Set("API_RESPONSE", []byte("upstream-err"))
+		c.JSON(http.StatusBadGateway, gin.H{"error": "boom"})
+	})
+	request := httptest.NewRequest(http.MethodPost, "/fail", strings.NewReader(`{"input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(httptest.NewRecorder(), request)
+
+	if len(sink.got) != 1 {
+		t.Fatalf("failed request must auto-capture, got %d captures", len(sink.got))
+	}
+	got := sink.got[0]
+	if got.Provider != "openai" {
+		t.Fatalf("provider = %q, want %q", got.Provider, "openai")
+	}
+	if got.UpstreamProviderID != 7 {
+		t.Fatalf("upstream id = %d, want 7", got.UpstreamProviderID)
+	}
+	if string(got.UpstreamResponse) != "upstream-err" {
+		t.Fatalf("upstream response = %q", got.UpstreamResponse)
+	}
+	if !strings.Contains(string(got.ClientRequestBody), `"input":"hi"`) {
+		t.Fatalf("client request body = %q", got.ClientRequestBody)
+	}
+}
+
+func TestBodyCaptureSinkAutoCapturesAPIResponseErrorOn2xx(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := &recordingSink{}
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(nil, sink))
+	// A stream can terminate with an API_RESPONSE_ERROR while the HTTP status
+	// is still 200 (e.g. an SSE error frame); that must auto-capture too.
+	engine.POST("/stream-fail", func(c *gin.Context) {
+		c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{{StatusCode: http.StatusBadGateway, Error: errors.New("upstream error")}})
+		c.Set(logging.StoreRequestBodiesProviderContextKey, "claude")
+		c.JSON(http.StatusOK, gin.H{"ok": false})
+	})
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/stream-fail", nil))
+
+	if len(sink.got) != 1 {
+		t.Fatalf("API_RESPONSE_ERROR request must auto-capture, got %d captures", len(sink.got))
+	}
+}
+
+func TestBodyCaptureSinkSkipsSuccessfulRequestWithoutGate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := &recordingSink{}
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(nil, sink))
+	engine.POST("/ok", func(c *gin.Context) {
+		c.Set(logging.StoreRequestBodiesProviderContextKey, "openai")
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/ok", nil))
+
+	if len(sink.got) != 0 {
+		t.Fatalf("successful request without the opt-in gate must not capture, got %d", len(sink.got))
 	}
 }

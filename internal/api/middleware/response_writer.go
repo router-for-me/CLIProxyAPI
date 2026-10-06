@@ -359,13 +359,13 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
 	if !loggerActive && !forceLog {
-		if w.captureOn() && w.bodySink != nil {
+		if (w.captureOn() || hasAPIError) && w.bodySink != nil {
 			w.captureToSink(c)
 		}
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil
 	}
-	if w.captureOn() && w.bodySink != nil {
+	if (w.captureOn() || hasAPIError) && w.bodySink != nil {
 		w.captureToSink(c)
 	}
 
