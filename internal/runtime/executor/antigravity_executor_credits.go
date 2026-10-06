@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +62,9 @@ var (
 		"quota_exhausted",
 		"quota exhausted",
 	}
+	// antigravityQuotaResetHint matches the human-readable reset hint of an exhausted
+	// quota window, e.g. "Individual quota reached. Resets in 69h2m37s.".
+	antigravityQuotaResetHint = regexp.MustCompile(`(?i)resets?\s+in\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)`)
 )
 
 type antigravityKVClient interface {
@@ -279,6 +283,127 @@ func decideAntigravity429(body []byte) antigravity429Decision {
 
 	decision.kind = antigravity429DecisionSoftRetry
 	return decision
+}
+
+// antigravityQuotaExhaustedReason reports whether upstream explicitly labelled the
+// window as QUOTA_EXHAUSTED. decideAntigravity429 also folds a long-retry
+// RATE_LIMIT_EXCEEDED into full_quota_exhausted; those carry no quota window, so this
+// keeps the reset hint scoped to the cases that actually have one.
+func antigravityQuotaExhaustedReason(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	details := gjson.GetBytes(body, "error.details")
+	if details.Exists() && details.IsArray() {
+		for _, detail := range details.Array() {
+			if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(detail.Get("reason").String()), "QUOTA_EXHAUSTED") {
+				return true
+			}
+		}
+	}
+	lowerBody := strings.ToLower(string(body))
+	for _, keyword := range antigravityQuotaExhaustedKeywords {
+		if strings.Contains(lowerBody, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// antigravityQuotaResetDelay returns the upstream-supplied delay until an exhausted
+// quota window resets. Structured hints (RetryInfo.retryDelay or ErrorInfo
+// metadata.quotaResetDelay) win; otherwise the human-readable hint embedded in the
+// error message ("Resets in 69h2m37s.") is parsed. A nil result means the upstream
+// gave no usable reset time and callers must fall back to exponential backoff.
+//
+// Only payloads upstream labelled QUOTA_EXHAUSTED are considered: a long-retry
+// RATE_LIMIT_EXCEEDED is classified as full_quota_exhausted too, but it has no quota
+// window and keeps the pre-fix behavior of carrying no provider hint.
+func antigravityQuotaResetDelay(body []byte) *time.Duration {
+	if !antigravityQuotaExhaustedReason(body) {
+		return nil
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	if delay, errParse := helps.ParseRetryDelay(body); errParse == nil && delay != nil && *delay > 0 {
+		return delay
+	}
+	message := gjson.GetBytes(body, "error.message").String()
+	if message == "" {
+		return nil
+	}
+	matches := antigravityQuotaResetHint.FindStringSubmatch(message)
+	if len(matches) < 2 {
+		return nil
+	}
+	delay, errParse := time.ParseDuration(matches[1])
+	if errParse != nil || delay <= 0 {
+		return nil
+	}
+	return &delay
+}
+
+// withAntigravityQuotaResetDelay attaches the upstream quota reset hint to an upstream
+// status error so the conductor cools this model until the window reopens instead of
+// re-selecting the credential a second later. An explicit provider hint already carried
+// by the error takes precedence.
+//
+// quotaGroup is the exhausted window's Antigravity quota group (see
+// cliproxyauth.AntigravityQuotaGroup). It is non-empty only for the non-credits path
+// where the executor knows a real quota window is exhausted, and tells the conductor to
+// cool every sibling model of that group on the same credential, not just this model.
+func withAntigravityQuotaResetDelay(statusErr statusErr, delay *time.Duration, quotaGroup string) statusErr {
+	if statusErr.quotaGroup == "" {
+		statusErr.quotaGroup = strings.TrimSpace(quotaGroup)
+	}
+	// The deadline flag is what the conductor uses to tell a hard quota-window reset
+	// from a speculative retry hint, so set it whenever the caller supplies a delay -
+	// independently of whether retryAfter was already populated. Guarding on
+	// statusErr.retryAfter != nil here would silently drop the flag, because
+	// newAntigravityStatusErr always parses a retry delay into retryAfter first, and
+	// the conductor would then treat a multi-hour exhausted window as a soft hint and
+	// re-select the credential while it is still known to be exhausted.
+	if delay == nil || *delay <= 0 {
+		return statusErr
+	}
+	if statusErr.retryAfter == nil {
+		statusErr.retryAfter = delay
+	}
+	statusErr.quotaResetDeadline = true
+	return statusErr
+}
+
+// antigravityQuotaExhaustedGroup returns the quota group an exhausted window belongs to,
+// or "" when the model matches no known group or the credits path handled the failure.
+// Unknown groups keep the pre-group behavior of cooling only the failing model.
+func antigravityQuotaExhaustedGroup(model string, useCredits bool) string {
+	if useCredits {
+		return ""
+	}
+	return cliproxyauth.AntigravityQuotaGroup(model)
+}
+
+// antigravityHandleFullQuotaExhausted runs the shared side effects of a 429 classified as
+// full quota exhaustion: closing idle transports and, in credits mode, permanently
+// disabling the credential. Outside credits mode it returns the upstream reset deadline
+// to attach to the returned status error, so the conductor cools this model until the
+// window reopens. Returns nil when there is no deadline to hand over, which leaves the
+// conductor on its existing exponential-backoff path.
+func antigravityHandleFullQuotaExhausted(auth *cliproxyauth.Auth, body []byte, useCredits bool, cfg *config.Config) *time.Duration {
+	closeAntigravityAuthIdleTransports(auth)
+	if useCredits {
+		if antigravityHasExplicitCreditsBalanceExhaustedReason(body) && !antigravityCoolingDisabled(auth, cfg) {
+			markAntigravityCreditsPermanentlyDisabled(auth)
+		}
+		// Credits requests are retried through the credits fallback, which keeps its own
+		// balance-driven candidate selection. Leave that path unchanged.
+		return nil
+	}
+	return antigravityQuotaResetDelay(body)
 }
 
 func antigravityCreditsRetryEnabled(cfg *config.Config) bool {

@@ -1426,12 +1426,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
-				if ra := retryAfterFromError(errExec); ra != nil {
-					result.RetryAfter = ra
-				}
-				if isCredentialScopedError(errExec) {
-					result.CredentialScope = true
-				}
+				applyQuotaRetryHint(&result, errExec)
 				m.MarkResult(creditsCtx, result)
 				if result.CredentialScope {
 					break

@@ -139,8 +139,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				rerr := resultErrorFromError(chunk.Err)
 				action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.runtimeConfigSnapshot())
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts}
-				result.RetryAfter = retryAfterFromError(chunk.Err)
-				result.CredentialScope = isCredentialScopedError(chunk.Err)
+				applyQuotaRetryHint(&result, chunk.Err)
 				applyRequestScopedActionToResult(action, okAction, &result)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			}
@@ -290,10 +289,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
-			result.RetryAfter = retryAfterFromError(errStream)
-			if isCredentialScopedError(errStream) {
-				result.CredentialScope = true
-			}
+			applyQuotaRetryHint(&result, errStream)
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			if okAction {
@@ -376,10 +372,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				if isCredentialScopedError(bootstrapErr) {
-					result.CredentialScope = true
-				}
+				applyQuotaRetryHint(&result, bootstrapErr)
 				applyRequestScopedActionToResult(action, okAction, &result)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 				discardStreamChunks(streamResult.Chunks)
@@ -396,10 +389,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				if isCredentialScopedError(bootstrapErr) {
-					result.CredentialScope = true
-				}
+				applyQuotaRetryHint(&result, bootstrapErr)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
@@ -407,10 +397,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if idx < len(execModels)-1 {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				if isCredentialScopedError(bootstrapErr) {
-					result.CredentialScope = true
-				}
+				applyQuotaRetryHint(&result, bootstrapErr)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
@@ -422,10 +409,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			rerr := resultErrorFromError(bootstrapErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
-			result.RetryAfter = retryAfterFromError(bootstrapErr)
-			if isCredentialScopedError(bootstrapErr) {
-				result.CredentialScope = true
-			}
+			applyQuotaRetryHint(&result, bootstrapErr)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			discardStreamChunks(streamResult.Chunks)
 			currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)

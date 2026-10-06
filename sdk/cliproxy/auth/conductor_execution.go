@@ -631,12 +631,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
-				if ra := retryAfterFromError(errExec); ra != nil {
-					result.RetryAfter = ra
-				}
-				if isCredentialScopedError(errExec) {
-					result.CredentialScope = true
-				}
+				applyQuotaRetryHint(&result, errExec)
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
 				applyRequestScopedActionToResult(action, okAction, &result)
 				if isResponsesCompactAvailabilityNeutralError(execOpts, errExec, result.Error) {
@@ -845,6 +840,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
+					result.QuotaResetDeadline = quotaResetDeadlineFromError(errExec)
 				}
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
 				applyRequestScopedActionToResult(action, okAction, &result)
@@ -857,6 +853,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				} else {
 					if isCredentialScopedError(errExec) {
 						result.CredentialScope = true
+						result.QuotaGroup = quotaGroupFromError(errExec)
 					}
 					m.MarkResult(execCtx, result)
 				}

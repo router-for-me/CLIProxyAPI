@@ -1097,6 +1097,12 @@ type statusErr struct {
 	msg              string
 	retryAfter       *time.Duration
 	credentialScoped bool
+	// quotaGroup names the upstream quota group an exhausted window belongs to.
+	// Only Antigravity sets it; see cliproxyauth.AntigravityQuotaGroup.
+	quotaGroup string
+	// quotaResetDeadline marks retryAfter as a provider-reported quota-window reset
+	// deadline rather than a speculative retry hint.
+	quotaResetDeadline bool
 }
 
 func (e statusErr) Error() string {
@@ -1108,6 +1114,14 @@ func (e statusErr) Error() string {
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
+
+// QuotaGroup reports the upstream quota group this failure exhausts, if any.
+func (e statusErr) QuotaGroup() string { return e.quotaGroup }
+
+// IsQuotaResetDeadline reports whether retryAfter is a provider-reported quota-window
+// reset deadline. Such a deadline is honored even when cooldown scheduling is disabled,
+// so an exhausted credential is not re-selected until the window actually reopens.
+func (e statusErr) IsQuotaResetDeadline() bool { return e.quotaResetDeadline }
 
 const openAICompatTPMFallbackRetryAfter = time.Minute
 
