@@ -167,8 +167,8 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	directAnthropic := isAnthropicUpstreamBase(baseURL)
 	// Claude Code's count_tokens carries only model, messages and tools, so the
 	// full Messages cloaking must not run here for any origin. Apply the parts
-	// that still have to hold: relocate the caller's system prompt into messages
-	// so its tokens stay counted, and obfuscate sensitive words exactly like the
+	// that still have to hold: follow the selected system layout so caller tokens
+	// stay counted, and obfuscate sensitive words exactly like the
 	// Messages path. Kimi opt-in uses the same contract.
 	policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
 	cloaked := policy.Cloak
@@ -179,7 +179,12 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 				return cliproxyexecutor.Response{}, errSystem
 			}
 		}
-		body = relocateClaudeSystemPromptForCountTokens(body, settings.strictMode, explicitCacheMode)
+		if settings.relaxedSystemPrompt {
+			blocks := collectRelaxedClaudeSystemPromptBlocks(gjson.GetBytes(body, "system"))
+			body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+		} else {
+			body = relocateClaudeSystemPromptForCountTokens(body, settings.strictMode, explicitCacheMode)
+		}
 		if len(settings.sensitiveWords) > 0 {
 			body = helps.ObfuscateSensitiveWords(body, helps.BuildSensitiveWordMatcher(settings.sensitiveWords))
 		}
