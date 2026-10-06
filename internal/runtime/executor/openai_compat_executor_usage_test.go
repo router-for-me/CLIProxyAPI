@@ -174,3 +174,72 @@ func TestOpenAICompatStreamHTTP200DataErrorPublishesFailure(t *testing.T) {
 		t.Fatal("timed out waiting for usage record")
 	}
 }
+
+// TestStatusErrErrorEnrichesEmptyMessage pins the fallback text used when an
+// upstream error body is empty: the code alone ("status 502") carried no
+// context in the Errors feed, so the HTTP status text is included.
+func TestStatusErrErrorEnrichesEmptyMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  statusErr
+		want string
+	}{
+		{"message wins", statusErr{code: http.StatusBadGateway, msg: "upstream said no"}, "upstream said no"},
+		{"empty message keeps status text", statusErr{code: http.StatusBadGateway}, "upstream status 502 (Bad Gateway)"},
+		{"empty message and code", statusErr{}, "status 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.Error(); got != tc.want {
+				t.Fatalf("Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOpenAICompatEmptyErrorBodyPublishesStatusText guards the Errors-feed
+// enrichment: an upstream that answers a non-2xx with an empty body used to
+// record just "status 502", which reads as a diagnosis but carries none. The
+// fallback now includes the HTTP status text so the row is self-explanatory.
+func TestOpenAICompatEmptyErrorBodyPublishesStatusText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	plugin := &captureOpenAICompatUsagePlugin{records: make(chan usage.Record, 8)}
+	usage.RegisterPlugin(plugin)
+
+	executorObj := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{Name: "compat"}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+
+	_, errExecute := executorObj.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: []byte(`{"model":"gpt-5.6","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if errExecute == nil {
+		t.Fatal("expected an error for a 502 response")
+	}
+
+	select {
+	case record := <-plugin.records:
+		if !record.Failed {
+			t.Fatalf("record Failed = false; want true: %+v", record)
+		}
+		if want := "upstream status 502 (Bad Gateway)"; record.Fail.Body != want {
+			t.Fatalf("Fail.Body = %q, want %q", record.Fail.Body, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}

@@ -530,3 +530,27 @@ func TestWriteErrorResponse_DisabledOverrideFallsBackToDefault(t *testing.T) {
 		t.Fatalf("disabled override message leaked into response.\nbody = %s", body)
 	}
 }
+
+// TestModelExecutionStreamErrorEnrichesEmptyMessage pins the fallback text for
+// a terminal stream error with no message: the bare HTTP status text
+// ("Service Unavailable") was indistinguishable from an operator-defined
+// message in the Errors feed, so the status code is included too.
+func TestModelExecutionStreamErrorEnrichesEmptyMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  *ModelExecutionStreamError
+		want string
+	}{
+		{"nil receiver", nil, ""},
+		{"message wins", &ModelExecutionStreamError{StatusCode: http.StatusBadGateway, Message: "upstream said no"}, "upstream said no"},
+		{"empty message keeps status text", &ModelExecutionStreamError{StatusCode: http.StatusServiceUnavailable}, "stream error: status 503 (Service Unavailable)"},
+		{"zero status", &ModelExecutionStreamError{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.Error(); got != tc.want {
+				t.Fatalf("Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
