@@ -316,6 +316,17 @@ export async function getUsageEventBodies(id, options = {}) {
   return fetchJSON(url);
 }
 
+// Captured request/response payloads for one failed-attempt (usage_errors)
+// record. Reuses the same request_bodies table under the hood; returns the
+// same eventBodiesResponse shape as getUsageEventBodies.
+export async function getUsageErrorBodies(id, options = {}) {
+  let url = `/usage-stats/errors/${encodeURIComponent(id)}/bodies`;
+  const params = [];
+  if (options.redact === false) params.push('redact=false');
+  if (params.length > 0) url += '?' + params.join('&');
+  return fetchJSON(url);
+}
+
 // Paginated list of raw failed-attempt records (usage_errors table). Mirrors
 // getUsageEvents in shape but surfaces fail_status_code and error_message so
 // operators can triage request errors separately from successful responses.

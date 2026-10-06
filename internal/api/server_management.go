@@ -306,6 +306,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-stats/events/:id/bodies", s.mgmt.GetUsageEventBodies)
 		mgmt.GET("/usage-stats/errors", s.mgmt.GetUsageErrors)
 		mgmt.GET("/usage-stats/errors/:id", s.mgmt.GetUsageError)
+		mgmt.GET("/usage-stats/errors/:id/bodies", s.mgmt.GetUsageErrorBodies)
 		mgmt.GET("/usage-stats/filters", s.mgmt.GetUsageFilters)
 		mgmt.GET("/usage-windows/:api_key_id", s.mgmt.GetUsageWindows)
 

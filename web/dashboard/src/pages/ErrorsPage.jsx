@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
-  getUsageErrors, getUsageError, getUsageFilterOptions, getUsageTotals,
+  getUsageErrors, getUsageError, getUsageErrorBodies, getUsageFilterOptions, getUsageTotals,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -14,6 +14,7 @@ import {
   TIMEZONES, loadTimezone, saveTimezone, formatInTZ, tzAbbreviation,
   TokenBreakdownCard, ChartSkeleton,
   FilterSelect, DetailRow, CopyButton, FailoverHistory,
+  EventBodiesSection,
 } from './usageShared.jsx';
 
 // ErrorsPage renders the failed-attempt stream (usage_errors table) as a
@@ -468,6 +469,12 @@ function ErrorDetailModal({ id, timezone, onClose }) {
               {e.error_message || '—'}
             </div>
           </div>
+
+          {/* Raw captured upstream response (headers + body) for this failed
+              attempt, when body capture was enabled for the provider. Fetched
+              through the errors :id/bodies endpoint so the same request_bodies
+              row the Events modal shows is surfaced here too. */}
+          <EventBodiesSection id={id} fetchBodies={getUsageErrorBodies} />
 
           <FailoverHistory
             requestId={e.request_id}

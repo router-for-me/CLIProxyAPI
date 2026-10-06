@@ -949,11 +949,18 @@ function saveRedactPref(v) {
 }
 
 // EventBodiesSection lazily loads captured request/response payloads for one
-// event. Capture is opt-in per upstream provider, so available:false is a
-// normal state, not an error.
-export function EventBodiesSection({ id }) {
+// event (or one error). Capture is opt-in per upstream provider, so
+// available:false is a normal state, not an error.
+//
+// Props:
+//   id          - event or error primary key
+//   fetchBodies - async (id, opts) => bodies response; defaults to
+//                 getUsageEventBodies (the events endpoint). Pass
+//                 getUsageErrorBodies for the Errors page detail modal.
+export function EventBodiesSection({ id, fetchBodies }) {
+  const getBodies = fetchBodies || getUsageEventBodies;
   const [redactPII, setRedactPII] = useState(() => loadRedactPref());
-  const detail = useAsync(() => getUsageEventBodies(id, { redact: redactPII }), [id, redactPII]);
+  const detail = useAsync(() => getBodies(id, { redact: redactPII }), [id, redactPII, getBodies]);
   function toggleRedact() {
     setRedactPII((v) => {
       const next = !v;

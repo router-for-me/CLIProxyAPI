@@ -70,11 +70,46 @@ func (h *Handler) GetUsageEventBodies(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 		return
 	}
-	if event.RequestID == "" {
+	h.serveBodiesByRequestID(c, usage, event.RequestID)
+}
+
+// GetUsageErrorBodies handles GET /v0/management/usage-stats/errors/:id/bodies.
+// Mirrors GetUsageEventBodies but resolves the captured payloads through the
+// failed-attempt row (usage_errors) so the Errors page detail modal can show
+// the raw upstream response alongside the error message.
+func (h *Handler) GetUsageErrorBodies(c *gin.Context) {
+	_, usage, _, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "id must be a positive integer"}})
+		return
+	}
+	errRow, err := usage.GetError(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrUsageErrorNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found", "message": "usage error not found"}})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	h.serveBodiesByRequestID(c, usage, errRow.RequestID)
+}
+
+// serveBodiesByRequestID loads the captured body pair for a request id and
+// renders it with the same redaction defaults as the events bodies endpoint.
+// Shared by GetUsageEventBodies and GetUsageErrorBodies; an empty request id
+// or a missing capture row yields available:false with a reason rather than
+// an error, since body capture is opt-in.
+func (h *Handler) serveBodiesByRequestID(c *gin.Context, usage *store.UsageStore, requestID string) {
+	if requestID == "" {
 		c.JSON(http.StatusOK, eventBodiesResponse{Available: false, Reason: "no_request_id"})
 		return
 	}
-	rb, err := usage.GetRequestBodyByRequestID(c.Request.Context(), event.RequestID)
+	rb, err := usage.GetRequestBodyByRequestID(c.Request.Context(), requestID)
 	if err != nil {
 		if errors.Is(err, store.ErrRequestBodyNotFound) {
 			c.JSON(http.StatusOK, eventBodiesResponse{Available: false, Reason: "not_captured"})
