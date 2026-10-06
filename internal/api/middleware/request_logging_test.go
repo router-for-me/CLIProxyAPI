@@ -10,13 +10,16 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 )
 
 func TestShouldSkipMethodForRequestLogging(t *testing.T) {
@@ -584,5 +587,130 @@ func TestCaptureRequestInfo_HeadersDeepCopy(t *testing.T) {
 
 	if got := info.Headers["X-Audit"][0]; got != "original-value" {
 		t.Fatalf("header slice was aliased: got %q, want %q", got, "original-value")
+	}
+}
+
+func TestManagementV8RequestsAreNotLogged(t *testing.T) {
+	for _, path := range []string{"/v8/management/config", "/v8/management/config.yaml", "/v8/management/config/api-keys/codex", "/v8/management/oauth/auth-url"} {
+		if shouldLogRequest(path) {
+			t.Errorf("management config request would be logged: %s", path)
+		}
+	}
+}
+
+type spyRequestLogger struct {
+	lastLogRequestID       string
+	lastStreamingRequestID string
+	underlying             logging.RequestLogger
+}
+
+func (s *spyRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	s.lastLogRequestID = requestID
+	if s.underlying != nil {
+		return s.underlying.LogRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors, requestID, requestTimestamp, apiResponseTimestamp)
+	}
+	return nil
+}
+
+func (s *spyRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (logging.StreamingLogWriter, error) {
+	s.lastStreamingRequestID = requestID
+	if s.underlying != nil {
+		return s.underlying.LogStreamingRequest(url, method, headers, body, requestID)
+	}
+	return &testStreamingLogWriter{}, nil
+}
+
+func (s *spyRequestLogger) IsEnabled() bool {
+	return true
+}
+
+func TestRequestLoggingMiddleware_PreservesFullUUIDForLoggerAndTruncatesFilename(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	fileLogger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+	spy := &spyRequestLogger{underlying: fileLogger}
+
+	router := gin.New()
+	router.Use(logging.GinLogrusLogger())
+	router.Use(RequestLoggingMiddleware(spy))
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"choices": []string{"hello"}})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"input":"ping"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Code)
+	}
+
+	// 1. Verify logger received full UUIDv7
+	if spy.lastLogRequestID == "" {
+		t.Fatalf("expected non-empty request ID passed to logger")
+	}
+	parsed, errParse := uuid.Parse(spy.lastLogRequestID)
+	if errParse != nil {
+		t.Fatalf("request ID passed to logger is not a valid UUID: %q (%v)", spy.lastLogRequestID, errParse)
+	}
+	if parsed.Version() != 7 {
+		t.Fatalf("request ID version = %d, want 7", parsed.Version())
+	}
+
+	// 2. Verify on-disk log filename uses the trailing 8 chars, not full UUID
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		t.Fatalf("ReadDir logsDir failed: %v", errRead)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 log file on disk, got %d", len(entries))
+	}
+	fileName := entries[0].Name()
+	expectedShortID := spy.lastLogRequestID[len(spy.lastLogRequestID)-8:]
+	expectedSuffix := "-" + expectedShortID + ".log"
+	if !strings.HasSuffix(fileName, expectedSuffix) {
+		t.Fatalf("filename %q does not end with expected short suffix %q", fileName, expectedSuffix)
+	}
+	if strings.Contains(fileName, spy.lastLogRequestID) {
+		t.Fatalf("filename %q should not contain the full UUID", fileName)
+	}
+}
+
+func TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	fileLogger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+	spy := &spyRequestLogger{underlying: fileLogger}
+
+	router := gin.New()
+	router.Use(logging.GinLogrusLogger())
+	router.Use(RequestLoggingMiddleware(spy))
+	router.POST("/v1/responses", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write([]byte("data: chunk\n\n"))
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Code)
+	}
+
+	if spy.lastStreamingRequestID == "" {
+		t.Fatalf("expected non-empty streaming request ID passed to logger")
+	}
+	parsed, errParse := uuid.Parse(spy.lastStreamingRequestID)
+	if errParse != nil {
+		t.Fatalf("streaming request ID passed to logger is not a valid UUID: %q (%v)", spy.lastStreamingRequestID, errParse)
+	}
+	if parsed.Version() != 7 {
+		t.Fatalf("streaming request ID version = %d, want 7", parsed.Version())
 	}
 }

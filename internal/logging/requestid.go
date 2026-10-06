@@ -2,10 +2,11 @@ package logging
 
 import (
 	"context"
-	"fmt"
-	"sync/atomic"
+	"io"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // requestIDKey is the context key for storing/retrieving request IDs.
@@ -14,13 +15,36 @@ type requestIDKey struct{}
 // ginRequestIDKey is the Gin context key for request IDs.
 const ginRequestIDKey = "__request_id__"
 
-var requestIDCounter atomic.Uint32
+// GenerateRequestID creates a new UUIDv7 request ID string using the default random source.
+// It returns an error if the underlying random source fails.
+func GenerateRequestID() (string, error) {
+	return GenerateRequestIDFromReader(nil)
+}
 
-// GenerateRequestID creates a new 8-character hex auto-incrementing request ID,
-// wrapping around to 00000000 after ffffffff.
-func GenerateRequestID() string {
-	id := requestIDCounter.Add(1) - 1
-	return fmt.Sprintf("%08x", id)
+// GenerateRequestIDFromReader creates a new UUIDv7 request ID string using the provided reader.
+// If r is nil, the default crypto/rand source is used.
+func GenerateRequestIDFromReader(r io.Reader) (string, error) {
+	var id uuid.UUID
+	var errNewV7 error
+	if r == nil {
+		id, errNewV7 = uuid.NewV7()
+	} else {
+		id, errNewV7 = uuid.NewV7FromReader(r)
+	}
+	if errNewV7 != nil {
+		return "", errNewV7
+	}
+	return id.String(), nil
+}
+
+// ShortRequestID returns the trailing 8 characters of a request ID.
+// If requestID is 8 characters or shorter, it returns it unchanged.
+func ShortRequestID(requestID string) string {
+	requestID = strings.TrimSpace(requestID)
+	if len(requestID) > 8 {
+		return requestID[len(requestID)-8:]
+	}
+	return requestID
 }
 
 // WithRequestID returns a new context with the request ID attached.

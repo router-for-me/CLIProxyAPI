@@ -3,7 +3,7 @@ package responses
 import (
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -73,7 +73,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		rawInputArray := input.Array()
+		rawInputArray := toolIndex.shellHistory(input.Array())
 		explicitOutputCounts := make(map[string]int)
 		missingIDOutputsCount := 0
 		for _, item := range rawInputArray {
@@ -482,6 +482,12 @@ func convertResponsesToolChoiceWithIndex(toolChoice gjson.Result, toolIndex *res
 	}
 
 	choiceType := toolChoice.Get("type").String()
+	if choiceType == "shell" {
+		if name := toolIndex.shellName(); name != "" {
+			converted, _ := sjson.SetBytes([]byte(`{"type":"function","function":{}}`), "function.name", name)
+			return converted
+		}
+	}
 	if choiceType != "function" && choiceType != "custom" {
 		return []byte(toolChoice.Raw)
 	}

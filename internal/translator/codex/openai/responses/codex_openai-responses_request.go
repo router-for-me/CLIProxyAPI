@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -57,8 +57,49 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
+	rawJSON = normalizeEmptyFunctionCallArguments(rawJSON)
 
 	return rawJSON
+}
+
+// normalizeEmptyFunctionCallArguments rewrites blank string arguments on
+// history function_call items to "{}". Some Responses clients serialize
+// parameter-less tool calls as an empty string, which strict Codex Responses
+// upstreams reject with "`arguments` must be valid JSON". Only blank strings
+// are touched: non-empty strings (even invalid JSON) pass through unchanged
+// so other errors keep their original shape, and custom_tool_call items use
+// the separate input field and are never affected.
+func normalizeEmptyFunctionCallArguments(rawJSON []byte) []byte {
+	inputResult := util.GetGJSONBytesNoCopy(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+	items := inputResult.Array()
+	if len(items) == 0 {
+		return rawJSON
+	}
+	changed := false
+	rebuilt := make([][]byte, 0, len(items))
+	for _, item := range items {
+		itemRaw := []byte(item.Raw)
+		if item.IsObject() && item.Get("type").String() == "function_call" {
+			if args := item.Get("arguments"); args.Type == gjson.String && strings.TrimSpace(args.String()) == "" {
+				if updated, errSet := sjson.SetBytes(itemRaw, "arguments", "{}"); errSet == nil {
+					itemRaw = updated
+					changed = true
+				}
+			}
+		}
+		rebuilt = append(rebuilt, itemRaw)
+	}
+	if !changed {
+		return rawJSON
+	}
+	updated, errSetRaw := sjson.SetRawBytes(rawJSON, "input", translatorcommon.JoinRawArray(rebuilt))
+	if errSetRaw != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 func setCodexRequiredBool(rawJSON []byte, path string, value bool) []byte {
@@ -76,12 +117,30 @@ func setCodexRequiredBool(rawJSON []byte, path string, value bool) []byte {
 
 func setCodexRequiredInclude(rawJSON []byte) []byte {
 	current := gjson.GetBytes(rawJSON, "include")
-	values := current.Array()
-	if current.IsArray() && len(values) == 1 && values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" {
-		return rawJSON
+	includeSources := false
+	if current.IsArray() {
+		values := current.Array()
+		for _, value := range values {
+			if value.Type == gjson.String && value.String() == "web_search_call.action.sources" {
+				includeSources = true
+				break
+			}
+		}
+		if !includeSources && len(values) == 1 && values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" {
+			return rawJSON
+		}
+		if includeSources && len(values) == 2 &&
+			values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" &&
+			values[1].Type == gjson.String && values[1].String() == "web_search_call.action.sources" {
+			return rawJSON
+		}
 	}
 
-	updated, errSet := sjson.SetRawBytes(rawJSON, "include", []byte(`["reasoning.encrypted_content"]`))
+	encoded := []byte(`["reasoning.encrypted_content"]`)
+	if includeSources {
+		encoded = []byte(`["reasoning.encrypted_content","web_search_call.action.sources"]`)
+	}
+	updated, errSet := sjson.SetRawBytes(rawJSON, "include", encoded)
 	if errSet != nil {
 		return rawJSON
 	}

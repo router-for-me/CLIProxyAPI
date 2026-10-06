@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestAPICallCodexQuotaRecovery(t *testing.T) {
@@ -179,6 +179,24 @@ func TestAPICallCodexQuotaRecovery(t *testing.T) {
 				t.Fatalf("saved cooldowns after recovery = %+v, error = %v", records, errLoad)
 			}
 		})
+	}
+}
+
+func TestAPICallLegacyPreservesCodexQuota(t *testing.T) {
+	h, auth, _ := newQuotaRecoveryHandler(t, "codex")
+	useQuotaTestUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(recoveredCodexUsage))
+	})
+	recorder, ctx := newQuotaTestAPICall(t, auth, "https://chatgpt.com/backend-api/wham/usage")
+	ctx.Request.URL.Path = "/v0/management/api-call"
+	before, _ := h.authManager.GetByID(auth.ID)
+	h.APICall(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("API status = %d, want 200", recorder.Code)
+	}
+	after, _ := h.authManager.GetByID(auth.ID)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("legacy API call changed cooldown state")
 	}
 }
 

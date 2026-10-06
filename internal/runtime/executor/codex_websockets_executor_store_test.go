@@ -3,7 +3,7 @@ package executor
 import (
 	"testing"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestCodexWebsocketsExecutor_CloseAllReleasesSessions(t *testing.T) {

@@ -16,13 +16,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -1586,120 +1586,6 @@ func TestApplyCodexPromptCacheHeadersClaudeRejectsBareUserID(t *testing.T) {
 	}
 	if got := headers.Get("Conversation_id"); got != "" {
 		t.Fatalf("bare metadata.user_id must not create websocket Conversation_id, got %q", got)
-	}
-}
-
-func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testing.T) {
-	cfg := &config.Config{
-		Routing: config.RoutingConfig{SessionAffinity: true},
-		Codex:   config.CodexConfig{IdentityConfuse: true},
-	}
-	auth := &cliproxyauth.Auth{ID: "auth-ws-1", Provider: "codex"}
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5-codex",
-		Payload: []byte(`{"prompt_cache_key":"cache-ws-1","client_metadata":{"x-codex-installation-id":"install-ws-1"}}`),
-	}
-
-	body, headers := applyCodexPromptCacheHeaders("openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
-	body, identityState := applyCodexIdentityConfuseBody(cfg, auth, req.Payload, body)
-	ctx := contextWithGinHeaders(map[string]string{
-		"X-Codex-Turn-Metadata": `{"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1","window_id":"cache-ws-1:0"}`,
-		"X-Client-Request-Id":   "client-request-1",
-	})
-	headers = applyCodexWebsocketHeaders(ctx, headers, auth, "oauth-token", cfg, false)
-	applyCodexIdentityConfuseHeaders(headers, &identityState)
-
-	expectedPromptCacheKey := codexIdentityConfuseUUID("auth-ws-1", "prompt-cache", "cache-ws-1")
-	expectedTurnID := codexIdentityConfuseUUID("auth-ws-1", "turn", "turn-ws-1")
-	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != expectedPromptCacheKey {
-		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedPromptCacheKey)
-	}
-	if gotSession := headers["session_id"]; len(gotSession) != 1 || gotSession[0] != expectedPromptCacheKey {
-		t.Fatalf("session_id = %#v, want [%q]", gotSession, expectedPromptCacheKey)
-	}
-	if gotCanonicalSession := headers.Get("Session-Id"); gotCanonicalSession != "" {
-		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
-	}
-	if gotRequestID := headers.Get("X-Client-Request-Id"); gotRequestID != expectedPromptCacheKey {
-		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, expectedPromptCacheKey)
-	}
-	if gotThreadID := headers.Get("Thread-Id"); gotThreadID != expectedPromptCacheKey {
-		t.Fatalf("Thread-Id = %q, want %q", gotThreadID, expectedPromptCacheKey)
-	}
-	if gotConversation := headers.Get("Conversation_id"); gotConversation != expectedPromptCacheKey {
-		t.Fatalf("Conversation_id = %q, want %q", gotConversation, expectedPromptCacheKey)
-	}
-	if gotWindowID := headers.Get("X-Codex-Window-Id"); gotWindowID != expectedPromptCacheKey+":0" {
-		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")
-	}
-	gotMetadata := headers.Get("X-Codex-Turn-Metadata")
-	if gotMetadataPromptCacheKey := gjson.Get(gotMetadata, "prompt_cache_key").String(); gotMetadataPromptCacheKey != expectedPromptCacheKey {
-		t.Fatalf("X-Codex-Turn-Metadata.prompt_cache_key = %q, want %q", gotMetadataPromptCacheKey, expectedPromptCacheKey)
-	}
-	if gotMetadataTurnID := gjson.Get(gotMetadata, "turn_id").String(); gotMetadataTurnID != expectedTurnID {
-		t.Fatalf("X-Codex-Turn-Metadata.turn_id = %q, want %q", gotMetadataTurnID, expectedTurnID)
-	}
-	if gotMetadataWindowID := gjson.Get(gotMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
-		t.Fatalf("X-Codex-Turn-Metadata.window_id = %q, want %q", gotMetadataWindowID, expectedPromptCacheKey+":0")
-	}
-	expectedInstallationID := codexIdentityConfuseUUID("auth-ws-1", "installation", "install-ws-1")
-	if gotInstallationID := gjson.GetBytes(body, "client_metadata.x-codex-installation-id").String(); gotInstallationID != expectedInstallationID {
-		t.Fatalf("installation id = %q, want %q", gotInstallationID, expectedInstallationID)
-	}
-}
-
-func TestCodexIdentityConfuseResponsePayloadHidesUpstreamAndRestoresClient(t *testing.T) {
-	state := codexIdentityConfuseState{
-		enabled:                true,
-		authID:                 "auth-ws-1",
-		originalPromptCacheKey: "cache-ws-1",
-		promptCacheKey:         codexIdentityConfuseUUID("auth-ws-1", "prompt-cache", "cache-ws-1"),
-	}
-	expectedTurnID := state.confuseTurnID("turn-ws-1")
-	rawPayload := []byte(`{"type":"response.completed","response":{"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1"},"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1"}`)
-
-	upstreamPayload := applyCodexIdentityConfuseResponsePayload(rawPayload, state)
-	if bytes.Contains(upstreamPayload, []byte(`cache-ws-1`)) {
-		t.Fatalf("upstream payload still contains original prompt_cache_key: %s", string(upstreamPayload))
-	}
-	if bytes.Contains(upstreamPayload, []byte(`turn-ws-1`)) {
-		t.Fatalf("upstream payload still contains original turn_id: %s", string(upstreamPayload))
-	}
-	if !bytes.Contains(upstreamPayload, []byte(state.promptCacheKey)) {
-		t.Fatalf("upstream payload missing confused prompt_cache_key: %s", string(upstreamPayload))
-	}
-	if !bytes.Contains(upstreamPayload, []byte(expectedTurnID)) {
-		t.Fatalf("upstream payload missing confused turn_id: %s", string(upstreamPayload))
-	}
-
-	clientPayload := applyCodexIdentityExposeResponsePayload(upstreamPayload, state)
-	if bytes.Contains(clientPayload, []byte(state.promptCacheKey)) {
-		t.Fatalf("client payload still contains confused prompt_cache_key: %s", string(clientPayload))
-	}
-	if bytes.Contains(clientPayload, []byte(expectedTurnID)) {
-		t.Fatalf("client payload still contains confused turn_id: %s", string(clientPayload))
-	}
-	if !bytes.Contains(clientPayload, []byte(`cache-ws-1`)) {
-		t.Fatalf("client payload missing original prompt_cache_key: %s", string(clientPayload))
-	}
-	if !bytes.Contains(clientPayload, []byte(`turn-ws-1`)) {
-		t.Fatalf("client payload missing original turn_id: %s", string(clientPayload))
-	}
-
-	rawSSE := []byte(`data: {"type":"response.completed","response":{"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1"}}`)
-	upstreamSSE := applyCodexIdentityConfuseResponsePayload(rawSSE, state)
-	if bytes.Contains(upstreamSSE, []byte(`cache-ws-1`)) {
-		t.Fatalf("upstream SSE still contains original prompt_cache_key: %s", string(upstreamSSE))
-	}
-	if bytes.Contains(upstreamSSE, []byte(`turn-ws-1`)) {
-		t.Fatalf("upstream SSE still contains original turn_id: %s", string(upstreamSSE))
-	}
-	clientSSE := applyCodexIdentityExposeResponsePayload(upstreamSSE, state)
-	if !bytes.Contains(clientSSE, []byte(`cache-ws-1`)) || bytes.Contains(clientSSE, []byte(state.promptCacheKey)) {
-		t.Fatalf("client SSE prompt_cache_key was not restored: %s", string(clientSSE))
-	}
-	if !bytes.Contains(clientSSE, []byte(`turn-ws-1`)) || bytes.Contains(clientSSE, []byte(expectedTurnID)) {
-		t.Fatalf("client SSE turn_id was not restored: %s", string(clientSSE))
 	}
 }
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/tidwall/gjson"
 )
 
@@ -441,6 +441,9 @@ func TestShouldEnsureCacheControl(t *testing.T) {
 		{name: "cloaked with marker", payload: withMarker, cloaked: true, want: true},
 		{name: "unconfirmed markerless", payload: markerless, want: true},
 		{name: "unconfirmed with marker", payload: withMarker, want: false},
+		{name: "explicit mode markerless", payload: []byte(`{"prompt_cache_options":{"mode":"explicit"},"messages":[{"role":"user","content":"x"}]}`), want: false},
+		{name: "explicit mode cloaked", payload: []byte(`{"prompt_cache_options":{"mode":"explicit"},"messages":[{"role":"user","content":"x"}]}`), cloaked: true, want: false},
+		{name: "explicit mode with marker", payload: []byte(`{"prompt_cache_options":{"mode":"explicit"},"messages":[{"role":"user","content":[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]}]}`), cloaked: true, want: false},
 	}
 
 	for _, tt := range tests {

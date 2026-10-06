@@ -139,6 +139,24 @@ func TestConvertGeminiRequestToClaude_KeepsSystemInstructionUserSeparate(t *test
 	}
 }
 
+func TestConvertGeminiRequestToClaude_SupportsCamelCaseSystemInstruction(t *testing.T) {
+	raw := []byte(`{
+		"systemInstruction":{"parts":[{"text":"system rule in camelCase"}]},
+		"contents":[{"role":"user","parts":[{"text":"question"}]}]
+	}`)
+	out := ConvertGeminiRequestToClaude("claude-test", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "system rule in camelCase" {
+		t.Fatalf("system user text = %q, want system rule in camelCase", got)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "question" {
+		t.Fatalf("ordinary user text = %q, want question", got)
+	}
+}
+
 func TestConvertGeminiRequestToClaude_DropsTemperature(t *testing.T) {
 	raw := []byte(`{
 		"generationConfig": {

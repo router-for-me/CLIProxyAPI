@@ -2,14 +2,12 @@ package helps
 
 import (
 	"context"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 )
@@ -107,13 +105,13 @@ func TestExtractCodexResponseModel(t *testing.T) {
 		},
 		{
 			name:    "oversized model value",
-			payload: `{"type":"response.created","response":{"model":"` + strings.Repeat("m", maxCodexResponseModelLength+1) + `"}}`,
+			payload: `{"type":"response.created","response":{"model":"` + strings.Repeat("m", maxResponseModelLength+1) + `"}}`,
 			want:    "",
 		},
 		{
 			name:    "model value at the length limit",
-			payload: `{"type":"response.created","response":{"model":"` + strings.Repeat("m", maxCodexResponseModelLength) + `"}}`,
-			want:    strings.Repeat("m", maxCodexResponseModelLength),
+			payload: `{"type":"response.created","response":{"model":"` + strings.Repeat("m", maxResponseModelLength) + `"}}`,
+			want:    strings.Repeat("m", maxResponseModelLength),
 		},
 		{
 			name:    "done marker",
@@ -151,7 +149,7 @@ func TestExtractCodexResponseModel(t *testing.T) {
 	}
 }
 
-func TestIsCodexModelSubstituted(t *testing.T) {
+func TestIsModelSubstituted(t *testing.T) {
 	tests := []struct {
 		name      string
 		requested string
@@ -185,15 +183,14 @@ func TestIsCodexModelSubstituted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsCodexModelSubstituted(tt.requested, tt.served); got != tt.want {
-				t.Fatalf("IsCodexModelSubstituted(%q, %q) = %v, want %v", tt.requested, tt.served, got, tt.want)
+			if got := IsModelSubstituted(tt.requested, tt.served); got != tt.want {
+				t.Fatalf("IsModelSubstituted(%q, %q) = %v, want %v", tt.requested, tt.served, got, tt.want)
 			}
 		})
 	}
 }
 
-// setupResponseModelLoggerHook captures warnings from the process-global logrus logger
-// and gives the test its own throttle; both are shared, so callers must not use t.Parallel.
+// setupResponseModelLoggerHook captures warnings from the process-global logrus logger.
 func setupResponseModelLoggerHook(t *testing.T) *logtest.Hook {
 	t.Helper()
 	logger := log.StandardLogger()
@@ -202,10 +199,7 @@ func setupResponseModelLoggerHook(t *testing.T) *logtest.Hook {
 	savedHooks := logger.ReplaceHooks(make(log.LevelHooks))
 	hook := new(logtest.Hook)
 	logger.AddHook(hook)
-	savedThrottle := codexModelSubstitutionWarns
-	codexModelSubstitutionWarns = newCodexModelSubstitutionThrottle(nil)
 	t.Cleanup(func() {
-		codexModelSubstitutionWarns = savedThrottle
 		logger.SetLevel(oldLevel)
 		logger.ReplaceHooks(savedHooks)
 	})
@@ -254,7 +248,7 @@ func TestUsageReporterRecordsSubstitutedCodexResponseModelAndWarnsOnce(t *testin
 
 	var detail usage.Detail
 	for _, line := range strings.Split(codexSubstitutedStream, "\n") {
-		reporter.ObserveCodexResponseModel([]byte(line))
+		reporter.ObserveResponseModel([]byte(line))
 		if parsed, ok := ParseCodexUsage(JSONPayload([]byte(line))); ok {
 			detail = parsed
 		}
@@ -292,13 +286,13 @@ func TestUsageReporterRecordsSubstitutedCodexResponseModelAndWarnsOnce(t *testin
 	}
 }
 
-// Relies on the global logrus logger and warning throttle; do not add t.Parallel.
+// Relies on the global logrus logger; do not add t.Parallel.
 func TestUsageReporterDoesNotWarnWhenCodexResponseModelMatches(t *testing.T) {
 	hook := setupResponseModelLoggerHook(t)
 	ctx := context.Background()
 	reporter := newCodexTestReporter(ctx, "gpt-6-astra(high)", nil)
 
-	reporter.ObserveCodexResponseModel([]byte(`data: {"type":"response.created","response":{"model":"gpt-6-astra-2026-05-13"}}`))
+	reporter.ObserveResponseModel([]byte(`data: {"type":"response.created","response":{"model":"gpt-6-astra-2026-05-13"}}`))
 	reporter.Publish(ctx, usage.Detail{TotalTokens: 3})
 
 	if got := reporter.ResponseModel(); got != "gpt-6-astra-2026-05-13" {
@@ -309,14 +303,14 @@ func TestUsageReporterDoesNotWarnWhenCodexResponseModelMatches(t *testing.T) {
 	}
 }
 
-// Relies on the global logrus logger and warning throttle; do not add t.Parallel.
+// Relies on the global logrus logger; do not add t.Parallel.
 func TestUsageReporterIgnoresPayloadsWithoutResponseModel(t *testing.T) {
 	hook := setupResponseModelLoggerHook(t)
 	ctx := context.Background()
 	reporter := newCodexTestReporter(ctx, "gpt-6-astra", nil)
 
-	reporter.ObserveCodexResponseModel([]byte(`data: {"type":"response.created","response":{"model":"gpt-5.6-luna"}}`))
-	reporter.ObserveCodexResponseModel([]byte(`data: {"type":"response.output_text.delta","delta":"hello"}`))
+	reporter.ObserveResponseModel([]byte(`data: {"type":"response.created","response":{"model":"gpt-5.6-luna"}}`))
+	reporter.ObserveResponseModel([]byte(`data: {"type":"response.output_text.delta","delta":"hello"}`))
 	reporter.Publish(ctx, usage.Detail{TotalTokens: 3})
 
 	if got := reporter.ResponseModel(); got != "gpt-5.6-luna" {
@@ -332,7 +326,7 @@ func TestUsageReporterIgnoresPayloadsWithoutResponseModel(t *testing.T) {
 	}
 }
 
-// Relies on the global logrus logger and warning throttle; do not add t.Parallel.
+// Relies on the global logrus logger; do not add t.Parallel.
 func TestUsageReporterWarnsOnceUnderConcurrentObservationsAndPublishes(t *testing.T) {
 	hook := setupResponseModelLoggerHook(t)
 	ctx := context.Background()
@@ -349,9 +343,9 @@ func TestUsageReporterWarnsOnceUnderConcurrentObservationsAndPublishes(t *testin
 			defer wg.Done()
 			<-start
 			if worker%2 == 0 {
-				reporter.ObserveCodexResponseModel(created)
+				reporter.ObserveResponseModel(created)
 			} else {
-				reporter.ObserveCodexResponseModel(completed)
+				reporter.ObserveResponseModel(completed)
 			}
 			reporter.EnsurePublished(ctx)
 		}(i)
@@ -367,97 +361,53 @@ func TestUsageReporterWarnsOnceUnderConcurrentObservationsAndPublishes(t *testin
 	}
 }
 
-// Relies on the global logrus logger and warning throttle; do not add t.Parallel.
-func TestUsageReporterThrottlesRepeatedSubstitutionWarnings(t *testing.T) {
+// Relies on the global logrus logger; do not add t.Parallel.
+func TestUsageReporterEmitsWarningOnRepeatedSubstitutionsWithoutThrottle(t *testing.T) {
 	hook := setupResponseModelLoggerHook(t)
 	ctx := context.Background()
-	now := time.Unix(1_700_000_000, 0)
-	codexModelSubstitutionWarns = newCodexModelSubstitutionThrottle(func() time.Time { return now })
 
 	publishSubstitutedAttempt := func(authID, authIndex string) {
 		auth := &cliproxyauth.Auth{ID: authID, Index: authIndex, Provider: "codex"}
 		reporter := newCodexTestReporter(ctx, "gpt-6-astra", auth)
-		reporter.ObserveCodexResponseModel([]byte(`{"type":"response.completed","response":{"model":"gpt-5.6-luna"}}`))
+		reporter.ObserveResponseModel([]byte(`{"type":"response.completed","response":{"model":"gpt-5.6-luna"}}`))
 		reporter.Publish(ctx, usage.Detail{TotalTokens: 3})
 	}
 
 	publishSubstitutedAttempt("codex-auth-1", "auth-index-7")
 	publishSubstitutedAttempt("codex-auth-1", "auth-index-7")
-	if warnings := substitutionWarnings(hook); len(warnings) != 1 {
-		t.Fatalf("substitution warnings = %d, want 1 inside the window: %#v", len(warnings), warnings)
+	if warnings := substitutionWarnings(hook); len(warnings) != 2 {
+		t.Fatalf("substitution warnings = %d, want 2 without throttle: %#v", len(warnings), warnings)
 	}
 
-	// A different credential is an independent signal.
+	// A different credential is also recorded without throttle.
 	publishSubstitutedAttempt("codex-auth-2", "auth-index-8")
-	if warnings := substitutionWarnings(hook); len(warnings) != 2 {
-		t.Fatalf("substitution warnings = %d, want 2 after a second credential: %#v", len(warnings), warnings)
-	}
-
-	now = now.Add(codexModelSubstitutionWarnWindow - time.Second)
-	publishSubstitutedAttempt("codex-auth-1", "auth-index-7")
-	if warnings := substitutionWarnings(hook); len(warnings) != 2 {
-		t.Fatalf("substitution warnings = %d, want 2 before the window elapsed: %#v", len(warnings), warnings)
-	}
-
-	now = now.Add(time.Second)
-	publishSubstitutedAttempt("codex-auth-1", "auth-index-7")
 	if warnings := substitutionWarnings(hook); len(warnings) != 3 {
-		t.Fatalf("substitution warnings = %d, want 3 once the window elapsed: %#v", len(warnings), warnings)
+		t.Fatalf("substitution warnings = %d, want 3: %#v", len(warnings), warnings)
 	}
 }
 
-// Relies on the global logrus logger and warning throttle; do not add t.Parallel.
-func TestUsageReporterThrottlesSubstitutionWarningsAcrossServedModelCase(t *testing.T) {
+// Relies on the global logrus logger; do not add t.Parallel.
+func TestUsageReporterEmitsWarningAcrossServedModelCaseWithoutThrottle(t *testing.T) {
 	hook := setupResponseModelLoggerHook(t)
 	ctx := context.Background()
-	now := time.Unix(1_700_000_000, 0)
-	codexModelSubstitutionWarns = newCodexModelSubstitutionThrottle(func() time.Time { return now })
 
 	auth := &cliproxyauth.Auth{ID: "codex-auth-1", Index: "auth-index-7", Provider: "codex"}
 	for _, served := range []string{"gpt-5.6-luna", "GPT-5.6-LUNA"} {
 		reporter := newCodexTestReporter(ctx, "gpt-6-astra", auth)
-		reporter.ObserveCodexResponseModel([]byte(`{"type":"response.completed","response":{"model":"` + served + `"}}`))
+		reporter.ObserveResponseModel([]byte(`{"type":"response.completed","response":{"model":"` + served + `"}}`))
 		reporter.Publish(ctx, usage.Detail{TotalTokens: 3})
 	}
 
-	// Both attempts describe one substitution pair, so the casing must not open a
-	// second throttle window while the WARN keeps the raw upstream name.
 	warnings := substitutionWarnings(hook)
-	if len(warnings) != 1 {
-		t.Fatalf("substitution warnings = %d, want 1 for one normalized pair: %#v", len(warnings), warnings)
-	}
-	want := `codex executor: upstream served model "gpt-5.6-luna" for requested model "gpt-6-astra" (auth_index=auth-index-7)`
-	if warnings[0] != want {
-		t.Fatalf("warning = %q, want %q", warnings[0], want)
-	}
-}
-
-func TestCodexModelSubstitutionThrottleBoundsStoredEntries(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	throttle := newCodexModelSubstitutionThrottle(func() time.Time { return now })
-
-	for i := range codexModelSubstitutionWarnMaxEntries + 16 {
-		key := codexModelSubstitutionKey{
-			authID:    "codex-auth-" + strconv.Itoa(i),
-			requested: "gpt-6-astra",
-			served:    "gpt-5.6-luna",
-		}
-		if !throttle.allow(key) {
-			t.Fatalf("first warning for key %d was suppressed", i)
-		}
-	}
-	throttle.mu.Lock()
-	stored := len(throttle.lastWarn)
-	throttle.mu.Unlock()
-	if stored > codexModelSubstitutionWarnMaxEntries {
-		t.Fatalf("stored throttle entries = %d, want at most %d", stored, codexModelSubstitutionWarnMaxEntries)
+	if len(warnings) != 2 {
+		t.Fatalf("substitution warnings = %d, want 2 without throttle: %#v", len(warnings), warnings)
 	}
 }
 
 func TestUsageReporterAdditionalModelRecordOmitsResponseModel(t *testing.T) {
 	ctx := context.Background()
 	reporter := newCodexTestReporter(ctx, "gpt-5.4-mini", nil)
-	reporter.ObserveCodexResponseModel([]byte(`data: {"type":"response.completed","response":{"model":"gpt-5.4-mini"}}`))
+	reporter.ObserveResponseModel([]byte(`data: {"type":"response.completed","response":{"model":"gpt-5.4-mini"}}`))
 
 	mainRecord := reporter.buildRecord(usage.Detail{TotalTokens: 12}, false)
 	if mainRecord.ResponseModel != "gpt-5.4-mini" {

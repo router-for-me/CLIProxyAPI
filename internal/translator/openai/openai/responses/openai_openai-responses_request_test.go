@@ -2570,3 +2570,74 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MapsMaxOutputToken
 		t.Fatalf("max_completion_tokens should be absent; output=%s", string(outNull))
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NamespaceToolPrefixCollision(t *testing.T) {
+	tests := []struct {
+		namespace string
+		child     string
+		want      string
+	}{
+		{namespace: "fs", child: "fs_read", want: "fs__fs_read"},
+		{namespace: "collab", child: "collaboration", want: "collab__collaboration"},
+		{namespace: "fs", child: "fs__read", want: "fs__read"},
+		{namespace: "fs", child: "fs", want: "fs"},
+		{namespace: "fs__", child: "read", want: "fs__read"},
+		{namespace: "mcp__node_repl", child: "mcp__node_repl__js", want: "mcp__node_repl__js"},
+	}
+	for _, tt := range tests {
+		if got := rawResponsesNamespaceQualifiedName(tt.namespace, tt.child); got != tt.want {
+			t.Errorf("rawResponsesNamespaceQualifiedName(%q, %q) = %q, want %q", tt.namespace, tt.child, got, tt.want)
+		}
+	}
+
+	raw := []byte(`{
+		"model": "gpt-5.4",
+		"tools": [
+			{"type": "function", "name": "fs_read", "parameters": {"type": "object"}},
+			{"type": "namespace", "name": "fs", "tools": [{"type": "function", "name": "fs_read", "parameters": {"type": "object"}}]}
+		],
+		"input": []
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("len(tools) = %d, want 2; output=%s", len(tools), string(out))
+	}
+	names := []string{tools[0].Get("function.name").String(), tools[1].Get("function.name").String()}
+	if names[0] != "fs_read" || names[1] != "fs__fs_read" {
+		t.Fatalf("emitted tool names = %v, want [\"fs_read\", \"fs__fs_read\"]", names)
+	}
+
+	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, "fs__fs_read")
+	if name != "fs_read" || namespace != "fs" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(raw, \"fs__fs_read\") = (%q, %q), want (\"fs_read\", \"fs\")", name, namespace)
+	}
+	name, namespace = splitResponsesQualifiedFunctionCallFromRequest(raw, "fs_read")
+	if name != "fs_read" || namespace != "" {
+		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(raw, \"fs_read\") = (%q, %q), want (\"fs_read\", \"\")", name, namespace)
+	}
+}
+
+func TestApplyPatchChatRequestContractAndHistory(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch","description":"Edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.","format":{"type":"grammar","syntax":"lark","definition":"start: patch"},"cache_control":{"type":"ephemeral"}}]}],"input":[{"type":"custom_tool_call","namespace":"editor","name":"apply_patch","call_id":"c1","input":"*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"done"}]}`)
+	result := gjson.ParseBytes(ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false))
+	tool := result.Get("tools.0.function")
+	description := tool.Get("description").String()
+	schema := tool.Get("parameters")
+	for _, instruction := range []string{"*** Begin Patch", "*** End Patch", "*** Add File:", "*** Delete File:", "*** Update File:", "*** Move to:", "*** End of File", "@@", "start: patch", "JSON object"} {
+		if !strings.Contains(description, instruction) {
+			t.Errorf("missing instruction %q", instruction)
+		}
+	}
+	if strings.Contains(description, "do not wrap the patch in JSON") {
+		t.Fatal("contradictory freeform instructions")
+	}
+	if schema.Get("additionalProperties").Bool() || !schema.Get("additionalProperties").Exists() || schema.Get("required.0").String() != "input" {
+		t.Fatalf("not strict schema: %s", schema.Raw)
+	}
+	call := result.Get("messages.0.tool_calls.0")
+	if call.Get("function.name").String() != "editor__apply_patch" || gjson.Get(call.Get("function.arguments").String(), "input").String() != "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch" || call.Get("id").String() != "c1" || result.Get("messages.1.tool_call_id").String() != "c1" || result.Get("messages.1.content").String() != "done" {
+		t.Fatalf("history mismatch: %s", result.Raw)
+	}
+}

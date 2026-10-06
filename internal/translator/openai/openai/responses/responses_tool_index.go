@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 )
 
@@ -118,6 +118,8 @@ func (idx *responsesToolIndex) chatTools() [][]byte {
 		convert := convertResponsesFunctionToolToOpenAIChat
 		if d.custom {
 			convert = convertResponsesCustomToolToOpenAIChat
+		} else if d.shell {
+			convert = convertResponsesShellToolToOpenAIChat
 		}
 		if tool, ok := convert(d.tool, d.chatName); ok {
 			merged = append(merged, tool)
