@@ -51,7 +51,7 @@ func (e *LiteLLMExporter) Status() string {
 func (e *LiteLLMExporter) setStatus(status string) {
 	e.mu.Lock()
 	if e.status != status {
-		log.WithField("accounting_exporter_status", status).Info("LiteLLM accounting status")
+		log.WithField("accounting_exporter_status", status).Infof("LiteLLM accounting status: %s", status)
 	}
 	e.status = status
 	e.mu.Unlock()
@@ -188,6 +188,8 @@ func (e *LiteLLMExporter) ExportOnce(ctx context.Context) error {
 		}
 		if errPayload != nil {
 			e.setStatus("mapping_required: verify client identity, complete usage and USD pricing")
+			_, mapped := e.cfg.Clients[event.ClientKeyID]
+			log.Warnf("LiteLLM export held for event %s (provider=%s model=%s client_mapped=%t estimate=%s missing=%v): %v", event.ExecutionID, event.Provider, event.ExecutedModel, mapped, estimateStatus(event.Estimate), estimateMissing(event.Estimate), errPayload)
 			// No request has been sent. Retain the event for configuration repair.
 			if err := e.outbox.Resolve(id, delivery.Attempts, DeliveryRetryable, e.outbox.now().Add(time.Hour)); err != nil {
 				return err
@@ -212,11 +214,14 @@ func (e *LiteLLMExporter) ExportOnce(ctx context.Context) error {
 	req.Header.Set("Content-Type", "application/json")
 
 	state, hold := DeliveryRetryable, false
+	started := time.Now()
 	resp, err := e.client.Do(req)
 	if err != nil {
 		e.setStatus("receiver_unavailable: check accounting service connectivity")
+		log.Warnf("LiteLLM export of %d records failed after %s: %v", len(records), time.Since(started).Round(time.Millisecond), err)
 	} else {
 		defer func() { _ = resp.Body.Close() }()
+		log.Infof("LiteLLM export of %d records returned HTTP %d after %s", len(records), resp.StatusCode, time.Since(started).Round(time.Millisecond))
 		switch resp.StatusCode {
 		case 401, 403:
 			hold = true
@@ -255,6 +260,20 @@ func (e *LiteLLMExporter) ExportOnce(ctx context.Context) error {
 	return nil
 }
 
+func estimateStatus(estimate *CostEstimate) string {
+	if estimate == nil {
+		return "none"
+	}
+	return estimate.Status
+}
+
+func estimateMissing(estimate *CostEstimate) []string {
+	if estimate == nil {
+		return nil
+	}
+	return estimate.Missing
+}
+
 // applyCallbackResult downgrades the outcomes of records LiteLLM reports as failed.
 func (e *LiteLLMExporter) applyCallbackResult(body io.Reader, outcomes []DeliveryState) {
 	var result struct {
@@ -282,6 +301,7 @@ func (e *LiteLLMExporter) applyCallbackResult(body io.Reader, outcomes []Deliver
 		outcomes[f.Index] = DeliveryRetryable
 	}
 	if result.Failed > 0 {
+		log.Warnf("LiteLLM callback reported %d of %d records failed", result.Failed, len(outcomes))
 		e.setStatus("callback_failure")
 		return
 	}
