@@ -12,15 +12,36 @@ import (
 
 func TestAPICallCodexQuotaRecovery(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		body      string
-		url       string
-		provider  string
-		status    int
-		setup     func(*testing.T, *coreauth.Manager, *coreauth.Auth)
-		wantReset bool
+		name        string
+		body        string
+		url         string
+		provider    string
+		activeLimit string
+		status      int
+		setup       func(*testing.T, *coreauth.Manager, *coreauth.Auth)
+		wantReset   bool
 	}{
 		{name: "confirmed quota recovery", wantReset: true},
+		{name: "shared quota with sparse model usage", activeLimit: "premium", wantReset: true},
+		{name: "shared quota without model usage", activeLimit: "premium", wantReset: true,
+			body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false}}`},
+		{name: "shared quota cannot override model restriction", activeLimit: "premium",
+			body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false},"model_usage":{"gpt-6-sol":{"available":false}}}`},
+		{name: "shared quota cannot override missing availability", activeLimit: "premium",
+			body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false},"model_usage":{"gpt-6-sol":{}}}`},
+		{name: "shared quota cannot override null availability", activeLimit: "premium",
+			body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false},"model_usage":{"gpt-6-sol":{"available":null}}}`},
+		{name: "shared quota cannot override null model", activeLimit: "premium",
+			body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false},"model_usage":{"gpt-6-sol":null}}`},
+		{name: "unknown quota pool", activeLimit: "codex_bengalfox"},
+		{name: "missing limit reached flag",
+			body: `{"account_id":"quota-account","rate_limit":{"allowed":true},"model_usage":{"gpt-6-astra":{"available":true}}}`},
+		{name: "null limit reached flag",
+			body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":null},"model_usage":{"gpt-6-astra":{"available":true}}}`},
+		{name: "shared quota still reached", activeLimit: "premium",
+			body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":true}}`},
+		{name: "shared quota without allowed flag", activeLimit: "premium",
+			body: `{"account_id":"quota-account","rate_limit":{"limit_reached":false}}`},
 		{name: "percentages alone", body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0}}}`},
 		{name: "model still restricted", body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false},"model_usage":{"gpt-6-astra":{"available":false,"credits_would_enable":true}}}`},
 		{name: "only another model available", body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false},"model_usage":{"gpt-6-sol":{"available":true}}}`},
@@ -48,13 +69,25 @@ func TestAPICallCodexQuotaRecovery(t *testing.T) {
 			}
 		}},
 		{name: "unconfirmed second quota", setup: func(t *testing.T, manager *coreauth.Manager, auth *coreauth.Auth) {
-			recordUsageLimit(t, manager, auth.ID, auth.Provider, "gpt-6-sol", false)
+			recordUsageLimit(t, manager, auth.ID, auth.Provider, "gpt-6-sol", false, nil)
 		}},
 		{name: "all recorded quotas confirmed", wantReset: true,
 			body: `{"account_id":"quota-account","rate_limit":{"allowed":true,"limit_reached":false},"model_usage":{"gpt-6-astra":{"available":true},"gpt-6-sol":{"available":true}}}`,
 			setup: func(t *testing.T, manager *coreauth.Manager, auth *coreauth.Auth) {
-				recordUsageLimit(t, manager, auth.ID, auth.Provider, "gpt-6-sol", false)
+				recordUsageLimit(t, manager, auth.ID, auth.Provider, "gpt-6-sol", false, nil)
 			}},
+		{name: "credential observation cannot identify model quota pool", setup: func(t *testing.T, manager *coreauth.Manager, auth *coreauth.Auth) {
+			recordUsageLimit(t, manager, auth.ID, auth.Provider, "gpt-6-sol", false, nil)
+			updated, _ := manager.GetByID(auth.ID)
+			updated.Quota.Signals = map[string]string{"X-Codex-Active-Limit": "premium"}
+			if _, errUpdate := manager.Update(t.Context(), updated); errUpdate != nil {
+				t.Fatalf("update credential observation: %v", errUpdate)
+			}
+		}},
+		{name: "shared quota with unconfirmed additional pool", activeLimit: "premium", setup: func(t *testing.T, manager *coreauth.Manager, auth *coreauth.Auth) {
+			recordUsageLimit(t, manager, auth.ID, auth.Provider, "gpt-6-luna", false,
+				http.Header{"X-Codex-Active-Limit": {"codex_bengalfox"}})
+		}},
 		{name: "unrelated model failure", setup: func(t *testing.T, manager *coreauth.Manager, auth *coreauth.Auth) {
 			manager.MarkResult(t.Context(), coreauth.Result{
 				AuthID: auth.ID, Provider: auth.Provider, Model: "gpt-6-sol",
@@ -80,6 +113,13 @@ func TestAPICallCodexQuotaRecovery(t *testing.T) {
 				provider = "codex"
 			}
 			h, auth, store := newQuotaRecoveryHandler(t, provider)
+			if tc.activeLimit != "" {
+				if _, _, errReset := h.authManager.ResetQuota(t.Context(), auth.ID); errReset != nil {
+					t.Fatalf("reset fixture quota: %v", errReset)
+				}
+				recordUsageLimit(t, h.authManager, auth.ID, provider, "gpt-6-sol", true,
+					http.Header{"X-Codex-Active-Limit": {tc.activeLimit}, "X-Codex-Primary-Used-Percent": {"100"}})
+			}
 			if tc.setup != nil {
 				tc.setup(t, h.authManager, auth)
 			}
@@ -130,8 +170,10 @@ func TestAPICallCodexQuotaRecovery(t *testing.T) {
 			if after.Success != before.Success || after.Failed != before.Failed {
 				t.Fatal("quota query changed inference counters")
 			}
-			if count := registry.GetGlobalRegistry().GetModelCount("gpt-6-astra"); count != 1 {
-				t.Fatalf("registry model count after recovery = %d, want 1", count)
+			for _, model := range []string{"gpt-6-astra", "gpt-6-luna", "gpt-6-sol"} {
+				if count := registry.GetGlobalRegistry().GetModelCount(model); count != 1 {
+					t.Fatalf("registry model %s count after recovery = %d, want 1", model, count)
+				}
 			}
 			if records, errLoad := store.Load(t.Context()); errLoad != nil || len(records) != 0 {
 				t.Fatalf("saved cooldowns after recovery = %+v, error = %v", records, errLoad)

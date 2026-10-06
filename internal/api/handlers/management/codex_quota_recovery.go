@@ -13,8 +13,8 @@ import (
 type codexQuotaRecoveryResponse struct {
 	AccountID string `json:"account_id"`
 	RateLimit struct {
-		Allowed      bool `json:"allowed"`
-		LimitReached bool `json:"limit_reached"`
+		Allowed      bool  `json:"allowed"`
+		LimitReached *bool `json:"limit_reached"`
 	} `json:"rate_limit"`
 	ModelUsage map[string]struct {
 		Available bool `json:"available"`
@@ -33,7 +33,8 @@ func (h *Handler) reconcileCodexQuotaRecovery(ctx context.Context, auth *coreaut
 	}
 	var usage codexQuotaRecoveryResponse
 	if errDecode := json.Unmarshal(body, &usage); errDecode != nil || usage.AccountID != accountID ||
-		!usage.RateLimit.Allowed || usage.RateLimit.LimitReached || !codexQuotaSnapshotRecovered(auth, usage) {
+		!usage.RateLimit.Allowed || usage.RateLimit.LimitReached == nil || *usage.RateLimit.LimitReached ||
+		!codexQuotaSnapshotRecovered(auth, usage) {
 		return
 	}
 	if _, _, errReset := h.authManager.ResetQuotaIfUnchanged(ctx, auth); errReset != nil {
@@ -71,12 +72,21 @@ func codexQuotaSnapshotRecovered(auth *coreauth.Auth, usage codexQuotaRecoveryRe
 		if state.Quota.Reason == "credential_quota" && state.LastError == nil {
 			continue
 		}
-		if !isCodexUsageLimitFailure(state.LastError) || !usage.ModelUsage[model].Available {
+		if !isCodexUsageLimitFailure(state.LastError) || !codexModelQuotaRecovered(model, state, usage) {
 			return false
 		}
 		confirmed = true
 	}
 	return confirmed
+}
+
+func codexModelQuotaRecovered(model string, state *coreauth.ModelState, usage codexQuotaRecoveryResponse) bool {
+	if modelUsage, reported := usage.ModelUsage[model]; reported {
+		return modelUsage.Available
+	}
+	// model_usage is sparse. A failure attributed to the shared premium pool
+	// recovers with the account rate limit; unknown pools need model evidence.
+	return state.Quota.Signals["X-Codex-Active-Limit"] == "premium"
 }
 
 func isQuotaCooldownReason(reason string) bool {

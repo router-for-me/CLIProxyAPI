@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -38,15 +39,17 @@ func newQuotaRecoveryHandler(t *testing.T, provider string) (*Handler, *coreauth
 		t.Fatalf("register auth: %v", errRegister)
 	}
 	manager.MarkResult(t.Context(), coreauth.Result{AuthID: auth.ID, Provider: provider, Model: "gpt-6-luna", Success: true})
-	recordUsageLimit(t, manager, auth.ID, provider, "gpt-6-astra", true)
+	recordUsageLimit(t, manager, auth.ID, provider, "gpt-6-astra", true, nil)
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 	return h, auth, store
 }
 
-func recordUsageLimit(t *testing.T, manager *coreauth.Manager, authID, provider, model string, credentialScope bool) {
+func recordUsageLimit(t *testing.T, manager *coreauth.Manager, authID, provider, model string, credentialScope bool, headers http.Header) {
 	t.Helper()
 	week := 7 * 24 * time.Hour
-	manager.MarkResult(t.Context(), coreauth.Result{
+	ctx := internallogging.WithResponseHeadersHolder(t.Context())
+	internallogging.SetResponseHeaders(ctx, headers)
+	manager.MarkResult(ctx, coreauth.Result{
 		AuthID: authID, Provider: provider, Model: model, CredentialScope: credentialScope, RetryAfter: &week,
 		Error: &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`},
 	})
