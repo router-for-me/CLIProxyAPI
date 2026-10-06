@@ -447,6 +447,46 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	// MiniMax keys (do not print key material)
+	if len(oldCfg.MinimaxKey) != len(newCfg.MinimaxKey) {
+		changes = append(changes, fmt.Sprintf("minimax-api-key count: %d -> %d", len(oldCfg.MinimaxKey), len(newCfg.MinimaxKey)))
+	} else {
+		for i := range oldCfg.MinimaxKey {
+			o := oldCfg.MinimaxKey[i]
+			n := newCfg.MinimaxKey[i]
+			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
+				changes = append(changes, fmt.Sprintf("minimax[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)))
+			}
+			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
+				changes = append(changes, fmt.Sprintf("minimax[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
+			}
+			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
+				changes = append(changes, fmt.Sprintf("minimax[%d].prefix: %s -> %s", i, o.Prefix, n.Prefix))
+			}
+			if o.Priority != n.Priority {
+				changes = append(changes, fmt.Sprintf("minimax[%d].priority: %d -> %d", i, o.Priority, n.Priority))
+			}
+			changes = appendOptionalBoolChange(changes, fmt.Sprintf("minimax[%d].disable-cooling", i), o.DisableCooling, n.DisableCooling)
+			changes = appendOptionalIntChange(changes, fmt.Sprintf("minimax[%d].request-retry", i), o.RequestRetry, n.RequestRetry)
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("minimax[%d].api-key: updated", i))
+			}
+			if !equalStringMap(o.Headers, n.Headers) {
+				changes = append(changes, fmt.Sprintf("minimax[%d].headers: updated", i))
+			}
+			oldModels := SummarizeCodexModels(o.Models)
+			newModels := SummarizeCodexModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("minimax[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
+			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
+			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("minimax[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
+		}
+	}
+
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}

@@ -34,6 +34,7 @@ func validateCredentialWeightYAML(data []byte) error {
 	families := map[string]struct{}{
 		"gemini-api-key": {}, "interactions-api-key": {}, "claude-api-key": {},
 		"vertex-api-key": {}, "codex-api-key": {}, "xai-api-key": {}, "meta-api-key": {},
+		"minimax-api-key": {},
 	}
 	for index := 0; root != nil && root.Kind == yaml.MappingNode && index+1 < len(root.Content); index += 2 {
 		name := root.Content[index].Value
@@ -147,6 +148,11 @@ func (cfg *Config) ValidateCredentialWeights() error {
 	for index := range cfg.MetaKey {
 		if errValidate := ValidateCredentialWeight(cfg.MetaKey[index].Weight); errValidate != nil {
 			return fmt.Errorf("meta-api-key[%d].weight: %w", index, errValidate)
+		}
+	}
+	for index := range cfg.MinimaxKey {
+		if errValidate := ValidateCredentialWeight(cfg.MinimaxKey[index].Weight); errValidate != nil {
+			return fmt.Errorf("minimax-api-key[%d].weight: %w", index, errValidate)
 		}
 	}
 	for providerIndex := range cfg.OpenAICompatibility {

@@ -740,6 +740,9 @@ type XAIModel = CodexModel
 // MetaKey uses the Codex API key structure for native Meta Muse execution.
 type MetaKey = CodexKey
 
+// MinimaxKey uses the Codex API key structure for native MiniMax execution.
+type MinimaxKey = CodexKey
+
 // MetaModel uses the Codex model mapping structure for Meta Muse models.
 type MetaModel = CodexModel
 

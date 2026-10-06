@@ -4832,5 +4832,117 @@
         "text"
       ]
     }
+  ],
+  "minimax": [
+    {
+      "id": "MiniMax-M3.1-Flash-Preview",
+      "object": "model",
+      "created": 1789000000,
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M3.1 Flash Preview",
+      "name": "MiniMax-M3.1-Flash-Preview",
+      "description": "MiniMax M3.1 Flash Preview with adaptive thinking effort levels",
+      "context_length": 524288,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "MiniMax-M3",
+      "object": "model",
+      "created": 1789000000,
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M3",
+      "name": "MiniMax-M3",
+      "description": "MiniMax M3 flagship model with 1M context",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "MiniMax-M2.7",
+      "object": "model",
+      "created": 1789000000,
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7",
+      "name": "MiniMax-M2.7",
+      "description": "MiniMax M2.7 text model",
+      "context_length": 204800,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "MiniMax-M2.7-highspeed",
+      "object": "model",
+      "created": 1789000000,
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7 Highspeed",
+      "name": "MiniMax-M2.7-highspeed",
+      "description": "MiniMax M2.7 highspeed text model",
+      "context_length": 204800,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    }
   ]
 }

@@ -793,6 +793,26 @@ upstream:
 #         - api-key: "..."
 #           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #
+#   # MiniMax API keys
+#   # Uses the native MiniMax executor. Text traffic targets the Anthropic-compatible
+#   # endpoint at {base-url}/anthropic, and image models (image-01) use /v1/image_generation.
+#
+#   minimax:
+#     - name: minimax-1
+#       prefix: "minimax" # optional: require calls like "minimax/MiniMax-M3" to target this credential
+#       disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
+#       request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       base-url: "https://api.minimax.io" # optional: defaults to https://api.minimax.io; use https://api.minimax.cn for China
+#       proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#       models:
+#         - name: "MiniMax-M3" # upstream model name
+#           alias: "minimax-latest" # client alias mapped to the upstream model
+#       excluded-models:
+#         - "MiniMax-M2.7"
+#       keys:
+#         - api-key: "..."
+#           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#
 #   # OpenAI compatibility providers
 #
 #   openai-compatibility:

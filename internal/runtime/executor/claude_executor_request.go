@@ -1024,6 +1024,20 @@ func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
 	return !hasAPIKeyAttr
 }
 
+// claudeForceAPIKeyHeaderAttr marks a credential whose upstream expects the
+// secret in x-api-key even though the base URL is not Anthropic's own origin.
+const claudeForceAPIKeyHeaderAttr = "force_api_key_header"
+
+// claudeCredentialForcesAPIKeyHeader reports whether the credential explicitly
+// requires x-api-key authentication on a third-party Anthropic-compatible base.
+func claudeCredentialForcesAPIKeyHeader(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	value := strings.ToLower(strings.TrimSpace(auth.Attributes[claudeForceAPIKeyHeaderAttr]))
+	return value == "true" || value == "1" || value == "yes"
+}
+
 func copyClaudeCallerFingerprintHeaders(dst, src http.Header, confirmedClaudeCode bool) {
 	if dst == nil || src == nil {
 		return
@@ -1105,8 +1119,12 @@ func applyClaudeHeadersWithNativeProfile(
 	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
 	useOAuthBetas := fp.UseOAuthBetas
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
+	// Anthropic-compatible gateways outside Anthropic's own origin may still
+	// require the credential in x-api-key. Such a credential opts in by carrying
+	// this attribute; every other provider keeps the existing header choice.
+	forceAPIKeyHeader := claudeCredentialForcesAPIKeyHeader(auth)
 	if strings.TrimSpace(apiKey) != "" {
-		if isAnthropicBase && useAPIKey {
+		if (isAnthropicBase && useAPIKey) || forceAPIKeyHeader {
 			r.Header.Del("Authorization")
 			r.Header.Set("x-api-key", apiKey)
 		} else {

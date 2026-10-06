@@ -181,6 +181,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Meta keys.
 	cfg.SanitizeMetaKeys()
+	cfg.SanitizeMinimaxKeys()
 
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()

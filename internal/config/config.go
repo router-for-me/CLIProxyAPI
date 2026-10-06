@@ -136,6 +136,9 @@ type Config struct {
 	// MetaKey defines Meta API key configurations using the same structure as Codex API keys.
 	MetaKey []MetaKey `yaml:"meta-api-key" json:"meta-api-key"`
 
+	// MinimaxKey defines MiniMax API key configurations using the same structure as Codex API keys.
+	MinimaxKey []MinimaxKey `yaml:"minimax-api-key" json:"minimax-api-key"`
+
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 

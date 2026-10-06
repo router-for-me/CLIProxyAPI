@@ -32,6 +32,7 @@ type CodexKey = internalconfig.CodexKey
 type XAIKey = internalconfig.XAIKey
 type XAIModel = internalconfig.XAIModel
 type MetaKey = internalconfig.MetaKey
+type MinimaxKey = internalconfig.MinimaxKey
 type MetaModel = internalconfig.MetaModel
 type ClaudeKey = internalconfig.ClaudeKey
 type VertexCompatKey = internalconfig.VertexCompatKey

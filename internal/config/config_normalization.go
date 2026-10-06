@@ -246,6 +246,39 @@ func (cfg *Config) SanitizeMetaKeys() {
 	cfg.MetaKey = sanitizeMetaKeyEntries(cfg.MetaKey)
 }
 
+// SanitizeMinimaxKeys normalizes MiniMax API key entries, defaulting BaseURL to
+// the global MiniMax API origin when empty.
+func (cfg *Config) SanitizeMinimaxKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.MinimaxKey = sanitizeMinimaxKeyEntries(cfg.MinimaxKey)
+}
+
+func sanitizeMinimaxKeyEntries(entries []MinimaxKey) []MinimaxKey {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]MinimaxKey, 0, len(entries))
+	for i := range entries {
+		e := entries[i]
+		e.APIKey = strings.TrimSpace(e.APIKey)
+		if e.APIKey == "" {
+			continue
+		}
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		if e.BaseURL == "" {
+			e.BaseURL = "https://api.minimax.io"
+		}
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		e.AlphaSearch = false
+		out = append(out, e)
+	}
+	return out
+}
+
 func sanitizeMetaKeyEntries(entries []MetaKey) []MetaKey {
 	if len(entries) == 0 {
 		return entries

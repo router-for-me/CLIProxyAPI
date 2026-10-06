@@ -54,6 +54,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
 	// Meta API Keys
 	out = append(out, s.synthesizeMetaKeys(ctx)...)
+	// MiniMax API Keys
+	out = append(out, s.synthesizeMinimaxKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
@@ -214,6 +216,11 @@ func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth
 // synthesizeMetaKeys creates Auth entries for Meta API keys.
 func (s *ConfigSynthesizer) synthesizeMetaKeys(ctx *SynthesisContext) []*coreauth.Auth {
 	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.MetaKey, "meta")
+}
+
+// synthesizeMinimaxKeys creates Auth entries for MiniMax API keys.
+func (s *ConfigSynthesizer) synthesizeMinimaxKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.MinimaxKey, "minimax")
 }
 
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {

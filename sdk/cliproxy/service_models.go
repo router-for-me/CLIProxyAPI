@@ -193,6 +193,17 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "minimax":
+		models = registry.GetMinimaxModels()
+		if entry := s.resolveConfigMinimaxKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildMinimaxConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -544,6 +555,13 @@ func (s *Service) resolveConfigMetaKey(auth *coreauth.Auth) *config.MetaKey {
 		return nil
 	}
 	return resolveConfigCodexStyleKey(auth, s.cfg.MetaKey, false)
+}
+
+func (s *Service) resolveConfigMinimaxKey(auth *coreauth.Auth) *config.MinimaxKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.MinimaxKey, false)
 }
 
 func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {
@@ -910,6 +928,13 @@ func buildMetaConfigModels(entry *config.MetaKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "meta", "meta", "meta")
+}
+
+func buildMinimaxConfigModels(entry *config.MinimaxKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "minimax", "minimax", "minimax")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {

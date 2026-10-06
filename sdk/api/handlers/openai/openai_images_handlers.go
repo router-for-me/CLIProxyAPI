@@ -40,6 +40,7 @@ const (
 	xaiImagesDefaultResolution  = "1k"
 	imagesGenerationsPath       = "/v1/images/generations"
 	imagesEditsPath             = "/v1/images/edits"
+	minimaxImagesModel          = "image-01"
 )
 
 type imageCallResult struct {
@@ -233,8 +234,60 @@ func isXAIImagesModel(model string) bool {
 	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok"
 }
 
+func isMinimaxImagesModel(model string) bool {
+	prefix, _ := imagesModelParts(model)
+	if imagesModelBase(model) != minimaxImagesModel {
+		return false
+	}
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	return prefix == "" || prefix == "minimax"
+}
+
+// buildMinimaxImagesGenerationsRequest converts the OpenAI image request shape
+// into the MiniMax /v1/image_generation shape. The executor maps the response
+// back to the OpenAI shape, so only the request needs translating here.
+func buildMinimaxImagesGenerationsRequest(rawJSON []byte, model string, responseFormat string) []byte {
+	req := []byte(`{"model":"image-01","prompt":""}`)
+	if trimmed := strings.TrimSpace(model); trimmed != "" {
+		req, _ = sjson.SetBytes(req, "model", trimmed)
+	}
+	req, _ = sjson.SetBytes(req, "prompt", gjson.GetBytes(rawJSON, "prompt").String())
+	req, _ = sjson.SetBytes(req, "response_format", normalizeMinimaxImagesResponseFormat(responseFormat))
+
+	if aspect := strings.TrimSpace(gjson.GetBytes(rawJSON, "aspect_ratio").String()); aspect != "" {
+		req, _ = sjson.SetBytes(req, "aspect_ratio", aspect)
+	}
+	if size := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String()); size != "" {
+		req, _ = sjson.SetBytes(req, "size", size)
+	}
+	if n := gjson.GetBytes(rawJSON, "n"); n.Exists() && n.Type == gjson.Number && n.Int() > 0 {
+		req, _ = sjson.SetBytes(req, "n", n.Int())
+	}
+	if seed := gjson.GetBytes(rawJSON, "seed"); seed.Exists() && seed.Type == gjson.Number {
+		req, _ = sjson.SetBytes(req, "seed", seed.Int())
+	}
+	return req
+}
+
+// normalizeMinimaxImagesResponseFormat maps the OpenAI response_format values
+// onto the ones MiniMax accepts. MiniMax rejects anything other than "url" or
+// "base64", so OpenAI's "b64_json" must be translated rather than forwarded.
+func normalizeMinimaxImagesResponseFormat(responseFormat string) string {
+	switch strings.ToLower(strings.TrimSpace(responseFormat)) {
+	case "url":
+		return "url"
+	case "base64":
+		return "base64"
+	default:
+		return "base64"
+	}
+}
+
 func isSupportedImagesModel(model string) bool {
 	if isCodexImagesToolModel(model) {
+		return true
+	}
+	if isMinimaxImagesModel(model) {
 		return true
 	}
 	return isXAIImagesModel(model) || isOpenAICompatImagesModel(model)
@@ -675,6 +728,11 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if isXAIImagesModel(imageModel) {
 		xaiReq := buildXAIImagesGenerationsRequest(rawJSON, imageModel, responseFormat)
 		h.handleXAIImages(c, xaiReq, responseFormat, "image_generation", stream)
+		return
+	}
+	if isMinimaxImagesModel(imageModel) {
+		minimaxReq := buildMinimaxImagesGenerationsRequest(rawJSON, imageModel, responseFormat)
+		h.handleOpenAICompatImages(c, minimaxReq, imageModel, responseFormat, "image_generation", stream)
 		return
 	}
 	if isOpenAICompatImagesModel(imageModel) {

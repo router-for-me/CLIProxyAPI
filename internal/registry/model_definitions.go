@@ -18,6 +18,7 @@ const (
 	xaiBuiltinVideoModelID             = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID           = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewID         = "grok-imagine-video-1.5-preview"
+	minimaxBuiltinImageModelID         = "image-01"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -35,6 +36,7 @@ type staticModelsJSON struct {
 	XAI         []*ModelInfo `json:"xai"`
 	Devin       []*ModelInfo `json:"devin"`
 	Meta        []*ModelInfo `json:"meta"`
+	Minimax     []*ModelInfo `json:"minimax"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -505,6 +507,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetDevinModels()
 	case "meta", "muse":
 		return GetMetaModels()
+	case "minimax":
+		return GetMinimaxModels()
 	default:
 		return nil
 	}
@@ -530,6 +534,32 @@ func GetMetaModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Meta)
 }
 
+// GetMinimaxModels returns the standard MiniMax model definitions.
+func GetMinimaxModels() []*ModelInfo {
+	return WithMinimaxBuiltins(cloneModelInfos(getModels().Minimax))
+}
+
+// WithMinimaxBuiltins injects hard-coded MiniMax model definitions that should
+// not depend on remote models.json updates. The image model is generated through
+// the OpenAI image endpoints rather than the chat pipeline, so it must exist in
+// the registry for provider routing to resolve it.
+func WithMinimaxBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, minimaxBuiltinImageModelInfo())
+}
+
+func minimaxBuiltinImageModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          minimaxBuiltinImageModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "minimax",
+		Type:        "minimax",
+		DisplayName: "MiniMax Image 01",
+		Name:        minimaxBuiltinImageModelID,
+		Description: "MiniMax image generation model, served through the OpenAI image endpoints.",
+	}
+}
+
 // LookupStaticModelInfo searches all static model definitions for a model by ID.
 // Returns nil if no matching model is found.
 func LookupStaticModelInfo(modelID string) *ModelInfo {
@@ -550,6 +580,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Devin,
 		staticDevinModels,
 		data.Meta,
+		data.Minimax,
 	}
 	for _, models := range allModels {
 		for _, m := range models {
