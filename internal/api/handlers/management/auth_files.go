@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	minimaxauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/minimax"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -666,6 +667,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
+	}
+	// Providers that serve multiple regions from different origins need the
+	// region exposed so the UI can target the matching host.
+	if provider := strings.ToLower(strings.TrimSpace(auth.Provider)); provider == "minimax" || provider == minimaxauth.ProviderCN {
+		entry["region"] = minimaxauth.ResolveRegionFromAuth(auth)
 	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed

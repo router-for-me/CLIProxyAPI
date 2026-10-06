@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
+	minimaxauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/minimax"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -1080,4 +1081,125 @@ func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 		Headers: c.Request.Header,
 	}
 	return coreauth.WithRequestInfo(ctx, info)
+}
+
+// RequestMinimaxToken starts the MiniMax device authorization flow and tracks it
+// as an OAuth session so the management UI can poll for completion. MiniMax
+// serves two regions from different account hosts, so the region is taken from
+// the request and defaults to global.
+func (h *Handler) RequestMinimaxToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	// The provider key selects the region so the two logins stay separate,
+	// mirroring kimi.com and kimi.ai. A query parameter may only narrow it.
+	region := minimaxauth.RegionGlobal
+	if minimaxauth.IsCNProvider(c.Query("provider")) {
+		region = minimaxauth.RegionCN
+	} else if override := strings.TrimSpace(c.Query("region")); override != "" {
+		region = minimaxauth.NormalizeRegion(override)
+	}
+
+	state := fmt.Sprintf("minimax-%d", time.Now().UnixNano())
+	authSvc := minimaxauth.NewMinimaxAuth(h.cfg, region)
+
+	deviceCode, pkce, errStart := authSvc.StartDeviceFlow(ctx)
+	if errStart != nil {
+		log.Errorf("Failed to start MiniMax device flow: %v", errStart)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
+		return
+	}
+	authURL := strings.TrimSpace(deviceCode.VerificationURI)
+
+	RegisterOAuthSession(state, "minimax")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "minimax")
+
+		bundle, errWait := authSvc.WaitForAuthorization(pollCtx, deviceCode, pkce)
+		if errWait != nil {
+			if !IsOAuthSessionPending(state, "minimax") {
+				return
+			}
+			log.Errorf("MiniMax authentication failed: %v", errWait)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWait))
+			return
+		}
+		if !IsOAuthSessionPending(state, "minimax") {
+			return
+		}
+
+		tokenStorage := authSvc.CreateTokenStorage(bundle)
+		if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
+			log.Error("MiniMax token exchange returned empty access token")
+			SetOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+
+		record := buildMinimaxAuthRecord(region, bundle, tokenStorage)
+		if errGuard := guardOAuthSessionPendingForSave(state, "minimax"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save MiniMax token to file: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token to file")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+	}()
+
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device", "region": region}
+	if userCode := strings.TrimSpace(deviceCode.UserCode); userCode != "" {
+		response["user_code"] = userCode
+	}
+	response["expires_in"] = int(minimaxauth.MaxPollDuration / time.Second)
+	c.JSON(200, response)
+}
+
+// buildMinimaxAuthRecord converts a completed device flow into a persistable
+// record filed under the provider key for its region.
+func buildMinimaxAuthRecord(region string, bundle *minimaxauth.AuthBundle, tokenStorage *minimaxauth.MinimaxTokenStorage) *coreauth.Auth {
+	region = minimaxauth.NormalizeRegion(region)
+	provider := minimaxauth.ProviderForRegion(region)
+	fileName := fmt.Sprintf("%s-%d.json", provider, time.Now().UnixMilli())
+	label := "MiniMax"
+	if minimaxauth.IsCNRegion(region) {
+		label = "MiniMax (China)"
+	}
+
+	metadata := map[string]any{
+		"type":          provider,
+		"auth_kind":     "oauth",
+		"access_token":  tokenStorage.AccessToken,
+		"refresh_token": tokenStorage.RefreshToken,
+		"token_type":    tokenStorage.TokenType,
+		"scope":         tokenStorage.Scope,
+		"region":        region,
+		"base_url":      tokenStorage.BaseURL,
+		"expired":       tokenStorage.Expired,
+		"last_refresh":  tokenStorage.LastRefresh,
+	}
+	if tokenStorage.ResourceURL != "" {
+		metadata["resource_url"] = tokenStorage.ResourceURL
+	}
+
+	return &coreauth.Auth{
+		ID:       fileName,
+		Provider: provider,
+		FileName: fileName,
+		Label:    label,
+		Storage:  tokenStorage,
+		Metadata: metadata,
+		Attributes: map[string]string{
+			"base_url":    tokenStorage.BaseURL,
+			"region":      region,
+			"auth_kind":   "oauth",
+			"claude_base": minimaxauth.ResolveClaudeBaseURL(region),
+		},
+	}
 }

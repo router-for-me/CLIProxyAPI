@@ -23,6 +23,7 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewDevinAuthenticator(),
 		sdkAuth.NewMetaAuthenticator(),
 		sdkAuth.NewMinimaxAuthenticator(),
+		sdkAuth.NewMinimaxCNAuthenticator(),
 	)
 	return manager
 }

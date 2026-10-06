@@ -12,10 +12,15 @@ import (
 // file-backed credentials are reloaded at runtime.
 type cliproxyauthAuthStub struct {
 	metadata map[string]any
+	provider string
 }
 
 func (s *cliproxyauthAuthStub) asAuth() *cliproxyauth.Auth {
-	return &cliproxyauth.Auth{Provider: "minimax", Metadata: s.metadata}
+	provider := s.provider
+	if provider == "" {
+		provider = "minimax"
+	}
+	return &cliproxyauth.Auth{Provider: provider, Metadata: s.metadata}
 }
 
 // resolveClaudeURL is a thin wrapper so tests can exercise URL resolution

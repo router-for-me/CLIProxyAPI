@@ -48,10 +48,10 @@ func (ts *MinimaxTokenStorage) SetMetadata(meta map[string]any) {
 // SaveTokenToFile serializes the token storage to a JSON credential file.
 func (ts *MinimaxTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
-	if ts.Type == "" {
-		ts.Type = "minimax"
-	}
 	ts.Region = NormalizeRegion(ts.Region)
+	if ts.Type == "" {
+		ts.Type = ProviderForRegion(ts.Region)
+	}
 	if ts.BaseURL == "" {
 		ts.BaseURL = ResolveAPIBaseURL(ts.Region)
 	}

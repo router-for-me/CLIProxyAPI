@@ -71,7 +71,7 @@ func applyMinimaxRefresh(ctx context.Context, client minimaxTokenRefresher, auth
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	auth.Metadata["type"] = "minimax"
+	auth.Metadata["type"] = minimaxauth.ProviderForRegion(region)
 	auth.Metadata["auth_kind"] = cliproxyauth.AuthKindOAuth
 	auth.Metadata["access_token"] = tokenData.AccessToken
 	if tokenData.RefreshToken != "" {

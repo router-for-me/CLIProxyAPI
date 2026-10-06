@@ -13,8 +13,9 @@ import (
 )
 
 // DoMinimaxLogin triggers the OAuth device-code flow for the MiniMax provider and saves tokens.
-// When no region is supplied on the command line and a terminal is attached, the
-// user is asked to pick between the Global and China regions.
+// The region selects which provider key the credential is filed under, mirroring
+// the way kimi.com and kimi.ai are kept as separate providers. When no region is
+// supplied on the command line and a terminal is attached, the user is asked to pick.
 func DoMinimaxLogin(cfg *config.Config, options *LoginOptions) {
 	if options == nil {
 		options = &LoginOptions{}
@@ -36,11 +37,12 @@ func DoMinimaxLogin(cfg *config.Config, options *LoginOptions) {
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
-		Metadata:     map[string]string{"minimax_region": region},
+		Metadata:     map[string]string{},
 		Prompt:       promptFn,
 	}
 
-	record, savedPath, err := manager.Login(context.Background(), "minimax", cfg, authOpts)
+	provider := minimax.ProviderForRegion(region)
+	record, savedPath, err := manager.Login(context.Background(), provider, cfg, authOpts)
 	if err != nil {
 		log.Errorf("MiniMax authentication failed: %v", err)
 		return

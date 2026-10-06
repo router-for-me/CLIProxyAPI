@@ -193,7 +193,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
-	case "minimax":
+	case "minimax", "minimax-cn":
 		models = registry.GetMinimaxModels()
 		if entry := s.resolveConfigMinimaxKey(a); entry != nil {
 			if len(entry.Models) > 0 {

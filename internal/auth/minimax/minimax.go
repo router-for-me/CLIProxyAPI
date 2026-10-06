@@ -50,8 +50,8 @@ const (
 
 	// defaultPollInterval is the minimum delay between token polls.
 	defaultPollInterval = 3 * time.Second
-	// maxPollDuration caps how long the login waits for user authorization.
-	maxPollDuration = 15 * time.Minute
+	// MaxPollDuration caps how long the login waits for user authorization.
+	MaxPollDuration = 15 * time.Minute
 	// refreshThreshold is when a token is considered due for refresh.
 	refreshThreshold = 5 * time.Minute
 	// httpClientTimeout only guards OAuth credential acquisition calls.
@@ -98,10 +98,36 @@ func ResolveClaudeBaseURL(region string) string {
 	return strings.TrimRight(ResolveAPIBaseURL(region), "/") + AnthropicPathPrefix
 }
 
+// ProviderCN is the provider key for the China region. Global and China are
+// separate keys, matching the way kimi.com and kimi.ai are split, so each
+// credential records which region it belongs to.
+const ProviderCN = "minimax-cn"
+
+// ProviderForRegion returns the provider key for a region.
+func ProviderForRegion(region string) string {
+	if IsCNRegion(region) {
+		return ProviderCN
+	}
+	return "minimax"
+}
+
+// IsCNProvider reports whether a provider key targets the China region.
+func IsCNProvider(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), ProviderCN)
+}
+
 // ResolveRegionFromAuth detects the region an Auth belongs to. Explicit
-// configuration (region, base_url, resource_url) takes precedence over defaults.
+// configuration (region, base_url, resource_url) takes precedence, and the
+// provider key itself is authoritative so the two regions never share state.
 func ResolveRegionFromAuth(auth *cliproxyauth.Auth) string {
 	if auth == nil {
+		return RegionGlobal
+	}
+	// The provider key is the strongest signal: it is what the user picked.
+	if IsCNProvider(auth.Provider) {
+		return RegionCN
+	}
+	if auth.Provider == "minimax" {
 		return RegionGlobal
 	}
 	if auth.Attributes != nil {
@@ -225,14 +251,14 @@ type DeviceCodeResponse struct {
 // expiryDeadline converts the absolute expiry timestamp into a duration.
 func (d *DeviceCodeResponse) expiryDeadline() time.Duration {
 	if d == nil || d.ExpiredIn <= 0 {
-		return maxPollDuration
+		return MaxPollDuration
 	}
 	remaining := time.Until(time.UnixMilli(d.ExpiredIn))
 	if remaining <= 0 {
 		return time.Millisecond
 	}
-	if remaining > maxPollDuration {
-		return maxPollDuration
+	if remaining > MaxPollDuration {
+		return MaxPollDuration
 	}
 	return remaining
 }
@@ -586,7 +612,7 @@ func (m *MinimaxAuth) CreateTokenStorage(bundle *AuthBundle) *MinimaxTokenStorag
 		region = m.region
 	}
 	storage := &MinimaxTokenStorage{
-		Type:         "minimax",
+		Type:         ProviderForRegion(region),
 		Region:       region,
 		AccessToken:  bundle.TokenData.AccessToken,
 		RefreshToken: bundle.TokenData.RefreshToken,

@@ -426,7 +426,7 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		return sdktranslator.FormatOpenAI
 	case "meta":
 		return sdktranslator.FormatCodex
-	case "minimax":
+	case "minimax", "minimax-cn":
 		return sdktranslator.FormatClaude
 	case "antigravity":
 		return sdktranslator.FormatAntigravity

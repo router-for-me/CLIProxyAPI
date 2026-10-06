@@ -507,7 +507,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetDevinModels()
 	case "meta", "muse":
 		return GetMetaModels()
-	case "minimax":
+	case "minimax", "minimax-cn":
 		return GetMinimaxModels()
 	default:
 		return nil

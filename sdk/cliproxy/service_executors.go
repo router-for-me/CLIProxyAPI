@@ -316,7 +316,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewDevinExecutor(cfg))
 	case "meta":
 		s.coreManager.RegisterExecutor(executor.NewMetaExecutor(cfg))
-	case "minimax":
+	case "minimax", "minimax-cn":
 		s.coreManager.RegisterExecutor(executor.NewMinimaxExecutor(cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))

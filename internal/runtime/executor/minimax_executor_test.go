@@ -53,11 +53,11 @@ func TestMinimaxInjectsAnthropicBaseURL(t *testing.T) {
 		t.Fatal("credential must opt in to the x-api-key header")
 	}
 
-	// The China region must be detected from metadata alone, since a
-	// file-backed credential loses its Attributes on reload.
+	// A China credential is identified by its provider key, which survives the
+	// metadata-only reload that a file-backed credential goes through.
 	cn := newMinimaxTestAuth()
+	cn.Provider = minimaxauth.ProviderCN
 	cn.Attributes = nil
-	cn.Metadata["region"] = "cn"
 	injectMinimaxBaseURL(cn)
 	if got := cn.Attributes["base_url"]; got != "https://api.minimax.cn/anthropic" {
 		t.Fatalf("cn base_url = %q", got)

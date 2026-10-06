@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestResolveRegionAndBaseURL(t *testing.T) {
@@ -55,7 +56,7 @@ func TestResolveClaudeUpstreamURLHonorsResourceURL(t *testing.T) {
 		t.Fatalf("base_url = %q", got)
 	}
 	// With nothing configured, the region default applies.
-	auth3 := &cliproxyauthAuthStub{metadata: map[string]any{"region": "cn"}}
+	auth3 := &cliproxyauthAuthStub{provider: ProviderCN}
 	if got := resolveClaudeURL(auth3); got != "https://api.minimax.cn/anthropic" {
 		t.Fatalf("region default = %q", got)
 	}
@@ -97,8 +98,8 @@ func TestDeviceCodeExpiryIsAbsoluteTimestamp(t *testing.T) {
 	if d := past.expiryDeadline(); d != time.Millisecond {
 		t.Fatalf("past expiry deadline = %v, want a positive minimum", d)
 	}
-	if d := (&DeviceCodeResponse{}).expiryDeadline(); d != maxPollDuration {
-		t.Fatalf("missing expiry deadline = %v, want %v", d, maxPollDuration)
+	if d := (&DeviceCodeResponse{}).expiryDeadline(); d != MaxPollDuration {
+		t.Fatalf("missing expiry deadline = %v, want %v", d, MaxPollDuration)
 	}
 }
 
@@ -331,8 +332,8 @@ func TestCreateTokenStorage(t *testing.T) {
 	if storage == nil {
 		t.Fatal("storage must be created")
 	}
-	if storage.Type != "minimax" {
-		t.Fatalf("type = %q", storage.Type)
+	if storage.Type != ProviderCN {
+		t.Fatalf("type = %q, want %q", storage.Type, ProviderCN)
 	}
 	if storage.Region != RegionCN {
 		t.Fatalf("region = %q", storage.Region)
@@ -350,6 +351,9 @@ func TestCreateTokenStorage(t *testing.T) {
 	storage2 := auth2.CreateTokenStorage(&AuthBundle{Region: RegionGlobal, TokenData: &TokenData{AccessToken: "a"}})
 	if storage2.BaseURL != APIBaseURLGlobal {
 		t.Fatalf("default base_url = %q", storage2.BaseURL)
+	}
+	if storage2.Type != "minimax" {
+		t.Fatalf("global type = %q", storage2.Type)
 	}
 }
 
@@ -371,8 +375,8 @@ func TestSaveTokenToFileRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if data["type"] != "minimax" {
-		t.Fatalf("type = %v", data["type"])
+	if data["type"] != ProviderCN {
+		t.Fatalf("type = %v, want %q", data["type"], ProviderCN)
 	}
 	if data["access_token"] != "access-1" || data["refresh_token"] != "refresh-1" {
 		t.Fatalf("tokens not persisted: %+v", data)
@@ -412,5 +416,41 @@ func TestNeedsRefresh(t *testing.T) {
 	broken := &MinimaxTokenStorage{RefreshToken: "r", Expired: "not-a-time"}
 	if !broken.NeedsRefresh() {
 		t.Fatal("unparseable expiry must be treated as expired")
+	}
+}
+
+// TestProviderForRegion locks in that the two regions get separate provider
+// keys, matching the kimi.com / kimi.ai split so credentials never share a
+// provider across regions.
+func TestProviderForRegion(t *testing.T) {
+	if got := ProviderForRegion(RegionGlobal); got != "minimax" {
+		t.Fatalf("global provider = %q", got)
+	}
+	if got := ProviderForRegion(RegionCN); got != ProviderCN {
+		t.Fatalf("cn provider = %q", got)
+	}
+	if !IsCNProvider(ProviderCN) {
+		t.Fatal("ProviderCN must be recognised as the China provider")
+	}
+	if IsCNProvider("minimax") {
+		t.Fatal("the global provider must not be treated as China")
+	}
+}
+
+// TestResolveRegionFromAuthPrefersProviderKey ensures a China credential is
+// never resolved as global, even if its stored base URL is ambiguous.
+func TestResolveRegionFromAuthPrefersProviderKey(t *testing.T) {
+	cn := &cliproxyauth.Auth{
+		Provider:   ProviderCN,
+		Metadata:   map[string]any{"region": "global", "base_url": "https://api.minimax.io"},
+		Attributes: map[string]string{"base_url": "https://api.minimax.io"},
+	}
+	if got := ResolveRegionFromAuth(cn); got != RegionCN {
+		t.Fatalf("CN provider resolved to %q; the provider key must win", got)
+	}
+
+	global := &cliproxyauth.Auth{Provider: "minimax", Metadata: map[string]any{"base_url": "https://api.minimax.cn"}}
+	if got := ResolveRegionFromAuth(global); got != RegionGlobal {
+		t.Fatalf("global provider resolved to %q; the provider key must win", got)
 	}
 }

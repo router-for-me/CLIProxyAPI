@@ -17,6 +17,7 @@ func init() {
 	registerRefreshLead("devin", func() Authenticator { return NewDevinAuthenticator() })
 	registerRefreshLead("meta", func() Authenticator { return NewMetaAuthenticator() })
 	registerRefreshLead("minimax", func() Authenticator { return NewMinimaxAuthenticator() })
+	registerRefreshLead("minimax-cn", func() Authenticator { return NewMinimaxCNAuthenticator() })
 }
 
 func registerRefreshLead(provider string, factory func() Authenticator) {

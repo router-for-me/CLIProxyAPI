@@ -31,8 +31,12 @@ func NewMinimaxCNAuthenticator() Authenticator {
 	return &MinimaxAuthenticator{region: minimax.RegionCN}
 }
 
-// Provider returns the provider key for minimax.
-func (a MinimaxAuthenticator) Provider() string { return "minimax" }
+// Provider returns the provider key for the configured region. The two regions
+// use separate keys so their credentials never share a provider, matching the
+// kimi.com / kimi.ai split.
+func (a MinimaxAuthenticator) Provider() string {
+	return minimax.ProviderForRegion(a.region)
+}
 
 // RefreshLead returns the duration before token expiry when refresh should occur.
 func (MinimaxAuthenticator) RefreshLead() *time.Duration { return &minimaxRefreshLead }
@@ -49,11 +53,7 @@ func (a MinimaxAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		opts = &LoginOptions{}
 	}
 
-	region := a.region
-	if override := strings.TrimSpace(opts.Metadata[regionMetadataKey]); override != "" {
-		region = minimax.NormalizeRegion(override)
-	}
-	region = minimax.NormalizeRegion(region)
+	region := minimax.NormalizeRegion(a.region)
 	displayName := "MiniMax"
 	if minimax.IsCNRegion(region) {
 		displayName = "MiniMax (China)"
