@@ -52,6 +52,12 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
 
+	// Claude Code probes HEAD {ANTHROPIC_BASE_URL}/api/hello on startup to warm
+	// the connection and ignores the result; answer it instead of logging a 404.
+	anthropicHelloHandler := func(c *gin.Context) { c.Status(http.StatusOK) }
+	s.engine.GET("/api/hello", anthropicHelloHandler)
+	s.engine.HEAD("/api/hello", anthropicHelloHandler)
+
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)

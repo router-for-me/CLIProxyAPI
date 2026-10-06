@@ -724,6 +724,25 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
+// Claude Code sends HEAD {ANTHROPIC_BASE_URL}/api/hello as a connection warm-up
+// on every start; answering it keeps those probes out of the error request logs.
+func TestAnthropicHelloProbe(t *testing.T) {
+	server := newTestServer(t)
+
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		t.Run(method, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, httptest.NewRequest(method, "/api/hello", nil))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+			}
+			if rr.Body.Len() != 0 {
+				t.Fatalf("expected empty body, got %q", rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestHealthzAccessLogging(t *testing.T) {
 	server := newTestServer(t)
 	previousHome := home.Current()
