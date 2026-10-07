@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom';
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   getUsageErrors, getUsageError, getUsageErrorBodies, getUsageFilterOptions,
@@ -566,10 +567,20 @@ export default function ErrorsPage() {
       )}
 
       {selectedErrorId != null && (
-        <ErrorDetailModal id={selectedErrorId} timezone={timezone} onClose={() => setSelectedErrorId(null)} />
+        <ErrorDetailModal id={selectedErrorId} timezone={timezone} onClose={() => setSelectedErrorId(null)} onApplyPattern={(f) => { updateFilter(f); setSelectedErrorId(null); requestAnimationFrame(() => { tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }); }} />
       )}
     </>
   );
+}
+
+// Maps a class-tone CSS variable to its faint-dim background for row tinting.
+// Only colour tone vars (var(--danger), var(--warning), etc.) have a dim
+// counterpart. Neutral tones (var(--text-dim), var(--text-muted)) get none.
+function rowToneBg(slug) {
+  if (!slug) return undefined;
+  const tone = classTone(slug);
+  if (!tone || tone === 'var(--text-dim)' || tone === 'var(--text-muted)') return undefined;
+  return tone.replace(')', '-dim)');
 }
 
 // ErrorsTableBody mirrors EventsTableBody but renders failed-attempt rows
@@ -593,6 +604,7 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick, timezone 
                 <th>Provider Official</th>
                 <th>Model Alias</th>
                 <th style={{ textAlign: 'right' }}>Status</th>
+                <th>Class</th>
                 <th>Error message</th>
                 <th style={{ textAlign: 'right' }}>Latency</th>
               </tr>
@@ -600,6 +612,7 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick, timezone 
             <tbody>
               {Array.from({ length: 4 }).map((_, i) => (
                 <tr key={i} className="skeleton-row">
+                  <td><span className="skeleton-line" /></td>
                   <td><span className="skeleton-line" /></td>
                   <td><span className="skeleton-line" /></td>
                   <td><span className="skeleton-line" /></td>
@@ -630,6 +643,7 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick, timezone 
                   <th>Provider Official</th>
                   <th>Model Alias</th>
                   <th style={{ textAlign: 'right' }}>Status</th>
+                  <th>Class</th>
                   <th>Error message</th>
                   <th style={{ textAlign: 'right' }}>Latency</th>
                 </tr>
@@ -640,6 +654,7 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick, timezone 
                     key={String(e.id)}
                     className="row-link"
                     onClick={() => onRowClick(e.id)}
+                    style={rowToneBg(e.error_class) ? { background: rowToneBg(e.error_class) } : undefined}
                   >
                     <td className="mono" style={{ whiteSpace: 'nowrap' }} title={e.requested_at ? new Date(e.requested_at).toISOString() : ''}>
                       {e.requested_at ? formatInTZ(e.requested_at, timezone) : '—'}
@@ -650,6 +665,14 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick, timezone 
                     <td className="mono">{e.alias || e.model || '—'}</td>
                     <td style={{ textAlign: 'right' }} className="mono">
                       {e.fail_status_code ? String(e.fail_status_code) : '—'}
+                    </td>
+                    <td>
+                      {e.error_class ? (
+                        <span className="err-class-chip" style={{ '--chip-tone': classTone(e.error_class), display: 'inline-flex', fontSize: 11, padding: '1px 8px', minHeight: 22 }}>
+                          <span className="err-class-chip__dot" />
+                          <span className="err-class-chip__label">{classLabel(e.error_class)}</span>
+                        </span>
+                      ) : '—'}
                     </td>
                     <td style={{ maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {e.error_message || '—'}
@@ -681,12 +704,19 @@ function ErrorsTableBody({ errors, page, pageSize, onPage, onRowClick, timezone 
 // executor actually hit) and the client IP / forwarded-for fields are
 // surfaced here so an operator can correlate a failure to a concrete upstream
 // path and a concrete source IP without leaving the modal.
-function ErrorDetailModal({ id, timezone, onClose }) {
+//
+// Props:
+//   id, timezone, onClose — same as before.
+//   onApplyPattern(filter) — called when the operator clicks "View other errors
+//     with the same pattern"; sets the fingerprint filter, closes the modal,
+//     and scrolls to the table.
+function ErrorDetailModal({ id, timezone, onClose, onApplyPattern }) {
+  const navigate = useNavigate();
   const detail = useAsync(() => getUsageError(id), [id]);
   const e = detail.data?.error_event;
   const substituted = Boolean(e?.served_model && e?.model && e.served_model !== e.model);
   return (
-    <Modal title={`Error #${id}`} onClose={onClose} size="lg">
+    <Modal title={<span>Error #{id} {e?.error_class ? <span className="err-class-chip" style={{ '--chip-tone': classTone(e.error_class), display: 'inline-flex', marginLeft: 8, verticalAlign: 'middle' }}><span className="err-class-chip__dot" /><span className="err-class-chip__label">{classLabel(e.error_class)}</span></span> : null}</span>} onClose={onClose} size="lg">
       {detail.loading && <Spinner label="Loading…" />}
       {detail.error && <ErrorBanner error={detail.error} />}
       {!detail.loading && !detail.error && e && (
@@ -740,6 +770,16 @@ function ErrorDetailModal({ id, timezone, onClose }) {
             <DetailRow label="Generate" value={e.generate ? 'true' : 'false'} mono />
           </div>
 
+          {/* Provider details — surfaced here so the operator sees which entry
+              key routed the request, the network round-trip, and the user who
+              made the call. These fields were already persisted but hidden. */}
+          <div className="detail-row__block-label" style={{ marginTop: 14 }}>Provider details</div>
+          <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+            <DetailRow label="Entry Provider Key" value={e.entry_provider_key || '—'} mono />
+            <DetailRow label="Network RTT" value={e.network_rtt_ms ? `${e.network_rtt_ms} ms` : '—'} mono />
+            <DetailRow label="User ID" value={e.user_id || '—'} mono />
+          </div>
+
           <div className="detail-row__block-label" style={{ marginTop: 14 }}>Client</div>
           <div className="grid grid--2" style={{ gap: '6px 24px' }}>
             <DetailRow label="Client IP" value={e.client_ip || '—'} mono />
@@ -747,11 +787,44 @@ function ErrorDetailModal({ id, timezone, onClose }) {
             <DetailRow label="Status Code" value={e.fail_status_code ? String(e.fail_status_code) : '—'} mono />
           </div>
 
+          {/* Pattern section — error fingerprint and the "same pattern" drill-down
+              link that closes the modal and filters the failed-attempts table.
+              Only shown when the error has a valid (non-empty) class. */}
+          {e.error_class ? (
+            <>
+              <div className="detail-row__block-label" style={{ marginTop: 14 }}>Pattern</div>
+              <div className="grid grid--2" style={{ gap: '6px 24px' }}>
+                <DetailRow label="Error Fingerprint" value={e.error_fingerprint || '—'} mono />
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  style={{ fontSize: 13, cursor: 'pointer' }}
+                  onClick={() => onApplyPattern && onApplyPattern({ error_fingerprint: e.error_fingerprint, error_class: '' })}
+                >
+                  View other errors with the same pattern
+                </button>
+              </div>
+            </>
+          ) : null}
+
           <div className="detail-row__block">
             <div className="detail-row__block-label">Error message</div>
             <div className="mono" style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: 4 }}>
               {e.error_message || '—'}
             </div>
+          </div>
+
+          {/* Action buttons — quickly navigate to related views without
+              closing the modal and manually re-filtering. Uses react-router
+              navigate so the transition is instantaneous. */}
+          <div className="row gap-sm" style={{ marginTop: 14 }}>
+            <button type="button" onClick={() => navigate(`/logs?request_id=${e.request_id}`)}>
+              View logs
+            </button>
+            <button type="button" onClick={() => navigate(`/provider-performance?provider=${encodeURIComponent(e.provider || '')}`)}>
+              Check provider health
+            </button>
           </div>
 
           {/* Raw captured upstream response (headers + body) for this failed
