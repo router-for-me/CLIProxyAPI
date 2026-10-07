@@ -542,7 +542,6 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
 	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
 	if errRefresh != nil || refreshed == nil {
-		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
 		return auth, false
 	}
 	return refreshed, true
@@ -692,8 +691,19 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		m.queueRefreshReschedule(id)
 		return nil, err
 	}
-	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
+	if err == nil {
+		log.Debugf("refreshed %s, %s", auth.Provider, auth.ID)
+	}
 	if err != nil {
+		credential := strings.TrimSpace(auth.FileName)
+		if credential == "" {
+			credential = strings.TrimSpace(auth.ID)
+		}
+		log.WithFields(log.Fields{
+			"provider": auth.Provider,
+			"auth_id":  auth.ID,
+			"file":     credential,
+		}).Warnf("credential refresh failed: %s", safeErrorDiagnosticForLog(err))
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
 		shouldReschedule := false
@@ -799,9 +809,6 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.NextRefreshAfter = nextRetry
 				shouldReschedule = true
 
-				if !current.Unavailable {
-					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
-				}
 			}
 			m.auths[id] = current
 			if m.scheduler != nil {
