@@ -472,6 +472,7 @@ func (s *UsageStore) SelectErrorTimeline(ctx context.Context, filter UsageFilter
 	return out, nil
 }
 
+// usageErrorColumnList is the canonical column list for INSERT statements.
 // Order must stay in sync with the positional args built by InsertError and
 // BatchInsertErrors, and with errorRowSelectColumns used by SelectErrors /
 // GetError (which additionally projects the joined key_alias).

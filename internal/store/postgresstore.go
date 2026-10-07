@@ -1668,11 +1668,10 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	}
 	// error_class / error_fingerprint record the classified error category and
 	// the deduplication fingerprint for usage_errors so the dashboard can group
-	// and deduplicate failures by type. error_class is a registry slug such as
-	// "rate_limited", "auth_error" or "upstream_error"; error_fingerprint is a
-	// hash over the stable error characteristics (class + status code + upstream
-	// provider + message prefix). Idempotent ALTER so pre-existing stores pick
-	// the columns up on the next start.
+	// and deduplicate failures by type. error_class is a stable slug (rate_limit,
+	// auth, invalid_request, etc.); error_fingerprint is a 16-char hash over
+	// class + provider + model + normalized message. Idempotent ALTER so
+	// pre-existing stores pick the columns up on the next start.
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		ALTER TABLE %s
 			ADD COLUMN IF NOT EXISTS error_class TEXT,
