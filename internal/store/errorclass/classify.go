@@ -99,6 +99,8 @@ func classFromStatus(statusCode int) string {
 func classFromKeywords(body string) string {
 	s := strings.ToLower(body)
 	switch {
+	case strings.Contains(s, "context length") || strings.Contains(s, "context_length") || strings.Contains(s, "maximum context") || strings.Contains(s, "context window"):
+		return ClassInvalidRequest
 	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline exceeded"):
 		return ClassTimeout
 	case strings.Contains(s, "overloaded"):
