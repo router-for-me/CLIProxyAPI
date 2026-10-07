@@ -213,6 +213,14 @@ A composite index `(requested_at DESC, error_class)` backs the class-scoped
 aggregations. `group_by` is mapped to a *whitelisted* column expression (never string
 interpolation of caller input), consistent with `dimensionColumn`.
 
+The **listing** endpoint (`GET /usage-stats/errors`) also gains `error_class` and
+`error_fingerprint` filters, carried on `UsageFilter` and applied by
+`buildWhereClause` like every other filter. These two fields are errors-only (the
+columns exist on `usage_errors`, not `usage_events`); the drill-down interactions in
+§4.1 / §4.2 / §4.4 (chip click, group-row click, "same pattern" link) all resolve to
+one of these two parameters, so the table, the KPI strip, and the patterns panel all
+share a single filter vocabulary.
+
 ---
 
 ## 4. Dashboard (React)

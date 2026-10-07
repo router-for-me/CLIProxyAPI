@@ -792,6 +792,88 @@ git commit -m "feat(api): add error summary/groups/timeline endpoints"
 
 ---
 
+### Task 9b: `error_class` / `error_fingerprint` filter support
+
+**Why this task exists (gap found during execution):** design doc §4.1 (clicking a
+class chip filters the table), §4.2 (clicking a group row applies that group as a
+table filter), and §4.4 (the "N other errors with the same pattern" link opens the
+table filtered to that fingerprint) all require the failed-attempts **listing**
+endpoint to accept a class / fingerprint filter. Neither `UsageFilter` nor
+`buildWhereClause` carries one today — both were written before these columns
+existed — so the drill-down features have no backend to call. This task closes that
+gap before the dashboard tasks that depend on it.
+
+**Files:**
+- Modify: `internal/store/pg_usage.go` (`UsageFilter` struct + `buildWhereClause`)
+- Modify: `internal/api/handlers/management/usage_stats.go` (`usageStatsQuery` +
+  `parseUsageStatsQuery` + `filterFromQuery`)
+- Test: `internal/store/pg_usage_errors_test.go`
+
+**Step 1: Write the failing test**
+
+Add a PG-backed test asserting that `SelectErrorCount` (or `SelectErrors`) with
+`UsageFilter{ErrorClass: "rate_limit"}` returns only rows of that class, and likewise
+for `ErrorFingerprint`. Seed rows with distinct classes/fingerprints, filter by one,
+assert the count excludes the others. Expected: FAIL — fields do not exist.
+
+**Step 2: Extend `UsageFilter`**
+
+```go
+	// ErrorClass narrows to a single error class slug (see
+	// internal/store/errorclass). Empty means no constraint. Errors-only:
+	// the column exists on usage_errors, not usage_events.
+	ErrorClass string
+	// ErrorFingerprint narrows to a single error fingerprint. Empty means no
+	// constraint. Errors-only.
+	ErrorFingerprint string
+```
+
+**Step 3: Add the `buildWhereClause` arms**
+
+Place them with the other simple equality clauses (after the `Model` arm, before
+`RequestID`):
+
+```go
+	if filter.ErrorClass != "" {
+		args = append(args, filter.ErrorClass)
+		b.WriteString(" AND e.error_class = $")
+		b.WriteString(itoa(len(args)))
+	}
+	if filter.ErrorFingerprint != "" {
+		args = append(args, filter.ErrorFingerprint)
+		b.WriteString(" AND e.error_fingerprint = $")
+		b.WriteString(itoa(len(args)))
+	}
+```
+
+**CAUTION:** `buildWhereClause` is shared by both the events and errors query paths.
+These two columns exist only on `usage_errors`. Confirm no events-path caller can set
+these fields (they are new, so none do today) and add a doc comment on the struct
+fields noting the errors-only constraint, mirroring the existing `KeyLabel` comment
+("Events-only: …must not be set by usage_errors callers").
+
+**Step 4: Thread the query params**
+
+- Add `ErrorClass string` and `ErrorFingerprint string` to `usageStatsQuery`.
+- In `parseUsageStatsQuery`: `ErrorClass: strings.TrimSpace(c.Query("error_class"))`,
+  `ErrorFingerprint: strings.TrimSpace(c.Query("error_fingerprint"))`.
+- In `filterFromQuery`: copy both through.
+
+**Step 5: Run test to verify it passes**
+
+Run: `go test ./internal/store/ -run TestSelectError -v`
+Expected: PASS.
+
+**Step 6: Commit**
+
+```bash
+gofmt -w internal/store/pg_usage.go internal/api/handlers/management/usage_stats.go
+git add internal/store/pg_usage.go internal/api/handlers/management/usage_stats.go internal/store/pg_usage_errors_test.go
+git commit -m "feat(store): filter errors by error_class / error_fingerprint"
+```
+
+---
+
 ## Phase 5 — Dashboard
 
 ### Task 10: API client functions
