@@ -16,6 +16,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// emptyUserMessageBlock stands in for a user turn that carries no content
+// Claude can represent. Anthropic rejects empty text blocks, so the turn is
+// kept with a visible marker rather than dropped.
+const emptyUserMessageBlock = `{"type":"text","text":"(empty message)"}`
+
 // ConvertOpenAIRequestToClaude parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
@@ -254,6 +259,13 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					})
 				}
 
+				// OpenAI accepts a user message with empty content; Claude needs a
+				// non-empty text block, and dropping the turn would leave the
+				// conversation ending on the previous assistant message.
+				if role == "user" && len(contentBlocks) == 0 {
+					contentBlocks = append(contentBlocks, []byte(emptyUserMessageBlock))
+				}
+
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
 				msg, _ = sjson.SetRawBytes(msg, "content", common.JoinRawArray(contentBlocks))
@@ -298,6 +310,9 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 		messageBlocks = messageAccumulator.Messages()
 	}
+	if !preserveEmptyThinkingBlocks {
+		messageBlocks = common.DropUnsupportedClaudeAssistantPrefill(modelName, messageBlocks)
+	}
 
 	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(root.Get("response_format")); formatInstruction != "" {
 		systemBlock := []byte(`{"type":"text","text":""}`)
@@ -305,10 +320,11 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		systemBlocks = append(systemBlocks, systemBlock)
 	}
 
-	// Preserve a minimal conversational turn for system-only inputs.
-	// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
-	if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
-		messageBlocks = append(messageBlocks, []byte(`{"role":"user","content":[{"type":"text","text":""}]}`))
+	// Preserve a minimal conversational turn when no message survived:
+	// system-only inputs, or a lone assistant prefill dropped above. Anthropic
+	// rejects an empty text block once a cache breakpoint lands on it.
+	if len(messageBlocks) == 0 {
+		messageBlocks = append(messageBlocks, []byte(`{"role":"user","content":[`+emptyUserMessageBlock+`]}`))
 	}
 
 	if len(systemBlocks) > 0 {
