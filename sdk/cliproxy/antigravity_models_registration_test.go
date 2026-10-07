@@ -21,7 +21,7 @@ func TestAntigravityDynamicRegistrationLifecycle(t *testing.T) {
 	t.Cleanup(resetAntigravityCapabilityCache)
 	const allowed = "gemini-3.1-flash-lite"
 	var response atomic.Value
-	response.Store(map[string]any{"models": map[string]any{allowed: map[string]any{"maxTokens": 1}, "not-in-static": map[string]any{}}, "webSearchModelIds": []string{allowed}})
+	response.Store(map[string]any{"models": map[string]any{allowed: map[string]any{"maxTokens": 250000}, "not-in-static": map[string]any{}}, "webSearchModelIds": []string{allowed}})
 	var status atomic.Int32
 	status.Store(200)
 	var calls atomic.Int32

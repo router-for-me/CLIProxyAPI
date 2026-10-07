@@ -132,11 +132,14 @@ func pluginModelInfoToRegistryModelInfo(model pluginapi.ModelInfo) *registry.Mod
 		OutputTokenLimit:           int(model.OutputTokenLimit),
 		SupportedGenerationMethods: cloneStringSlice(model.SupportedGenerationMethods),
 		ContextLength:              int(model.ContextLength),
+		MaxContextLength:           int(model.ContextLength),
 		MaxCompletionTokens:        int(model.MaxCompletionTokens),
 		SupportedParameters:        cloneStringSlice(model.SupportedParameters),
 		SupportedInputModalities:   cloneStringSlice(model.SupportedInputModalities),
 		SupportedOutputModalities:  cloneStringSlice(model.SupportedOutputModalities),
 		Thinking:                   pluginThinkingSupportToRegistryThinkingSupport(model.Thinking),
+		ExplicitThinking:           model.Thinking != nil,
+		ExplicitInputModalities:    len(model.SupportedInputModalities) > 0,
 		UserDefined:                model.UserDefined,
 	}
 }
