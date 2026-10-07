@@ -101,12 +101,19 @@ func TestRefreshAuthForRequest_DisabledAuth_TerminalFailure_NeverRetries(t *test
 			},
 		},
 		{
-			name: "unauthorized",
-			err:  oauthStatusError{code: http.StatusUnauthorized, msg: "unauthorized"},
+			name: "wrapped_refresh_rejection",
+			err: fmt.Errorf("token refresh failed after 3 attempts: %w", fmt.Errorf(`token refresh failed with status 401: {
+"error": {
+"message": "Could not validate your refresh token. Please try signing in again.",
+"type": "invalid_request_error",
+"param": null,
+"code": "invalid_refresh_token"
+}
+}`)),
 		},
 		{
 			name: "invalid_refresh_token",
-			err:  oauthStatusError{code: http.StatusUnauthorized, msg: `{"error":"invalid_refresh_token"}`},
+			err:  &Error{HTTPStatus: http.StatusUnauthorized, Code: "invalid_refresh_token"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,6 +152,20 @@ func TestRefreshAuthForRequest_DisabledAuth_TerminalFailure_NeverRetries(t *test
 			}
 			if _, scheduled := nextRefreshCheckAt(time.Now(), current, time.Second); scheduled {
 				t.Fatal("terminal refresh failure remained scheduled")
+			}
+			if tc.name != "invalid_grant" {
+				if current.LastError.HTTPStatus != 401 || current.LastError.Code != "invalid_refresh_token" {
+					t.Fatalf("normalization lost the refresh rejection: %+v", current.LastError)
+				}
+				if HasDisabledInvalidGrantFailure(current) {
+					t.Fatal("invalid refresh token broadened the existing public grant matcher")
+				}
+			}
+			if manager.shouldRefresh(current, time.Now().Add(24*time.Hour)) {
+				t.Fatal("terminal failure became eligible after backoff")
+			}
+			if job := manager.markRefreshPending(nil, current.ID, current.RegistrationEpoch, time.Now().Add(24*time.Hour)); job != nil {
+				t.Fatal("terminal failure queued a refresh job")
 			}
 
 			callsBefore := executor.refreshCalls.Load()

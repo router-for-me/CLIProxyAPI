@@ -118,7 +118,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
-	if hasUnauthorizedAuthFailure(a) || hasDisabledTerminalRefreshFailure(a) {
+	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) || hasDisabledInvalidRefreshTokenFailure(a) {
 		return false
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
@@ -325,7 +325,7 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, registrationEpoch uint64, now time.Time) *authRefreshJob {
 	m.mu.Lock()
 	auth := m.auths[id]
-	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledTerminalRefreshFailure(auth) {
+	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) || hasDisabledInvalidRefreshTokenFailure(auth) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -652,8 +652,11 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
 		return nil, errors.New("auth registration changed before refresh")
 	}
-	if hasDisabledTerminalRefreshFailure(auth) && !forceRefresh {
-		return nil, errors.New("auth is disabled with terminal refresh failure")
+	if hasDisabledInvalidGrantFailure(auth) && !forceRefresh {
+		return nil, errors.New("auth is disabled with invalid grant")
+	}
+	if hasDisabledInvalidRefreshTokenFailure(auth) && !forceRefresh {
+		return nil, errors.New("auth is disabled with invalid refresh token")
 	}
 	if hasUnauthorizedAuthFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is unauthorized")
@@ -743,7 +746,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			// failedAccessToken is set only when upstream rejected this exact access
 			// token. Its expiry time no longer proves it is usable.
 			accessTokenRejected := failedAccessToken != "" && authAccessToken(current) == failedAccessToken
-			if isDisabled && (invalidGrant || unauthorized || invalidRefreshToken) {
+			if isDisabled && (invalidGrant || invalidRefreshToken) {
 				current.Unavailable = true
 				current.Status = StatusDisabled
 				current.NextRefreshAfter = time.Time{}
