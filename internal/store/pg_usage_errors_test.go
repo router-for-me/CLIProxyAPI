@@ -479,6 +479,39 @@ func TestUsageRequestIDFilter(t *testing.T) {
 	}
 }
 
+func TestInsertErrorRoundTripsClassAndFingerprint(t *testing.T) {
+	store := newTestPostgresStore(t, "test_error_class_rt")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	errRow := UsageError{
+		RequestID:        "req-class-test-1",
+		Provider:         "anthropic",
+		Model:            "claude-sonnet-4-5",
+		FailStatusCode:   429,
+		ErrorMessage:     "rate limit exceeded",
+		ErrorClass:       "rate_limit",
+		ErrorFingerprint: "deadbeefdeadbeef",
+		RequestedAt:      now(),
+	}
+	if err := us.InsertError(ctx, errRow); err != nil {
+		t.Fatalf("InsertError: %v", err)
+	}
+	rows, _, err := us.SelectErrors(ctx, UsageFilter{RequestID: "req-class-test-1"}, 1, 10)
+	if err != nil {
+		t.Fatalf("SelectErrors: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].ErrorClass != "rate_limit" {
+		t.Fatalf("class = %q, want rate_limit", rows[0].ErrorClass)
+	}
+	if rows[0].ErrorFingerprint != "deadbeefdeadbeef" {
+		t.Fatalf("fingerprint = %q, want deadbeefdeadbeef", rows[0].ErrorFingerprint)
+	}
+}
+
 func TestUsageStoreSelectErrorTopNullDimensionKey(t *testing.T) {
 	// Regression: SelectErrorTop projects a nullable dimension column (e.g.
 	// e.api_key_id) directly into TopEntry.Key (a plain string). When the

@@ -53,14 +53,18 @@ type UsageError struct {
 	// OriginalCostUSD is the pre-discount cost stamped at flush time alongside
 	// DiscountPct (mirrors UsageEvent). Equals CostUSD when no discount was
 	// applied. Persisted column.
-	OriginalCostUSD float64   `json:"original_cost_usd,omitempty"`
-	LatencyMs       int64     `json:"latency_ms,omitempty"`
-	TTFTMs          int64     `json:"ttft_ms,omitempty"`
-	NetworkRTTMs    int64     `json:"network_rtt_ms,omitempty"`
-	FailStatusCode  int       `json:"fail_status_code,omitempty"`
-	ErrorMessage    string    `json:"error_message,omitempty"`
-	Generate        bool      `json:"generate,omitempty"`
-	RequestedAt     time.Time `json:"requested_at"`
+	OriginalCostUSD float64 `json:"original_cost_usd,omitempty"`
+	LatencyMs       int64   `json:"latency_ms,omitempty"`
+	TTFTMs          int64   `json:"ttft_ms,omitempty"`
+	NetworkRTTMs    int64   `json:"network_rtt_ms,omitempty"`
+	FailStatusCode  int     `json:"fail_status_code,omitempty"`
+	ErrorMessage    string  `json:"error_message,omitempty"`
+	// ErrorClass is the stable failure category (see internal/store/errorclass).
+	ErrorClass string `json:"error_class,omitempty"`
+	// ErrorFingerprint groups structurally-identical errors (see errorclass).
+	ErrorFingerprint string    `json:"error_fingerprint,omitempty"`
+	Generate         bool      `json:"generate,omitempty"`
+	RequestedAt      time.Time `json:"requested_at"`
 }
 
 // UsageErrorRow is the dashboard-friendly projection of a single usage_errors
@@ -117,14 +121,18 @@ type UsageErrorRow struct {
 	// AppliedPricing mirrors UsageEventRow.AppliedPricing: the resolved unit
 	// rates that produced CostBreakdown, populated alongside it so the dashboard
 	// can render a tokens × rate → cost derivation for failed attempts too.
-	AppliedPricing *Pricing  `json:"applied_pricing,omitempty"`
-	LatencyMs      int64     `json:"latency_ms,omitempty"`
-	TTFTMs         int64     `json:"ttft_ms,omitempty"`
-	NetworkRTTMs   int64     `json:"network_rtt_ms,omitempty"`
-	FailStatusCode int       `json:"fail_status_code,omitempty"`
-	ErrorMessage   string    `json:"error_message"`
-	Generate       bool      `json:"generate,omitempty"`
-	RequestedAt    time.Time `json:"requested_at"`
+	AppliedPricing *Pricing `json:"applied_pricing,omitempty"`
+	LatencyMs      int64    `json:"latency_ms,omitempty"`
+	TTFTMs         int64    `json:"ttft_ms,omitempty"`
+	NetworkRTTMs   int64    `json:"network_rtt_ms,omitempty"`
+	FailStatusCode int      `json:"fail_status_code,omitempty"`
+	ErrorMessage   string   `json:"error_message"`
+	// ErrorClass is the stable failure category (see internal/store/errorclass).
+	ErrorClass string `json:"error_class,omitempty"`
+	// ErrorFingerprint groups structurally-identical errors (see errorclass).
+	ErrorFingerprint string    `json:"error_fingerprint,omitempty"`
+	Generate         bool      `json:"generate,omitempty"`
+	RequestedAt      time.Time `json:"requested_at"`
 }
 
 // usageErrorColumnList is the canonical column list for INSERT statements.
@@ -136,12 +144,12 @@ const usageErrorColumnList = `
 	alias, route_model, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort,
 	service_tier, response_service_tier, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
-	ttft_ms, network_rtt_ms, fail_status_code, error_message, generate, requested_at
+	ttft_ms, network_rtt_ms, fail_status_code, error_message, generate, error_class, error_fingerprint, requested_at
 `
 
 // usageErrorColumnCount is the number of columns in usageErrorColumnList. It
 // must stay in sync with the list; mirrors usageEventColumnCount.
-const usageErrorColumnCount = 35
+const usageErrorColumnCount = 37
 
 // errorRowSelectColumns is the column list used by SelectErrors and GetError.
 // The api_key_principal column is intentionally not projected; KeyAlias is
@@ -164,6 +172,7 @@ const errorRowSelectColumns = `
 	e.discount_pct,
 	e.original_cost_usd,
 	e.latency_ms, e.ttft_ms, e.fail_status_code, e.error_message, e.generate,
+	e.error_class, e.error_fingerprint,
 	e.requested_at,
 	COALESCE(mcAlias.official_provider, mcModel.official_provider, mcCompat.official_provider, '') AS official_provider
 `
@@ -200,7 +209,7 @@ func scanErrorRow(scanner interface {
 		&r.Source, &r.ReasoningEffort, &r.ServiceTier, &r.ResponseServiceTier,
 		&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
 		&r.CacheCreationTokens, &r.TotalTokens, &r.CostUSD, &r.DiscountPct, &r.OriginalCostUSD, &r.LatencyMs, &r.TTFTMs,
-		&r.FailStatusCode, &r.ErrorMessage, &r.Generate, &r.RequestedAt,
+		&r.FailStatusCode, &r.ErrorMessage, &r.Generate, &r.ErrorClass, &r.ErrorFingerprint, &r.RequestedAt,
 		&r.OfficialProvider,
 	); err != nil {
 		return UsageErrorRow{}, err
@@ -238,7 +247,7 @@ func (s *UsageStore) InsertError(ctx context.Context, e UsageError) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
 	`, s.errorsTable, usageErrorColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
@@ -249,7 +258,7 @@ func (s *UsageStore) InsertError(ctx context.Context, e UsageError) error {
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
 		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.OriginalCostUSD, e.LatencyMs, e.TTFTMs,
 		e.NetworkRTTMs,
-		e.FailStatusCode, e.ErrorMessage, e.Generate, e.RequestedAt,
+		e.FailStatusCode, e.ErrorMessage, e.Generate, e.ErrorClass, e.ErrorFingerprint, e.RequestedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres store: insert usage error: %w", err)
@@ -304,7 +313,7 @@ func (s *UsageStore) BatchInsertErrors(ctx context.Context, errors []UsageError)
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
 			ev.NetworkRTTMs,
-			ev.FailStatusCode, ev.ErrorMessage, ev.Generate, ev.RequestedAt)
+			ev.FailStatusCode, ev.ErrorMessage, ev.Generate, ev.ErrorClass, ev.ErrorFingerprint, ev.RequestedAt)
 	}
 	if _, err := s.db.ExecContext(ctx, b.String(), args...); err != nil {
 		return fmt.Errorf("postgres store: batch insert usage errors: %w", err)
@@ -410,7 +419,7 @@ func (s *UsageStore) ImportLiteLLMErrors(ctx context.Context, errs []UsageError)
 				ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 				ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
 				ev.NetworkRTTMs,
-				ev.FailStatusCode, ev.ErrorMessage, ev.Generate, ev.RequestedAt)
+				ev.FailStatusCode, ev.ErrorMessage, ev.Generate, ev.ErrorClass, ev.ErrorFingerprint, ev.RequestedAt)
 		}
 		res, err := s.db.ExecContext(ctx, b.String(), args...)
 		if err != nil {
