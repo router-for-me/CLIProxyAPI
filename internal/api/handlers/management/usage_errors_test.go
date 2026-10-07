@@ -243,7 +243,7 @@ func TestErrorDiagnosticsWithPG(t *testing.T) {
 			Model:          "gpt-4",
 			FailStatusCode: 429,
 			ErrorMessage:   "rate limit exceeded",
-			ErrorClass:     "rate_limited",
+			ErrorClass:     "rate_limit",
 			RequestedAt:    now.Add(-3 * time.Hour),
 		},
 		{
@@ -252,7 +252,7 @@ func TestErrorDiagnosticsWithPG(t *testing.T) {
 			Model:          "gpt-4",
 			FailStatusCode: 429,
 			ErrorMessage:   "rate limit exceeded again",
-			ErrorClass:     "rate_limited",
+			ErrorClass:     "rate_limit",
 			RequestedAt:    now.Add(-2 * time.Hour),
 		},
 		{
