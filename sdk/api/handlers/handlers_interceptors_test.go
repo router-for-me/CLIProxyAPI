@@ -968,6 +968,44 @@ func TestHandlerStreamChunkErrorBeforePayloadSkipsResponseInterceptors(t *testin
 	}
 }
 
+func TestHandlerStreamInterceptorReceivesResolvedProvider(t *testing.T) {
+	model := "handler-interceptor-provider-model"
+	executor := &interceptorCaptureExecutor{provider: "vendor-a"}
+	executor.stream = func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte("chunk")}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+	handler := newInterceptorHandler(t, model, executor, nil)
+
+	var payloadProviders []string
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex != pluginapi.StreamChunkHeaderInitIndex {
+				payloadProviders = append(payloadProviders, req.Provider)
+			}
+			return pluginapi.StreamChunkInterceptResponse{}
+		},
+	})
+
+	stream, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, model)), "")
+	for range stream {
+	}
+	for errMsg := range errChan {
+		t.Fatalf("ExecuteStreamWithAuthManager() error = %+v", errMsg)
+	}
+
+	if len(payloadProviders) == 0 {
+		t.Fatal("stream interceptor received no payload chunks")
+	}
+	for index, provider := range payloadProviders {
+		if provider != "vendor-a" {
+			t.Fatalf("payload chunk %d Provider = %q, want vendor-a", index, provider)
+		}
+	}
+}
+
 func TestHandlerStreamInterceptorRewritesAndDropsChunks(t *testing.T) {
 	model := "handler-interceptor-stream-model"
 	executor := &interceptorCaptureExecutor{

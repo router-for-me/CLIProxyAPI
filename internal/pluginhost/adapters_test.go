@@ -1718,6 +1718,224 @@ func TestStreamInterceptorsDropChunkStopsChain(t *testing.T) {
 	}
 }
 
+func TestStreamChunkInterceptorScopeSkipsUnmatchedProviderAndModel(t *testing.T) {
+	newScopedHost := func(scoped *int, providers, models []string) *Host {
+		return newHostWithRecords(capabilityRecord{
+			id: "scoped",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						*scoped++
+						return pluginapi.StreamChunkInterceptResponse{Body: append(req.Body, []byte("|scoped")...)}, nil
+					},
+				},
+				StreamChunkInterceptorProviders: providers,
+				StreamChunkInterceptorModels:    models,
+			}},
+		})
+	}
+
+	payloadChunk := func(provider, model, requestedModel string) pluginapi.StreamChunkInterceptRequest {
+		return pluginapi.StreamChunkInterceptRequest{
+			SourceFormat:   "openai",
+			Provider:       provider,
+			Model:          model,
+			RequestedModel: requestedModel,
+			Body:           []byte("chunk"),
+		}
+	}
+
+	tests := []struct {
+		name       string
+		providers  []string
+		models     []string
+		req        pluginapi.StreamChunkInterceptRequest
+		wantCalled bool
+	}{
+		{
+			name:       "no scope declared keeps legacy behavior",
+			req:        payloadChunk("vendor-a", "vendor-a/Model-X", "vendor-a/Model-X"),
+			wantCalled: true,
+		},
+		{
+			name:       "provider scope matches",
+			providers:  []string{"vendor-a"},
+			req:        payloadChunk("vendor-a", "any-model", "any-model"),
+			wantCalled: true,
+		},
+		{
+			name:      "provider scope rejects other providers",
+			providers: []string{"vendor-a"},
+			req:       payloadChunk("openrouter", "any-model", "any-model"),
+		},
+		{
+			name:       "provider scope matches case-insensitively",
+			providers:  []string{"Vendor-A"},
+			req:        payloadChunk("vendor-a", "any-model", "any-model"),
+			wantCalled: true,
+		},
+		{
+			name:       "provider scope ignores surrounding whitespace",
+			providers:  []string{"  vendor-a  "},
+			req:        payloadChunk("vendor-a", "any-model", "any-model"),
+			wantCalled: true,
+		},
+		{
+			name:      "empty provider on the request does not match a declared scope",
+			providers: []string{"vendor-a"},
+			req:       payloadChunk("", "any-model", "any-model"),
+		},
+		{
+			name:       "model prefix matches the namespace",
+			models:     []string{"vendor-a/"},
+			req:        payloadChunk("vendor-a", "vendor-a/Model-X", "vendor-a/Model-X"),
+			wantCalled: true,
+		},
+		{
+			name:   "model prefix does not match a sibling namespace",
+			models: []string{"vendor-a/"},
+			req:    payloadChunk("vendor-a", "vendor-a-lite/model", "vendor-a-lite/model"),
+		},
+		{
+			name:   "model scope rejects unrelated models",
+			models: []string{"vendor-a/"},
+			req:    payloadChunk("vendor-a", "vendor-b/Model-Y", "vendor-b/Model-Y"),
+		},
+		{
+			name:       "model scope falls back to the requested model after alias rewriting",
+			models:     []string{"vendor-a/"},
+			req:        payloadChunk("vendor-a", "upstream-renamed", "vendor-a/Model-X"),
+			wantCalled: true,
+		},
+		{
+			name:       "both scopes must accept the chunk",
+			providers:  []string{"vendor-a"},
+			models:     []string{"vendor-a/"},
+			req:        payloadChunk("vendor-a", "vendor-a/Model-X", "vendor-a/Model-X"),
+			wantCalled: true,
+		},
+		{
+			name:      "provider match cannot rescue a model mismatch",
+			providers: []string{"vendor-a"},
+			models:    []string{"vendor-a/"},
+			req:       payloadChunk("vendor-a", "vendor-b/Model-Y", "vendor-b/Model-Y"),
+		},
+		{
+			name:       "a model-only scope still matches when the provider is empty",
+			models:     []string{"vendor-a/"},
+			req:        payloadChunk("", "vendor-a/Model-X", "vendor-a/Model-X"),
+			wantCalled: true,
+		},
+		{
+			name:      "blank scope entries never match",
+			providers: []string{"", "   "},
+			req:       payloadChunk("", "any-model", "any-model"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var scoped int
+			host := newScopedHost(&scoped, tt.providers, tt.models)
+
+			got := host.InterceptStreamChunk(context.Background(), tt.req)
+			if tt.wantCalled {
+				if scoped != 1 {
+					t.Fatalf("interceptor calls = %d, want 1", scoped)
+				}
+				if string(got.Body) != "chunk|scoped" {
+					t.Fatalf("body = %q, want chunk|scoped", got.Body)
+				}
+
+				return
+			}
+			if scoped != 0 {
+				t.Fatalf("interceptor calls = %d, want 0", scoped)
+			}
+			if string(got.Body) != "chunk" {
+				t.Fatalf("body = %q, want the untouched chunk", got.Body)
+			}
+		})
+	}
+}
+
+func TestStreamChunkInterceptorScopeAlwaysReceivesHeaderInit(t *testing.T) {
+	var scoped int
+	host := newHostWithRecords(capabilityRecord{
+		id: "scoped",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					scoped++
+					return pluginapi.StreamChunkInterceptResponse{
+						Headers: http.Header{"X-Stream": []string{"scoped"}},
+					}, nil
+				},
+			},
+			StreamChunkInterceptorProviders: []string{"vendor-a"},
+			StreamChunkInterceptorModels:    []string{"vendor-a/"},
+		}},
+	})
+
+	got := host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		SourceFormat:   "openai",
+		Provider:       "openrouter",
+		Model:          "vendor-b/Model-Y",
+		RequestedModel: "vendor-b/Model-Y",
+		ChunkIndex:     pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if scoped != 1 {
+		t.Fatalf("header-init interceptor calls = %d, want 1 even when the scope does not match", scoped)
+	}
+	if got.Headers.Get("X-Stream") != "scoped" {
+		t.Fatalf("headers = %#v, want the header-init rewrite to be applied", got.Headers)
+	}
+}
+
+func TestStreamChunkInterceptorScopeStopsPerPlugin(t *testing.T) {
+	var scopedCalls, unscopedCalls int
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "scoped",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						scopedCalls++
+						return pluginapi.StreamChunkInterceptResponse{}, nil
+					},
+				},
+				StreamChunkInterceptorProviders: []string{"vendor-a"},
+			}},
+		},
+		capabilityRecord{
+			id:       "unscoped",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						unscopedCalls++
+						return pluginapi.StreamChunkInterceptResponse{}, nil
+					},
+				},
+			}},
+		},
+	)
+
+	host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		SourceFormat: "openai",
+		Provider:     "openrouter",
+		Model:        "vendor-b/Model-Y",
+		Body:         []byte("chunk"),
+	})
+	if scopedCalls != 0 {
+		t.Fatalf("scoped interceptor calls = %d, want 0 for an unmatched provider", scopedCalls)
+	}
+	if unscopedCalls != 1 {
+		t.Fatalf("unscoped interceptor calls = %d, want 1", unscopedCalls)
+	}
+}
+
 func TestHasStreamInterceptorsReflectsActiveStreamInterceptors(t *testing.T) {
 	requestOnly := newHostWithRecords(capabilityRecord{
 		id: "request",
@@ -4087,6 +4305,72 @@ func BenchmarkHostRequestInterceptors_ReadOnly(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkHostStreamChunkInterceptors_Scope measures the dispatch overhead of
+// the scope filter itself. The in-process interceptor used here is a plain Go
+// call, so these numbers do not include the cgo/JSON round trip that a real
+// out-of-process plugin pays per chunk; the saving from skipping that round trip
+// is orders of magnitude larger than what this benchmark can show. Its purpose is
+// to keep the filter's own cost visible and to catch regressions that would make
+// the skip path more expensive than the call it avoids.
+func BenchmarkHostStreamChunkInterceptors_Scope(b *testing.B) {
+	noopInterceptor := responseInterceptorFunc{
+		interceptStreamChunk: func(context.Context, pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+			return pluginapi.StreamChunkInterceptResponse{}, nil
+		},
+	}
+
+	unscopedHost := newHostWithRecords(capabilityRecord{
+		id: "unscoped",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: noopInterceptor,
+		}},
+	})
+	scopedHost := newHostWithRecords(capabilityRecord{
+		id: "scoped",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor:          noopInterceptor,
+			StreamChunkInterceptorProviders: []string{"vendor-a"},
+			StreamChunkInterceptorModels:    []string{"vendor-a/"},
+		}},
+	})
+
+	payload := []byte(`{"choices":[{"delta":{"content":"x"}}],"usage":{"prompt_tokens":0}}`)
+	chunkFor := func(provider, model string) pluginapi.StreamChunkInterceptRequest {
+		return pluginapi.StreamChunkInterceptRequest{
+			SourceFormat:   "openai",
+			Provider:       provider,
+			Model:          model,
+			RequestedModel: model,
+			Body:           payload,
+		}
+	}
+
+	b.Run("unscoped-interceptor-called", func(b *testing.B) {
+		req := chunkFor("openrouter", "vendor-b/Model-Y")
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			unscopedHost.InterceptStreamChunk(context.Background(), req)
+		}
+	})
+	b.Run("scoped-out-of-scope-skipped", func(b *testing.B) {
+		req := chunkFor("openrouter", "vendor-b/Model-Y")
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			scopedHost.InterceptStreamChunk(context.Background(), req)
+		}
+	})
+	b.Run("scoped-in-scope-called", func(b *testing.B) {
+		req := chunkFor("vendor-a", "vendor-a/Model-X")
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			scopedHost.InterceptStreamChunk(context.Background(), req)
+		}
+	})
 }
 
 func TestExecutorAdapterRefresh_MergesAttributesAndPreservesPath_Issue6119(t *testing.T) {

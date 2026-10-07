@@ -266,6 +266,10 @@ type StreamResult struct {
 	Headers http.Header
 	// Chunks is the channel of streaming payload units.
 	Chunks <-chan StreamChunk
+	// Provider identifies the upstream provider that served this stream.
+	// It is empty when the stream did not come from a resolved provider,
+	// such as plugin executor routes.
+	Provider string
 }
 
 // StatusError represents an error that carries an HTTP-like status code.
