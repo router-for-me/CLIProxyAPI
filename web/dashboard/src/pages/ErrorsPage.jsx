@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
-  getUsageErrors, getUsageError, getUsageErrorBodies, getUsageFilterOptions, getUsageTotals,
+  getUsageErrors, getUsageError, getUsageErrorBodies, getUsageFilterOptions,
+  getUsageTotals, getErrorSummary, getErrorTimeline,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -16,6 +17,7 @@ import {
   FilterSelect, DetailRow, CopyButton, FailoverHistory,
   EventBodiesSection,
 } from './usageShared.jsx';
+import { ERROR_CLASSES, classLabel, classTone } from './errorClass.js';
 
 // ErrorsPage renders the failed-attempt stream (usage_errors table) as a
 // first-class sibling to Usage Stats. It was promoted from a tab on the
@@ -40,6 +42,7 @@ export default function ErrorsPage() {
     provider: '',
     model: '',
     request_id: '',
+    error_class: '',
     customFrom: '',
     customTo: '',
     useCustomRange: false,
@@ -70,9 +73,10 @@ export default function ErrorsPage() {
     provider: filter.provider || undefined,
     model: filter.model || undefined,
     request_id: filter.request_id.trim() || undefined,
+    error_class: filter.error_class || undefined,
     from: rangeParams.from,
     to: rangeParams.to,
-  }), [filter.api_key_id, filter.provider, filter.model, filter.request_id, rangeParams.from, rangeParams.to]);
+  }), [filter.api_key_id, filter.provider, filter.model, filter.request_id, filter.error_class, rangeParams.from, rangeParams.to]);
 
   // Totals power the KPI strip — failure_count and failure_rate come back
   // from the same totals endpoint that Usage Stats uses, scoped to the same
@@ -92,13 +96,20 @@ export default function ErrorsPage() {
   );
   useEffect(() => { setErrorsPage(1); }, [JSON.stringify(baseFilter)]);
 
+  // Error summary powers the class breakdown chip strip below the KPI cards.
+  const summary = useAsync(() => getErrorSummary(baseFilter), [JSON.stringify(baseFilter)]);
+  // Error timeline powers the mini per-class timeline.
+  const timeline = useAsync(() => getErrorTimeline(baseFilter, rangeParams.interval || 'hour'), [JSON.stringify(baseFilter), rangeParams.interval]);
+
   const [selectedErrorId, setSelectedErrorId] = useState(null);
 
   const reloadAll = useCallback(() => {
     totals.reload();
     filterOptions.reload();
     errors.reload();
-  }, [totals, filterOptions, errors]);
+    summary.reload();
+    timeline.reload();
+  }, [totals, filterOptions, errors, summary, timeline]);
 
   useAutoRefresh(reloadAll, AUTO_REFRESH_INTERVAL_MS, autoRefresh);
 
@@ -123,6 +134,92 @@ export default function ErrorsPage() {
   const failureRate = totals.data?.failure_rate ?? 0;
   const totalAttempts = totals.data?.total_attempts ?? 0;
   const totalErrors = errors.data?.total || 0;
+
+  // Class counts keyed by slug. The summary is computed over baseFilter, which
+  // already carries the active class filter, so when a chip is selected only
+  // that class comes back with a non-zero count — the strip then shows one
+  // "active" chip rather than a misleading full breakdown.
+  const classCounts = useMemo(() => {
+    const map = new Map();
+    for (const c of summary.data?.by_class || []) {
+      map.set(c.error_class || '', (map.get(c.error_class || '') || 0) + (c.count || 0));
+    }
+    return map;
+  }, [summary.data]);
+
+  // Only surface classes the summary actually reported. If a class the
+  // backend knows about is absent from this window it is a zero-count chip,
+  // which is noise; the strip is driven by real data instead.
+  const chipClasses = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const cls of ERROR_CLASSES) {
+      if (classCounts.has(cls.slug)) {
+        out.push(cls);
+        seen.add(cls.slug);
+      }
+    }
+    // Append any slug the backend returned that errorClass.js does not know
+    // yet, so a new class is still visible before the map is updated.
+    for (const slug of classCounts.keys()) {
+      if (slug && !seen.has(slug)) out.push({ slug, label: classLabel(slug), tone: classTone(slug) });
+    }
+    return out;
+  }, [classCounts]);
+
+  // Flatten the per-class timeline into stacked columns. Each class's bucket
+  // sequence is aligned on the union of buckets so the columns line up, and
+  // the tallest column drives the percentage heights.
+  const timelineModel = useMemo(() => {
+    const series = timeline.data?.series || [];
+    if (!series.length) return { columns: [], first: '', last: '' };
+    const buckets = [];
+    const index = new Map();
+    for (const s of series) {
+      for (const p of s.points || []) {
+        if (!index.has(p.bucket)) {
+          index.set(p.bucket, buckets.length);
+          buckets.push(p.bucket);
+        }
+      }
+    }
+    buckets.sort();
+    const columns = buckets.map((bucket) => ({ bucket, total: 0, segments: [] }));
+    for (const s of series) {
+      for (const p of s.points || []) {
+        const col = columns[index.get(p.bucket)];
+        if (!col) continue;
+        col.segments.push({ slug: s.error_class || '', count: p.count || 0 });
+        col.total += p.count || 0;
+      }
+    }
+    const max = columns.reduce((m, c) => Math.max(m, c.total), 0) || 1;
+    return {
+      columns,
+      max,
+      first: buckets[0] || '',
+      last: buckets[buckets.length - 1] || '',
+    };
+  }, [timeline.data]);
+
+  const classChip = (cls) => {
+    const count = classCounts.get(cls.slug) || 0;
+    const active = filter.error_class === cls.slug;
+    return (
+      <button
+        key={cls.slug}
+        type="button"
+        className={`err-class-chip ${active ? 'err-class-chip--active' : ''} ${count === 0 ? 'err-class-chip--empty' : ''}`}
+        style={{ '--chip-tone': cls.tone }}
+        onClick={() => updateFilter({ error_class: active ? '' : cls.slug })}
+        title={active ? 'Clear the class filter' : `Filter to ${cls.label}`}
+      >
+        <span className="err-class-chip__dot" />
+        <span className="err-class-chip__label">{cls.label}</span>
+        <span className="err-class-chip__count">{count.toLocaleString()}</span>
+      </button>
+    );
+  };
 
   return (
     <>
@@ -265,6 +362,66 @@ export default function ErrorsPage() {
       </div>
 
       {totals.error && <ErrorBanner error={totals.error} onRetry={totals.reload} />}
+
+      {/* Class breakdown + per-class timeline. Each has its own loading/error
+          state so a failing aggregation degrades on its own without taking the
+          KPI cards or the table down with it. */}
+      {summary.error && <ErrorBanner error={summary.error} onRetry={summary.reload} />}
+      {!summary.error && chipClasses.length > 0 && (
+        <div className="err-classes">
+          {chipClasses.map(classChip)}
+          {filter.error_class && (
+            <button
+              type="button"
+              className="err-class-chip"
+              style={{ '--chip-tone': 'var(--text-dim)' }}
+              onClick={() => updateFilter({ error_class: '' })}
+              title="Clear the class filter"
+            >
+              <span className="err-class-chip__label">Clear ✕</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="err-strip">
+        <div className="err-strip__title">Errors over time by class</div>
+        {timeline.loading && !timeline.data && <Spinner label="Loading timeline…" />}
+        {timeline.error && <ErrorBanner error={timeline.error} onRetry={timeline.reload} />}
+        {!timeline.error && !timeline.loading && timelineModel.columns.length === 0 && (
+          <div className="err-timeline__empty">No errors in this window</div>
+        )}
+        {!timeline.error && timelineModel.columns.length > 0 && (
+          <>
+            <div className="err-timeline">
+              {timelineModel.columns.map((col) => (
+                <div
+                  key={col.bucket}
+                  className="err-timeline__col"
+                  title={`${formatInTZ(col.bucket, timezone)} — ${col.total.toLocaleString()} error${col.total === 1 ? '' : 's'}`}
+                >
+                  {col.total === 0
+                    ? <div className="err-timeline__seg err-timeline__seg--empty" />
+                    : col.segments.map((seg, i) => (
+                      <div
+                        key={`${seg.slug}-${i}`}
+                        className="err-timeline__seg"
+                        style={{
+                          background: classTone(seg.slug),
+                          height: `${(seg.count / timelineModel.max) * 100}%`,
+                        }}
+                      />
+                    ))}
+                </div>
+              ))}
+            </div>
+            <div className="err-timeline__foot">
+              <span>{formatInTZ(timelineModel.first, timezone)}</span>
+              <span>{formatInTZ(timelineModel.last, timezone)}</span>
+            </div>
+          </>
+        )}
+      </div>
 
       {/* Errors table */}
       <div className="card" style={{ marginTop: 16 }}>

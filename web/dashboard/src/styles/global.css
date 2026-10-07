@@ -23,6 +23,19 @@
   --warning-dim: rgba(251, 191, 36, 0.13);
   --success: #4ade80;
   --success-dim: rgba(74, 222, 128, 0.13);
+  --purple: #a78bfa;
+  --purple-dim: rgba(167, 139, 250, 0.13);
+  --orange: #fb923c;
+  --orange-dim: rgba(251, 146, 60, 0.13);
+  --blue: #38bdf8;
+  --blue-dim: rgba(56, 189, 248, 0.13);
+  --magenta: #f472b6;
+  --magenta-dim: rgba(244, 114, 182, 0.13);
+  /* Deep red, reserved for the `server_error` error class — deliberately
+     darker than --danger so a 5xx reads as more severe than an auth/rate-limit
+     rejection when both appear in the same class strip. */
+  --dark-red: #b91c1c;
+  --dark-red-dim: rgba(185, 28, 28, 0.16);
   --radius: 8px;
   --radius-sm: 4px;
   --sidebar-w: 240px;
@@ -2514,6 +2527,113 @@ select.has-error:focus {
   color: var(--text-dim);
 }
 
+/* =========================================================================
+   Errors page — class-aware KPI strip (error diagnostics)
+   The three stat cards are joined by a chip per error class and a stacked
+   per-class timeline. Both tint themselves from a single inline --chip-tone /
+   --seg-tone custom property resolved in pages/errorClass.js, so a class only
+   needs its tone swapped to retheme.
+   ========================================================================= */
+.err-classes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -6px 0 4px;
+}
+.err-class-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--chip-tone) 45%, transparent);
+  background: color-mix(in srgb, var(--chip-tone) 12%, transparent);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.err-class-chip:hover {
+  border-color: var(--chip-tone);
+  background: color-mix(in srgb, var(--chip-tone) 20%, transparent);
+}
+.err-class-chip:focus-visible {
+  outline: 2px solid var(--chip-tone);
+  outline-offset: 1px;
+}
+.err-class-chip__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--chip-tone);
+  flex-shrink: 0;
+}
+.err-class-chip__label { color: var(--text); }
+.err-class-chip__count {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+/* Active chip — the class currently narrowing the table below. Filled with its
+   own tone so a selection is unambiguous even among neighbouring hues. */
+.err-class-chip--active {
+  background: var(--chip-tone);
+  border-color: var(--chip-tone);
+}
+.err-class-chip--active .err-class-chip__label,
+.err-class-chip--active .err-class-chip__count { color: var(--bg); }
+.err-class-chip--active .err-class-chip__dot { background: var(--bg); }
+.err-class-chip--empty { opacity: 0.55; }
+
+/* Per-class timeline — a stacked column per time bucket, one segment per
+   class, heights as percentages of the tallest bucket. Dependency-free. */
+.err-strip { margin-top: 12px; }
+.err-strip__title {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.err-timeline {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 72px;
+  padding: 4px 0 0;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.err-timeline__col {
+  flex: 1 0 5px;
+  min-width: 4px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 1px;
+  min-height: 1px;
+  border-radius: 2px 2px 0 0;
+}
+.err-timeline__col:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
+.err-timeline__seg { width: 100%; min-height: 1px; }
+.err-timeline__seg--empty { background: var(--border); height: 100%; }
+.err-timeline__foot {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.err-timeline__empty {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
 /* Segmented control — used for density toggle, stale filter, etc. */
 .seg-group {
   display: inline-flex;
@@ -4749,6 +4869,8 @@ button.ghost:hover:not(:disabled) {
   --warning-dim: rgba(217, 119, 6, 0.08);
   --success: #16a34a;
   --success-dim: rgba(22, 163, 74, 0.08);
+  --dark-red: #991b1b;
+  --dark-red-dim: rgba(153, 27, 27, 0.10);
 }
 
 /* Overrides for hardcoded RGBA values in light mode */
