@@ -4,7 +4,7 @@
 
 **Goal:** Enrich the dashboard Errors page with server-side error classification, aggregation, and pattern grouping so operators can analyse *why* failures happen, not just inspect one row at a time.
 
-**Architecture:** Two new `usage_errors` columns (`error_class`, `error_fingerprint`) are computed at flush time by a new pure package `internal/store/errorclass` (body → status → keyword resolution; message normalisation before hashing). Three read-only aggregation endpoints under `usage-stats/errors/*` expose summary / groups / timeline, built on the existing `buildWhereClause` filter shape. The dashboard renders them in a new "Error Patterns" tab, an enriched KPI strip, a Class column, and a richer detail modal.
+**Architecture:** Two new `usage_errors` columns (`error_class`, `error_fingerprint`) are computed at flush time by a new pure package `internal/store/errorclass` (body → keyword → status resolution; message normalisation before hashing). Three read-only aggregation endpoints under `usage-stats/errors/*` expose summary / groups / timeline, built on the existing `buildWhereClause` filter shape. The dashboard renders them in a new "Error Patterns" tab, an enriched KPI strip, a Class column, and a richer detail modal.
 
 **Tech Stack:** Go 1.26, `gjson` (already a dependency) for body parsing, Postgres (pgx via `database/sql`), React + Vite dashboard.
 
@@ -115,7 +115,7 @@ const (
 )
 
 // Classify maps an upstream failure to a class slug. Resolution order is
-// body (structured) → status code → message keywords → ClassOther.
+// body (structured) → message keywords → status code → ClassOther.
 func Classify(statusCode int, body string) string {
 	if c := classFromBody(body); c != "" {
 		return c

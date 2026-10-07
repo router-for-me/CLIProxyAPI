@@ -77,7 +77,9 @@ New package `internal/store/errorclass` (pure, no DB, no globals, unit-testable)
 func Classify(statusCode int, body string) string
 ```
 
-Resolution order — body wins over status, status wins over keyword fallback:
+Resolution order — body wins over keywords, keywords win over status fallback
+(a specific cause keyword like `timeout` or `overloaded` is more actionable than
+the generic bucket the status alone would give, e.g. `server_error`):
 
 1. **Body, structured.** Parse `error.type` / `error.code` from the raw body with
    `gjson` (the proxy already does exactly this in
@@ -85,12 +87,12 @@ Resolution order — body wins over status, status wins over keyword fallback:
    `rate_limit_error` / `authentication_error` / `permission_error` / `not_found_error`
    / `invalid_request_error` is the precedent this reuses). Also recognise
    `insufficient_quota` and `content_filter` codes.
-2. **Status code.** 429→`rate_limit`, 401→`auth`, 403→`permission`, 404→`not_found`,
-   400/422→`invalid_request`, 408/504→`timeout`, 502/503/500→`server_error`.
-3. **Message keywords.** Lowercased substring scan for `timeout`, `deadline exceeded`,
+2. **Message keywords.** Lowercased substring scan for `timeout`, `deadline exceeded`,
    `connection refused`/`reset`, `overloaded`, `quota`, `rate limit`, `unauthorized`,
    `context length`, `content filter`.
-4. **Fallback:** `other` (or `server_error` for any other 5xx status).
+3. **Status code.** 429→`rate_limit`, 401→`auth`, 403→`permission`, 404→`not_found`,
+   400/422→`invalid_request`, 408/504→`timeout`, ≥500→`server_error`.
+4. **Fallback:** `other`.
 
 `Classify` **never returns an error and never panics** — an unparseable body simply
 falls through to the status/keyword arms. Classification failure must never drop a row.
