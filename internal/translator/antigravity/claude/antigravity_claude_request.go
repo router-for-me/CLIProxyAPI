@@ -309,7 +309,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
 	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
-		return buildAntigravityWebSearchRequest(modelName, rawJSON)
+		return buildAntigravityWebSearchRequest(antigravityWebSearchTargetModel(modelName), rawJSON)
 	}
 	functionNameMap := util.SanitizedFunctionNameMap(rawJSON)
 

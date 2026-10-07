@@ -351,6 +351,24 @@ func TestConvertClaudeRequestToAntigravity_UsesDefaultWebSearchMaxResultCountWit
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_StripsPerformWebSearchPrefix(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-prefix", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch-prefix") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [{"role": "user", "content": "Perform a web search for the query: golang 1.24 release notes"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.1-flash-lite", inputJSON, true)
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.text").String(); got != "golang 1.24 release notes" {
+		t.Fatalf("search query = %q, want stripped query: %s", got, output)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchWhenMixedWithCustomTools(t *testing.T) {
 	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-mixed", "antigravity", []*registry.ModelInfo{
 		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
