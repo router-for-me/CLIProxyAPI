@@ -340,6 +340,28 @@ export async function getUsageError(id) {
   return fetchJSON(`/usage-stats/errors/${encodeURIComponent(id)}`);
 }
 
+// Error summary — roll-up of error stats for the filter window.
+// Returns { total, by_class, by_status, by_provider, top_models }.
+export async function getErrorSummary(params = {}) {
+  const qs = toUsageQS(params);
+  return fetchJSON(`/usage-stats/errors/summary${qs}`);
+}
+
+// Error groups — aggregation by dimension (class/fingerprint/provider/model/status).
+// Default group_by=class, limit=20. Returns { group_by, groups: [...] }.
+export async function getErrorGroups(params = {}, groupBy = 'class', limit = 20) {
+  const qs = toUsageQS({ ...params, group_by: groupBy, limit });
+  return fetchJSON(`/usage-stats/errors/groups${qs}`);
+}
+
+// Error timeline — one bucket per interval across the filter window.
+// interval is 'minute' | 'hour' | 'day'. Defaults to 'hour'.
+// Returns { interval, series: [...] }.
+export async function getErrorTimeline(params = {}, interval = 'hour') {
+  const qs = toUsageQS({ ...params, interval });
+  return fetchJSON(`/usage-stats/errors/timeline${qs}`);
+}
+
 // --- Cooldown Providers ----------------------------------------------------
 
 // Live snapshot of upstream auth/model pairs currently in cooldown, sourced
