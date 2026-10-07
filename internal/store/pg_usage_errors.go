@@ -135,7 +135,343 @@ type UsageErrorRow struct {
 	RequestedAt      time.Time `json:"requested_at"`
 }
 
-// usageErrorColumnList is the canonical column list for INSERT statements.
+// ErrorClassCount is one (error_class, count) cell of the summary rollup.
+type ErrorClassCount struct {
+	ErrorClass string `json:"error_class"`
+	Count      int64  `json:"count"`
+}
+
+// ErrorStatusCount is one (fail_status_code, count) cell of the summary rollup.
+type ErrorStatusCount struct {
+	Status int   `json:"status"`
+	Count  int64 `json:"count"`
+}
+
+// ErrorProviderCount is one (provider, count) cell of the summary rollup.
+type ErrorProviderCount struct {
+	Provider string `json:"provider"`
+	Count    int64  `json:"count"`
+}
+
+// ErrorModelCount is one (model, count) cell of the summary rollup's top-models.
+type ErrorModelCount struct {
+	Model string `json:"model"`
+	Count int64  `json:"count"`
+}
+
+// ErrorSummary is the dashboard's at-a-glance failure rollup: a total plus four
+// distributions over the same filtered window.
+type ErrorSummary struct {
+	Total      int64                `json:"total"`
+	ByClass    []ErrorClassCount    `json:"by_class"`
+	ByStatus   []ErrorStatusCount   `json:"by_status"`
+	ByProvider []ErrorProviderCount `json:"by_provider"`
+	TopModels  []ErrorModelCount    `json:"top_models"`
+}
+
+// ErrorGroup is one aggregated failure group with representative metadata.
+type ErrorGroup struct {
+	Key           string    `json:"key"`
+	ErrorClass    string    `json:"error_class,omitempty"`
+	SampleMessage string    `json:"sample_message"`
+	Count         int64     `json:"count"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
+	Providers     []string  `json:"providers"`
+	Models        []string  `json:"models"`
+	LastRequestID string    `json:"last_request_id,omitempty"`
+}
+
+// ErrorTimelinePoint is one (bucket, count) cell of a per-class timeline.
+type ErrorTimelinePoint struct {
+	Bucket string `json:"bucket"`
+	Count  int64  `json:"count"`
+}
+
+// ErrorClassSeries is one error class's timeline over the requested interval.
+type ErrorClassSeries struct {
+	ErrorClass string               `json:"error_class"`
+	Points     []ErrorTimelinePoint `json:"points"`
+}
+
+// errorGroupColumn returns a safe SQL expression (never caller-driven string
+// interpolation) that projects the group-by key from the errors table.
+func errorGroupColumn(groupBy string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(groupBy)) {
+	case "class":
+		return "COALESCE(e.error_class, '')", nil
+	case "fingerprint":
+		return "COALESCE(e.error_fingerprint, '')", nil
+	case "provider":
+		return "e.provider", nil
+	case "model":
+		return "e.model", nil
+	case "status":
+		return "e.fail_status_code::text", nil
+	default:
+		return "", fmt.Errorf("unsupported group_by: %q (use class|fingerprint|provider|model|status)", groupBy)
+	}
+}
+
+// SelectErrorSummary returns a multi-rollup summary for the dashboard's
+// at-a-glance failure cards: total count, distributions by class/status/provider,
+// and top-10 models. Each distribution comes from its own GROUP BY so the
+// response stays flat and independently consumable.
+func (s *UsageStore) SelectErrorSummary(ctx context.Context, filter UsageFilter) (ErrorSummary, error) {
+	if s == nil || s.db == nil {
+		return ErrorSummary{}, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	var out ErrorSummary
+
+	// Total count
+	{
+		var b strings.Builder
+		b.WriteString("SELECT COUNT(*) FROM ")
+		b.WriteString(s.errorsTable)
+		b.WriteString(" e")
+		args := buildWhereClause(&b, filter)
+		if err := s.db.QueryRowContext(ctx, b.String(), args...).Scan(&out.Total); err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: error total: %w", err)
+		}
+	}
+
+	// By class
+	{
+		var b strings.Builder
+		b.WriteString("SELECT COALESCE(e.error_class, ''), COUNT(*) FROM ")
+		b.WriteString(s.errorsTable)
+		b.WriteString(" e")
+		args := buildWhereClause(&b, filter)
+		b.WriteString(" GROUP BY e.error_class ORDER BY COUNT(*) DESC")
+		rows, err := s.db.QueryContext(ctx, b.String(), args...)
+		if err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: error by class: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var c ErrorClassCount
+			if err := rows.Scan(&c.ErrorClass, &c.Count); err != nil {
+				return ErrorSummary{}, fmt.Errorf("postgres store: scan error by class: %w", err)
+			}
+			out.ByClass = append(out.ByClass, c)
+		}
+		if err := rows.Err(); err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: rows error by class: %w", err)
+		}
+	}
+
+	// By status
+	{
+		var b strings.Builder
+		b.WriteString("SELECT e.fail_status_code, COUNT(*) FROM ")
+		b.WriteString(s.errorsTable)
+		b.WriteString(" e")
+		args := buildWhereClause(&b, filter)
+		b.WriteString(" AND e.fail_status_code IS NOT NULL GROUP BY e.fail_status_code ORDER BY COUNT(*) DESC")
+		rows, err := s.db.QueryContext(ctx, b.String(), args...)
+		if err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: error by status: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var s ErrorStatusCount
+			if err := rows.Scan(&s.Status, &s.Count); err != nil {
+				return ErrorSummary{}, fmt.Errorf("postgres store: scan error by status: %w", err)
+			}
+			out.ByStatus = append(out.ByStatus, s)
+		}
+		if err := rows.Err(); err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: rows error by status: %w", err)
+		}
+	}
+
+	// By provider
+	{
+		var b strings.Builder
+		b.WriteString("SELECT e.provider, COUNT(*) FROM ")
+		b.WriteString(s.errorsTable)
+		b.WriteString(" e")
+		args := buildWhereClause(&b, filter)
+		b.WriteString(" GROUP BY e.provider ORDER BY COUNT(*) DESC")
+		rows, err := s.db.QueryContext(ctx, b.String(), args...)
+		if err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: error by provider: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p ErrorProviderCount
+			if err := rows.Scan(&p.Provider, &p.Count); err != nil {
+				return ErrorSummary{}, fmt.Errorf("postgres store: scan error by provider: %w", err)
+			}
+			out.ByProvider = append(out.ByProvider, p)
+		}
+		if err := rows.Err(); err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: rows error by provider: %w", err)
+		}
+	}
+
+	// Top models (limit 10)
+	{
+		var b strings.Builder
+		b.WriteString("SELECT e.model, COUNT(*) FROM ")
+		b.WriteString(s.errorsTable)
+		b.WriteString(" e")
+		args := buildWhereClause(&b, filter)
+		b.WriteString(" GROUP BY e.model ORDER BY COUNT(*) DESC LIMIT 10")
+		rows, err := s.db.QueryContext(ctx, b.String(), args...)
+		if err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: error top models: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var m ErrorModelCount
+			if err := rows.Scan(&m.Model, &m.Count); err != nil {
+				return ErrorSummary{}, fmt.Errorf("postgres store: scan error top models: %w", err)
+			}
+			out.TopModels = append(out.TopModels, m)
+		}
+		if err := rows.Err(); err != nil {
+			return ErrorSummary{}, fmt.Errorf("postgres store: rows error top models: %w", err)
+		}
+	}
+
+	return out, nil
+}
+
+// SelectErrorGroups groups failed-attempt rows by the specified dimension
+// (class|fingerprint|provider|model|status) and returns summary statistics per
+// group: count, first/last seen, sample message, distinct providers/models, and
+// the latest request_id. limit is clamped to [1, 200] (default 20).
+func (s *UsageStore) SelectErrorGroups(ctx context.Context, filter UsageFilter, groupBy string, limit int) ([]ErrorGroup, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	groupExpr, err := errorGroupColumn(groupBy)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	var b strings.Builder
+	b.WriteString(`SELECT ` + groupExpr + ` AS gkey,
+		COALESCE(e.error_class, ''),
+		MIN(e.error_message),
+		COUNT(*),
+		MIN(e.requested_at),
+		MAX(e.requested_at),
+		array_to_json(array_agg(DISTINCT e.provider) FILTER (WHERE e.provider IS NOT NULL AND e.provider <> '')),
+		array_to_json(array_agg(DISTINCT e.model) FILTER (WHERE e.model IS NOT NULL AND e.model <> '')),
+		(array_agg(e.request_id ORDER BY e.requested_at DESC))[1]
+	FROM `)
+	b.WriteString(s.errorsTable)
+	b.WriteString(" e")
+	args := buildWhereClause(&b, filter)
+	b.WriteString(" GROUP BY gkey, e.error_class ORDER BY COUNT(*) DESC")
+	args = append(args, limit)
+	b.WriteString(" LIMIT $")
+	b.WriteString(itoa(len(args)))
+
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: select error groups: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]ErrorGroup, 0, limit)
+	for rows.Next() {
+		var g ErrorGroup
+		// provider/model are aggregated via array_to_json, so they arrive as a
+		// JSON array literal rather than a native Go slice; decodeStringArray
+		// (shared with the api_keys JSON columns) unmarshals them.
+		var providersRaw, modelsRaw []byte
+		if err := rows.Scan(
+			&g.Key, &g.ErrorClass, &g.SampleMessage, &g.Count,
+			&g.FirstSeen, &g.LastSeen,
+			&providersRaw,
+			&modelsRaw,
+			&g.LastRequestID,
+		); err != nil {
+			return nil, fmt.Errorf("postgres store: scan error group: %w", err)
+		}
+		g.Providers = decodeStringArray(providersRaw)
+		g.Models = decodeStringArray(modelsRaw)
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres store: rows error groups: %w", err)
+	}
+	return out, nil
+}
+
+// SelectErrorTimeline returns per-error-class time-series buckets over the
+// filtered window. Each class gets its own series of (bucket, count) points
+// ordered by ascending bucket. interval is "minute", "hour", or "day" (default
+// hour). The bucket timestamp is serialized as RFC3339 UTC.
+func (s *UsageStore) SelectErrorTimeline(ctx context.Context, filter UsageFilter, interval string) ([]ErrorClassSeries, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	iexpr, err := intervalExpr(interval)
+	if err != nil {
+		return nil, err
+	}
+
+	var b strings.Builder
+	b.WriteString(`SELECT ` + iexpr + ` AS bucket,
+		EXTRACT(EPOCH FROM ` + iexpr + `)::bigint AS bucket_ts,
+		COALESCE(e.error_class, ''),
+		COUNT(*)
+	FROM `)
+	b.WriteString(s.errorsTable)
+	b.WriteString(" e")
+	args := buildWhereClause(&b, filter)
+	b.WriteString(" GROUP BY bucket, bucket_ts, e.error_class ORDER BY bucket ASC")
+
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: select error timeline: %w", err)
+	}
+	defer rows.Close()
+
+	// Fold into per-class series preserving insertion order.
+	seriesMap := make(map[string]*ErrorClassSeries)
+	var order []string
+	for rows.Next() {
+		var bucket time.Time
+		var bucketTs int64
+		var class string
+		var count int64
+		if err := rows.Scan(&bucket, &bucketTs, &class, &count); err != nil {
+			return nil, fmt.Errorf("postgres store: scan error timeline: %w", err)
+		}
+		pt := ErrorTimelinePoint{
+			Bucket: bucket.UTC().Format(time.RFC3339),
+			Count:  count,
+		}
+		s, ok := seriesMap[class]
+		if !ok {
+			s = &ErrorClassSeries{ErrorClass: class}
+			seriesMap[class] = s
+			order = append(order, class)
+		}
+		s.Points = append(s.Points, pt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres store: rows error timeline: %w", err)
+	}
+
+	out := make([]ErrorClassSeries, len(order))
+	for i, class := range order {
+		out[i] = *seriesMap[class]
+	}
+	return out, nil
+}
+
 // Order must stay in sync with the positional args built by InsertError and
 // BatchInsertErrors, and with errorRowSelectColumns used by SelectErrors /
 // GetError (which additionally projects the joined key_alias).

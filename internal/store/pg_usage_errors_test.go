@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -556,5 +557,111 @@ func TestUsageStoreSelectErrorTopNullDimensionKey(t *testing.T) {
 		if top[0].FailedCount != 1 {
 			t.Errorf("SelectErrorTop(dim=%q) FailedCount = %d; want 1", dim, top[0].FailedCount)
 		}
+	}
+}
+
+func TestSelectErrorSummary(t *testing.T) {
+	store := newTestPostgresStore(t, "test_err_summary")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	now := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		if err := us.InsertError(ctx, UsageError{
+			RequestID: fmt.Sprintf("summary-req-%d", i), Provider: "test-prov", Model: "m",
+			FailStatusCode: 429, ErrorMessage: "rate limit", ErrorClass: "rate_limit", RequestedAt: now.Add(-time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("InsertError: %v", err)
+		}
+	}
+	if err := us.InsertError(ctx, UsageError{
+		RequestID: "summary-req-auth", Provider: "test-prov", Model: "m",
+		FailStatusCode: 401, ErrorMessage: "auth fail", ErrorClass: "auth", RequestedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertError: %v", err)
+	}
+
+	got, err := us.SelectErrorSummary(ctx, UsageFilter{From: now.Add(-time.Hour)})
+	if err != nil {
+		t.Fatalf("SelectErrorSummary: %v", err)
+	}
+	if got.Total != 4 {
+		t.Fatalf("total = %d, want 4", got.Total)
+	}
+	if len(got.ByClass) != 2 {
+		t.Fatalf("by_class has %d entries, want 2", len(got.ByClass))
+	}
+}
+
+func TestSelectErrorGroups(t *testing.T) {
+	store := newTestPostgresStore(t, "test_err_groups")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	now := time.Now().UTC()
+	// Two rows sharing a fingerprint, one different.
+	for i := 0; i < 2; i++ {
+		if err := us.InsertError(ctx, UsageError{
+			RequestID: fmt.Sprintf("grp-req-%d", i), Provider: "p", Model: "m",
+			FailStatusCode: 429, ErrorMessage: fmt.Sprintf("limit hit for %d", i),
+			ErrorClass: "rate_limit", ErrorFingerprint: "fp1", RequestedAt: now.Add(-time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("InsertError: %v", err)
+		}
+	}
+	if err := us.InsertError(ctx, UsageError{
+		RequestID: "grp-req-other", Provider: "p", Model: "m",
+		FailStatusCode: 401, ErrorMessage: "auth fail",
+		ErrorClass: "auth", ErrorFingerprint: "fp2", RequestedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertError: %v", err)
+	}
+
+	groups, err := us.SelectErrorGroups(ctx, UsageFilter{From: now.Add(-time.Hour)}, "fingerprint", 20)
+	if err != nil {
+		t.Fatalf("SelectErrorGroups: %v", err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("got %d groups, want 2", len(groups))
+	}
+	if groups[0].ErrorClass != "rate_limit" || groups[0].Count != 2 {
+		t.Fatalf("top group: class=%q count=%d", groups[0].ErrorClass, groups[0].Count)
+	}
+}
+
+func TestSelectErrorGroupsRejectsUnknownDimension(t *testing.T) {
+	store := newTestPostgresStore(t, "test_err_groups_bad")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+	if _, err := us.SelectErrorGroups(ctx, UsageFilter{}, "bogus", 20); err == nil {
+		t.Fatal("unknown group_by must error")
+	}
+}
+
+func TestSelectErrorTimeline(t *testing.T) {
+	store := newTestPostgresStore(t, "test_err_timeline")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	now := time.Now().UTC()
+	for i := 0; i < 2; i++ {
+		if err := us.InsertError(ctx, UsageError{
+			RequestID: fmt.Sprintf("tl-req-%d", i), Provider: "p", Model: "m",
+			FailStatusCode: 429, ErrorMessage: "rate limit",
+			ErrorClass: "rate_limit", RequestedAt: now.Add(-time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("InsertError: %v", err)
+		}
+	}
+
+	series, err := us.SelectErrorTimeline(ctx, UsageFilter{From: now.Add(-time.Hour)}, "hour")
+	if err != nil {
+		t.Fatalf("SelectErrorTimeline: %v", err)
+	}
+	if len(series) == 0 {
+		t.Fatal("expected at least one series")
+	}
+	if series[0].ErrorClass != "rate_limit" || series[0].Points[0].Count != 2 {
+		t.Fatalf("series: class=%q count=%d", series[0].ErrorClass, series[0].Points[0].Count)
 	}
 }
