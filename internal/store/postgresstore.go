@@ -1691,8 +1691,11 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	// provider and model context isn't available in a single UPDATE.
 	//
 	// usage_errors is never pruned, so the UPDATE re-runs on every EnsureSchema.
-	// The partial index covers only unclassified rows, keeping the no-op pass an
-	// empty index scan; it shrinks to zero entries once the backfill completes.
+	// This partial index exists only to make "find the rows where error_class IS
+	// NULL" cheap: the predicate is what matters, and it shrinks to zero entries
+	// once the backfill completes, so the steady-state pass touches no rows. The
+	// indexed column is incidental (the UPDATE neither filters nor orders by it);
+	// requested_at is used purely to match the sibling usage_errors indexes.
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		CREATE INDEX IF NOT EXISTS idx_usage_errors_unclassified ON %s(requested_at) WHERE error_class IS NULL`,
 		usageErrorsTable,

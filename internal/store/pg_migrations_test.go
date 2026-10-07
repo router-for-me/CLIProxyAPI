@@ -267,8 +267,10 @@ func TestEnsureSchemaBackfillsUsageErrorClass(t *testing.T) {
 
 	table := pg.fullTableName(pg.cfg.UsageErrorsTable)
 	// Insert legacy-style rows: error_class NULL, fingerprint NULL. provider and
-	// model are the only NOT NULL columns besides requested_at.
-	statuses := []int{429, 401, 403, 404, 422, 504, 500, 418}
+	// model are the only NOT NULL columns besides requested_at. Both members of
+	// every multi-value CASE arm are covered (400+422, 408+504), so dropping one
+	// equality from the CASE fails the test instead of silently falling to ELSE.
+	statuses := []int{429, 401, 403, 404, 400, 422, 408, 504, 500, 418}
 	for _, code := range statuses {
 		if _, err := pg.DB().ExecContext(ctx, fmt.Sprintf(
 			`INSERT INTO %s (provider, model, fail_status_code, requested_at)
@@ -276,6 +278,13 @@ func TestEnsureSchemaBackfillsUsageErrorClass(t *testing.T) {
 		); err != nil {
 			t.Fatalf("insert legacy row (status %d): %v", code, err)
 		}
+	}
+	// A NULL status must also land in 'other' (the CASE falls through to ELSE).
+	if _, err := pg.DB().ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (provider, model, fail_status_code, requested_at)
+		 VALUES ('openai', 'gpt-4', NULL, NOW())`, table),
+	); err != nil {
+		t.Fatalf("insert legacy row (NULL status): %v", err)
 	}
 
 	// Re-run EnsureSchema: the same path a server restart takes.
@@ -288,7 +297,9 @@ func TestEnsureSchemaBackfillsUsageErrorClass(t *testing.T) {
 		401: "auth",
 		403: "permission",
 		404: "not_found",
+		400: "invalid_request",
 		422: "invalid_request",
+		408: "timeout",
 		504: "timeout",
 		500: "server_error",
 		418: "other",
@@ -308,6 +319,17 @@ func TestEnsureSchemaBackfillsUsageErrorClass(t *testing.T) {
 		if fingerprint != nil {
 			t.Errorf("status %d: error_fingerprint = %q; want NULL (body unavailable)", code, *fingerprint)
 		}
+	}
+
+	// NULL status: the CASE matches no equality arm and falls to ELSE 'other'.
+	var nullStatusClass string
+	if err := pg.DB().QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT error_class FROM %s WHERE fail_status_code IS NULL`, table),
+	).Scan(&nullStatusClass); err != nil {
+		t.Fatalf("select backfilled row (NULL status): %v", err)
+	}
+	if nullStatusClass != "other" {
+		t.Errorf("NULL status: error_class = %q; want %q", nullStatusClass, "other")
 	}
 
 	// Idempotent: a third run must not change the already-classified rows.

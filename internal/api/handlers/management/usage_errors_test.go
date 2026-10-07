@@ -203,7 +203,7 @@ func TestErrorDiagnosticsRouteOrdering(t *testing.T) {
 
 // newTestErrorDiagnosticsHandler opens the PG store and wires it into a bare
 // Handler so requirePG passes. Skips when PGSTORE_TEST_DSN is unset.
-func newTestErrorDiagnosticsHandler(t *testing.T, schema string) *Handler {
+func newTestErrorDiagnosticsHandler(t *testing.T, schema string) (*Handler, *store.PostgresStore) {
 	t.Helper()
 	skipIfNoPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -227,13 +227,14 @@ func newTestErrorDiagnosticsHandler(t *testing.T, schema string) *Handler {
 	h.pgAPIKeys = store.NewAPIKeyStore(pg)
 	h.pgUsage = store.NewUsageStore(pg)
 	h.mu.Unlock()
-	return h
+	return h, pg
 }
 
 // TestErrorDiagnosticsWithPG runs the full assertions against a real PG
 // instance. Skipped without PGSTORE_TEST_DSN.
 func TestErrorDiagnosticsWithPG(t *testing.T) {
-	h := newTestErrorDiagnosticsHandler(t, "err_diag_full")
+	h, pg := newTestErrorDiagnosticsHandler(t, "err_diag_full")
+	defer pg.Close()
 	ctx := context.Background()
 	usage := h.pgUsage
 
