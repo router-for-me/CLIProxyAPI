@@ -11,6 +11,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store/errorclass"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -452,6 +453,11 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 	if !record.Failed {
 		failStatus = 0
 	}
+	// Classify the failure and derive a stable fingerprint at flush time, at
+	// the single point where the status, model and body are all known, so the
+	// persisted error_class / error_fingerprint columns are always populated.
+	errorClass := errorclass.Classify(failStatus, record.Fail.Body)
+	errorFingerprint := errorclass.Fingerprint(errorClass, record.Provider, model, record.Fail.Body)
 	return UsageError{
 		RequestID:           record.RequestID,
 		APIKeyPrincipal:     principal,
@@ -484,6 +490,8 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 		NetworkRTTMs:        record.NetworkRTTMs,
 		FailStatusCode:      failStatus,
 		ErrorMessage:        record.Fail.Body,
+		ErrorClass:          errorClass,
+		ErrorFingerprint:    errorFingerprint,
 		Generate:            generateEnabled(record.Generate),
 		RequestedAt:         now,
 	}, apiKeyID, userID, true

@@ -82,6 +82,36 @@ func TestUsageFlusherToEventCarriesProviderEnergyAndMetadata(t *testing.T) {
 	}
 }
 
+// TestUsageFlusherPopulatesErrorClass guards Task 5: the flusher's toError must
+// classify the upstream failure and stamp a stable fingerprint onto the
+// UsageError it persists, so usage_errors.error_class / error_fingerprint are
+// populated for every new failed request rather than landing as empty strings.
+// toError tolerates nil stores (only ResolvePricing is store-gated), so this
+// exercises the field plumbing without a live Postgres.
+func TestUsageFlusherPopulatesErrorClass(t *testing.T) {
+	f := NewUsageFlusher(nil, nil, nil, DefaultFlusherConfig())
+	ctx := cancelableTestCtx(t)
+
+	rec := coreusage.Record{
+		Provider: "test-provider", Model: "test-model", Alias: "test-alias",
+		RequestID: "req-flush-class-1", Failed: true, RequestedAt: now(),
+		Fail: coreusage.Failure{
+			StatusCode: 429,
+			Body:       `{"error":{"type":"rate_limit_error"}}`,
+		},
+	}
+	uerr, _, _, ok := f.toError(ctx, rec)
+	if !ok {
+		t.Fatal("toError returned ok=false for a valid failed record")
+	}
+	if uerr.ErrorClass != "rate_limit" {
+		t.Fatalf("error_class = %q, want rate_limit", uerr.ErrorClass)
+	}
+	if uerr.ErrorFingerprint == "" {
+		t.Fatal("error_fingerprint must be non-empty")
+	}
+}
+
 func TestUsageFlusherHandleUsageQueuesRecord(t *testing.T) {
 	store := newTestPostgresStore(t, "flusher_test")
 	ctx := cancelableTestCtx(t)
