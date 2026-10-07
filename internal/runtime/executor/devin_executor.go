@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -849,7 +850,7 @@ func (e *DevinExecutor) streamDevinFrames(
 				failedEvent, _ := sjson.SetBytes([]byte(`{"event_type":"response.failed","error":{"message":"","code":""}}`), "error.message", errTrailer.Error())
 				failedEvent, _ = sjson.SetBytes(failedEvent, "error.code", fmt.Sprintf("%d", code))
 				_ = emitInteractionsEvent(failedEvent)
-				emitStreamError(statusErr{code: code, msg: errTrailer.Error()})
+				emitStreamError(newDevinTrailerStatusError(code, errTrailer))
 				return
 			}
 			sawEOS = true
@@ -1239,7 +1240,7 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 					Usage:         finalUsage,
 					UnknownFields: unknownFields,
 				}
-				return nil, respLog, statusErr{code: code, msg: errTrailer.Error()}
+				return nil, respLog, newDevinTrailerStatusError(code, errTrailer)
 			}
 			sawEOS = true
 			break
@@ -2509,20 +2510,93 @@ func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 	return e.cachedMatcher
 }
 
+var (
+	// devinResetInPattern matches relative reset hints like "reset in 13 minutes"
+	// or "reset in 5 hours 30 minutes" embedded in Devin 429 bodies.
+	devinResetInPattern = regexp.MustCompile(`(?i)reset in\s+(?:(\d+)\s*hours?)?\s*(?:(\d+)\s*minutes?)?\s*(?:(\d+)\s*seconds?)?`)
+	// devinResetAtPattern matches absolute reset hints like "(at 18:01 UTC)".
+	devinResetAtPattern = regexp.MustCompile(`\(at\s+(\d{1,2}):(\d{2})\s*UTC\)`)
+)
+
+// devinResetHintFromMessage extracts the rate-limit reset delay embedded in
+// Devin error messages such as "Your limit will reset in 13 minutes (at 18:01
+// UTC)". Devin does not send a Retry-After header, so the hint lives in the
+// body text. Returns nil when no hint is present.
+func devinResetHintFromMessage(msg string, now time.Time) *time.Duration {
+	if m := devinResetInPattern.FindStringSubmatch(msg); m != nil {
+		var seconds int64
+		if v, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+			seconds += v * 3600
+		}
+		if v, err := strconv.ParseInt(m[2], 10, 64); err == nil {
+			seconds += v * 60
+		}
+		if v, err := strconv.ParseInt(m[3], 10, 64); err == nil {
+			seconds += v
+		}
+		if seconds > 0 {
+			delay := time.Duration(seconds) * time.Second
+			return &delay
+		}
+	}
+	if m := devinResetAtPattern.FindStringSubmatch(msg); m != nil {
+		hour, errH := strconv.Atoi(m[1])
+		minute, errM := strconv.Atoi(m[2])
+		if errH == nil && errM == nil {
+			reset := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), hour, minute, 0, 0, time.UTC)
+			delay := reset.Sub(now)
+			if delay <= 0 {
+				delay += 24 * time.Hour
+			}
+			return &delay
+		}
+	}
+	return nil
+}
+
+// devinMessageIsCredentialScoped reports whether a Devin error message
+// describes an account-level quota exhaustion rather than a per-model rate
+// limit. Account-scoped failures cool down the whole credential.
+func devinMessageIsCredentialScoped(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "usage quota")
+}
+
 func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {
 	err := statusErr{code: code, msg: string(body)}
-	if code == http.StatusTooManyRequests && headers != nil {
-		if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {
-			if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && seconds >= 0 {
-				delay := time.Duration(seconds) * time.Second
-				err.retryAfter = &delay
-			} else if deadline, errParse := http.ParseTime(raw); errParse == nil {
-				delay := time.Until(deadline)
-				if delay > 0 {
+	if code == http.StatusTooManyRequests {
+		if headers != nil {
+			if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {
+				if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && seconds >= 0 {
+					delay := time.Duration(seconds) * time.Second
 					err.retryAfter = &delay
+				} else if deadline, errParse := http.ParseTime(raw); errParse == nil {
+					delay := time.Until(deadline)
+					if delay > 0 {
+						err.retryAfter = &delay
+					}
 				}
 			}
 		}
+		if err.retryAfter == nil {
+			err.retryAfter = devinResetHintFromMessage(err.msg, time.Now())
+		}
+		err.credentialScoped = devinMessageIsCredentialScoped(err.msg)
+	}
+	return err
+}
+
+// newDevinTrailerStatusError builds a statusErr for Devin stream trailer
+// failures, which carry no HTTP headers. The trailer message still embeds the
+// same reset hints, so parse them for an accurate cooldown.
+func newDevinTrailerStatusError(code int, trailerErr error) statusErr {
+	err := statusErr{code: code}
+	if trailerErr != nil {
+		err.msg = trailerErr.Error()
+	}
+	if code == http.StatusTooManyRequests {
+		err.retryAfter = devinResetHintFromMessage(err.msg, time.Now())
+		err.credentialScoped = devinMessageIsCredentialScoped(err.msg)
 	}
 	return err
 }
