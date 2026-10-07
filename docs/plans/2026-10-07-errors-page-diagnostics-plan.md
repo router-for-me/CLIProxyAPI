@@ -413,6 +413,73 @@ git commit -m "feat(store): add usage_errors error_class + fingerprint columns"
 
 ---
 
+### Task 3b: One-shot backfill for pre-existing rows
+
+Design §2.5 and rollout step 2 require old rows (which never stored a raw body)
+to get an `error_class` from `fail_status_code` alone. This runs in the same
+schema-init path as Task 3 and is idempotent: the `WHERE error_class IS NULL`
+predicate means a restart re-runs the statement as an empty index scan.
+
+**Files:**
+- Modify: `internal/store/postgresstore.go` (directly after the Task 3 index)
+- Test: `internal/store/pg_migrations_test.go` (extend)
+
+**Step 1: Write the failing test**
+
+`TestEnsureSchemaBackfillsUsageErrorClass` inserts legacy-style rows with a NULL
+`error_class` and a known `fail_status_code`, re-runs `EnsureSchema`, then
+asserts each row's class matches the `errorclass.classFromStatus` arm for its
+status and that `error_fingerprint` stays NULL.
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./internal/store/ -run TestEnsureSchemaBackfillsUsageErrorClass -v`
+Expected: FAIL — rows still carry NULL.
+
+**Step 3: Write minimal implementation**
+
+Add a partial index over the unclassified rows, then the UPDATE whose CASE arms
+mirror `errorclass.classFromStatus` exactly (so backfilled rows agree with
+newly-classified ones):
+
+```go
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE INDEX IF NOT EXISTS idx_usage_errors_unclassified ON %s(requested_at) WHERE error_class IS NULL`,
+		usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_errors unclassified index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE %s SET error_class = CASE
+			WHEN fail_status_code = 429 THEN 'rate_limit'
+			...
+			ELSE 'other'
+		END WHERE error_class IS NULL`,
+		usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: backfill usage_errors error_class: %w", err)
+	}
+```
+
+Keep the CASE in sync with `errorclass.classFromStatus`; the two are the same
+mapping expressed in SQL. Rows with a NULL status fall to `'other'`, matching
+`Classify(0, "")`.
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./internal/store/ -run TestEnsureSchemaBackfillsUsageErrorClass -v`
+Expected: PASS (requires a PG test harness).
+
+**Step 5: Commit**
+
+```bash
+gofmt -w internal/store/postgresstore.go internal/store/pg_migrations_test.go
+git add internal/store/postgresstore.go internal/store/pg_migrations_test.go
+git commit -m "feat(errors): backfill error_class from fail_status_code for pre-existing rows"
+```
+
+---
+
 ### Task 4: Persist the columns on `UsageError` (struct, insert, scan)
 
 **Files:**
