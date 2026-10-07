@@ -230,6 +230,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}
 	bodyForUpstream = stripDefaultKimiClaudeCodeAttribution(auth, url, fp.ProfileClaudeCodeCLI, bodyForUpstream)
+	bodyForUpstream = helps.ApplyClaudeSearchRecovery(ctx, bodyForUpstream)
 	// User rules match the fully prepared business body and are applied only once.
 	var touchedPayloadPaths map[string]bool
 	bodyForUpstream, touchedPayloadPaths = helps.ApplyPayloadConfigWithTrackedPaths(
@@ -320,6 +321,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
+		}
+		if httpResp.StatusCode == http.StatusBadRequest && helps.CanRecoverClaudeSearch(ctx) {
+			if _, recoverable := helps.RecoverClaudeSearchHistory(bodyForUpstream, b); recoverable {
+				helps.LogWithRequestID(ctx).Warn("Retrying Claude request with readable rejected-turn web-search history after encrypted search replay rejection")
+				return e.Execute(helps.WithClaudeSearchRecovery(ctx, b, bodyForUpstream), auth, req, opts)
+			}
 		}
 		if fastRequest {
 			return resp, newClaudeFastDirectResponseError(httpResp, b)
