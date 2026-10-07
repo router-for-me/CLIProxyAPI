@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -37,6 +38,15 @@ func (h *Handler) GetUsageErrors(c *gin.Context) {
 	}
 	q := parseUsageStatsQuery(c)
 	filter := filterFromQuery(q)
+	// error_class / error_fingerprint are errors-only columns. They are parsed
+	// here directly rather than through parseUsageStatsQuery / filterFromQuery so
+	// that events-path handlers (which share those helpers) never see them.
+	if v := strings.TrimSpace(c.Query("error_class")); v != "" {
+		filter.ErrorClass = v
+	}
+	if v := strings.TrimSpace(c.Query("error_fingerprint")); v != "" {
+		filter.ErrorFingerprint = v
+	}
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "25"))
 	rows, total, err := usage.SelectErrors(c.Request.Context(), filter, page, pageSize)
@@ -106,6 +116,134 @@ func (h *Handler) GetUsageError(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"error_event": errRow})
 }
 
+// GetErrorSummary handles GET /v0/management/usage-stats/errors/summary.
+//
+// Returns a multi-rollup summary for the dashboard's at-a-glance failure cards:
+// total count, distributions by class/status/provider, and top 10 models.
+// Accepts the same filter parameters as /usage-stats/errors.
+func (h *Handler) GetErrorSummary(c *gin.Context) {
+	_, usage, _, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	q := parseUsageStatsQuery(c)
+	filter := filterFromQuery(q)
+	// error_class / error_fingerprint are errors-only columns.
+	if v := strings.TrimSpace(c.Query("error_class")); v != "" {
+		filter.ErrorClass = v
+	}
+	if v := strings.TrimSpace(c.Query("error_fingerprint")); v != "" {
+		filter.ErrorFingerprint = v
+	}
+
+	summary, err := usage.SelectErrorSummary(c.Request.Context(), filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
+// GetErrorGroups handles GET /v0/management/usage-stats/errors/groups.
+//
+// Query parameters:
+//   - group_by: "class" (default) | "fingerprint" | "provider" | "model" | "status"
+//   - limit:    default 20, max 200
+//   - plus the usual filter set (api_key_id, provider, model, from, to, error_class, error_fingerprint)
+//
+// Returns groups sorted by count descending, each with sample message and metadata.
+func (h *Handler) GetErrorGroups(c *gin.Context) {
+	_, usage, _, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	q := parseUsageStatsQuery(c)
+	filter := filterFromQuery(q)
+	if v := strings.TrimSpace(c.Query("error_class")); v != "" {
+		filter.ErrorClass = v
+	}
+	if v := strings.TrimSpace(c.Query("error_fingerprint")); v != "" {
+		filter.ErrorFingerprint = v
+	}
+
+	// Validate group_by in the handler before calling the store so an invalid
+	// value yields 400 (the store returns a plain error for unsupported group_by
+	// with no sentinel type — validating here is cleaner than string-matching).
+	groupBy := strings.TrimSpace(c.DefaultQuery("group_by", "class"))
+	groupBy = strings.ToLower(groupBy)
+	switch groupBy {
+	case "class", "fingerprint", "provider", "model", "status":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "group_by must be one of: class|fingerprint|provider|model|status"}})
+		return
+	}
+
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	groups, err := usage.SelectErrorGroups(c.Request.Context(), filter, groupBy, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"group_by": groupBy,
+		"groups":   groups,
+	})
+}
+
+// GetErrorTimeline handles GET /v0/management/usage-stats/errors/timeline.
+//
+// Query parameters:
+//   - interval: "minute" | "hour" (default) | "day"
+//   - plus the usual filter set (api_key_id, provider, model, from, to, error_class, error_fingerprint)
+//
+// Returns one series per error class, each with (bucket, count) points sorted
+// ascending by bucket. Zero-bucket classes are omitted.
+func (h *Handler) GetErrorTimeline(c *gin.Context) {
+	_, usage, _, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	q := parseUsageStatsQuery(c)
+	filter := filterFromQuery(q)
+	if v := strings.TrimSpace(c.Query("error_class")); v != "" {
+		filter.ErrorClass = v
+	}
+	if v := strings.TrimSpace(c.Query("error_fingerprint")); v != "" {
+		filter.ErrorFingerprint = v
+	}
+
+	// Validate interval in the handler before calling the store. intervalExpr
+	// returns a plain error for unsupported values with no sentinel type, so
+	// handler-side validation gives us a clear 400 vs 500 boundary.
+	interval := strings.TrimSpace(c.DefaultQuery("interval", "hour"))
+	interval = strings.ToLower(interval)
+	switch interval {
+	case "minute", "hour", "day":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "interval must be one of: minute|hour|day"}})
+		return
+	}
+
+	series, err := usage.SelectErrorTimeline(c.Request.Context(), filter, interval)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"interval": interval,
+		"series":   series,
+	})
+}
+
 // GetInternalUserErrors handles GET /v0/management/internal-users/:id/errors.
 //
 // Paged raw failed-attempt rows for the user, newest first. The principal
@@ -134,6 +272,13 @@ func (h *Handler) GetInternalUserErrors(c *gin.Context) {
 	q := parseUsageStatsQuery(c)
 	q.UserID = userID
 	filter := filterFromQuery(q)
+	// error_class / error_fingerprint are errors-only columns.
+	if v := strings.TrimSpace(c.Query("error_class")); v != "" {
+		filter.ErrorClass = v
+	}
+	if v := strings.TrimSpace(c.Query("error_fingerprint")); v != "" {
+		filter.ErrorFingerprint = v
+	}
 	rows, total, err := usage.SelectErrors(c.Request.Context(), filter, page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})

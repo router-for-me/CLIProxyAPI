@@ -147,8 +147,15 @@ type UsageFilter struct {
 	// match against usage_events.request_id / usage_errors.request_id; empty
 	// means no constraint.
 	RequestID string
-	From      time.Time
-	To        time.Time
+	// ErrorClass narrows to a single error class slug (see
+	// internal/store/errorclass). Empty means no constraint. Errors-only:
+	// the column exists on usage_errors, not usage_events.
+	ErrorClass string
+	// ErrorFingerprint narrows to a single error fingerprint. Empty means no
+	// constraint. Errors-only.
+	ErrorFingerprint string
+	From             time.Time
+	To               time.Time
 	// GroupBy selects the aggregation dimension: "api_key_id" | "model" |
 	// "provider" | "user_id" | "day" | "hour" | "" (no grouping, totals only).
 	GroupBy string
@@ -2443,6 +2450,19 @@ func buildWhereClause(b *strings.Builder, filter UsageFilter) []any {
 	if filter.Model != "" {
 		args = append(args, filter.Model)
 		b.WriteString(" AND e.model = $")
+		b.WriteString(itoa(len(args)))
+	}
+	// ErrorClass / ErrorFingerprint are errors-only columns: usage_events has
+	// no such columns, so an events caller must never set them. They default to
+	// "" and are only populated on the usage_errors listing path.
+	if filter.ErrorClass != "" {
+		args = append(args, filter.ErrorClass)
+		b.WriteString(" AND e.error_class = $")
+		b.WriteString(itoa(len(args)))
+	}
+	if filter.ErrorFingerprint != "" {
+		args = append(args, filter.ErrorFingerprint)
+		b.WriteString(" AND e.error_fingerprint = $")
 		b.WriteString(itoa(len(args)))
 	}
 	if filter.RequestID != "" {
