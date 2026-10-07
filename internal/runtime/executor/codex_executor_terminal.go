@@ -315,6 +315,9 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 }
 
 func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling bool) statusErr {
+	if isCodexTemporaryIPRestriction(statusCode, body) {
+		return newCodexTemporaryIPRestrictionErr(body)
+	}
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
@@ -327,6 +330,38 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+// This upstream 401 describes a short-lived network admission failure, not an
+// expired OAuth token. A 503 avoids the conductor's unauthorized refresh path.
+func isCodexTemporaryIPRestriction(statusCode int, body []byte) bool {
+	if statusCode != http.StatusUnauthorized {
+		return false
+	}
+	message := gjson.GetBytes(body, "error.message").String()
+	if message == "" {
+		message = gjson.GetBytes(body, "message").String()
+	}
+	if message == "" {
+		message = strings.TrimSpace(string(body))
+	}
+	return strings.Contains(strings.ToLower(message), "your ip is not authorized to make this request")
+}
+
+func newCodexTemporaryIPRestrictionErr(body []byte) statusErr {
+	message := gjson.GetBytes(body, "error.message").String()
+	if message == "" {
+		message = gjson.GetBytes(body, "message").String()
+	}
+	if message == "" {
+		message = strings.TrimSpace(string(body))
+	}
+	out := []byte(`{"error":{}}`)
+	out, _ = sjson.SetBytes(out, "error.message", message)
+	out, _ = sjson.SetBytes(out, "error.type", "server_error")
+	out, _ = sjson.SetBytes(out, "error.code", "ip_temporarily_restricted")
+	retryAfter := 30 * time.Second
+	return statusErr{code: http.StatusServiceUnavailable, msg: string(out), retryAfter: &retryAfter}
 }
 
 func classifyCodexStatusError(statusCode int, body []byte) []byte {
