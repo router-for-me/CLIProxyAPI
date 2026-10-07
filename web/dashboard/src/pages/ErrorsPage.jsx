@@ -1,7 +1,7 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   getUsageErrors, getUsageError, getUsageErrorBodies, getUsageFilterOptions,
-  getUsageTotals, getErrorSummary, getErrorTimeline,
+  getUsageTotals, getErrorSummary, getErrorTimeline, getErrorGroups,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -18,6 +18,7 @@ import {
   EventBodiesSection,
 } from './usageShared.jsx';
 import { ERROR_CLASSES, classLabel, classTone } from './errorClass.js';
+import ErrorGroupsPanel from './ErrorGroupsPanel.jsx';
 
 // ErrorsPage renders the failed-attempt stream (usage_errors table) as a
 // first-class sibling to Usage Stats. It was promoted from a tab on the
@@ -28,10 +29,19 @@ import { ERROR_CLASSES, classLabel, classTone } from './errorClass.js';
 
 const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
 const AUTOREFRESH_STORAGE = 'nixllm.dashboard.errorsAutorefresh';
+const ERRORS_TAB_STORAGE = 'nixllm.dashboard.errorsTab';
 
 function readAutoRefresh() {
   try { return localStorage.getItem(AUTOREFRESH_STORAGE) !== '0'; }
   catch { return true; }
+}
+
+function readErrorsTab() {
+  try {
+    const v = localStorage.getItem(ERRORS_TAB_STORAGE);
+    if (v === 'failed' || v === 'patterns') return v;
+  } catch { /* ignore */ }
+  return 'failed';
 }
 
 export default function ErrorsPage() {
@@ -43,6 +53,7 @@ export default function ErrorsPage() {
     model: '',
     request_id: '',
     error_class: '',
+    error_fingerprint: '',
     customFrom: '',
     customTo: '',
     useCustomRange: false,
@@ -51,6 +62,18 @@ export default function ErrorsPage() {
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
   // Selected display timezone (shared with Usage Stats via localStorage).
   const [timezone, setTimezone] = useState(() => loadTimezone());
+  // Failed attempts vs Error patterns tab. Persisted so a reload keeps the
+  // operator on the view they were using, mirroring the auto-refresh pref.
+  const [errorsTab, setErrorsTab] = useState(() => readErrorsTab());
+  // Grouping dimension for the Error patterns leaderboard.
+  const [patternsGroupBy, setPatternsGroupBy] = useState('class');
+  // Ref to the Failed attempts card so selecting a pattern can scroll to it.
+  const tableRef = useRef(null);
+
+  function changeTab(tab) {
+    setErrorsTab(tab);
+    try { localStorage.setItem(ERRORS_TAB_STORAGE, tab); } catch { /* ignore */ }
+  }
 
   function changeTimezone(tz) {
     setTimezone(tz);
@@ -74,9 +97,10 @@ export default function ErrorsPage() {
     model: filter.model || undefined,
     request_id: filter.request_id.trim() || undefined,
     error_class: filter.error_class || undefined,
+    error_fingerprint: filter.error_fingerprint || undefined,
     from: rangeParams.from,
     to: rangeParams.to,
-  }), [filter.api_key_id, filter.provider, filter.model, filter.request_id, filter.error_class, rangeParams.from, rangeParams.to]);
+  }), [filter.api_key_id, filter.provider, filter.model, filter.request_id, filter.error_class, filter.error_fingerprint, rangeParams.from, rangeParams.to]);
 
   // Totals power the KPI strip — failure_count and failure_rate come back
   // from the same totals endpoint that Usage Stats uses, scoped to the same
@@ -101,6 +125,15 @@ export default function ErrorsPage() {
   // Error timeline powers the mini per-class timeline.
   const timeline = useAsync(() => getErrorTimeline(baseFilter, rangeParams.interval || 'hour'), [JSON.stringify(baseFilter), rangeParams.interval]);
 
+  // Error patterns leaderboard — only fetched when the Error patterns tab is
+  // active so we don't waste bandwidth on a hidden view. The guard returns
+  // Promise.resolve(null) which useAsync treats as a successful null result.
+  const patternsActive = errorsTab === 'patterns';
+  const errorGroups = useAsync(
+    () => (patternsActive ? getErrorGroups(baseFilter, patternsGroupBy, 50) : Promise.resolve(null)),
+    [JSON.stringify(baseFilter), patternsGroupBy, patternsActive],
+  );
+
   const [selectedErrorId, setSelectedErrorId] = useState(null);
 
   const reloadAll = useCallback(() => {
@@ -109,7 +142,8 @@ export default function ErrorsPage() {
     errors.reload();
     summary.reload();
     timeline.reload();
-  }, [totals, filterOptions, errors, summary, timeline]);
+    errorGroups.reload();
+  }, [totals, filterOptions, errors, summary, timeline, errorGroups]);
 
   useAutoRefresh(reloadAll, AUTO_REFRESH_INTERVAL_MS, autoRefresh);
 
@@ -128,6 +162,40 @@ export default function ErrorsPage() {
 
   function updateFilter(partial) {
     setFilter((f) => ({ ...f, ...partial }));
+  }
+
+  // Called when a row in the Error patterns leaderboard is clicked. Maps the
+  // group's dimension to the corresponding filter param so the Failed-attempts
+  // table narrows to matches of that group. Afterwards switches to the table
+  // tab and scrolls it into view.
+  function onSelectGroup(group) {
+    switch (patternsGroupBy) {
+      case 'class':
+        updateFilter({ error_class: group.key, error_fingerprint: '' });
+        break;
+      case 'fingerprint':
+        updateFilter({ error_fingerprint: group.key, error_class: '' });
+        break;
+      case 'provider':
+        updateFilter({ provider: group.key, error_class: '', error_fingerprint: '' });
+        break;
+      case 'model':
+        updateFilter({ model: group.key, error_class: '', error_fingerprint: '' });
+        break;
+      case 'status':
+        // The listing endpoint does NOT support status-based filtering; as a
+        // best-effort fallback we filter by the group's error_class (if any).
+        updateFilter({ error_class: group.error_class || '', error_fingerprint: '' });
+        break;
+      default:
+        break;
+    }
+    changeTab('failed');
+    // Scroll the Failed attempts card into view on a brief delay so React has
+    // rendered the tab switch first.
+    requestAnimationFrame(() => {
+      tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   const failedCount = totals.data?.totals?.failed_count || 0;
@@ -423,20 +491,79 @@ export default function ErrorsPage() {
         )}
       </div>
 
-      {/* Errors table */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="row row--between" style={{ marginBottom: 12 }}>
-          <h3 className="card__title" style={{ margin: 0 }}>Failed attempts</h3>
+      {/* Fingerprint hint chip — the Failed attempts table has no fingerprint
+          column, so without this an operator can't tell why the list narrowed
+          after picking a Message group. Clicking clears the fingerprint. */}
+      {filter.error_fingerprint && (
+        <div className="err-classes">
+          <button
+            type="button"
+            className="err-class-chip"
+            style={{ '--chip-tone': 'var(--purple)' }}
+            onClick={() => updateFilter({ error_fingerprint: '' })}
+            title="Clear the fingerprint filter"
+          >
+            <span className="err-class-chip__dot" />
+            <span className="err-class-chip__label">
+              filtered by fingerprint: {filter.error_fingerprint.slice(0, 12)}…
+            </span>
+            <span className="err-class-chip__count">Clear ✕</span>
+          </button>
         </div>
-        <ErrorsTableBody
-          errors={errors}
-          page={errorsPage}
-          pageSize={EVENTS_PAGE_SIZE}
-          onPage={setErrorsPage}
-          onRowClick={setSelectedErrorId}
-          timezone={timezone}
-        />
+      )}
+
+      {/* Tab row — Failed attempts (the raw stream) vs Error patterns
+          (the grouped leaderboard). */}
+      <div className="seg-group" role="tablist" aria-label="Errors view" style={{ marginTop: 16 }}>
+        <button
+          type="button"
+          className={`seg-btn ${errorsTab === 'failed' ? 'seg-btn--active' : ''}`}
+          onClick={() => changeTab('failed')}
+        >
+          Failed attempts
+        </button>
+        <button
+          type="button"
+          className={`seg-btn ${errorsTab === 'patterns' ? 'seg-btn--active' : ''}`}
+          onClick={() => changeTab('patterns')}
+        >
+          Error patterns
+        </button>
       </div>
+
+      {errorsTab === 'failed' && (
+        <div className="card" style={{ marginTop: 16 }} ref={tableRef}>
+          <div className="row row--between" style={{ marginBottom: 12 }}>
+            <h3 className="card__title" style={{ margin: 0 }}>Failed attempts</h3>
+          </div>
+          <ErrorsTableBody
+            errors={errors}
+            page={errorsPage}
+            pageSize={EVENTS_PAGE_SIZE}
+            onPage={setErrorsPage}
+            onRowClick={setSelectedErrorId}
+            timezone={timezone}
+          />
+        </div>
+      )}
+
+      {errorsTab === 'patterns' && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="row row--between" style={{ marginBottom: 12 }}>
+            <h3 className="card__title" style={{ margin: 0 }}>Error patterns</h3>
+          </div>
+          <ErrorGroupsPanel
+            groups={errorGroups.data?.groups || []}
+            loading={errorGroups.loading}
+            error={errorGroups.error}
+            groupBy={patternsGroupBy}
+            onGroupByChange={setPatternsGroupBy}
+            onSelectGroup={onSelectGroup}
+            timezone={timezone}
+            onRetry={errorGroups.reload}
+          />
+        </div>
+      )}
 
       {selectedErrorId != null && (
         <ErrorDetailModal id={selectedErrorId} timezone={timezone} onClose={() => setSelectedErrorId(null)} />
