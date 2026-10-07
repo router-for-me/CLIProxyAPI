@@ -88,62 +88,73 @@ func TestRefreshAuthForRequest_NormalDisabledAuth_RefreshesTokenSuccessfully(t *
 	}
 }
 
-func TestRefreshAuthForRequest_DisabledAuth_InvalidGrant_NeverRetries(t *testing.T) {
-	ctx := context.Background()
-	manager := NewManager(nil, &RoundRobinSelector{}, nil)
-	invalidGrantErr := oauthStatusError{
-		code: http.StatusBadRequest,
-		msg:  `{"error": "invalid_grant", "error_description": "Bad Request"}`,
-	}
-	executor := &mockOAuthErrorExecutor{
-		id:          "test-provider",
-		errToReturn: invalidGrantErr,
-	}
-	manager.RegisterExecutor(executor)
-
-	auth := &Auth{
-		ID:       "disabled-invalid-grant",
-		Provider: "test-provider",
-		Disabled: true,
-		Status:   StatusDisabled,
-		Metadata: map[string]any{
-			"access_token":  "expired-token",
-			"refresh_token": "refresh-1",
+func TestRefreshAuthForRequest_DisabledAuth_TerminalFailure_NeverRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "invalid_grant",
+			err: oauthStatusError{
+				code: http.StatusBadRequest,
+				msg:  `{"error": "invalid_grant", "error_description": "Bad Request"}`,
+			},
 		},
-	}
-	if _, err := manager.Register(ctx, auth); err != nil {
-		t.Fatalf("Register error: %v", err)
-	}
+		{
+			name: "unauthorized",
+			err:  oauthStatusError{code: http.StatusUnauthorized, msg: "unauthorized"},
+		},
+		{
+			name: "invalid_refresh_token",
+			err:  oauthStatusError{code: http.StatusUnauthorized, msg: `{"error":"invalid_refresh_token"}`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			executor := &mockOAuthErrorExecutor{id: "test-provider", errToReturn: tc.err}
+			manager.RegisterExecutor(executor)
 
-	// 1st call encounters invalid_grant
-	_, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, "")
-	if errRefresh == nil {
-		t.Fatalf("expected refresh error, got nil")
-	}
+			auth := &Auth{
+				ID:       "disabled-" + tc.name,
+				Provider: "test-provider",
+				Disabled: true,
+				Status:   StatusDisabled,
+				Metadata: map[string]any{
+					"access_token":  "expired-token",
+					"refresh_token": "refresh-1",
+				},
+			}
+			if _, err := manager.Register(ctx, auth); err != nil {
+				t.Fatalf("Register error: %v", err)
+			}
 
-	manager.mu.RLock()
-	current := manager.auths[auth.ID]
-	manager.mu.RUnlock()
+			if _, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, ""); errRefresh == nil {
+				t.Fatal("expected refresh error, got nil")
+			}
 
-	if current == nil {
-		t.Fatalf("auth not found in manager")
-	}
-	// Disabled + invalid_grant must never schedule retry
-	if current.Status != StatusDisabled {
-		t.Fatalf("auth status = %v, want StatusDisabled", current.Status)
-	}
-	if !current.NextRefreshAfter.IsZero() {
-		t.Fatalf("NextRefreshAfter = %v, want zero time (never refresh)", current.NextRefreshAfter)
-	}
+			current, ok := manager.GetByID(auth.ID)
+			if !ok {
+				t.Fatalf("auth %q not found in manager", auth.ID)
+			}
+			if current.Status != StatusDisabled {
+				t.Fatalf("auth status = %v, want StatusDisabled", current.Status)
+			}
+			if !current.NextRefreshAfter.IsZero() {
+				t.Fatalf("NextRefreshAfter = %v, want zero time (never refresh)", current.NextRefreshAfter)
+			}
+			if _, scheduled := nextRefreshCheckAt(time.Now(), current, time.Second); scheduled {
+				t.Fatal("terminal refresh failure remained scheduled")
+			}
 
-	// 2nd call should be blocked immediately without calling executor
-	callsBefore := executor.refreshCalls.Load()
-	_, errSecond := manager.refreshAuthForRequest(ctx, auth.ID, "")
-	if errSecond == nil {
-		t.Fatalf("expected second call to fail, got nil")
-	}
-	if executor.refreshCalls.Load() != callsBefore {
-		t.Fatalf("executor was called again for disabled+invalid_grant, calls=%d", executor.refreshCalls.Load())
+			callsBefore := executor.refreshCalls.Load()
+			if _, errSecond := manager.refreshAuthForRequest(ctx, auth.ID, ""); errSecond == nil {
+				t.Fatal("expected second call to fail")
+			}
+			if executor.refreshCalls.Load() != callsBefore {
+				t.Fatalf("executor was called again after terminal %s failure, calls=%d", tc.name, executor.refreshCalls.Load())
+			}
+		})
 	}
 }
 

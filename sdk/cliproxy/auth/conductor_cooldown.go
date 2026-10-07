@@ -1771,6 +1771,10 @@ func HasUnauthorizedAuthFailure(auth *Auth) bool {
 }
 
 func hasDisabledInvalidGrantFailure(auth *Auth) bool {
+	return hasDisabledTerminalRefreshFailure(auth)
+}
+
+func hasDisabledTerminalRefreshFailure(auth *Auth) bool {
 	if auth == nil {
 		return false
 	}
@@ -1778,13 +1782,17 @@ func hasDisabledInvalidGrantFailure(auth *Auth) bool {
 	if !isDisabled {
 		return false
 	}
-	if auth.LastError != nil && (isInvalidGrantResultError(auth.LastError) || isInvalidGrantErrorMessage(auth.LastError.Message) || isInvalidGrantErrorMessage(auth.LastError.Code)) {
+	if auth.LastError != nil && (isInvalidGrantResultError(auth.LastError) ||
+		isInvalidGrantErrorMessage(auth.LastError.Message) || isInvalidGrantErrorMessage(auth.LastError.Code) ||
+		isInvalidRefreshTokenResultError(auth.LastError) ||
+		isInvalidRefreshTokenErrorMessage(auth.LastError.Message) || isInvalidRefreshTokenErrorMessage(auth.LastError.Code) ||
+		auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized")) {
 		return true
 	}
 	return false
 }
 
-// HasDisabledInvalidGrantFailure reports whether the auth is disabled and has encountered an invalid_grant error.
+// HasDisabledInvalidGrantFailure reports whether the disabled auth has a terminal refresh failure.
 func HasDisabledInvalidGrantFailure(auth *Auth) bool {
 	return hasDisabledInvalidGrantFailure(auth)
 }
@@ -1794,7 +1802,7 @@ func refreshErrorFromError(err error) *Error {
 		return nil
 	}
 	statusCode := statusCodeFromError(err)
-	if statusCode == 0 && isUnauthorizedError(err) {
+	if statusCode == 0 && (isUnauthorizedError(err) || isInvalidRefreshTokenError(err)) {
 		statusCode = http.StatusUnauthorized
 	}
 	authErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
@@ -1911,6 +1919,26 @@ func isInvalidGrantResultError(err *Error) bool {
 		return true
 	}
 	return false
+}
+
+func isInvalidRefreshTokenErrorMessage(message string) bool {
+	return strings.Contains(strings.ToLower(message), "invalid_refresh_token")
+}
+
+func isInvalidRefreshTokenError(err error) bool {
+	if err == nil || !isInvalidRefreshTokenErrorMessage(err.Error()) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	return status == http.StatusUnauthorized || status == 0
+}
+
+func isInvalidRefreshTokenResultError(err *Error) bool {
+	if err == nil || (!isInvalidRefreshTokenErrorMessage(err.Code) && !isInvalidRefreshTokenErrorMessage(err.Message)) {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	return status == http.StatusUnauthorized || status == 0
 }
 
 func isModelSupportResultError(err *Error) bool {
