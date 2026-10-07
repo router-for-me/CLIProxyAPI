@@ -305,6 +305,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-stats/events/:id", s.mgmt.GetUsageEvent)
 		mgmt.GET("/usage-stats/events/:id/bodies", s.mgmt.GetUsageEventBodies)
 		mgmt.GET("/usage-stats/errors", s.mgmt.GetUsageErrors)
+		// Aggregate error diagnostics endpoints. Registered before the :id wildcard
+		// so gin (httprouter) resolves the static path segments first. Registered
+		// immediately after the main errors listing for logical grouping.
+		mgmt.GET("/usage-stats/errors/summary", s.mgmt.GetErrorSummary)
+		mgmt.GET("/usage-stats/errors/groups", s.mgmt.GetErrorGroups)
+		mgmt.GET("/usage-stats/errors/timeline", s.mgmt.GetErrorTimeline)
 		mgmt.GET("/usage-stats/errors/:id", s.mgmt.GetUsageError)
 		mgmt.GET("/usage-stats/errors/:id/bodies", s.mgmt.GetUsageErrorBodies)
 		mgmt.GET("/usage-stats/filters", s.mgmt.GetUsageFilters)
