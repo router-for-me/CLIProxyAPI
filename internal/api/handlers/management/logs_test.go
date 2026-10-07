@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestDecodeLogCursorRejectsUnsafeFiles(t *testing.T) {
@@ -915,5 +915,43 @@ func TestGetRequestLogByID_SelectsLatestCrossYearBoundaryOnModTimeTie(t *testing
 
 	if body := rec.Body.String(); body != "2027 content" {
 		t.Fatalf("body = %q, want %q (2027-01-01 must beat 2026-12-31 on mod time tie)", body, "2027 content")
+	}
+}
+
+func TestGetRequestLogByID_MatchesFullUUIDAndShortID(t *testing.T) {
+	dir := t.TempDir()
+	h := newLogsTestHandler(dir, true)
+
+	logPath := filepath.Join(dir, "v1_chat_completions-2026-09-28T100000-1234abcd.log")
+	if errWrite := os.WriteFile(logPath, []byte("uuid v7 request log content"), 0o644); errWrite != nil {
+		t.Fatalf("write log: %v", errWrite)
+	}
+
+	// 1. Fetch via short 8-char ID
+	recShort := httptest.NewRecorder()
+	cShort, _ := gin.CreateTestContext(recShort)
+	cShort.Params = gin.Params{{Key: "id", Value: "1234abcd"}}
+	cShort.Request = httptest.NewRequest(http.MethodGet, "/v0/management/logs/request/1234abcd", nil)
+	h.GetRequestLogByID(cShort)
+
+	if recShort.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", recShort.Code, recShort.Body.String())
+	}
+	if body := recShort.Body.String(); body != "uuid v7 request log content" {
+		t.Fatalf("body = %q, want %q", body, "uuid v7 request log content")
+	}
+
+	// 2. Fetch via full 36-char UUID string ending with same 8 chars
+	recFull := httptest.NewRecorder()
+	cFull, _ := gin.CreateTestContext(recFull)
+	cFull.Params = gin.Params{{Key: "id", Value: "018f3a5b-1234-7abc-def0-00001234abcd"}}
+	cFull.Request = httptest.NewRequest(http.MethodGet, "/v0/management/logs/request/018f3a5b-1234-7abc-def0-00001234abcd", nil)
+	h.GetRequestLogByID(cFull)
+
+	if recFull.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", recFull.Code, recFull.Body.String())
+	}
+	if body := recFull.Body.String(); body != "uuid v7 request log content" {
+		t.Fatalf("body = %q, want %q", body, "uuid v7 request log content")
 	}
 }

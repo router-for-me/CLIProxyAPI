@@ -10,7 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -63,6 +64,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	} else {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}
+	if serviceTier := normalizeCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
+		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+	}
 	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
 	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
 	// reasoning.summary to the source request's canonical summary intent instead
@@ -108,7 +112,14 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			if _, custom := customToolNames[name]; custom {
 				callType = "custom"
 			}
-			return callType, name, toolCall.Get("function.arguments").String(), true
+			input = toolCall.Get("function.arguments").String()
+			if callType == "custom" && strings.TrimSpace(name) == "apply_patch" {
+				// Only normalized function history carries the JSON envelope. Explicit custom input is raw.
+				if unwrapped, errUnwrap := applypatch.UnwrapInput(input); errUnwrap == nil {
+					input = unwrapped
+				}
+			}
+			return callType, name, input, true
 		default:
 			return "", "", "", false
 		}
@@ -772,4 +783,19 @@ func buildShortNameMap(names []string) map[string]string {
 		m[n] = uniq
 	}
 	return m
+}
+
+func normalizeCodexServiceTier(result gjson.Result) string {
+	if !result.Exists() || result.Type != gjson.String {
+		return ""
+	}
+
+	switch strings.ToLower(strings.TrimSpace(result.String())) {
+	case "fast", "priority":
+		return "priority"
+	case "ultrafast":
+		return "ultrafast"
+	default:
+		return ""
+	}
 }

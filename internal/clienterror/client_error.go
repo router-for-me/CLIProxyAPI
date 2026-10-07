@@ -92,6 +92,11 @@ func IsRequestFault(status int, err error) bool {
 	if status == http.StatusUnauthorized && hasAuthenticationErrorBody(err) {
 		return false
 	}
+	// Claude's missing thread state is tied to the stale continuation ID rather
+	// than the selected credential. Let the client replay the full conversation.
+	if IsClaudeThreadNotFound(status, err) {
+		return true
+	}
 	// Model not found indicates a credential-model capability mismatch rather than
 	// a caller request error. Preserve rotation and cooldown for the model.
 	if hasModelNotFoundErrorBody(err) {
@@ -127,6 +132,28 @@ func IsItemNotPersisted(message string) bool {
 	return strings.Contains(lower, "item with id") &&
 		strings.Contains(lower, "not found") &&
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+// IsClaudeThreadNotFound reports the bare Claude 404 response for a stale
+// previous_message_id continuation.
+func IsClaudeThreadNotFound(status int, err error) bool {
+	if status != http.StatusNotFound || err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		body = strings.TrimSpace(string(responseBody.ResponseBody()))
+	}
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(gjson.Get(body, "error.type").String()), "not_found_error") &&
+		strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "thread state") &&
+		strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "previous_message_id")
 }
 
 func hasModelNotFoundErrorBody(err error) bool {

@@ -179,25 +179,232 @@ func TestSanitizeGeminiRequestThoughtSignaturesLogsBypassReplacement(t *testing.
 		t.Fatalf("thoughtSignature = %q, want bypass sentinel. Output: %s", got, string(out))
 	}
 
-	found := false
-	for _, entry := range hook.AllEntries() {
-		if entry.Level != log.DebugLevel {
-			continue
-		}
-		if entry.Data["component"] != "signature_sanitizer" ||
-			entry.Data["target_provider"] != string(SignatureProviderGemini) ||
-			entry.Data["action"] != "replace_with_gemini_bypass" {
-			continue
-		}
-		if entry.Data["block_kind"] != string(SignatureBlockKindGeminiFunctionCall) {
-			t.Fatalf("block_kind = %v, want %s", entry.Data["block_kind"], SignatureBlockKindGeminiFunctionCall)
-		}
-		found = true
+	entries := hook.AllEntries()
+	if len(entries) != 1 || entries[0].Level != log.DebugLevel {
+		t.Fatalf("expected one debug log for bypass replacement, got %v", entries)
 	}
-	if !found {
-		t.Fatal("expected debug log for Gemini thoughtSignature bypass replacement")
+	entry := entries[0]
+	if len(entry.Data) != 0 {
+		t.Fatalf("sanitizer log must not rely on structured fields: %v", entry.Data)
+	}
+	for _, field := range []string{
+		"sanitized 1 thoughtSignature",
+		"action=replace_bypass",
+		"part=function_call",
+		"sig_type=unknown",
+		`reason="missing or incompatible signature"`,
+	} {
+		if !strings.Contains(entry.Message, field) {
+			t.Fatalf("console message omits %q: %q", field, entry.Message)
+		}
 	}
 	assertSignatureDebugDoesNotLeak(t, hook, sig)
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesAggregatesRepeatedLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"contents":[
+		{"role":"model","parts":[{"text":"a","thoughtSignature":"invalid_sig_1"}]},
+		{"role":"model","parts":[{"text":"b","thoughtSignature":"invalid_sig_2"}]},
+		{"role":"model","parts":[{"text":"c","thoughtSignature":"invalid_sig_3"}]}
+	]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	for i := 0; i < 3; i++ {
+		path := fmt.Sprintf("contents.%d.parts.0.thoughtSignature", i)
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("expected part %d signature to be dropped, got: %s", i, string(out))
+		}
+	}
+
+	entries := hook.AllEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 aggregated debug log entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry.Level != log.DebugLevel || len(entry.Data) != 0 {
+		t.Fatalf("expected plain-text debug aggregate: level=%v fields=%v", entry.Level, entry.Data)
+	}
+	for _, field := range []string{"sanitized 3 thoughtSignatures", "action=drop", "part=model_part", "sig_type=unknown", `reason="text parts cannot carry signatures"`} {
+		if !strings.Contains(entry.Message, field) {
+			t.Fatalf("console message omits %q: %q", field, entry.Message)
+		}
+	}
+	for _, sig := range []string{"invalid_sig_1", "invalid_sig_2", "invalid_sig_3"} {
+		assertSignatureDebugDoesNotLeak(t, hook, sig)
+	}
+
+	hook.Reset()
+	again := SanitizeGeminiRequestThoughtSignatures(out, "contents")
+	if &again[0] != &out[0] || len(hook.AllEntries()) != 0 {
+		t.Fatal("sanitized payload should be reused without additional logs")
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesDistinguishesDetectedProviders(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"contents":[
+		{"role":"model","parts":[{"text":"a","thoughtSignature":"sealed.v1.demo_signature_1"}]},
+		{"role":"model","parts":[{"text":"b","thoughtSignature":"sealed.v1.demo_signature_2"}]},
+		{"role":"model","parts":[{"text":"c","thoughtSignature":"invalid_sig_unknown_1"}]},
+		{"role":"model","parts":[{"text":"d","thoughtSignature":"invalid_sig_unknown_2"}]}
+	]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	for i := 0; i < 4; i++ {
+		path := fmt.Sprintf("contents.%d.parts.0.thoughtSignature", i)
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("expected part %d signature to be dropped, got: %s", i, string(out))
+		}
+	}
+
+	entries := hook.AllEntries()
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 provider aggregates, got %d", len(entries))
+	}
+	for i, provider := range []SignatureProvider{SignatureProviderSWE, SignatureProviderUnknown} {
+		entry := entries[i]
+		if entry.Level != log.DebugLevel || len(entry.Data) != 0 {
+			t.Fatalf("expected plain-text provider aggregate: level=%v fields=%v", entry.Level, entry.Data)
+		}
+		for _, field := range []string{"sanitized 2 thoughtSignatures", "sig_type=" + string(provider), "path=contents"} {
+			if !strings.Contains(entry.Message, field) {
+				t.Fatalf("console message omits %q: %q", field, entry.Message)
+			}
+		}
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesSiblingBypassLogsSingleAggregate(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	for _, prefix := range []string{"", "gemini#", "google#"} {
+		t.Run(prefix, func(t *testing.T) {
+			hook.Reset()
+			input := []byte(`{"contents":[{"role":"model","parts":[` +
+				`{"functionCall":{"name":"first","args":{}},"thoughtSignature":"` + GeminiSkipThoughtSignatureValidator + `"},` +
+				`{"functionCall":{"name":"second","args":{}},"thoughtSignature":"` + prefix + GeminiSkipThoughtSignatureValidator + `"},` +
+				`{"functionCall":{"name":"third","args":{}},"thoughtSignature":"` + prefix + GeminiSkipThoughtSignatureValidator + `"}]}]}`)
+
+			out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+			if gjson.GetBytes(out, "contents.0.parts.1.thoughtSignature").Exists() ||
+				gjson.GetBytes(out, "contents.0.parts.2.thoughtSignature").Exists() {
+				t.Fatalf("sibling bypass was not removed: %s", out)
+			}
+			entries := hook.AllEntries()
+			if len(entries) != 1 || entries[0].Level != log.DebugLevel {
+				t.Fatalf("expected one debug log entry, got %v", entries)
+			}
+			entry := entries[0]
+			for _, field := range []string{
+				"sanitized 2 thoughtSignatures",
+				"action=drop",
+				"part=function_call",
+				"sig_type=bypass",
+				`reason="sibling calls must be unsigned"`,
+			} {
+				if !strings.Contains(entry.Message, field) {
+					t.Fatalf("console message omits %q: %q", field, entry.Message)
+				}
+			}
+		})
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesInvalidSiblingStillLogsAtDebug(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"request":{"contents":[{"role":"model","parts":[` +
+		`{"functionCall":{"name":"first","args":{}},"thoughtSignature":"` + GeminiSkipThoughtSignatureValidator + `"},` +
+		`{"functionCall":{"name":"second","args":{}},"thoughtSignature":"invalid_sibling_signature"},` +
+		`{"functionCall":{"name":"third","args":{}},"thoughtSignature":"` + GeminiSkipThoughtSignatureValidator + `"}]}]}}`)
+
+	// Independent requests must not be suppressed by a process-wide deduplication cache.
+	for range 2 {
+		hook.Reset()
+		out := SanitizeGeminiRequestThoughtSignatures(input, "request.contents")
+		if gjson.GetBytes(out, "request.contents.0.parts.1.thoughtSignature").Exists() {
+			t.Fatalf("invalid sibling signature was not removed: %s", out)
+		}
+		entries := hook.AllEntries()
+		if len(entries) != 2 {
+			t.Fatalf("expected 2 distinct provider groups at debug, got %v", entries)
+		}
+		foundInvalid := false
+		foundBypass := false
+		for _, entry := range entries {
+			if entry.Level != log.DebugLevel {
+				t.Fatalf("unexpected entry level: %v", entry.Level)
+			}
+			if strings.Contains(entry.Message, "sig_type=unknown") && strings.Contains(entry.Message, "sanitized 1 thoughtSignature") {
+				foundInvalid = true
+			}
+			if strings.Contains(entry.Message, "sig_type=bypass") && strings.Contains(entry.Message, "sanitized 1 thoughtSignature") {
+				foundBypass = true
+			}
+			if !strings.Contains(entry.Message, "path=request.contents") {
+				t.Fatalf("console message omits path: %q", entry.Message)
+			}
+		}
+		if !foundInvalid || !foundBypass {
+			t.Fatalf("missing expected provider logs: invalid=%t bypass=%t in %v", foundInvalid, foundBypass, entries)
+		}
+		assertSignatureDebugDoesNotLeak(t, hook, "invalid_sibling_signature")
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesForeignPrefixedBypassLogsAtDebug(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	for _, prefix := range []string{"claude#", "gpt#", "swe#"} {
+		foreign := prefix + GeminiSkipThoughtSignatureValidator
+		for _, siblings := range [][]string{{foreign}, {foreign, "invalid_sibling"}, {"invalid_sibling", foreign}} {
+			hook.Reset()
+			parts := `{"functionCall":{"name":"first","args":{}},"thoughtSignature":"` + GeminiSkipThoughtSignatureValidator + `"}`
+			for _, sig := range siblings {
+				parts += `,{"functionCall":{"name":"sibling","args":{}},"thoughtSignature":"` + sig + `"}`
+			}
+			input := []byte(`{"contents":[{"role":"model","parts":[` + parts + `]}]}`)
+			out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+			for i := range siblings {
+				if gjson.GetBytes(out, fmt.Sprintf("contents.0.parts.%d.thoughtSignature", i+1)).Exists() {
+					t.Fatalf("foreign sibling signature was not removed: %s", out)
+				}
+			}
+			entries := hook.AllEntries()
+			expectedCountWord := fmt.Sprintf("sanitized %d thoughtSignature", len(siblings))
+			if len(siblings) > 1 {
+				expectedCountWord = fmt.Sprintf("sanitized %d thoughtSignatures", len(siblings))
+			}
+			if len(entries) != 1 || entries[0].Level != log.DebugLevel ||
+				!strings.Contains(entries[0].Message, expectedCountWord) {
+				t.Fatalf("foreign prefix %q must stay visible at debug, got %v", prefix, entries)
+			}
+			assertSignatureDebugDoesNotLeak(t, hook, foreign)
+		}
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesReasonGroupsRemainDistinct(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"contents":[` +
+		`{"role":"user","parts":[{"functionResponse":{"name":"f","response":{}},"thoughtSignature":"invalid_response_sig"}]},` +
+		`{"role":"model","parts":[{"text":"answer","thoughtSignature":"invalid_text_sig"}]}]}`)
+	SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	entries := hook.AllEntries()
+	if len(entries) != 2 || entries[0].Message == entries[1].Message {
+		t.Fatalf("different reason groups must have distinct console messages, got %v", entries)
+	}
+	for i, reason := range []string{
+		"tool responses cannot carry signatures",
+		"text parts cannot carry signatures",
+	} {
+		if !strings.Contains(entries[i].Message, fmt.Sprintf("reason=%q", reason)) {
+			t.Fatalf("console message omits reason: %q", entries[i].Message)
+		}
+	}
+	assertSignatureDebugDoesNotLeak(t, hook, "invalid_response_sig")
+	assertSignatureDebugDoesNotLeak(t, hook, "invalid_text_sig")
 }
 
 func TestSanitizeGeminiRequestThoughtSignaturesPreservesField2WrappedUUIDFunctionCall(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,12 +19,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -326,8 +328,13 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 }
 
 type claudeErrorDetail struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
+	Type    string              `json:"type"`
+	Message string              `json:"message"`
+	Details *claudeErrorDetails `json:"details,omitempty"`
+}
+
+type claudeErrorDetails struct {
+	ErrorCode string `json:"error_code"`
 }
 
 type claudeErrorResponse struct {
@@ -344,19 +351,23 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 			errText = http.StatusText(status)
 		}
 		if msg.Error != nil {
-			if v := strings.TrimSpace(msg.Error.Error()); v != "" {
+			if v := strings.TrimSpace(claudeErrorText(msg.Error)); v != "" {
 				errText = v
 			}
 		}
 	}
 	errType, message := claudeErrorDetailFromText(status, errText)
-	return claudeErrorResponse{
+	response := claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
 			Type:    errType,
 			Message: message,
 		},
 	}
+	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
+		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
+	}
+	return response
 }
 
 func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
@@ -375,6 +386,14 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 			}
 		}
 		body := bytes.Clone(msg.Body)
+		if clienterror.IsClaudeThreadNotFound(status, errors.New(string(body))) {
+			if markedBody, errMarshal := json.Marshal(h.toClaudeError(&interfaces.ErrorMessage{
+				StatusCode: status,
+				Error:      errors.New(string(body)),
+			})); errMarshal == nil {
+				body = markedBody
+			}
+		}
 		appendClaudeAPIResponse(c, body)
 		if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
 			c.Writer.Header().Set("Content-Type", "application/json")
@@ -410,6 +429,20 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+func claudeErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		return string(responseBody.ResponseBody())
+	}
+	return err.Error()
 }
 
 func claudeErrorDetailFromText(status int, errText string) (string, string) {
@@ -459,7 +492,7 @@ func claudeErrorTypeFromStatus(status int) string {
 		return "request_too_large"
 	case http.StatusTooManyRequests:
 		return "rate_limit_error"
-	case http.StatusGatewayTimeout:
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		return "timeout_error"
 	case 529:
 		return "overloaded_error"

@@ -3,6 +3,7 @@ package chat_completions
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -74,6 +75,109 @@ func TestConvertCodexResponseToOpenAI_FirstChunkUsesRequestModelName(t *testing.
 	if gotModel != modelName {
 		t.Fatalf("expected model %q, got %q", modelName, gotModel)
 	}
+}
+
+func TestConvertCodexResponseToOpenAI_PreservesURLCitations(t *testing.T) {
+	t.Run("non-stream", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_citation","model":"gpt-5.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"前🙂"},{"type":"output_text","text":"引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2},{"type":"file_citation","file_id":"file_1","index":0}]}]}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(t.Context(), "gpt-5.5", nil, nil, raw, nil)
+
+		if got := gjson.GetBytes(out, "choices.0.message.content").String(); got != "前🙂引用" {
+			t.Fatalf("content = %q, want %q; response=%s", got, "前🙂引用", out)
+		}
+		annotation := gjson.GetBytes(out, "choices.0.message.annotations.0")
+		if !annotation.Exists() {
+			t.Fatalf("expected message annotation, response=%s", out)
+		}
+		if got := gjson.GetBytes(out, "choices.0.message.annotations.#").Int(); got != 1 {
+			t.Fatalf("annotation count = %d, want 1 after filtering unsupported types; response=%s", got, out)
+		}
+		if got := annotation.Get("type").String(); got != "url_citation" {
+			t.Fatalf("annotation type = %q, want url_citation; response=%s", got, out)
+		}
+		if got := annotation.Get("url").String(); got != "https://example.com" {
+			t.Fatalf("annotation url = %q, want https://example.com; response=%s", got, out)
+		}
+		if got := annotation.Get("title").String(); got != "Example" {
+			t.Fatalf("annotation title = %q, want Example; response=%s", got, out)
+		}
+		if got := annotation.Get("start_index").Int(); got != 2 {
+			t.Fatalf("annotation start_index = %d, want 2; response=%s", got, out)
+		}
+		if got := annotation.Get("end_index").Int(); got != 4 {
+			t.Fatalf("annotation end_index = %d, want 4; response=%s", got, out)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		var param any
+		if out := ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"前🙂"}`), &param); len(out) != 1 {
+			t.Fatalf("expected text delta chunk, got %d", len(out))
+		}
+
+		annotationEvent := []byte(`data: {"type":"response.output_text.annotation.added","annotation_index":0,"annotation":{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":1}}`)
+		out := ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, annotationEvent, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected citation chunk, got %d", len(out))
+		}
+		annotation := gjson.GetBytes(out[0], "choices.0.delta.annotations.0")
+		if !annotation.Exists() {
+			t.Fatalf("expected delta annotation, chunk=%s", out[0])
+		}
+		if got := annotation.Get("type").String(); got != "url_citation" {
+			t.Fatalf("annotation type = %q, want url_citation; chunk=%s", got, out[0])
+		}
+		if got := annotation.Get("start_index").Int(); got != 2 {
+			t.Fatalf("annotation start_index = %d, want 2; chunk=%s", got, out[0])
+		}
+		if got := annotation.Get("end_index").Int(); got != 3 {
+			t.Fatalf("annotation end_index = %d, want 3; chunk=%s", got, out[0])
+		}
+
+		if out = ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"引用"}`), &param); len(out) != 1 {
+			t.Fatalf("expected second text delta chunk, got %d", len(out))
+		}
+		updatedAnnotationEvent := []byte(`data: {"type":"response.output_text.annotation.added","annotation_index":0,"annotation":{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}}`)
+		if out = ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, updatedAnnotationEvent, &param); len(out) != 0 {
+			t.Fatalf("expected duplicate citation to be suppressed after more text, got %d chunks", len(out))
+		}
+	})
+
+	t.Run("stream completion annotation", func(t *testing.T) {
+		var param any
+		for _, delta := range []string{"前🙂", "引用"} {
+			if out := ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":`+string(mustJSONMarshal(t, delta))+`}`), &param); len(out) != 1 {
+				t.Fatalf("expected text delta chunk, got %d", len(out))
+			}
+		}
+
+		doneEvent := []byte(`data: {"type":"response.output_text.done","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}]}`)
+		out := ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, doneEvent, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected citation completion chunk, got %d", len(out))
+		}
+		annotation := gjson.GetBytes(out[0], "choices.0.delta.annotations.0")
+		if got := annotation.Get("start_index").Int(); got != 4 {
+			t.Fatalf("annotation start_index = %d, want 4; chunk=%s", got, out[0])
+		}
+		if got := annotation.Get("end_index").Int(); got != 6 {
+			t.Fatalf("annotation end_index = %d, want 6; chunk=%s", got, out[0])
+		}
+
+		contentPartDoneEvent := []byte(`data: {"type":"response.content_part.done","part":{"type":"output_text","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://other.example","title":"Other","start_index":0,"end_index":1}]}}`)
+		out = ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, contentPartDoneEvent, &param)
+		if len(out) != 1 || gjson.GetBytes(out[0], "choices.0.delta.annotations.0.url").String() != "https://other.example" {
+			t.Fatalf("expected content-part citation chunk, got %d: %s", len(out), out)
+		}
+		if got := gjson.GetBytes(out[0], "choices.0.delta.annotations.0.start_index").Int(); got != 4 {
+			t.Fatalf("content-part annotation start_index = %d, want 4; chunk=%s", got, out[0])
+		}
+
+		itemDoneEvent := []byte(`data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}]}]}}`)
+		if out = ConvertCodexResponseToOpenAI(t.Context(), "gpt-5.5", nil, nil, itemDoneEvent, &param); len(out) != 0 {
+			t.Fatalf("expected duplicate completion citation to be suppressed, got %d chunks", len(out))
+		}
+	})
 }
 
 func TestConvertCodexResponseToOpenAI_ToolCallChunkOmitsNullContentFields(t *testing.T) {
@@ -881,5 +985,76 @@ func TestConvertCodexResponseToOpenAI_RestoresNormalizedToolNames(t *testing.T) 
 	gotNameStream := gjson.GetBytes(streamChunks[0], "choices.0.delta.tool_calls.0.function.name").String()
 	if gotNameStream != originalName {
 		t.Fatalf("stream expected restored name %q, got %q", originalName, gotNameStream)
+	}
+}
+
+// Only the original winning custom patch declaration allows the JSON wrapper.
+func TestApplyPatchCustomChatCompletionsWrapper(t *testing.T) {
+	for _, toolType := range []string{"custom", "function"} {
+		t.Run(toolType, func(t *testing.T) {
+			request := []byte(`{"tools":[{"type":"` + toolType + `","name":"apply_patch"}]}`)
+			var param any
+			var arguments strings.Builder
+			send := func(event string) {
+				for _, out := range ConvertCodexResponseToOpenAI(t.Context(), "model", request, request, []byte("data: "+event), &param) {
+					arguments.WriteString(gjson.GetBytes(out, "choices.0.delta.tool_calls.0.function.arguments").String())
+				}
+			}
+			send(`{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`)
+			for _, delta := range []string{"*** Begin Patch\n", "+中文😀 \"\n", "*** End Patch\n"} {
+				send(`{"type":"response.custom_tool_call_input.delta","item_id":"a","output_index":0,"delta":` + string(mustJSONMarshal(t, delta)) + `}`)
+			}
+			patch := "*** Begin Patch\n+中文😀 \"\n*** End Patch\n"
+			send(`{"type":"response.custom_tool_call_input.done","item_id":"a","output_index":0,"input":` + string(mustJSONMarshal(t, patch)) + `}`)
+			send(`{"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":` + string(mustJSONMarshal(t, patch)) + `}}`)
+			want := patch
+			if toolType == "custom" {
+				want = `{"input":` + string(mustJSONMarshal(t, patch)) + `}`
+			}
+			if arguments.String() != want {
+				t.Fatalf("arguments=%q want=%q", arguments.String(), want)
+			}
+			var nonStream any
+			out := ConvertCodexResponseToOpenAINonStream(t.Context(), "model", request, request, []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","name":"apply_patch","call_id":"c","input":`+string(mustJSONMarshal(t, patch))+`}]}}`), &nonStream)
+			if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != want {
+				t.Fatalf("nonstream arguments=%q want=%q", got, want)
+			}
+		})
+	}
+}
+
+func TestApplyPatchCustomChatCompletionsDoneFallback(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	for _, added := range []bool{false, true} {
+		var param any
+		if added {
+			_ = ConvertCodexResponseToOpenAI(t.Context(), "m", request, request, []byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`), &param)
+		}
+		out := ConvertCodexResponseToOpenAI(t.Context(), "m", request, request, []byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}}`), &param)
+		if len(out) != 1 || gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String() != `{"input":"p"}` {
+			t.Fatalf("fallback: %s", out)
+		}
+	}
+}
+
+// This round trip requires the request converter to unwrap only a winning custom
+// patch's normalized function envelope, while explicit custom inputs remain raw.
+func TestApplyPatchChatCompletionNativeHistoryRoundTrip(t *testing.T) {
+	original := []byte(`{"messages":[{"role":"user","content":"patch"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	response := []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"p"}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, original, response, nil)
+	message := gjson.GetBytes(out, "choices.0.message")
+	followup := []byte(`{"messages":[` + message.Raw + `,{"role":"tool","tool_call_id":"c","content":"ok"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	request := ConvertOpenAIRequestToCodex("m", followup, true)
+	if got := gjson.GetBytes(request, "input.0.input").String(); got != "p" {
+		t.Fatalf("normalized function history must restore raw patch before native Codex: got %q, request=%s", got, request)
+	}
+}
+
+func TestApplyPatchChatResponseOrdinaryFunctionPreference(t *testing.T) {
+	original := []byte(`{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","function":{"name":"apply_patch","parameters":{}}}]}`)
+	out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, nil, []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"raw"}]}}`), nil)
+	if gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.arguments").String() != "raw" {
+		t.Fatalf("ordinary preference stolen: %s", out)
 	}
 }

@@ -8,10 +8,78 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
+
+func TestClaudeOAuthToolAliasRestoresContinuationWithoutDeclarations(t *testing.T) {
+	secret := "continuation-alias-caller"
+	createBody := []byte(`{"thread":{"type":"create"},"tools":[{"name":"Read","input_schema":{"type":"object"}}]}`)
+	executor := &ClaudeExecutor{}
+	_, reverseMap, errPrepare := executor.prepareClaudeOAuthToolNamesForRequest(createBody, claudeMCPAliasOptions{secret: secret})
+	if errPrepare != nil {
+		t.Fatalf("prepare create request: %v", errPrepare)
+	}
+	alias := ""
+	for upstreamName := range reverseMap {
+		alias = upstreamName
+		break
+	}
+	if alias == "" {
+		t.Fatal("create request did not allocate an OAuth MCP alias")
+	}
+
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"msg-one"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}]}]}`)
+	executor.rememberClaudeOAuthToolAliases(createBody, reverseMap, "msg-one")
+	_, continuationReverseMap, errPrepareContinuation := executor.prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: secret})
+	if errPrepareContinuation != nil {
+		t.Fatalf("prepare continuation request: %v", errPrepareContinuation)
+	}
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"tool-two","name":%q,"input":{}}]}`, alias))
+	restored, errRestore := restoreClaudeOAuthToolNamesFromResponse(response, continuationReverseMap)
+	if errRestore != nil {
+		t.Fatalf("restore continuation tool name: %v", errRestore)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Read" {
+		t.Fatalf("continuation tool name = %q, want Read; response=%s", got, restored)
+	}
+}
+
+func TestClaudeOAuthToolAliasMissingContinuationStateIsRequestScopedNotFound(t *testing.T) {
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"missing-message"}}`)
+	_, _, errPrepare := (&ClaudeExecutor{}).prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "missing-state-caller"})
+	if errPrepare == nil {
+		t.Fatal("prepare continuation request returned nil error")
+	}
+	statusErr, okStatus := errPrepare.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != 404 {
+		t.Fatalf("continuation error status = %v, want 404", errPrepare)
+	}
+	requestErr, okRequest := errPrepare.(cliproxyexecutor.RequestScopedError)
+	if !okRequest || !requestErr.IsRequestScoped() {
+		t.Fatalf("continuation error is not request-scoped: %T", errPrepare)
+	}
+}
+
+func TestClaudeOAuthToolAliasEvictionReturnsThreadNotFound(t *testing.T) {
+	executor := &ClaudeExecutor{}
+	createBody := []byte(`{"thread":{"type":"create"}}`)
+	executor.rememberClaudeOAuthToolAliases(createBody, map[string]string{"alias": "Read"}, "first-message")
+	for i := 0; i < claudeOAuthToolAliasStateLimit; i++ {
+		executor.rememberClaudeOAuthToolAliases(createBody, nil, fmt.Sprintf("message-%d", i))
+	}
+
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"first-message"}}`)
+	_, _, errPrepare := executor.prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "evicted-state-caller"})
+	if errPrepare == nil {
+		t.Fatal("evicted continuation returned nil error")
+	}
+	statusErr, okStatus := errPrepare.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != 404 {
+		t.Fatalf("evicted continuation error status = %v, want 404", errPrepare)
+	}
+}
 
 func TestRemapOAuthToolNamesWithBatchedEditsMatchesLegacyBytes(t *testing.T) {
 	secret := "differential-caller"
@@ -48,6 +116,10 @@ func TestRemapOAuthToolNamesWithBatchedEditsMatchesLegacyBytes(t *testing.T) {
 		{
 			name: "no edits",
 			body: []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"mcp__server__existing"}],"messages":[{"content":[{"type":"tool_reference","tool_name":"unknown"}]}]}`),
+		},
+		{
+			name: "mid-conversation tool changes",
+			body: []byte(`{"tools":[{"name":"read_file","input_schema":{"type":"object"}},{"name":"lookup_notes","input_schema":{"type":"object"},"defer_loading":true},{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}]},{"role":"system","content":[{"type":"text","text":"tools changed"},{"type":"tool_addition","tool":{"type":"tool_reference","name":"lookup_notes"}},{"type":"tool_removal","tool":{"type":"tool_reference","name":"read_file"}},{"type":"tool_addition","tool":{"type":"tool_reference","name":"web_search"}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"lookup_notes","input_schema":{"type":"object"}}}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"db_query","input_schema":{"type":"object"}}}},{"type":"tool_removal","tool":{"type":"mcp_tool_reference","server_name":"docs","name":"read_file"}},{"type":"tool_removal","tool":"read_file"}]}]}`),
 		},
 	}
 
@@ -336,11 +408,6 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 			alias:     "mcp__" + firstParts.server + "__" + unknownToolID[:len(unknownToolID)-1] + "_" + firstParts.semantic,
 			wantError: "semantic suffix matches multiple declared tools",
 		},
-		{
-			name:      "unrecoverable semantic suffix",
-			alias:     "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool",
-			wantError: "no unique request-local match",
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -365,6 +432,27 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("unrecoverable semantic suffix fails open", func(t *testing.T) {
+		unrecoverableAlias := "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool"
+		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, unrecoverableAlias))
+		restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+		if errReverse != nil {
+			t.Fatalf("reverseRemapOAuthToolNames() error = %v, want fail-open nil", errReverse)
+		}
+		if got := gjson.GetBytes(restored, "content.0.name").String(); got != unrecoverableAlias {
+			t.Fatalf("unrecoverable alias = %q, want %q forwarded unchanged", got, unrecoverableAlias)
+		}
+
+		line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, unrecoverableAlias))
+		restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+		if errStream != nil {
+			t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
+		}
+		if !bytes.Equal(restoredLine, line) {
+			t.Fatalf("stream line = %s, want it forwarded unchanged", restoredLine)
+		}
+	})
 }
 
 func TestReverseRemapOAuthToolNames_OverlappingSemanticSuffix(t *testing.T) {
@@ -445,6 +533,7 @@ func FuzzRemapOAuthToolNamesWithBatchedEditsMatchesLegacy(f *testing.F) {
 		[]byte(`{"tools":[{"name":"search_web"}]}`),
 		[]byte(`{"tools":[{"type":"custom","name":"读取文件"}],"tool_choice":{"type":"tool","name":"读取文件"},"messages":[{"content":[{"type":"tool_use","name":"读取文件"}]}]}`),
 		[]byte("{\n\"messages\":[{\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"a\\u005fb\"}]}],\"tools\":[{\"name\":\"a\\u005fb\"}]}"),
+		[]byte(`{"tools":[{"name":"lookup_notes"}],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"lookup_notes"}},{"type":"tool_removal","tool":{"type":"tool_reference","name":"lookup_notes"}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"lookup_notes"}}}]}]}`),
 	}
 	for _, seed := range seeds {
 		f.Add(seed, "fuzz-caller")
@@ -555,35 +644,37 @@ func TestRemapKeepsReverseMapEmptyWhenOnlyCallerMCPToolsArePresent(t *testing.T)
 	}
 }
 
-func TestReverseRemapOAuthToolNamesMarksTrailingMarkupFailureRequestScoped(t *testing.T) {
+// TestReverseRemapOAuthToolNamesFailsOpenOnTrailingMarkup verifies that an alias with
+// trailing prompt markup glued to it is forwarded verbatim instead of failing the
+// response or terminating the SSE stream.
+func TestReverseRemapOAuthToolNamesFailsOpenOnTrailingMarkup(t *testing.T) {
 	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_clear_thinking"
 	malformedAlias := alias + "</parameter>\n<parameter name=\"merge\""
 	reverseMap := map[string]string{alias: "clear_thinking"}
 
 	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, malformedAlias))
 	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
-	if errReverse == nil {
-		t.Fatal("reverseRemapOAuthToolNames() error = nil, want fail-closed alias error")
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v, want fail-open nil", errReverse)
 	}
 	if !bytes.Equal(restored, response) {
 		t.Fatalf("reverseRemapOAuthToolNames() returned modified response: %s", restored)
 	}
-	var requestErr cliproxyexecutor.RequestScopedError
-	if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
-	}
 
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, malformedAlias))
 	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
-	if errStream == nil {
-		t.Fatal("reverseRemapOAuthToolNamesFromStreamLine() error = nil, want fail-closed alias error")
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
 	}
 	if !bytes.Equal(restoredLine, line) {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() returned modified line: %s", restoredLine)
 	}
-	requestErr = nil
-	if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
+}
+
+func TestClaudeMCPAliasRestoreErrorStaysRequestScoped(t *testing.T) {
+	var requestErr cliproxyexecutor.RequestScopedError = claudeMCPAliasRestoreError{fmt.Errorf("probe")}
+	if !requestErr.IsRequestScoped() {
+		t.Fatal("claudeMCPAliasRestoreError.IsRequestScoped() = false, want true")
 	}
 }
 
@@ -737,6 +828,146 @@ func TestRemapOAuthToolNames_ToolSearchResultInMessageHistory(t *testing.T) {
 	}
 }
 
+// TestRemapOAuthToolNames_MidConversationToolChanges covers tool_addition and
+// tool_removal blocks in role=system messages. Upstream resolves their tool
+// references against tools[], so a reference to a declared client tool must
+// carry the same MCP alias or the request fails with "references unknown
+// tool". Both remap paths must agree.
+func TestRemapOAuthToolNames_MidConversationToolChanges(t *testing.T) {
+	const tools = `[` +
+		`{"name":"read_file","description":"Read a file","input_schema":{"type":"object","properties":{}}},` +
+		`{"name":"lookup_notes","description":"Look up notes","input_schema":{"type":"object","properties":{}},"defer_loading":true},` +
+		`{"type":"web_search_20250305","name":"web_search"},` +
+		`{"name":"mcp__context7__query-docs","input_schema":{"type":"object"}}` +
+		`]`
+
+	type nameCheck struct {
+		path     string
+		original string
+		aliased  bool
+	}
+	tests := []struct {
+		name     string
+		messages string
+		checks   []nameCheck
+	}{
+		{
+			name:     "tool_addition reference to declared tool",
+			messages: `[{"role":"user","content":"Reply with exactly: ok"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"lookup_notes"}}]}]`,
+			checks:   []nameCheck{{path: "messages.1.content.0.tool.name", original: "lookup_notes", aliased: true}},
+		},
+		{
+			name:     "tool_removal reference to declared tool",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"read_file"}}]}]`,
+			checks:   []nameCheck{{path: "messages.1.content.0.tool.name", original: "read_file", aliased: true}},
+		},
+		{
+			name:     "mixed with text and tool_use history",
+			messages: `[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]},{"role":"system","content":[{"type":"text","text":"Tools changed."},{"type":"tool_removal","tool":{"type":"tool_reference","name":"read_file"}},{"type":"tool_addition","tool":{"type":"tool_reference","name":"lookup_notes"}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.0.name", original: "read_file", aliased: true},
+				{path: "messages.3.content.0.text", original: "Tools changed."},
+				{path: "messages.3.content.1.tool.name", original: "read_file", aliased: true},
+				{path: "messages.3.content.2.tool.name", original: "lookup_notes", aliased: true},
+			},
+		},
+		{
+			name:     "undeclared server and caller MCP names unchanged",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"Bash"}},{"type":"tool_addition","tool":{"type":"tool_reference","name":"web_search"}},{"type":"tool_removal","tool":{"type":"tool_reference","name":"mcp__context7__query-docs"}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.0.tool.name", original: "Bash"},
+				{path: "messages.1.content.1.tool.name", original: "web_search"},
+				{path: "messages.1.content.2.tool.name", original: "mcp__context7__query-docs"},
+			},
+		},
+		{
+			name:     "MCP connector references unchanged",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"mcp_tool_reference","server_name":"docs","name":"read_file"}},{"type":"tool_removal","tool":{"type":"mcp_toolset_reference","server_name":"read_file"}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.0.tool.name", original: "read_file"},
+				{path: "messages.1.content.1.tool.server_name", original: "read_file"},
+			},
+		},
+		{
+			name:     "inline definition redefining declared tool",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"lookup_notes","description":"v2","input_schema":{"type":"object"}}}}]}]`,
+			checks:   []nameCheck{{path: "messages.1.content.0.tool.definition.name", original: "lookup_notes", aliased: true}},
+		},
+		{
+			name:     "inline definitions of undeclared or server tools unchanged",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"db_query","input_schema":{"type":"object"}}}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"web_search_20260209","name":"read_file"}}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"mcp_toolset","mcp_server_name":"calendar"}}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.0.tool.definition.name", original: "db_query"},
+				{path: "messages.1.content.1.tool.definition.name", original: "read_file"},
+				{path: "messages.1.content.2.tool.definition.mcp_server_name", original: "calendar"},
+			},
+		},
+		{
+			name:     "malformed tool changes ignored",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition"},{"type":"tool_addition","tool":"lookup_notes"},{"type":"tool_addition","tool":{"name":"lookup_notes"}},{"type":"tool_addition","tool":{"type":"tool_reference","tool_name":"lookup_notes"}},{"type":"tool_removal","tool":{"type":"tool_definition","definition":{"name":"lookup_notes"}}},{"type":"tool_addition","tool":{"type":"tool_reference","name":""}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.1.tool", original: "lookup_notes"},
+				{path: "messages.1.content.2.tool.name", original: "lookup_notes"},
+				{path: "messages.1.content.3.tool.tool_name", original: "lookup_notes"},
+				{path: "messages.1.content.4.tool.definition.name", original: "lookup_notes"},
+				{path: "messages.1.content.5.tool.name", original: ""},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := []byte(`{"model":"claude-opus-5-5","max_tokens":64,"tools":` + tools + `,"messages":` + test.messages + `}`)
+			options := claudeMCPAliasOptions{secret: "tool-change-caller"}
+			legacyBody, legacyReverseMap := remapOAuthToolNamesWithOptionsLegacy(body, options)
+			batchedBody, batchedReverseMap, ok := remapOAuthToolNamesWithBatchedEdits(body, options)
+			if !ok {
+				t.Fatal("batched remap unexpectedly rejected valid JSON offsets")
+			}
+			if !bytes.Equal(batchedBody, legacyBody) || !maps.Equal(batchedReverseMap, legacyReverseMap) {
+				t.Fatalf("batched result differs from legacy\n got: %s %v\nwant: %s %v", batchedBody, batchedReverseMap, legacyBody, legacyReverseMap)
+			}
+
+			for _, variant := range []struct {
+				name       string
+				body       []byte
+				reverseMap map[string]string
+			}{
+				{name: "batched", body: batchedBody, reverseMap: batchedReverseMap},
+				{name: "legacy", body: legacyBody, reverseMap: legacyReverseMap},
+			} {
+				declared := make(map[string]string)
+				gjson.GetBytes(variant.body, "tools").ForEach(func(index, tool gjson.Result) bool {
+					original := gjson.Get(tools, fmt.Sprintf("%d.name", index.Int())).String()
+					declared[original] = tool.Get("name").String()
+					return true
+				})
+				for _, check := range test.checks {
+					want := check.original
+					if check.aliased {
+						want = declared[check.original]
+						if want == check.original || !helps.IsClaudeMCPToolName(want) {
+							t.Fatalf("%s: tools[] name for %q = %q, want an MCP alias", variant.name, check.original, want)
+						}
+						if got := variant.reverseMap[want]; got != check.original {
+							t.Fatalf("%s: reverseMap[%q] = %q, want %q", variant.name, want, got, check.original)
+						}
+					}
+					if got := gjson.GetBytes(variant.body, check.path).String(); got != want {
+						t.Fatalf("%s: %s = %q, want %q", variant.name, check.path, got, want)
+					}
+				}
+				if got := gjson.GetBytes(variant.body, "tools.2.name").String(); got != "web_search" {
+					t.Fatalf("%s: server tool name = %q, want web_search", variant.name, got)
+				}
+				if got := gjson.GetBytes(variant.body, "tools.3.name").String(); got != "mcp__context7__query-docs" {
+					t.Fatalf("%s: caller MCP tool name = %q, want unchanged", variant.name, got)
+				}
+			}
+		})
+	}
+}
+
 func reverseMapKeyFor(m map[string]string, val string) string {
 	for k, v := range m {
 		if v == val && k != val {
@@ -829,4 +1060,41 @@ func TestReverseRemapOAuthToolNamesHybridPassthroughPrecedenceAndAmbiguity(t *te
 			t.Fatal("restoreClaudeOAuthToolNamesFromResponse() expected error for ambiguous passthrough, got nil")
 		}
 	})
+}
+
+func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
+	// Under Claude OAuth cloaking, when the model generates an undeclared tool name
+	// under the request's virtual server prefix (e.g. hallucinated or misspelled tool),
+	// reverseRemapOAuthToolNames and reverseRemapOAuthToolNamesFromStreamLine must fail OPEN:
+	// forwarding the tool name unchanged without error so the stream is not aborted.
+	body := []byte(`{"tools":[{"name":"terminal","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "undeclared-tool-caller"})
+	terminalAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	parts, ok := parseClaudeMCPAlias(terminalAlias)
+	if !ok {
+		t.Fatalf("parseClaudeMCPAlias(%q) failed", terminalAlias)
+	}
+
+	// Model hallucinated an undeclared tool name under the same virtual server
+	undeclaredToolName := "mcp__" + parts.server + "__tiny_terminap"
+
+	// 1. Non-stream response
+	resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, undeclaredToolName))
+	restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+	if err != nil {
+		t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v, want fail-open nil", err)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != undeclaredToolName {
+		t.Fatalf("restored tool name = %q, want %q forwarded unchanged", got, undeclaredToolName)
+	}
+
+	// 2. Stream SSE line
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, undeclaredToolName))
+	restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream != nil {
+		t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
+	}
+	if !bytes.Equal(restoredLine, line) {
+		t.Fatalf("restoredLine = %s, want %s forwarded unchanged", string(restoredLine), string(line))
+	}
 }

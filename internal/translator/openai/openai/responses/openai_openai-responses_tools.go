@@ -4,7 +4,8 @@ import (
 	"strconv"
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -19,6 +20,7 @@ type responsesToolDeclaration struct {
 	localName string
 	namespace string
 	custom    bool
+	shell     bool
 }
 
 // walkResponsesToolDeclarations visits the tool declarations of a Responses
@@ -35,15 +37,23 @@ type responsesToolDeclaration struct {
 func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDeclaration) bool) {
 	var declarations []responsesToolDeclaration
 	emit := func(tool gjson.Result, namespaceName string) {
-		var custom bool
+		var custom, shell bool
 		switch strings.TrimSpace(tool.Get("type").String()) {
 		case "", "function":
 		case "custom":
 			custom = true
+		case "shell":
+			if namespaceName != "" || tool.Get("environment.type").String() != "local" {
+				return
+			}
+			shell = true
 		default:
 			return
 		}
 		localName := responsesToolName(tool)
+		if shell {
+			localName = "__cpa_local_shell"
+		}
 		if localName == "" {
 			return
 		}
@@ -53,6 +63,7 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 			localName: localName,
 			namespace: namespaceName,
 			custom:    custom,
+			shell:     shell,
 		})
 	}
 	scan := func(tools gjson.Result) {
@@ -85,6 +96,25 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 		})
 	}
 
+	// Reserve user identities before assigning the synthetic shell name.
+	reserved := make(map[string]bool)
+	for _, d := range declarations {
+		if !d.shell {
+			reserved[d.localName] = true
+			reserved[d.chatName] = true
+			reserved[rawResponsesNamespaceQualifiedName(d.namespace, d.localName)] = true
+		}
+	}
+	shellName := "__cpa_local_shell"
+	for suffix := 1; reserved[shellName]; suffix++ {
+		shellName = "__cpa_local_shell_" + strconv.Itoa(suffix)
+	}
+	for i := range declarations {
+		if declarations[i].shell {
+			declarations[i].localName = shellName
+			declarations[i].chatName = shellName
+		}
+	}
 	disambiguateResponsesChatToolNames(declarations)
 
 	proceed := true
@@ -218,7 +248,17 @@ func convertResponsesCustomToolToOpenAIChat(tool gjson.Result, overrideName stri
 	if description := responsesToolDescription(tool); description != "" {
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
 	}
+	if applypatch.IsCustomTool(tool) {
+		chatTool, _ = sjson.SetBytes(chatTool, "function.description", applypatch.Description(tool))
+		chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", applypatch.Parameters())
+	}
 	return chatTool, true
+}
+
+// isApplyPatch resolves only the original winning custom declaration.
+func (idx *responsesToolIndex) isApplyPatch(name string) bool {
+	d, ok := idx.byChat[name]
+	return ok && d.custom && applypatch.IsCustomTool(d.tool)
 }
 
 func convertResponsesFunctionToolToOpenAIChat(tool gjson.Result, overrideName string) ([]byte, bool) {
@@ -344,7 +384,7 @@ func rawResponsesNamespaceQualifiedName(namespaceName, childName string) string 
 	if childName == "" || namespaceName == "" || strings.HasPrefix(childName, "mcp__") {
 		return childName
 	}
-	if strings.HasPrefix(childName, namespaceName) {
+	if childName == namespaceName || strings.HasPrefix(childName, namespaceName+"__") {
 		return childName
 	}
 	if strings.HasSuffix(namespaceName, "__") {

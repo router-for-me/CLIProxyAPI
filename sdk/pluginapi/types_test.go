@@ -351,6 +351,9 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 		AuthID:          request.Candidates[0].ID,
 		DelegateBuiltin: SchedulerBuiltinRoundRobin,
 		Handled:         true,
+		Reject:          false,
+		RejectCode:      "",
+		RejectReason:    "",
 	}
 
 	if request.Plugin.Name != "scheduler-plugin" {
@@ -389,6 +392,159 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	}
 	if response.AuthID != "auth-1" || response.DelegateBuiltin != SchedulerBuiltinRoundRobin || !response.Handled {
 		t.Fatalf("SchedulerPickResponse = %#v", response)
+	}
+
+	rejectedResponse := SchedulerPickResponse{
+		Handled:      true,
+		Reject:       true,
+		RejectCode:   "policy_violation",
+		RejectReason: "all candidates exceed usage quota",
+	}
+	if !rejectedResponse.Reject || rejectedResponse.RejectCode != "policy_violation" || rejectedResponse.RejectReason != "all candidates exceed usage quota" {
+		t.Fatalf("rejectedResponse = %#v", rejectedResponse)
+	}
+}
+
+func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
+	tests := []struct {
+		name         string
+		payload      string
+		wantAuthID   string
+		wantDelegate string
+		wantHandled  bool
+		wantReject   bool
+		wantCode     string
+		wantReason   string
+	}{
+		{
+			name:         "legacy pascal case auth id",
+			payload:      `{"AuthID":"auth-legacy","DelegateBuiltin":"","Handled":true}`,
+			wantAuthID:   "auth-legacy",
+			wantDelegate: "",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "legacy pascal case delegate",
+			payload:      `{"AuthID":"","DelegateBuiltin":"round-robin","Handled":true}`,
+			wantAuthID:   "",
+			wantDelegate: "round-robin",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "snake case auth id",
+			payload:      `{"auth_id":"auth-snake","delegate_builtin":"","handled":true}`,
+			wantAuthID:   "auth-snake",
+			wantDelegate: "",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "snake case delegate",
+			payload:      `{"auth_id":"","delegate_builtin":"fill-first","handled":true}`,
+			wantAuthID:   "",
+			wantDelegate: "fill-first",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:        "snake case terminal rejection",
+			payload:     `{"handled":true,"reject":true,"reject_code":"quota_exceeded","reject_reason":"quota exhausted"}`,
+			wantHandled: true,
+			wantReject:  true,
+			wantCode:    "quota_exceeded",
+			wantReason:  "quota exhausted",
+		},
+		{
+			name:        "pascal case terminal rejection",
+			payload:     `{"Handled":true,"Reject":true,"RejectCode":"policy_violation","RejectReason":"blocked by policy"}`,
+			wantHandled: true,
+			wantReject:  true,
+			wantCode:    "policy_violation",
+			wantReason:  "blocked by policy",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp SchedulerPickResponse
+			if errUnmarshal := json.Unmarshal([]byte(tc.payload), &resp); errUnmarshal != nil {
+				t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+			}
+			if resp.AuthID != tc.wantAuthID {
+				t.Fatalf("AuthID = %q, want %q", resp.AuthID, tc.wantAuthID)
+			}
+			if resp.DelegateBuiltin != tc.wantDelegate {
+				t.Fatalf("DelegateBuiltin = %q, want %q", resp.DelegateBuiltin, tc.wantDelegate)
+			}
+			if resp.Handled != tc.wantHandled {
+				t.Fatalf("Handled = %v, want %v", resp.Handled, tc.wantHandled)
+			}
+			if resp.Reject != tc.wantReject {
+				t.Fatalf("Reject = %v, want %v", resp.Reject, tc.wantReject)
+			}
+			if resp.RejectCode != tc.wantCode {
+				t.Fatalf("RejectCode = %q, want %q", resp.RejectCode, tc.wantCode)
+			}
+			if resp.RejectReason != tc.wantReason {
+				t.Fatalf("RejectReason = %q, want %q", resp.RejectReason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T) {
+	// Verify that explicit false or empty string in incoming JSON correctly overwrites pre-existing true/non-empty values.
+	resp := SchedulerPickResponse{
+		AuthID:          "old-auth",
+		DelegateBuiltin: "old-delegate",
+		Handled:         true,
+		Reject:          true,
+		RejectCode:      "old-code",
+		RejectReason:    "old-reason",
+	}
+
+	payload := `{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":""}`
+	if errUnmarshal := json.Unmarshal([]byte(payload), &resp); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+
+	if resp.Handled {
+		t.Fatalf("Handled = %v, want false", resp.Handled)
+	}
+	if resp.Reject {
+		t.Fatalf("Reject = %v, want false", resp.Reject)
+	}
+	if resp.AuthID != "" {
+		t.Fatalf("AuthID = %q, want empty", resp.AuthID)
+	}
+	if resp.DelegateBuiltin != "" {
+		t.Fatalf("DelegateBuiltin = %q, want empty", resp.DelegateBuiltin)
+	}
+	if resp.RejectCode != "" {
+		t.Fatalf("RejectCode = %q, want empty", resp.RejectCode)
+	}
+	if resp.RejectReason != "" {
+		t.Fatalf("RejectReason = %q, want empty", resp.RejectReason)
+	}
+
+	// Verify that omitting fields in incoming JSON leaves existing fields intact.
+	resp2 := SchedulerPickResponse{
+		AuthID:  "keep-auth",
+		Handled: true,
+	}
+	if errUnmarshal := json.Unmarshal([]byte(`{"reject":true}`), &resp2); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	if resp2.AuthID != "keep-auth" {
+		t.Fatalf("AuthID = %q, want keep-auth", resp2.AuthID)
+	}
+	if !resp2.Handled {
+		t.Fatalf("Handled = %v, want true", resp2.Handled)
+	}
+	if !resp2.Reject {
+		t.Fatalf("Reject = %v, want true", resp2.Reject)
 	}
 }
 

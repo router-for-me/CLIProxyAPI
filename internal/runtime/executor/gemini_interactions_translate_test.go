@@ -5,10 +5,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -75,9 +75,6 @@ func TestTranslateGeminiInteractionsRequestPairTranslatesSameSliceOnce(t *testin
 	to := sdktranslator.FormatInteractions
 	if sdktranslator.HasRequestTransformer(from, to) {
 		t.Fatalf("request transformer %s -> %s is already registered", from, to)
-	}
-	if sdktranslator.HasPluginHooks() {
-		t.Fatal("plugin hooks are installed and disable translation reuse")
 	}
 
 	const model = "gemini-interactions-count"
@@ -156,7 +153,7 @@ func TestTranslateGeminiInteractionsRequestPairTranslatesDistinctInputs(t *testi
 	}
 }
 
-func TestTranslateGeminiInteractionsRequestPairPreservesHookOrder(t *testing.T) {
+func TestTranslateGeminiInteractionsRequestPairInvokesPluginOncePerInput(t *testing.T) {
 	hooks := &interactionsTranslateHooks{}
 	sdktranslator.SetPluginHooks(hooks)
 	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
@@ -166,22 +163,27 @@ func TestTranslateGeminiInteractionsRequestPairPreservesHookOrder(t *testing.T) 
 	const model = "gemini-3.1-flash-lite"
 	payload := []byte(`{"model":"gemini-3.1-flash-lite","messages":[{"role":"user","content":"same"}]}`)
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, OriginalRequest: payload}
-	base, work := translateGeminiInteractionsRequestPair(ctx, cfg, model, payload, opts, false, true)
-	if hooks.calls != 2 {
-		t.Fatalf("plugin hook calls = %d, want 2", hooks.calls)
+	for _, stream := range []bool{false, true} {
+		for _, compat := range []bool{false, true} {
+			hooks.calls = 0
+			base, work := translateGeminiInteractionsRequestPair(ctx, cfg, model, payload, opts, stream, compat)
+			if hooks.calls != 1 {
+				t.Fatalf("stream=%v compat=%v: plugin calls = %d, want 1", stream, compat, hooks.calls)
+			}
+			if got := gjson.GetBytes(work, "plugin_call").Int(); got != 1 {
+				t.Fatalf("working plugin_call = %d, want 1", got)
+			}
+			if !bytes.Equal(base, work) {
+				t.Fatal("same input produced different plugin results")
+			}
+			assertIndependentGeminiInteractionsBuffers(t, payload, base, work)
+		}
 	}
-	if got := gjson.GetBytes(work, "plugin_call").Int(); got != 1 {
-		t.Fatalf("working plugin_call = %d, want 1", got)
-	}
-	if got := gjson.GetBytes(base, "plugin_call").Int(); got != 2 {
-		t.Fatalf("baseline plugin_call = %d, want 2", got)
-	}
-	assertIndependentGeminiInteractionsBuffers(t, payload, base, work)
 
 	detached := bytes.Clone(payload)
 	opts.OriginalRequest = detached
 	before := hooks.calls
-	base, work = translateGeminiInteractionsRequestPair(ctx, cfg, model, payload, opts, true, false)
+	base, work := translateGeminiInteractionsRequestPair(ctx, cfg, model, payload, opts, true, false)
 	if hooks.calls != before+2 {
 		t.Fatalf("distinct plugin hook calls = %d, want %d", hooks.calls-before, 2)
 	}

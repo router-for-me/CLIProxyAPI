@@ -1,6 +1,73 @@
 package registry
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestCodexConfigurationUpdateCapability(t *testing.T) {
+	for _, tier := range []struct {
+		name    string
+		models  func() []*ModelInfo
+		capable []string
+	}{
+		{name: "free", models: GetCodexFreeModels, capable: []string{"gpt-6-luna"}},
+		{name: "team", models: GetCodexTeamModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}},
+		{name: "plus", models: GetCodexPlusModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}},
+		{name: "pro", models: GetCodexProModels, capable: []string{"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}},
+	} {
+		t.Run(tier.name, func(t *testing.T) {
+			byID := make(map[string]*ModelInfo)
+			for _, info := range tier.models() {
+				if info != nil {
+					byID[info.ID] = info
+				}
+			}
+			for _, id := range append([]string{"gpt-5.5"}, tier.capable...) {
+				info := byID[id]
+				if info == nil {
+					t.Errorf("%s is missing", id)
+					continue
+				}
+				want := id != "gpt-5.5"
+				if info.SupportConfigurationUpdate != want {
+					t.Errorf("%s configuration_update = %v, want %v", id, info.SupportConfigurationUpdate, want)
+				}
+				if cloned := cloneModelInfo(info); cloned.SupportConfigurationUpdate != want {
+					t.Errorf("%s clone configuration_update = %v, want %v", id, cloned.SupportConfigurationUpdate, want)
+				}
+				raw, errMarshal := json.Marshal(info)
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				if strings.Contains(string(raw), "support_configuration_update") || strings.Contains(string(raw), "SupportConfigurationUpdate") {
+					t.Errorf("%s exposed configuration_update capability: %s", id, raw)
+				}
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "true", raw: `{"id":"test","support_configuration_update":true}`, want: true},
+		{name: "false", raw: `{"id":"test","support_configuration_update":false}`},
+		{name: "absent", raw: `{"id":"test"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			info := ModelInfo{SupportConfigurationUpdate: true}
+			if errUnmarshal := json.Unmarshal([]byte(tt.raw), &info); errUnmarshal != nil {
+				t.Fatal(errUnmarshal)
+			}
+			if info.SupportConfigurationUpdate != tt.want {
+				t.Errorf("capability = %v, want %v", info.SupportConfigurationUpdate, tt.want)
+			}
+		})
+	}
+}
 
 func TestGetStaticModelDefinitionsByChannelSupportsGeminiInteractions(t *testing.T) {
 	models := GetStaticModelDefinitionsByChannel("gemini-interactions")
@@ -62,6 +129,28 @@ func TestWithXAIBuiltinsIncludesImage20(t *testing.T) {
 		}
 	}
 	t.Fatalf("expected xAI builtin model %s", xaiBuiltinImage20ModelID)
+}
+
+func TestWithXAIBuiltinsIncludesSpeechModels(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	found := map[string]*ModelInfo{}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if model.ID == xaiBuiltinSpeechModelID || model.ID == xaiBuiltinSpeechVoiceModelID {
+			found[model.ID] = model
+		}
+	}
+	for _, id := range []string{xaiBuiltinSpeechModelID, xaiBuiltinSpeechVoiceModelID} {
+		model := found[id]
+		if model == nil {
+			t.Fatalf("expected xAI builtin model %s", id)
+		}
+		if model.OwnedBy != "xai" || model.Type != "xai" {
+			t.Fatalf("%s owned_by/type = %s/%s, want xai/xai", id, model.OwnedBy, model.Type)
+		}
+	}
 }
 
 func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {

@@ -12,15 +12,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	devinauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/devin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	interactionsclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/interactions/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	devinauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/devin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	interactionsclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/interactions/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
@@ -3800,7 +3800,8 @@ func TestDevinExecutor_WarnsWhenUpstreamServesUnexpectedModel(t *testing.T) {
 
 	exec := NewDevinExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
-		ID:         "devin-auth-unexpected",
+		// Isolate this run from the process-wide model warning throttle.
+		ID:         "devin-auth-unexpected-" + uuid.NewString(),
 		Provider:   "devin",
 		Attributes: map[string]string{"api_key": "test-key"},
 	}
@@ -4670,4 +4671,198 @@ func TestRegressionIssue5951_InterleavedToolsWithTextAndContinuation(t *testing.
 	if steps[2].Get("content.0.text").String() != "Working on step 1... All done." {
 		t.Fatalf("step[2] text = %q, want 'Working on step 1... All done.'", steps[2].Get("content.0.text").String())
 	}
+}
+
+func TestStreamDevinFrames_ImmediateTrailerError_NoInitialPayloadBeforeError(t *testing.T) {
+	var buf bytes.Buffer
+	// Immediate Connect trailer error with code 7 (PERMISSION_DENIED)
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{"error":{"code":"permission_denied","message":"Unable to process request due to an MCP configuration issue."}}`)))
+
+	e := &DevinExecutor{}
+	out := make(chan cliproxyexecutor.StreamChunk, 10)
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		OriginalRequest: []byte(`{"model":"devin/kimi-k3","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	}
+
+	go func() {
+		defer close(out)
+		e.streamDevinFrames(
+			context.Background(),
+			&buf,
+			cliproxyexecutor.Request{Model: "devin/kimi-k3", Payload: opts.OriginalRequest},
+			opts,
+			"kimi-k3",
+			sdktranslator.FormatOpenAI,
+			nil,
+			out,
+		)
+	}()
+
+	firstChunk, ok := <-out
+	if !ok {
+		t.Fatalf("expected at least one chunk")
+	}
+	if firstChunk.Err == nil {
+		t.Fatalf("expected first chunk to have Err, but got Payload: %s", string(firstChunk.Payload))
+	}
+	type statusError interface {
+		StatusCode() int
+	}
+	if se, ok := firstChunk.Err.(statusError); !ok || se.StatusCode() != 403 {
+		t.Fatalf("expected status code 403, got error: %v", firstChunk.Err)
+	}
+}
+
+func TestStreamDevinFrames_MidStreamTrailerError_EmitsTranslatedFailedEventBeforeStreamError(t *testing.T) {
+	var buf bytes.Buffer
+	// Frame 1: text content
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 3, protowire.BytesType)
+	f1 = protowire.AppendString(f1, "partial answer")
+	buf.Write(helps.WrapConnectEnvelope(f1))
+
+	// Connect trailer with error code 7 (PERMISSION_DENIED)
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{"error":{"code":"permission_denied","message":"devin upstream error (permission_denied): MCP configuration issue"}}`)))
+
+	e := &DevinExecutor{}
+	out := make(chan cliproxyexecutor.StreamChunk, 20)
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: []byte(`{"model":"devin/kimi-k3","stream":true}`),
+	}
+
+	go func() {
+		defer close(out)
+		e.streamDevinFrames(
+			context.Background(),
+			&buf,
+			cliproxyexecutor.Request{Model: "devin/kimi-k3", Payload: opts.OriginalRequest},
+			opts,
+			"kimi-k3",
+			sdktranslator.FormatOpenAIResponse,
+			nil,
+			out,
+		)
+	}()
+
+	var payloads [][]byte
+	var sawErrorChunk bool
+	var failedEventIdx = -1
+	var errorChunkIdx = -1
+	idx := 0
+	for chunk := range out {
+		if chunk.Err != nil {
+			sawErrorChunk = true
+			errorChunkIdx = idx
+			idx++
+			continue
+		}
+		if strings.Contains(string(chunk.Payload), "response.failed") {
+			failedEventIdx = idx
+		}
+		payloads = append(payloads, chunk.Payload)
+		idx++
+	}
+
+	if !sawErrorChunk {
+		t.Fatalf("expected stream error chunk")
+	}
+	if failedEventIdx == -1 {
+		t.Fatalf("expected translated response.failed SSE event, but none found")
+	}
+	if failedEventIdx >= errorChunkIdx {
+		t.Fatalf("expected response.failed (idx %d) to be emitted before error chunk (idx %d)", failedEventIdx, errorChunkIdx)
+	}
+
+	allPayload := string(bytes.Join(payloads, []byte("\n")))
+	if !strings.Contains(allPayload, "permission_denied") {
+		t.Fatalf("expected error message in stream payloads, got:\n%s", allPayload)
+	}
+}
+
+func TestDevinApplyPatchExecutorReuse(t *testing.T) {
+	wireField := func(data []byte, target protowire.Number) []byte {
+		for len(data) > 0 {
+			number, kind, n := protowire.ConsumeTag(data)
+			if n < 0 {
+				return nil
+			}
+			data = data[n:]
+			if kind == protowire.BytesType {
+				value, m := protowire.ConsumeBytes(data)
+				if m < 0 {
+					return nil
+				}
+				if number == target {
+					return value
+				}
+				data = data[m:]
+			} else {
+				m := protowire.ConsumeFieldValue(number, kind, data)
+				if m < 0 {
+					return nil
+				}
+				data = data[m:]
+			}
+		}
+		return nil
+	}
+	args := `{"input":"  *** Begin Patch\n*** End Patch\n "}`
+	var frames bytes.Buffer
+	for i, fragment := range []string{args[:22], args[22:]} {
+		var tool []byte
+		tool = protowire.AppendTag(tool, 1, protowire.BytesType)
+		tool = protowire.AppendString(tool, "call_patch")
+		if i == 0 {
+			tool = protowire.AppendTag(tool, 2, protowire.BytesType)
+			tool = protowire.AppendString(tool, "functions__apply_patch")
+		}
+		tool = protowire.AppendTag(tool, 3, protowire.BytesType)
+		tool = protowire.AppendString(tool, fragment)
+		var frame []byte
+		frame = protowire.AppendTag(frame, 6, protowire.BytesType)
+		frame = protowire.AppendBytes(frame, tool)
+		frames.Write(helps.WrapConnectEnvelope(frame))
+	}
+	frames.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+	requests := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errReadAll := io.ReadAll(r.Body)
+		if errReadAll != nil {
+			t.Error(errReadAll)
+			w.WriteHeader(500)
+			return
+		}
+		requests <- body
+		w.Header().Set("Content-Type", "application/connect+proto")
+		_, _ = w.Write(frames.Bytes())
+	}))
+	defer server.Close()
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{ID: "devin-patch", Provider: "devin", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{Model: "devin/swe-2", Payload: []byte(executorPatchRequest)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: req.Payload}
+	assertWire := func(body []byte) {
+		if len(body) < 5 {
+			t.Fatal("missing envelope")
+		}
+		tool := wireField(body[5:], 10)
+		name, desc, params := wireField(tool, 1), wireField(tool, 2), wireField(tool, 3)
+		if string(name) != "functions__apply_patch" || !strings.Contains(string(desc), "*** Begin Patch") || !strings.Contains(string(desc), "@@") || !strings.Contains(string(desc), "start: patch") || gjson.GetBytes(params, "properties.input.type").String() != "string" || !gjson.GetBytes(params, "additionalProperties").Exists() || gjson.GetBytes(params, "additionalProperties").Bool() {
+			t.Fatalf("wire contract: name=%s desc=%s params=%s", name, desc, params)
+		}
+	}
+	response, errExecute := exec.Execute(context.Background(), auth, req, opts)
+	if errExecute != nil {
+		t.Fatal(errExecute)
+	}
+	assertWire(<-requests)
+	assertExecutorPatchOutput(t, response.Payload)
+	stream, errExecuteStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errExecuteStream != nil {
+		t.Fatal(errExecuteStream)
+	}
+	assertWire(<-requests)
+	assertExecutorPatchStream(t, stream.Chunks)
 }

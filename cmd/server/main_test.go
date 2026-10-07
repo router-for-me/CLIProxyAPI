@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestArgvEnablesBoolFlag(t *testing.T) {
@@ -113,59 +113,6 @@ func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	}
 }
 
-func TestModelCatalogUpdaterPlan(t *testing.T) {
-	tests := []struct {
-		name            string
-		localModel      bool
-		homeEnabled     bool
-		wantModels      bool
-		wantCodexClient bool
-		wantDevin       bool
-	}{
-		{
-			name:            "normal CPA refreshes all catalogs",
-			localModel:      false,
-			homeEnabled:     false,
-			wantModels:      true,
-			wantCodexClient: true,
-			wantDevin:       true,
-		},
-		{
-			name:            "home mode keeps models.json local and refreshes codex templates and devin",
-			localModel:      false,
-			homeEnabled:     true,
-			wantModels:      false,
-			wantCodexClient: true,
-			wantDevin:       true,
-		},
-		{
-			name:            "local-model disables all remote catalogs",
-			localModel:      true,
-			homeEnabled:     false,
-			wantModels:      false,
-			wantCodexClient: false,
-			wantDevin:       false,
-		},
-		{
-			name:            "local-model disables all remote catalogs even under home",
-			localModel:      true,
-			homeEnabled:     true,
-			wantModels:      false,
-			wantCodexClient: false,
-			wantDevin:       false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotModels, gotCodex, gotDevin := modelCatalogUpdaterPlan(tt.localModel, tt.homeEnabled)
-			if gotModels != tt.wantModels || gotCodex != tt.wantCodexClient || gotDevin != tt.wantDevin {
-				t.Fatalf("modelCatalogUpdaterPlan(%v, %v) = (%v, %v, %v), want (%v, %v, %v)",
-					tt.localModel, tt.homeEnabled, gotModels, gotCodex, gotDevin, tt.wantModels, tt.wantCodexClient, tt.wantDevin)
-			}
-		})
-	}
-}
-
 func TestHomeConfigPayloadPortApplication(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -206,6 +153,69 @@ func TestHomeConfigPayloadPortApplication(t *testing.T) {
 			parsed.Port = config.NormalizeHomePort(parsed.Port)
 			if parsed.Port != tt.wantPort {
 				t.Fatalf("parsed.Port = %d, want %d", parsed.Port, tt.wantPort)
+			}
+		})
+	}
+}
+
+func TestResolveManagementBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		flagURL string
+		cfg     *config.Config
+		want    string
+	}{
+		{
+			name:    "flag takes highest precedence",
+			flagURL: "https://flag.example.com",
+			cfg: &config.Config{
+				RemoteManagement: config.RemoteManagement{
+					BaseURL: "https://cfg.example.com",
+				},
+				Port: 9000,
+			},
+			want: "https://flag.example.com",
+		},
+		{
+			name:    "config base url used when flag is empty",
+			flagURL: "",
+			cfg: &config.Config{
+				RemoteManagement: config.RemoteManagement{
+					BaseURL: "https://cfg.example.com",
+				},
+				Port: 9000,
+			},
+			want: "https://cfg.example.com",
+		},
+		{
+			name:    "config port used when neither flag nor base url provided",
+			flagURL: "",
+			cfg: &config.Config{
+				Port: 9090,
+			},
+			want: "http://127.0.0.1:9090",
+		},
+		{
+			name:    "nil config falls back to default port 8317",
+			flagURL: "",
+			cfg:     nil,
+			want:    "http://127.0.0.1:8317",
+		},
+		{
+			name:    "zero port falls back to default port 8317",
+			flagURL: "",
+			cfg: &config.Config{
+				Port: 0,
+			},
+			want: "http://127.0.0.1:8317",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveManagementBaseURL(tt.flagURL, tt.cfg)
+			if got != tt.want {
+				t.Fatalf("resolveManagementBaseURL(%q, %v) = %q, want %q", tt.flagURL, tt.cfg, got, tt.want)
 			}
 		})
 	}
