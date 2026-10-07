@@ -852,12 +852,30 @@ these fields (they are new, so none do today) and add a doc comment on the struc
 fields noting the errors-only constraint, mirroring the existing `KeyLabel` comment
 ("Events-only: …must not be set by usage_errors callers").
 
-**Step 4: Thread the query params**
+**Step 4: Thread the query params (errors-listing handlers only)**
 
-- Add `ErrorClass string` and `ErrorFingerprint string` to `usageStatsQuery`.
-- In `parseUsageStatsQuery`: `ErrorClass: strings.TrimSpace(c.Query("error_class"))`,
-  `ErrorFingerprint: strings.TrimSpace(c.Query("error_fingerprint"))`.
-- In `filterFromQuery`: copy both through.
+**CRITICAL — shared-path hazard discovered during execution:** threading `ErrorClass`/`ErrorFingerprint`
+through `parseUsageStatsQuery`/`filterFromQuery` (the original plan) would expose **all** events-path
+handlers (`GetUsageStats`, `GetUsageTimeSeries`, etc.) to generating `AND e.error_class = $N` against
+`usage_events`, which has no `error_class` column. Never do this.
+
+Instead, pass the params directly in the two errors listing handlers that need them. In
+`internal/api/handlers/management/usage_errors.go`, after calling `filterFromQuery(q)`, add:
+
+```go
+	filter.ErrorClass = strings.TrimSpace(c.Query("error_class"))
+	filter.ErrorFingerprint = strings.TrimSpace(c.Query("error_fingerprint"))
+```
+
+This is safe because `GetUsageErrors` / `GetInternalUserErrors` always query the `usage_errors` table,
+and no events-path handler will reach this code. The three aggregation handlers
+(`GetErrorSummary`/`GetErrorGroups`/`GetErrorTimeline`) also query only `usage_errors`, but their filters
+are scoped to window/provider/model/key; class/fingerprint filtering there is handled by the aggregation
+params themselves (`group_by`, `limit`, `interval`), not by the listing filter. If a future need to filter
+the summary by a specific class arises, add the same two lines in those handlers — never share through
+the common path.
+
+Do NOT add `ErrorClass`/`ErrorFingerprint` to `usageStatsQuery` or `filterFromQuery`.
 
 **Step 5: Run test to verify it passes**
 

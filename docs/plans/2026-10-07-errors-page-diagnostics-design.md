@@ -216,10 +216,14 @@ interpolation of caller input), consistent with `dimensionColumn`.
 The **listing** endpoint (`GET /usage-stats/errors`) also gains `error_class` and
 `error_fingerprint` filters, carried on `UsageFilter` and applied by
 `buildWhereClause` like every other filter. These two fields are errors-only (the
-columns exist on `usage_errors`, not `usage_events`); the drill-down interactions in
-§4.1 / §4.2 / §4.4 (chip click, group-row click, "same pattern" link) all resolve to
-one of these two parameters, so the table, the KPI strip, and the patterns panel all
-share a single filter vocabulary.
+columns exist on `usage_errors`, not `usage_events`); they are set **directly in the
+errors listing handlers** (`GetUsageErrors`, `GetInternalUserErrors`) after
+`filterFromQuery`, never threaded through the shared `parseUsageStatsQuery` /
+`filterFromQuery` helpers — that would leak `AND e.error_class = $N` into
+`usage_events` queries issued by every events-path handler. The drill-down
+interactions in §4.1 / §4.2 / §4.4 (chip click, group-row click, "same pattern"
+link) all resolve to one of these two parameters, so the table, the KPI strip, and
+the patterns panel all share a single filter vocabulary.
 
 ---
 
