@@ -143,7 +143,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		block := []byte(`{"type":"text","text":""}`)
 		block, _ = sjson.SetBytes(block, "text", text)
 		if cacheSource.Exists() {
-			block = common.AttachCacheControl(block, cacheSource)
+			block = common.AttachPartCacheControl(block, cacheSource)
 		}
 		systemBlocks = append(systemBlocks, block)
 	}
@@ -331,7 +331,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							contentPart := []byte(`{"type":"text","text":""}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
 							contentPart = attachClaudeCitations(contentPart, part.Get("annotations"))
-							contentPart = common.AttachCacheControl(contentPart, part)
+							contentPart = common.AttachPartCacheControl(contentPart, part)
 							partsJSON = append(partsJSON, contentPart)
 						}
 						if ptype == "input_text" {
@@ -344,7 +344,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						if t := part.Get("refusal"); t.Exists() && t.String() != "" {
 							contentPart := []byte(`{"type":"text","text":""}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "text", t.String())
-							contentPart = common.AttachCacheControl(contentPart, part)
+							contentPart = common.AttachPartCacheControl(contentPart, part)
 							partsJSON = append(partsJSON, contentPart)
 						}
 						role = "assistant"
@@ -376,7 +376,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
 							}
 							if len(contentPart) > 0 {
-								contentPart = common.AttachCacheControl(contentPart, part)
+								contentPart = common.AttachPartCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, contentPart)
 								if role == "" {
 									role = "user"
@@ -401,7 +401,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
 							contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
-							contentPart = common.AttachCacheControl(contentPart, part)
+							contentPart = common.AttachPartCacheControl(contentPart, part)
 							partsJSON = append(partsJSON, contentPart)
 							if role == "" {
 								role = "user"

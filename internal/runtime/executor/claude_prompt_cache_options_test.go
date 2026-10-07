@@ -948,3 +948,61 @@ func TestClaudeExecutor_CountTokensUpstream_Cloaked_LegacyModel_ExplicitPreserve
 		t.Fatalf("legacy count_tokens system reminder must preserve client cache_control with scope: global: %s", string(seenBody))
 	}
 }
+
+func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_OpenAIPromptCacheBreakpoint(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		writeClaudeSSEMockResponse(w)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	originalReq := []byte(`{
+		"model": "claude-3-5-sonnet-20241022",
+		"prompt_cache_options": {
+			"mode": "explicit"
+		},
+		"messages": [
+			{"role": "system", "content": "You are a helpful assistant."},
+			{"role": "user", "content": [
+				{"type": "text", "text": "Cached part", "prompt_cache_breakpoint": {"mode": "explicit"}},
+				{"type": "text", "text": "Uncached part"}
+			]},
+			{"role": "user", "content": "Another message"}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: originalReq,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: originalReq,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if count := countCacheControls(seenBody); count != 1 {
+		t.Fatalf("expected exactly 1 cache_control block (the client-specified prompt_cache_breakpoint), got %d: %s", count, string(seenBody))
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("client prompt_cache_breakpoint was not translated to ephemeral cache_control: %s", string(seenBody))
+	}
+	if gjson.GetBytes(seenBody, "system.0.cache_control").Exists() {
+		t.Fatalf("system prompt unexpectedly received automatic cache_control: %s", string(seenBody))
+	}
+	if gjson.GetBytes(seenBody, "prompt_cache_options").Exists() {
+		t.Fatalf("prompt_cache_options should not be forwarded upstream: %s", string(seenBody))
+	}
+	if strings.Contains(string(seenBody), "prompt_cache_breakpoint") {
+		t.Fatalf("prompt_cache_breakpoint should not be forwarded upstream: %s", string(seenBody))
+	}
+}
