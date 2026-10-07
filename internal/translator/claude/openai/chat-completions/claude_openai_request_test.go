@@ -470,8 +470,9 @@ func TestConvertOpenAIRequestToClaude_SystemOnlyInputKeepsFallbackUserMessage(t 
 	if got := messages[0].Get("content.0.type").String(); got != "text" {
 		t.Fatalf("Expected fallback content type %q, got %q", "text", got)
 	}
-	if got := messages[0].Get("content.0.text").String(); got != "" {
-		t.Fatalf("Expected fallback text %q, got %q", "", got)
+	// Anthropic rejects an empty text block once a cache breakpoint lands on it.
+	if got := strings.TrimSpace(messages[0].Get("content.0.text").String()); got == "" {
+		t.Fatalf("Expected non-empty fallback text, got %q", got)
 	}
 }
 
@@ -1430,5 +1431,81 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchem
 	toolChoiceName := gjson.GetBytes(result, "tool_choice.name").String()
 	if toolChoiceName != "mcp_server_special_get_time" {
 		t.Fatalf("tool_choice.name = %q, want mcp_server_special_get_time. Output: %s", toolChoiceName, result)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PrefillRejectingModelDropsTrailingAssistant(t *testing.T) {
+	raw := []byte(`{"messages":[
+		{"role":"system","content":"sys"},
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":"partial"}
+	]}`)
+	for _, model := range []string{"claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-4-6", "claude/claude-opus-5-5"} {
+		out := ConvertOpenAIRequestToClaude(model, raw, false)
+		messages := gjson.GetBytes(out, "messages").Array()
+		if len(messages) != 1 {
+			t.Fatalf("%s: expected 1 message after dropping trailing assistant, got %d: %s", model, len(messages), out)
+		}
+		if got := messages[0].Get("role").String(); got != "user" {
+			t.Fatalf("%s: expected final role user, got %q", model, got)
+		}
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PrefillSupportingModelKeepsTrailingAssistant(t *testing.T) {
+	raw := []byte(`{"messages":[
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":"partial"}
+	]}`)
+	for _, model := range []string{"claude-sonnet-4-5", "claude-opus-4-1-20250805"} {
+		out := ConvertOpenAIRequestToClaude(model, raw, false)
+		messages := gjson.GetBytes(out, "messages").Array()
+		if len(messages) != 2 || messages[1].Get("role").String() != "assistant" {
+			t.Fatalf("%s: expected trailing assistant preserved: %s", model, out)
+		}
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeWithCompat_KeepsTrailingAssistantOnPrefillRejectingModel(t *testing.T) {
+	raw := []byte(`{"messages":[
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":"partial"}
+	]}`)
+	out := ConvertOpenAIRequestToClaudeWithCompat("claude-opus-5-5", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 || messages[1].Get("role").String() != "assistant" {
+		t.Fatalf("expected compat mode to preserve trailing assistant: %s", out)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_EmptyTrailingUserMessageIsKept(t *testing.T) {
+	raw := []byte(`{"messages":[
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":"reply"},
+		{"role":"user","content":""}
+	]}`)
+	out := ConvertOpenAIRequestToClaude("claude-opus-5-5", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("expected the empty user turn kept, got %d messages: %s", len(messages), out)
+	}
+	last := messages[2]
+	if last.Get("role").String() != "user" {
+		t.Fatalf("expected final role user: %s", out)
+	}
+	if text := strings.TrimSpace(last.Get("content.0.text").String()); text == "" {
+		t.Fatalf("expected a non-empty placeholder text block: %s", out)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_LoneAssistantYieldsFallbackUser(t *testing.T) {
+	raw := []byte(`{"messages":[{"role":"assistant","content":"orphan"}]}`)
+	out := ConvertOpenAIRequestToClaude("claude-opus-5-5", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 || messages[0].Get("role").String() != "user" {
+		t.Fatalf("expected one fallback user message: %s", out)
+	}
+	if strings.TrimSpace(messages[0].Get("content.0.text").String()) == "" {
+		t.Fatalf("expected non-empty fallback text: %s", out)
 	}
 }
