@@ -53,7 +53,7 @@ const (
 	// Keep in sync with the current Grok CLI client version that chat-proxy
 	// expects. The server rejects older versions with HTTP 426; it required
 	// 1.0.13+ as of 2026-10-01 (#6249).
-	xaiClientVersionValue         = "1.0.44"
+	xaiClientVersionValue         = "1.0.46"
 	xaiClientIdentifierHeader     = "x-grok-client-identifier"
 	xaiClientIdentifierValue      = "grok-shell"
 	xaiAuthenticateResponseHeader = "x-authenticateresponse"
