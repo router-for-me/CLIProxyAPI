@@ -32,7 +32,7 @@ func setRefreshLeadFactory(t *testing.T, provider string, factory func() *time.D
 	})
 }
 
-func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
+func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	expiry := now.Add(time.Hour)
 	lead := 10 * time.Minute
@@ -41,7 +41,25 @@ func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
 		return &d
 	})
 
-	// Case 1: Normal disabled credential WITHOUT invalid_grant is scheduled for token refresh (expected behavior)
+	for _, auth := range []*Auth{
+		{
+			ID:       "disabled-flag",
+			Provider: "disabled-schedule",
+			Disabled: true,
+			Status:   StatusActive,
+		},
+		{
+			ID:       "disabled-status",
+			Provider: "disabled-schedule",
+			Status:   StatusDisabled,
+		},
+	} {
+		if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+			t.Fatalf("nextRefreshCheckAt() ok = true for disabled auth %q, want false", auth.ID)
+		}
+	}
+
+	// A disabled credential with an expired token is also never scheduled.
 	normalDisabledAuth := &Auth{
 		ID:       "normal-disabled",
 		Provider: "disabled-schedule",
@@ -52,16 +70,6 @@ func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
 			"expires_at": expiry.Format(time.RFC3339),
 		},
 	}
-	got, ok := nextRefreshCheckAt(now, normalDisabledAuth, 15*time.Minute)
-	if !ok {
-		t.Fatalf("nextRefreshCheckAt() ok = false, want true for normal disabled auth")
-	}
-	want := expiry.Add(-lead)
-	if !got.Equal(want) {
-		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
-	}
-
-	// Case 2: Disabled credential WITH invalid_grant is permanently unscheduled (never refreshed)
 	invalidGrantDisabledAuth := &Auth{
 		ID:       "invalid-grant-disabled",
 		Provider: "disabled-schedule",
@@ -76,8 +84,10 @@ func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
 			"expires_at": expiry.Format(time.RFC3339),
 		},
 	}
-	if _, ok := nextRefreshCheckAt(now, invalidGrantDisabledAuth, 15*time.Minute); ok {
-		t.Fatalf("nextRefreshCheckAt() ok = true, want false for disabled auth with invalid_grant")
+	for _, auth := range []*Auth{normalDisabledAuth, invalidGrantDisabledAuth} {
+		if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+			t.Fatalf("nextRefreshCheckAt() ok = true, want false for disabled auth %q", auth.ID)
+		}
 	}
 }
 

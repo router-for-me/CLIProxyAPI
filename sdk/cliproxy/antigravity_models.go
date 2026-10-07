@@ -482,7 +482,7 @@ func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth
 	}
 	if s.coreManager != nil {
 		current, exists := s.coreManager.GetByID(auth.ID)
-		if !exists || current == nil || current.Disabled || current.Provider != auth.Provider || current.RegistrationEpoch != expectedEpoch || !antigravityAuthModelSettingsEqual(current, auth) || s.antigravityCapabilityKey(current) != expectedKey {
+		if !exists || current == nil || current.Disabled || current.Status == coreauth.StatusDisabled || current.Provider != auth.Provider || current.RegistrationEpoch != expectedEpoch || !antigravityAuthModelSettingsEqual(current, auth) || s.antigravityCapabilityKey(current) != expectedKey {
 			return
 		}
 	}
@@ -540,7 +540,7 @@ func (s *Service) refreshAntigravityModels(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if auth == nil || auth.Disabled || !strings.EqualFold(auth.Provider, "antigravity") {
+		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled || !strings.EqualFold(auth.Provider, "antigravity") {
 			continue
 		}
 		snapshot := auth.Clone()
@@ -574,7 +574,7 @@ func (s *Service) nextAntigravityModelRefreshDelay() time.Duration {
 		return antigravityRefreshScanInterval
 	}
 	for _, auth := range s.coreManager.List() {
-		if auth == nil || auth.Disabled || !strings.EqualFold(auth.Provider, "antigravity") {
+		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled || !strings.EqualFold(auth.Provider, "antigravity") {
 			continue
 		}
 		key := s.antigravityCapabilityKey(auth)

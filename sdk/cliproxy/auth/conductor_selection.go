@@ -1755,7 +1755,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	registryRef := registry.GetGlobalRegistry()
 	targetKey := canonicalSchedulingProvider(provider)
 	for _, candidate := range m.auths {
-		if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
+		if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled || candidate.Status == StatusDisabled {
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
@@ -1997,7 +1997,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		m.mu.RLock()
 		targetKey := canonicalSchedulingProvider(provider)
 		for _, candidate := range m.auths {
-			if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
+			if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled || candidate.Status == StatusDisabled {
 				continue
 			}
 			if !eligibility.allows(candidate) {
@@ -2079,7 +2079,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if candidate == nil || candidate.Disabled || candidate.Status == StatusDisabled {
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
@@ -2193,7 +2193,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		}
 		m.mu.RLock()
 		for _, candidate := range m.auths {
-			if candidate == nil || candidate.Disabled {
+			if candidate == nil || candidate.Disabled || candidate.Status == StatusDisabled {
 				continue
 			}
 			if _, ok := providerSet[canonicalSchedulingProvider(executorKeyFromAuth(candidate))]; !ok {
@@ -2302,7 +2302,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 	coolingSummaries := make([]string, 0)
 	totalCandidates := 0
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if candidate == nil || candidate.Disabled || candidate.Status == StatusDisabled {
 			continue
 		}
 		providerKey := executorKeyFromAuth(candidate)

@@ -118,6 +118,9 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
+	if a.Disabled || a.Status == StatusDisabled {
+		return false
+	}
 	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
 		return false
 	}
@@ -325,7 +328,7 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, registrationEpoch uint64, now time.Time) *authRefreshJob {
 	m.mu.Lock()
 	auth := m.auths[id]
-	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
+	if auth == nil || auth.RegistrationEpoch != registrationEpoch || auth.Disabled || auth.Status == StatusDisabled || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -653,6 +656,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
 		return nil, errors.New("auth registration changed before refresh")
 	}
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return nil, errors.New("auth is disabled")
+	}
 	if hasDisabledInvalidGrantFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is disabled with invalid grant")
 	}
@@ -899,7 +905,7 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 	m.mu.RLock()
 	ids := make([]string, 0, len(m.auths))
 	for id, auth := range m.auths {
-		if auth != nil && !auth.Disabled && (authHasRefreshCredential(auth) || auth.Runtime != nil) {
+		if auth != nil && !auth.Disabled && auth.Status != StatusDisabled && (authHasRefreshCredential(auth) || auth.Runtime != nil) {
 			ids = append(ids, id)
 		}
 	}

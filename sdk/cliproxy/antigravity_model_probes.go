@@ -20,7 +20,7 @@ type antigravityModelRefreshRequest struct {
 // one worker per account. Repeated updates replace a single queued successor,
 // rather than accumulating singleflight followers while an upstream is stalled.
 func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreauth.Auth, provider string) {
-	if s == nil || auth == nil || auth.ID == "" || auth.Disabled || s.antigravityHomeEnabled() {
+	if s == nil || auth == nil || auth.ID == "" || auth.Disabled || auth.Status == coreauth.StatusDisabled || s.antigravityHomeEnabled() {
 		return
 	}
 	if ctx == nil {

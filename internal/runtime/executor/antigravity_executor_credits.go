@@ -353,7 +353,7 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	return err
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
-	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
+	if e == nil || auth == nil || auth.Disabled || auth.Status == cliproxyauth.StatusDisabled || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
 		return
 	}
 	if ctx != nil && ctx.Err() != nil {
@@ -405,7 +405,7 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 }
 
 func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context, auth *cliproxyauth.Auth, accessToken string, timeout time.Duration) {
-	if e == nil || auth == nil || (ctx != nil && ctx.Err() != nil) {
+	if e == nil || auth == nil || auth.Disabled || auth.Status == cliproxyauth.StatusDisabled || (ctx != nil && ctx.Err() != nil) {
 		return
 	}
 	authID := strings.TrimSpace(auth.ID)
@@ -505,7 +505,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 }
 
 func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context.Context, auth *cliproxyauth.Auth, accessToken string, task *antigravityCreditsRefreshTask) {
-	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+	if auth == nil || auth.Disabled || auth.Status == cliproxyauth.StatusDisabled || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
 	token := strings.TrimSpace(accessToken)

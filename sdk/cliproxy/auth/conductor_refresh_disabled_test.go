@@ -55,13 +55,12 @@ type oauthStatusError struct {
 func (e oauthStatusError) Error() string   { return fmt.Sprintf("status %d: %s", e.code, e.msg) }
 func (e oauthStatusError) StatusCode() int { return e.code }
 
-func TestRefreshAuthForRequest_NormalDisabledAuth_RefreshesTokenSuccessfully(t *testing.T) {
+func TestRefreshAuthForRequest_DisabledAuth_NeverRefreshes(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	executor := &mockOAuthErrorExecutor{id: "test-provider"}
 	manager.RegisterExecutor(executor)
 
-	// Normal disabled auth without invalid_grant should refresh tokens normally (expected behavior)
 	auth := &Auth{
 		ID:       "normal-disabled-auth",
 		Provider: "test-provider",
@@ -76,15 +75,12 @@ func TestRefreshAuthForRequest_NormalDisabledAuth_RefreshesTokenSuccessfully(t *
 		t.Fatalf("Register error: %v", err)
 	}
 
-	refreshed, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, "")
-	if errRefresh != nil {
-		t.Fatalf("expected successful refresh for normal disabled auth, got error: %v", errRefresh)
+	_, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, "")
+	if errRefresh == nil {
+		t.Fatal("expected disabled auth refresh to be rejected")
 	}
-	if executor.refreshCalls.Load() != 1 {
-		t.Fatalf("executor.Refresh called %d times, want 1 for normal disabled auth", executor.refreshCalls.Load())
-	}
-	if refreshed.Metadata["access_token"] != "new-valid-token" {
-		t.Fatalf("refreshed token = %v, want new-valid-token", refreshed.Metadata["access_token"])
+	if executor.refreshCalls.Load() != 0 {
+		t.Fatalf("executor.Refresh called %d times, want 0 for disabled auth", executor.refreshCalls.Load())
 	}
 }
 
