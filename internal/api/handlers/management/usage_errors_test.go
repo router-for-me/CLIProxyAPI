@@ -222,6 +222,9 @@ func newTestErrorDiagnosticsHandler(t *testing.T, schema string) *Handler {
 	}
 	h := &Handler{}
 	h.mu.Lock()
+	// requirePG nil-checks BOTH pgAPIKeys and pgUsage, so both must be wired for
+	// the PG-backed routes to pass the gate. Mirrors newTestEventBodiesHandler.
+	h.pgAPIKeys = store.NewAPIKeyStore(pg)
 	h.pgUsage = store.NewUsageStore(pg)
 	h.mu.Unlock()
 	return h
