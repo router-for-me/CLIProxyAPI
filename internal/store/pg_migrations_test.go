@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -249,5 +250,77 @@ func TestMigrateAddsUsageErrorClassColumns(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("expected 2 error_class/fingerprint columns after re-migrate, found %d", count)
+	}
+}
+
+// TestEnsureSchemaBackfillsUsageErrorClass verifies the one-shot backfill for
+// pre-existing rows: rows inserted with a NULL error_class (as an old store
+// would have) are classified from fail_status_code alone when EnsureSchema
+// runs again, and error_fingerprint is left empty because the raw body is not
+// available. The backfill must be idempotent — a second run leaves populated
+// rows untouched.
+func TestEnsureSchemaBackfillsUsageErrorClass(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_backfill_error_class")
+	defer pg.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	table := pg.fullTableName(pg.cfg.UsageErrorsTable)
+	// Insert legacy-style rows: error_class NULL, fingerprint NULL. provider and
+	// model are the only NOT NULL columns besides requested_at.
+	statuses := []int{429, 401, 403, 404, 422, 504, 500, 418}
+	for _, code := range statuses {
+		if _, err := pg.DB().ExecContext(ctx, fmt.Sprintf(
+			`INSERT INTO %s (provider, model, fail_status_code, requested_at)
+			 VALUES ('openai', 'gpt-4', $1, NOW())`, table), code,
+		); err != nil {
+			t.Fatalf("insert legacy row (status %d): %v", code, err)
+		}
+	}
+
+	// Re-run EnsureSchema: the same path a server restart takes.
+	if err := pg.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema (backfill): %v", err)
+	}
+
+	wantByStatus := map[int]string{
+		429: "rate_limit",
+		401: "auth",
+		403: "permission",
+		404: "not_found",
+		422: "invalid_request",
+		504: "timeout",
+		500: "server_error",
+		418: "other",
+	}
+	for _, code := range statuses {
+		var got string
+		var fingerprint *string
+		if err := pg.DB().QueryRowContext(ctx, fmt.Sprintf(
+			`SELECT error_class, error_fingerprint FROM %s WHERE fail_status_code = $1`, table),
+			code,
+		).Scan(&got, &fingerprint); err != nil {
+			t.Fatalf("select backfilled row (status %d): %v", code, err)
+		}
+		if got != wantByStatus[code] {
+			t.Errorf("status %d: error_class = %q; want %q", code, got, wantByStatus[code])
+		}
+		if fingerprint != nil {
+			t.Errorf("status %d: error_fingerprint = %q; want NULL (body unavailable)", code, *fingerprint)
+		}
+	}
+
+	// Idempotent: a third run must not change the already-classified rows.
+	if err := pg.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema (second backfill run): %v", err)
+	}
+	var nullCount int
+	if err := pg.DB().QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s WHERE error_class IS NULL`, table),
+	).Scan(&nullCount); err != nil {
+		t.Fatalf("count NULL error_class: %v", err)
+	}
+	if nullCount != 0 {
+		t.Errorf("%d rows still unclassified after backfill", nullCount)
 	}
 }

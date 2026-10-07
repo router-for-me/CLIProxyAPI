@@ -1686,6 +1686,34 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: create usage_errors class index: %w", err)
 	}
+	// Idempotent backfill for pre-existing rows: classify from status code alone
+	// (the raw body was never stored). error_fingerprint is left empty since the
+	// provider and model context isn't available in a single UPDATE.
+	//
+	// usage_errors is never pruned, so the UPDATE re-runs on every EnsureSchema.
+	// The partial index covers only unclassified rows, keeping the no-op pass an
+	// empty index scan; it shrinks to zero entries once the backfill completes.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE INDEX IF NOT EXISTS idx_usage_errors_unclassified ON %s(requested_at) WHERE error_class IS NULL`,
+		usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_errors unclassified index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE %s SET error_class = CASE
+			WHEN fail_status_code = 429 THEN 'rate_limit'
+			WHEN fail_status_code = 401 THEN 'auth'
+			WHEN fail_status_code = 403 THEN 'permission'
+			WHEN fail_status_code = 404 THEN 'not_found'
+			WHEN fail_status_code = 400 OR fail_status_code = 422 THEN 'invalid_request'
+			WHEN fail_status_code = 408 OR fail_status_code = 504 THEN 'timeout'
+			WHEN fail_status_code >= 500 THEN 'server_error'
+			ELSE 'other'
+		END WHERE error_class IS NULL`,
+		usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: backfill usage_errors error_class: %w", err)
+	}
 
 	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
