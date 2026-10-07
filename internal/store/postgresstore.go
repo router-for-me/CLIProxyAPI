@@ -1666,6 +1666,27 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter usage_errors add original_cost_usd: %w", err)
 	}
+	// error_class / error_fingerprint record the classified error category and
+	// the deduplication fingerprint for usage_errors so the dashboard can group
+	// and deduplicate failures by type. error_class is a registry slug such as
+	// "rate_limited", "auth_error" or "upstream_error"; error_fingerprint is a
+	// hash over the stable error characteristics (class + status code + upstream
+	// provider + message prefix). Idempotent ALTER so pre-existing stores pick
+	// the columns up on the next start.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		ALTER TABLE %s
+			ADD COLUMN IF NOT EXISTS error_class TEXT,
+			ADD COLUMN IF NOT EXISTS error_fingerprint TEXT`,
+		usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: add usage_errors error_class/fingerprint columns: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE INDEX IF NOT EXISTS idx_usage_errors_class ON %s(requested_at DESC, error_class)`,
+		usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_errors class index: %w", err)
+	}
 
 	usageWindowsTable := s.fullTableName(s.cfg.UsageWindowsTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`

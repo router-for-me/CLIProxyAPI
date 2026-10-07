@@ -213,3 +213,41 @@ func TestProxyPoolsSchemaAndBindingColumns(t *testing.T) {
 		t.Fatalf("is_active default = %q, want true", activeDefault)
 	}
 }
+
+// TestMigrateAddsUsageErrorClassColumns verifies the error_class and
+// error_fingerprint columns are added to usage_errors by Migrate and that
+// running Migrate twice is idempotent (no duplicate columns).
+func TestMigrateAddsUsageErrorClassColumns(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_migrate_error_class_cols")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+	ctx := context.Background()
+
+	for _, col := range []string{"error_class", "error_fingerprint"} {
+		var exists bool
+		if err := pg.DB().QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+			)`, pg.cfg.Schema, pg.cfg.UsageErrorsTable, col).Scan(&exists); err != nil {
+			t.Fatalf("query column %s: %v", col, err)
+		}
+		if !exists {
+			t.Fatalf("column %s missing after Migrate", col)
+		}
+	}
+
+	// Idempotent: a second run must be a no-op.
+	ensureMigrated(t, pg)
+	var count int
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2
+		  AND column_name IN ('error_class', 'error_fingerprint')
+	`, pg.cfg.Schema, pg.cfg.UsageErrorsTable).Scan(&count); err != nil {
+		t.Fatalf("count error columns: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 error_class/fingerprint columns after re-migrate, found %d", count)
+	}
+}
