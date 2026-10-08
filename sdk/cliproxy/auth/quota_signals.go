@@ -12,11 +12,21 @@ const (
 	maxQuotaSignalValue   = 512
 )
 
+// metaQuotaSignalHeaders lists the lower-cased Meta subscription usage signals.
+var metaQuotaSignalHeaders = map[string]bool{
+	"x-meta-tier":                true,
+	"x-meta-window-used-percent": true,
+	"x-meta-window-minutes":      true,
+	"x-meta-window-reset-at":     true,
+	"x-meta-weekly-used-percent": true,
+	"x-meta-weekly-reset-at":     true,
+}
+
 // ProviderSupportsQuotaObservation reports whether the named provider emits a
 // passive credential-level quota snapshot understood by collectQuotaSignals.
 func ProviderSupportsQuotaObservation(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "claude", "codex", "devin":
+	case "claude", "codex", "devin", "meta":
 		return true
 	default:
 		return false
@@ -175,6 +185,11 @@ func isQuotaSignalHeaderForProvider(provider, name string) bool {
 	}
 	if strings.HasPrefix(name, "anthropic-ratelimit-unified-") {
 		return provider == "claude"
+	}
+	if strings.HasPrefix(name, "x-meta-") {
+		// Meta reports usage in a response.subscription_usage stream event, which
+		// the executor converts to these names (helps.ParseMetaSubscriptionUsageHeaders).
+		return provider == "meta" && metaQuotaSignalHeaders[name]
 	}
 	if strings.HasPrefix(name, "x-ratelimit-") {
 		// Observed Codex responses do not carry x-ratelimit-* headers; the only
