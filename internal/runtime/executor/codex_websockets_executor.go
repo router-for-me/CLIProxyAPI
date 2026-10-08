@@ -154,3 +154,38 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 func (e *CodexAutoExecutor) SupportsApplyPatch() bool {
 	return e != nil && e.httpExec != nil && e.wsExec != nil && e.httpExec.SupportsApplyPatch() && e.wsExec.SupportsApplyPatch()
 }
+
+// InterruptExecutionSession sends control input on the existing upstream socket.
+func (e *CodexAutoExecutor) InterruptExecutionSession(ctx context.Context, sessionID string, payload []byte) error {
+	if e == nil || e.wsExec == nil {
+		return fmt.Errorf("no active upstream websocket for response.interrupt")
+	}
+	return e.wsExec.InterruptExecutionSession(ctx, sessionID, payload)
+}
+
+func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context, sessionID string, payload []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	store.mu.Lock()
+	sess := store.sessions[sessionID]
+	store.mu.Unlock()
+	if sess == nil {
+		return fmt.Errorf("no active upstream websocket for response.interrupt")
+	}
+	sess.connMu.Lock()
+	conn, authID := sess.conn, sess.authID
+	sess.connMu.Unlock()
+	if conn == nil {
+		return fmt.Errorf("no active upstream websocket for response.interrupt")
+	}
+	if !cliproxyexecutor.WebsocketAuthEnabled(ctx, authID) {
+		return fmt.Errorf("websocket credential is no longer enabled")
+	}
+	// Use the captured socket: an interrupt must never trigger a reconnect or replay.
+	return writeCodexWebsocketMessage(sess, conn, payload)
+}
