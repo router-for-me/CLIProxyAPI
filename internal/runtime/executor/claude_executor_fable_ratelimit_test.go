@@ -798,3 +798,103 @@ func TestClaudeExecutor_AuthManager_OverageSpendCapFirstRequestAllowsOpus_Issue5
 		t.Fatalf("Opus upstream attempts = %d, want 1", got)
 	}
 }
+
+func TestClaudeExecutor_AuthManager_OpusWeeklyAllowanceRejectionDoesNotBlockSonnet(t *testing.T) {
+	var opusAttempts, sonnetAttempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			http.Error(w, "failed to read sanitized test request", http.StatusBadRequest)
+			return
+		}
+		switch {
+		case strings.Contains(string(body), `"model":"claude-opus-5"`):
+			opusAttempts.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Representative-Claim", "seven_day_opus")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d-Utilization", "0.65")
+			w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+			w.Header().Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.20")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(time.Now().Add(7*24*time.Hour).Unix(), 10))
+			w.Header().Set("Retry-After", "604800")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"You have exceeded your Opus usage allowance."}}`))
+		case strings.Contains(string(body), `"model":"claude-sonnet-4"`):
+			sonnetAttempts.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"msg-sonnet-ok","type":"message","model":"claude-sonnet-4","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+		default:
+			http.Error(w, "unexpected sanitized test model", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(NewClaudeExecutor(&config.Config{DisableCooling: false}))
+
+	auth := &cliproxyauth.Auth{
+		ID:       uuid.NewString() + "-opus-weekly-model-scope",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "sanitized-test-key",
+			"base_url": server.URL,
+		},
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-opus-5"}, {ID: "claude-sonnet-4"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	// 1. Initial request on the credential for Opus fails due to Opus weekly allowance exhausted.
+	payloadOpus := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":[{"type":"text","text":"test"}]}]}`)
+	_, errOpus := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: payloadOpus,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if errOpus == nil {
+		t.Fatal("expected Opus request to be rate limited")
+	}
+	if got := opusAttempts.Load(); got != 1 {
+		t.Fatalf("Opus upstream attempts = %d, want 1", got)
+	}
+
+	// 2. The credential itself must not have a credential-level quota lockout.
+	updatedAuth, ok := manager.GetByID(auth.ID)
+	if !ok || updatedAuth == nil {
+		t.Fatal("auth not found")
+	}
+	if updatedAuth.Quota.Reason == "credential_quota" {
+		t.Fatalf("auth Quota.Reason = credential_quota; want non-credential_quota")
+	}
+
+	// 3. Opus model state cooldown must not be locked out for 7 days.
+	opusState := updatedAuth.ModelStates["claude-opus-5"]
+	if opusState == nil {
+		t.Fatal("opus model state not found")
+	}
+	if opusState.Quota.NextRecoverAt.IsZero() || !opusState.Quota.NextRecoverAt.After(time.Now()) {
+		t.Fatal("opus model cooldown should be set in the future via exponential backoff")
+	}
+	if opusState.Quota.NextRecoverAt.After(time.Now().Add(10 * time.Minute)) {
+		t.Fatalf("opus model cooldown was %v; want exponential backoff (<10m), not 7d unified reset", opusState.Quota.NextRecoverAt)
+	}
+
+	// 4. Subsequent Sonnet request on the same credential succeeds cleanly.
+	payloadSonnet := []byte(`{"model":"claude-sonnet-4","messages":[{"role":"user","content":[{"type":"text","text":"test"}]}]}`)
+	_, errSonnet := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4",
+		Payload: payloadSonnet,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if errSonnet != nil {
+		t.Fatalf("expected Sonnet to succeed on the same credential, got: %v", errSonnet)
+	}
+	if got := sonnetAttempts.Load(); got != 1 {
+		t.Fatalf("Sonnet upstream attempts = %d, want 1", got)
+	}
+}
