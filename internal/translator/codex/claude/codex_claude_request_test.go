@@ -1300,3 +1300,127 @@ func TestConvertClaudeRequestToCodex_StripsPatternPropertiesIncompatibleKeys(t *
 		t.Errorf("expected patternProperties key '^[a-z]+$' to be preserved, got: %s", params.Get("patternProperties").Raw)
 	}
 }
+
+func TestConvertClaudeRequestToCodex_ToolResultBlockKinds(t *testing.T) {
+	tests := []struct {
+		name  string
+		block string
+		want  map[string]string
+	}{
+		{
+			name:  "text",
+			block: `{"type":"text","text":"read result"}`,
+			want:  map[string]string{"type": "input_text", "text": "read result"},
+		},
+		{
+			name:  "image base64",
+			block: `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}`,
+			want:  map[string]string{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+		},
+		{
+			name:  "image url",
+			block: `{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}`,
+			want:  map[string]string{"type": "input_image", "image_url": "https://example.com/a.png"},
+		},
+		{
+			name:  "image file id",
+			block: `{"type":"image","source":{"type":"file","file_id":"file_abc"}}`,
+			want:  map[string]string{"type": "input_image", "file_id": "file_abc"},
+		},
+		{
+			name:  "document url stays as its own json",
+			block: `{"type":"document","source":{"type":"url","url":"https://example.com/a.pdf"}}`,
+			want:  map[string]string{"type": "input_text", "text": `{"type":"document","source":{"type":"url","url":"https://example.com/a.pdf"}}`},
+		},
+		{
+			name:  "unknown block stays as its own json",
+			block: `{"type":"search_result","title":"found"}`,
+			want:  map[string]string{"type": "input_text", "text": `{"type":"search_result","title":"found"}`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"messages":[` +
+				`{"role":"user","content":"go"},` +
+				`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+				`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"lead"},` + tt.block + `]}]}]}`)
+			result, err := ConvertClaudeRequestToCodex("gpt-5.4", input, false)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			output := gjson.GetBytes(result, `input.#(type=="function_call_output").output`)
+			if len(output.Array()) != 2 {
+				t.Fatalf("output has %d items, want 2: %s", len(output.Array()), output.Raw)
+			}
+			item := output.Get("1")
+			for key, want := range tt.want {
+				if got := item.Get(key).String(); got != want {
+					t.Errorf("%s = %q, want %q (item %s)", key, got, want, item.Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ToolResultPDFRelaysInAUserMessage(t *testing.T) {
+	pdf := `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}}`
+	wantFile := "data:application/pdf;base64,aGVsbG8="
+	request := func(results ...string) []byte {
+		return []byte(`{"messages":[{"role":"user","content":"go"},` +
+			`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}},{"type":"tool_use","id":"toolu_2","name":"Read","input":{}}]},` +
+			`{"role":"user","content":[` + strings.Join(results, ",") + `]}]}`)
+	}
+	toolResult := func(id string, blocks ...string) string {
+		return `{"type":"tool_result","tool_use_id":"` + id + `","content":[` + strings.Join(blocks, ",") + `]}`
+	}
+
+	t.Run("beside text", func(t *testing.T) {
+		result, err := ConvertClaudeRequestToCodex("gpt-5.4", request(toolResult("toolu_1", `{"type":"text","text":"lead"}`, pdf)), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output := gjson.GetBytes(result, `input.#(type=="function_call_output").output`)
+		if len(output.Array()) != 1 || output.Get("0.type").String() != "input_text" || strings.Contains(output.Raw, "file_data") {
+			t.Fatalf("the tool output should keep only its text, got %s", output.Raw)
+		}
+		items := gjson.GetBytes(result, "input").Array()
+		last := items[len(items)-1]
+		if last.Get("type").String() != "message" || last.Get("role").String() != "user" {
+			t.Fatalf("the file should follow in a user message, got %s", last.Raw)
+		}
+		if got := last.Get("content.1.file_data").String(); got != wantFile || last.Get("content.1.type").String() != "input_file" {
+			t.Fatalf("relayed file = %q, want %q (%s)", got, wantFile, last.Raw)
+		}
+	})
+
+	t.Run("alone keeps the tool output non-empty", func(t *testing.T) {
+		result, err := ConvertClaudeRequestToCodex("gpt-5.4", request(toolResult("toolu_1", pdf)), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output := gjson.GetBytes(result, `input.#(type=="function_call_output").output`)
+		if output.Type != gjson.String || !strings.Contains(output.String(), "file") || !strings.Contains(output.String(), "next user message") {
+			t.Fatalf("output = %s, want a non-empty note that the file follows in a user message", output.Raw)
+		}
+	})
+
+	t.Run("two tool results relay once, after both outputs", func(t *testing.T) {
+		result, err := ConvertClaudeRequestToCodex("gpt-5.4", request(toolResult("toolu_1", pdf), toolResult("toolu_2", pdf)), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var types []string
+		for _, item := range gjson.GetBytes(result, "input").Array() {
+			types = append(types, item.Get("type").String())
+		}
+		got := strings.Join(types[len(types)-3:], ",")
+		if got != "function_call_output,function_call_output,message" {
+			t.Fatalf("tail of input = %s, want both outputs then one relay message (%v)", got, types)
+		}
+		items := gjson.GetBytes(result, "input").Array()
+		if n := len(items[len(items)-1].Get("content").Array()); n != 3 {
+			t.Fatalf("relay message has %d parts, want notice plus two files", n)
+		}
+	})
+}

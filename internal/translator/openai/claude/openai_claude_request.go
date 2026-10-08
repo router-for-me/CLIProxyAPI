@@ -186,8 +186,8 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				contentItems := make([][]byte, 0)
 				var reasoningParts []string // Accumulate thinking text for reasoning_content
 				var toolCalls []interface{}
-				toolResults := make([][]byte, 0)       // Collect tool_result messages to emit after the main message
-				relayedToolImages := make([][]byte, 0) // Images pulled out of tool_result content for user-message relay
+				toolResults := make([][]byte, 0)            // Collect tool_result messages to emit after the main message
+				relayedToolAttachments := make([][]byte, 0) // Images and files pulled out of tool_result content for user-message relay
 
 				contentResult.ForEach(func(_, part gjson.Result) bool {
 					partType := part.Get("type").String()
@@ -250,9 +250,9 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						if toolName := toolNameByID[toolUseID]; toolName != "" {
 							toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "name", toolName)
 						}
-						toolResultContent, toolResultImages := convertClaudeToolResultContent(part.Get("content"))
+						toolResultContent, toolResultAttachments := convertClaudeToolResultContent(part.Get("content"))
 						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "content", toolResultContent)
-						relayedToolImages = append(relayedToolImages, toolResultImages...)
+						relayedToolAttachments = append(relayedToolAttachments, toolResultAttachments...)
 						toolResults = append(toolResults, toolResultJSON)
 					}
 					return true
@@ -285,12 +285,12 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 				// OpenAI tool messages cannot carry image parts, so images returned by a tool are
 				// replayed as a user message directly after the tool results.
-				if len(relayedToolImages) > 0 {
-					relayItems := make([][]byte, 0, len(relayedToolImages)+1)
+				if len(relayedToolAttachments) > 0 {
+					relayItems := make([][]byte, 0, len(relayedToolAttachments)+1)
 					noticeJSON := []byte(`{"type":"text","text":""}`)
 					noticeJSON, _ = sjson.SetBytes(noticeJSON, "text", toolResultImageRelayNotice)
 					relayItems = append(relayItems, noticeJSON)
-					relayItems = append(relayItems, relayedToolImages...)
+					relayItems = append(relayItems, relayedToolAttachments...)
 
 					if role == "user" && hasContent {
 						// Merge into the current user message so the request keeps a single user turn.
@@ -608,6 +608,8 @@ const toolResultImagePlaceholder = "[Tool returned image content; the images fol
 // toolResultImageRelayNotice labels the user message that carries relayed tool images.
 const toolResultImageRelayNotice = "Images returned by the preceding tool call(s):"
 
+// convertClaudeToolResultContent flattens a tool_result into the text of an OpenAI tool
+// message plus the image and file parts that must travel in a following user message.
 func convertClaudeToolResultContent(content gjson.Result) (string, [][]byte) {
 	if !content.Exists() {
 		return "", nil
@@ -619,7 +621,7 @@ func convertClaudeToolResultContent(content gjson.Result) (string, [][]byte) {
 
 	if content.IsArray() {
 		var parts []string
-		var images [][]byte
+		var attachments [][]byte
 		content.ForEach(func(_, item gjson.Result) bool {
 			switch {
 			case item.Type == gjson.String:
@@ -628,7 +630,13 @@ func convertClaudeToolResultContent(content gjson.Result) (string, [][]byte) {
 				parts = append(parts, item.Get("text").String())
 			case item.IsObject() && item.Get("type").String() == "image":
 				if contentItem, ok := convertClaudeContentPart(item); ok {
-					images = append(images, []byte(contentItem))
+					attachments = append(attachments, []byte(contentItem))
+				} else {
+					parts = append(parts, item.Raw)
+				}
+			case item.IsObject() && item.Get("type").String() == "document":
+				if contentItem, ok := convertClaudeFilePartToOpenAI(item); ok {
+					attachments = append(attachments, []byte(contentItem))
 				} else {
 					parts = append(parts, item.Raw)
 				}
@@ -642,12 +650,12 @@ func convertClaudeToolResultContent(content gjson.Result) (string, [][]byte) {
 
 		joined := strings.Join(parts, "\n\n")
 		if strings.TrimSpace(joined) == "" {
-			if len(images) > 0 {
-				return toolResultImagePlaceholder, images
+			if len(attachments) > 0 {
+				return toolResultImagePlaceholder, attachments
 			}
 			return content.Raw, nil
 		}
-		return joined, images
+		return joined, attachments
 	}
 
 	if content.IsObject() {

@@ -662,7 +662,7 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							} else if functionResponseResult.IsArray() {
 								frResults := functionResponseResult.Array()
 								nonImageItems := make([][]byte, 0, len(frResults))
-								imagePartItems := make([][]byte, 0, 2)
+								mediaPartItems := make([][]byte, 0, 2)
 								for _, fr := range frResults {
 									if fr.Get("type").String() == "image" && fr.Get("source.type").String() == "base64" {
 										inlineDataJSON := []byte(`{}`)
@@ -675,8 +675,15 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 										imagePartJSON := []byte(`{}`)
 										imagePartJSON, _ = sjson.SetRawBytes(imagePartJSON, "inlineData", inlineDataJSON)
-										imagePartItems = append(imagePartItems, imagePartJSON)
+										mediaPartItems = append(mediaPartItems, imagePartJSON)
 										continue
+									}
+
+									if fr.Get("type").String() == "document" {
+										if documentPart := claudeBase64InlineData(fr.Get("source")); documentPart != nil {
+											mediaPartItems = append(mediaPartItems, documentPart)
+											continue
+										}
 									}
 
 									nonImageItems = append(nonImageItems, []byte(fr.Raw))
@@ -693,8 +700,8 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								// Place image data inside functionResponse.parts as inlineData
 								// instead of as sibling parts in the outer content, to avoid
 								// base64 data bloating the text context.
-								if len(imagePartItems) > 0 {
-									functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "parts", translatorcommon.JoinRawArray(imagePartItems))
+								if len(mediaPartItems) > 0 {
+									functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "parts", translatorcommon.JoinRawArray(mediaPartItems))
 								}
 
 							} else if functionResponseResult.IsObject() {
