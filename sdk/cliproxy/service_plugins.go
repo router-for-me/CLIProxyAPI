@@ -182,7 +182,7 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 			phase:    modelRegistrationPhase(authForRegistration),
 			category: modelRegistrationCategory(authForRegistration),
 			run: func(compatCache *openAICompatibilityRegistrationCache) {
-				s.completeModelRegistrationForAuthWithCache(ctx, authForRegistration, compatCache)
+				s.refreshModelRegistrationForAuthWithContext(ctx, authForRegistration, compatCache)
 			},
 		})
 	}
