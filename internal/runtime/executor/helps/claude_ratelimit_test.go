@@ -367,3 +367,101 @@ func TestClaudeHeadersIndicateUnifiedRateLimitRejection_OverageRejection_Utiliza
 		})
 	}
 }
+
+func TestClaudeHeadersIndicateUnifiedRateLimitRejection_ModelFamilyWeeklyClaims(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name          string
+		headers       http.Header
+		wantUnified   bool
+		checkResetNil bool
+	}{
+		{
+			name: "seven_day_opus with 5h+7d allowed is model-scoped and ignores far unified reset and retry-after",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"seven_day_opus"},
+				"Anthropic-Ratelimit-Unified-5h-Status":            []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d-Status":            []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-Reset":                []string{strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10)},
+				"Retry-After":                                      []string{"604800"},
+			},
+			wantUnified:   false,
+			checkResetNil: true,
+		},
+		{
+			name: "seven_day_sonnet with 7d allowed and 5h omitted but utilization 0.10 is model-scoped",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"seven_day_sonnet"},
+				"Anthropic-Ratelimit-Unified-7d-Status":            []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-5h-Utilization":       []string{"0.10"},
+			},
+			wantUnified: false,
+		},
+		{
+			name: "seven_day_opus with 7d rejected is credential-scoped",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"seven_day_opus"},
+				"Anthropic-Ratelimit-Unified-5h-Status":            []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d-Status":            []string{"rejected"},
+			},
+			wantUnified: true,
+		},
+		{
+			name: "seven_day_opus with 5h omitted and no utilization is credential-scoped",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"seven_day_opus"},
+				"Anthropic-Ratelimit-Unified-7d-Status":            []string{"allowed"},
+			},
+			wantUnified: true,
+		},
+		{
+			name: "plain seven_day claim with unified rejected is credential-scoped",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"seven_day"},
+				"Anthropic-Ratelimit-Unified-5h-Status":            []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d-Status":            []string{"allowed"},
+			},
+			wantUnified: true,
+		},
+		{
+			name: "mixed-case claim SEVEN_DAY_OPUS with allowed windows works",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"  SEVEN_DAY_OPUS  "},
+				"Anthropic-Ratelimit-Unified-5h-Status":            []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d-Status":            []string{"allowed"},
+			},
+			wantUnified: false,
+		},
+		{
+			name: "mixed-case claim Seven_Day_Sonnet with allowed windows works",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{" Seven_Day_Sonnet "},
+				"Anthropic-Ratelimit-Unified-5h-Status":            []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d-Status":            []string{"allowed"},
+			},
+			wantUnified: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClaudeHeadersIndicateUnifiedRateLimitRejection(tt.headers)
+			if got != tt.wantUnified {
+				t.Fatalf("ClaudeHeadersIndicateUnifiedRateLimitRejection() = %v, want %v", got, tt.wantUnified)
+			}
+			if tt.checkResetNil {
+				gotReset := ParseClaudeRateLimitReset(tt.headers, now)
+				if gotReset != nil {
+					t.Fatalf("ParseClaudeRateLimitReset() = %v, want nil", *gotReset)
+				}
+			}
+		})
+	}
+}
