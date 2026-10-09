@@ -223,6 +223,71 @@ func TestReadExistingCredentialIgnoresSymlink(t *testing.T) {
 	}
 }
 
+// TestImportCodexAuthRejectsSameFileSource checks that an import never rewrites its
+// own source: a source that is the destination credential file itself, or a link
+// to it, is refused and left byte for byte as it was.
+func TestImportCodexAuthRejectsSameFileSource(t *testing.T) {
+	aliases := map[string]func(destination, alias string) error{
+		"same path": nil,
+		"hard link": os.Link,
+		"symlink":   os.Symlink,
+	}
+	for name, link := range aliases {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(func() { sdkAuth.RegisterTokenStore(nil) })
+			sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
+
+			root := t.TempDir()
+			authDir := filepath.Join(root, "imported")
+			native, errMarshal := json.Marshal(map[string]any{
+				"tokens": map[string]any{
+					"id_token": testJWT(t, map[string]any{
+						"email":                       "dev@example.com",
+						"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "account-from-token"},
+					}),
+					"access_token":  "access-secret",
+					"refresh_token": "refresh-secret",
+				},
+			})
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			outside := filepath.Join(root, "auth.json")
+			if errWrite := os.WriteFile(outside, native, 0o600); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			// A first import from outside names the destination file.
+			destination, errImport := importCodexAuth(&config.Config{AuthDir: authDir}, outside)
+			if errImport != nil {
+				t.Fatalf("first importCodexAuth() error = %v", errImport)
+			}
+			// Put the native file at the destination, then import it through the alias.
+			if errWrite := os.WriteFile(destination, native, 0o600); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			source := destination
+			if link != nil {
+				source = filepath.Join(root, "alias.json")
+				if errLink := link(destination, source); errLink != nil {
+					t.Skipf("%s unavailable on this platform: %v", name, errLink)
+				}
+			}
+
+			_, errAgain := importCodexAuth(&config.Config{AuthDir: authDir}, source)
+			if errAgain == nil || !strings.Contains(errAgain.Error(), "same file") {
+				t.Fatalf("importCodexAuth() error = %v, want a same-file refusal", errAgain)
+			}
+			after, errRead := os.ReadFile(destination)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if string(after) != string(native) {
+				t.Fatal("the source file was rewritten by its own import")
+			}
+		})
+	}
+}
+
 func testJWT(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	payload, errMarshal := json.Marshal(claims)

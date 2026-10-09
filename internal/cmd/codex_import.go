@@ -131,10 +131,15 @@ func importCodexAuth(cfg *config.Config, authPath string) (string, error) {
 	if setter, ok := store.(interface{ SetBaseDir(string) }); ok {
 		setter.SetBaseDir(cfg.AuthDir)
 	}
-	// Importing an account that already has a credential file must keep what the
-	// user configured on it (disabled, proxy_url, excluded models), as a login does.
 	if strings.TrimSpace(cfg.AuthDir) != "" {
-		if existing := readExistingCredential(filepath.Join(cfg.AuthDir, fileName)); len(existing) > 0 {
+		destination := filepath.Join(cfg.AuthDir, fileName)
+		// The import must never rewrite its own source.
+		if sameFile(rawPath, destination) {
+			return "", fmt.Errorf("source and destination are the same file: %s", destination)
+		}
+		// Importing an account that already has a credential file must keep what the
+		// user configured on it (disabled, proxy_url, excluded models), as a login does.
+		if existing := readExistingCredential(destination); len(existing) > 0 {
 			coreauth.MergeExistingAuthMetadata(record, existing)
 		}
 	}
@@ -143,6 +148,20 @@ func importCodexAuth(cfg *config.Config, authPath string) (string, error) {
 		return "", fmt.Errorf("save credential: %w", errSave)
 	}
 	return path, nil
+}
+
+// sameFile reports whether both paths resolve to one existing file. Symlinks are
+// followed, so a link to the file counts as the file.
+func sameFile(first, second string) bool {
+	firstInfo, errFirst := os.Stat(first)
+	if errFirst != nil {
+		return false
+	}
+	secondInfo, errSecond := os.Stat(second)
+	if errSecond != nil {
+		return false
+	}
+	return os.SameFile(firstInfo, secondInfo)
 }
 
 // readExistingCredential returns the JSON object stored in an existing credential
