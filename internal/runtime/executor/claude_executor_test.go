@@ -8119,6 +8119,62 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *
 	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance", "")
 }
 
+func TestInsertClaudeMidConversationSystemMessages_SkipsEffortDirectiveInUserRun(t *testing.T) {
+	// After a client compacts history, the next request can be a summary user turn,
+	// a directive-only effort update, and the new user turn, with no assistant turn.
+	payload := []byte(`{"messages":[` +
+		`{"role":"user","content":"summary"},` +
+		`{"role":"system","content":[],"output_config":{"effort":"low"}},` +
+		`{"role":"user","content":"next"}` +
+		`]}`)
+
+	out := insertClaudeMidConversationSystemMessages(payload, []string{"guidance"})
+	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	wantRoles := []string{"user", "system", "user", "system"}
+	if len(roles) != len(wantRoles) {
+		t.Fatalf("message count = %d, want %d: %s", len(roles), len(wantRoles), out)
+	}
+	for idx, wantRole := range wantRoles {
+		if got := roles[idx].String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
+		}
+	}
+	if got := gjson.GetBytes(out, "messages.1.output_config.effort").String(); got != "low" {
+		t.Fatalf("messages[1] is not the caller's effort directive: %s", out)
+	}
+	assertClaudeMidConversationSystemMessage(t, out, 3, "guidance", "")
+}
+
+func TestCheckSystemInstructionsWithMode_EffortDirectiveInUserRunKeepsWireValid(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[` +
+		`{"type":"text","text":"caller guidance"}],` +
+		`"messages":[{"role":"user","content":"summary"},` +
+		`{"role":"system","content":[],"output_config":{"effort":"low"}},` +
+		`{"role":"user","content":"next"}]}`)
+
+	for _, keepTopLevel := range []bool{false, true} {
+		out := checkSystemInstructionsWithMode(payload, false, keepTopLevel)
+		// The API accepts a system turn with content only when the system run it
+		// belongs to is followed by an assistant turn or ends messages.
+		messages := gjson.GetBytes(out, "messages").Array()
+		for idx, message := range messages {
+			if message.Get("role").String() != "system" || isClaudeSystemDirectiveMessage(message) {
+				continue
+			}
+			next := idx + 1
+			for next < len(messages) && messages[next].Get("role").String() == "system" {
+				next++
+			}
+			if next < len(messages) && messages[next].Get("role").String() == "user" {
+				t.Fatalf("keepTopLevel=%v: messages[%d] system turn precedes a user turn: %s", keepTopLevel, idx, out)
+			}
+		}
+		if !strings.Contains(string(out), "caller guidance") {
+			t.Fatalf("keepTopLevel=%v: caller guidance dropped: %s", keepTopLevel, out)
+		}
+	}
+}
+
 func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	texts := []string{"first guidance", "second guidance"}

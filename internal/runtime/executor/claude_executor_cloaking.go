@@ -853,6 +853,29 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 	return false
 }
 
+// claudeLeadingUserRunEnd returns the index after the run of user turns that
+// starts at firstUserIdx. A directive-only system turn (content: [] with
+// output_config) is accepted at any position, so it does not end the run;
+// otherwise a forwarded system turn would be placed before a user turn.
+func claudeLeadingUserRunEnd(messageBlocks []gjson.Result, firstUserIdx int) int {
+	insertAt := firstUserIdx + 1
+	for insertAt < len(messageBlocks) {
+		message := messageBlocks[insertAt]
+		if message.Get("role").String() != "user" && !isClaudeSystemDirectiveMessage(message) {
+			break
+		}
+		insertAt++
+	}
+	return insertAt
+}
+
+func isClaudeSystemDirectiveMessage(message gjson.Result) bool {
+	content := message.Get("content")
+	return message.Get("role").String() == "system" &&
+		message.Get("output_config").Exists() &&
+		content.IsArray() && len(content.Array()) == 0
+}
+
 func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
 	firstUserIdx := firstClaudeUserMessageIndex(payload)
 	if firstUserIdx < 0 {
@@ -864,10 +887,7 @@ func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
 		return false
 	}
 	messageBlocks := messages.Array()
-	insertAt := firstUserIdx + 1
-	for insertAt < len(messageBlocks) && messageBlocks[insertAt].Get("role").String() == "user" {
-		insertAt++
-	}
+	insertAt := claudeLeadingUserRunEnd(messageBlocks, firstUserIdx)
 	return insertAt == len(messageBlocks) || insertAt > firstUserIdx+1
 }
 
@@ -890,10 +910,7 @@ func insertClaudeMidConversationSystemBlocks(payload []byte, blocks []forwardedC
 		return payload
 	}
 	messageBlocks := messages.Array()
-	insertAt := firstUserIdx + 1
-	for insertAt < len(messageBlocks) && messageBlocks[insertAt].Get("role").String() == "user" {
-		insertAt++
-	}
+	insertAt := claudeLeadingUserRunEnd(messageBlocks, firstUserIdx)
 	if len(messageBlocks)-insertAt >= len(blocks) {
 		matches := true
 		for idx, block := range blocks {
@@ -976,10 +993,7 @@ func captureClaudeCodeSystemPlacement(before, after []byte, cloaked bool) claude
 	if firstUserIdx < 0 {
 		return claudeCodeSystemPlacementState{}
 	}
-	insertAt := firstUserIdx + 1
-	for insertAt < len(beforeMessages) && beforeMessages[insertAt].Get("role").String() == "user" {
-		insertAt++
-	}
+	insertAt := claudeLeadingUserRunEnd(beforeMessages, firstUserIdx)
 	if insertAt+len(texts) > len(afterMessages) {
 		return claudeCodeSystemPlacementState{}
 	}
