@@ -191,6 +191,63 @@ func TestApplyClaudeLegacyDeviceHeadersAcceptsConfiguredMeasuredBaseline(t *test
 	}
 }
 
+func TestApplyClaudeLegacyDeviceHeadersPreserveNativeIdentityKeepsCoherentSoftwareTuple(t *testing.T) {
+	newerPatchUA := "claude-cli/2.1.295 (external, cli)"
+	tests := []struct {
+		name        string
+		preserve    bool
+		wantPackage string
+		wantRuntime string
+	}{
+		{name: "default", preserve: false, wantPackage: defaultClaudeFingerprintPackageVersion, wantRuntime: defaultClaudeFingerprintRuntimeVersion},
+		{name: "preserve native identity", preserve: true, wantPackage: "0.128.0", wantRuntime: "v26.4.1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+			if errRequest != nil {
+				t.Fatal(errRequest)
+			}
+			incoming := claudeDeviceHeaders(newerPatchUA)
+			incoming.Set("X-Stainless-Package-Version", "0.128.0")
+			incoming.Set("X-Stainless-Runtime-Version", "v26.4.1")
+			cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{PreserveNativeIdentity: tt.preserve}}
+
+			ApplyClaudeLegacyDeviceHeaders(request, incoming, cfg, true)
+
+			if got := request.Header.Get("User-Agent"); got != newerPatchUA {
+				t.Fatalf("User-Agent = %q, want %q", got, newerPatchUA)
+			}
+			if got := request.Header.Get("X-Stainless-Package-Version"); got != tt.wantPackage {
+				t.Fatalf("X-Stainless-Package-Version = %q, want %q", got, tt.wantPackage)
+			}
+			if got := request.Header.Get("X-Stainless-Runtime-Version"); got != tt.wantRuntime {
+				t.Fatalf("X-Stainless-Runtime-Version = %q, want %q", got, tt.wantRuntime)
+			}
+		})
+	}
+}
+
+func TestApplyClaudeLegacyDeviceHeadersPreserveNativeIdentityStillRejectsUnmeasuredClients(t *testing.T) {
+	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	incoming := claudeDeviceHeaders("claude-cli/999.0.0 (external, cli)")
+	incoming.Set("X-Stainless-Package-Version", "999.0.0")
+	cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{PreserveNativeIdentity: true}}
+
+	ApplyClaudeLegacyDeviceHeaders(request, incoming, cfg, true)
+
+	baseline := defaultClaudeDeviceProfile(nil)
+	if got := request.Header.Get("User-Agent"); got != baseline.UserAgent {
+		t.Fatalf("User-Agent = %q, want baseline %q", got, baseline.UserAgent)
+	}
+	if got := request.Header.Get("X-Stainless-Package-Version"); got != baseline.PackageVersion {
+		t.Fatalf("X-Stainless-Package-Version = %q, want baseline %q", got, baseline.PackageVersion)
+	}
+}
+
 func TestResolveClaudeDeviceProfileRequiredHomeReadWithoutCandidate(t *testing.T) {
 	client := newFakeClaudeDeviceProfileKVClient()
 	auth := &cliproxyauth.Auth{ID: "auth-1"}

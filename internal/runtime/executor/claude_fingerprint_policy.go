@@ -2,6 +2,7 @@ package executor
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -110,6 +111,16 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 		InjectDiagnostics:    profileClaudeCodeCLI,
 		OAuthCancellation:    authIsOAuth,
 	}
+}
+
+// preserveNativeClaudeIdentity reports whether a confirmed native Claude Code
+// request keeps its own metadata.user_id. It only applies when the operator
+// opted in and the caller's identity is well formed and bound to its session.
+func preserveNativeClaudeIdentity(cfg *config.Config, confirmedClaudeCode bool, headers http.Header, body []byte) bool {
+	if !confirmedClaudeCode || !helps.ClaudeNativeIdentityPreserved(cfg) {
+		return false
+	}
+	return helps.ClaudeNativeMetadataUserIDMatches(headers, body)
 }
 
 // applyClaudeCLIIdentity applies the Claude Code CLI credential identity to the
