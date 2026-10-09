@@ -994,10 +994,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
-					// An explicit rule cooldown replaces the deadline derived for this result;
-					// the monotonic check below still keeps a longer prior cooldown live.
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown && result.Cooldown > 0 {
-						state.NextRetryAfter = now.Add(result.Cooldown)
+						next := now.Add(result.Cooldown)
+						if next.After(state.NextRetryAfter) {
+							state.NextRetryAfter = next
+						}
 						state.Unavailable = true
 					}
 
@@ -2383,10 +2384,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.Unavailable = !auth.NextRetryAfter.IsZero()
 		}
 	}
-	// An explicit rule cooldown replaces the deadline derived for this result;
-	// the monotonic check below still keeps a longer prior cooldown live.
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && cooldown > 0 {
-		auth.NextRetryAfter = now.Add(cooldown)
+		next := now.Add(cooldown)
+		if next.After(auth.NextRetryAfter) {
+			auth.NextRetryAfter = next
+		}
 		auth.Unavailable = true
 	}
 	// A later failure only extends a still-live credential cooldown; a
