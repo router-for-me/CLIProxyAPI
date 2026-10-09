@@ -1268,3 +1268,125 @@ func TestUsageReporter_ExplicitTraceIDPrecedenceOverLogRequestID(t *testing.T) {
 		t.Fatalf("record.TraceID = %q, want explicit-trace-1", record.TraceID)
 	}
 }
+
+func TestUsageReporterObserveGenerationStartRequiresArmedClock(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+
+	reporter.ObserveGenerationStart()
+	if reporter.IsGenerationStartSet() {
+		t.Fatalf("ObserveGenerationStart before StartResponseTTFT must record nothing")
+	}
+
+	reporter.StartResponseTTFT()
+	reporter.ObserveGenerationStart()
+	if !reporter.IsGenerationStartSet() {
+		t.Fatalf("ObserveGenerationStart after StartResponseTTFT must record a value")
+	}
+
+	first := reporter.rawGenerationStart()
+
+	// Marking TTFT clears ttftStart; the generation clock origin must survive, the value
+	// becomes reportable, and a later observation must not move it.
+	reporter.ObserveTokenEvent(true)
+	reporter.ObserveGenerationStart()
+	if got := reporter.rawGenerationStart(); got != first {
+		t.Fatalf("generation start changed from %v to %v after TTFT", first, got)
+	}
+	ttft, reported := reporter.recordTimings()
+	if reported != first {
+		t.Fatalf("recordTimings generation start = %v, want %v", reported, first)
+	}
+	if ttft < first {
+		t.Fatalf("ttft %v precedes generation start %v on the shared clock", ttft, first)
+	}
+}
+
+// rawGenerationStart reads the recorded offset regardless of TTFT state.
+func (r *UsageReporter) rawGenerationStart() time.Duration {
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	return r.generationStarted
+}
+
+func TestUsageReporterSetTTFTDropsLaterGenerationStart(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	reporter.StartResponseTTFT()
+
+	// Simulate MarkFirstResponseByte sampling its duration before a generation start was
+	// observed, then committing that smaller duration after the observation.
+	reporter.ttftMu.Lock()
+	reporter.generationStarted = 50 * time.Millisecond
+	reporter.generationStartedSet = true
+	reporter.ttftMu.Unlock()
+	reporter.setTTFT(20 * time.Millisecond)
+
+	if reporter.IsGenerationStartSet() {
+		t.Fatalf("a generation start later than the committed TTFT must be dropped")
+	}
+	ttft, started := reporter.recordTimings()
+	if ttft != 20*time.Millisecond || started != 0 {
+		t.Fatalf("recordTimings = (%v, %v), want (20ms, 0)", ttft, started)
+	}
+
+	// A start that precedes the committed TTFT is kept.
+	keep := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	keep.StartResponseTTFT()
+	keep.ttftMu.Lock()
+	keep.generationStarted = 10 * time.Millisecond
+	keep.generationStartedSet = true
+	keep.ttftMu.Unlock()
+	keep.setTTFT(20 * time.Millisecond)
+	if ttft, started := keep.recordTimings(); ttft != 20*time.Millisecond || started != 10*time.Millisecond {
+		t.Fatalf("recordTimings = (%v, %v), want (20ms, 10ms)", ttft, started)
+	}
+}
+
+func TestUsageReporterNilObserveGenerationStartIsSafe(t *testing.T) {
+	var reporter *UsageReporter
+	reporter.ObserveGenerationStart()
+	if reporter.IsGenerationStartSet() {
+		t.Fatalf("nil reporter must report no generation start")
+	}
+}
+
+func TestUsageReporterObserveGenerationStartIgnoredAfterTTFT(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	reporter.StartResponseTTFT()
+
+	// A byte-level TTFT mark (TrackHTTPClient path) lands before any frame is parsed.
+	reporter.MarkFirstResponseByte()
+	if !reporter.IsTTFTSet() {
+		t.Fatalf("MarkFirstResponseByte must set TTFT")
+	}
+	reporter.ObserveGenerationStart()
+	if reporter.IsGenerationStartSet() {
+		t.Fatalf("ObserveGenerationStart after TTFT must record nothing")
+	}
+	record := reporter.buildRecord(usage.Detail{OutputTokens: 5, TotalTokens: 5}, false)
+	if record.GenerationStarted != 0 {
+		t.Fatalf("record generation started = %v, want 0", record.GenerationStarted)
+	}
+}
+
+func TestUsageReporterGenerationStartWithheldWithoutTokenTTFT(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	reporter.StartResponseTTFT()
+
+	// First packet arrives, then an output item is announced, then the stream dies
+	// before any token or terminal frame: TTFT falls back to the first packet.
+	reporter.ObserveTokenEvent(false)
+	reporter.ObserveGenerationStart()
+	if !reporter.IsGenerationStartSet() {
+		t.Fatalf("expected generation start to be observed")
+	}
+	if reporter.IsTTFTSet() {
+		t.Fatalf("no token was observed, TTFT must not be set")
+	}
+	record := reporter.buildRecord(usage.Detail{}, true)
+	if record.TTFT != reporter.firstPacketDuration {
+		t.Fatalf("ttft = %v, want first packet fallback %v", record.TTFT, reporter.firstPacketDuration)
+	}
+	if record.GenerationStarted != 0 {
+		t.Fatalf("generation started = %v must be withheld when TTFT is a first-packet fallback", record.GenerationStarted)
+	}
+}
