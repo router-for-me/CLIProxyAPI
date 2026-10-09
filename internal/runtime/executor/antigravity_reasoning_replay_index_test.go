@@ -1064,6 +1064,53 @@ func TestApplyAntigravityReasoningReplayItems_MultiPartContextHashRejectionLoggi
 		t.Fatal("expected payload not to change")
 	}
 
+	execCount := 0
+	readCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if strings.Contains(entry.Message, `first="exec"`) {
+			execCount++
+			expected := `antigravity replay: context hash rejected 1 part (first="exec" at contents[1].parts[0], opaque_id=false, batch=1, seq=1)`
+			if entry.Message != expected {
+				t.Fatalf("expected exec log %q, got %q", expected, entry.Message)
+			}
+		}
+		if strings.Contains(entry.Message, `first="read"`) {
+			readCount++
+			expected := `antigravity replay: context hash rejected 1 part (first="read" at contents[3].parts[0], opaque_id=false, batch=1, seq=1)`
+			if entry.Message != expected {
+				t.Fatalf("expected read log %q, got %q", expected, entry.Message)
+			}
+		}
+	}
+
+	if execCount != 1 || readCount != 1 {
+		t.Fatalf("expected 1 exec log and 1 read log for different tools, got exec=%d read=%d", execCount, readCount)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_SameToolMultiPartContextHashRejectionAggregates(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	payload := []byte(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-2","name":"exec","args":{"cmd":"pwd"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"exec","response":{"result":"/app"}}}]}
+	]}}`)
+
+	item1 := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	item2 := []byte(`{"type":"function_call_part","call_id":"call-2","name":"exec","args":{"cmd":"pwd"},"thoughtSignature":"sig-2","contextHash":"wrong-hash-2"}`)
+
+	toolSchemas := map[string]any{"exec": map[string]any{"type": "object"}}
+	_, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item1, item2}, toolSchemas)
+	if changed {
+		t.Fatal("expected payload not to change")
+	}
+
 	detailCount := 0
 	for _, entry := range hook.AllEntries() {
 		if entry.Level != log.DebugLevel {
@@ -1079,7 +1126,49 @@ func TestApplyAntigravityReasoningReplayItems_MultiPartContextHashRejectionLoggi
 	}
 
 	if detailCount != 1 {
-		t.Fatalf("expected exactly 1 multi-part rejection log, got %d", detailCount)
+		t.Fatalf("expected exactly 1 aggregated log for same tool across multiple parts, got %d", detailCount)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_SameToolDifferentOpaqueIDTypesRemainSeparate(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	nativeID := "call-2"
+	name := "exec"
+	args := `{"cmd":"pwd"}`
+	opaqueID := util.GeminiClaudeToolUseID(nativeID, name, args)
+	payload := []byte(fmt.Sprintf(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":%q,"args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":%q,"response":{"result":"ok"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":%q,"name":%q,"args":%s}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":%q,"name":%q,"response":{"result":"/app"}}}]}
+	]}}`, name, name, opaqueID, name, args, opaqueID, name))
+
+	item1 := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	item2 := []byte(fmt.Sprintf(`{"type":"function_call_part","call_id":%q,"name":%q,"args":%s,"thoughtSignature":"sig-2","contextHash":"wrong-hash-2"}`, nativeID, name, args))
+
+	_, _ = applyAntigravityReasoningReplayItems(payload, [][]byte{item1, item2}, map[string]any{
+		"exec": map[string]any{"type": "object"},
+	})
+
+	entries := make([]string, 0, 2)
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.DebugLevel && strings.Contains(entry.Message, "context hash rejected") {
+			entries = append(entries, entry.Message)
+		}
+	}
+	expected := []string{
+		`antigravity replay: context hash rejected 1 part (first="exec" at contents[1].parts[0], opaque_id=false, batch=1, seq=1)`,
+		`antigravity replay: context hash rejected 1 part (first="exec" at contents[3].parts[0], opaque_id=true, batch=1, seq=0)`,
+	}
+	if len(entries) != len(expected) {
+		t.Fatalf("expected %d separate logs, got %d: %v", len(expected), len(entries), entries)
+	}
+	for index, got := range entries {
+		if got != expected[index] {
+			t.Fatalf("log[%d] = %q, want %q", index, got, expected[index])
+		}
 	}
 }
 
@@ -1116,5 +1205,40 @@ func TestApplyAntigravityReasoningReplayItems_SingleContextHashRejectionLogs(t *
 
 	if detailCount != 1 {
 		t.Fatalf("expected exactly 1 detailed rejection log, got %d", detailCount)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_ContextHashRejectionSkipsBatchRetry(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	payload := []byte(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-ok","name":"exec","args":{"cmd":"pwd"}},"thoughtSignature":"sig-ok"}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-ok","name":"exec","response":{"result":"/app"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"tool_call","args":{"id":"web_search"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"tool_call","response":{"result":"ok"}}}]}
+	]}}`)
+
+	applied := []byte(`{"type":"function_call_part","call_id":"call-ok","name":"exec","args":{"cmd":"pwd"},"thoughtSignature":"sig-ok"}`)
+	rejected := []byte(`{"type":"function_call_part","call_id":"call-1","name":"tool_call","args":{"id":"web_search"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	toolSchemas := map[string]any{
+		"exec":      map[string]any{"type": "object"},
+		"tool_call": map[string]any{"type": "object"},
+	}
+	_, _ = applyAntigravityReasoningReplayItems(payload, [][]byte{applied, rejected}, toolSchemas)
+
+	detailCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel || !strings.Contains(entry.Message, "context hash rejected") {
+			continue
+		}
+		detailCount++
+		expected := `antigravity replay: context hash rejected 1 part (first="tool_call" at contents[3].parts[0], opaque_id=false, batch=1, seq=1)`
+		if entry.Message != expected {
+			t.Fatalf("expected log %q, got %q", expected, entry.Message)
+		}
+	}
+	if detailCount != 1 {
+		t.Fatalf("expected exactly 1 rejection log, got %d", detailCount)
 	}
 }

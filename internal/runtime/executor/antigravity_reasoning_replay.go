@@ -356,7 +356,13 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 		tracker.setPhase(antigravityReplayPhaseBatch)
 		batch := newAntigravityReplayBatch(index)
 		handled := 0
-		for handled < len(items) && batch.apply(items[handled], toolSchemas) {
+		contextHashStopped := false
+		for handled < len(items) {
+			rejectionsBefore := tracker.contextHashRejectionCount()
+			if !batch.apply(items[handled], toolSchemas) {
+				contextHashStopped = tracker.contextHashRejectionCount() > rejectionsBefore
+				break
+			}
 			handled++
 		}
 		if handled > 0 {
@@ -376,10 +382,13 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 				break
 			}
 			index = newAntigravityReplayRequestIndexWithTracker(updated, tracker)
-			// Retry the first unhandled item against the freshly flushed payload.
-			// It may only have rejected the batch because a prior stable-ID restore
-			// made the old context index stale.
-			continue
+			// Retry only when this batch restored a stable ID. That changes the
+			// context fingerprint, so the rejection may belong to the stale index.
+			// A context-hash mismatch on an unchanged identity cannot be repaired
+			// by rebuilding the same payload.
+			if !(contextHashStopped && !batch.identityChanged) {
+				continue
+			}
 		}
 
 		// Apply one structural or context-dependent item with the original
@@ -1332,17 +1341,30 @@ type antigravityReplayContextHashSample struct {
 	opaqueID     bool
 }
 
-type antigravityReplayContextHashLogTracker struct {
-	phase                antigravityReplayPhase
+type antigravityReplayContextHashGroupKey struct {
+	toolName string
+	opaqueID bool
+}
+
+type antigravityReplayContextHashGroup struct {
+	key                  antigravityReplayContextHashGroupKey
 	batchRejections      int
 	sequentialRejections int
 	loggedKeys           map[antigravityReplayPartKey]bool
-	sample               *antigravityReplayContextHashSample
+	sampleContentIndex   int
+	samplePartIndex      int
+}
+
+type antigravityReplayContextHashLogTracker struct {
+	phase                      antigravityReplayPhase
+	totalContextHashRejections int
+	groups                     map[antigravityReplayContextHashGroupKey]*antigravityReplayContextHashGroup
+	order                      []antigravityReplayContextHashGroupKey
 }
 
 func newAntigravityReplayContextHashLogTracker() *antigravityReplayContextHashLogTracker {
 	return &antigravityReplayContextHashLogTracker{
-		loggedKeys: make(map[antigravityReplayPartKey]bool),
+		groups: make(map[antigravityReplayContextHashGroupKey]*antigravityReplayContextHashGroup),
 	}
 }
 
@@ -1352,33 +1374,59 @@ func (t *antigravityReplayContextHashLogTracker) setPhase(phase antigravityRepla
 	}
 }
 
+func (t *antigravityReplayContextHashLogTracker) contextHashRejectionCount() int {
+	if t == nil {
+		return 0
+	}
+	return t.totalContextHashRejections
+}
+
 func (t *antigravityReplayContextHashLogTracker) recordRejection(sample antigravityReplayContextHashSample, key antigravityReplayPartKey) {
 	if t == nil {
 		return
 	}
+	t.totalContextHashRejections++
+	groupKey := antigravityReplayContextHashGroupKey{
+		toolName: sample.name,
+		opaqueID: sample.opaqueID,
+	}
+	group, exists := t.groups[groupKey]
+	if !exists {
+		group = &antigravityReplayContextHashGroup{
+			key:                groupKey,
+			loggedKeys:         make(map[antigravityReplayPartKey]bool),
+			sampleContentIndex: sample.contentIndex,
+			samplePartIndex:    sample.partIndex,
+		}
+		t.groups[groupKey] = group
+		t.order = append(t.order, groupKey)
+	}
 	if t.phase == antigravityReplayPhaseSequential {
-		t.sequentialRejections++
+		group.sequentialRejections++
 	} else {
-		t.batchRejections++
+		group.batchRejections++
 	}
-	if t.sample == nil {
-		t.sample = &sample
-	}
-	t.loggedKeys[key] = true
+	group.loggedKeys[key] = true
 }
 
 func (t *antigravityReplayContextHashLogTracker) log() {
-	if t == nil || t.sample == nil || (t.batchRejections == 0 && t.sequentialRejections == 0) {
+	if t == nil || len(t.groups) == 0 {
 		return
 	}
-	partsCount := len(t.loggedKeys)
-	partsNoun := "parts"
-	if partsCount == 1 {
-		partsNoun = "part"
+	for _, groupKey := range t.order {
+		group := t.groups[groupKey]
+		if group == nil || (group.batchRejections == 0 && group.sequentialRejections == 0) {
+			continue
+		}
+		partsCount := len(group.loggedKeys)
+		partsNoun := "parts"
+		if partsCount == 1 {
+			partsNoun = "part"
+		}
+		log.Debugf("antigravity replay: context hash rejected %d %s (first=%q at contents[%d].parts[%d], opaque_id=%t, batch=%d, seq=%d)",
+			partsCount, partsNoun, group.key.toolName, group.sampleContentIndex, group.samplePartIndex, group.key.opaqueID,
+			group.batchRejections, group.sequentialRejections)
 	}
-	log.Debugf("antigravity replay: context hash rejected %d %s (first=%q at contents[%d].parts[%d], opaque_id=%t, batch=%d, seq=%d)",
-		partsCount, partsNoun, t.sample.name, t.sample.contentIndex, t.sample.partIndex, t.sample.opaqueID,
-		t.batchRejections, t.sequentialRejections)
 }
 
 type antigravityReplayRequestIndex struct {
