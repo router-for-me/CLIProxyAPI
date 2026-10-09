@@ -7,6 +7,103 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
+// antigravityModelRefreshRequest captures publication ownership at admission.
+// A queued successor must not adopt a later epoch from an external publisher.
+type antigravityModelRefreshRequest struct {
+	ctx           context.Context
+	auth          *coreauth.Auth
+	provider      string
+	registryEpoch uint64
+}
+
+// queueAntigravityModelRefresh coalesces registration and periodic probes into
+// one worker per account. Repeated updates replace a single queued successor,
+// rather than accumulating singleflight followers while an upstream is stalled.
+func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreauth.Auth, provider string) {
+	if s == nil || auth == nil || auth.ID == "" || auth.Disabled || s.antigravityHomeEnabled() {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil || pluginHostHasAuthModelProvider(s.pluginHost, auth.Provider) {
+		return
+	}
+	s.cfgMu.RLock()
+	lifetime := s.antigravityContext
+	s.cfgMu.RUnlock()
+	if lifetime != nil && lifetime.Err() != nil {
+		return
+	}
+	request := &antigravityModelRefreshRequest{
+		ctx: ctx, auth: auth.Clone(), provider: provider,
+		registryEpoch: GlobalModelRegistry().ClientRegistrationEpoch(auth.ID),
+	}
+	token, _ := request.auth.Metadata["access_token"].(string)
+	probe := &antigravityAccountProbe{
+		auth: request.auth, routeKey: s.antigravityCapabilityKey(request.auth), token: strings.TrimSpace(token),
+	}
+	s.antigravityProbeMu.Lock()
+	// Late stale callers must not replace the latest queued auth snapshot.
+	if ctx.Err() != nil || !s.antigravityAccountProbeCurrent(probe) {
+		s.antigravityProbeMu.Unlock()
+		return
+	}
+	if s.antigravityRefreshPending == nil {
+		s.antigravityRefreshPending = make(map[string]*antigravityModelRefreshRequest)
+	}
+	queued, running := s.antigravityRefreshPending[auth.ID]
+	if queued != nil && queued.registryEpoch > request.registryEpoch {
+		// Concurrent registration callers can reach admission out of order.
+		s.antigravityProbeMu.Unlock()
+		return
+	}
+	s.antigravityRefreshPending[auth.ID] = request
+	if !running {
+		s.antigravityProbeWg.Add(1)
+	}
+	s.antigravityProbeMu.Unlock()
+	if !running {
+		go s.runAntigravityAccountRefresh(auth.ID)
+	}
+}
+
+func (s *Service) runAntigravityAccountRefresh(authID string) {
+	defer s.antigravityProbeWg.Done()
+	defer s.signalAntigravityModelRefresh()
+	for {
+		s.antigravityProbeMu.Lock()
+		request := s.antigravityRefreshPending[authID]
+		if request == nil {
+			delete(s.antigravityRefreshPending, authID)
+			s.antigravityProbeMu.Unlock()
+			return
+		}
+		s.antigravityRefreshPending[authID] = nil
+		s.antigravityProbeMu.Unlock()
+		s.executeAntigravityModelRefresh(request)
+	}
+}
+
+func (s *Service) executeAntigravityModelRefresh(request *antigravityModelRefreshRequest) {
+	if request.ctx.Err() != nil || pluginHostHasAuthModelProvider(s.pluginHost, request.auth.Provider) {
+		return
+	}
+	probeCtx, cancel := context.WithCancel(request.ctx)
+	defer cancel()
+	s.cfgMu.RLock()
+	lifetime := s.antigravityContext
+	s.cfgMu.RUnlock()
+	if lifetime != nil {
+		stop := context.AfterFunc(lifetime, cancel)
+		defer stop()
+		if lifetime.Err() != nil {
+			return
+		}
+	}
+	s.probeAndRegisterAntigravityModels(probeCtx, request.auth, request.provider, request.auth.RegistrationEpoch, request.registryEpoch)
+}
+
 // antigravityAccountProbe owns both queued and connected work for one auth snapshot.
 // Cancellation releases network slots without imposing an upstream timeout.
 type antigravityAccountProbe struct {

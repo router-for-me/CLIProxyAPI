@@ -137,11 +137,10 @@ type Service struct {
 	antigravityProbeMu       sync.Mutex
 	antigravityAccountProbes map[string]map[*antigravityAccountProbe]struct{}
 	antigravityRefreshWake   chan struct{}
-	// antigravityRefreshPending is protected by antigravityProbeMu and bounds
-	// periodic refresh work to one queued or running task per account.
-	antigravityRefreshPending map[string]struct{}
-	// Plugin queries have their own bound; native HTTP must not hold these slots.
-	antigravityRefreshPluginSlots chan struct{}
+	// antigravityRefreshPending is protected by antigravityProbeMu. Each entry
+	// owns one worker and at most one queued snapshot shared by all probe entry
+	// points. A nil value means the worker is running without a queued successor.
+	antigravityRefreshPending map[string]*antigravityModelRefreshRequest
 }
 
 // SetResultPolicy sets an execution result policy on the underlying core auth manager.

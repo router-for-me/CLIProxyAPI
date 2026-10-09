@@ -111,9 +111,8 @@ func TestAntigravityRefreshBoundsQueuedWorkAndCancels(t *testing.T) {
 		antigravityProbeSlots = make(chan struct{}, cap(slots))
 		defer func() { antigravityProbeSlots = slots }()
 		svc := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil), pluginHost: pluginhost.New()}
-		svc.antigravityRefreshPluginSlots = make(chan struct{}, modelRegistrationMaxWorkersPerCategory)
-		for range cap(svc.antigravityRefreshPluginSlots) {
-			svc.antigravityRefreshPluginSlots <- struct{}{}
+		for range cap(antigravityProbeSlots) {
+			antigravityProbeSlots <- struct{}{}
 		}
 		const accounts = modelRegistrationMaxWorkersPerCategory + 3
 		for i := range accounts {
@@ -134,10 +133,12 @@ func TestAntigravityRefreshBoundsQueuedWorkAndCancels(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { defer close(done); svc.runAntigravityModelRefresh(ctx) }()
-		time.Sleep(2 * time.Minute) // Synthetic time: plugin calls are waiting for admission.
+		time.Sleep(2 * time.Minute) // Synthetic time: native probes are waiting for admission.
 		synctest.Wait()
 		beforeAdmission := calls.Load()
-		<-svc.antigravityRefreshPluginSlots
+		for range cap(antigravityProbeSlots) {
+			<-antigravityProbeSlots
+		}
 		time.Sleep(8 * time.Minute) // Repeated scans must not accumulate followers.
 		synctest.Wait()
 		connected := calls.Load()
@@ -154,8 +155,8 @@ func TestAntigravityRefreshBoundsQueuedWorkAndCancels(t *testing.T) {
 		if connected != modelRegistrationMaxWorkersPerCategory || pending != accounts {
 			t.Fatalf("connected=%d pending=%d, want %d and %d", connected, pending, modelRegistrationMaxWorkersPerCategory, accounts)
 		}
-		if beforeAdmission != 0 || len(svc.antigravityRefreshPluginSlots) != cap(svc.antigravityRefreshPluginSlots)-1 {
-			t.Fatal("plugin admission was bypassed or its slot was held during native probes")
+		if beforeAdmission != 0 {
+			t.Fatal("native network admission was bypassed")
 		}
 		if remaining != 0 || len(antigravityProbeSlots) != 0 {
 			t.Fatal("canceled refresh retained tasks or network slots")

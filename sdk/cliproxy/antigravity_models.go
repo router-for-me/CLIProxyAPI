@@ -455,32 +455,7 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
 }
 
 func (s *Service) asyncProbeAntigravityCapabilities(ctx context.Context, auth *coreauth.Auth, providerKey string) {
-	if s == nil || auth == nil || auth.ID == "" || auth.Disabled || s.antigravityHomeEnabled() {
-		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	authClone := auth.Clone()
-	expectedEpoch := auth.RegistrationEpoch
-	expectedRegEpoch := GlobalModelRegistry().ClientRegistrationEpoch(auth.ID)
-	s.antigravityProbeWg.Add(1)
-	go func() {
-		defer s.antigravityProbeWg.Done()
-		probeCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		s.cfgMu.RLock()
-		lifetime := s.antigravityContext
-		s.cfgMu.RUnlock()
-		if lifetime != nil {
-			stop := context.AfterFunc(lifetime, cancel)
-			defer stop()
-			if lifetime.Err() != nil {
-				return
-			}
-		}
-		s.probeAndRegisterAntigravityModels(probeCtx, authClone, providerKey, expectedEpoch, expectedRegEpoch)
-	}()
+	s.queueAntigravityModelRefresh(ctx, auth, providerKey)
 }
 
 func (s *Service) probeAndRegisterAntigravityModels(ctx context.Context, auth *coreauth.Auth, providerKey string, expectedEpoch, expectedRegEpoch uint64) {
@@ -586,47 +561,7 @@ func (s *Service) refreshAntigravityModels(ctx context.Context) {
 }
 
 func (s *Service) scheduleAntigravityModelRefresh(ctx context.Context, auth *coreauth.Auth) {
-	s.antigravityProbeMu.Lock()
-	if _, pending := s.antigravityRefreshPending[auth.ID]; pending {
-		s.antigravityProbeMu.Unlock()
-		return
-	}
-	if s.antigravityRefreshPending == nil {
-		s.antigravityRefreshPending = make(map[string]struct{})
-	}
-	s.antigravityRefreshPending[auth.ID] = struct{}{}
-	if s.antigravityRefreshPluginSlots == nil {
-		s.antigravityRefreshPluginSlots = make(chan struct{}, modelRegistrationMaxWorkersPerCategory)
-	}
-	pluginSlots := s.antigravityRefreshPluginSlots
-	s.antigravityProbeWg.Add(1)
-	s.antigravityProbeMu.Unlock()
-	go func() {
-		defer s.antigravityProbeWg.Done()
-		defer func() {
-			s.antigravityProbeMu.Lock()
-			delete(s.antigravityRefreshPending, auth.ID)
-			s.antigravityProbeMu.Unlock()
-			s.signalAntigravityModelRefresh()
-		}()
-		if ctx.Err() != nil {
-			return
-		}
-		if s.pluginHost != nil {
-			select {
-			case pluginSlots <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			result := s.pluginHost.ModelsForAuth(ctx, auth)
-			<-pluginSlots
-			if result.Handled || ctx.Err() != nil {
-				return
-			}
-		}
-		epoch := GlobalModelRegistry().ClientRegistrationEpoch(auth.ID)
-		s.probeAndRegisterAntigravityModels(ctx, auth, "antigravity", auth.RegistrationEpoch, epoch)
-	}()
+	s.queueAntigravityModelRefresh(ctx, auth, "antigravity")
 }
 
 // nextAntigravityModelRefreshDelay preserves retry jitter in actual scheduling,
