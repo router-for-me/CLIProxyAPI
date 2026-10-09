@@ -17,8 +17,11 @@ import (
 
 const (
 	modelsFetchTimeout    = 30 * time.Second
-	modelsRefreshInterval = 3 * time.Hour
+	modelsRefreshInterval = ModelsRefreshInterval
 )
+
+// ModelsRefreshInterval is the shared cadence for model catalogs and account entitlements.
+const ModelsRefreshInterval = 3 * time.Hour
 
 var modelsURLs = []string{
 	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",

@@ -512,6 +512,9 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	if result.Err != nil {
 		return true
 	}
+	if s.coreManager != nil && strings.EqualFold(a.Provider, "antigravity") && !s.antigravityHomeEnabled() {
+		defer s.coreManager.ReconcileRegistryModelStates(ctx, a.ID)
+	}
 	activeAuth := a
 	providerKey := strings.ToLower(strings.TrimSpace(result.Provider))
 	if providerKey == "" {

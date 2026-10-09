@@ -37,6 +37,9 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	ctx, runCancel := context.WithCancel(ctx)
+	s.cfgMu.Lock()
+	s.antigravityContext = ctx
+	s.cfgMu.Unlock()
 	s.homeMu.Lock()
 	s.runCancel = runCancel
 	s.homeMu.Unlock()
@@ -206,6 +209,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
+	if !homeEnabled {
+		go s.runAntigravityModelRefresh(ctx)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -233,6 +239,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() {
 		if ctx == nil {
 			ctx = context.Background()
+		}
+
+		s.homeMu.Lock()
+		runCancel := s.runCancel
+		s.homeMu.Unlock()
+		if runCancel != nil {
+			runCancel()
 		}
 
 		s.homeLifecycleMu.Lock()

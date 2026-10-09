@@ -116,6 +116,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Generation = 1
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	m.notifyAuthChangeLocked(auth.ID)
 	// Snapshot before unlocking: MarkResult mutates the published auth in place.
 	var schedulerSnapshot *Auth
 	if m.scheduler != nil {
@@ -271,6 +272,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	m.notifyAuthChangeLocked(auth.ID)
 	// Snapshot before unlocking: MarkResult mutates the published auth in place.
 	var schedulerSnapshot *Auth
 	if m.scheduler != nil {
@@ -319,6 +321,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
+	m.notifyAuthChangeLocked(id)
 	if m.modelPoolOffsets != nil {
 		delete(m.modelPoolOffsets, id)
 	}
@@ -423,6 +426,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		cfg = &internalconfig.Config{}
 	}
 	m.rebuildAPIKeyModelAliasLocked(cfg)
+	for id := range m.authChangeWatchers {
+		m.notifyAuthChangeLocked(id)
+	}
 	m.mu.Unlock()
 
 	if m.scheduler != nil {
