@@ -31,6 +31,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
+	if claudeThreadContinuationNeedsReplay(req.Payload, apiKey, baseURL) {
+		return resp, newClaudeThreadNotFoundError()
+	}
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 	// Real Claude OAuth always signs CCH. An opted-in API key signs only where

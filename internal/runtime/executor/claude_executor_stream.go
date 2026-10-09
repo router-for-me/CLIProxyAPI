@@ -33,6 +33,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
+	if claudeThreadContinuationNeedsReplay(req.Payload, apiKey, baseURL) {
+		return nil, newClaudeThreadNotFoundError()
+	}
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 	defer func() {
