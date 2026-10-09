@@ -252,9 +252,7 @@ func applyRequestScopedActionToResult(action string, cooldown time.Duration, okA
 		result.Error.Code = ErrorCodeRequestScoped
 	} else if action == RequestScopedActionStopAndCooldown || action == RequestScopedActionContinueAndCooldown {
 		result.Error.Code = ErrorCodeForceCooldown
-		if cooldown > 0 {
-			result.RetryAfter = &cooldown
-		}
+		result.Cooldown = cooldown
 	}
 }
 
