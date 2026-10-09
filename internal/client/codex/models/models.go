@@ -730,13 +730,15 @@ func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
 	}
 }
 
+// isCodexClientImageOrVideoModel reports catalog IDs that are not chat models.
+// Speech IDs are included so the Codex client does not offer them as text models.
 func isCodexClientImageOrVideoModel(id string) bool {
 	target := strings.TrimSpace(id)
 	if idx := strings.Index(target, "/"); idx != -1 {
 		target = strings.TrimSpace(target[idx+1:])
 	}
 	switch target {
-	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview":
+	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview", "grok-tts", "grok-voice-tts-1.0":
 		return true
 	default:
 		return false

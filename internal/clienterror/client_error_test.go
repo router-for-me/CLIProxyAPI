@@ -198,6 +198,12 @@ func TestIsRequestFault(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "Claude missing thread state plain text",
+			status: http.StatusNotFound,
+			err:    errors.New("No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."),
+			want:   true,
+		},
+		{
 			name: "Claude missing thread state in response body",
 			err: responseBodyError{
 				status: http.StatusNotFound,

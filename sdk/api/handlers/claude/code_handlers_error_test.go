@@ -170,6 +170,49 @@ func TestClaudeErrorMarksMissingThreadForClientReplay(t *testing.T) {
 	}
 }
 
+func TestClaudeErrorMarksPlainTextMissingThreadForClientReplay(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      errors.New("No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := gjson.GetBytes(body, "error.details.error_code").String(); got != "thread_not_found" {
+		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+	}
+}
+
+type mockClaudeThreadNotFoundError struct {
+	msg  string
+	body []byte
+}
+
+func (e mockClaudeThreadNotFoundError) Error() string        { return e.msg }
+func (e mockClaudeThreadNotFoundError) ResponseBody() []byte { return e.body }
+
+func TestClaudeErrorMarksStructuredExecutorMissingThreadForClientReplay(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error: mockClaudeThreadNotFoundError{
+			msg:  "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread.",
+			body: []byte(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."}}`),
+		},
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := gjson.GetBytes(body, "error.details.error_code").String(); got != "thread_not_found" {
+		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+	}
+}
+
 func TestWriteClaudeDirectErrorMarksMissingThreadForClientReplay(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

@@ -411,7 +411,16 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	nativeReq := req
 	nativeOpts := opts
 	if inputRequested != "" && inputRequested != inputFormat {
-		nativeReq.Payload = sdktranslator.TranslateRequest(inputRequested, inputFormat, req.Model, req.Payload, opts.Stream)
+		translated := sdktranslator.TranslateRequestEnvelope(context.Background(), inputRequested, inputFormat, sdktranslator.RequestEnvelope{
+			Format: inputRequested,
+			Model:  req.Model,
+			Stream: opts.Stream,
+			Body:   req.Payload,
+		})
+		if translated.Err != nil {
+			return preparedExecutorCall{}, translated.Err
+		}
+		nativeReq.Payload = translated.Body
 	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat

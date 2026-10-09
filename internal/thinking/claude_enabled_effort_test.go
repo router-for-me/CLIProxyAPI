@@ -63,7 +63,7 @@ func TestApplyThinking_ClaudeEnabledWithOutputConfigEffort(t *testing.T) {
 
 func TestClaudeToOpenAITranslationAndThinkingChained(t *testing.T) {
 	rawClaude := []byte(`{"model":"custom-openai","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled"},"output_config":{"effort":"high"}}`)
-	translated := openaiclaude.ConvertClaudeRequestToOpenAI("custom-openai", rawClaude, false)
+	translated, _ := openaiclaude.ConvertClaudeRequestToOpenAI("custom-openai", rawClaude, false)
 	if got := gjson.GetBytes(translated, "reasoning_effort").String(); got != "high" {
 		t.Fatalf("translated reasoning_effort = %q, want high; body=%s", got, translated)
 	}

@@ -63,7 +63,8 @@ const (
 )
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
-// If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
+// If errText is already valid JSON, it is compacted to ensure single-line SSE compatibility
+// while preserving upstream error payloads.
 func BuildErrorResponseBody(status int, errText string) []byte {
 	return BuildErrorResponseBodyWithError(status, errText, nil)
 }
@@ -111,6 +112,10 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	}
 
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
+		var compact bytes.Buffer
+		if errCompact := json.Compact(&compact, []byte(trimmed)); errCompact == nil {
+			return compact.Bytes()
+		}
 		return []byte(trimmed)
 	}
 

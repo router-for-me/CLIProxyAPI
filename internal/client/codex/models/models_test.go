@@ -132,6 +132,17 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	}
 }
 
+func TestCodexClientHidesSpeechModels(t *testing.T) {
+	for _, id := range []string{"grok-tts", "grok-voice-tts-1.0", "xai/grok-tts"} {
+		if !isCodexClientImageOrVideoModel(id) {
+			t.Fatalf("%s should be hidden from the Codex chat catalog", id)
+		}
+	}
+	if isCodexClientImageOrVideoModel("grok-4") {
+		t.Fatal("grok-4 should stay visible")
+	}
+}
+
 func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.T) {
 	resp := BuildResponse([]map[string]any{{
 		"id":           "gpt-5.5",

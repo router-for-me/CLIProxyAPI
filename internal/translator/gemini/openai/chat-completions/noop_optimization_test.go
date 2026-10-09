@@ -10,7 +10,7 @@ import (
 func TestConvertOpenAIRequestToGeminiNormalizesToolNameAndStrict(t *testing.T) {
 	input := []byte(`{"messages":[],"tools":[{"type":"function","function":{"name":true,"strict":true,"parameters":{"type":"object"}}}]}`)
 
-	output := ConvertOpenAIRequestToGemini("gemini-test", input, false)
+	output, _ := ConvertOpenAIRequestToGemini("gemini-test", input, false)
 
 	name := gjson.GetBytes(output, "tools.0.functionDeclarations.0.name")
 	if name.Type != gjson.String || name.String() != "true" {

@@ -761,23 +761,15 @@ func TestClaudeExecutor_CountTokensUpstream_Cloaked_ExplicitPreservesClientSyste
 	if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 		t.Fatalf("user message must not receive auto cache_control: %s", string(seenBody))
 	}
-	// Verify client system breakpoint was preserved with scope: global
+	// Verify client system breakpoint was preserved with scope: global.
 	foundClientSystemCC := false
-	messages := gjson.GetBytes(seenBody, "messages")
-	if messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
-			if msg.Get("role").String() == "system" {
-				content := msg.Get("content")
-				if content.IsArray() {
-					content.ForEach(func(_, part gjson.Result) bool {
-						if part.Get("text").String() == "Count tokens system instructions" &&
-							part.Get("cache_control.type").String() == "ephemeral" &&
-							part.Get("cache_control.scope").String() == "global" {
-							foundClientSystemCC = true
-						}
-						return true
-					})
-				}
+	system := gjson.GetBytes(seenBody, "system")
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("text").String() == "Count tokens system instructions" &&
+				part.Get("cache_control.type").String() == "ephemeral" &&
+				part.Get("cache_control.scope").String() == "global" {
+				foundClientSystemCC = true
 			}
 			return true
 		})
@@ -946,5 +938,82 @@ func TestClaudeExecutor_CountTokensUpstream_Cloaked_LegacyModel_ExplicitPreserve
 	}
 	if !foundReminderCC {
 		t.Fatalf("legacy count_tokens system reminder must preserve client cache_control with scope: global: %s", string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_CountTokensUpstream_OAuthRelocatesAffectedSystemPrompts(t *testing.T) {
+	tests := []struct {
+		name          string
+		messages      string
+		wantMessages  int64
+		wantSystemIdx int
+	}{
+		{
+			name:          "single user",
+			messages:      `[{"role":"user","content":"request"}]`,
+			wantMessages:  2,
+			wantSystemIdx: 1,
+		},
+		{
+			name:          "leading user run",
+			messages:      `[{"role":"user","content":"prompt"},{"role":"user","content":"context"},{"role":"assistant","content":"answer"},{"role":"user","content":"follow-up"}]`,
+			wantMessages:  5,
+			wantSystemIdx: 2,
+		},
+		{
+			name:          "trailing user run",
+			messages:      `[{"role":"user","content":"first"},{"role":"user","content":"second"}]`,
+			wantMessages:  3,
+			wantSystemIdx: 2,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var seenBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				seenBody = bytes.Clone(body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"input_tokens":20}`))
+			}))
+			defer server.Close()
+
+			auth := &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"api_key":  "sk-ant-oat-count-tokens",
+					"base_url": server.URL,
+				},
+				Metadata: claudeOAuthTestMetadata(),
+			}
+			payload := []byte(`{"model":"claude-opus-5","system":"caller guidance","messages":` + test.messages + `}`)
+			executor := NewClaudeExecutor(&config.Config{})
+			resp, errCount := executor.countTokensUpstream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-opus-5",
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatClaude,
+				OriginalRequest: payload,
+			})
+			if errCount != nil {
+				t.Fatalf("countTokensUpstream() error = %v", errCount)
+			}
+			if len(resp.Payload) == 0 {
+				t.Fatal("expected non-empty countTokensUpstream payload")
+			}
+			if gjson.GetBytes(seenBody, "system").Exists() {
+				t.Fatalf("OAuth caller system prompt must not remain top-level: %s", seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != test.wantMessages {
+				t.Fatalf("message count = %d, want %d: %s", got, test.wantMessages, seenBody)
+			}
+			messagePath := fmt.Sprintf("messages.%d", test.wantSystemIdx)
+			if got := gjson.GetBytes(seenBody, messagePath+".role").String(); got != "system" {
+				t.Fatalf("%s.role = %q, want system: %s", messagePath, got, seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, messagePath+".content.0.text").String(); got != "caller guidance" {
+				t.Fatalf("%s.content.0.text = %q, want caller guidance: %s", messagePath, got, seenBody)
+			}
+		})
 	}
 }

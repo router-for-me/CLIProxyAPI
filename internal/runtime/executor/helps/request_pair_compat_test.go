@@ -49,7 +49,7 @@ func TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations(t *t
 	const model = "compat-count-model"
 	var calls int
 	var wantStream bool
-	sdktranslator.Register(from, to, func(gotModel string, rawJSON []byte, stream bool) []byte {
+	sdktranslator.Register(from, to, func(gotModel string, rawJSON []byte, stream bool) ([]byte, error) {
 		if gotModel != model {
 			t.Errorf("model = %q, want %q", gotModel, model)
 		}
@@ -57,7 +57,7 @@ func TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations(t *t
 			t.Errorf("stream = %v, want %v", stream, wantStream)
 		}
 		calls++
-		return append([]byte(nil), rawJSON...)
+		return append([]byte(nil), rawJSON...), nil
 	}, sdktranslator.ResponseTransform{})
 	t.Cleanup(func() { sdktranslator.Unregister(from, to) })
 

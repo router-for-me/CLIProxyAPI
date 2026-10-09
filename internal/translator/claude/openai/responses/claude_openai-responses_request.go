@@ -33,18 +33,20 @@ const (
 //   - top-level tools and input[].additional_tools -> Claude tools[].input_schema
 //   - max_output_tokens -> max_tokens
 //   - stream passthrough via parameter
-func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertOpenAIResponsesRequestToClaude(modelName, inputRawJSON, stream, false)
+
 }
 
 // ConvertOpenAIResponsesRequestToClaudeWithCompat preserves reasoning items
 // whose encrypted content is empty for configured compatibility endpoints.
-func ConvertOpenAIResponsesRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIResponsesRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertOpenAIResponsesRequestToClaude(modelName, inputRawJSON, stream, true)
 }
 
-func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
+func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) ([]byte, error) {
 	rawJSON := normalizeCodexAgentMessages(inputRawJSON)
+	var drops common.UserTurnDrops
 
 	userID := common.DeriveClaudeUserID(rawJSON)
 
@@ -321,6 +323,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			// Determine role and construct Claude-compatible content parts.
 			var role string
 			var partsJSON [][]byte
+			var droppedPartType string
 			if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 				parts.ForEach(func(_, part gjson.Result) bool {
 					ptype := part.Get("type").String()
@@ -406,6 +409,13 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							if role == "" {
 								role = "user"
 							}
+						} else if droppedPartType == "" {
+							droppedPartType = ptype
+						}
+					case "input_audio":
+						// Claude has no audio block, so the part cannot be sent.
+						if droppedPartType == "" {
+							droppedPartType = ptype
 						}
 					}
 					return true
@@ -425,6 +435,13 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				default:
 					role = "user"
 				}
+			}
+
+			if role == "user" {
+				if droppedPartType != "" {
+					drops.Drop(droppedPartType)
+				}
+				drops.EndTurn(len(partsJSON))
 			}
 
 			if len(partsJSON) > 0 {
@@ -631,18 +648,26 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
-	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai-response", modelName)
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai-response", modelName), drops.Err()
 }
 
 func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
 	maxTokens := defaultClaudeResponsesMaxTokens
-	if strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "fable") {
+	if strings.Contains(normalized, "fable") {
 		maxTokens = defaultFableResponsesMaxTokens
 	}
-	if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && info.MaxCompletionTokens < maxTokens {
-		return info.MaxCompletionTokens
+	info := registry.LookupModelInfo(modelName, "claude")
+	if info == nil || info.MaxCompletionTokens <= 0 {
+		return maxTokens
 	}
-	return maxTokens
+	// Fable keeps its conservative omitted-field ceiling. Every other registered
+	// model uses its output limit, including when that limit is above the
+	// historical 32000 default.
+	if strings.Contains(normalized, "fable") && info.MaxCompletionTokens >= maxTokens {
+		return maxTokens
+	}
+	return info.MaxCompletionTokens
 }
 
 // isResponsesSystemLevelRole reports whether an input item carries system-level

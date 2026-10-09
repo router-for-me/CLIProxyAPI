@@ -464,6 +464,7 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 		return nil
 	}
 	var resumed []string
+	anyChanged := false
 	for model, state := range auth.ModelStates {
 		if state == nil {
 			continue
@@ -480,10 +481,19 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 		if !isUnauth {
 			continue
 		}
+		anyChanged = true
+		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
+			state.LastError = nil
+			if strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") {
+				state.StatusMessage = state.Quota.Reason
+			}
+			state.UpdatedAt = now
+			continue
+		}
 		resetModelState(state, now)
 		resumed = append(resumed, model)
 	}
-	if len(resumed) > 0 {
+	if anyChanged {
 		updateAggregatedAvailability(auth, now)
 	}
 	return resumed
@@ -578,6 +588,27 @@ func isForceRefreshContext(ctx context.Context) bool {
 	return ok && v
 }
 
+func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
+	if m == nil || id == "" || failedAccessToken == "" {
+		return
+	}
+	releaseMutation := m.lockAuthMutation(id)
+	defer releaseMutation()
+	m.mu.Lock()
+	if current := m.auths[id]; current != nil && authAccessToken(current) == failedAccessToken {
+		if _, hasExp := current.AccessTokenExpirationTime(); !hasExp {
+			current.Generation++
+			current.UpdatedAt = time.Now()
+			current.RejectedAccessToken = failedAccessToken
+			m.auths[id] = current
+			if m.scheduler != nil {
+				m.scheduler.upsertAuth(current.Clone())
+			}
+		}
+	}
+	m.mu.Unlock()
+}
+
 func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
@@ -593,6 +624,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil, errors.New("auth id is empty")
+	}
+	if failedAccessToken != "" {
+		m.markRejectedAccessToken(id, failedAccessToken)
 	}
 
 	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
@@ -635,12 +669,24 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
+	now := time.Now()
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		m.mu.Lock()
+		if current := m.auths[id]; current != nil {
+			if current.NextRefreshAfter.IsZero() || current.NextRefreshAfter.Before(now) {
+				current.NextRefreshAfter = now.Add(time.Second)
+			}
+			m.auths[id] = current
+			if m.scheduler != nil {
+				m.scheduler.upsertAuth(current.Clone())
+			}
+		}
+		m.mu.Unlock()
+		m.queueRefreshReschedule(id)
 		return nil, err
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
-	now := time.Now()
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
@@ -713,7 +759,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
 				current.StatusMessage = "unauthorized (refresh token invalid)"
 				shouldUnschedule = true
-			} else if !hasValidAccessToken {
+			} else if !hasValidAccessToken || accessTokenRejected {
 				current.Unavailable = true
 				current.Status = StatusError
 				if unauthorized {
@@ -778,6 +824,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	updated.StatusMessage = ""
 	updated.Unavailable = false
 	updated.RefreshFailures = 0
+	updated.RejectedAccessToken = ""
 	if updated.Status == StatusError || updated.Status == "" {
 		updated.Status = StatusActive
 	}

@@ -197,7 +197,7 @@ func TestGeminiApplyPatchNonStreamConflictingCompleteCalls(t *testing.T) {
 
 func TestGeminiApplyPatchHistoryPreservesWhitespaceAndToolPair(t *testing.T) {
 	request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch"}]}],"input":[{"type":"custom_tool_call","call_id":"c1","namespace":"functions","name":"apply_patch","input":"  *** Begin Patch\n*** Add File: 中.txt\n+😀\n*** End Patch\n "},{"type":"custom_tool_call_output","call_id":"c1","output":"ok"},{"role":"user","type":"message","content":"continue"}]}`)
-	out := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-pro-preview", request, false)
+	out, _ := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-pro-preview", request, false)
 	want := "  *** Begin Patch\n*** Add File: 中.txt\n+😀\n*** End Patch\n "
 	var call, result gjson.Result
 	gjson.GetBytes(out, "contents").ForEach(func(_, content gjson.Result) bool {

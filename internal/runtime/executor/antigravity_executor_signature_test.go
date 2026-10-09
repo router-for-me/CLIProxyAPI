@@ -198,8 +198,11 @@ func TestAntigravityGeminiSignatureNormalizationDoesNotRepeatLogs(t *testing.T) 
 		`{"functionCall":{"name":"second","args":{}},"thoughtSignature":"skip_thought_signature_validator"},` +
 		`{"functionCall":{"name":"third","args":{}},"thoughtSignature":"google#skip_thought_signature_validator"}]}]}`)
 	translationReq := sdktranslator.RequestEnvelope{Model: "gemini-3.8-flash-high", Stream: true}
-	original, working := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(t.Context(), nil, &config.Config{},
+	original, working, errTranslate := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(t.Context(), nil, &config.Config{},
 		sdktranslator.FormatGemini, sdktranslator.FormatAntigravity, translationReq, payload, payload)
+	if errTranslate != nil {
+		t.Fatalf("translate request pair: %v", errTranslate)
+	}
 	working = sanitizeAntigravityGeminiRequestSignatures(translationReq.Model, working)
 
 	if got := gjson.GetBytes(working, "request.contents.0.parts.0.thoughtSignature").String(); got != issue4959GeminiThoughtSignature() {

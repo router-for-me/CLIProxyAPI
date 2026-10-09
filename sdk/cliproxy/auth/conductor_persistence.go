@@ -68,7 +68,7 @@ func mergeAuthSaveDelta(target, before, after *Auth, preserveConcurrent bool) {
 	next := reflect.ValueOf(after).Elem()
 	for i := 0; i < dst.NumField(); i++ {
 		field := dst.Type().Field(i)
-		if field.PkgPath != "" || field.Name == "ID" || field.Name == "RegistrationEpoch" || field.Name == "Generation" {
+		if field.PkgPath != "" || field.Name == "ID" || field.Name == "RegistrationEpoch" || field.Name == "CredentialVersion" || field.Name == "Generation" || field.Name == "RejectedAccessToken" {
 			continue
 		}
 		d, b, n := dst.Field(i), base.Field(i), next.Field(i)

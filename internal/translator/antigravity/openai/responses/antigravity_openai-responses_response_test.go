@@ -226,7 +226,7 @@ func TestConvertAntigravityResponseToOpenAIResponsesNonStream_WebSearch(t *testi
 
 func TestAntigravityApplyPatchReuse(t *testing.T) {
 	request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}],"input":"patch"}`)
-	translated := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.1-pro-preview", request, false)
+	translated, _ := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.1-pro-preview", request, false)
 	declaration := gjson.GetBytes(translated, "request.tools.0.functionDeclarations.0")
 	if declaration.Get("name").String() != "functions__apply_patch" || !strings.Contains(declaration.Get("description").String(), "*** Begin Patch") || declaration.Get("parametersJsonSchema.properties.input.type").String() != "string" || !declaration.Get("parametersJsonSchema.additionalProperties").Exists() || declaration.Get("parametersJsonSchema.additionalProperties").Bool() {
 		t.Fatalf("missing declaration: %s", translated)

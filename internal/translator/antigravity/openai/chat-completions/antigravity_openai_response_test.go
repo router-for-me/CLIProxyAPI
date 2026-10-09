@@ -128,17 +128,44 @@ func TestNoFinishReasonOnIntermediateChunks(t *testing.T) {
 	}
 }
 
-func TestConvertAntigravityResponseToOpenAIIncludesZeroCompletionTokensWhenMissing(t *testing.T) {
-	var param any
-	chunk := []byte(`{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`)
-
-	result := ConvertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, chunk, &param)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(result))
+func TestConvertAntigravityResponseToOpenAICompletionTokensIncludeThoughts(t *testing.T) {
+	tests := []struct {
+		name       string
+		chunk      string
+		wantOutput int64
+	}{
+		{
+			name:       "candidates and thoughts",
+			chunk:      `{"response":{"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63}}}`,
+			wantOutput: 47,
+		},
+		{
+			name:       "thoughts without candidates",
+			chunk:      `{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`,
+			wantOutput: 42,
+		},
 	}
-	completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
-	if !completionTokens.Exists() || completionTokens.Int() != 0 {
-		t.Fatalf("completion_tokens = %s, want present with value 0. Output: %s", completionTokens.Raw, result[0])
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			result := ConvertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, []byte(tt.chunk), &param)
+			if len(result) != 1 {
+				t.Fatalf("expected 1 result, got %d", len(result))
+			}
+			completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
+			if !completionTokens.Exists() || completionTokens.Int() != tt.wantOutput {
+				t.Fatalf("completion_tokens = %s, want present with value %d. Output: %s", completionTokens.Raw, tt.wantOutput, result[0])
+			}
+			if got := gjson.GetBytes(result[0], "usage.completion_tokens_details.reasoning_tokens").Int(); got != 42 {
+				t.Fatalf("reasoning_tokens = %d, want 42. Output: %s", got, result[0])
+			}
+			promptTokens := gjson.GetBytes(result[0], "usage.prompt_tokens").Int()
+			totalTokens := gjson.GetBytes(result[0], "usage.total_tokens").Int()
+			if promptTokens+completionTokens.Int() != totalTokens {
+				t.Fatalf("prompt_tokens + completion_tokens = %d, total_tokens = %d", promptTokens+completionTokens.Int(), totalTokens)
+			}
+		})
 	}
 }
 

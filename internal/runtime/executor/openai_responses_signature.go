@@ -49,10 +49,18 @@ func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx, provider, body, false)
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, false)
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx context.Context, provider string, body []byte, isCompat bool) []byte {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, isCompat, isCompat)
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx context.Context, provider string, body []byte) []byte {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true)
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Context, provider string, body []byte, isCompat bool, keepForeign bool) []byte {
 	inputResult := util.GetGJSONBytesNoCopy(body, "input")
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
@@ -168,9 +176,10 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx context.Cont
 			if rawSignature != strings.TrimSpace(rawSignature) {
 				reason = "encrypted_content has leading or trailing whitespace"
 			} else if _, err := signature.InspectGPTReasoningSignature(rawSignature); err != nil {
-				// When isCompat is true, third-party Responses models (such as Muse)
-				// expect their own unknown-format encrypted_content to be replayed.
-				if !isCompat || rawSignature == "" || signature.DetectSignatureProvider(rawSignature) != signature.SignatureProviderUnknown {
+				// When keepForeign is true (compat callers enable it via WithCompat),
+				// third-party Responses models (such as Muse) expect their own
+				// unknown-format encrypted_content to be replayed.
+				if !keepForeign || rawSignature == "" || signature.DetectSignatureProvider(rawSignature) != signature.SignatureProviderUnknown {
 					reason = err.Error()
 				}
 			}

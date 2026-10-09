@@ -310,8 +310,9 @@ const claudeCodeFableReportingOutcomes = `# Reporting outcomes
 
 Report what actually happened, not what you intended. When you say something is done, sent, saved, fixed, or verified, that claim must rest on a result you observed in this session — tool output, the file as it now reads, the page as it now loads — not on what the step should have produced. If you did not check, say you did not check. If any step failed, was skipped, or came back different from what you expected, say so in the first sentence of your report, before anything else, even when the rest of the work succeeded. Never quietly work around a failure in a way that makes it look resolved; a problem the user can see is recoverable, one your summary hides is not. When you stop before the task is complete, your first line says so plainly and names what is left. Do not describe partial work as done, and do not let a summary read as more certain than the evidence behind it.`
 
-func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.280", "cli", "")
+func checkSystemInstructionsWithMode(payload []byte, strictMode bool, keepCallerSystemTopLevel ...bool) []byte {
+	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.280", "cli", "", keepAtTopLevel)
 }
 
 // checkSystemInstructionsWithSigningMode keeps the top-level system in Claude
@@ -319,8 +320,9 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // mid-conversation system message after the first user turn, where supported
 // Claude models give it operator-level authority without changing the cached
 // top-level prefix.
-func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string) []byte {
-	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", "")
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string, keepCallerSystemTopLevel ...bool) []byte {
+	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
+	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
@@ -406,6 +408,7 @@ func checkSystemInstructionsWithSigningModeAt(
 	currentDate string,
 	isSubagent bool,
 	prevReq, promptID string,
+	keepCallerSystemTopLevel bool,
 	turnOrigin ...string,
 ) []byte {
 	system := gjson.GetBytes(payload, "system")
@@ -444,7 +447,7 @@ func checkSystemInstructionsWithSigningModeAt(
 	}
 	if claudeUsesLegacySystemReminder(payload) {
 		payload = prependClaudeSystemReminderBlocksToFirstUserMessage(payload, forwardedSystemBlocks, isExplicit)
-	} else if claudeMidConversationSystemMessagesAtEnd(payload) {
+	} else if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEnd(payload) {
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
 		}
@@ -463,11 +466,16 @@ func checkSystemInstructionsWithSigningModeAt(
 // tokens aligned with the request the caller is about to send while preventing a
 // third-party system prompt from reaching Anthropic in the system slot.
 func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool, explicitCacheMode ...bool) []byte {
+	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheMode(payload)
+	return relocateClaudeSystemPromptForCountTokensWithPolicy(payload, strictMode, isExplicit, false)
+}
+
+func relocateClaudeSystemPromptForCountTokensWithPolicy(payload []byte, strictMode, explicitCacheMode, keepCallerSystemTopLevel bool) []byte {
 	system := gjson.GetBytes(payload, "system")
 	if !system.Exists() {
 		return payload
 	}
-	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheMode(payload)
+	isExplicit := explicitCacheMode
 	// Strict mode drops caller prompts on the Messages path, so it must not
 	// reintroduce them here either.
 	var forwardedSystemBlocks []forwardedClaudeSystemPromptBlock
@@ -498,7 +506,7 @@ func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool, e
 	if claudeUsesLegacySystemReminder(payload) {
 		return prependClaudeSystemReminderBlocksToFirstUserMessage(payload, forwardedSystemBlocks, isExplicit)
 	}
-	if claudeMidConversationSystemMessagesAtEnd(payload) {
+	if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEnd(payload) {
 		blocks := make([]string, 0, len(forwardedSystemBlocks))
 		for _, block := range forwardedSystemBlocks {
 			blocks = append(blocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
@@ -860,7 +868,7 @@ func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
 	for insertAt < len(messageBlocks) && messageBlocks[insertAt].Get("role").String() == "user" {
 		insertAt++
 	}
-	return insertAt > firstUserIdx+1 && insertAt == len(messageBlocks)
+	return insertAt == len(messageBlocks) || insertAt > firstUserIdx+1
 }
 
 func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) []byte {
@@ -1607,6 +1615,7 @@ func applyCloakingInternal(
 		isSubagent,
 		prevReq,
 		promptID,
+		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
 		turnOriginArgs...,
 	)
 

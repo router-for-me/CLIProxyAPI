@@ -215,6 +215,51 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompat_PreservesUnk
 	}
 }
 
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign_Issue6450(t *testing.T) {
+	const museSig = "Q-PaDg-mock-muse-spark-encrypted-reasoning-payload"
+	body := []byte(`{"store":false,"input":[` +
+		`{"id":"rs_muse","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"cleartext thinking"}],"encrypted_content":"` + museSig + `"},` +
+		`{"id":"rs_claude","type":"reasoning","summary":[],"content":null,"encrypted_content":"` + testClaudeCAISSample + `"},` +
+		`{"id":"rs_empty","type":"reasoning","summary":[],"content":null,"encrypted_content":""},` +
+		`{"id":"rs_orphan","type":"reasoning","summary":[]}` +
+		`]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(context.Background(), "test", body)
+
+	// rs_muse: unknown format signature preserved, cleartext content moved to summary, id kept
+	assertEmptyReasoningContent(t, got, "input.0.content")
+	if gotSig := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotSig != museSig {
+		t.Fatalf("keepForeign encrypted_content = %q, want %q; body=%s", gotSig, museSig, got)
+	}
+	if gotID := gjson.GetBytes(got, "input.0.id").String(); gotID != "rs_muse" {
+		t.Fatalf("keepForeign reasoning id = %q, want rs_muse; body=%s", gotID, got)
+	}
+	if gotSummary := gjson.GetBytes(got, "input.0.summary.0.text").String(); gotSummary != "cleartext thinking" {
+		t.Fatalf("keepForeign summary = %q, want 'cleartext thinking'; body=%s", gotSummary, got)
+	}
+
+	// rs_claude: known foreign signature stripped, id dropped when store=false
+	if gjson.GetBytes(got, "input.1.encrypted_content").Exists() {
+		t.Fatalf("Claude signature should be stripped: %s", got)
+	}
+	if gjson.GetBytes(got, "input.1.id").Exists() {
+		t.Fatalf("Claude reasoning id should be dropped: %s", got)
+	}
+
+	// rs_empty: empty signature stripped, id dropped
+	if gjson.GetBytes(got, "input.2.encrypted_content").Exists() {
+		t.Fatalf("empty signature should be stripped: %s", got)
+	}
+	if gjson.GetBytes(got, "input.2.id").Exists() {
+		t.Fatalf("empty reasoning id should be dropped: %s", got)
+	}
+
+	// rs_orphan: missing signature, id dropped when store=false
+	if gjson.GetBytes(got, "input.3.id").Exists() {
+		t.Fatalf("orphan reasoning id should be dropped: %s", got)
+	}
+}
+
 func BenchmarkSanitizeOpenAIResponsesReasoningEncryptedContentLargeNoopPayload(b *testing.B) {
 	body := []byte(`{"store":false,"input":[{"type":"message","role":"user","content":"` + strings.Repeat("x", 8<<20) + `"}]}`)
 	b.ReportAllocs()

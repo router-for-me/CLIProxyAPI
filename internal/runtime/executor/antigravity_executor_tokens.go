@@ -35,6 +35,18 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, errValidate
 	}
 	req.Payload = originalPayloadSource
+
+	// Prepare payload once (doesn't depend on baseURL). A translation refusal is
+	// observed before the token refresh or any upstream call.
+	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
+	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Body: req.Payload, ModelInfo: modelInfo}
+	translatedReq := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq)
+	if translatedReq.Err != nil {
+		return cliproxyexecutor.Response{}, translatedReq.Err
+	}
+	payload := translatedReq.Body
+	originalTranslatedForPayload := append([]byte(nil), payload...)
+
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return cliproxyexecutor.Response{}, errToken
@@ -46,12 +58,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if strings.TrimSpace(token) == "" {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
-
-	// Prepare payload once (doesn't depend on baseURL)
-	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
-	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Body: req.Payload, ModelInfo: modelInfo}
-	payload := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq).Body
-	originalTranslatedForPayload := append([]byte(nil), payload...)
 
 	payload, err := helps.ApplyRequestThinking(payload, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {

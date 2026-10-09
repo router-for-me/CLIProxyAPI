@@ -27,6 +27,7 @@ type responsesWebsocketForwardOptions struct {
 	toolCacheTurn            *responsesWebsocketToolCacheTurn
 	suppressError            func(*interfaces.ErrorMessage) bool
 	keepAliveInterval        *time.Duration
+	localInterrupt           *responsesLocalInterrupt
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -70,9 +71,16 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		defer keepAliveTicker.Stop()
 		keepAliveC = keepAliveTicker.C
 	}
+	if opts.localInterrupt != nil {
+		opts.localInterrupt.begin()
+		defer opts.localInterrupt.end()
+	}
+	localFrames := opts.localInterrupt.framesChan()
 
 	for {
 		select {
+		case interruptPayload := <-localFrames:
+			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
@@ -184,7 +192,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						cancel(payloadErrMsg.Error)
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
 					}
-				} else if isResponsesWebsocketCompletionEvent(eventType) {
+				} else if isResponsesWebsocketCompletionEvent(eventType) || eventType == "response.incomplete" {
+					// response.incomplete ends the turn too. Codex uses it, with
+					// reason "interrupted", to acknowledge response.interrupt. Closing
+					// the client socket here would block the follow-up request.
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
@@ -231,6 +242,37 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 		}
 	}
+}
+
+func completeResponsesWebsocketLocalInterrupt(
+	writer *responsesWebsocketWriter,
+	wsTimelineLog websocketTimelineAppender,
+	cancel handlers.APIHandlerCancelFunc,
+	payload []byte,
+	outputItemsByIndex map[int64][]byte,
+	outputItemsFallback [][]byte,
+	pendingToolCallIDs map[string]struct{},
+) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
+	responseID := strings.TrimSpace(gjson.GetBytes(payload, "response_id").String())
+	output := responseCompletedOutputFromPayload([]byte(`{"response":{"output":[]}}`), outputItemsByIndex, outputItemsFallback)
+	incomplete := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}`)
+	var errSet error
+	incomplete, errSet = sjson.SetBytes(incomplete, "response.id", responseID)
+	if errSet != nil {
+		cancel(errSet)
+		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
+	}
+	incomplete, errSet = sjson.SetRawBytes(incomplete, "response.output", output)
+	if errSet != nil {
+		cancel(errSet)
+		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
+	}
+	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, incomplete, time.Now()); errWrite != nil {
+		cancel(errWrite)
+		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
+	}
+	cancel(context.Canceled)
+	return output, responseID, sortedStringSet(pendingToolCallIDs), nil, nil
 }
 
 func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {

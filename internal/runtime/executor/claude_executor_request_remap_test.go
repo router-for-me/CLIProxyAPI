@@ -60,6 +60,13 @@ func TestClaudeOAuthToolAliasMissingContinuationStateIsRequestScopedNotFound(t *
 	if !okRequest || !requestErr.IsRequestScoped() {
 		t.Fatalf("continuation error is not request-scoped: %T", errPrepare)
 	}
+	responseErr, okResponse := errPrepare.(interface{ ResponseBody() []byte })
+	if !okResponse || len(responseErr.ResponseBody()) == 0 {
+		t.Fatalf("continuation error does not provide ResponseBody: %T", errPrepare)
+	}
+	if got := gjson.GetBytes(responseErr.ResponseBody(), "error.type").String(); got != "not_found_error" {
+		t.Fatalf("continuation error.type = %q, want not_found_error; body=%s", got, responseErr.ResponseBody())
+	}
 }
 
 func TestClaudeOAuthToolAliasEvictionReturnsThreadNotFound(t *testing.T) {

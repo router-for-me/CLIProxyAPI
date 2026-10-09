@@ -27,8 +27,17 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in OpenAI chat completions format
-func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, inputRawJSON, stream)
+
+}
+
+// convertOpenAIResponsesRequestToOpenAIChatCompletions also reports a file or
+// audio part Chat Completions cannot receive when it leaves a user turn with
+// nothing to send.
+func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	var drops translatorcommon.UserTurnDrops
 	// Base OpenAI chat completions template with default values
 	out := []byte(`{"model":"","messages":[],"stream":false}`)
 
@@ -243,6 +252,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
+				// Only a real user turn can be refused; developer text is sent as user text
+				// but never counts as the user's own turn.
+				isUserTurn := role == "user"
 				if role == "developer" {
 					role = "user"
 				}
@@ -256,6 +268,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 				if content := item.Get("content"); content.Exists() && content.IsArray() {
 					var contentItems [][]byte
+					// Counts the parts this turn really sends; an empty text part does not.
+					turnSendable := 0
 					content.ForEach(func(_, contentItem gjson.Result) bool {
 						contentType := contentItem.Get("type").String()
 						if contentType == "" {
@@ -268,6 +282,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							contentPart := []byte(`{"type":"text","text":""}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "text", text)
 							contentItems = append(contentItems, contentPart)
+							if text != "" {
+								turnSendable++
+							}
 						case "input_video", "video_url":
 							contentPart := []byte(`{"type":"video_url","video_url":{}}`)
 							videoURL := contentItem.Get("video_url")
@@ -282,6 +299,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							// Preserve malformed video parts for upstream validation instead of
 							// silently turning a video request into a text-only request.
 							contentItems = append(contentItems, contentPart)
+							turnSendable++
 						case "input_image":
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
@@ -290,9 +308,28 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail)
 							}
 							contentItems = append(contentItems, contentPart)
+							turnSendable++
+						case "input_file":
+							if contentPart, ok := responsesInputFileToChatPart(contentItem); ok {
+								contentItems = append(contentItems, contentPart)
+								turnSendable++
+							} else if isUserTurn {
+								// Chat Completions takes a file id or inline bytes only.
+								drops.Drop(contentType)
+							}
+						case "input_audio":
+							if contentPart, ok := responsesInputAudioToChatPart(contentItem); ok {
+								contentItems = append(contentItems, contentPart)
+								turnSendable++
+							} else if isUserTurn {
+								drops.Drop(contentType)
+							}
 						}
 						return true
 					})
+					if isUserTurn {
+						drops.EndTurn(turnSendable)
+					}
 					message = translatorcommon.SetRawArrayItems(message, "content", contentItems)
 				} else if content.Type == gjson.String {
 					message, _ = sjson.SetBytes(message, "content", content.String())
@@ -469,7 +506,52 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 	}
 
-	return out
+	return out, drops.Err()
+}
+
+// responsesInputFileToChatPart maps a Responses input_file part onto a Chat
+// Completions file part. It reports false when the part carries neither a file
+// id nor inline bytes, because Chat Completions has no field for a bare url.
+func responsesInputFileToChatPart(contentItem gjson.Result) ([]byte, bool) {
+	fileID := contentItem.Get("file_id").String()
+	fileData := contentItem.Get("file_data").String()
+	if fileID == "" && fileData == "" {
+		return nil, false
+	}
+	part := []byte(`{"type":"file","file":{}}`)
+	if fileID != "" {
+		part, _ = sjson.SetBytes(part, "file.file_id", fileID)
+	}
+	if fileData != "" {
+		part, _ = sjson.SetBytes(part, "file.file_data", fileData)
+	}
+	if filename := contentItem.Get("filename").String(); filename != "" {
+		part, _ = sjson.SetBytes(part, "file.filename", filename)
+	}
+	return part, true
+}
+
+// responsesInputAudioToChatPart maps a Responses input_audio part onto a Chat
+// Completions input_audio part. It reports false when the part has no bytes.
+func responsesInputAudioToChatPart(contentItem gjson.Result) ([]byte, bool) {
+	audio := contentItem.Get("input_audio")
+	data := audio.Get("data").String()
+	if data == "" {
+		data = contentItem.Get("data").String()
+	}
+	if data == "" {
+		return nil, false
+	}
+	format := audio.Get("format").String()
+	if format == "" {
+		format = contentItem.Get("format").String()
+	}
+	part := []byte(`{"type":"input_audio","input_audio":{"data":""}}`)
+	part, _ = sjson.SetBytes(part, "input_audio.data", data)
+	if format != "" {
+		part, _ = sjson.SetBytes(part, "input_audio.format", format)
+	}
+	return part, true
 }
 
 func convertResponsesToolChoiceToChatCompletions(toolChoice gjson.Result, inputRawJSON []byte) []byte {

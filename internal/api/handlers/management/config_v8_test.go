@@ -756,3 +756,137 @@ plugins:
 		request(http.MethodDelete, path, http.StatusNotFound, "")
 	}
 }
+
+func TestConfigV8SaveNormalizesCollectionStylesToBlockYAML(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `config-version: 8
+server:
+  port: 8317
+api-keys:
+  openai-compatibility:
+    - name: compat-provider
+      base-url: "https://api.example.com"
+      headers:
+        User-Agent: "$User-Agent"
+      models:
+        - alias: "coding"
+          name: "gpt-4o"
+      keys:
+        - api-key: "sk-compat-1"
+`
+	if errWrite := os.WriteFile(file, []byte(raw), 0600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(file)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	h := &Handler{cfg: cfg, configFilePath: file}
+	router := gin.New()
+	router.PUT("/v8/management/config", h.ConfigV8)
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+	router.PATCH("/v8/management/config", h.ConfigV8)
+
+	// Send JSON update simulating v8 management panel saving complex items
+	jsonUpdate := `[{"name":"compat-provider","base-url":"https://api.example.com","headers":{"User-Agent":"$User-Agent"},"models":[{"alias":"coding","name":"gpt-4o"}],"keys":[{"api-key":"sk-compat-1"}]}]`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v8/management/config/api-keys/openai-compatibility", strings.NewReader(jsonUpdate))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	saved, errRead := os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	savedStr := string(saved)
+
+	// Ensure the saved config does NOT contain inline JSON / flow style for complex collections
+	if strings.Contains(savedStr, "[{") || strings.Contains(savedStr, `headers: {`) || strings.Contains(savedStr, `models: [{`) {
+		t.Fatalf("config contains flow style / inline JSON collections:\n%s", savedStr)
+	}
+	if !strings.Contains(savedStr, "openai-compatibility:") || !strings.Contains(savedStr, "- name:") || !strings.Contains(savedStr, "base-url:") {
+		t.Fatalf("expected block style sequence with unquoted keys for openai-compatibility, got:\n%s", savedStr)
+	}
+	if strings.Contains(savedStr, `"name":`) || strings.Contains(savedStr, `"base-url":`) {
+		t.Fatalf("expected keys to be unquoted in block YAML, got:\n%s", savedStr)
+	}
+
+	// Also test PATCH at root /v8/management/config with JSON
+	patchJSON := `{"api-keys":{"openai-compatibility":[{"name":"compat-provider-2","base-url":"https://api.example2.com","headers":{"User-Agent":"$User-Agent-2"},"models":[{"alias":"coding-2","name":"gpt-4o-mini"}],"keys":[{"api-key":"sk-compat-2"}]}]}}`
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(patchJSON))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+	saved, errRead = os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	savedStr = string(saved)
+	if strings.Contains(savedStr, "[{") || strings.Contains(savedStr, `headers: {`) || strings.Contains(savedStr, `models: [{`) {
+		t.Fatalf("PATCH saved config contains flow style / inline JSON collections:\n%s", savedStr)
+	}
+	if !strings.Contains(savedStr, "openai-compatibility:") || !strings.Contains(savedStr, "- name:") {
+		t.Fatalf("expected block style sequence after PATCH for openai-compatibility, got:\n%s", savedStr)
+	}
+
+	// Verify that empty sequence retains flow style []
+	emptyJSON := `{"server":{"trusted-proxies":[]}}`
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(emptyJSON))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH with empty sequence failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+	saved, errRead = os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	savedStr = string(saved)
+	if !strings.Contains(savedStr, "trusted-proxies: []") {
+		t.Fatalf("expected empty sequence to retain flow style [], got:\n%s", savedStr)
+	}
+
+	// Also test root PUT with entire JSON document
+	rootPutJSON := `{"config-version":8,"server":{"port":8317},"api-keys":{"openai-compatibility":[{"name":"compat-provider-root","base-url":"https://api.example3.com","headers":{"User-Agent":"$User-Agent-3"},"models":[{"alias":"coding-3","name":"gpt-4o"}],"keys":[{"api-key":"sk-compat-3"}]}]}}`
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/v8/management/config", strings.NewReader(rootPutJSON))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("root PUT failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+	saved, errRead = os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	savedStr = string(saved)
+	if strings.Contains(savedStr, "[{") || strings.Contains(savedStr, `headers: {`) || strings.Contains(savedStr, `models: [{`) {
+		t.Fatalf("root PUT saved config contains flow style / inline JSON collections:\n%s", savedStr)
+	}
+	if strings.Contains(savedStr, `"config-version":`) || strings.Contains(savedStr, `"server":`) || strings.Contains(savedStr, `"api-keys":`) {
+		t.Fatalf("root PUT saved config contains quoted keys:\n%s", savedStr)
+	}
+	if !strings.Contains(savedStr, "compat-provider-root") {
+		t.Fatalf("expected compat-provider-root in saved config, got:\n%s", savedStr)
+	}
+
+	// Verify the final saved file loads correctly into Config
+	loaded, errLoaded := config.LoadConfig(file)
+	if errLoaded != nil {
+		t.Fatalf("LoadConfig failed on normalized saved YAML: %v", errLoaded)
+	}
+	if len(loaded.OpenAICompatibility) != 1 || loaded.OpenAICompatibility[0].Name != "compat-provider-root" {
+		t.Fatalf("unexpected loaded config content: %+v", loaded.OpenAICompatibility)
+	}
+	if loaded.OpenAICompatibility[0].Headers["User-Agent"] != "$User-Agent-3" {
+		t.Fatalf("unexpected loaded headers: %+v", loaded.OpenAICompatibility[0].Headers)
+	}
+}

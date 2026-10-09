@@ -10,7 +10,15 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIResponsesRequestToInteractions(modelName, inputRawJSON, stream)
+
+}
+
+// convertOpenAIResponsesRequestToInteractions also reports a file, audio or video
+// part Interactions cannot receive when it leaves a user turn with nothing to send.
+func convertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
 	model := requestModel(modelName, root)
@@ -33,7 +41,7 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	forAntigravity := isAntigravityModel(model)
 	forDevin := isDevinModel(model) || !forAntigravity
 	if input := root.Get("input"); input.Exists() {
-		out = setResponsesInputOnInteractions(out, input, forAntigravity)
+		out = setResponsesInputOnInteractions(out, input, forAntigravity, &drops)
 	}
 	out = appendResponsesToolsToInteractions(out, root, forAntigravity, forDevin)
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
@@ -104,10 +112,10 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 			out, _ = sjson.SetRawBytes(out, "generation_config.stop_sequences", []byte(stop.Raw))
 		}
 	}
-	return out
+	return out, drops.Err()
 }
 
-func ConvertInteractionsRequestToOpenAIResponses(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertInteractionsRequestToOpenAIResponses(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
 	model := requestModel(modelName, root)
@@ -152,7 +160,7 @@ func ConvertInteractionsRequestToOpenAIResponses(modelName string, inputRawJSON 
 	if format := root.Get("response_format"); format.Exists() {
 		out, _ = sjson.SetRawBytes(out, "text.format", []byte(format.Raw))
 	}
-	return out
+	return out, nil
 }
 
 func requestModel(modelName string, root gjson.Result) string {
@@ -230,20 +238,20 @@ func interactionsThinkingEffort(root gjson.Result) string {
 	return ""
 }
 
-func setResponsesInputOnInteractions(out []byte, input gjson.Result, forAntigravity bool) []byte {
+func setResponsesInputOnInteractions(out []byte, input gjson.Result, forAntigravity bool, drops *translatorcommon.UserTurnDrops) []byte {
 	functionNamesByCallID := make(map[string]string)
 	items := make([][]byte, 0)
 	if input.Type == gjson.String {
 		items = append(items, interactionsTextStep("user_input", input.String()))
 	} else if input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
-			if converted := responsesInputItemToInteractions(item, functionNamesByCallID, forAntigravity); converted != nil {
+			if converted := responsesInputItemToInteractions(item, functionNamesByCallID, forAntigravity, drops); converted != nil {
 				items = append(items, converted)
 			}
 			return true
 		})
 	} else if input.IsObject() {
-		if converted := responsesInputItemToInteractions(input, functionNamesByCallID, forAntigravity); converted != nil {
+		if converted := responsesInputItemToInteractions(input, functionNamesByCallID, forAntigravity, drops); converted != nil {
 			items = append(items, converted)
 		}
 	}
@@ -253,16 +261,29 @@ func setResponsesInputOnInteractions(out []byte, input gjson.Result, forAntigrav
 	return out
 }
 
-func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID map[string]string, forAntigravity bool) []byte {
+// responsesUserTurnDrops returns drops when the item is a real user turn. A
+// system or developer message is also sent as a user_input step, but it is not
+// the user's own turn and must never be refused or hide an emptied one.
+func responsesUserTurnDrops(role string, drops *translatorcommon.UserTurnDrops) *translatorcommon.UserTurnDrops {
+	if role == "" || role == "user" {
+		return drops
+	}
+	return nil
+}
+
+func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID map[string]string, forAntigravity bool, drops *translatorcommon.UserTurnDrops) []byte {
 	switch item.Get("type").String() {
 	case "message":
 		stepType := "user_input"
-		if role := item.Get("role").String(); role == "assistant" || role == "model" {
+		role := item.Get("role").String()
+		turnDrops := responsesUserTurnDrops(role, drops)
+		if role == "assistant" || role == "model" {
 			stepType = "model_output"
+			turnDrops = nil
 		}
 		step := []byte(`{"type":"","content":[]}`)
 		step, _ = sjson.SetBytes(step, "type", stepType)
-		return appendResponsesContentToInteractions(step, item.Get("content"))
+		return appendResponsesContentToInteractions(step, item.Get("content"), turnDrops)
 	case "function_call":
 		callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
 		name := item.Get("name").String()
@@ -291,48 +312,79 @@ func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID m
 			stepType = "model_output"
 		}
 		return interactionsTextStep(stepType, item.Get("text").String())
-	case "input_image", "output_image":
+	case "input_image", "output_image", "input_file", "input_audio", "input_video":
 		stepType := "user_input"
+		var turnDrops *translatorcommon.UserTurnDrops
 		if item.Get("type").String() == "output_image" {
 			stepType = "model_output"
+		} else {
+			turnDrops = drops
 		}
 		step := []byte(`{"type":"","content":[]}`)
 		step, _ = sjson.SetBytes(step, "type", stepType)
-		if part, ok := responsesContentPartToInteractions(item); ok {
-			step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{part})
-		}
-		return step
+		return appendResponsesContentToInteractions(step, item, turnDrops)
 	default:
 		if content := item.Get("content"); content.Exists() {
 			step := []byte(`{"type":"user_input","content":[]}`)
-			return appendResponsesContentToInteractions(step, content)
+			return appendResponsesContentToInteractions(step, content, responsesUserTurnDrops(item.Get("role").String(), drops))
 		}
 	}
 	return nil
 }
 
-func appendResponsesContentToInteractions(step []byte, content gjson.Result) []byte {
+// appendResponsesContentToInteractions converts one message content into step
+// content. A non-nil drops closes the user turn: an attachment that cannot be
+// sent is recorded, and text or any other sendable part beside it keeps the turn
+// alive. An empty text part is forwarded but does not count as sendable.
+func appendResponsesContentToInteractions(step []byte, content gjson.Result, drops *translatorcommon.UserTurnDrops) []byte {
 	var contentItems [][]byte
+	sendable := 0
+	appendPart := func(item gjson.Result) {
+		part, ok := responsesContentPartToInteractions(item)
+		if !ok {
+			if partType := item.Get("type").String(); drops != nil && isResponsesUnsendableAttachmentType(partType) {
+				drops.Drop(partType)
+			}
+			return
+		}
+		contentItems = append(contentItems, part)
+		if gjson.GetBytes(part, "type").String() != "text" || gjson.GetBytes(part, "text").String() != "" {
+			sendable++
+		}
+	}
 	if content.Type == gjson.String {
 		part := []byte(`{"type":"text","text":""}`)
 		part, _ = sjson.SetBytes(part, "text", content.String())
 		contentItems = append(contentItems, part)
+		if content.String() != "" {
+			sendable++
+		}
 	} else if content.IsArray() {
 		content.ForEach(func(_, item gjson.Result) bool {
-			if part, ok := responsesContentPartToInteractions(item); ok {
-				contentItems = append(contentItems, part)
-			}
+			appendPart(item)
 			return true
 		})
 	} else if content.IsObject() {
-		if part, ok := responsesContentPartToInteractions(content); ok {
-			contentItems = append(contentItems, part)
-		}
+		appendPart(content)
+	}
+	if drops != nil {
+		drops.EndTurn(sendable)
 	}
 	if len(contentItems) > 0 {
 		step = translatorcommon.SetRawArrayItems(step, "content", contentItems)
 	}
 	return step
+}
+
+// isResponsesUnsendableAttachmentType reports the Responses attachment types
+// whose loss must be refused when they leave a user turn empty. A file id,
+// a part without bytes and a video have no Interactions counterpart.
+func isResponsesUnsendableAttachmentType(partType string) bool {
+	switch partType {
+	case "input_file", "input_audio", "input_video":
+		return true
+	}
+	return false
 }
 
 func responsesContentPartToInteractions(part gjson.Result) ([]byte, bool) {
@@ -343,6 +395,10 @@ func responsesContentPartToInteractions(part gjson.Result) ([]byte, bool) {
 		return out, true
 	case "input_image", "output_image":
 		return responsesImagePartToInteractions(part), true
+	case "input_file":
+		return responsesFilePartToInteractions(part)
+	case "input_audio":
+		return responsesAudioPartToInteractions(part)
 	}
 	if text := part.Get("text"); text.Exists() {
 		out := []byte(`{"type":"text","text":""}`)
@@ -350,6 +406,60 @@ func responsesContentPartToInteractions(part gjson.Result) ([]byte, bool) {
 		return out, true
 	}
 	return nil, false
+}
+
+// responsesFilePartToInteractions maps an input_file onto an Interactions
+// document. Interactions takes inline bytes or a url; a bare file_id names a file
+// only the OpenAI side can resolve, so it reports false.
+func responsesFilePartToInteractions(part gjson.Result) ([]byte, bool) {
+	filename := part.Get("filename").String()
+	fallbackMIMEType := firstNonEmpty(part.Get("mime_type").String(), part.Get("mimeType").String())
+	out := []byte(`{"type":"document"}`)
+	if filename != "" {
+		out, _ = sjson.SetBytes(out, "filename", filename)
+	}
+	hasContent := false
+	if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, fallbackMIMEType, part.Get("file_data").String()); ok {
+		out, _ = sjson.SetBytes(out, "mime_type", mimeType)
+		out, _ = sjson.SetBytes(out, "data", data)
+		hasContent = true
+	}
+	if fileURL := part.Get("file_url").String(); fileURL != "" {
+		out, _ = sjson.SetBytes(out, "file_url", fileURL)
+		hasContent = true
+	}
+	return out, hasContent
+}
+
+// responsesAudioPartToInteractions maps an input_audio with inline bytes onto an
+// Interactions audio part.
+func responsesAudioPartToInteractions(part gjson.Result) ([]byte, bool) {
+	audio := part.Get("input_audio")
+	data := firstNonEmpty(audio.Get("data").String(), part.Get("data").String())
+	if data == "" {
+		return nil, false
+	}
+	out := []byte(`{"type":"audio","data":""}`)
+	out, _ = sjson.SetBytes(out, "data", data)
+	if format := firstNonEmpty(audio.Get("format").String(), part.Get("format").String()); format != "" {
+		out, _ = sjson.SetBytes(out, "mime_type", responsesInputAudioMIMEType(format))
+	}
+	return out, true
+}
+
+func responsesInputAudioMIMEType(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "wav":
+		return "audio/wav"
+	case "flac":
+		return "audio/flac"
+	case "opus":
+		return "audio/opus"
+	case "pcm16":
+		return "audio/pcm"
+	default:
+		return "audio/mpeg"
+	}
 }
 
 func responsesImagePartToInteractions(part gjson.Result) []byte {

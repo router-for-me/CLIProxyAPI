@@ -158,6 +158,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		}
 	}
 	stripAPIKeysAuthIndexesFromRoot(root)
+	config.NormalizeCollectionNodeStyles(root)
 	data, err = yaml.Marshal(&doc)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})

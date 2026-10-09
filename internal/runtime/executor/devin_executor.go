@@ -396,9 +396,24 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 	payload := req.Payload
 	isInteractionsSource := opts.SourceFormat == "" || opts.SourceFormat == sdktranslator.FormatInteractions
 	if !isInteractionsSource {
-		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatInteractions, req.Model, payload, opts.Stream)
+		translated := sdktranslator.TranslateRequestEnvelope(ctx, opts.SourceFormat, sdktranslator.FormatInteractions, sdktranslator.RequestEnvelope{
+			Format: opts.SourceFormat,
+			Model:  req.Model,
+			Stream: opts.Stream,
+			Body:   payload,
+		})
+		if translated.Err != nil {
+			return nil, "", nil, translated.Err
+		}
+		payload = translated.Body
 	}
 	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, thinkingLevel, budgetTokens := parseInteractionsPayload(payload, opts.OriginalRequest)
+	// Devin cannot fetch a remote uri or take audio, video or documents. A user turn left
+	// with nothing else to send is refused here, before any upstream call.
+	prompts, errTurns := helps.CheckDevinUserTurns(prompts)
+	if errTurns != nil {
+		return nil, "", nil, errTurns
+	}
 	sessionID, cascadeID = resolveDevinSessionAndCascadeIDs(ctx, sessionID, cascadeID, opts)
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -1591,12 +1606,13 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 			stepType := strings.ToLower(strings.TrimSpace(step.Get("type").String()))
 			switch stepType {
 			case "user_input":
-				text, images := extractInteractionsStepContent(step)
+				text, images, droppedPart := extractInteractionsStepContent(step)
 				prompts = append(prompts, helps.DevinPrompt{
-					MessageID: uuid.New().String(),
-					Source:    1,
-					Content:   text,
-					Images:    images,
+					MessageID:   uuid.New().String(),
+					Source:      1,
+					Content:     text,
+					Images:      images,
+					DroppedPart: droppedPart,
 				})
 
 			case "model_output":
@@ -1703,12 +1719,13 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					systemPrompt = m.Get("content").String()
 				}
 			case "user":
-				text, images := extractInteractionsStepContent(m)
+				text, images, droppedPart := extractInteractionsStepContent(m)
 				prompts = append(prompts, helps.DevinPrompt{
-					MessageID: uuid.New().String(),
-					Source:    1,
-					Content:   text,
-					Images:    images,
+					MessageID:   uuid.New().String(),
+					Source:      1,
+					Content:     text,
+					Images:      images,
+					DroppedPart: droppedPart,
 				})
 			case "assistant":
 				text := extractInteractionsStepText(m)
@@ -1879,7 +1896,8 @@ func extractDevinImage(part gjson.Result) (helps.DevinImage, bool) {
 	}
 
 	if base64Data == "" {
-		url := firstNonEmpty(part.Get("image_url.url").String(), part.Get("image_url").String(), part.Get("url").String())
+		// uri and file_uri are Interactions spellings of url; only a data URL is usable.
+		url := firstNonEmpty(part.Get("image_url.url").String(), part.Get("image_url").String(), part.Get("url").String(), part.Get("uri").String(), part.Get("file_uri").String(), part.Get("fileUri").String())
 		if m, d, ok := parseDataURL(url); ok {
 			base64Data = d
 			if mimeType == "" {
@@ -2108,10 +2126,27 @@ func extractFunctionResultContent(step gjson.Result) (string, []helps.DevinImage
 	return resText, images
 }
 
-func extractInteractionsStepContent(step gjson.Result) (string, []helps.DevinImage) {
+// devinUnsendableMediaType names the type of a media part that Devin cannot send, or
+// returns "" for text and for parts that are not media. Devin only takes inline images,
+// so a remote uri or any audio, video or document part is unsendable.
+func devinUnsendableMediaType(part gjson.Result) string {
+	if part.Get("text").String() != "" {
+		return ""
+	}
+	switch partType := strings.ToLower(strings.TrimSpace(part.Get("type").String())); partType {
+	case "image", "input_image", "image_url", "audio", "input_audio", "video", "document", "file", "input_file":
+		return partType
+	}
+	return ""
+}
+
+// extractInteractionsStepContent returns the text and inline images of a user step. The
+// third result is the type of the first media part Devin could not send, or "".
+func extractInteractionsStepContent(step gjson.Result) (string, []helps.DevinImage, string) {
 	content := step.Get("content")
 	var textParts []string
 	var images []helps.DevinImage
+	droppedPart := ""
 
 	extractFromPart := func(p gjson.Result) {
 		if img, ok := extractDevinImage(p); ok {
@@ -2120,6 +2155,9 @@ func extractInteractionsStepContent(step gjson.Result) (string, []helps.DevinIma
 		}
 		if t := p.Get("text").String(); t != "" {
 			textParts = append(textParts, t)
+		}
+		if droppedPart == "" {
+			droppedPart = devinUnsendableMediaType(p)
 		}
 	}
 
@@ -2149,7 +2187,7 @@ func extractInteractionsStepContent(step gjson.Result) (string, []helps.DevinIma
 		}
 	}
 
-	return text, images
+	return text, images, droppedPart
 }
 
 func extractInteractionsStepText(step gjson.Result) string {

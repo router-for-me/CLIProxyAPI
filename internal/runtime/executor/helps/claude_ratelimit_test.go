@@ -367,3 +367,183 @@ func TestClaudeHeadersIndicateUnifiedRateLimitRejection_OverageRejection_Utiliza
 		})
 	}
 }
+
+// Issue #6465: an overage claim with no shared-window headers must not bench
+// the credential until Anthropic's monthly billing reset.
+func TestOverageClaimWithoutSharedWindowsDoesNotCoolUntilBillingReset_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 7, 20, 46, 4, 0, time.UTC)
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"overage"},
+		"Anthropic-Ratelimit-Unified-Reset":                []string{"1793491200"},
+		"Anthropic-Ratelimit-Unified-Overage-Status":       []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-Overage-Reset":        []string{"1793491200"},
+		"Anthropic-Ratelimit-Unified-Overage-Utilization":  []string{"0.11"},
+	}
+
+	if ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+		t.Fatal("overage claim with no shared-window headers was treated as a credential-wide rejection")
+	}
+	got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
+	if got != nil {
+		t.Fatalf("cooldown = %v, want nil; monthly billing reset must not become a rate-limit deadline", *got)
+	}
+}
+
+func TestRejectedFiveHourWindowIgnoresMonthlyUnifiedReset_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 7, 20, 46, 4, 0, time.UTC)
+	fiveHourReset := strconv.FormatInt(now.Add(5*time.Hour).Unix(), 10)
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-5h-Status":            []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-5h-Reset":             []string{fiveHourReset},
+		"Anthropic-Ratelimit-Unified-Reset":                []string{"1793491200"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"five_hour"},
+	}
+
+	got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
+	if got == nil {
+		t.Fatal("expected the rejected 5h window reset")
+	}
+	if *got < 5*time.Hour-time.Second || *got > 5*time.Hour+time.Second {
+		t.Fatalf("cooldown = %v, want ~5h; monthly unified reset must not outrank the rejected window", *got)
+	}
+}
+
+func TestUnifiedResetMatchingOverageResetDoesNotOverrideRetryAfter_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	billingReset := strconv.FormatInt(now.Add(48*time.Hour).Unix(), 10)
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"overage"},
+		"Anthropic-Ratelimit-Unified-7d-Status":            []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-7d-Utilization":       []string{"0.69"},
+		"Anthropic-Ratelimit-Unified-Reset":                []string{billingReset},
+		"Anthropic-Ratelimit-Unified-Overage-Status":       []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-Overage-Reset":        []string{billingReset},
+		"Retry-After": []string{"60"},
+	}
+
+	if !ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+		t.Fatal("missing 5h utilization should stay a credential-wide rejection")
+	}
+	got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
+	if got == nil {
+		t.Fatal("expected Retry-After to remain after ignoring the billing reset")
+	}
+	if *got != 60*time.Second {
+		t.Fatalf("cooldown = %v, want 60s; unified reset equal to overage reset is not a rate-limit deadline", *got)
+	}
+}
+
+func TestFiveHourClaimWithOverageDisabledReasonStaysCredentialScoped_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 7, 20, 46, 4, 0, time.UTC)
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":                  []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim":    []string{"five_hour"},
+		"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": []string{"org_level_disabled"},
+		"Retry-After": []string{"10800"},
+	}
+
+	if !ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+		t.Fatal("five_hour rejection with overage disabled was treated as model-scoped")
+	}
+	got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
+	if got == nil || *got != 3*time.Hour {
+		var gotDesc string
+		if got == nil {
+			gotDesc = "nil"
+		} else {
+			gotDesc = got.String()
+		}
+		t.Fatalf("cooldown = %s, want 3h; Retry-After must survive when the claim is not overage", gotDesc)
+	}
+}
+
+func TestOverageClaimWithExhaustedSharedUtilizationStaysCredentialScoped_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 7, 20, 46, 4, 0, time.UTC)
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"overage"},
+		"Anthropic-Ratelimit-Unified-5h-Utilization":       []string{"1.0"},
+		"Retry-After": []string{"10800"},
+	}
+
+	if !ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+		t.Fatal("overage claim with exhausted 5h utilization was treated as model-scoped")
+	}
+	got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
+	if got == nil || *got != 3*time.Hour {
+		var gotDesc string
+		if got == nil {
+			gotDesc = "nil"
+		} else {
+			gotDesc = got.String()
+		}
+		t.Fatalf("cooldown = %s, want 3h; exhausted shared utilization must keep Retry-After", gotDesc)
+	}
+}
+
+func TestOverageClaimWithHealthyUtilizationStaysModelScoped_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 7, 20, 46, 4, 0, time.UTC)
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":               []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"overage"},
+		"Anthropic-Ratelimit-Unified-5h-Utilization":       []string{"0.00"},
+		"Anthropic-Ratelimit-Unified-Reset":                []string{"1793491200"},
+		"Anthropic-Ratelimit-Unified-Overage-Reset":        []string{"1793491200"},
+		"Retry-After": []string{"10800"},
+	}
+
+	if ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+		t.Fatal("overage claim with healthy omitted-window utilization was treated as credential-scoped")
+	}
+	got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
+	if got != nil {
+		t.Fatalf("cooldown = %v, want nil; healthy utilization must not adopt the billing reset or Retry-After", *got)
+	}
+}
+
+func TestRetryAfterBeyondSevenDaysFallsBack_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 7, 20, 46, 4, 0, time.UTC)
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":    []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-5h-Status": []string{"rejected"},
+		"Retry-After":                           []string{"2034192"},
+	}
+
+	got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
+	if got != nil {
+		t.Fatalf("cooldown = %v, want nil; Retry-After beyond 7 days is not a rate-limit window", *got)
+	}
+}
+
+func TestAllowedUnifiedOverageClaimKeepsShortRetryAfter_Issue6465(t *testing.T) {
+	now := time.Date(2026, 10, 7, 20, 46, 4, 0, time.UTC)
+	for _, unifiedStatus := range []string{"allowed", ""} {
+		t.Run(unifiedStatus, func(t *testing.T) {
+			headers := http.Header{
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"overage"},
+				"Anthropic-Ratelimit-Unified-Overage-Status":       []string{"allowed"},
+				"Retry-After": []string{"30"},
+			}
+			if unifiedStatus != "" {
+				headers.Set("Anthropic-Ratelimit-Unified-Status", unifiedStatus)
+			}
+
+			if ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+				t.Fatal("non-rejected unified status was treated as a credential rejection")
+			}
+			got := parseClaudeRateLimitResetWithFuzz(headers, now, 0, 0)
+			if got == nil || *got != 30*time.Second {
+				var gotDesc string
+				if got == nil {
+					gotDesc = "nil"
+				} else {
+					gotDesc = got.String()
+				}
+				t.Fatalf("cooldown = %s, want 30s; a short Retry-After must survive when unified status is not rejected", gotDesc)
+			}
+		})
+	}
+}

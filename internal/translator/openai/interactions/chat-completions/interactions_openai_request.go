@@ -9,7 +9,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func ConvertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","messages":[]}`)
 	model := firstNonEmpty(modelName, root.Get("model").String())
@@ -29,7 +29,7 @@ func ConvertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, s
 	out = copyInteractionsToolsToOpenAI(out, root, forAntigravity)
 	out = copyInteractionsGenerationConfigToOpenAI(out, root)
 	out = copyInteractionsOpenAITopLevel(out, root)
-	return out
+	return out, nil
 }
 
 func appendInteractionsSystemToOpenAI(items *[][]byte, root gjson.Result) {

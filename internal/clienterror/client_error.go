@@ -134,8 +134,9 @@ func IsItemNotPersisted(message string) bool {
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
 }
 
-// IsClaudeThreadNotFound reports the bare Claude 404 response for a stale
-// previous_message_id continuation.
+// IsClaudeThreadNotFound reports the Claude 404 response for a stale
+// previous_message_id continuation from either a structured JSON response
+// or a plain-text error message.
 func IsClaudeThreadNotFound(status int, err error) bool {
 	if status != http.StatusNotFound || err == nil {
 		return false
@@ -148,12 +149,16 @@ func IsClaudeThreadNotFound(status int, err error) bool {
 	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
 		body = strings.TrimSpace(string(responseBody.ResponseBody()))
 	}
-	if body == "" || !json.Valid([]byte(body)) {
+	if body == "" {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(gjson.Get(body, "error.type").String()), "not_found_error") &&
-		strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "thread state") &&
-		strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "previous_message_id")
+	if json.Valid([]byte(body)) {
+		return strings.EqualFold(strings.TrimSpace(gjson.Get(body, "error.type").String()), "not_found_error") &&
+			strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "thread state") &&
+			strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "previous_message_id")
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "thread state") && strings.Contains(lower, "previous_message_id")
 }
 
 func hasModelNotFoundErrorBody(err error) bool {

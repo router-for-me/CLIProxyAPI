@@ -74,6 +74,10 @@ type Result struct {
 	// observed watermark. Count-tokens requests reuse the credential but are not
 	// generation traffic; their response headers are not a generation snapshot.
 	SkipQuotaObservation bool
+	// CredentialVersion captures the credential version under which the request was executed.
+	CredentialVersion uint64
+	// RegistrationEpoch captures the registration epoch under which the request was executed.
+	RegistrationEpoch uint64
 }
 
 // Selector chooses an auth candidate for execution.

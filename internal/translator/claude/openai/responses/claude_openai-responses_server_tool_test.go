@@ -86,7 +86,7 @@ func TestWebSearchCallItemReplaysAsClaudeServerToolBlocks(t *testing.T) {
 		"action":{"type":"search","query":"lindorm vector"},
 		"results":[{"title":"Lindorm Vector","url":"https://example.com/a","encrypted_content":"ENC_A"}]
 	}`)
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 
 	if got := claudeAssistantBlockTypes(t, out); len(got) != 2 ||
 		got[0] != "server_tool_use" || got[1] != "web_search_tool_result" {
@@ -123,7 +123,7 @@ func TestWebSearchCallWithoutEncryptedContentReplaysEmptyResults(t *testing.T) {
 		"action":{"type":"search","query":"q"},
 		"results":[{"title":"T","url":"https://example.com/a"}]
 	}`)
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	if got := claudeAssistantBlockTypes(t, out); len(got) != 2 {
 		t.Fatalf("assistant blocks = %v, want the server_tool_use/result pair", got)
 	}
@@ -139,7 +139,7 @@ func TestOutputTextAnnotationsReplayAsClaudeCitations(t *testing.T) {
 			{"type":"web_search_result_location","url":"https://example.com/a","title":"A","cited_text":"Answer","encrypted_index":"IDX_A"}
 		]}]
 	}`)
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	block := gjson.GetBytes(out, "messages.0.content.0")
 	if got := block.Get("type").String(); got != "text" {
 		t.Fatalf("block type = %q", got)
@@ -163,7 +163,7 @@ func TestAnnotationsWithoutEncryptedIndexAreNotReplayedAsCitations(t *testing.T)
 			{"type":"url_citation","url":"https://example.com/a","title":"A"}
 		]}]
 	}`)
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	if gjson.GetBytes(out, "messages.0.content.0.citations").Exists() {
 		t.Fatal("citations without encrypted_index must be dropped, not sent")
 	}
@@ -174,7 +174,7 @@ func TestRefusalPartReplaysAsClaudeText(t *testing.T) {
 		"type":"message","role":"assistant",
 		"content":[{"type":"refusal","refusal":"I cannot help with that."}]
 	}`)
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	block := gjson.GetBytes(out, "messages.0.content")
 	text := block.Get("0.text").String()
 	if block.Type == gjson.String {
@@ -225,7 +225,7 @@ func TestRoundTripPreservesReachableClaudeBlocks(t *testing.T) {
 		return true
 	})
 	req, _ := json.Marshal(map[string]any{"model": "claude-test", "input": items})
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
 
 	got := claudeAssistantBlockTypes(t, out)
 	want := []string{"thinking", "text", "server_tool_use", "web_search_tool_result", "thinking", "tool_use"}
@@ -256,7 +256,7 @@ func TestWebSearchCallIDNormalisedToClaudeServerToolPattern(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := responsesRequestFromItems(`{"type":"web_search_call","id":"` + tc.responsesID + `","status":"completed","action":{"type":"search","query":"q"}}`)
-			out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+			out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 			blocks := gjson.GetBytes(out, "messages.0.content")
 			if got := blocks.Get("0.id").String(); got != tc.want {
 				t.Fatalf("server_tool_use id = %q, want %q", got, tc.want)
@@ -271,7 +271,7 @@ func TestWebSearchCallIDNormalisedToClaudeServerToolPattern(t *testing.T) {
 func TestWebSearchCallWithoutIDProducesNoBlocks(t *testing.T) {
 	for _, id := range []string{``, `ws_`} {
 		raw := responsesRequestFromItems(`{"type":"web_search_call","id":"` + id + `","status":"completed","action":{"type":"search","query":"q"}}`)
-		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 		if got := claudeAssistantBlockTypes(t, out); len(got) != 0 {
 			t.Fatalf("id=%q produced %v; an unpairable server_tool_use is rejected by Anthropic", id, got)
 		}
@@ -360,7 +360,7 @@ func TestWebSearchCallQueryAcceptsNativeOpenAIActionShapes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := responsesRequestFromItems(`{"type":"web_search_call","id":"ws_srvtoolu_1","status":"completed","action":` + tc.action + `}`)
-			out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+			out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 			if got := gjson.GetBytes(out, "messages.0.content.0.input.query").String(); got != tc.want {
 				t.Fatalf("input.query = %q, want %q", got, tc.want)
 			}
@@ -422,7 +422,7 @@ func TestClaudeWebSearchErrorResultSurvivesRoundTrip(t *testing.T) {
 
 	// Replay back to Claude
 	req, _ := json.Marshal(map[string]any{"model": "claude-test", "input": []json.RawMessage{json.RawMessage(outputItems[0].Raw)}})
-	replayed := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
+	replayed, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
 	replayedBlocks := gjson.GetBytes(replayed, "messages.0.content")
 	if got := replayedBlocks.Get("1.content.0.type").String(); got != "web_search_tool_result_error" {
 		t.Fatalf("replayed error type = %q, want web_search_tool_result_error", got)
@@ -503,7 +503,7 @@ func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
 		rawItems = append(rawItems, json.RawMessage(it.Raw))
 	}
 	req, _ := json.Marshal(map[string]any{"model": "claude-test", "input": rawItems})
-	replayed := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
+	replayed, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
 	replayedBlocks := claudeAssistantBlockTypes(t, replayed)
 	wantBlocks := []string{"text", "server_tool_use", "web_search_tool_result", "text"}
 	if strings.Join(replayedBlocks, ",") != strings.Join(wantBlocks, ",") {

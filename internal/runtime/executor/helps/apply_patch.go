@@ -38,8 +38,16 @@ func CanFinalizeResponseStream(param any) bool {
 
 // RecordApplyPatchStreamFailure records validation before delivery can be canceled.
 func RecordApplyPatchStreamFailure(ctx context.Context, param any, reporter *UsageReporter, gatewayErr error) bool {
+	return RecordApplyPatchStreamFailureWithUsage(ctx, param, reporter, nil, gatewayErr)
+}
+
+// RecordApplyPatchStreamFailureWithUsage records validation with buffered upstream usage.
+func RecordApplyPatchStreamFailureWithUsage(ctx context.Context, param any, reporter *UsageReporter, streamUsage *StreamUsageBuffer, gatewayErr error) bool {
 	if ApplyPatchTranslationError(param) == nil {
 		return false
+	}
+	if streamUsage != nil && streamUsage.PublishFailure(ctx, reporter, gatewayErr) {
+		return true
 	}
 	reporter.PublishFailure(ctx, gatewayErr)
 	return true
@@ -48,7 +56,12 @@ func RecordApplyPatchStreamFailure(ctx context.Context, param any, reporter *Usa
 // StopApplyPatchStream propagates a retained failure after its one translated frame.
 // The caller supplies its existing sanitized gateway status error.
 func StopApplyPatchStream(ctx context.Context, param any, reporter *UsageReporter, out chan<- cliproxyexecutor.StreamChunk, gatewayErr error) bool {
-	if !RecordApplyPatchStreamFailure(ctx, param, reporter, gatewayErr) {
+	return StopApplyPatchStreamWithUsage(ctx, param, reporter, nil, out, gatewayErr)
+}
+
+// StopApplyPatchStreamWithUsage propagates a retained failure with buffered upstream usage.
+func StopApplyPatchStreamWithUsage(ctx context.Context, param any, reporter *UsageReporter, streamUsage *StreamUsageBuffer, out chan<- cliproxyexecutor.StreamChunk, gatewayErr error) bool {
+	if !RecordApplyPatchStreamFailureWithUsage(ctx, param, reporter, streamUsage, gatewayErr) {
 		return false
 	}
 	select {
