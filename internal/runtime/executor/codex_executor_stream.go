@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -374,6 +376,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
+		// Termination diagnostic counters: when the stream ends without a terminal event these
+		// feed one metadata-only log line, see logCodexStreamTerminationDiagnostics.
+		sseStartedAt := time.Now()
+		var sseEventCount int
+		sseLastEventType := ""
+		var sseLastEventAt time.Time
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -388,6 +396,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
+				sseEventCount++
+				sseLastEventType = eventType
+				sseLastEventAt = time.Now()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -460,16 +471,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			if ctx.Err() != nil {
+				helps.LogWithRequestID(ctx).Debugf("codex executor: upstream SSE stream read interrupted by downstream cancellation after %d events, last event type %s", sseEventCount, codexDiagnosticEventType(sseLastEventType))
 				return
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		}
 		if emittedCount == 0 {
+			logCodexStreamTerminationDiagnostics(ctx, scanner.Err(), sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 			helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 			reporter.PublishFailure(ctx, emptyErr)
 			return
 		}
+		logCodexStreamTerminationDiagnostics(ctx, scanner.Err(), sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
@@ -479,4 +493,71 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// logCodexStreamTerminationDiagnostics emits the one metadata-only warning an operator gets when
+// an upstream SSE stream ends without a recognized terminal event. The client-facing 408 stays
+// normalized on purpose, which leaves no evidence of whether the stream ended on a clean EOF or a
+// transport failure; request-log could say more but captures private prompt and tool bodies, so
+// this line is limited to counters, event classes and sanitized read-error classes. It never
+// carries request or response content.
+func logCodexStreamTerminationDiagnostics(ctx context.Context, readErr error, eventCount int, lastEventType string, lastEventAt, startedAt time.Time) {
+	idleSince := startedAt
+	if !lastEventAt.IsZero() {
+		idleSince = lastEventAt
+	}
+	helps.LogWithRequestID(ctx).Warnf(
+		"codex executor: upstream SSE stream terminated without response.completed (metadata-only diagnostics): read_error=%s events=%d last_event_type=%s idle_ms=%d total_ms=%d",
+		classifyCodexSSEReadError(readErr),
+		eventCount,
+		codexDiagnosticEventType(lastEventType),
+		time.Since(idleSince).Milliseconds(),
+		time.Since(startedAt).Milliseconds(),
+	)
+}
+
+// codexDiagnosticEventType renders an unset event type as a dash so the diagnostic line never
+// contains an empty key=value pair.
+func codexDiagnosticEventType(eventType string) string {
+	if strings.TrimSpace(eventType) == "" {
+		return "-"
+	}
+	return eventType
+}
+
+// classifyCodexSSEReadError reduces a transport read failure to a sanitized class for the
+// termination diagnostics. The raw error text is deliberately never logged: transport errors may
+// embed peer addresses or credential material that request-log keeps out of operator-visible
+// lines, so only the closed vocabulary below may appear.
+func classifyCodexSSEReadError(err error) string {
+	if err == nil {
+		return "clean-eof"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "unexpected-eof"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "client-cancelled"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "unexpected eof"):
+		return "unexpected-eof"
+	case strings.Contains(message, "reset by peer"), strings.Contains(message, "connection reset"):
+		return "connection-reset"
+	case strings.Contains(message, "broken pipe"):
+		return "broken-pipe"
+	case strings.Contains(message, "timeout"), strings.Contains(message, "deadline exceeded"):
+		return "timeout"
+	case strings.Contains(message, "tls:"):
+		return "tls-error"
+	case strings.Contains(message, "http2"), strings.Contains(message, "http/2"):
+		return "http2-stream-error"
+	default:
+		return "read-error"
+	}
 }
