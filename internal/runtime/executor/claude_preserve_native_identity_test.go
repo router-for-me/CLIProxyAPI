@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -23,6 +24,16 @@ const preserveNativeIdentityUserID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaa
 // through an OAuth (setup-token) credential and returns what reached upstream.
 func runPreserveNativeIdentityRequest(t *testing.T, cfg *config.Config, stream bool, sessionHeader string) ([]byte, http.Header) {
 	t.Helper()
+	payload := []byte(`{"model":"claude-opus-4-6","stream":` + fmt.Sprint(stream) + `,"system":[{"type":"text","text":"interactive-system","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"x"}],"metadata":{"user_id":` + fmt.Sprintf("%q", preserveNativeIdentityUserID) + `}}`)
+	body, headers, errRun := runPreserveNativeIdentityPayload(t, cfg, stream, sessionHeader, payload)
+	if errRun != nil {
+		t.Fatal(errRun)
+	}
+	return body, headers
+}
+
+func runPreserveNativeIdentityPayload(t *testing.T, cfg *config.Config, stream bool, sessionHeader string, payload []byte) ([]byte, http.Header, error) {
+	t.Helper()
 	var seenBody []byte
 	var seenHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +49,6 @@ func runPreserveNativeIdentityRequest(t *testing.T, cfg *config.Config, stream b
 	}))
 	defer server.Close()
 
-	payload := []byte(`{"model":"claude-opus-4-6","stream":` + fmt.Sprint(stream) + `,"system":[{"type":"text","text":"interactive-system","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"x"}],"metadata":{"user_id":` + fmt.Sprintf("%q", preserveNativeIdentityUserID) + `}}`)
 	incoming := http.Header{
 		"User-Agent":                  {"claude-cli/2.1.295 (external, cli)"},
 		"X-App":                       {"cli"},
@@ -68,17 +78,17 @@ func runPreserveNativeIdentityRequest(t *testing.T, cfg *config.Config, stream b
 	if stream {
 		result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
 		if errStream != nil {
-			t.Fatalf("ExecuteStream() error = %v", errStream)
+			return nil, nil, fmt.Errorf("ExecuteStream() error = %w", errStream)
 		}
 		for chunk := range result.Chunks {
 			if chunk.Err != nil {
-				t.Fatalf("stream chunk error = %v", chunk.Err)
+				return nil, nil, fmt.Errorf("stream chunk error = %w", chunk.Err)
 			}
 		}
 	} else if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
-		t.Fatalf("Execute() error = %v", errExecute)
+		return nil, nil, fmt.Errorf("Execute() error = %w", errExecute)
 	}
-	return seenBody, seenHeaders
+	return seenBody, seenHeaders, nil
 }
 
 func preserveNativeIdentityConfig(enabled bool) *config.Config {
@@ -126,5 +136,18 @@ func TestClaudeExecutor_PreserveNativeIdentityRequiresSessionBoundIdentity(t *te
 
 	if got := gjson.GetBytes(body, "metadata.user_id").String(); got == preserveNativeIdentityUserID {
 		t.Fatalf("metadata.user_id = %q, want rewrite when the identity does not match the session header", got)
+	}
+}
+
+func TestClaudeExecutor_PreserveNativeIdentityRejectsDuplicateMetadata(t *testing.T) {
+	const otherUserID = `{"device_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","account_uuid":"","session_id":"99999999-2222-4333-8444-555555555555"}`
+	payload := []byte(`{"model":"claude-opus-4-6","system":[{"type":"text","text":"interactive-system"}],"messages":[{"role":"user","content":"x"}],"metadata":{"user_id":` + fmt.Sprintf("%q", preserveNativeIdentityUserID) + `},"metadata":{"user_id":` + fmt.Sprintf("%q", otherUserID) + `}}`)
+
+	body, _, errRun := runPreserveNativeIdentityPayload(t, preserveNativeIdentityConfig(true), false, preserveNativeIdentitySessionID, payload)
+
+	// The per-credential path rejects duplicated metadata, so the request must
+	// either fail or at least never forward one of the caller identities.
+	if errRun == nil && (strings.Contains(string(body), strings.Repeat("a", 64)) || strings.Contains(string(body), strings.Repeat("c", 64))) {
+		t.Fatalf("upstream body forwarded a caller identity from a duplicated metadata member: %s", body)
 	}
 }

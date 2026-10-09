@@ -305,7 +305,12 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 
 // ClaudeNativeMetadataUserIDMatches reports whether payload carries a native
 // Claude Code metadata.user_id whose session_id matches the session header.
+// A duplicated top-level metadata member is never accepted: gjson and the
+// upstream decoder could otherwise disagree about which identity is sent.
 func ClaudeNativeMetadataUserIDMatches(headers http.Header, payload []byte) bool {
+	if _, present, errMetadata := uniqueClaudeJSONObjectMember(payload, "metadata"); errMetadata != nil || !present {
+		return false
+	}
 	return measuredClaudeCodeHelperSessionMatches(headers, payload)
 }
 
