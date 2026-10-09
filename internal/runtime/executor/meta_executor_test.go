@@ -1359,3 +1359,317 @@ func TestMetaExecutor_ExecuteStream_StripsSearchContentTypesFromWebSearch(t *tes
 		t.Fatalf("web_search tool missing from forwarded stream body: %s", gotBody)
 	}
 }
+
+func TestMetaExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`))
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		},
+	}
+
+	payload := []byte(`{
+		"model": "muse-spark-1.3",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "functions__exec_command",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"yield_time_ms": {"type": "number"}
+							}
+						}
+					}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"name": "exec_command",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"cmd": {"type": "string"},
+						"yield_time_ms": {"type": "number"},
+						"max_output_tokens": {"type": "number"},
+						"timeout_ms": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "write_stdin",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"session_id": {"type": "number"},
+						"yield_time_ms": {"type": "number"},
+						"max_output_tokens": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "sleep",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"duration_ms": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "wait_agent",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"timeout_ms": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "wait",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"yield_time_ms": {"type": "number"},
+						"max_tokens": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "tool_search",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"limit": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "test_sync_tool",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"sleep_before_ms": {"type": "number"},
+						"sleep_after_ms": {"type": "number"},
+						"participants": {"type": "number"},
+						"timeout_ms": {"type": "number"}
+					}
+				}
+			}
+		]
+	}`)
+
+	// 1. With non-Codex User-Agent, tool types must remain unchanged (number).
+	gotBody = nil
+	_, errExecNonCodex := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"curl/8.7.1"}},
+	})
+	if errExecNonCodex != nil {
+		t.Fatalf("Execute(non-codex) error = %v", errExecNonCodex)
+	}
+	if gotType := gjson.GetBytes(gotBody, "tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("expected non-Codex UA to preserve number, got %q", gotType)
+	}
+
+	// 2. With nil headers, tool types must remain unchanged (number).
+	gotBody = nil
+	_, errExecNilHeaders := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if errExecNilHeaders != nil {
+		t.Fatalf("Execute(nil headers) error = %v", errExecNilHeaders)
+	}
+	if gotType := gjson.GetBytes(gotBody, "tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("expected nil headers to preserve number, got %q", gotType)
+	}
+
+	// 3. With Codex User-Agent, specified fields must be normalized to integer.
+	gotBody = nil
+	_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex-desktop/0.159.0"}},
+	})
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+
+	toolMap := make(map[string]gjson.Result)
+	for _, tool := range gjson.GetBytes(gotBody, "tools").Array() {
+		toolMap[tool.Get("name").String()] = tool
+	}
+
+	expected := map[string][]string{
+		"exec_command":   {"yield_time_ms", "max_output_tokens", "timeout_ms"},
+		"write_stdin":    {"session_id", "yield_time_ms", "max_output_tokens"},
+		"sleep":          {"duration_ms"},
+		"wait_agent":     {"timeout_ms"},
+		"wait":           {"yield_time_ms", "max_tokens"},
+		"tool_search":    {"limit"},
+		"test_sync_tool": {"sleep_before_ms", "sleep_after_ms", "participants", "timeout_ms"},
+	}
+
+	for toolName, fields := range expected {
+		tool, ok := toolMap[toolName]
+		if !ok {
+			t.Fatalf("missing tool: %s", toolName)
+		}
+		for _, field := range fields {
+			if got := tool.Get("parameters.properties." + field + ".type").String(); got != "integer" {
+				t.Errorf("tool %s field %s type = %q, want integer", toolName, field, got)
+			}
+		}
+	}
+
+	// Verify input[].additional_tools is also normalized to integer
+	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta Execute additional_tools yield_time_ms type = %q, want integer", gotType)
+	}
+
+	// 4. Test ExecuteStream: verify both tools and additional_tools are normalized to integer
+	gotBody = nil
+	streamResult, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex-desktop/0.159.0"}},
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for range streamResult.Chunks {
+	}
+	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta stream tools exec_command yield_time_ms type = %q, want integer", gotType)
+	}
+	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta stream additional_tools yield_time_ms type = %q, want integer", gotType)
+	}
+}
+
+func TestMetaApplyPatchResponsesExecutor(t *testing.T) {
+	testApplyPatchResponsesExecutor(t, "meta", NewMetaExecutor(&config.Config{}), "muse-spark-1.3")
+}
+
+func TestMetaExecutor_Execute_PreservesMuseReasoningEncryptedContent_Issue6450(t *testing.T) {
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	const museEncryptedContent = "Q-PaDg-mock-muse-spark-encrypted-reasoning-payload"
+	reqPayload := []byte(`{"model":"muse-spark-1.3","store":false,"input":[` +
+		`{"id":"rs_1","type":"reasoning","encrypted_content":"` + museEncryptedContent + `","content":[{"type":"reasoning_text","text":"thinking step"}],"summary":[]},` +
+		`{"id":"rs_claude","type":"reasoning","encrypted_content":"` + testClaudeCAISSample + `","summary":[]},` +
+		`{"id":"msg_1","type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}` +
+		`]}`)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: reqPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotEC := gjson.GetBytes(gotBody, "input.0.encrypted_content").String(); gotEC != museEncryptedContent {
+		t.Fatalf("encrypted_content = %q, want %q; body=%s", gotEC, museEncryptedContent, gotBody)
+	}
+	if gotID := gjson.GetBytes(gotBody, "input.0.id").String(); gotID != "rs_1" {
+		t.Fatalf("reasoning id = %q, want rs_1; body=%s", gotID, gotBody)
+	}
+	assertEmptyReasoningContent(t, gotBody, "input.0.content")
+	if gotSummary := gjson.GetBytes(gotBody, "input.0.summary.0.text").String(); gotSummary != "thinking step" {
+		t.Fatalf("summary = %q, want 'thinking step'; body=%s", gotSummary, gotBody)
+	}
+	// Verify Claude signature stripped and id dropped when store=false
+	if gjson.GetBytes(gotBody, "input.1.encrypted_content").Exists() {
+		t.Fatalf("Claude signature should be stripped: %s", gotBody)
+	}
+	if gjson.GetBytes(gotBody, "input.1.id").Exists() {
+		t.Fatalf("Claude reasoning id should be dropped: %s", gotBody)
+	}
+
+	gotBody = nil
+	streamResult, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: reqPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for range streamResult.Chunks {
+	}
+	if gotEC := gjson.GetBytes(gotBody, "input.0.encrypted_content").String(); gotEC != museEncryptedContent {
+		t.Fatalf("stream encrypted_content = %q, want %q; body=%s", gotEC, museEncryptedContent, gotBody)
+	}
+	if gotID := gjson.GetBytes(gotBody, "input.0.id").String(); gotID != "rs_1" {
+		t.Fatalf("stream reasoning id = %q, want rs_1; body=%s", gotID, gotBody)
+	}
+	assertEmptyReasoningContent(t, gotBody, "input.0.content")
+	if gotSummary := gjson.GetBytes(gotBody, "input.0.summary.0.text").String(); gotSummary != "thinking step" {
+		t.Fatalf("stream summary = %q, want 'thinking step'; body=%s", gotSummary, gotBody)
+	}
+	if gjson.GetBytes(gotBody, "input.1.encrypted_content").Exists() {
+		t.Fatalf("stream Claude signature should be stripped: %s", gotBody)
+	}
+	if gjson.GetBytes(gotBody, "input.1.id").Exists() {
+		t.Fatalf("stream Claude reasoning id should be dropped: %s", gotBody)
+	}
+}

@@ -82,9 +82,8 @@ func ResolvedHomeModelOptions(req cliproxyexecutor.Request) (internalconfig.Open
 }
 
 // CodexAPIKeyModelIsCompat reports whether the selected codex-api-key model has
-// is-compat enabled. When true and codex.optimize-multi-agent-v2 is also true,
-// Codex MultiAgentV2 agent_message items are converted into portable Responses
-// message/user input for third-party Responses-compatible endpoints.
+// is-compat enabled. When true, Codex MultiAgentV2 agent_message items are converted
+// into portable Responses message/user input for third-party Responses-compatible endpoints.
 func CodexAPIKeyModelIsCompat(cfg *internalconfig.Config, auth *Auth, model string) bool {
 	if cfg == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return false

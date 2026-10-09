@@ -302,15 +302,23 @@ func isClaudeOpus55Model(model string) bool {
 	return model == "claude-opus-5-5" || strings.HasPrefix(model, "claude-opus-5-5[")
 }
 
+func isClaudeSonnet55Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	return model == "claude-sonnet-5-5" || strings.HasPrefix(model, "claude-sonnet-5-5-") || strings.HasPrefix(model, "claude-sonnet-5-5[")
+}
+
 func isClaudeSonnet5Model(model string) bool {
 	model = claudeCanonicalModel(model)
+	if isClaudeSonnet55Model(model) {
+		return false
+	}
 	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5-") || strings.HasPrefix(model, "claude-sonnet-5[")
 }
 
 // claudeModelUsesProgressDisplay reports the 2.1.280 interactive CLI models that
 // send thinking.display=updates unless the caller already chose a display mode.
 func claudeModelUsesProgressDisplay(model string) bool {
-	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeSonnet5Model(model)
+	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
 }
 
 // applyClaudeCloakThinkingDisplay fills the latest CLI display only when the
@@ -2468,7 +2476,8 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		}
 	}
 
-	return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)}
+	log.Warnf("claude oauth mcp alias: cannot restore tool name %q: no unique request-local match; forwarding it unchanged", name)
+	return "", false, nil
 }
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses

@@ -340,7 +340,7 @@ func TestSanitizeAntigravityToolSchemasKeepNativeTypeAndNullableOnBothPaths(t *t
 
 func TestAntigravityBuildRequestKeepsJSONObjectMimeOnly(t *testing.T) {
 	input := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`)
-	translated := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", input, false)
+	translated, _ := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", input, false)
 	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-pro-low", translated)
 	encoded, errMarshal := json.Marshal(body)
 	if errMarshal != nil {
@@ -396,7 +396,7 @@ func TestAntigravityBuildRequestSanitizesSnakeCaseGenerationResponseSchemas(t *t
 	} {
 		t.Run(testCase.alias, func(t *testing.T) {
 			input := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"user","content":"hi"}],"generation_config":{"` + testCase.alias + `":{"type":"object","$id":"drop-me","properties":{"title":{"type":"string"}}}}}`)
-			translated := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.6-flash-high", input, false)
+			translated, _ := antigravitychat.ConvertOpenAIRequestToAntigravity("gemini-3.6-flash-high", input, false)
 			body := buildRequestBodyFromRawPayload(t, "gemini-3.6-flash-high", translated)
 			encoded, errMarshal := json.Marshal(body)
 			if errMarshal != nil {

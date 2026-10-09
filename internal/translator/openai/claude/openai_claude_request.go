@@ -6,6 +6,7 @@
 package claude
 
 import (
+	"encoding/base64"
 	"strings"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
@@ -19,18 +20,20 @@ import (
 // ConvertClaudeRequestToOpenAI parses and transforms an Anthropic API request into OpenAI Chat Completions API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
-func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, false)
+
 }
 
 // ConvertClaudeRequestToOpenAIWithCompat preserves assistant thinking text
 // for configured compatibility endpoints.
-func ConvertClaudeRequestToOpenAIWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertClaudeRequestToOpenAIWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, true)
 }
 
-func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool, preserveThinkingBlocks bool) []byte {
+func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool, preserveThinkingBlocks bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	var drops translatorcommon.UserTurnDrops
 	// Base OpenAI Chat Completions API template
 	out := []byte(`{"model":"","messages":[]}`)
 
@@ -78,8 +81,12 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 					}
+				} else if v := root.Get("output_config.effort"); v.Exists() && v.Type == gjson.String && strings.TrimSpace(v.String()) != "" {
+					// Some Claude-compatible clients pair manual thinking with output_config.effort.
+					// Preserve that explicit level when there is no legacy token budget to map.
+					out, _ = sjson.SetBytes(out, "reasoning_effort", strings.ToLower(strings.TrimSpace(v.String())))
 				} else {
-					// No budget_tokens specified, default to "auto" for enabled thinking
+					// No budget_tokens or explicit effort specified; preserve the enabled-thinking default.
 					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
 						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 					}
@@ -203,9 +210,11 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "redacted_thinking":
 						// Explicitly ignore redacted_thinking - never map to reasoning_content (AC2)
 
-					case "text", "image":
+					case "text", "image", "document", "container_upload":
 						if contentItem, ok := convertClaudeContentPart(part); ok {
 							contentItems = append(contentItems, []byte(contentItem))
+						} else if role == "user" && partType != "text" {
+							drops.Drop(partType)
 						}
 
 					case "tool_use":
@@ -259,6 +268,9 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				hasReasoning := reasoningContent != ""
 				hasToolCalls := len(toolCalls) > 0
 				hasToolResults := len(toolResults) > 0
+				if role == "user" {
+					drops.EndTurn(len(contentItems) + len(toolResults))
+				}
 
 				// Flush pending system reminders before new content if no tool_results responded to preceding calls
 				if precedingToolCallsPending && !hasToolResults && len(pendingSystemReminders) > 0 {
@@ -418,11 +430,20 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		out, _ = sjson.SetBytes(out, "user", user.String())
 	}
 
-	return out
+	return out, drops.Err()
 }
 
 func normalizeObjectSchemaProperties(schema any) any {
 	switch value := schema.(type) {
+	case bool:
+		// JSON Schema boolean subschemas (true/false) are valid, but strict OpenAPI 3.0
+		// upstream validators reject boolean subschemas.
+		// Normalize `true` (accept anything) to an empty object schema `{}`.
+		// Preserve `false` (reject all) to avoid turning rejection constraints into open schemas.
+		if value {
+			return map[string]any{}
+		}
+		return value
 	case map[string]any:
 		if schemaType, ok := value["type"].(string); ok && schemaType == "object" {
 			if _, ok := value["properties"]; !ok {
@@ -458,6 +479,12 @@ func normalizeObjectSchemaProperties(schema any) any {
 		for _, valKey := range util.SchemaValueKeywords {
 			if val, exists := value[valKey]; exists {
 				switch sub := val.(type) {
+				case bool:
+					// Normalize boolean subschemas (e.g. items: true), but preserve boolean
+					// additionalProperties (false/true) required by OpenAI structured outputs.
+					if valKey != "additionalProperties" && sub {
+						value[valKey] = map[string]any{}
+					}
 				case map[string]any:
 					value[valKey] = normalizeObjectSchemaProperties(sub)
 				case []any:
@@ -538,9 +565,40 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 
 		return string(imageContent), true
 
+	case "document", "container_upload":
+		return convertClaudeFilePartToOpenAI(part)
+
 	default:
 		return "", false
 	}
+}
+
+// convertClaudeFilePartToOpenAI emits an OpenAI file part for inline base64 bytes.
+// A file id carries none, so it stays unconverted and the caller reports it.
+func convertClaudeFilePartToOpenAI(part gjson.Result) (string, bool) {
+	source := part.Get("source")
+	mimeType := source.Get("media_type").String()
+
+	var data []byte
+	if source.Get("type").String() == "base64" {
+		decoded, errDecode := base64.StdEncoding.DecodeString(strings.TrimSpace(source.Get("data").String()))
+		if errDecode != nil {
+			return "", false
+		}
+		data = decoded
+	}
+
+	if len(data) == 0 {
+		return "", false
+	}
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	fileContent := []byte(`{"type":"file","file":{"filename":"","file_data":""}}`)
+	fileContent, _ = sjson.SetBytes(fileContent, "file.filename", part.Get("filename").String())
+	fileContent, _ = sjson.SetBytes(fileContent, "file.file_data", "data:"+mimeType+";base64,"+base64.StdEncoding.EncodeToString(data))
+	return string(fileContent), true
 }
 
 // toolResultImagePlaceholder keeps the OpenAI tool message non-empty when a Claude

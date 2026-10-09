@@ -23,7 +23,7 @@ func TestConvertOpenAIResponsesRequestToInteractions(t *testing.T) {
 		"response_format":{"type":"json_object"},
 		"stream":true
 	}`)
-	out := ConvertOpenAIResponsesRequestToInteractions("gpt-test", raw, true)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("gpt-test", raw, true)
 	if got := gjson.GetBytes(out, "input.0.type").String(); got != "user_input" {
 		t.Fatalf("input.0.type = %q, want user_input. Output: %s", got, string(out))
 	}
@@ -70,19 +70,19 @@ func TestConvertOpenAIResponsesRequestToInteractions(t *testing.T) {
 }
 
 func TestConvertOpenAIResponsesRequestToInteractionsPreservesRequestStream(t *testing.T) {
-	out := ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","stream":true}`), false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","stream":true}`), false)
 	if got := gjson.GetBytes(out, "stream").Bool(); !got {
 		t.Fatalf("stream = %v, want true. Output: %s", got, string(out))
 	}
 
-	out = ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","stream":false}`), true)
+	out, _ = ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","stream":false}`), true)
 	if got := gjson.GetBytes(out, "stream").Bool(); got {
 		t.Fatalf("stream = %v, want false. Output: %s", got, string(out))
 	}
 }
 
 func TestConvertOpenAIResponsesRequestToInteractionsPreservesPreviousResponseID(t *testing.T) {
-	out := ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_response_id":"resp_123"}`), false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_response_id":"resp_123"}`), false)
 	if got := gjson.GetBytes(out, "previous_interaction_id").String(); got != "resp_123" {
 		t.Fatalf("previous_interaction_id = %q, want resp_123. Output: %s", got, string(out))
 	}
@@ -90,7 +90,7 @@ func TestConvertOpenAIResponsesRequestToInteractionsPreservesPreviousResponseID(
 
 func TestConvertInteractionsRequestToOpenAIResponsesWithToolMessages(t *testing.T) {
 	raw := []byte(`{"model":"gpt-test","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}]}`)
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
 
 	foundFunctionCall := false
 	foundFunctionOutput := false
@@ -116,7 +116,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesWithToolMessages(t *testing.
 
 func TestConvertInteractionsRequestToOpenAIResponsesPreservesStringSystemAndThinkingConfig(t *testing.T) {
 	raw := []byte(`{"model":"gpt-test","system_instruction":"You are a helpful assistant.","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"lookup","type":"function","parameters":{"type":"object"}}],"generation_config":{"tool_choice":"auto","thinking_level":"high","thinking_summaries":"auto"},"stream":true}`)
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, true)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, true)
 	if got := gjson.GetBytes(out, "instructions").String(); got != "You are a helpful assistant." {
 		t.Fatalf("instructions = %q, want system instruction. Output: %s", got, string(out))
 	}
@@ -132,21 +132,21 @@ func TestConvertInteractionsRequestToOpenAIResponsesPreservesStringSystemAndThin
 }
 
 func TestConvertInteractionsRequestToOpenAIResponsesPreservesInteractionStream(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":"hi","stream":true}`), false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":"hi","stream":true}`), false)
 	if got := gjson.GetBytes(out, "stream").Bool(); !got {
 		t.Fatalf("stream = %v, want true. Output: %s", got, string(out))
 	}
 }
 
 func TestConvertInteractionsRequestToOpenAIResponsesPreservesPreviousInteractionID(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_interaction_id":"interaction_123"}`), false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_interaction_id":"interaction_123"}`), false)
 	if got := gjson.GetBytes(out, "previous_response_id").String(); got != "interaction_123" {
 		t.Fatalf("previous_response_id = %q, want interaction_123. Output: %s", got, string(out))
 	}
 }
 
 func TestConvertInteractionsRequestToOpenAIResponsesPreservesToolCallID(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":[{"type":"function_call","name":"lookup","call_id":"call_gateway","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_gateway","result":{"ok":true}}]}`), false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":[{"type":"function_call","name":"lookup","call_id":"call_gateway","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_gateway","result":{"ok":true}}]}`), false)
 
 	foundFunctionCall := false
 	foundFunctionOutput := false
@@ -174,7 +174,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesPreservesToolCallID(t *testi
 }
 
 func TestConvertInteractionsRequestToOpenAIResponsesConvertsSimpleTools(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","tools":[{"name":"lookup","description":"Find data","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],"input":"hi"}`), false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","tools":[{"name":"lookup","description":"Find data","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],"input":"hi"}`), false)
 	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
 		t.Fatalf("tools.0.type = %q, want function. Output: %s", got, string(out))
 	}
@@ -190,7 +190,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesConvertsSimpleTools(t *testi
 }
 
 func TestConvertInteractionsRequestToOpenAIResponsesConvertsFunctionDeclarationsTools(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","tools":[{"function_declarations":[{"name":"lookup","description":"Find data","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}],"input":"hi"}`), false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","tools":[{"function_declarations":[{"name":"lookup","description":"Find data","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}],"input":"hi"}`), false)
 	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
 		t.Fatalf("tools.0.type = %q, want function. Output: %s", got, string(out))
 	}
@@ -204,7 +204,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesConvertsFunctionDeclarations
 
 func TestConvertInteractionsRequestToOpenAIResponsesWithImageContent(t *testing.T) {
 	raw := []byte(`{"model":"gpt-test","input":[{"type":"user_input","content":[{"type":"text","text":"describe"},{"type":"image","mime_type":"image/png","data":"aGVsbG8="}]}]}`)
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
 	if got := gjson.GetBytes(out, "input.0.content.1.type").String(); got != "input_image" {
 		t.Fatalf("content.1.type = %q, want input_image", got)
 	}
@@ -214,7 +214,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesWithImageContent(t *testing.
 }
 
 func TestConvertInteractionsRequestToOpenAIResponsesPreservesNonImageMediaContent(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":[{"type":"model_output","content":[{"type":"audio","mime_type":"audio/wav","data":"UklGRg=="},{"type":"video","mime_type":"video/mp4","data":"AAAAIGZ0eXA="},{"type":"document","mime_type":"application/pdf","data":"JVBERi0="}]}]}`), false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":[{"type":"model_output","content":[{"type":"audio","mime_type":"audio/wav","data":"UklGRg=="},{"type":"video","mime_type":"video/mp4","data":"AAAAIGZ0eXA="},{"type":"document","mime_type":"application/pdf","data":"JVBERi0="}]}]}`), false)
 
 	if got := gjson.GetBytes(out, "input.0.content.0.type").String(); got != "output_text" {
 		t.Fatalf("audio fallback type = %q, want output_text. Output: %s", got, string(out))
@@ -232,7 +232,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesPreservesNonImageMediaConten
 
 func TestConvertInteractionsRequestToOpenAIResponsesWithAssistantTextContent(t *testing.T) {
 	raw := []byte(`{"model":"gpt-test","input":[{"type":"model_output","content":[{"type":"text","text":"hello"}]}]}`)
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
 	if got := gjson.GetBytes(out, "input.0.content.0.type").String(); got != "output_text" {
 		t.Fatalf("content.0.type = %q, want output_text", got)
 	}
@@ -243,7 +243,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesWithAssistantTextContent(t *
 
 func TestConvertInteractionsRequestToOpenAIResponsesWithUserObjectContent(t *testing.T) {
 	raw := []byte(`{"model":"gpt-test","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]}]}`)
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
 	if got := gjson.GetBytes(out, "input.0.content.0.type").String(); got != "input_text" {
 		t.Fatalf("content.0.type = %q, want input_text", got)
 	}
@@ -254,7 +254,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesWithUserObjectContent(t *tes
 
 func TestConvertInteractionsRequestToOpenAIResponsesWithStringFunctionArguments(t *testing.T) {
 	raw := []byte(`{"model":"gpt-test","input":[{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}]}`)
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", raw, false)
 
 	found := false
 	gjson.GetBytes(out, "input").ForEach(func(_, item gjson.Result) bool {
@@ -275,7 +275,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesWithStringFunctionArguments(
 }
 
 func TestConvertInteractionsRequestToOpenAIResponsesPreservesExpressibleFields(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","tool_choice":{"type":"function","function":{"name":"lookup"}},"response_modalities":["text","image"],"service_tier":"priority","store":true,"background":true,"webhook_config":{"url":"https://example.com"},"input":"hi"}`), false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","tool_choice":{"type":"function","function":{"name":"lookup"}},"response_modalities":["text","image"],"service_tier":"priority","store":true,"background":true,"webhook_config":{"url":"https://example.com"},"input":"hi"}`), false)
 	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
 		t.Fatalf("tool_choice.type = %q, want function. Output: %s", got, string(out))
 	}
@@ -299,7 +299,7 @@ func TestConvertInteractionsRequestToOpenAIResponsesPreservesExpressibleFields(t
 }
 
 func TestConvertOpenAIResponsesRequestToInteractions_PreservesEnvironmentID(t *testing.T) {
-	out := ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_response_id":"resp_123","environment_id":"env_abc456"}`), false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_response_id":"resp_123","environment_id":"env_abc456"}`), false)
 	if got := gjson.GetBytes(out, "previous_interaction_id").String(); got != "resp_123" {
 		t.Fatalf("previous_interaction_id = %q, want resp_123. Output: %s", got, string(out))
 	}
@@ -309,7 +309,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_PreservesEnvironmentID(t *t
 }
 
 func TestConvertInteractionsRequestToOpenAIResponses_PreservesEnvironmentID(t *testing.T) {
-	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_interaction_id":"interaction_123","environment_id":"env_abc456"}`), false)
+	out, _ := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_interaction_id":"interaction_123","environment_id":"env_abc456"}`), false)
 	if got := gjson.GetBytes(out, "previous_response_id").String(); got != "interaction_123" {
 		t.Fatalf("previous_response_id = %q, want interaction_123. Output: %s", got, string(out))
 	}
@@ -329,7 +329,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_AntigravitySanitizesGenerat
 		"top_p":0.95,
 		"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}]
 	}`)
-	out := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
 	if got := gjson.GetBytes(out, "previous_interaction_id").String(); got != "v1_Chd3..." {
 		t.Fatalf("previous_interaction_id = %q, want v1_Chd3.... Output: %s", got, string(out))
 	}
@@ -359,7 +359,7 @@ func TestConvertOpenAIResponsesRequestToInteractionsRenamesConflictingAntigravit
 			{"type":"function","name":"web_search","parameters":{"type":"object"}}
 		]
 	}`)
-	out := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "external_read_file" {
 		t.Fatalf("tools.0.name = %q, want external_read_file. Output: %s", got, string(out))
 	}
@@ -372,7 +372,7 @@ func TestConvertOpenAIResponsesRequestToInteractionsRenamesConflictingAntigravit
 	if got := gjson.GetBytes(out, "tools.3.name").String(); got != "web_search" {
 		t.Fatalf("tools.3.name = %q, want web_search (unchanged). Output: %s", got, string(out))
 	}
-	outNonAnti := ConvertOpenAIResponsesRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	outNonAnti, _ := ConvertOpenAIResponsesRequestToInteractions("gemini-3.1-flash-lite", raw, false)
 	if got := gjson.GetBytes(outNonAnti, "tools.0.name").String(); got != "read_file" {
 		t.Fatalf("gemini tools.0.name = %q, want read_file. Output: %s", got, string(outNonAnti))
 	}
@@ -390,7 +390,7 @@ func TestConvertOpenAIResponsesRequestToInteractionsRenamesConflictingAntigravit
 			{"type":"function","name":"read_file","parameters":{"type":"object"}}
 		]
 	}`)
-	out := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
 	if got := gjson.GetBytes(out, "input.1.name").String(); got != "external_read_file" {
 		t.Fatalf("input.1.name = %q, want external_read_file. Output: %s", got, string(out))
 	}
@@ -406,11 +406,11 @@ func TestConvertOpenAIResponsesRequestToInteractionsRenamesConflictingToolChoice
 		"tools":[{"type":"function","name":"read_file","parameters":{"type":"object"}}],
 		"tool_choice":{"type":"function","name":"read_file"}
 	}`)
-	out := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
 	if got := gjson.GetBytes(out, "generation_config.tool_choice.name").String(); got != "external_read_file" {
 		t.Fatalf("generation_config.tool_choice.name = %q, want external_read_file. Output: %s", got, string(out))
 	}
-	outNonAnti := ConvertOpenAIResponsesRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	outNonAnti, _ := ConvertOpenAIResponsesRequestToInteractions("gemini-3.1-flash-lite", raw, false)
 	if got := gjson.GetBytes(outNonAnti, "generation_config.tool_choice.name").String(); got != "read_file" {
 		t.Fatalf("gemini tool_choice.name = %q, want read_file (no rename). Output: %s", got, string(outNonAnti))
 	}
@@ -424,7 +424,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_NonAntigravityGenerationCon
 		"temperature":0.7,
 		"top_p":0.95
 	}`)
-	out := ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", raw, false)
 	if got := gjson.GetBytes(out, "generation_config.max_output_tokens").Int(); got != 400 {
 		t.Fatalf("generation_config.max_output_tokens = %d, want 400. Output: %s", got, string(out))
 	}
@@ -496,7 +496,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_FlattensNamespaceTools(t *t
 		}
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToInteractions("devin/gemini-3-7-flash", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("devin/gemini-3-7-flash", raw, false)
 	tools := gjson.GetBytes(out, "tools").Array()
 	if len(tools) != 4 {
 		t.Fatalf("expected 4 flattened tools, got %d. Output: %s", len(tools), string(out))
@@ -573,7 +573,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_HistoryNamespaceAndCustomTo
 		]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToInteractions("devin/gemini-3-7-flash", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("devin/gemini-3-7-flash", raw, false)
 
 	// Step 0: function_call with qualified name
 	if got := gjson.GetBytes(out, "input.0.name").String(); got != "multi_agent_v1__close_agent" {
@@ -612,7 +612,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_AntigravityCustomToolRename
 			{"type": "custom", "name": "read_file", "description": "Read file"}
 		]
 	}`)
-	out := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "external_read_file" {
 		t.Fatalf("tools.0.name = %q, want external_read_file", got)
 	}
@@ -644,7 +644,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_FixedFixtureFullNamespaceEx
 		]
 	}`
 
-	out := ConvertOpenAIResponsesRequestToInteractions("devin/gemini-3-7-flash", []byte(fixture), false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("devin/gemini-3-7-flash", []byte(fixture), false)
 	tools := gjson.GetBytes(out, "tools").Array()
 	expectedNames := []string{
 		"top_fn_1",
@@ -699,7 +699,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_LogFilePayload(t *testing.T
 		}`
 	}
 
-	out := ConvertOpenAIResponsesRequestToInteractions("devin/gemini-3-7-flash", []byte(reqBody), false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("devin/gemini-3-7-flash", []byte(reqBody), false)
 
 	tools := gjson.GetBytes(out, "tools").Array()
 	if len(tools) == 0 {
@@ -778,7 +778,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_DevinToolsFilterAndObfuscat
 		]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", responsesPayload, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", responsesPayload, false)
 
 	tools := gjson.GetBytes(out, "tools").Array()
 	toolNames := make([]string, 0, len(tools))
@@ -858,7 +858,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_AntigravityDoesNotFilterDev
 		"input": "hello"
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", responsesPayload, false)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", responsesPayload, false)
 
 	// In Antigravity, mcp__codex_app__automation_update should NOT be filtered by Devin rules
 	foundAuto := false

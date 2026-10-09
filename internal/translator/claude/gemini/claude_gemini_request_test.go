@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -18,7 +19,7 @@ func TestConvertGeminiRequestToClaude_ThinkingSummaryVisibility(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			out := ConvertGeminiRequestToClaude("claude-opus-5-5", []byte(test.input), false)
+			out, _ := ConvertGeminiRequestToClaude("claude-opus-5-5", []byte(test.input), false)
 			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.wanted {
 				t.Fatalf("thinking.display = %q, want %q; body=%s", got, test.wanted, out)
 			}
@@ -66,7 +67,7 @@ func TestConvertGeminiRequestToClaude_PreservesCustomToolIDs(t *testing.T) {
 				]
 			}`, tt.callField, tt.responseField))
 
-			out := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+			out, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
 
 			gotCallID := gjson.GetBytes(out, "messages.0.content.0.id").String()
 			if gotCallID != tt.want {
@@ -92,7 +93,7 @@ func TestConvertGeminiRequestToClaude_GroupsConsecutiveRoleTurns(t *testing.T) {
 		]
 	}`)
 
-	out := ConvertGeminiRequestToClaude("claude-test", raw, false)
+	out, _ := ConvertGeminiRequestToClaude("claude-test", raw, false)
 	messages := gjson.GetBytes(out, "messages").Array()
 	if len(messages) != 2 {
 		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
@@ -126,13 +127,31 @@ func TestConvertGeminiRequestToClaude_KeepsSystemInstructionUserSeparate(t *test
 		"system_instruction":{"parts":[{"text":"system rule"}]},
 		"contents":[{"role":"user","parts":[{"text":"question"}]}]
 	}`)
-	out := ConvertGeminiRequestToClaude("claude-test", raw, false)
+	out, _ := ConvertGeminiRequestToClaude("claude-test", raw, false)
 	messages := gjson.GetBytes(out, "messages").Array()
 	if len(messages) != 2 {
 		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
 	}
 	if got := messages[0].Get("content.0.text").String(); got != "system rule" {
 		t.Fatalf("system user text = %q, want system rule", got)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "question" {
+		t.Fatalf("ordinary user text = %q, want question", got)
+	}
+}
+
+func TestConvertGeminiRequestToClaude_SupportsCamelCaseSystemInstruction(t *testing.T) {
+	raw := []byte(`{
+		"systemInstruction":{"parts":[{"text":"system rule in camelCase"}]},
+		"contents":[{"role":"user","parts":[{"text":"question"}]}]
+	}`)
+	out, _ := ConvertGeminiRequestToClaude("claude-test", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "system rule in camelCase" {
+		t.Fatalf("system user text = %q, want system rule in camelCase", got)
 	}
 	if got := messages[1].Get("content.0.text").String(); got != "question" {
 		t.Fatalf("ordinary user text = %q, want question", got)
@@ -153,7 +172,7 @@ func TestConvertGeminiRequestToClaude_DropsTemperature(t *testing.T) {
 		]
 	}`)
 
-	out := ConvertGeminiRequestToClaude("claude-sonnet-5", raw, false)
+	out, _ := ConvertGeminiRequestToClaude("claude-sonnet-5", raw, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -164,7 +183,7 @@ func TestConvertGeminiRequestToClaude_DropsTemperature(t *testing.T) {
 }
 
 func TestConvertGeminiRequestToClaude_AcceptsCamelInlineData(t *testing.T) {
-	out := ConvertGeminiRequestToClaude("claude-sonnet-4", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}]}`), false)
+	out, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}]}`), false)
 	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "image" {
 		t.Fatalf("content type = %q, want image. Output: %s", got, string(out))
 	}
@@ -174,25 +193,26 @@ func TestConvertGeminiRequestToClaude_AcceptsCamelInlineData(t *testing.T) {
 }
 
 func TestConvertGeminiRequestToClaude_SplitsNonImageInlineDataByMIME(t *testing.T) {
-	out := ConvertGeminiRequestToClaude("claude-sonnet-4", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`), false)
+	out, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`), false)
 
-	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "text" {
-		t.Fatalf("audio fallback type = %q, want text. Output: %s", got, string(out))
+	// A user attachment Claude cannot read is dropped rather than replaced by placeholder text.
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("user content has %d blocks, want only the document. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.1.type").String(); got != "text" {
-		t.Fatalf("video fallback type = %q, want text. Output: %s", got, string(out))
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.2.type").String(); got != "document" {
+	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "document" {
 		t.Fatalf("document content type = %q, want document. Output: %s", got, string(out))
 	}
 	if gjson.GetBytes(out, "messages.0.content.#(type==\"image\")").Exists() {
 		t.Fatalf("non-image inlineData must not be converted to image. Output: %s", string(out))
 	}
+	if strings.Contains(string(out), "Media content") {
+		t.Fatalf("user attachment was replaced by placeholder text. Output: %s", string(out))
+	}
 }
 
 func TestConvertGeminiRequestToClaude_DropsHiddenThoughtParts(t *testing.T) {
 	t.Run("thought-only turn", func(t *testing.T) {
-		out := ConvertGeminiRequestToClaude("claude-test", []byte(`{
+		out, _ := ConvertGeminiRequestToClaude("claude-test", []byte(`{
 			"contents":[
 				{"role":"model","parts":[{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"}]},
 				{"role":"user","parts":[{"text":"continue"}]}
@@ -206,7 +226,7 @@ func TestConvertGeminiRequestToClaude_DropsHiddenThoughtParts(t *testing.T) {
 	})
 
 	t.Run("mixed turn", func(t *testing.T) {
-		out := ConvertGeminiRequestToClaude("claude-test", []byte(`{
+		out, _ := ConvertGeminiRequestToClaude("claude-test", []byte(`{
 			"contents":[{"role":"model","parts":[
 				{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"},
 				{"text":"visible answer"}
@@ -250,8 +270,8 @@ func TestConvertGeminiRequestToClaude_DeterministicToolIDs(t *testing.T) {
 		]
 	}`)
 
-	out1 := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
-	out2 := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+	out1, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
+	out2, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
 
 	if string(out1) != string(out2) {
 		t.Fatalf("expected deterministic output across multiple conversions, got different outputs:\nout1=%s\nout2=%s", string(out1), string(out2))
@@ -298,7 +318,7 @@ func TestConvertGeminiRequestToClaude_PreservesCallerSuppliedMetadataUserID(t *t
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := ConvertGeminiRequestToClaude("claude-test", []byte(tc.rawJSON), false)
+			out, _ := ConvertGeminiRequestToClaude("claude-test", []byte(tc.rawJSON), false)
 			if !gjson.ValidBytes(out) {
 				t.Fatalf("output is invalid json: %s", string(out))
 			}
@@ -313,8 +333,8 @@ func TestConvertGeminiRequestToClaude_PreservesCallerSuppliedMetadataUserID(t *t
 func TestConvertGeminiRequestToClaude_DifferentSessionsProduceDifferentUserIDs(t *testing.T) {
 	a := []byte(`{"model":"claude-test","prompt_cache_key":"gemini-session-a","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
 	b := []byte(`{"model":"claude-test","prompt_cache_key":"gemini-session-b","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
-	outA := ConvertGeminiRequestToClaude("claude-test", a, false)
-	outB := ConvertGeminiRequestToClaude("claude-test", b, false)
+	outA, _ := ConvertGeminiRequestToClaude("claude-test", a, false)
+	outB, _ := ConvertGeminiRequestToClaude("claude-test", b, false)
 	idA := gjson.GetBytes(outA, "metadata.user_id").String()
 	idB := gjson.GetBytes(outB, "metadata.user_id").String()
 	if idA == idB {
@@ -325,8 +345,8 @@ func TestConvertGeminiRequestToClaude_DifferentSessionsProduceDifferentUserIDs(t
 func TestConvertGeminiRequestToClaude_DefaultRoleDifferentContentProducesDifferentUserIDs(t *testing.T) {
 	a := []byte(`{"contents":[{"parts":[{"text":"first prompt"}]}]}`)
 	b := []byte(`{"contents":[{"parts":[{"text":"second prompt"}]}]}`)
-	outA := ConvertGeminiRequestToClaude("claude-test", a, false)
-	outB := ConvertGeminiRequestToClaude("claude-test", b, false)
+	outA, _ := ConvertGeminiRequestToClaude("claude-test", a, false)
+	outB, _ := ConvertGeminiRequestToClaude("claude-test", b, false)
 	idA := gjson.GetBytes(outA, "metadata.user_id").String()
 	idB := gjson.GetBytes(outB, "metadata.user_id").String()
 	if idA == "" || idB == "" || idA == "unknown" || idB == "unknown" {
@@ -381,7 +401,7 @@ func TestConvertGeminiRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchem
 		}
 	}`
 
-	result := ConvertGeminiRequestToClaude("claude-test", []byte(inputJSON), false)
+	result, _ := ConvertGeminiRequestToClaude("claude-test", []byte(inputJSON), false)
 
 	// 1. Tool declaration name sanitized
 	toolName := gjson.GetBytes(result, "tools.0.name").String()

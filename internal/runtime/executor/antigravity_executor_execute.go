@@ -75,6 +75,13 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, errValidate
 	}
 	req.Payload = originalPayload
+	// Observe a translation refusal before the token refresh or any upstream call.
+	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
+	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, ModelInfo: modelInfo}
+	originalTranslated, translated, errTranslate := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq, originalPayload, req.Payload)
+	if errTranslate != nil {
+		return resp, errTranslate
+	}
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -83,18 +90,13 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		auth = updatedAuth
 		reporter.UpdateAccessTokenFingerprint(auth)
 	}
-	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
-	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, ModelInfo: modelInfo}
-	originalTranslated, translated := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq, originalPayload, req.Payload)
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, "antigravity", "request", originalTranslated, req, opts))
 	translated = e.obfuscateSensitiveWords(translated)
 	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
@@ -130,7 +132,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, err
 	}
 
-	httpResp, errDo := httpClient.Do(httpReq)
+	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate").Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
@@ -190,9 +192,12 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, bodyBytes)
 	bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
 	reporter.ObserveResponseModel(bodyBytes)
-	reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
 	var param any
-	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
+	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bodyBytes, &param)
+	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		converted = helps.EnsureResponsesUsageDetails(converted)
 	}
@@ -282,6 +287,13 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, errValidate
 	}
 	req.Payload = originalPayload
+	// Observe a translation refusal before the token refresh or any upstream call.
+	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
+	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Stream: true, ModelInfo: modelInfo}
+	originalTranslated, translated, errTranslate := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq, originalPayload, req.Payload)
+	if errTranslate != nil {
+		return resp, errTranslate
+	}
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -290,18 +302,13 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		auth = updatedAuth
 		reporter.UpdateAccessTokenFingerprint(auth)
 	}
-	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
-	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Stream: true, ModelInfo: modelInfo}
-	originalTranslated, translated := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq, originalPayload, req.Payload)
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, "antigravity", "request", originalTranslated, req, opts))
 	translated = e.obfuscateSensitiveWords(translated)
 	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
@@ -337,7 +344,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, err
 	}
 
-	httpResp, errDo := httpClient.Do(httpReq)
+	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate").Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
@@ -428,10 +435,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			}
 			reporter.ObserveResponseModel(payload)
 
-			if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
-				reporter.Publish(ctx, detail)
-			}
-
 			out <- cliproxyexecutor.StreamChunk{Payload: payload}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -442,7 +445,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			if replayAccumulator != nil {
 				replayAccumulator.Commit(ctx)
 			}
-			reporter.EnsurePublished(ctx)
 		}
 	}(httpResp)
 
@@ -460,9 +462,12 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, resp.Payload)
 	reporter.ObserveResponseModel(resp.Payload)
-	reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
 	var param any
-	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, resp.Payload, &param)
+	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, resp.Payload, &param)
+	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		converted = helps.EnsureResponsesUsageDetails(converted)
 	}

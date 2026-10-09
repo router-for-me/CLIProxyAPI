@@ -11,7 +11,7 @@ import (
 
 func TestConvertClaudeRequestToInteractionsMapsMessagesToolsAndStream(t *testing.T) {
 	raw := []byte(`{"model":"gemini-3.1-flash-lite","stream":true,"max_tokens":1024,"tools":[{"name":"get_weather","description":"Weather","input_schema":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}],"messages":[{"role":"user","content":[{"type":"text","text":"今天北京的天气怎么样？"}]}]}`)
-	out := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, true)
+	out, _ := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, true)
 	if got := gjson.GetBytes(out, "model").String(); got != "gemini-3.1-flash-lite" {
 		t.Fatalf("model = %q, want gemini-3.1-flash-lite. Output: %s", got, string(out))
 	}
@@ -37,7 +37,7 @@ func TestConvertClaudeRequestToInteractionsMapsMessagesToolsAndStream(t *testing
 
 func TestConvertClaudeRequestToInteractionsMapsToolUseAndResult(t *testing.T) {
 	raw := []byte(`{"model":"gemini-3.1-flash-lite","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"location":"北京"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"晴"}]}]}`)
-	out := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	out, _ := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
 	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call" {
 		t.Fatalf("input.0.type = %q, want function_call. Output: %s", got, string(out))
 	}
@@ -84,7 +84,7 @@ func TestConvertClaudeRequestToInteractionsInfersToolNamesForOutOfOrderResults(t
 			}
 		]
 	}`)
-	out := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	out, _ := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
 	// Since AlignClaudeToolResults aligns tool results with tool_use order (toolu_1 then toolu_2):
 	// input.0: function_call toolu_1 (lookup)
 	// input.1: function_call toolu_2 (weather)
@@ -106,7 +106,7 @@ func TestConvertClaudeRequestToInteractionsInfersToolNamesForOutOfOrderResults(t
 
 func TestConvertClaudeRequestToInteractionsPropagatesIsError(t *testing.T) {
 	raw := []byte(`{"model":"gemini-3.1-flash-lite","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_err","content":"command failed","is_error":true}]}]}`)
-	out := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	out, _ := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
 	if !gjson.GetBytes(out, "input.0.is_error").Bool() {
 		t.Fatalf("expected input.0.is_error = true. Output: %s", string(out))
 	}
@@ -141,7 +141,7 @@ func TestConvertClaudeRequestToInteractions_PreservesToolAdjacencyWithIntervenin
 			}
 		]
 	}`)
-	out := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	out, _ := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
 	inputs := gjson.GetBytes(out, "input").Array()
 
 	// Expected types:
@@ -581,7 +581,7 @@ func TestConvertClaudeRequestToInteractionsPreservesImagesInToolResult(t *testin
 		]
 	}`)
 
-	out := ConvertClaudeRequestToInteractions("devin/swe-2", raw, false)
+	out, _ := ConvertClaudeRequestToInteractions("devin/swe-2", raw, false)
 	res := gjson.GetBytes(out, "input.1.result")
 	if !res.IsArray() {
 		t.Fatalf("expected input.1.result to be array, got: %s", res.Raw)
@@ -630,7 +630,7 @@ func TestConvertClaudeRequestToInteractionsPreservesBusinessObjectsInToolResultA
 		]
 	}`)
 
-	out := ConvertClaudeRequestToInteractions("devin/swe-2", raw, false)
+	out, _ := ConvertClaudeRequestToInteractions("devin/swe-2", raw, false)
 	res := gjson.GetBytes(out, "input.0.result")
 	if !res.IsArray() {
 		t.Fatalf("expected input.0.result to be array, got: %s", res.Raw)
@@ -642,5 +642,46 @@ func TestConvertClaudeRequestToInteractionsPreservesBusinessObjectsInToolResultA
 	}
 	if !strings.Contains(resStr, `"exit_code": 2`) {
 		t.Errorf("expected exit_code 2 to be preserved in result: %s", resStr)
+	}
+}
+
+func TestConvertInteractionsResponseToClaude_ResponseFailed(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wantMsg string
+	}{
+		{
+			name:    "response_failed_top_level",
+			payload: `data: {"event_type":"response.failed","error":{"message":"devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.","code":"403"}}`,
+			wantMsg: "permission_denied",
+		},
+		{
+			name:    "interaction_failed_nested",
+			payload: `data: {"event_type":"interaction.failed","interaction":{"error":{"message":"service unavailable","type":"server_error"}}}`,
+			wantMsg: "service unavailable",
+		},
+		{
+			name:    "fallback_defaults",
+			payload: `data: {"event_type":"response.failed"}`,
+			wantMsg: "upstream error occurred",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			events := ConvertInteractionsResponseToClaude(context.Background(), "devin/kimi-k3", nil, nil, []byte(tt.payload), &param)
+			if len(events) == 0 {
+				t.Fatalf("expected non-empty events for %s, got 0", tt.name)
+			}
+			payload := findClaudeEventPayload(events, "error")
+			if len(payload) == 0 {
+				t.Fatalf("expected error event payload, got: %s", string(bytes.Join(events, []byte("\n"))))
+			}
+			if got := gjson.GetBytes(payload, "error.message").String(); !strings.Contains(got, tt.wantMsg) {
+				t.Fatalf("error.message = %q, want containing %q", got, tt.wantMsg)
+			}
+		})
 	}
 }

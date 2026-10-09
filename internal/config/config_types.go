@@ -207,8 +207,6 @@ type CodexConfig struct {
 	// When set (e.g. "20s"), the stream is released once the time ceiling is reached, avoiding
 	// reverse-proxy timeouts (e.g. Nginx 60s proxy_read_timeout).
 	StreamBootstrapTimeout string `yaml:"stream-bootstrap-timeout,omitempty" json:"stream-bootstrap-timeout,omitempty"`
-	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
-	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
 	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
 	// ModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the requested model
@@ -708,7 +706,7 @@ type CodexModel struct {
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
 	// IsCompat converts Codex MultiAgentV2 agent_message items into portable
-	// Responses message/user input when codex.optimize-multi-agent-v2 is also true.
+	// Responses message/user input when client.codex.optimize-multi-agent-v2 is also true.
 	// Use this for third-party Responses-compatible endpoints that do not accept
 	// native agent_message items or empty-signature thinking blocks. Default false
 	// keeps the native behavior unchanged.

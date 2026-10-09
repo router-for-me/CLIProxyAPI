@@ -33,18 +33,20 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
-func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertOpenAIRequestToClaude(modelName, inputRawJSON, stream, false)
+
 }
 
 // ConvertOpenAIRequestToClaudeWithCompat preserves assistant reasoning content
 // as an unsigned thinking block for configured compatibility endpoints.
-func ConvertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertOpenAIRequestToClaude(modelName, inputRawJSON, stream, true)
 }
 
-func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
+func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	var drops common.UserTurnDrops
 
 	userID := common.DeriveClaudeUserID(rawJSON)
 
@@ -208,12 +210,17 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					contentBlocks = append(contentBlocks, part)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
-						claudePart := convertOpenAIContentPartToClaudePart(part)
-						if claudePart != "" {
+						if claudePart := convertOpenAIContentPartToClaudePart(part); claudePart != "" {
 							contentBlocks = append(contentBlocks, []byte(claudePart))
+						} else if partType := part.Get("type").String(); role == "user" && (partType == "file" || partType == "input_audio") {
+							drops.Drop(partType)
 						}
 						return true
 					})
+				}
+
+				if role == "user" {
+					drops.EndTurn(len(contentBlocks))
 				}
 
 				// Handle tool calls (for assistant messages)
@@ -304,6 +311,9 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		systemBlock, _ = sjson.SetBytes(systemBlock, "text", formatInstruction)
 		systemBlocks = append(systemBlocks, systemBlock)
 	}
+
+	// Decided per user turn, so neither a system prompt nor the blank turn added below hides an emptied turn.
+	nothingLeftErr := drops.Err()
 
 	// Preserve a minimal conversational turn for system-only inputs.
 	// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
@@ -458,7 +468,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		}
 	}
 
-	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai", modelName)
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai", modelName), nothingLeftErr
 }
 
 func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {

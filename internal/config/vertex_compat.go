@@ -53,6 +53,9 @@ type VertexCompatKey struct {
 	// RequestRetry optionally overrides the global request-retry for this credential.
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
+	// Interactions optionally enables native Vertex Interactions API routing for this key.
+	Interactions *bool `yaml:"interactions,omitempty" json:"interactions,omitempty"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string   { return k.APIKey }

@@ -87,8 +87,95 @@ plugins:
 	if h.PluginRegistered("alpha") {
 		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
 	}
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false after global disable")
+	}
+	if lookup := loader.lookups["alpha"]; lookup == nil || lookup.shutdownCalls != 1 {
+		shutdownCalls := 0
+		if lookup != nil {
+			shutdownCalls = lookup.shutdownCalls
+		}
+		t.Fatalf("alpha shutdown calls = %d, want 1 after global disable", shutdownCalls)
+	}
 	if snap := h.Snapshot(); snap.enabled || len(snap.records) != 0 {
 		t.Fatalf("Snapshot() = %+v, want empty disabled snapshot", snap)
+	}
+}
+
+func TestHostApplyConfigStopsDisabledPluginAndKeepsSibling(t *testing.T) {
+	loader := newTestSymbolLoader()
+	alphaPlugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	bravoPlugin := &testPlugin{
+		registerResult:    validTestPlugin("bravo"),
+		reconfigureResult: validTestPlugin("bravo"),
+	}
+	alphaLookup := newTestSymbolLookup(alphaPlugin)
+	bravoLookup := newTestSymbolLookup(bravoPlugin)
+	loader.lookups["alpha"] = alphaLookup
+	loader.lookups["bravo"] = bravoLookup
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+
+	pluginsDir := makePluginDir(t, "alpha", "bravo")
+	enabledCfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: enabledPluginConfigs("alpha", "bravo"),
+		},
+	}
+	h.ApplyConfig(context.Background(), enabledCfg)
+	if !h.PluginRegistered("alpha") || !h.PluginLoaded("alpha") {
+		t.Fatal("alpha was not loaded before disable")
+	}
+	if !h.PluginRegistered("bravo") || !h.PluginLoaded("bravo") {
+		t.Fatal("bravo was not loaded before disable")
+	}
+
+	disabled := false
+	stillEnabled := true
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {Enabled: &disabled},
+				"bravo": {Enabled: &stillEnabled},
+			},
+		},
+	})
+
+	if h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
+	}
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false after disable")
+	}
+	if alphaLookup.shutdownCalls != 1 {
+		t.Fatalf("alpha shutdown calls = %d, want 1", alphaLookup.shutdownCalls)
+	}
+	if !h.PluginRegistered("bravo") || !h.PluginLoaded("bravo") {
+		t.Fatal("bravo was detached while disabling alpha")
+	}
+	if bravoLookup.shutdownCalls != 0 {
+		t.Fatalf("bravo shutdown calls = %d, want 0", bravoLookup.shutdownCalls)
+	}
+
+	h.ApplyConfig(context.Background(), enabledCfg)
+	if !h.PluginRegistered("alpha") || !h.PluginLoaded("alpha") {
+		t.Fatal("alpha was not loaded again after re-enable")
+	}
+	if alphaLookup.shutdownCalls != 1 {
+		t.Fatalf("alpha shutdown calls = %d, want 1 after re-enable", alphaLookup.shutdownCalls)
+	}
+	if alphaPlugin.registerCalls != 2 {
+		t.Fatalf("alpha register calls = %d, want 2", alphaPlugin.registerCalls)
+	}
+	if bravoLookup.shutdownCalls != 0 || bravoPlugin.registerCalls != 1 {
+		t.Fatalf("bravo changed during alpha re-enable: shutdown=%d register=%d", bravoLookup.shutdownCalls, bravoPlugin.registerCalls)
 	}
 }
 
@@ -177,14 +264,15 @@ func TestHostApplyConfig_DefaultDisabledPluginSkipsLoad(t *testing.T) {
 	}
 }
 
-func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
+func TestHostApplyConfigDisableStopsLoadedPluginHTTPOperations(t *testing.T) {
 	disabled := false
 	loader := newTestSymbolLoader()
 	plugin := &testPlugin{
 		registerResult:    validTestPlugin("alpha"),
 		reconfigureResult: validTestPlugin("alpha"),
 	}
-	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	lookup := newTestSymbolLookup(plugin)
+	loader.lookups["alpha"] = lookup
 	h := NewForTest(loader)
 	t.Cleanup(h.ShutdownAll)
 	pluginsDir := makePluginDir(t, "alpha")
@@ -206,6 +294,13 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	if len(h.RegisteredPlugins()) != 1 {
 		t.Fatalf("RegisteredPlugins() len = %d, want 1", len(h.RegisteredPlugins()))
 	}
+	h.mu.Lock()
+	instance := h.loaded["alpha"].callbackInstance
+	h.mu.Unlock()
+	operationID, operation, openedOperation := h.httpOperations.open("alpha", instance, "", context.Background())
+	if !openedOperation {
+		t.Fatal("failed to open alpha HTTP operation before disable")
+	}
 
 	h.ApplyConfig(context.Background(), &config.Config{
 		Plugins: config.PluginsConfig{
@@ -223,34 +318,25 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	if h.PluginRegistered("alpha") {
 		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
 	}
-	if !h.PluginLoaded("alpha") {
-		t.Fatal("PluginLoaded(alpha) = false, want true while library remains loaded")
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false after disable")
 	}
-	h.mu.Lock()
-	instance := h.loaded["alpha"].callbackInstance
-	h.mu.Unlock()
-	operationID, operation, openedOperation := h.httpOperations.open("alpha", instance, "", context.Background())
-	if !openedOperation {
-		t.Fatal("failed to open alpha HTTP operation before shutdown")
+	if lookup.shutdownCalls != 1 {
+		t.Fatalf("shutdown calls = %d, want 1 after disable", lookup.shutdownCalls)
 	}
-
-	h.ShutdownAll()
 	lateOpenContext := withHostCallbackIdentity(context.Background(), "alpha", instance)
 	if lateOperationID, errOpen := h.openHostHTTPOperation(lateOpenContext, ""); errOpen == nil {
 		h.httpOperations.cancel("alpha", instance, lateOperationID)
-		t.Fatal("opened an HTTP operation after host shutdown")
+		t.Fatal("opened an HTTP operation after disable")
 	}
 	if operation.ctx.Err() != context.Canceled {
-		t.Fatalf("HTTP operation context error = %v, want context.Canceled after shutdown", operation.ctx.Err())
+		t.Fatalf("HTTP operation context error = %v, want context.Canceled after disable", operation.ctx.Err())
 	}
 	h.httpOperations.mu.Lock()
 	_, operationOpen := h.httpOperations.operations[hostHTTPOperationKey{pluginID: "alpha", operationID: operationID}]
 	h.httpOperations.mu.Unlock()
 	if operationOpen {
-		t.Fatal("HTTP operation remained registered after shutdown")
-	}
-	if h.PluginLoaded("alpha") {
-		t.Fatal("PluginLoaded(alpha) = true, want false after ShutdownAll")
+		t.Fatal("HTTP operation remained registered after disable")
 	}
 }
 

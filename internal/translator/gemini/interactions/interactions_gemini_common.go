@@ -26,7 +26,14 @@ type StreamState struct {
 	StepIndex       int
 }
 
-func ConvertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertInteractionsRequestToGemini(modelName, inputRawJSON, stream)
+
+}
+
+// convertInteractionsRequestToGemini also reports a user turn that was left empty
+// because its only attachment has no Gemini equivalent.
+func convertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","contents":[]}`)
 	if modelName != "" && root.Get("model").Exists() {
@@ -39,12 +46,20 @@ func ConvertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, s
 	out = copyInteractionsToolChoice(out, root)
 	out = copyInteractionsServiceTier(out, root)
 	contentItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
-	appendInteractionsInput(&contentItems, root.Get("input"))
+	errInput := appendInteractionsInput(&contentItems, root.Get("input"))
 	out = translatorcommon.SetRawArrayItems(out, "contents", contentItems)
-	return out
+	return out, errInput
 }
 
-func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertGeminiRequestToInteractions(modelName, inputRawJSON, stream)
+
+}
+
+// convertGeminiRequestToInteractions also reports a user turn that was left empty
+// because its only part could not be carried over to Interactions.
+func convertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -62,11 +77,14 @@ func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 		if role == "model" {
 			stepType = "model_output"
 		}
+		// Counts what this turn sends; empty text is not sendable.
+		sendable := 0
 		content.Get("parts").ForEach(func(_, part gjson.Result) bool {
 			if fc := part.Get("functionCall"); fc.Exists() {
 				for _, step := range geminiPartToInteractionsSteps(part) {
 					if len(step) > 0 {
 						inputItems = append(inputItems, step)
+						sendable++
 					}
 				}
 				return true
@@ -75,6 +93,7 @@ func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 				for _, step := range geminiPartToInteractionsSteps(part) {
 					if len(step) > 0 {
 						inputItems = append(inputItems, step)
+						sendable++
 					}
 				}
 				return true
@@ -89,6 +108,9 @@ func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 			}
 			item := geminiPartToInteractionsContent(part)
 			if len(item) == 0 {
+				if role != "model" && geminiPartFileData(part).Exists() {
+					drops.Drop("fileData")
+				}
 				return true
 			}
 			currentStepType := stepType
@@ -99,13 +121,17 @@ func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 			step, _ = sjson.SetBytes(step, "type", currentStepType)
 			step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{item})
 			inputItems = append(inputItems, step)
+			sendable++
 			return true
 		})
+		if role != "model" {
+			drops.EndTurn(sendable)
+		}
 		return true
 	})
 	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	out, _ = sjson.SetBytes(out, "stream", stream)
-	return out
+	return out, drops.Err()
 }
 
 func copyGeminiSystemInstructionToInteractions(out []byte, root gjson.Result) []byte {
@@ -310,7 +336,18 @@ func geminiPartToInteractionsContent(part gjson.Result) []byte {
 	if inline := part.Get("inline_data"); inline.Exists() {
 		return geminiInlineDataToInteractionsContent(inline.Get("mime_type").String(), inline.Get("data").String())
 	}
+	if fileData := geminiPartFileData(part); fileData.Exists() {
+		return geminiFileDataToInteractionsContent(fileData)
+	}
 	return nil
+}
+
+// geminiPartFileData returns the fileData object of a Gemini part in either spelling.
+func geminiPartFileData(part gjson.Result) gjson.Result {
+	if fileData := part.Get("fileData"); fileData.Exists() {
+		return fileData
+	}
+	return part.Get("file_data")
 }
 
 func ConvertGeminiResponseToInteractionsStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
@@ -808,11 +845,36 @@ type geminiInteractionsInputContext struct {
 	inModelTurn      bool
 	lastStepType     string
 	pendingSignature string
+	// run follows the consecutive user content so that an attachment Gemini cannot
+	// carry is refused only when its whole user turn is left with nothing to send.
+	run translatorcommon.UserRun
+	// instruction is set while the step being added is developer or system content.
+	instruction bool
 }
 
-func appendInteractionsInput(items *[][]byte, input gjson.Result) {
+// userRun returns the tracker for content added with role. Model content and
+// developer or system content close the open user turn and have no tracker, so
+// they can never keep an emptied user turn alive.
+func (ctx *geminiInteractionsInputContext) userRun(role string) *translatorcommon.UserRun {
+	if role == "user" && !ctx.instruction {
+		return &ctx.run
+	}
+	ctx.run.End()
+	return nil
+}
+
+// appendText adds a text content; blank text does not keep a user turn alive.
+func (ctx *geminiInteractionsInputContext) appendText(role, text string) {
+	appendGeminiTextContent(&ctx.items, role, text)
+	run := ctx.userRun(role)
+	if strings.TrimSpace(text) != "" {
+		run.Add()
+	}
+}
+
+func appendInteractionsInput(items *[][]byte, input gjson.Result) error {
 	if !input.Exists() {
-		return
+		return nil
 	}
 	ctx := &geminiInteractionsInputContext{
 		items: *items,
@@ -821,7 +883,7 @@ func appendInteractionsInput(items *[][]byte, input gjson.Result) {
 		appendGeminiTextContent(&ctx.items, "user", input.String())
 		ctx.lastStepType = "text"
 		*items = ctx.items
-		return
+		return nil
 	}
 	if input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
@@ -833,24 +895,31 @@ func appendInteractionsInput(items *[][]byte, input gjson.Result) {
 		if role := input.Get("role").String(); role == "model" || role == "assistant" {
 			defaultRole = "model"
 		}
+		ctx.instruction = translatorcommon.IsInteractionsInstructionStep(input, false)
 		steps.ForEach(func(_, step gjson.Result) bool {
 			appendInteractionsStepToGemini(ctx, step, defaultRole)
 			return true
 		})
+		ctx.instruction = false
 	} else {
 		appendInteractionsStepToGemini(ctx, input, "user")
 	}
 	flushPendingGeminiSignature(ctx)
 	*items = ctx.items
+	ctx.run.End()
+	return ctx.run.Err()
 }
 
 func appendInteractionsStepToGemini(ctx *geminiInteractionsInputContext, item gjson.Result, defaultRole string) {
+	inheritedInstruction := ctx.instruction
+	ctx.instruction = translatorcommon.IsInteractionsInstructionStep(item, inheritedInstruction)
+	defer func() { ctx.instruction = inheritedInstruction }()
 	if item.Type == gjson.String {
 		if ctx.inModelTurn {
 			flushPendingGeminiSignature(ctx)
 			ctx.inModelTurn = false
 		}
-		appendGeminiTextContent(&ctx.items, defaultRole, item.String())
+		ctx.appendText(defaultRole, item.String())
 		ctx.lastStepType = "text"
 		return
 	}
@@ -870,6 +939,7 @@ func appendInteractionsStepToGemini(ctx *geminiInteractionsInputContext, item gj
 	stepType := item.Get("type").String()
 	switch stepType {
 	case "model_output":
+		ctx.run.End()
 		if ctx.pendingSignature != "" {
 			carrier := geminiTextPartJSON("", false)
 			carrier, _ = sjson.SetBytes(carrier, "thoughtSignature", ctx.pendingSignature)
@@ -891,6 +961,7 @@ func appendInteractionsStepToGemini(ctx *geminiInteractionsInputContext, item gj
 		ctx.inModelTurn = true
 		ctx.lastStepType = "model_output"
 	case "thought":
+		ctx.run.End()
 		if sig := firstNonEmptyString(item.Get("signature").String(), item.Get("thought_signature").String(), item.Get("thoughtSignature").String()); sig != "" {
 			if ctx.pendingSignature != "" && ctx.pendingSignature != sig {
 				carrier := geminiTextPartJSON("", false)
@@ -914,6 +985,7 @@ func appendInteractionsStepToGemini(ctx *geminiInteractionsInputContext, item gj
 		ctx.inModelTurn = true
 		ctx.lastStepType = "thought"
 	case "function_call":
+		ctx.run.End()
 		part := buildGeminiFunctionCallPart(item)
 		sig := firstNonEmptyString(item.Get("signature").String(), item.Get("thought_signature").String(), item.Get("thoughtSignature").String())
 		if sig == "" && ctx.pendingSignature != "" {
@@ -949,6 +1021,8 @@ func appendInteractionsStepToGemini(ctx *geminiInteractionsInputContext, item gj
 			ctx.inModelTurn = false
 		}
 		part := buildGeminiFunctionResultPart(item)
+		// A tool result is content the model reads, so it keeps the surrounding user turn.
+		ctx.run.Add()
 		if ctx.lastStepType == "function_result" && len(ctx.items) > 0 && gjson.GetBytes(ctx.items[len(ctx.items)-1], "role").String() == "user" {
 			ctx.items[len(ctx.items)-1] = appendGeminiUserContentPart(ctx.items[len(ctx.items)-1], part)
 		} else {
@@ -961,9 +1035,9 @@ func appendInteractionsStepToGemini(ctx *geminiInteractionsInputContext, item gj
 			ctx.inModelTurn = false
 		}
 		if item.Get("parts").Exists() {
-			appendInteractionsNativeContent(&ctx.items, item, defaultRole)
+			appendInteractionsNativeContent(ctx, item, defaultRole)
 		} else {
-			appendInteractionsContentList(&ctx.items, defaultRole, item.Get("content"))
+			appendInteractionsContentList(ctx, defaultRole, item.Get("content"))
 		}
 		ctx.lastStepType = "user_input"
 	default:
@@ -972,11 +1046,11 @@ func appendInteractionsStepToGemini(ctx *geminiInteractionsInputContext, item gj
 			ctx.inModelTurn = false
 		}
 		if item.Get("parts").Exists() {
-			appendInteractionsNativeContent(&ctx.items, item, defaultRole)
+			appendInteractionsNativeContent(ctx, item, defaultRole)
 		} else if item.Get("content").Exists() {
-			appendInteractionsContentList(&ctx.items, defaultRole, item.Get("content"))
+			appendInteractionsContentList(ctx, defaultRole, item.Get("content"))
 		} else if text := item.Get("text"); text.Exists() {
-			appendGeminiTextContent(&ctx.items, defaultRole, text.String())
+			ctx.appendText(defaultRole, text.String())
 		}
 		ctx.lastStepType = "default"
 	}
@@ -1134,23 +1208,32 @@ func buildGeminiFunctionResultPart(item gjson.Result) []byte {
 	return part
 }
 
-func appendInteractionsNativeContent(items *[][]byte, item gjson.Result, defaultRole string) {
+func appendInteractionsNativeContent(ctx *geminiInteractionsInputContext, item gjson.Result, defaultRole string) {
 	parts := item.Get("parts")
 	if !parts.Exists() || !parts.IsArray() {
 		return
 	}
+	role := interactionsGeminiContentRole(item.Get("role").String(), defaultRole)
+	run := ctx.userRun(role)
 	partItems := make([][]byte, 0, 4)
 	parts.ForEach(func(_, part gjson.Result) bool {
-		if partJSON := interactionsNativeGeminiPart(part); len(partJSON) > 0 {
-			partItems = append(partItems, partJSON)
+		partJSON := interactionsNativeGeminiPart(part)
+		if len(partJSON) == 0 {
+			if droppedType := translatorcommon.InteractionsAttachmentType(part); droppedType != "" {
+				run.Drop(droppedType)
+			}
+			return true
+		}
+		partItems = append(partItems, partJSON)
+		if translatorcommon.GeminiPartIsSendable(partJSON) {
+			run.Add()
 		}
 		return true
 	})
 	if len(partItems) == 0 {
 		return
 	}
-	role := interactionsGeminiContentRole(item.Get("role").String(), defaultRole)
-	*items = append(*items, interactionsGeminiContent(role, partItems))
+	ctx.items = append(ctx.items, interactionsGeminiContent(role, partItems))
 }
 
 func interactionsGeminiContentRole(role, defaultRole string) string {
@@ -1182,12 +1265,20 @@ func interactionsNativeGeminiPart(part gjson.Result) []byte {
 	return nil
 }
 
-func appendInteractionsContentPart(items *[][]byte, role string, part gjson.Result) {
+// appendInteractionsContentPart adds one content part. run is nil for model
+// content; for user content it records what is sent and what cannot be.
+func appendInteractionsContentPart(items *[][]byte, role string, part gjson.Result, run *translatorcommon.UserRun) {
 	partJSON := interactionsContentPartToGeminiPart(part, false)
 	if len(partJSON) == 0 {
+		if droppedType := translatorcommon.InteractionsAttachmentType(part); droppedType != "" {
+			run.Drop(droppedType)
+		}
 		return
 	}
 	*items = append(*items, interactionsGeminiContent(role, [][]byte{partJSON}))
+	if translatorcommon.GeminiPartIsSendable(partJSON) {
+		run.Add()
+	}
 }
 
 func interactionsContentPartToGeminiPart(part gjson.Result, thought bool) []byte {
@@ -1217,11 +1308,8 @@ func interactionsContentPartToGeminiPart(part gjson.Result, thought bool) []byte
 				return geminiInlineDataPartJSON(gjson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
 			}
 		}
-		if uri := part.Get("file_uri"); uri.Exists() || part.Get("fileUri").Exists() {
-			fileURI := uri.String()
-			if fileURI == "" {
-				fileURI = part.Get("fileUri").String()
-			}
+		// uri is the Interactions spelling of file_uri.
+		if fileURI := firstNonEmptyString(part.Get("file_uri").String(), part.Get("fileUri").String(), part.Get("uri").String()); fileURI != "" {
 			mimeType := part.Get("mime_type").String()
 			if mimeType == "" {
 				mimeType = part.Get("mimeType").String()
@@ -1320,38 +1408,67 @@ func interactionsInputAudioMimeType(format string) string {
 }
 
 func geminiInlineDataToInteractionsContent(mimeType, data string) []byte {
-	contentType := "document"
-	lower := strings.ToLower(mimeType)
-	switch {
-	case strings.HasPrefix(lower, "image/"):
-		contentType = "image"
-	case strings.HasPrefix(lower, "audio/"):
-		contentType = "audio"
-	case strings.HasPrefix(lower, "video/"):
-		contentType = "video"
-	}
 	item := []byte(`{"type":"","mime_type":"","data":""}`)
-	item, _ = sjson.SetBytes(item, "type", contentType)
+	item, _ = sjson.SetBytes(item, "type", geminiInteractionsMediaType(mimeType))
 	item, _ = sjson.SetBytes(item, "mime_type", mimeType)
 	item, _ = sjson.SetBytes(item, "data", data)
 	return item
 }
 
-func appendInteractionsContentList(items *[][]byte, role string, content gjson.Result) {
+// geminiFileDataToInteractionsContent maps a Gemini fileData part onto an
+// Interactions media part that references the file by uri. It returns nil when
+// the part names no uri, which leaves nothing to send.
+func geminiFileDataToInteractionsContent(fileData gjson.Result) []byte {
+	fileURI := strings.TrimSpace(fileData.Get("fileUri").String())
+	if fileURI == "" {
+		fileURI = strings.TrimSpace(fileData.Get("file_uri").String())
+	}
+	if fileURI == "" {
+		return nil
+	}
+	mimeType := fileData.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = fileData.Get("mime_type").String()
+	}
+	item := []byte(`{"type":"","uri":""}`)
+	item, _ = sjson.SetBytes(item, "type", geminiInteractionsMediaType(mimeType))
+	item, _ = sjson.SetBytes(item, "uri", fileURI)
+	if mimeType != "" {
+		item, _ = sjson.SetBytes(item, "mime_type", mimeType)
+	}
+	return item
+}
+
+// geminiInteractionsMediaType picks the Interactions content type for a MIME type.
+func geminiInteractionsMediaType(mimeType string) string {
+	lower := strings.ToLower(mimeType)
+	switch {
+	case strings.HasPrefix(lower, "image/"):
+		return "image"
+	case strings.HasPrefix(lower, "audio/"):
+		return "audio"
+	case strings.HasPrefix(lower, "video/"):
+		return "video"
+	}
+	return "document"
+}
+
+func appendInteractionsContentList(ctx *geminiInteractionsInputContext, role string, content gjson.Result) {
 	if !content.Exists() {
 		return
 	}
+	run := ctx.userRun(role)
 	if content.IsArray() {
 		content.ForEach(func(_, part gjson.Result) bool {
-			appendInteractionsContentPart(items, role, part)
+			appendInteractionsContentPart(&ctx.items, role, part, run)
 			return true
 		})
 		return
 	}
 	if content.IsObject() {
-		appendInteractionsContentPart(items, role, content)
+		appendInteractionsContentPart(&ctx.items, role, content, run)
 	} else if content.Type == gjson.String {
-		appendGeminiTextContent(items, role, content.String())
+		ctx.appendText(role, content.String())
 	}
 }
 

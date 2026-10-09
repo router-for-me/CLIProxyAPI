@@ -74,7 +74,11 @@ func (h *Handler) PostRuntimeShutdown(c *gin.Context) {
 		return
 	}
 
+	// The service may close active connections immediately. Finish the empty
+	// acknowledgement on the wire before allowing the shutdown callback to run.
+	c.Header("Content-Length", "0")
 	c.Status(http.StatusAccepted)
 	c.Writer.WriteHeaderNow()
+	c.Writer.Flush()
 	go shutdown()
 }

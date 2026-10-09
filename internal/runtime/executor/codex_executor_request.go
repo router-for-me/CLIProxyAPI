@@ -33,27 +33,28 @@ const (
 var dataTag = []byte("data:")
 
 func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte) {
-	original, body, _ := translateCodexRequestPairWithUpdateIntent(from, to, model, originalPayload, payload, stream, preserveEmptyThinkingBlocks...)
+	original, body, _, _ := translateCodexRequestPairWithUpdateIntent(from, to, model, originalPayload, payload, stream, preserveEmptyThinkingBlocks...)
 	return original, body
 }
 
-func translateCodexRequestPairWithUpdateIntent(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte, bool) {
+func translateCodexRequestPairWithUpdateIntent(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte, bool, error) {
 	isCompat := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	ctx := context.Background()
-	translate := func(raw []byte) ([]byte, bool) {
+	translate := func(raw []byte) ([]byte, bool, error) {
 		if isCompat && from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
-			return helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, nil, nil, from, to, model, raw, stream, true), false
+			body, err := helps.TranslateRequestReturningError(ctx, nil, nil, from, to, model, raw, stream, true)
+			return body, false, err
 		}
 		translated := sdktranslator.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: raw})
-		return translated.Body, translated.ConfigurationUpdatesChanged
+		return translated.Body, translated.ConfigurationUpdatesChanged, translated.Err
 	}
 	if bytes.Equal(originalPayload, payload) {
-		body, changed := translate(payload)
-		return body, body, changed
+		body, changed, err := translate(payload)
+		return body, body, changed, err
 	}
-	originalTranslated, _ := translate(originalPayload)
-	body, changed := translate(payload)
-	return originalTranslated, body, changed
+	originalTranslated, _, _ := translate(originalPayload)
+	body, changed, err := translate(payload)
+	return originalTranslated, body, changed, err
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.
@@ -135,6 +136,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 	}
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
+	rawJSON = helps.FinalizePayload(ctx, rawJSON)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, err

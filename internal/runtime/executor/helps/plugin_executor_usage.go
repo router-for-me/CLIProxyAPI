@@ -23,13 +23,31 @@ func ParsePluginExecutorResponseUsage(protocol string, payload []byte) usage.Det
 	case "antigravity":
 		return ParseAntigravityUsage(payload)
 	case "codex", "openai-response":
-		if detail, ok := ParseCodexUsage(payload); ok {
-			return detail
-		}
-		return ParseOpenAIUsage(payload)
+		return parseResponsesPluginExecutorUsage(payload)
 	default:
 		return ParseOpenAIUsage(payload)
 	}
+}
+
+// parseResponsesPluginExecutorUsage reads both streaming-event usage (response.usage)
+// and a completed Responses object (top-level usage). A service tier without
+// response.usage must not hide the completed object's token counts.
+func parseResponsesPluginExecutorUsage(payload []byte) usage.Detail {
+	detail, ok := ParseCodexUsage(payload)
+	if ok && hasNonZeroTokenUsage(detail) {
+		return detail
+	}
+	openAIDetail := ParseOpenAIUsage(payload)
+	if hasNonZeroTokenUsage(openAIDetail) {
+		if openAIDetail.ResponseServiceTier == "" {
+			openAIDetail.ResponseServiceTier = detail.ResponseServiceTier
+		}
+		return openAIDetail
+	}
+	if ok {
+		return detail
+	}
+	return openAIDetail
 }
 
 // ObservePluginExecutorStreamUsage parses streaming chunks and updates a stream usage buffer.
@@ -65,8 +83,10 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 	case "codex", "openai-response":
 		IterateStreamLines(payload, func(line []byte) {
 			if jsonBytes := ExtractStreamJSONPayload(line); len(jsonBytes) > 0 {
-				if detail, ok := ParseCodexUsage(jsonBytes); ok {
-					buffer.Observe(detail, ok)
+				// A service tier without response.usage is not token usage. Fall through
+				// so a completed Responses object's top-level usage is still recorded.
+				if detail, ok := ParseCodexUsage(jsonBytes); ok && hasNonZeroTokenUsage(detail) {
+					buffer.Observe(detail, true)
 					return
 				}
 			}

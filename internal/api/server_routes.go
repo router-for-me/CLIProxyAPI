@@ -64,6 +64,10 @@ func (s *Server) setupRoutes() {
 	v1.Use(AuthMiddleware(s.accessManager))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+		v1.GET("/models/*model", func(c *gin.Context) {
+			c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(c.Param("model"), "/"))
+			s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers)(c)
+		})
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
@@ -73,6 +77,8 @@ func (s *Server) setupRoutes() {
 		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
 		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
 		v1.GET("/videos/:request_id", openaiHandlers.XAIVideosRetrieve)
+		v1.POST("/audio/speech", openaiHandlers.AudioSpeech)
+		v1.POST("/tts", openaiHandlers.XAITTS)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
@@ -690,13 +696,44 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 	if clientVersion == "cpa" {
 		webSearchCapabilityForModel = homeWebSearchCapabilityForModel(entries)
 	}
-	payload := codexmodels.BuildResponseForClientWithCPACapabilities(models, nil, webSearchCapabilityForModel, s.cfg.Codex.OptimizeMultiAgentV2, clientVersion)
+	var manager *auth.Manager
+	if s.handlers != nil {
+		manager = s.handlers.AuthManager
+	}
+	var applyPatchCapabilityForModel codexmodels.ApplyPatchCapabilityForModelFunc
+	if s.cfg.Client.Codex.EnableApplyPatch {
+		applyPatchCapabilityForModel = homeApplyPatchCapabilityForModel(entries, manager)
+	}
+	payload := codexmodels.BuildResponseForClientWithToolCapabilities(models, nil, webSearchCapabilityForModel, applyPatchCapabilityForModel, s.cfg.Client.Codex.OptimizeMultiAgentV2, clientVersion)
 	body, errMarshal := codexmodels.MarshalCompact(payload)
 	if errMarshal != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
 		return
 	}
 	s.writeModelListResponse(c, "openai", body)
+}
+
+// homeApplyPatchCapabilityForModel uses only Home's exact public routing evidence,
+// never the local model registry or the template's metadata model ID.
+func homeApplyPatchCapabilityForModel(entries []homeModelEntry, manager *auth.Manager) codexmodels.ApplyPatchCapabilityForModelFunc {
+	providersByID := make(map[string][]string, len(entries))
+	for _, entry := range entries {
+		id := strings.TrimSpace(entry.id)
+		providersByID[id] = append(providersByID[id], entry.providers...)
+		if len(entry.providers) == 0 {
+			providersByID[id] = append(providersByID[id], "")
+		}
+		// The decoder omits empty section names from providers, but an unknown
+		// route must still veto support when combined with a known section.
+		for _, route := range entry.nativeCapabilityRoutes {
+			if strings.TrimSpace(route.Provider) == "" {
+				providersByID[id] = append(providersByID[id], "")
+			}
+		}
+	}
+	return func(id string) bool {
+		return manager.SupportsApplyPatchForProviders(providersByID[strings.TrimSpace(id)])
+	}
 }
 
 func homeWebSearchCapabilityForModel(entries []homeModelEntry) codexmodels.WebSearchCapabilityForModelFunc {

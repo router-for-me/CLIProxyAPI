@@ -969,5 +969,8 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	return helps.WithAntigravityHTTPClientTrace(httpClient, auth, "http_request").Do(httpReq)
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *AntigravityExecutor) SupportsApplyPatch() bool { return e != nil }
