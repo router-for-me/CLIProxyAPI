@@ -13,6 +13,74 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestClaudeOAuthToolAliasRestoresContinuationWithoutDeclarations(t *testing.T) {
+	secret := "continuation-alias-caller"
+	createBody := []byte(`{"thread":{"type":"create"},"tools":[{"name":"Read","input_schema":{"type":"object"}}]}`)
+	executor := &ClaudeExecutor{}
+	_, reverseMap, errPrepare := executor.prepareClaudeOAuthToolNamesForRequest(createBody, claudeMCPAliasOptions{secret: secret})
+	if errPrepare != nil {
+		t.Fatalf("prepare create request: %v", errPrepare)
+	}
+	alias := ""
+	for upstreamName := range reverseMap {
+		alias = upstreamName
+		break
+	}
+	if alias == "" {
+		t.Fatal("create request did not allocate an OAuth MCP alias")
+	}
+
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"msg-one"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}]}]}`)
+	executor.rememberClaudeOAuthToolAliases(createBody, reverseMap, "msg-one")
+	_, continuationReverseMap, errPrepareContinuation := executor.prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: secret})
+	if errPrepareContinuation != nil {
+		t.Fatalf("prepare continuation request: %v", errPrepareContinuation)
+	}
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"tool-two","name":%q,"input":{}}]}`, alias))
+	restored, errRestore := restoreClaudeOAuthToolNamesFromResponse(response, continuationReverseMap)
+	if errRestore != nil {
+		t.Fatalf("restore continuation tool name: %v", errRestore)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Read" {
+		t.Fatalf("continuation tool name = %q, want Read; response=%s", got, restored)
+	}
+}
+
+func TestClaudeOAuthToolAliasMissingContinuationStateIsRequestScopedNotFound(t *testing.T) {
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"missing-message"}}`)
+	_, _, errPrepare := (&ClaudeExecutor{}).prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "missing-state-caller"})
+	if errPrepare == nil {
+		t.Fatal("prepare continuation request returned nil error")
+	}
+	statusErr, okStatus := errPrepare.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != 404 {
+		t.Fatalf("continuation error status = %v, want 404", errPrepare)
+	}
+	requestErr, okRequest := errPrepare.(cliproxyexecutor.RequestScopedError)
+	if !okRequest || !requestErr.IsRequestScoped() {
+		t.Fatalf("continuation error is not request-scoped: %T", errPrepare)
+	}
+}
+
+func TestClaudeOAuthToolAliasEvictionReturnsThreadNotFound(t *testing.T) {
+	executor := &ClaudeExecutor{}
+	createBody := []byte(`{"thread":{"type":"create"}}`)
+	executor.rememberClaudeOAuthToolAliases(createBody, map[string]string{"alias": "Read"}, "first-message")
+	for i := 0; i < claudeOAuthToolAliasStateLimit; i++ {
+		executor.rememberClaudeOAuthToolAliases(createBody, nil, fmt.Sprintf("message-%d", i))
+	}
+
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"first-message"}}`)
+	_, _, errPrepare := executor.prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "evicted-state-caller"})
+	if errPrepare == nil {
+		t.Fatal("evicted continuation returned nil error")
+	}
+	statusErr, okStatus := errPrepare.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != 404 {
+		t.Fatalf("evicted continuation error status = %v, want 404", errPrepare)
+	}
+}
+
 func TestRemapOAuthToolNamesWithBatchedEditsMatchesLegacyBytes(t *testing.T) {
 	secret := "differential-caller"
 	collision := helps.ClaudeMCPToolAlias(secret, "fetch_url", 0)
