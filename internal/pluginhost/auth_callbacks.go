@@ -106,7 +106,7 @@ func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]by
 	if errGet != nil {
 		return nil, errGet
 	}
-	entry := h.buildHostAuthFileEntry(auth)
+	entry := h.buildHostAuthFileEntry(auth, time.Now().UTC())
 	if entry == nil {
 		return nil, fmt.Errorf("auth runtime info not found for auth_index %s", authIndex)
 	}
@@ -136,9 +136,10 @@ func (h *Host) listAuthFiles() ([]pluginapi.HostAuthFileEntry, error) {
 	manager := h.currentAuthManager()
 	if manager != nil {
 		auths := manager.List()
+		observedAt := time.Now().UTC()
 		entries := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
 		for _, auth := range auths {
-			if entry := h.buildHostAuthFileEntry(auth); entry != nil {
+			if entry := h.buildHostAuthFileEntry(auth, observedAt); entry != nil {
 				entries = append(entries, *entry)
 			}
 		}
@@ -402,7 +403,7 @@ func isUnsafeAuthFileName(name string) bool {
 	return false
 }
 
-func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFileEntry {
+func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth, now time.Time) *pluginapi.HostAuthFileEntry {
 	if auth == nil {
 		return nil
 	}
@@ -499,6 +500,11 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry.Websockets = websockets
+	}
+	// Match the Management API: in Home mode cooldowns are tracked remotely,
+	// so the local view is not authoritative and is omitted.
+	if manager := h.currentAuthManager(); manager != nil && !manager.HomeEnabled() {
+		entry.Cooldowns = hostAuthCooldowns(auth, now)
 	}
 	return entry
 }
@@ -657,6 +663,26 @@ func parseWebsocketsValue(raw any) (bool, bool) {
 
 func bytesTrimSpace(raw []byte) []byte {
 	return []byte(strings.TrimSpace(string(raw)))
+}
+
+func hostAuthCooldowns(auth *coreauth.Auth, now time.Time) []pluginapi.HostAuthCooldown {
+	views := coreauth.CooldownSnapshotForAuth(auth, now)
+	if len(views) == 0 {
+		return nil
+	}
+	out := make([]pluginapi.HostAuthCooldown, 0, len(views))
+	for _, view := range views {
+		out = append(out, pluginapi.HostAuthCooldown{
+			Scope:            view.Scope,
+			ModelKey:         view.ModelKey,
+			Reason:           view.Reason,
+			RetryAt:          view.RetryAt,
+			RemainingSeconds: view.RemainingSeconds,
+			BackoffLevel:     view.BackoffLevel,
+			HTTPStatus:       view.HTTPStatus,
+		})
+	}
+	return out
 }
 
 func hostRecentRequests(auth *coreauth.Auth) []pluginapi.HostRecentRequestEntry {

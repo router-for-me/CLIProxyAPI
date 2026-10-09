@@ -810,6 +810,34 @@ type HostAuthFileEntry struct {
 	Failed int64 `json:"failed,omitempty"`
 	// RecentRequests is the recent request snapshot.
 	RecentRequests []HostRecentRequestEntry `json:"recent_requests,omitempty"`
+	// Cooldowns lists the unexpired local retry restrictions, using the same
+	// view as the Management API auth-files `cooldowns` field. It is empty when
+	// no cooldown is active or when the host does not track cooldowns locally
+	// (Home mode, or no auth manager). An empty list does not imply that the
+	// credential is usable.
+	Cooldowns []HostAuthCooldown `json:"cooldowns,omitempty"`
+}
+
+// HostAuthCooldown describes one unexpired local retry restriction on a
+// credential. It mirrors the Management API cooldown view and contains no
+// credential metadata or raw upstream errors.
+type HostAuthCooldown struct {
+	// Scope is "credential" for a credential-wide cooldown or "model" for a
+	// model-scoped cooldown.
+	Scope string `json:"scope"`
+	// ModelKey is the canonical model key for model-scoped cooldowns.
+	ModelKey string `json:"model_key,omitempty"`
+	// Reason is a stable public reason code, such as "quota",
+	// "credential_quota", "transient_error", "unauthorized" or "unknown".
+	Reason string `json:"reason"`
+	// RetryAt is when the restriction expires.
+	RetryAt time.Time `json:"retry_at"`
+	// RemainingSeconds is the time left until RetryAt, rounded up.
+	RemainingSeconds int64 `json:"remaining_seconds"`
+	// BackoffLevel is the quota backoff level when applicable.
+	BackoffLevel *int `json:"backoff_level,omitempty"`
+	// HTTPStatus is the upstream HTTP status that caused the cooldown when known.
+	HTTPStatus int `json:"http_status,omitempty"`
 }
 
 // HostAuthGetRequest asks the host for credential JSON by auth index.
