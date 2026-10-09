@@ -36,14 +36,18 @@ func CredentialFileName(email, planType, hashAccountID string, includeProviderPr
 	return fmt.Sprintf("%s-%s-%s.json", prefix, email, plan)
 }
 
+// forbiddenFileNameChars are the path separators and the other characters that
+// Windows does not allow in a file name.
+const forbiddenFileNameChars = `/\<>:"|?*`
+
 // sanitizeFileNameComponent makes an untrusted string safe to embed in a file
-// name: path separators, colons (the NTFS stream separator) and control
-// characters become "_". Every other character is kept, so a credential saved
-// before this check keeps its file name.
+// name: the characters in forbiddenFileNameChars and control characters become
+// "_". Every other character is kept, so a credential saved before this check
+// keeps its file name unless it contained one of them.
 func sanitizeFileNameComponent(value string) string {
 	value = strings.TrimSpace(value)
 	return strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || r == ':' || unicode.IsControl(r) {
+		if strings.ContainsRune(forbiddenFileNameChars, r) || unicode.IsControl(r) {
 			return '_'
 		}
 		return r

@@ -62,9 +62,23 @@ func TestCredentialFileNameRejectsHostileAccountHash(t *testing.T) {
 	}
 }
 
+// TestCredentialFileNameReplacesWindowsForbiddenCharacters covers the characters
+// that are legal in a file name elsewhere but make the create fail on Windows.
+func TestCredentialFileNameReplacesWindowsForbiddenCharacters(t *testing.T) {
+	for _, forbidden := range `<>"|?*` {
+		email := "a" + string(forbidden) + "b@example.com"
+		t.Run(email, func(t *testing.T) {
+			got := CredentialFileName(email, "plus", "abc12345", true)
+			if want := "codex-abc12345-a_b@example.com-plus.json"; got != want {
+				t.Fatalf("CredentialFileName(%q) = %q, want %q", email, got, want)
+			}
+		})
+	}
+}
+
 // TestCredentialFileNameKeepsLegitimateEmails guards existing credentials: an email
-// without a path separator, colon or control character must keep the file name it
-// had before the sanitizer existed, or a new login would no longer find the saved file.
+// without a forbidden or control character must keep the file name it had before
+// the sanitizer existed, or a new login would no longer find the saved file.
 func TestCredentialFileNameKeepsLegitimateEmails(t *testing.T) {
 	emails := []string{
 		"user@example.com",
