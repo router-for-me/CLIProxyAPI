@@ -186,6 +186,20 @@ func TestRequestScopedCooldown_InvalidValueIgnoresRule(t *testing.T) {
 }
 
 func TestRequestScopedCooldown_ExplicitDurationWinsForStatusAndDisabledTransient(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cooldown string
+		want     time.Duration
+	}{
+		{name: "longer than status default", cooldown: "1h", want: time.Hour},
+		{name: "shorter than status default", cooldown: "1m", want: time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertExplicitRequestScopedCooldown(t, tc.cooldown, tc.want) })
+	}
+}
+
+func assertExplicitRequestScopedCooldown(t *testing.T, configured string, want time.Duration) {
+	t.Helper()
 	previousCooling := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(previousCooling) })
@@ -203,7 +217,7 @@ func TestRequestScopedCooldown_ExplicitDurationWinsForStatusAndDisabledTransient
 					Status:   402,
 					Match:    []string{"explicit payment cooldown"},
 					Action:   RequestScopedActionStopAndCooldown,
-					Cooldown: "1h",
+					Cooldown: configured,
 				}},
 			},
 		}
@@ -211,12 +225,12 @@ func TestRequestScopedCooldown_ExplicitDurationWinsForStatusAndDisabledTransient
 
 	matchedErr := requestScopedCooldownError{status: 402, body: "explicit payment cooldown"}
 	action, cooldown, okAction := matchRequestScopedErrorAction(newAuth("probe"), matchedErr, nil)
-	if !okAction || action != RequestScopedActionStopAndCooldown || cooldown != time.Hour {
-		t.Fatalf("matchRequestScopedErrorAction() = %q, %v, %v; want stop-and-cooldown, 1h, true", action, cooldown, okAction)
+	if !okAction || action != RequestScopedActionStopAndCooldown || cooldown != want {
+		t.Fatalf("matchRequestScopedErrorAction() = %q, %v, %v; want stop-and-cooldown, %v, true", action, cooldown, okAction, want)
 	}
 
 	modelManager := NewManager(nil, nil, nil)
-	modelAuth := newAuth("explicit-model-cooldown")
+	modelAuth := newAuth("explicit-model-cooldown-" + configured)
 	model := "claude-3"
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(modelAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
@@ -229,12 +243,12 @@ func TestRequestScopedCooldown_ExplicitDurationWinsForStatusAndDisabledTransient
 	modelManager.MarkResult(context.Background(), modelResult)
 	modelSnapshot, _ := modelManager.GetByID(modelAuth.ID)
 	modelState := modelSnapshot.ModelStates[model]
-	if modelState == nil || !modelState.Unavailable || modelState.NextRetryAfter.Before(time.Now().Add(59*time.Minute)) || modelState.NextRetryAfter.After(time.Now().Add(61*time.Minute)) {
-		t.Fatalf("model explicit cooldown = %#v; want about 1h and unavailable", modelState)
+	if modelState == nil || !modelState.Unavailable || modelState.NextRetryAfter.Before(time.Now().Add(want-5*time.Second)) || modelState.NextRetryAfter.After(time.Now().Add(want+5*time.Second)) {
+		t.Fatalf("model explicit cooldown = %#v; want about %v and unavailable", modelState, want)
 	}
 
 	authManager := NewManager(nil, nil, nil)
-	authOnly := newAuth("explicit-auth-cooldown")
+	authOnly := newAuth("explicit-auth-cooldown-" + configured)
 	if _, errRegister := authManager.Register(context.Background(), authOnly); errRegister != nil {
 		t.Fatalf("register auth-only auth: %v", errRegister)
 	}
@@ -242,7 +256,7 @@ func TestRequestScopedCooldown_ExplicitDurationWinsForStatusAndDisabledTransient
 	applyRequestScopedActionToResult(action, cooldown, okAction, &authResult)
 	authManager.MarkResult(context.Background(), authResult)
 	authSnapshot, _ := authManager.GetByID(authOnly.ID)
-	if !authSnapshot.Unavailable || authSnapshot.NextRetryAfter.Before(time.Now().Add(59*time.Minute)) || authSnapshot.NextRetryAfter.After(time.Now().Add(61*time.Minute)) {
-		t.Fatalf("auth explicit cooldown = unavailable %v, next %v; want about 1h", authSnapshot.Unavailable, authSnapshot.NextRetryAfter)
+	if !authSnapshot.Unavailable || authSnapshot.NextRetryAfter.Before(time.Now().Add(want-5*time.Second)) || authSnapshot.NextRetryAfter.After(time.Now().Add(want+5*time.Second)) {
+		t.Fatalf("auth explicit cooldown = unavailable %v, next %v; want about %v", authSnapshot.Unavailable, authSnapshot.NextRetryAfter, want)
 	}
 }
