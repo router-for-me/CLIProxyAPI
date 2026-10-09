@@ -228,6 +228,27 @@ func TestApplyClaudeLegacyDeviceHeadersPreserveNativeIdentityKeepsCoherentSoftwa
 	}
 }
 
+func TestApplyClaudeLegacyDeviceHeadersPreserveNativeIdentityRequiresCompleteVersionPair(t *testing.T) {
+	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	incoming := claudeDeviceHeaders("claude-cli/2.1.295 (external, cli)")
+	incoming.Set("X-Stainless-Package-Version", "0.128.0")
+	incoming.Del("X-Stainless-Runtime-Version")
+	cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{PreserveNativeIdentity: true}}
+
+	ApplyClaudeLegacyDeviceHeaders(request, incoming, cfg, true)
+
+	baseline := defaultClaudeDeviceProfile(nil)
+	if got := request.Header.Get("X-Stainless-Package-Version"); got != baseline.PackageVersion {
+		t.Fatalf("X-Stainless-Package-Version = %q, want baseline %q for a partial pair", got, baseline.PackageVersion)
+	}
+	if got := request.Header.Get("X-Stainless-Runtime-Version"); got != baseline.RuntimeVersion {
+		t.Fatalf("X-Stainless-Runtime-Version = %q, want baseline %q for a partial pair", got, baseline.RuntimeVersion)
+	}
+}
+
 func TestApplyClaudeLegacyDeviceHeadersPreserveNativeIdentityStillRejectsUnmeasuredClients(t *testing.T) {
 	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
 	if errRequest != nil {

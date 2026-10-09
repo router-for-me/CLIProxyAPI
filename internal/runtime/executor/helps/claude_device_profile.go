@@ -627,11 +627,15 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	if confirmedClaudeCode {
 		clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent"))
 		clientUAAccepted := plausibleClaudeCodeUserAgent(clientUA, cfg)
-		if clientUAAccepted && ClaudeNativeIdentityPreserved(cfg) {
+		clientPackage := strings.TrimSpace(ginHeaders.Get("X-Stainless-Package-Version"))
+		clientRuntime := strings.TrimSpace(ginHeaders.Get("X-Stainless-Runtime-Version"))
+		if clientUAAccepted && ClaudeNativeIdentityPreserved(cfg) &&
+			claudePackageVersionPattern.MatchString(clientPackage) && claudeRuntimeVersionPattern.MatchString(clientRuntime) {
 			// The caller's own User-Agent is forwarded, so its SDK and runtime
-			// versions must come from the same client to stay a coherent tuple.
-			miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, claudeRuntimeVersionPattern.MatchString)
-			miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, claudePackageVersionPattern.MatchString)
+			// versions are forwarded together with it; a partial pair falls back
+			// to the baseline pair below to keep the tuple coherent.
+			r.Header.Set("X-Stainless-Runtime-Version", clientRuntime)
+			r.Header.Set("X-Stainless-Package-Version", clientPackage)
 		} else {
 			miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, func(value string) bool { return value == profile.RuntimeVersion })
 			miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, func(value string) bool { return value == profile.PackageVersion })
