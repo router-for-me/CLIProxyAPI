@@ -65,6 +65,17 @@ traffic. Leave those overrides unset for the embedded-only catalog default.
 The runtime smoke fixtures keep them unset. Existing upstream catalog-policy
 and lifecycle tests run alongside the fork's host/key/reload checks.
 
+Native validation also exposed an existing host shutdown acknowledgement race:
+flush the empty 202 response before starting the asynchronous callback that can
+close active connections. Keep authentication, actual-loopback enforcement and
+upstream's immediate-close behavior. Deterministic flush-barrier and TCP tests
+protect this contract, with 50 race-detector repetitions in the upstream check.
+
+The upstream HTTP-interrupt test checked its executor's cancellation flag without
+waiting for the observing goroutine. A channel now signals actual observation of
+context cancellation before the unchanged flag and same-socket follow-up checks.
+The production interruption path is unchanged; CI repeats the test 100 times.
+
 The 2026-09-30 merge has four import-block conflicts:
 `internal/access/config_access/provider.go`, `internal/api/server_options.go`,
 `internal/api/server_reload.go`, and `internal/cmd/run.go`. Keep all upstream
