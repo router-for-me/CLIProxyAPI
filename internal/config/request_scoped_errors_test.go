@@ -17,6 +17,7 @@ gemini-api-key:
           - "maximum_context_length$"
           - "^context_length_exceeded"
         action: stop
+        cooldown: "1h"
 
 interactions-api-key:
   - api-key: interactions-key-1
@@ -77,7 +78,7 @@ openai-compatibility:
 		t.Fatalf("gemini[0].request-scoped-errors len = %d, want 1", len(cfg.GeminiKey[0].RequestScopedErrors))
 	}
 	gRule := cfg.GeminiKey[0].RequestScopedErrors[0]
-	if gRule.Status != 400 || len(gRule.Match) != 2 || len(gRule.MatchRegexr) != 2 || gRule.Action != "stop" {
+	if gRule.Status != 400 || len(gRule.Match) != 2 || len(gRule.MatchRegexr) != 2 || gRule.Action != "stop" || gRule.Cooldown != "1h" {
 		t.Fatalf("unexpected gemini rule: %+v", gRule)
 	}
 

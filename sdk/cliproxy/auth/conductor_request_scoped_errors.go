@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
@@ -181,15 +182,15 @@ func extractErrorBody(err error) string {
 }
 
 // matchRequestScopedErrorAction evaluates an error against the auth's RequestScopedErrors rules.
-// If a rule matches, it returns (action, true).
-// If no rule matches, it returns ("", false).
-func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Config) (string, bool) {
+// If a rule matches, it returns (action, cooldown, true). Invalid cooldown values ignore the rule.
+// If no rule matches, it returns ("", 0, false).
+func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Config) (string, time.Duration, bool) {
 	if err == nil {
-		return "", false
+		return "", 0, false
 	}
 	rules := extractRequestScopedErrorRules(auth, cfg)
 	if len(rules) == 0 {
-		return "", false
+		return "", 0, false
 	}
 
 	statusCode := statusCodeFromError(err)
@@ -230,16 +231,20 @@ func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Co
 			RequestScopedActionStopAndCooldown,
 			RequestScopedActionContinue,
 			RequestScopedActionContinueAndCooldown:
-			return action, true
+			cooldown, okCooldown := internalconfig.ParseRequestScopedErrorCooldown(rule.Cooldown)
+			if !okCooldown {
+				continue
+			}
+			return action, cooldown, true
 		default:
 			continue
 		}
 	}
 
-	return "", false
+	return "", 0, false
 }
 
-func applyRequestScopedActionToResult(action string, okAction bool, result *Result) {
+func applyRequestScopedActionToResult(action string, cooldown time.Duration, okAction bool, result *Result) {
 	if !okAction || result == nil || result.Error == nil {
 		return
 	}
@@ -247,6 +252,9 @@ func applyRequestScopedActionToResult(action string, okAction bool, result *Resu
 		result.Error.Code = ErrorCodeRequestScoped
 	} else if action == RequestScopedActionStopAndCooldown || action == RequestScopedActionContinueAndCooldown {
 		result.Error.Code = ErrorCodeForceCooldown
+		if cooldown > 0 {
+			result.RetryAfter = &cooldown
+		}
 	}
 }
 

@@ -989,7 +989,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							state.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, result.RetryAfter, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						default:
-							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+							state.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, result.RetryAfter, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						}
 					}
@@ -2372,7 +2372,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			if auth.StatusMessage == "" {
 				auth.StatusMessage = "request failed"
 			}
-			auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+			auth.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, retryAfter, disableCooling)
 			auth.Unavailable = !auth.NextRetryAfter.IsZero()
 		}
 	}

@@ -3,6 +3,7 @@ package config
 import (
 	"sort"
 	"strings"
+	"time"
 
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 )
@@ -146,8 +147,22 @@ func (cfg *Config) SanitizeOAuthSettings() {
 	cfg.OAuthSettings = out
 }
 
+// ParseRequestScopedErrorCooldown parses an optional positive Go duration.
+// Empty values are valid and preserve the legacy cooldown behavior.
+func ParseRequestScopedErrorCooldown(raw string) (time.Duration, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, true
+	}
+	duration, errParse := time.ParseDuration(raw)
+	if errParse != nil || duration <= 0 {
+		return 0, false
+	}
+	return duration, true
+}
+
 // SanitizeOAuthRequestScopedErrors normalizes and validates global OAuth request-scoped error rules.
-// It trims whitespace, normalizes channel keys to lower-case, validates status/action, and drops invalid rules.
+// It trims whitespace, normalizes channel keys to lower-case, validates status/action/cooldown, and drops invalid rules.
 func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 	if cfg == nil || len(cfg.OAuthRequestScopedErrors) == 0 {
 		return
@@ -161,6 +176,10 @@ func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 		clean := make([]RequestScopedErrorRule, 0, len(rules))
 		for _, r := range rules {
 			action := strings.ToLower(strings.TrimSpace(r.Action))
+			cooldown := strings.TrimSpace(r.Cooldown)
+			if _, okCooldown := ParseRequestScopedErrorCooldown(cooldown); !okCooldown {
+				continue
+			}
 			match := make([]string, 0, len(r.Match))
 			for _, m := range r.Match {
 				if tm := strings.TrimSpace(m); tm != "" {
@@ -181,6 +200,7 @@ func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 				Match:       match,
 				MatchRegexr: matchRegexr,
 				Action:      action,
+				Cooldown:    cooldown,
 			})
 		}
 		if len(clean) > 0 {
