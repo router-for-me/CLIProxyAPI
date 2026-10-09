@@ -397,8 +397,8 @@ func (s *Service) WaitAntigravityProbes() {
 	s.antigravityProbeWg.Wait()
 }
 
-// Native Antigravity reconciliation belongs to the fenced asynchronous registry
-// publication, not cache availability. A known cache can precede its registration.
+// Native Antigravity reconciliation belongs to fenced registry publication,
+// whether from cache or a network refresh. Cache availability alone is not enough.
 func (s *Service) reconcileRegisteredModelStates(ctx context.Context, auth *coreauth.Auth) {
 	if auth == nil || s.coreManager == nil {
 		return

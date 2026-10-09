@@ -111,11 +111,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = registry.GetAIStudioModels()
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
-		models = registry.GetAntigravityModels()
 		if !s.antigravityHomeEnabled() {
+			expectedRegEpoch := GlobalModelRegistry().ClientRegistrationEpoch(a.ID)
+			expectedKey := s.antigravityCapabilityKey(a)
 			hints := s.cachedAntigravityHints(a)
-			models = filterAntigravityModels(models, hints)
-			models = applyAntigravityFetchedModelCapabilities(models, hints)
+			if hints.ModelIDs != nil {
+				// Publish known catalogs through the same fenced, state-preserving
+				// path as refreshes. An expired catalog remains usable while HTTP
+				// is pending, including its quota and suspension projections.
+				s.applyAntigravityModelHints(ctx, a, provider, hints, expectedKey, a.RegistrationEpoch, expectedRegEpoch)
+				s.asyncProbeAntigravityCapabilities(ctx, a, provider)
+				return
+			}
+		} else {
+			models = registry.GetAntigravityModels()
 		}
 		models = applyExcludedModels(models, excluded)
 	case "claude":
@@ -319,9 +328,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 // one auth and reconciles any concurrent auth changes that race with the
 // refresh. Callers are expected to pre-filter provider membership.
 //
-// Re-registration is deliberate: registry cooldown/suspension state is treated
-// as part of the previous registration snapshot and is cleared when the auth is
-// rebound to the refreshed model catalog.
+// Re-registration is deliberate: most providers start a fresh registry snapshot.
+// Native Antigravity catalogs instead use fenced replacement to preserve quota
+// and suspension state while account entitlement refreshes are pending.
 func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 	return s.refreshModelRegistrationForAuthWithContext(context.Background(), current, nil)
 }
