@@ -1,0 +1,41 @@
+{
+  "five_hour": {
+    "utilization": 42.5,
+    "resets_at": "2026-10-09T18:00:00Z"
+  },
+  "seven_day": {
+    "utilization": 16,
+    "resets_at": "2026-10-15T09:00:00Z"
+  },
+  "seven_day_sonnet": {
+    "utilization": 10,
+    "resets_at": "2026-10-15T09:00:00Z"
+  },
+  "extra_usage": {
+    "is_enabled": true,
+    "monthly_limit": 5000,
+    "used_credits": 1250,
+    "utilization": 25,
+    "currency": "USD",
+    "disabled_reason": null,
+    "user_disabled": false,
+    "spend_limit_reached": false
+  },
+  "iguana_necktie": {
+    "limit_dollars": 100,
+    "used_dollars": 5.043595,
+    "remaining_dollars": 94.956405,
+    "utilization": 5.043595,
+    "resets_at": "2026-11-01T00:00:00Z"
+  },
+  "additional_credit_balance": {
+    "limit_dollars": 20,
+    "used_dollars": 0,
+    "remaining_dollars": 20,
+    "utilization": 0,
+    "resets_at": null
+  },
+  "unrelated": {
+    "utilization": 99
+  }
+}

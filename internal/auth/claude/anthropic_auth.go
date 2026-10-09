@@ -590,7 +590,8 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 	}
 	profile, errProfile := o.FetchOAuthProfile(ctx, tokenResp.AccessToken)
 	if errProfile != nil {
-		log.Warnf("fetch Claude OAuth profile after refresh: %v", errProfile)
+		// Upstream errors may echo credential material; never log their bodies.
+		log.Warn("fetch Claude OAuth profile after refresh failed")
 		return tokenData, nil
 	}
 	tokenData.Email = profile.Account.Email
@@ -656,7 +657,7 @@ func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken st
 		}
 
 		lastErr = err
-		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
+		log.WithField("attempt", attempt+1).Warn("Claude OAuth token refresh failed")
 		if !isClaudeRefreshRetryable(err) {
 			break
 		}

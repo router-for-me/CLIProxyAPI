@@ -41,9 +41,12 @@ type apiCallRequest struct {
 }
 
 type apiCallResponse struct {
-	StatusCode int                 `json:"status_code"`
-	Header     map[string][]string `json:"header"`
-	Body       string              `json:"body"`
+	StatusCode  int                  `json:"status_code"`
+	Header      map[string][]string  `json:"header"`
+	Body        string               `json:"body"`
+	ClaudeUsage *claudeUsageSnapshot `json:"claude_usage,omitempty"`
+	Stale       bool                 `json:"stale,omitempty"`
+	Error       string               `json:"error,omitempty"`
 }
 
 // APICall makes a generic HTTP request on behalf of the management API caller.
@@ -134,6 +137,10 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
+	if c.GetBool(ConfigV8ContextKey) && isClaudeOAuthUsageCall(method, parsedURL, auth) {
+		h.callClaudeOAuthUsage(c, auth, requestProxyURL)
+		return
+	}
 
 	reqHeaders := body.Header
 	if reqHeaders == nil {

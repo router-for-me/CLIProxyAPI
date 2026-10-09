@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -166,6 +167,7 @@ const (
 	updateModeReplace updateAuthMode = iota
 	updateModeRefresh
 	updateModePrepare
+	updateModeObservation
 )
 
 // UpdatePreparedAuth atomically merges request preparation results into the latest runtime auth
@@ -210,12 +212,16 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if existing.RegistrationEpoch > m.authEpochs[auth.ID] {
 		m.authEpochs[auth.ID] = existing.RegistrationEpoch
 	}
-	if (mode == updateModeRefresh || mode == updateModePrepare) && base != nil && existing.RegistrationEpoch != base.RegistrationEpoch {
+	if mode != updateModeReplace && base != nil && existing.RegistrationEpoch != base.RegistrationEpoch {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
 	}
+	if mode == updateModeObservation && !observationCredentialScopeMatches(base, existing, false) {
+		m.mu.Unlock()
+		return nil, errors.New("observation credential scope changed during refresh")
+	}
 	// Do not let an in-flight refresh overwrite credentials committed after its snapshot.
-	if mode == updateModeRefresh && base != nil && (existing.CredentialVersion != base.CredentialVersion || CredentialsChanged(base, existing)) {
+	if (mode == updateModeRefresh || mode == updateModeObservation) && base != nil && (existing.CredentialVersion != base.CredentialVersion || CredentialsChanged(base, existing)) {
 		current := existing.Clone()
 		m.mu.Unlock()
 		return current, nil
@@ -226,11 +232,14 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 			auth = merged
 			NormalizeCredentialMetadata(auth.Metadata)
 		}
-	} else if mode == updateModePrepare {
+	} else if mode == updateModePrepare || mode == updateModeObservation {
 		merged := MergePreparedAuth(base, existing, auth)
 		if merged != nil {
 			auth = merged
 			NormalizeCredentialMetadata(auth.Metadata)
+		}
+		if mode == updateModeObservation {
+			auth.LastRefreshedAt = time.Now()
 		}
 	}
 	if auth.RegistrationEpoch != 0 && auth.RegistrationEpoch < m.authEpochs[auth.ID] {
@@ -265,7 +274,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		auth.CredentialVersion = existingVersion
 	}
 	cooldownStateChanged := false
-	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+	if mode != updateModeObservation && !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
@@ -296,9 +305,11 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	now := time.Now()
 	auth.UpdatedAt = now
-	cooldownStateChanged = normalizeModelStates(auth) || cooldownStateChanged
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
-		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
+	if mode != updateModeObservation {
+		cooldownStateChanged = normalizeModelStates(auth) || cooldownStateChanged
+		if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+			cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
+		}
 	}
 	auth.EnsureIndex()
 	// Save before publication, including the transactional Meta mint path.
@@ -312,7 +323,13 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 			return nil, fmt.Errorf("persist meta auth: %w", errPersist)
 		}
 		// Ordinary persistence failures remain non-fatal, but never silent.
-		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist updated auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+		entry := log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider})
+		if mode == updateModeObservation {
+			// Store errors may include credential payloads.
+			entry.Warn("failed to persist observation credential refresh")
+		} else {
+			entry.Warnf("failed to persist updated auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+		}
 	}
 	if m.authEpochs[auth.ID] != auth.RegistrationEpoch {
 		m.mu.Unlock()

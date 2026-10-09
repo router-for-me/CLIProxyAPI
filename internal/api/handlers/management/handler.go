@@ -61,6 +61,8 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
 	pluginReleases          pluginReleaseCache
+	claudeUsageMu           sync.Mutex
+	claudeUsage             map[string]*claudeUsageCacheEntry
 }
 
 type configReloadSnapshot struct {

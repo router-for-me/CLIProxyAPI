@@ -40,21 +40,36 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
 			}
 			cfg.Home.Enabled = tc.home
 			cfg.Plugins.Dir = filepath.Dir(path)
+			cfg.AuthDir = t.TempDir()
 			h := management.NewHandler(cfg, path, nil)
 			h.SetLocalPassword("test-password")
 			s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
 			s.managementRoutesEnabled.Store(tc.enabled)
 			s.registerManagementRoutes()
-			for _, route := range []string{"/v0/management/config", "/v8/management/config", "/v0/management/plugins", "/v8/management/plugins"} {
-				req := httptest.NewRequest(http.MethodGet, route, nil)
+			for routeIndex, route := range []struct{ method, path string }{
+				{http.MethodGet, "/v0/management/config"},
+				{http.MethodGet, "/v8/management/config"},
+				{http.MethodGet, "/v0/management/plugins"},
+				{http.MethodGet, "/v8/management/plugins"},
+				{http.MethodGet, "/v8/management/credentials"},
+				{http.MethodPost, "/v8/management/requests/api-call"},
+			} {
+				req := httptest.NewRequest(route.method, route.path, nil)
 				req.RemoteAddr = "127.0.0.1:1234"
+				if routeIndex%2 == 1 {
+					req.RemoteAddr = "[::1]:1234"
+				}
 				if tc.authorized {
 					req.Header.Set("Authorization", "Bearer test-password")
 				}
 				recorder := httptest.NewRecorder()
 				s.engine.ServeHTTP(recorder, req)
-				if recorder.Code != tc.want {
-					t.Fatalf("%s: status=%d want=%d body=%s", route, recorder.Code, tc.want, recorder.Body.String())
+				want := tc.want
+				if tc.authorized && tc.enabled && !tc.home && route.method == http.MethodPost {
+					want = http.StatusBadRequest
+				}
+				if recorder.Code != want {
+					t.Fatalf("%s: status=%d want=%d body=%s", route.path, recorder.Code, want, recorder.Body.String())
 				}
 			}
 		})

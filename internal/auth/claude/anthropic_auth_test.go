@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,12 +11,54 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestRefreshTokensDoesNotLogEchoedCredentials(t *testing.T) {
+	for _, profileFailure := range []bool{false, true} {
+		name := "token failure"
+		if profileFailure {
+			name = "profile failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			resetClaudeRefreshState()
+			t.Cleanup(resetClaudeRefreshState)
+			var output bytes.Buffer
+			logger := log.StandardLogger()
+			originalOutput := logger.Out
+			logger.SetOutput(&output)
+			t.Cleanup(func() { logger.SetOutput(originalOutput) })
+			auth := &ClaudeAuth{httpClient: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if profileFailure && req.URL.String() == RefreshTokenURL {
+						return jsonResponse(req, `{"access_token":"synthetic-access-secret","refresh_token":"synthetic-refresh-secret","expires_in":3600}`), nil
+					}
+					response := jsonResponse(req, `{"error":"synthetic-access-secret synthetic-refresh-secret"}`)
+					response.StatusCode = http.StatusBadRequest
+					return response, nil
+				}),
+			}}
+			_, errRefresh := auth.RefreshTokensWithRetry(context.Background(), "synthetic-refresh-secret", 1)
+			if (errRefresh == nil) != profileFailure {
+				t.Fatal("refresh result changed when redacting logs")
+			}
+			if output.Len() == 0 {
+				t.Fatal("expected a safe refresh diagnostic")
+			}
+			for _, secret := range []string{"synthetic-access-secret", "synthetic-refresh-secret"} {
+				if strings.Contains(output.String(), secret) {
+					t.Fatal("upstream credential material leaked into refresh logs")
+				}
+			}
+		})
+	}
 }
 
 func TestNewAnthropicHttpClientDoesNotSetRequestTimeout(t *testing.T) {
