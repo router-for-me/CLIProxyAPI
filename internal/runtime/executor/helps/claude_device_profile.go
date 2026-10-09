@@ -111,6 +111,12 @@ func ClaudeDeviceProfileStabilizationEnabled(cfg *config.Config) bool {
 	return *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile
 }
 
+// ClaudeNativeIdentityPreserved reports whether confirmed native Claude Code
+// callers keep their own identity (metadata.user_id and software headers).
+func ClaudeNativeIdentityPreserved(cfg *config.Config) bool {
+	return cfg != nil && cfg.ClaudeHeaderDefaults.PreserveNativeIdentity
+}
+
 func ResetClaudeDeviceProfileCache() {
 	claudeDeviceProfileCacheMu.Lock()
 	claudeDeviceProfileCache = make(map[string]claudeDeviceProfileCacheEntry)
@@ -619,11 +625,20 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	}
 
 	if confirmedClaudeCode {
-		miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, func(value string) bool { return value == profile.RuntimeVersion })
-		miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, func(value string) bool { return value == profile.PackageVersion })
+		clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent"))
+		clientUAAccepted := plausibleClaudeCodeUserAgent(clientUA, cfg)
+		if clientUAAccepted && ClaudeNativeIdentityPreserved(cfg) {
+			// The caller's own User-Agent is forwarded, so its SDK and runtime
+			// versions must come from the same client to stay a coherent tuple.
+			miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, claudeRuntimeVersionPattern.MatchString)
+			miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, claudePackageVersionPattern.MatchString)
+		} else {
+			miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, func(value string) bool { return value == profile.RuntimeVersion })
+			miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, func(value string) bool { return value == profile.PackageVersion })
+		}
 		miscEnsure("X-Stainless-Os", mapStainlessOS(), nil)
 		miscEnsure("X-Stainless-Arch", mapStainlessArch(), nil)
-		if clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent")); plausibleClaudeCodeUserAgent(clientUA, cfg) {
+		if clientUAAccepted {
 			r.Header.Set("User-Agent", clientUA)
 			return
 		}

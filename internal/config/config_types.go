@@ -144,6 +144,9 @@ type ClaudeHeaderDefaults struct {
 	AnthropicBetaAppend    []string `yaml:"anthropic-beta-append,omitempty" json:"anthropic-beta-append,omitempty"`
 	InjectDiagnostics      *bool    `yaml:"inject-diagnostics,omitempty" json:"inject-diagnostics,omitempty"`
 	ClientRequestID        string   `yaml:"client-request-id,omitempty" json:"client-request-id,omitempty"`
+	// PreserveNativeIdentity keeps a confirmed native Claude Code caller's own
+	// metadata.user_id and software headers instead of the per-credential identity.
+	PreserveNativeIdentity bool `yaml:"preserve-native-identity,omitempty" json:"preserve-native-identity,omitempty"`
 }
 
 // Supported ClaudeHeaderDefaults.ClientRequestID values. An empty value means

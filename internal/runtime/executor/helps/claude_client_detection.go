@@ -303,6 +303,12 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 	return true
 }
 
+// ClaudeNativeMetadataUserIDMatches reports whether payload carries a native
+// Claude Code metadata.user_id whose session_id matches the session header.
+func ClaudeNativeMetadataUserIDMatches(headers http.Header, payload []byte) bool {
+	return measuredClaudeCodeHelperSessionMatches(headers, payload)
+}
+
 func measuredClaudeCodeHelperSessionMatches(headers http.Header, payload []byte) bool {
 	metadata := gjson.GetBytes(payload, "metadata")
 	if !metadata.IsObject() || !claudeJSONObjectHasKeys([]byte(metadata.Raw), []string{"user_id"}) {
