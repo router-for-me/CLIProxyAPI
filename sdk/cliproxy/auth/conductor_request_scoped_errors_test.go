@@ -1103,10 +1103,9 @@ func TestRequestScopedErrors_TransientCooldownDisabled_ForceCooldownStillApplies
 		Metadata: map[string]any{
 			"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
 				{
-					Status:   500,
-					Match:    []string{"cooldown_on_500"},
-					Action:   "stop-and-cooldown",
-					Cooldown: "1h",
+					Status: 500,
+					Match:  []string{"cooldown_on_500"},
+					Action: "stop-and-cooldown",
 				},
 			},
 		},

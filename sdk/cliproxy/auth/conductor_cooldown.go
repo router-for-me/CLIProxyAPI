@@ -1006,6 +1006,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
 					}
+					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown && state.NextRetryAfter.IsZero() {
+						state.NextRetryAfter = now.Add(transientErrorCooldown)
+						state.Unavailable = true
+					}
 					// A later failure only extends a still-live cooldown; it never
 					// shortens one. A deliberate zero write (disableCooling) still
 					// clears the deadline.
@@ -2391,6 +2395,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	// deliberate zero write (disableCooling) still clears it.
 	if !auth.NextRetryAfter.IsZero() && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
 		auth.NextRetryAfter = prevAuthRetryAfter
+	}
+	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
+		auth.NextRetryAfter = now.Add(transientErrorCooldown)
+		auth.Unavailable = true
 	}
 }
 
