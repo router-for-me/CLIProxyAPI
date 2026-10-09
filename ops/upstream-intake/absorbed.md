@@ -9,6 +9,8 @@ commits were ported onto our `main` **and** `verify-absorb.sh` exited 0.
 
 | v8.0.13 | 2026-10-03 | 28 substantive ports + 1 test-only port (initial and follow-up mappings below) | 6 entries, including 3 merge wrappers (final decisions below) | PASS; follow-up effective on merge to main | 2026-10-03 |
 
+| v8.0.16 | 2026-10-09 | 23 ports (mapping below) | 17 non-merge + 7 merge wrappers (decisions below) | PASS on intake branch | 2026-10-09 |
+
 ## Comparison baseline
 
 **Baseline: `v8.0.13`** (`d7914afdedca7af95ee974a42453dc49fc1388ce`), selectively advanced from
@@ -305,6 +307,85 @@ module-path, workflow or permanent intake-gate change was made.
 
 The detailed owner-facing Chinese report is
 [upstream-v8.0.13-deep-review.zh-CN.md](../../docs/upstream-v8.0.13-deep-review.zh-CN.md).
+
+### v8.0.16 — selective absorption, intake branch, 2026-10-09
+
+Baseline `v8.0.13`, candidate `v8.0.16` (`a2976eb8a303f11b4ea5177bce9f9ff752634dfc`),
+our clean baseline `main` `6eff48fba9564a03610b98d437d6a2a7ba54ea65`. The range
+contains 47 commits (40 non-merge + 7 merge wrappers). `v8.0.16` was published
+`2026-10-05T21:46:28Z` and cleared the 72-hour window normally; later releases
+(`v8.0.17`–`v8.0.22`) had not settled at assessment time and are out of scope.
+Intake branch `codex/upstream-v8.0.16-intake`, head `87ced434`. This entry
+becomes effective only when the verified branch reaches our `main`.
+
+This intake also records the new conflict-resolution rule: when an upstream
+commit and our fork solve the same problem, prefer the upstream
+implementation and keep fork-only deltas only where they cover behavior
+upstream does not address (SOP commit `d1e363ca`).
+
+#### Ported commits
+
+Each selected commit was cherry-picked individually with `-x`; adapted commits
+note the fork delta retained.
+
+| Upstream | Local | Decision and user-visible result |
+| --- | --- | --- |
+| `d2597a24` | `c3f17e76` | fix(openai): preserve unknown encrypted content in responses compat mode |
+| `e1e3a811` | `928a6e89` | fix(gemini): enforce object type on schema nodes with properties |
+| `ba1bbd75` | `54cae308` | fix(gemini): support document blocks in Claude request translation |
+| `97dd9eec` | `7f0b207d` | fix(openai): report error on truncated stream missing finish_reason |
+| `d31b61cb` | `ae3e6c2c` | fix(websockets): propagate upstream disconnect errors during session activation |
+| `5c959cb0` | `8a409630` | fix(claude): mark missing thread state error for client replay |
+| `26e5efbb` | `2bd7a7c4` | fix(claude): reserve cache breakpoint for thread continuation |
+| `5d890405` | `6fdc3bdf` | fix(claude): keep system messages top level for terminal user turns |
+| `33ec5502` | `18db5efe` | fix(claude): refine model version parsing for assistant prefill rejection |
+| `68afd0d1` | `eb9bd42b` | feat(codex): support action sources in Claude web search translation |
+| `16d98881` | `ac0c34a7` | feat(codex): preserve URL citations in OpenAI response translation |
+| `611ebba4` | `eed55169` | refactor(executor): unify model reporting and replay logs |
+| `678a9257` | `d088c01f` | feat(claude): preserve OAuth tool aliases across thread continuations |
+| `a2976eb8` | `f6b7d425` | fix(claude): share OAuth tool alias store across scoped executor copies |
+| `c7b4d573` | `1b366586` | Adapted: record reasoning effort from finalized upstream payload after cacheHelper, preserving the fork's outbound tool-contract guard. Upstream usage test targets a test file the fork does not carry; effort reporting remains covered by `usage_helpers_test.go`. |
+| `9b9c2bdf` | `5636f8b4` (joint) | feat(antigravity): support Claude 5.5 CAQS thinking signature replay |
+| `174248ca` | `5636f8b4` (joint) | fix(antigravity): reject ambiguous CAQS signature wrappers |
+| `7e857c37` | `a042b26e` | feat(antigravity): refresh per-account model entitlements safely |
+| `17dc1b81` | `57ea709f` | feat(antigravity): context hash rejection logging + replay phases |
+| `40f4df07` | `0d9a451d` | feat(antigravity): context hash rejection logging + batch retry logic |
+| `8a01bc02` | `44f07ad0` | feat(auth): mutation locking and persistence delta merging |
+| `9521fe29` | `31636b68` | fix(antigravity): preserve model lifecycle and cooldown state |
+| `ad381435` | `6bcfbdb8` | fix(antigravity): coalesce probes and respect plugin model ownership |
+| `61a70dc6` | `87ced434` | Adapted: native messages JSON to SSE adapter kept; fork's unused-param signature retained per new same-problem-prefers-upstream rule. |
+
+#### Skipped commits and reasons
+
+| Upstream | Decision |
+| --- | --- |
+| `980c3bc3` `6d06098d` `d2e3a77e` `dfd7c638` | Skip promotional/community README additions; neutral fork READMEs remain authoritative. |
+| `8ef43e4d` | Defer AxisNow sponsorship removal; conflicts with fork README sponsorship handling, needs separate review. |
+| `01e28567` | Defer Devin-catalog home-build disable; the fork has no `catalog_sources.go` home-build path (custom catalog system not ported), conflicts. Revisit if the catalog-sources feature is ever adopted. |
+| `8a945b3f` | Skip restoring retired Claude 4.6 model definitions; the fork already absorbed the 4.6→5.5 replacement and 4.6 IDs are retired. Upstream re-added them alongside 5.5 CAQS work; no live-availability evidence for 4.6. |
+| `91c934f6` | Defer local shell tool translation; conflicts with the fork's custom/apply_patch tool pipeline (`responses_tool_index.go`, response aggregator). Needs joint protocol review like the earlier deferred bridge. |
+| `868e137f` | Defer payload-finalizer architecture; cross-cutting executor rewrite touching every request path plus an AGENTS.md invariant the fork has not adopted. Needs separate design review. |
+| `cbc4cd55` | Defer Antigravity interactions session continuation; response-file conflict depends on the fork-absent `applypatch` package. Needs joint review with the deferred bridge. |
+| `c997cbb5` | Defer error-aware response flushing; stream-file conflict with the fork's delivery/usage accounting. Needs joint review, not a blind port. |
+| `eb6a768d` | Defer explicit prompt-cache options (950-line test, cloaking rewrite); conflicts across three executor files. Assess separately given cloaking is fork-sensitive. |
+| `0ea4e1dc` | Defer clean-EOF `[DONE]` synthesis; depends on `CanFinalizeResponseStream` in the fork-diverged `apply_patch.go` plus conflicts in compat executor and responses translator. Revisit after the bridge/apply_patch direction is settled. |
+| `a4acc9f7` | Defer terminal-disconnect-as-success; stream-file conflict with fork delivery accounting. Needs joint review. |
+| `4e4dede4` | Defer backend-error surfacing + multi-line payloads; stream-file conflict with fork delivery accounting. Needs joint review. |
+| `1672be5d` | Defer custom model catalog sources (263-line new subsystem + config shape); same rationale as the v8.0.13 intake which deferred the coupled config migrations. |
+| Merge wrappers `abe54e85` `7dc25a7e` `30700d44` `3e83083b` `13da3cee` `38a089ea` `0594a632` | No independent behavior; covered by assessing individual commits. |
+
+#### Validation and replay evidence
+
+`GOTOOLCHAIN=go1.26.4 bash ops/upstream-intake/verify-absorb.sh` on the intake
+branch head: PASS (maintenance fixtures, gofmt, vet, responses-tools
+invariants, full suite, all race-sensitive packages, server build).
+
+**Request/response replay: not performed yet.** No baseline-vs-candidate fixture
+replay was run for this intake's protocol changes; record coverage before merge
+or state its limits in the merge record.
+
+**Real client/provider replay: not performed.** Credential-free checks only. No
+release, tap, installation, production config or service restart was performed.
 
 ## How to fill this in
 
