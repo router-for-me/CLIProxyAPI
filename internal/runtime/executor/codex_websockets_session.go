@@ -71,6 +71,8 @@ type codexWebsocketSession struct {
 	activeCh     chan codexWebsocketRead
 	activeDone   <-chan struct{}
 	activeCancel context.CancelFunc
+	interrupt    *codexWebsocketInterrupt
+	terminalSeen bool
 	terminalConn *websocket.Conn
 	terminalErr  error
 
@@ -94,6 +96,12 @@ type codexWebsocketRead struct {
 	err     error
 }
 
+type codexWebsocketInterrupt struct {
+	responseID string
+	done       chan struct{}
+	err        error // Published by closing done after the write finishes.
+}
+
 func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWebsocketRead) {
 	if s == nil {
 		return
@@ -111,6 +119,8 @@ func (s *codexWebsocketSession) setActiveLocked(conn *websocket.Conn, ch chan co
 	}
 	s.activeConn = conn
 	s.activeCh = ch
+	s.interrupt = nil
+	s.terminalSeen = false
 	if conn != nil && ch != nil {
 		activeCtx, activeCancel := context.WithCancel(context.Background())
 		s.activeDone = activeCtx.Done()
@@ -191,12 +201,59 @@ func (s *codexWebsocketSession) clearActive(conn *websocket.Conn, ch chan codexW
 	}
 	s.activeConn = nil
 	s.activeCh = nil
+	s.interrupt = nil
+	s.terminalSeen = false
 	if s.activeCancel != nil {
 		s.activeCancel()
 	}
 	s.activeCancel = nil
 	s.activeDone = nil
 	return true
+}
+
+func (s *codexWebsocketSession) beginInterrupt(conn *websocket.Conn, ch chan codexWebsocketRead, payload []byte) *codexWebsocketInterrupt {
+	responseID := gjson.GetBytes(payload, "response_id")
+	if s == nil || gjson.GetBytes(payload, "type").String() != "response.interrupt" || responseID.Type != gjson.String || responseID.String() == "" {
+		return nil
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if s.activeConn != conn || s.activeCh != ch || ch == nil || s.terminalSeen {
+		return nil
+	}
+	interrupt := &codexWebsocketInterrupt{responseID: responseID.String(), done: make(chan struct{})}
+	s.interrupt = interrupt
+	return interrupt
+}
+
+// awaitMatchingInterrupt only exempts a terminal after this turn's matching control
+// frame was written successfully. The upstream acknowledgement can race with that write.
+func (s *codexWebsocketSession) awaitMatchingInterrupt(ctx context.Context, conn *websocket.Conn, ch chan codexWebsocketRead, payload []byte) bool {
+	if s == nil || gjson.GetBytes(payload, "response.incomplete_details.reason").String() != "interrupted" {
+		return false
+	}
+	s.activeMu.Lock()
+	interrupt := s.interrupt
+	activeDone := s.activeDone
+	matches := s.activeConn == conn && s.activeCh == ch && ch != nil && interrupt != nil &&
+		interrupt.responseID == gjson.GetBytes(payload, "response.id").String()
+	s.activeMu.Unlock()
+	if !matches {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-activeDone:
+		return false
+	case <-interrupt.done:
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	return interrupt.err == nil && ctx.Err() == nil && s.activeConn == conn && s.activeCh == ch
 }
 
 const codexWebsocketWriteChunkSize = 32 * 1024
@@ -755,6 +812,14 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		payload = bytes.TrimSpace(payload)
 		if len(payload) > 0 {
 			eventType := gjson.GetBytes(payload, "type").String()
+			if eventType == "response.incomplete" {
+				// Freeze interrupt attribution before the terminal enters the read buffer.
+				sess.activeMu.Lock()
+				if sess.activeConn == conn {
+					sess.terminalSeen = true
+				}
+				sess.activeMu.Unlock()
+			}
 			if eventType != "" {
 				sess.setLastEventType(conn, eventType)
 			}

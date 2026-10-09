@@ -337,7 +337,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		case "response.output_item.done":
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed", "response.done", "response.incomplete":
-			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
+			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) &&
+				!sess.awaitMatchingInterrupt(ctx, conn, readCh, payload) {
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "terminal_empty_incomplete", nil)
 					unlockSession()

@@ -201,13 +201,20 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
 	}
 	// A retained socket from an earlier turn is not the current upstream.
 	// HTTP turns must fall through to local cancellation instead.
-	if readCh, _ := sess.activeForConn(conn); readCh == nil {
+	readCh, _ := sess.activeForConn(conn)
+	if readCh == nil {
 		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
 	}
 	if !cliproxyexecutor.WebsocketAuthEnabled(ctx, authID) {
 		return fmt.Errorf("websocket credential is no longer enabled")
 	}
-	if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+	interrupt := sess.beginInterrupt(conn, readCh, payload)
+	errWrite := writeCodexWebsocketMessage(sess, conn, payload)
+	if interrupt != nil {
+		interrupt.err = errWrite
+		close(interrupt.done)
+	}
+	if errWrite != nil {
 		return errWrite
 	}
 	log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=response.interrupt", sessionID, authID, wsURL)

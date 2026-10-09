@@ -428,7 +428,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if helps.HasMeaningfulCodexOutputDelta(payload) {
 				sawOutputDelta = true
 			}
-			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
+			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) &&
+				!sess.awaitMatchingInterrupt(ctx, conn, readCh, payload) {
 				streamErr := newCodexEmptyIncompleteStreamError()
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
 				reporter.PublishFailure(ctx, streamErr)
@@ -663,7 +664,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if helps.HasMeaningfulCodexOutputDelta(payload) {
 				sawOutputDelta = true
 			}
-			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
+			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) &&
+				!sess.awaitMatchingInterrupt(ctx, conn, readCh, payload) {
 				streamErr := newCodexEmptyIncompleteStreamError()
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				reporter.PublishFailure(ctx, streamErr)

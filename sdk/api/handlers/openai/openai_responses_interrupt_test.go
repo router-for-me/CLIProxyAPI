@@ -32,9 +32,19 @@ import (
 // the same socket accepts the next response.create. Idle, malformed, and disabled-auth
 // interrupts must fail locally without opening or writing that socket.
 func TestResponsesInterruptInFlight(t *testing.T) {
-	for _, steering := range []bool{false, true} {
-		t.Run(fmt.Sprintf("steering_%t", steering), func(t *testing.T) {
+	for _, scenario := range []struct {
+		steering     bool
+		outputTokens int
+	}{
+		{steering: false, outputTokens: 0},
+		{steering: false, outputTokens: 7},
+		{steering: true, outputTokens: 0},
+		{steering: true, outputTokens: 7},
+	} {
+		t.Run(fmt.Sprintf("steering_%t/output_tokens_%d", scenario.steering, scenario.outputTokens), func(t *testing.T) {
+			steering, outputTokens := scenario.steering, scenario.outputTokens
 			interrupt := []byte(`{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items","extension":"keep"}`)
+			terminal := fmt.Sprintf(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"input_tokens":11,"output_tokens":%d,"total_tokens":%d},"output":[]}}`, outputTokens, 11+outputTokens)
 			var connections atomic.Int32
 			upstreamDone := make(chan struct{})
 			var upstreamDoneOnce sync.Once
@@ -70,7 +80,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 					t.Errorf("interrupt changed: %s", payload)
 					return
 				}
-				write(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"output_tokens":7},"output":[]}}`)
+				write(terminal)
 				if payload := read(); gjson.GetBytes(payload, "type").String() != "response.create" {
 					t.Errorf("expected follow-up response.create, got %s", payload)
 					return
@@ -123,7 +133,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 					t.Fatal(errSend)
 				}
 			}
-			expect := func(event string) {
+			expect := func(event string) []byte {
 				t.Helper()
 				_, payload, errRead := client.ReadMessage()
 				if errRead != nil {
@@ -132,6 +142,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 				if got := gjson.GetBytes(payload, "type").String(); got != event {
 					t.Fatalf("expected %s, got %s", event, payload)
 				}
+				return payload
 			}
 
 			send([]byte(`{"type":"response.interrupt"}`))
@@ -158,7 +169,14 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 				t.Fatal(errUpdate)
 			}
 			send(interrupt)
-			expect("response.incomplete")
+			interrupted := expect("response.incomplete")
+			usage := gjson.GetBytes(interrupted, "response.usage")
+			output := usage.Get("output_tokens")
+			if gjson.GetBytes(interrupted, "response.incomplete_details.reason").String() != "interrupted" ||
+				output.Type != gjson.Number || output.Num != float64(outputTokens) ||
+				usage.Get("input_tokens").Int() != 11 || usage.Get("total_tokens").Int() != int64(11+outputTokens) {
+				t.Fatalf("interruption reason or usage changed: %s", interrupted)
+			}
 			send([]byte(fmt.Sprintf(`{"type":"response.create","model":%q,"previous_response_id":"r1","input":[]}`, model)))
 			expect("response.created")
 			expect("response.completed")

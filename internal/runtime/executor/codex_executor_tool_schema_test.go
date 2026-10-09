@@ -6,11 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -176,6 +178,34 @@ func TestCodexExecutorExecuteStream_ZeroTokenIncompleteResponseIsFailure(t *test
 	}
 	if !sawError {
 		t.Fatalf("expected stream to fail on zero-token response.incomplete, but it completed without error")
+	}
+}
+
+func TestCodexExecutorEmptyInterruptedResponseIsFailure(t *testing.T) {
+	for _, mode := range []string{"execute", "stream", "buffered_stream"} {
+		t.Run(mode, func(t *testing.T) {
+			server := codexSSEServer(codexCreatedEvent, `{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"output":[],"usage":{"input_tokens":10,"output_tokens":0,"total_tokens":10}}}`)
+			defer server.Close()
+
+			executor := NewCodexExecutor(codexBufferingConfig(mode == "buffered_stream"))
+			req, opts := codexTestRequest()
+			opts.Stream = mode != "execute"
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var err error
+			if opts.Stream {
+				var result *cliproxyexecutor.StreamResult
+				result, err = executor.ExecuteStream(ctx, codexTestAuth(server.URL), req, opts)
+				if err == nil {
+					_, err = drainChunks(result)
+				}
+			} else {
+				_, err = executor.Execute(ctx, codexTestAuth(server.URL), req, opts)
+			}
+			if err == nil || !strings.Contains(err.Error(), helps.CodexEmptyIncompleteStreamMessage) {
+				t.Fatalf("HTTP empty interruption error = %v, want empty-incomplete failure", err)
+			}
+		})
 	}
 }
 

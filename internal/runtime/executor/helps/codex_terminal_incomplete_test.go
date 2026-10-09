@@ -84,3 +84,10 @@ func TestIsCodexTerminalEmptyIncomplete(t *testing.T) {
 		t.Fatal("expected false for response.completed")
 	}
 }
+
+func TestIsCodexTerminalEmptyIncompleteDoesNotTrustInterruptReason(t *testing.T) {
+	interrupted := []byte(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"output":[],"usage":{"output_tokens":0}}}`)
+	if !IsCodexTerminalEmptyIncomplete(interrupted, 0, false) {
+		t.Fatal("an interrupted reason alone must not exempt an empty response from the failure guard")
+	}
+}
