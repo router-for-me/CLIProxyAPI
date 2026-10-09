@@ -1027,10 +1027,11 @@ func TestApplyAntigravityReasoningReplayItems_PreservesContextHashRejectionLoggi
 		if strings.HasPrefix(entry.Message, "antigravity replay: suppressed repeated context-hash rejections") {
 			t.Fatalf("standalone suppressed summary log should no longer be emitted: %q", entry.Message)
 		}
-		if strings.Contains(entry.Message, "rejected by context hash") {
+		if strings.Contains(entry.Message, "context hash rejected") {
 			detailCount++
-			if !strings.Contains(entry.Message, "suppressed 4 repeated context-hash rejections across 1 part in same request") {
-				t.Fatalf("expected merged suppression summary in single log, got: %q", entry.Message)
+			expected := `antigravity replay: context hash rejected 1 part (first="exec" at contents[1].parts[0], opaque_id=false, batch=3, seq=2)`
+			if entry.Message != expected {
+				t.Fatalf("expected log %q, got %q", expected, entry.Message)
 			}
 		}
 	}
@@ -1040,32 +1041,75 @@ func TestApplyAntigravityReasoningReplayItems_PreservesContextHashRejectionLoggi
 	}
 }
 
-func TestApplyAntigravityReasoningReplayItems_SingleContextHashRejectionLogsWithoutSuppression(t *testing.T) {
+func TestApplyAntigravityReasoningReplayItems_MultiPartContextHashRejectionLogging(t *testing.T) {
 	hook := newSignatureDebugHook(t)
 
-	tracker := newAntigravityReplayContextHashLogTracker()
-	func() {
-		defer tracker.log()
+	payload := []byte(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-2","name":"read","args":{"path":"a.txt"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"read","response":{"result":"content"}}}]}
+	]}}`)
 
-		payload := []byte(`{"request":{"contents":[
-			{"role":"user","parts":[{"text":"first prompt"}]},
-			{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
-			{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]}
-		]}}`)
-		index := newAntigravityReplayRequestIndexWithTracker(payload, tracker)
-		item := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
-		index.functionCallPartLocationForReplayWithSchemas(gjson.ParseBytes(item), map[string]any{"exec": map[string]any{"type": "object"}})
-	}()
+	item1 := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	item2 := []byte(`{"type":"function_call_part","call_id":"call-2","name":"read","args":{"path":"a.txt"},"thoughtSignature":"sig-2","contextHash":"wrong-hash-2"}`)
+
+	toolSchemas := map[string]any{
+		"exec": map[string]any{"type": "object"},
+		"read": map[string]any{"type": "object"},
+	}
+	_, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item1, item2}, toolSchemas)
+	if changed {
+		t.Fatal("expected payload not to change")
+	}
 
 	detailCount := 0
 	for _, entry := range hook.AllEntries() {
 		if entry.Level != log.DebugLevel {
 			continue
 		}
-		if strings.Contains(entry.Message, "rejected by context hash") {
+		if strings.Contains(entry.Message, "context hash rejected") {
 			detailCount++
-			if strings.Contains(entry.Message, "suppressed") {
-				t.Fatalf("single rejection should not mention suppression, got: %q", entry.Message)
+			expected := `antigravity replay: context hash rejected 2 parts (first="exec" at contents[1].parts[0], opaque_id=false, batch=2, seq=2)`
+			if entry.Message != expected {
+				t.Fatalf("expected log %q, got %q", expected, entry.Message)
+			}
+		}
+	}
+
+	if detailCount != 1 {
+		t.Fatalf("expected exactly 1 multi-part rejection log, got %d", detailCount)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_SingleContextHashRejectionLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	payload := []byte(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]}
+	]}}`)
+
+	item := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+
+	toolSchemas := map[string]any{"exec": map[string]any{"type": "object"}}
+	_, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item}, toolSchemas)
+	if changed {
+		t.Fatal("expected payload to remain unchanged on rejection")
+	}
+
+	detailCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if strings.Contains(entry.Message, "context hash rejected") {
+			detailCount++
+			expected := `antigravity replay: context hash rejected 1 part (first="exec" at contents[1].parts[0], opaque_id=false, batch=1, seq=1)`
+			if entry.Message != expected {
+				t.Fatalf("expected log %q, got %q", expected, entry.Message)
 			}
 		}
 	}

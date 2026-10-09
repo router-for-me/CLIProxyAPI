@@ -353,6 +353,7 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 	defer tracker.log()
 	index := newAntigravityReplayRequestIndexWithTracker(payload, tracker)
 	for len(items) > 0 {
+		tracker.setPhase(antigravityReplayPhaseBatch)
 		batch := newAntigravityReplayBatch(index)
 		handled := 0
 		for handled < len(items) && batch.apply(items[handled], toolSchemas) {
@@ -364,6 +365,7 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 				// A malformed or non-addressable part offset makes splicing unsafe.
 				// Nothing has been committed yet, so retain the exact legacy behavior
 				// for all remaining items.
+				tracker.setPhase(antigravityReplayPhaseSequential)
 				next, sequentialChanged := applyAntigravityReasoningReplayItemsSequential(index, updated, items, toolSchemas)
 				return next, changed || sequentialChanged
 			}
@@ -384,6 +386,7 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 		// sequential implementation, then start another safe batch. A rare
 		// fallback therefore cannot make every preceding signature rewrite the
 		// entire request again.
+		tracker.setPhase(antigravityReplayPhaseSequential)
 		next, itemChanged := applyAntigravityReasoningReplayItemsSequential(index, updated, items[:1], toolSchemas)
 		updated = next
 		changed = itemChanged || changed
@@ -984,16 +987,12 @@ func (i *antigravityReplayRequestIndex) functionCallPartLocationForReplayWithSch
 		// identical. Only the surrounding context drifted, which invalidates the
 		// cached signature but not the tool identity.
 		key := antigravityReplayPartKey{contentIndex: location.contentIndex, partIndex: location.partIndex}
-		i.logTracker.rejections++
-		if i.logTracker.sample == nil {
-			i.logTracker.sample = &antigravityReplayContextHashSample{
-				name:         name,
-				contentIndex: location.contentIndex,
-				partIndex:    location.partIndex,
-				opaqueID:     util.IsGeminiClaudeToolUseID(candidateID),
-			}
-		}
-		i.logTracker.loggedKeys[key] = true
+		i.logTracker.recordRejection(antigravityReplayContextHashSample{
+			name:         name,
+			contentIndex: location.contentIndex,
+			partIndex:    location.partIndex,
+			opaqueID:     util.IsGeminiClaudeToolUseID(candidateID),
+		}, key)
 		return antigravityReplayIndexedPart{}, false
 	}
 
@@ -1319,6 +1318,13 @@ type antigravityReplayIndexedContent struct {
 // alias the payload bytes and memoizes context fingerprints lazily, so it must
 // be discarded and rebuilt as soon as the payload changes, and it must never be
 // shared across goroutines.
+type antigravityReplayPhase int
+
+const (
+	antigravityReplayPhaseBatch antigravityReplayPhase = iota
+	antigravityReplayPhaseSequential
+)
+
 type antigravityReplayContextHashSample struct {
 	name         string
 	contentIndex int
@@ -1327,9 +1333,11 @@ type antigravityReplayContextHashSample struct {
 }
 
 type antigravityReplayContextHashLogTracker struct {
-	rejections int
-	loggedKeys map[antigravityReplayPartKey]bool
-	sample     *antigravityReplayContextHashSample
+	phase                antigravityReplayPhase
+	batchRejections      int
+	sequentialRejections int
+	loggedKeys           map[antigravityReplayPartKey]bool
+	sample               *antigravityReplayContextHashSample
 }
 
 func newAntigravityReplayContextHashLogTracker() *antigravityReplayContextHashLogTracker {
@@ -1338,26 +1346,39 @@ func newAntigravityReplayContextHashLogTracker() *antigravityReplayContextHashLo
 	}
 }
 
+func (t *antigravityReplayContextHashLogTracker) setPhase(phase antigravityReplayPhase) {
+	if t != nil {
+		t.phase = phase
+	}
+}
+
+func (t *antigravityReplayContextHashLogTracker) recordRejection(sample antigravityReplayContextHashSample, key antigravityReplayPartKey) {
+	if t == nil {
+		return
+	}
+	if t.phase == antigravityReplayPhaseSequential {
+		t.sequentialRejections++
+	} else {
+		t.batchRejections++
+	}
+	if t.sample == nil {
+		t.sample = &sample
+	}
+	t.loggedKeys[key] = true
+}
+
 func (t *antigravityReplayContextHashLogTracker) log() {
-	if t == nil || t.sample == nil || t.rejections == 0 {
+	if t == nil || t.sample == nil || (t.batchRejections == 0 && t.sequentialRejections == 0) {
 		return
 	}
-	if t.rejections == 1 {
-		log.Debugf("antigravity replay: exact tool ID match for %q at contents[%d].parts[%d] rejected by context hash (opaque_id=%t)",
-			t.sample.name, t.sample.contentIndex, t.sample.partIndex, t.sample.opaqueID)
-		return
-	}
+	partsCount := len(t.loggedKeys)
 	partsNoun := "parts"
-	if len(t.loggedKeys) == 1 {
+	if partsCount == 1 {
 		partsNoun = "part"
 	}
-	rejectionsNoun := "rejections"
-	if t.rejections-1 == 1 {
-		rejectionsNoun = "rejection"
-	}
-	log.Debugf("antigravity replay: exact tool ID match for %q at contents[%d].parts[%d] rejected by context hash (opaque_id=%t, suppressed %d repeated context-hash %s across %d %s in same request)",
-		t.sample.name, t.sample.contentIndex, t.sample.partIndex, t.sample.opaqueID,
-		t.rejections-1, rejectionsNoun, len(t.loggedKeys), partsNoun)
+	log.Debugf("antigravity replay: context hash rejected %d %s (first=%q at contents[%d].parts[%d], opaque_id=%t, batch=%d, seq=%d)",
+		partsCount, partsNoun, t.sample.name, t.sample.contentIndex, t.sample.partIndex, t.sample.opaqueID,
+		t.batchRejections, t.sequentialRejections)
 }
 
 type antigravityReplayRequestIndex struct {
