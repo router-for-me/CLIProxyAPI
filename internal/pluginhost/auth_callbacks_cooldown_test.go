@@ -105,7 +105,18 @@ func callHostAuthListForTest(t *testing.T, host *Host) []byte {
 	return rawResp
 }
 
-func assertHostCooldowns(t *testing.T, label string, got []pluginapi.HostAuthCooldown, want []pluginapi.HostAuthCooldown) {
+// ceilSeconds rounds up like the host's cooldown view does.
+func ceilSeconds(d time.Duration) int64 {
+	seconds := int64(d / time.Second)
+	if d%time.Second != 0 {
+		seconds++
+	}
+	return seconds
+}
+
+// assertHostCooldowns checks cooldowns read by a callback that ran between before and after,
+// so RemainingSeconds is bounded by those two clock reads rather than a later one.
+func assertHostCooldowns(t *testing.T, label string, before, after time.Time, got []pluginapi.HostAuthCooldown, want []pluginapi.HostAuthCooldown) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("%s: cooldowns = %+v, want %d entries", label, got, len(want))
@@ -121,9 +132,9 @@ func assertHostCooldowns(t *testing.T, label string, got []pluginapi.HostAuthCoo
 		if !g.RetryAt.Equal(w.RetryAt) {
 			t.Fatalf("%s: cooldowns[%d].RetryAt = %v, want %v", label, i, g.RetryAt, w.RetryAt)
 		}
-		maxRemaining := int64(time.Until(w.RetryAt)/time.Second) + 1
-		if g.RemainingSeconds <= 0 || g.RemainingSeconds > maxRemaining {
-			t.Fatalf("%s: cooldowns[%d].RemainingSeconds = %d, want in (0, %d]", label, i, g.RemainingSeconds, maxRemaining)
+		minRemaining, maxRemaining := ceilSeconds(w.RetryAt.Sub(after)), ceilSeconds(w.RetryAt.Sub(before))
+		if g.RemainingSeconds < minRemaining || g.RemainingSeconds > maxRemaining {
+			t.Fatalf("%s: cooldowns[%d].RemainingSeconds = %d, want in [%d, %d]", label, i, g.RemainingSeconds, minRemaining, maxRemaining)
 		}
 	}
 }
@@ -142,13 +153,19 @@ func TestHostAuthCallbacksReturnCooldowns(t *testing.T) {
 		{Scope: "credential", Reason: "credential_quota", RetryAt: now.Add(5 * time.Hour)},
 	}
 
-	assertHostCooldowns(t, "get_runtime model", callHostAuthGetRuntimeForTest(t, host, modelScoped.Index).Cooldowns, wantModel)
-	assertHostCooldowns(t, "get_runtime credential", callHostAuthGetRuntimeForTest(t, host, credentialScoped.Index).Cooldowns, wantCredential)
+	before := time.Now()
+	gotModel := callHostAuthGetRuntimeForTest(t, host, modelScoped.Index).Cooldowns
+	assertHostCooldowns(t, "get_runtime model", before, time.Now(), gotModel, wantModel)
+	before = time.Now()
+	gotCredential := callHostAuthGetRuntimeForTest(t, host, credentialScoped.Index).Cooldowns
+	assertHostCooldowns(t, "get_runtime credential", before, time.Now(), gotCredential, wantCredential)
 	if got := callHostAuthGetRuntimeForTest(t, host, healthy.Index).Cooldowns; got != nil {
 		t.Fatalf("get_runtime healthy: cooldowns = %+v, want nil", got)
 	}
 
+	before = time.Now()
 	rawList := callHostAuthListForTest(t, host)
+	after := time.Now()
 	list, errDecode := decodeRPCEnvelope[rpcHostAuthListResponse](rawList)
 	if errDecode != nil {
 		t.Fatalf("decode list response: %v", errDecode)
@@ -157,8 +174,8 @@ func TestHostAuthCallbacksReturnCooldowns(t *testing.T) {
 	for _, entry := range list.Files {
 		byIndex[entry.AuthIndex] = entry
 	}
-	assertHostCooldowns(t, "list model", byIndex[modelScoped.Index].Cooldowns, wantModel)
-	assertHostCooldowns(t, "list credential", byIndex[credentialScoped.Index].Cooldowns, wantCredential)
+	assertHostCooldowns(t, "list model", before, after, byIndex[modelScoped.Index].Cooldowns, wantModel)
+	assertHostCooldowns(t, "list credential", before, after, byIndex[credentialScoped.Index].Cooldowns, wantCredential)
 
 	// Wire format: the field is "cooldowns" and is omitted when empty, so
 	// existing entries keep their previous shape.
