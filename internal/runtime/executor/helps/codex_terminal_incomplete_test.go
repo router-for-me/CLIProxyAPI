@@ -32,6 +32,24 @@ func TestHasMeaningfulCodexOutputDelta(t *testing.T) {
 }
 
 func TestIsCodexTerminalEmptyIncomplete(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		details string
+		want    bool
+	}{
+		{name: "explicit interruption", details: `{"reason":"interrupted"}`, want: false},
+		{name: "token limit", details: `{"reason":"max_output_tokens"}`, want: true},
+		{name: "content filter", details: `{"reason":"content_filter"}`, want: true},
+		{name: "missing reason", details: `{}`, want: true},
+		{name: "null details", details: `null`, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event := []byte(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","output":[],"incomplete_details":` + test.details + `,"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}`)
+			if got := IsCodexTerminalEmptyIncomplete(event, 0, false); got != test.want {
+				t.Fatalf("IsCodexTerminalEmptyIncomplete() = %v, want %v", got, test.want)
+			}
+		})
+	}
 	// Case 1: True empty incomplete with explicit numeric 0
 	trueEmpty := []byte(`{"type":"response.incomplete","response":{"id":"r1","output":[],"usage":{"output_tokens":0}}}`)
 	if !IsCodexTerminalEmptyIncomplete(trueEmpty, 0, false) {

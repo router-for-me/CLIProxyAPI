@@ -35,6 +35,11 @@ func IsCodexTerminalEmptyIncomplete(eventData []byte, outputItemsCount int, sawO
 	if eventType != "response.incomplete" {
 		return false
 	}
+	// Explicit interruption is a normal terminal even before the first output.
+	// Preserve its usage and the existing connection for the following turn.
+	if gjson.GetBytes(eventData, "response.incomplete_details.reason").String() == "interrupted" {
+		return false
+	}
 	// If any non-empty text delta, reasoning delta, or tool argument delta was emitted, content was produced.
 	if sawOutputDelta {
 		return false
