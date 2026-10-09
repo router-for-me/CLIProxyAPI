@@ -33,9 +33,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
-	if claudeThreadContinuationNeedsReplay(req.Payload, apiKey, baseURL) {
-		return nil, newClaudeThreadNotFoundError()
-	}
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 	defer func() {
@@ -252,9 +249,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return nil, fmt.Errorf("sign Claude CCH: %w", err)
 		}
 	}
-	// Read-only validation must observe the final configured model and messages.
+	// Read-only validation must observe the final configured model, messages, and thread.
 	if errMidSystem := validateClaudeMidSystemMessageModel(bodyForUpstream, confirmedClaudeCode, isAnthropicUpstreamBase(baseURL)); errMidSystem != nil {
 		return nil, errMidSystem
+	}
+	if claudeThreadContinuationNeedsReplay(bodyForUpstream, apiKey, baseURL) {
+		return nil, newClaudeThreadNotFoundError()
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
