@@ -16,7 +16,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestV8OAuthRequestSettingsDoNotAffectAPIKeys(t *testing.T) {
+func TestV8SharedUpstreamRequestSettingsAffectBothAuthKinds(t *testing.T) {
 	for _, provider := range []string{"codex", "xai"} {
 		for _, kind := range []string{cliproxyauth.AuthKindAPIKey, cliproxyauth.AuthKindOAuth} {
 			for _, stream := range []bool{false, true} {
@@ -34,10 +34,10 @@ func TestV8OAuthRequestSettingsDoNotAffectAPIKeys(t *testing.T) {
 					defer server.Close()
 					cfg, err := config.ParseConfigBytes([]byte(`proxy-url: direct
 disable-image-generation: true
-oauth:
-  providers:
-    codex: {optimize-multi-agent-v2: true, orphan-delegation-compatibility: true}
-    xai: {inject-x-search: true}
+client: {codex: {optimize-multi-agent-v2: true}}
+upstream:
+  codex: {orphan-delegation-compatibility: true}
+  xai: {inject-x-search: true}
 `))
 					if err != nil {
 						t.Fatal(err)
@@ -79,18 +79,17 @@ oauth:
 					default:
 						t.Fatalf("request did not reach upstream: %v", err)
 					}
-					wantOAuth := kind == cliproxyauth.AuthKindOAuth
-					if got := gjson.GetBytes(body, "input.0.type").String(); (got == "message") != wantOAuth {
-						t.Fatalf("orphan delegation type = %q, OAuth = %t; body=%s", got, wantOAuth, body)
+					if got := gjson.GetBytes(body, "input.0.type").String(); got != "message" {
+						t.Fatalf("shared orphan delegation type = %q; body=%s", got, body)
 					}
 					if provider == "codex" {
-						if got := gjson.GetBytes(body, "tools.0.name").String(); (got == "collaboration-optimize") != wantOAuth {
-							t.Fatalf("collaboration namespace = %q, OAuth = %t", got, wantOAuth)
+						if got := gjson.GetBytes(body, "tools.0.name").String(); got != "collaboration-optimize" {
+							t.Fatalf("client collaboration namespace = %q, want collaboration-optimize", got)
 						}
-					} else if injected := gjson.GetBytes(body, `tools.#(type=="x_search")`).Exists(); injected != wantOAuth {
-						t.Fatalf("x_search injected = %t, OAuth = %t", injected, wantOAuth)
+					} else if !gjson.GetBytes(body, `tools.#(type=="x_search")`).Exists() {
+						t.Fatal("shared x_search setting was not applied")
 					}
-					if !cfg.Codex.OptimizeMultiAgentV2 || !cfg.Codex.OrphanDelegationCompatibility || !cfg.XAI.InjectXSearch {
+					if !cfg.Client.Codex.OptimizeMultiAgentV2 || !cfg.Codex.OrphanDelegationCompatibility || !cfg.XAI.InjectXSearch {
 						t.Fatal("request changed shared configuration")
 					}
 				})
@@ -100,18 +99,18 @@ oauth:
 }
 
 func TestV8ScopedExecutorsPreserveWebsocketStores(t *testing.T) {
-	cfg, err := config.ParseConfigBytes([]byte("oauth: {providers: {codex: {response-steering: true}, xai: {inject-x-search: true}}}"))
+	cfg, err := config.ParseConfigBytes([]byte("upstream: {codex: {response-steering: true}, xai: {inject-x-search: true}}\noauth: {providers: {codex: {header-defaults: {user-agent: oauth-agent}}}}"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	codex := NewCodexAutoExecutor(cfg)
 	boundCodex := codex.ForAPIKey().(*CodexAutoExecutor)
-	if boundCodex.wsExec.store != codex.wsExec.store || boundCodex.httpExec.cfg.Codex.ResponseSteering || boundCodex.wsExec.cfg.Codex.ResponseSteering {
+	if boundCodex.wsExec.store != codex.wsExec.store || !boundCodex.httpExec.cfg.Codex.ResponseSteering || !boundCodex.wsExec.cfg.Codex.ResponseSteering || boundCodex.httpExec.cfg.CodexHeaderDefaults.UserAgent != "" {
 		t.Fatal("scoped Codex executor lost sessions or inherited OAuth settings")
 	}
 	xai := NewXAIAutoExecutor(cfg)
 	boundXAI := xai.ForAPIKey().(*XAIAutoExecutor)
-	if boundXAI.wsExec.store != xai.wsExec.store || boundXAI.wsExec.idStore != xai.wsExec.idStore || boundXAI.httpExec.cfg.XAI.InjectXSearch || boundXAI.wsExec.cfg.XAI.InjectXSearch {
+	if boundXAI.wsExec.store != xai.wsExec.store || boundXAI.wsExec.idStore != xai.wsExec.idStore || !boundXAI.httpExec.cfg.XAI.InjectXSearch || !boundXAI.wsExec.cfg.XAI.InjectXSearch || boundXAI.httpExec.cfg.CodexHeaderDefaults.UserAgent != "" {
 		t.Fatal("scoped xAI executor lost sessions or inherited OAuth settings")
 	}
 	if codex.httpExec.cfg != cfg || codex.wsExec.cfg != cfg || xai.httpExec.cfg != cfg || xai.wsExec.cfg != cfg || !cfg.Codex.ResponseSteering || !cfg.XAI.InjectXSearch {

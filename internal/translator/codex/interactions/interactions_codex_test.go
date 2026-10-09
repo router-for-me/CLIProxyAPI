@@ -10,7 +10,7 @@ import (
 )
 
 func TestConvertInteractionsRequestToCodexWithToolMessagesDirect(t *testing.T) {
-	out := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"thought","content":[{"type":"text","text":"thinking"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)
+	out, _ := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"thought","content":[{"type":"text","text":"thinking"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)
 	if got := gjson.GetBytes(out, "instructions").String(); got != "be brief" {
 		t.Fatalf("instructions = %q, want be brief. Output: %s", got, string(out))
 	}
@@ -38,7 +38,7 @@ func TestConvertInteractionsRequestToCodexWithToolMessagesDirect(t *testing.T) {
 }
 
 func TestConvertInteractionsRequestToCodexPreservesNonImageMediaContent(t *testing.T) {
-	out := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","input":[{"type":"model_output","content":[{"type":"audio","mime_type":"audio/wav","data":"UklGRg=="},{"type":"video","mime_type":"video/mp4","data":"AAAAIGZ0eXA="},{"type":"document","mime_type":"application/pdf","data":"JVBERi0="}]}]}`), false)
+	out, _ := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","input":[{"type":"model_output","content":[{"type":"audio","mime_type":"audio/wav","data":"UklGRg=="},{"type":"video","mime_type":"video/mp4","data":"AAAAIGZ0eXA="},{"type":"document","mime_type":"application/pdf","data":"JVBERi0="}]}]}`), false)
 
 	if got := gjson.GetBytes(out, "input.0.role").String(); got != "assistant" {
 		t.Fatalf("input.0.role = %q, want assistant. Output: %s", got, string(out))
@@ -55,7 +55,7 @@ func TestConvertInteractionsRequestToCodexPreservesNonImageMediaContent(t *testi
 }
 
 func TestConvertInteractionsRequestToCodexPreservesTopLevelThinkingLevel(t *testing.T) {
-	out := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","generation_config":{"thinking_level":"high"},"input":"hi"}`), true)
+	out, _ := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","generation_config":{"thinking_level":"high"},"input":"hi"}`), true)
 	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "high" {
 		t.Fatalf("reasoning.effort = %q, want high. Output: %s", got, string(out))
 	}
@@ -65,14 +65,14 @@ func TestConvertInteractionsRequestToCodexPreservesTopLevelThinkingLevel(t *test
 }
 
 func TestConvertInteractionsRequestToCodexUsesBodyStream(t *testing.T) {
-	out := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","stream":true,"input":"hi"}`), false)
+	out, _ := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","stream":true,"input":"hi"}`), false)
 	if got := gjson.GetBytes(out, "stream").Bool(); !got {
 		t.Fatalf("stream = %v, want true. Output: %s", got, string(out))
 	}
 }
 
 func TestConvertInteractionsRequestToCodexFunctionDeclarations(t *testing.T) {
-	out := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","input":"hi","tools":[{"function_declarations":[{"name":"lookup","description":"Lookup data","parameters":{"type":"object","$schema":"http://json-schema.org/draft-07/schema#","properties":{"q":{"type":"string"}}}}]}]}`), false)
+	out, _ := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","input":"hi","tools":[{"function_declarations":[{"name":"lookup","description":"Lookup data","parameters":{"type":"object","$schema":"http://json-schema.org/draft-07/schema#","properties":{"q":{"type":"string"}}}}]}]}`), false)
 	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
 		t.Fatalf("tools.0.type = %q, want function. Output: %s", got, string(out))
 	}

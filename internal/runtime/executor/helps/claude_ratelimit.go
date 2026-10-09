@@ -15,6 +15,10 @@ import (
 const (
 	defaultClaudeRateLimitFuzzMinSeconds = 1
 	defaultClaudeRateLimitFuzzMaxSeconds = 30
+	// maxClaudeRateLimitWindow is the longest Anthropic rate-limit window (7 days)
+	// plus a small clock-skew allowance. A later header timestamp is a billing
+	// boundary, not a recoverable rate limit.
+	maxClaudeRateLimitWindow = 7*24*time.Hour + time.Hour
 )
 
 // ClaudeHeadersIndicateUnifiedRateLimitRejection reports whether response headers explicitly
@@ -38,14 +42,14 @@ func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 		return false
 	}
 	status7dOI := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")))
-	return !isOverageOrFableOnlyRejection(headers, status5h, status7d, status7dOI)
+	return !isOverageOrFableOnlyRejection(headers, unifiedStatus, status5h, status7d, status7dOI)
 }
 
 func isClaudeWindowAllowed(status string) bool {
 	return status == "allowed" || status == "allowed_warning"
 }
 
-func isOverageOrFableOnlyRejection(headers http.Header, status5h, status7d, status7dOI string) bool {
+func isOverageOrFableOnlyRejection(headers http.Header, unifiedStatus, status5h, status7d, status7dOI string) bool {
 	if status5h == "rejected" || status7d == "rejected" {
 		return false
 	}
@@ -85,6 +89,20 @@ func isOverageOrFableOnlyRejection(headers http.Header, status5h, status7d, stat
 		}
 	}
 
+	// Anthropic omits both shared-window headers when it did not evaluate them.
+	// Only a rejected overage claim uses that absence. An allowed or missing
+	// unified status must still honor a short Retry-After. Other signals
+	// (overage disabled, overage status rejected) do not widen this exception.
+	if unifiedStatus == "rejected" && status5h == "" && status7d == "" && strings.Contains(representativeClaim, "overage") {
+		util5h := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Utilization")
+		util7d := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d-Utilization")
+		util5hAbsentOrHealthy := strings.TrimSpace(util5h) == "" || isClaudeUtilizationHealthy(util5h)
+		util7dAbsentOrHealthy := strings.TrimSpace(util7d) == "" || isClaudeUtilizationHealthy(util7d)
+		if util5hAbsentOrHealthy && util7dAbsentOrHealthy {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -117,7 +135,7 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	status5h := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Status")))
 	status7d := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d-Status")))
 	status7dOI := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")))
-	overageOnlyRejection := isOverageOrFableOnlyRejection(headers, status5h, status7d, status7dOI)
+	overageOnlyRejection := isOverageOrFableOnlyRejection(headers, unifiedStatus, status5h, status7d, status7dOI)
 
 	var candidateDeadlines []time.Time
 	var rejectedWindows []string
@@ -183,12 +201,18 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 			if !containsString(rejectedWindows, "unified") {
 				rejectedWindows = append(rejectedWindows, "unified")
 			}
-			if t, ok := parseUnixOrTimestamp(raw); ok && t.After(now) {
-				candidateDeadlines = append(candidateDeadlines, t)
+			// When the representative claim is overage and this timestamp matches
+			// the overage reset, it is the billing-period boundary, not a rate-limit
+			// recovery time.
+			if !claudeUnifiedResetIsOverageBillingBoundary(headers, raw) {
+				if resetAt, ok := parseUnixOrTimestamp(raw); ok && resetAt.After(now) {
+					candidateDeadlines = append(candidateDeadlines, resetAt)
+				}
 			}
 		}
 	}
 
+	candidateDeadlines = filterClaudeRateLimitDeadlines(candidateDeadlines, now)
 	if len(candidateDeadlines) == 0 {
 		if len(rejectedWindows) > 0 {
 			log.WithFields(log.Fields{
@@ -230,6 +254,37 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	}).Info("parsed Anthropic rate limit reset headers")
 
 	return &effectiveDuration
+}
+
+func claudeUnifiedResetIsOverageBillingBoundary(headers http.Header, unifiedReset string) bool {
+	claim := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Representative-Claim")))
+	if !strings.Contains(claim, "overage") {
+		return false
+	}
+	overageReset := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Overage-Reset")
+	unifiedAt, okUnified := parseUnixOrTimestamp(unifiedReset)
+	overageAt, okOverage := parseUnixOrTimestamp(overageReset)
+	if !okUnified || !okOverage {
+		return false
+	}
+	return unifiedAt.Equal(overageAt)
+}
+
+func filterClaudeRateLimitDeadlines(deadlines []time.Time, now time.Time) []time.Time {
+	if len(deadlines) == 0 {
+		return deadlines
+	}
+	kept := deadlines[:0]
+	for _, deadline := range deadlines {
+		if !deadline.After(now) {
+			continue
+		}
+		if deadline.Sub(now) > maxClaudeRateLimitWindow {
+			continue
+		}
+		kept = append(kept, deadline)
+	}
+	return kept
 }
 
 func containsString(list []string, target string) bool {

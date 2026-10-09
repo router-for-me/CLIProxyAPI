@@ -90,7 +90,8 @@ func TestManagementV8IndependentContract(t *testing.T) {
 		"GET /v8/management/observability/logs", "GET /v8/management/observability/usage/queue",
 		"GET /v8/management/credentials", "POST /v8/management/credentials",
 		"GET /v8/management/oauth/auth-url", "POST /v8/management/oauth/import", "POST /v8/management/oauth/callback",
-		"GET /v8/management/credentials/quota/providers", "POST /v8/management/routing/cooldown/reset",
+		"POST /v8/management/routing/cooldown/reset",
+		"GET /v8/management/plugins/:id/quota", "POST /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/quota",
 		"POST /v8/management/plugins/store/:id/install", "DELETE /v8/management/plugins/:id",
 	} {
 		if !routes[route] {
@@ -111,6 +112,16 @@ func TestManagementV8IndependentContract(t *testing.T) {
 	}
 	for _, legacy := range []string{"debug", "request-retry", "api-keys", "codex-api-key", "auth-files", "codex-auth-url", "oauth/providers/codex/auth-url", "plugins/test-plugin/config"} {
 		request(http.MethodGet, "/v8/management/"+legacy, "", http.StatusNotFound)
+	}
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/v8/management/credentials/quota/providers"},
+		{http.MethodPost, "/v8/management/credentials/quota/fetch"},
+		{http.MethodPost, "/v8/management/credentials/quota/reset"},
+	} {
+		if routes[route.method+" "+route.path] {
+			t.Errorf("removed route still registered: %s %s", route.method, route.path)
+		}
+		request(route.method, route.path, "", http.StatusNotFound)
 	}
 	request(http.MethodPost, "/v8/management/oauth/providers/vertex/import", "", http.StatusNotFound)
 	for _, tc := range []struct {
@@ -200,7 +211,7 @@ func TestManagementV8PluginOperationMigratesConfiguration(t *testing.T) {
 	}
 	select {
 	case next := <-reloads:
-		if next.ForAPIKey().Codex.DisableCodexCloaking || !next.Codex.DisableCodexCloaking {
+		if !next.ForAPIKey().Codex.DisableCodexCloaking || !next.Codex.DisableCodexCloaking {
 			t.Fatal("plugin operation published an incorrect configuration scope")
 		}
 	case <-time.After(5 * time.Second):

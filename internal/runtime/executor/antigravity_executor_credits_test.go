@@ -355,8 +355,7 @@ func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 	if !ok || state == nil {
 		t.Fatal("credits refresh state has unexpected type")
 	}
-	state.mu.Lock()
-	state.mu.Unlock()
+	waitForAntigravityCreditsRefresh(t, state)
 	if len(resp.Payload) == 0 {
 		t.Fatal("Execute() returned empty payload")
 	}

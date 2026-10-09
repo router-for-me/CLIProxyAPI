@@ -15,7 +15,7 @@ func BenchmarkConvertClaudeRequestToCodexLargeHistory(b *testing.B) {
 			if !gjson.ValidBytes(request) {
 				b.Fatal("benchmark generated an invalid Claude request")
 			}
-			if result := ConvertClaudeRequestToCodex("gpt-5.4", request, false); !gjson.ValidBytes(result) {
+			if result, _ := ConvertClaudeRequestToCodex("gpt-5.4", request, false); !gjson.ValidBytes(result) {
 				b.Fatal("translator generated invalid Codex JSON")
 			}
 			b.ReportAllocs()

@@ -2,6 +2,14 @@
 
 ## Baseline and invariant
 
+The 2026-10-09 synchronization targets upstream
+`67465884ca179a8f9098328d03a361b50003fdd7` from fork main
+`fa10525c30391ebade420d23302425eecc9678c1`: 140 upstream commits since
+`a270e7b9e57aaecd8f82555f44c2108518ad2330`, retaining all 32 fork-only commits.
+The Go module remains `/v8`, the required toolchain remains Go 1.26.0, and the
+Desktop host contract remains version `1`. The monolith deployment files and
+their safety documentation from the preceding patch import remain unchanged.
+
 The 2026-09-30 synchronization targets upstream
 `a270e7b9e57aaecd8f82555f44c2108518ad2330` from fork main
 `2eb057869ca11301edf1768e6ff68d8f95521e10`: 116 upstream commits since
@@ -41,6 +49,21 @@ on the next sync. Never resolve all conflicts with blanket `ours` or `theirs`.
   provider login modes, plugin hooks, and `discoveryManager` initialization.
 
 ## Conflict reduction
+
+The 2026-10-09 merge conflicts only in `cmd/server/main.go`, at two hunks.
+Keep upstream's new `--local-model` description and
+`registry.SetLocalModelCatalogs(localModel)` initialization, along with Pinable's
+`--parent-pid` registration and `hostOptions` argument. Do not restore the deleted
+`startModelCatalogUpdaters` helpers: the new upstream catalog lifecycle owns that
+work. A separate formatting group isolates the host-only flag from upstream's
+flag description. The host and SDK runtime helper files remain independent.
+
+`--local-model` now defaults to embedded catalogs, but explicit
+`models.catalog`, `models.codex-catalog`, or `models.devin-catalog` sources take
+precedence. This is upstream behavior, not a blanket guarantee of no network
+traffic. Leave those overrides unset for the embedded-only catalog default.
+The runtime smoke fixtures keep them unset. Existing upstream catalog-policy
+and lifecycle tests run alongside the fork's host/key/reload checks.
 
 The 2026-09-30 merge has four import-block conflicts:
 `internal/access/config_access/provider.go`, `internal/api/server_options.go`,

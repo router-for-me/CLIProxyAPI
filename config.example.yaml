@@ -9,6 +9,17 @@
 # The compatibility notes at the end show old spellings for existing deployments.
 config-version: 8
 
+# Optional model catalog sources: http(s) URLs or absolute local file paths.
+# Each explicit source overrides --local-model; otherwise --local-model uses
+# embedded catalogs, and normal mode uses the official remote sources.
+# Failed refreshes retain the last valid catalog; custom sources never fall back
+# to official URLs. Files and URLs are refreshed every 3 hours and on source changes.
+# Home mode never loads the general catalog, even when explicitly configured.
+models:
+  catalog: ""
+  codex-catalog: ""
+  devin-catalog: ""
+
 # Listener, TLS, network discovery, and server operation.
 server:
   # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
@@ -17,6 +28,11 @@ server:
 
   # Server port
   port: 8317
+
+  # Global token for GitHub requests (for example, release and asset downloads).
+  # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
+  # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.
+  github-token: ""
 
   # IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
   # An empty list (the default) does not trust forwarded headers. Restart after changing this setting.
@@ -272,6 +288,151 @@ requests:
   #         # Nested additional_tools structure in input[] (Codex CLI >= 0.154 "Responses Lite"):
   #         - 'input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="apply_patch")#'
 
+# Client-facing compatibility settings apply to both OAuth and API-key routes.
+client:
+  codex:
+    # When false (default), only models that natively declare freeform apply_patch advertise it.
+    # When true, non-template and bridged models supported by every routing executor also advertise "freeform".
+    enable-apply-patch: false
+    # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
+    # This refreshes Codex spawn_agent model details, removes message parameter encryption,
+    # normalizes encrypted agent_message content for Codex, and converts agent_message input
+    # into standard user messages for non-Codex upstream protocols.
+    # Default false. Applies to both OAuth and API-key credentials across providers.
+    # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
+    optimize-multi-agent-v2: false
+
+# Shared upstream behavior applies to OAuth and API-key credentials.
+upstream:
+  codex:
+    # Experimental full-duplex Codex Responses WebSocket steering (default: false).
+    # Keeps one upstream account/model per socket; accepted input is never replayed.
+    response-steering: false
+    # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
+    disable-codex-cloaking: false
+    # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
+    # response.in_progress, the websocket metadata frames), keepalive heartbeats, and the *.added
+    # announcements of an item or part that is still empty - until the upstream emits its first
+    # generated event. Anything else, including a server-side tool item such as web_search_call and
+    # any frame not on that list, releases the stream immediately. On the SSE transport the lines that
+    # are not `data:` frames - comments, `event:` lines, blank separators - are held alongside them.
+    # The hold is bounded by a frame budget and a 1 MiB byte budget, not by wall-clock time: an
+    # upstream that trickles frames holds the response headers for as long as the client will wait.
+    # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
+    # right after those handshake events, instead of returning 503 on the wire. Buffering them
+    # keeps the downstream response headers uncommitted long enough to transparently retry on
+    # another credential. Only overload/rate-limit rejections trigger failover; every other terminal
+    # failure is still delivered in-stream exactly as before. One pre-existing behaviour is worth
+    # knowing, because this option makes the window it lives in much longer: if the stream ends while
+    # the bootstrap is still holding, the attempt ends instead of the error reaching the client, and
+    # whether another credential is then tried depends on how it ended. A clean end with no terminal
+    # event is request-scoped on SSE, so nothing else is tried; a websocket close, or a transport error
+    # such as a dropped connection on either transport, is not, so the request may be retried on
+    # another credential. None of that is new, but before this option the hold ended at the first
+    # keepalive, so it was rare; now it can span the whole reasoning phase.
+    # Trade-off: response headers are delayed until generation starts. Because heartbeats are held
+    # too, the delay now ends at the first generated token rather than at the first heartbeat. The
+    # budget bounds how much is held, not how long: 48 SSE lines, which measures out as 15 heartbeats
+    # of the three-line event:/data:/blank shape, 23 of a two-line ": keepalive" comment followed by
+    # its blank separator, or 47 of a bare ": keepalive" with no separator - one short of the obvious
+    # division, because the rejection frame's own event: line comes out of the same budget before its
+    # data: line is parsed. An upstream that sends the rejection as a bare data: line with no event:
+    # line gets the round number instead. At a 10s upstream heartbeat that is 150s, 230s or 470s of
+    # uncommitted response headers depending on the framing the upstream picks, all of it past nginx's
+    # 60s default proxy_read_timeout, so raise the timeouts in front of the proxy before enabling this.
+    # Those seconds bound what the buffer holds, not when the response headers are committed. Headers
+    # are committed on the first chunk the downstream translator actually produces, so for a format
+    # that renders the handshake as nothing - Chat Completions and Gemini do - they stay uncommitted
+    # past the budget, until the first generated token. That is not specific to the budget: any frame
+    # that releases the buffer has always behaved this way.
+    # The websocket transport spends the same 48 differently - one per message read, whether the loop
+    # holds it or skips it, with no framing to divide by - so there it is 48 heartbeats, about 480s.
+    # Two cases no budget covers: a websocket peer that sends only ping frames, which the library
+    # answers inside the read call, leaving only the 5 minute websocket read deadline; and an upstream
+    # that stops mid-line on SSE, where the scanner never returns and only the request context ends the
+    # wait. Neither is made worse by this option - with it off the same stalled line stalls the
+    # conductor instead, which waits on the same context - but a client-side request timeout, not
+    # proxy_read_timeout, is what bounds them.
+    # Default: false
+    stream-bootstrap-buffering: false
+    # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
+    # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
+    # the stream is released to the client and further in-stream overloads are delivered rather
+    # than failed over. This bounds how long trickled heartbeats or early empty frames can delay
+    # response headers before streaming begins.
+    # Recommendation: If your CPA is deployed behind a reverse proxy with a strict read timeout
+    # (e.g. Nginx default proxy_read_timeout 60s or Cloudflare 100s timeout), setting this to "20s"
+    # is strongly recommended to guarantee headers commit well before proxy timeouts while retaining
+    # a comfortable 20s window to fail over early scheduling overloads.
+    # Note: The timeout check is evaluated as upstream frames arrive; it never aborts the upstream
+    # connection. Downstream headers are committed as soon as the downstream translator emits chunks
+    # (for formats that render handshake/heartbeats, headers commit immediately on release; for
+    # formats like Chat Completions and Gemini that render nothing until the first text token, headers
+    # commit when that first token arrives).
+    # When unset or set to "0", "0s", "none", "unlimited", "disabled", "off", or "never", no time ceiling
+    # is applied, and buffering relies purely on the 48-frame and 1MB byte budget.
+    # Default: "0" (unlimited)
+    stream-bootstrap-timeout: "0"
+    # When true, enable opt-in compatibility for orphan Codex delegation outputs.
+    # Converts orphan function_call_output items from codex_app/create_thread and
+    # codex_app/send_message_to_thread (which lack a valid call_id or matching function_call)
+    # into standard user messages across Responses and non-Codex protocols when the request
+    # header contains X-Openai-Subagent: collab_spawn.
+    orphan-delegation-compatibility: false
+    # When true, scope Codex usage_limit_reached quota cooldowns to the requested model rather
+    # than cooling down the entire credential across all sibling models.
+    # Default: false
+    model-level-cooling: false
+
+  claude:
+    # When true, scope quota cooldowns to the requested model rather than cooling down
+    # the entire credential across all sibling models. Default is false.
+    model-level-cooling: false
+
+    # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
+    # system prompt replacement), so the original system prompt is passed through to Claude as-is.
+    # Credential attributes and explicit per-key cloak modes override this shared default.
+    # Default false keeps the per-client "auto" behavior (cloak only non-Claude-Code clients).
+    # API-key overrides use api-keys.claude[].keys[].cloak.mode.
+    disable-claude-cloak-mode: false
+
+    # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
+    disable-cloaking-model-list: false
+
+    # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
+    # Claude Code: context-1m sits right after claude-code, mid-conversation-system
+    # is added only for models that accept a role=system turn, advanced-tool-use only when
+    # the request uses tool search (deferred tools) or another advanced tool-use feature,
+    # afk-mode sits between fast-mode and extended-cache-ttl, and server-side-fallback / fallback-credit /
+    # structured-outputs trail effort. On direct api.anthropic.com a caller may only ask for
+    # betas real Claude Code also sends, and they are placed at their observed positions;
+    # anything else is dropped so the outgoing set stays one a real client could produce.
+    # Other Anthropic-compatible upstreams still forward caller betas verbatim.
+    #
+    # Shared Claude CLI fingerprint defaults. Update only after measuring a new Claude Code release.
+    # Unconfirmed clients use this CLI baseline. Verified native Claude Code CLI, sdk-cli,
+    # and VSCode requests preserve their measured entrypoint when the Claude Code version is a
+    # patch release in the configured major/minor line at or above this baseline. Older versions
+    # and newer major/minor lines fall back to the baseline until measured. In legacy mode,
+    # timeout is a fallback and
+    # verified native OS/arch values remain client-supplied. When stabilize-device-profile is
+    # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
+    # the same exact software baseline rather than learning newer client versions.
+    # header-defaults:
+    #   user-agent: "claude-cli/2.1.280 (external, cli)"
+    #   package-version: "0.112.1"
+    #   runtime-version: "v26.3.0"
+    #   os: "MacOS"
+    #   arch: "arm64"
+    #   timeout: "600"
+    #   timezone: "Asia/Singapore"  # fallback IANA timezone for cloaked currentDate; a credential JSON "timezone" takes priority
+    #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth fingerprint pinning
+
+  xai:
+    # When true, inject the native x_search tool when the request does not declare it.
+    # The injected tool is also added to tool_choice.allowed_tools when applicable.
+    inject-x-search: false
+
 # API-key upstreams are separate from access.api-keys (client authentication).
 # Each provider contains named groups: one base-url, shared settings, and a keys list.
 # Add another group for another endpoint; base-url belongs to the group, not a key.
@@ -281,7 +442,7 @@ requests:
 # supported by the field. Map/list overrides replace the inherited value as a whole.
 # Negative request-retry values retain the global fallback; weight belongs to each key.
 # An empty proxy-url falls back to requests.proxy-url; direct bypasses proxy settings.
-# OAuth-only provider features belong to oauth.providers and do not apply to these keys.
+# Shared provider defaults belong to upstream; OAuth-only features remain under oauth.providers.
 # Keep differing legacy policies in separate groups or preserve them as key overrides.
 # Uncomment the api-keys root and only the provider examples you want to configure.
 # Replace placeholder keys/URLs before using them.
@@ -398,6 +559,7 @@ requests:
 #       base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #       proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #       # proxy-url: "direct" # optional: explicit direct connect for this credential
+#       # interactions: true                        # optional: opt into native Vertex Interactions API routing (/v1beta1/interactions). For service account JSON files under auths/, add "interactions": true at the root of the file.
 #       headers:
 #         X-Custom-Header: "custom-value"
 #         # Values starting with "$" dynamically copy the header value from downstream client requests.
@@ -445,7 +607,7 @@ requests:
 #           max-context-length: 1048576 # optional: override Codex client context window metadata
 #           force-mapping: true    # optional: rewrite response model fields back to the alias
 #           # Preserve thinking blocks with empty signatures for compatible upstreams.
-#           # OAuth optimize-multi-agent-v2 does not apply to API-key credentials.
+#           # client.codex.optimize-multi-agent-v2 applies to both OAuth and API-key credentials.
 #           is-compat: false
 #           # Optional: enable configuration_update for this API-key model; omitted defaults to false.
 #           support-configuration-update: false
@@ -511,7 +673,7 @@ requests:
 #             # This "cloak" block applies to this api-keys.claude key entry only. For Claude OAuth
 #             # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
 #             # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id".
-#             # oauth.providers.claude.disable-claude-cloak-mode affects OAuth credentials only.
+#             # upstream.claude.disable-claude-cloak-mode is the shared default; this key can override it.
 #             strict-mode: false           # false (default): legacy-model whitelist uses a user system-reminder;
 #                                          # all other and future models use messages[].role=system
 #                                          # true: strip caller prompts and keep only Claude Code billing and identity blocks
@@ -843,89 +1005,6 @@ oauth:
 
     # Codex provider behavior.
     codex:
-      # Experimental full-duplex Codex Responses WebSocket steering (default: false).
-      # Keeps one upstream account/model per socket; accepted input is never replayed.
-      response-steering: false
-      # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
-      disable-codex-cloaking: false
-      # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
-      # response.in_progress, the websocket metadata frames), keepalive heartbeats, and the *.added
-      # announcements of an item or part that is still empty - until the upstream emits its first
-      # generated event. Anything else, including a server-side tool item such as web_search_call and
-      # any frame not on that list, releases the stream immediately. On the SSE transport the lines that
-      # are not `data:` frames - comments, `event:` lines, blank separators - are held alongside them.
-      # The hold is bounded by a frame budget and a 1 MiB byte budget, not by wall-clock time: an
-      # upstream that trickles frames holds the response headers for as long as the client will wait.
-      # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
-      # right after those handshake events, instead of returning 503 on the wire. Buffering them
-      # keeps the downstream response headers uncommitted long enough to transparently retry on
-      # another credential. Only overload/rate-limit rejections trigger failover; every other terminal
-      # failure is still delivered in-stream exactly as before. One pre-existing behaviour is worth
-      # knowing, because this option makes the window it lives in much longer: if the stream ends while
-      # the bootstrap is still holding, the attempt ends instead of the error reaching the client, and
-      # whether another credential is then tried depends on how it ended. A clean end with no terminal
-      # event is request-scoped on SSE, so nothing else is tried; a websocket close, or a transport error
-      # such as a dropped connection on either transport, is not, so the request may be retried on
-      # another credential. None of that is new, but before this option the hold ended at the first
-      # keepalive, so it was rare; now it can span the whole reasoning phase.
-      # Trade-off: response headers are delayed until generation starts. Because heartbeats are held
-      # too, the delay now ends at the first generated token rather than at the first heartbeat. The
-      # budget bounds how much is held, not how long: 48 SSE lines, which measures out as 15 heartbeats
-      # of the three-line event:/data:/blank shape, 23 of a two-line ": keepalive" comment followed by
-      # its blank separator, or 47 of a bare ": keepalive" with no separator - one short of the obvious
-      # division, because the rejection frame's own event: line comes out of the same budget before its
-      # data: line is parsed. An upstream that sends the rejection as a bare data: line with no event:
-      # line gets the round number instead. At a 10s upstream heartbeat that is 150s, 230s or 470s of
-      # uncommitted response headers depending on the framing the upstream picks, all of it past nginx's
-      # 60s default proxy_read_timeout, so raise the timeouts in front of the proxy before enabling this.
-      # Those seconds bound what the buffer holds, not when the response headers are committed. Headers
-      # are committed on the first chunk the downstream translator actually produces, so for a format
-      # that renders the handshake as nothing - Chat Completions and Gemini do - they stay uncommitted
-      # past the budget, until the first generated token. That is not specific to the budget: any frame
-      # that releases the buffer has always behaved this way.
-      # The websocket transport spends the same 48 differently - one per message read, whether the loop
-      # holds it or skips it, with no framing to divide by - so there it is 48 heartbeats, about 480s.
-      # Two cases no budget covers: a websocket peer that sends only ping frames, which the library
-      # answers inside the read call, leaving only the 5 minute websocket read deadline; and an upstream
-      # that stops mid-line on SSE, where the scanner never returns and only the request context ends the
-      # wait. Neither is made worse by this option - with it off the same stalled line stalls the
-      # conductor instead, which waits on the same context - but a client-side request timeout, not
-      # proxy_read_timeout, is what bounds them.
-      # Default: false
-      stream-bootstrap-buffering: false
-      # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
-      # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
-      # the stream is released to the client and further in-stream overloads are delivered rather
-      # than failed over. This bounds how long trickled heartbeats or early empty frames can delay
-      # response headers before streaming begins.
-      # Recommendation: If your CPA is deployed behind a reverse proxy with a strict read timeout
-      # (e.g. Nginx default proxy_read_timeout 60s or Cloudflare 100s timeout), setting this to "20s"
-      # is strongly recommended to guarantee headers commit well before proxy timeouts while retaining
-      # a comfortable 20s window to fail over early scheduling overloads.
-      # Note: The timeout check is evaluated as upstream frames arrive; it never aborts the upstream
-      # connection. Downstream headers are committed as soon as the downstream translator emits chunks
-      # (for formats that render handshake/heartbeats, headers commit immediately on release; for
-      # formats like Chat Completions and Gemini that render nothing until the first text token, headers
-      # commit when that first token arrives).
-      # When unset or set to "0", "0s", "none", "unlimited", "disabled", "off", or "never", no time ceiling
-      # is applied, and buffering relies purely on the 48-frame and 1MB byte budget.
-      # Default: "0" (unlimited)
-      stream-bootstrap-timeout: "0"
-      # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
-      # This refreshes Codex spawn_agent model details, removes message parameter encryption,
-      # normalizes encrypted agent_message content for Codex, and converts agent_message input
-      # into standard user messages for non-Codex upstream protocols.
-      optimize-multi-agent-v2: false
-      # When true, enable opt-in compatibility for orphan Codex delegation outputs.
-      # Converts orphan function_call_output items from codex_app/create_thread and
-      # codex_app/send_message_to_thread (which lack a valid call_id or matching function_call)
-      # into standard user messages across Responses and non-Codex protocols when the request
-      # header contains X-Openai-Subagent: collab_spawn.
-      orphan-delegation-compatibility: false
-      # When true, scope Codex usage_limit_reached quota cooldowns to the requested model rather
-      # than cooling down the entire credential across all sibling models.
-      # Default: false
-      model-level-cooling: false
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
       live-media-relay:
@@ -961,53 +1040,6 @@ oauth:
       #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
       #   beta-features: "multi_agent"
 
-    # Provider-wide Claude settings.
-    claude:
-      # When true, scope quota cooldowns to the requested model rather than cooling down
-      # the entire credential across all sibling models. Default is false.
-      model-level-cooling: false
-
-      # When true, disable Claude OAuth request cloaking (the Claude Code CLI disguise and
-      # system prompt replacement), so the original system prompt is passed through to Claude as-is.
-      # Individual OAuth/token files can override this via a "cloak_mode" value.
-      # Default false keeps the per-client "auto" behavior (cloak only non-Claude-Code clients).
-      # API-key credentials use api-keys.claude[].keys[].cloak.mode separately.
-      disable-claude-cloak-mode: false
-
-      # Claude Code compatibility settings.
-      claude-code:
-        # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
-        disable-cloaking-model-list: false
-
-      # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
-      # Claude Code: context-1m sits right after claude-code, mid-conversation-system
-      # is added only for models that accept a role=system turn, advanced-tool-use only when
-      # the request uses tool search (deferred tools) or another advanced tool-use feature,
-      # afk-mode sits between fast-mode and extended-cache-ttl, and server-side-fallback / fallback-credit /
-      # structured-outputs trail effort. On direct api.anthropic.com a caller may only ask for
-      # betas real Claude Code also sends, and they are placed at their observed positions;
-      # anything else is dropped so the outgoing set stays one a real client could produce.
-      # Other Anthropic-compatible upstreams still forward caller betas verbatim.
-      #
-      # Default headers for Claude OAuth requests. Update only after measuring a new Claude Code release.
-      # Unconfirmed clients use this CLI baseline. Verified native Claude Code CLI, sdk-cli,
-      # and VSCode requests preserve their measured entrypoint when the Claude Code version is a
-      # patch release in the configured major/minor line at or above this baseline. Older versions
-      # and newer major/minor lines fall back to the baseline until measured. In legacy mode,
-      # timeout is a fallback and
-      # verified native OS/arch values remain client-supplied. When stabilize-device-profile is
-      # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
-      # the same exact software baseline rather than learning newer client versions.
-      # header-defaults:
-      #   user-agent: "claude-cli/2.1.280 (external, cli)"
-      #   package-version: "0.112.1"
-      #   runtime-version: "v26.3.0"
-      #   os: "MacOS"
-      #   arch: "arm64"
-      #   timeout: "600"
-      #   timezone: "Asia/Singapore"  # fallback IANA timezone for cloaked currentDate; a credential JSON "timezone" takes priority
-      #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth fingerprint pinning
-
     # Antigravity provider behavior.
     antigravity:
       # sensitive-words:              # optional: words to obfuscate with zero-width characters in system instructions
@@ -1029,12 +1061,6 @@ oauth:
       # When true, validates full Claude protobuf tree (Field 2 -> Field 1 structure).
       # When false (default), only checks R/E prefix + base64 + first byte 0x12.
       # signature-bypass-strict: false
-
-    # xAI provider behavior.
-    xai:
-      # When true, inject the native x_search tool when the request does not declare it.
-      # The injected tool is also added to tool_choice.allowed_tools when applicable.
-      inject-x-search: false
 
     # Devin provider behavior.
     # devin:

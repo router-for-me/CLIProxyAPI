@@ -434,6 +434,9 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		if hash := diff.ComputeVertexCompatModelsHash(compat.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
+		if compat.Interactions != nil && *compat.Interactions {
+			attrs["interactions"] = "true"
+		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
 		metadata := map[string]any{}
 		if compat.DisableCooling != nil {

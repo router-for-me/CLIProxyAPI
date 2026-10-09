@@ -41,18 +41,20 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in internal client format
-func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false)
+
 }
 
 // ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
 // empty or unknown-format signatures for configured compatibility endpoints.
-func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
 }
 
-func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) []byte {
+func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	var drops translatorcommon.UserTurnDrops
 
 	template := []byte(`{"model":"","instructions":"","input":[]}`)
 
@@ -124,9 +126,15 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 			}
 			pendingToolUseIDs = nil
 			contentItems := make([][]byte, 0, 4)
+			// Counts only what this turn itself sends, not system reminders flushed beside it.
+			// Empty text is forwarded but does not count: it can hide an emptied attachment.
+			turnSendable := 0
+			bufferedSendable := 0
 
 			flushMessage := func() {
 				if len(contentItems) > 0 {
+					turnSendable += bufferedSendable
+					bufferedSendable = 0
 					message := []byte(`{"type":"message","role":""}`)
 					message, _ = sjson.SetBytes(message, "role", messageRole)
 					message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(contentItems))
@@ -144,18 +152,21 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				content, _ = sjson.SetBytes(content, "type", partType)
 				content, _ = sjson.SetBytes(content, "text", text)
 				contentItems = append(contentItems, content)
+				if text != "" {
+					bufferedSendable++
+				}
 			}
 
-			appendImageContent := func(dataURL string) {
-				content := []byte(`{"type":"input_image","image_url":""}`)
-				content, _ = sjson.SetBytes(content, "image_url", dataURL)
+			appendImageContent := func(content []byte) {
 				contentItems = append(contentItems, content)
+				bufferedSendable++
 			}
 
 			appendDocumentContent := func(dataURL string) {
 				content := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
 				content, _ = sjson.SetBytes(content, "file_data", dataURL)
 				contentItems = append(contentItems, content)
+				bufferedSendable++
 			}
 
 			appendReasoningContent := func(part gjson.Result) {
@@ -210,43 +221,20 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 							inputItems = append(inputItems, pendingSystemReminders...)
 							pendingSystemReminders = nil
 						}
-						sourceResult := messageContentResult.Get("source")
-						if sourceResult.Exists() {
-							data := sourceResult.Get("data").String()
-							if data == "" {
-								data = sourceResult.Get("base64").String()
-							}
-							if data != "" {
-								mediaType := sourceResult.Get("media_type").String()
-								if mediaType == "" {
-									mediaType = sourceResult.Get("mime_type").String()
-								}
-								if mediaType == "" {
-									mediaType = "application/octet-stream"
-								}
-								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-								appendImageContent(dataURL)
-							}
+						if imagePart, ok := claudeImageInputPart(messageContentResult.Get("source")); ok {
+							appendImageContent(imagePart)
+						} else if messageRole == "user" {
+							drops.Drop(contentType)
 						}
-					case "document":
+					case "document", "container_upload":
 						if len(pendingSystemReminders) > 0 {
 							inputItems = append(inputItems, pendingSystemReminders...)
 							pendingSystemReminders = nil
 						}
-						sourceResult := messageContentResult.Get("source")
-						if sourceResult.Get("type").String() != "base64" {
-							continue
-						}
-						mediaType := strings.TrimSpace(sourceResult.Get("media_type").String())
-						if !strings.EqualFold(mediaType, "application/pdf") {
-							continue
-						}
-						data := sourceResult.Get("data").String()
-						if data == "" {
-							data = sourceResult.Get("base64").String()
-						}
-						if data != "" {
-							appendDocumentContent(fmt.Sprintf("data:%s;base64,%s", mediaType, data))
+						if dataURL, ok := claudeDocumentDataURL(messageContentResult); ok {
+							appendDocumentContent(dataURL)
+						} else if messageRole == "user" {
+							drops.Drop(contentType)
 						}
 					case "tool_use":
 						flushMessage()
@@ -315,6 +303,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 						}
 
 						inputItems = append(inputItems, functionCallOutputMessage)
+						turnSendable++
 					}
 				}
 				flushMessage()
@@ -330,6 +319,9 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					pendingSystemReminders = nil
 				}
 			}
+			if messageRole == "user" {
+				drops.EndTurn(turnSendable)
+			}
 		}
 
 		if len(pendingSystemReminders) > 0 {
@@ -339,6 +331,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 	// Convert tools declarations to the expected format for the Codex API.
 	toolsResult := rootResult.Get("tools")
+	hasWebSearchTool := false
 	var toolItems [][]byte
 	if toolsResult.IsArray() {
 		webSearchToolNames := buildClaudeWebSearchToolNameSet(toolsResult)
@@ -349,6 +342,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
 			if isClaudeWebSearchToolType(toolResult.Get("type").String()) {
+				hasWebSearchTool = true
 				toolItems = append(toolItems, convertClaudeWebSearchToolToCodex(toolResult))
 				continue
 			}
@@ -433,7 +427,11 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	}
 	template, _ = sjson.SetBytes(template, "stream", true)
 	template, _ = sjson.SetBytes(template, "store", false)
-	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
+	includeFields := []string{"reasoning.encrypted_content"}
+	if hasWebSearchTool {
+		includeFields = append(includeFields, "web_search_call.action.sources")
+	}
+	template, _ = sjson.SetBytes(template, "include", includeFields)
 
 	// Map Claude output_config.format to Codex Responses text.format.
 	if format := rootResult.Get("output_config.format"); format.IsObject() && format.Get("type").String() == "json_schema" && format.Get("schema").IsObject() {
@@ -463,7 +461,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	}
 	template = translatorcommon.SetRawArrayItems(template, "input", inputItems)
 
-	return template
+	return template, drops.Err()
 }
 
 func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
@@ -838,4 +836,57 @@ func codexSchemaMissesRequired(schema gjson.Result) bool {
 		}
 	}
 	return false
+}
+
+// claudeDocumentDataURL turns an inline PDF into a Codex input_file URL. Anything
+// else, a file id included, is not representable and is reported by the caller.
+// claudeImageInputPart maps a Claude image source onto a Responses input_image
+// part. Base64 bytes become a data URL, an http(s) url passes through and a file
+// id is carried as file_id. It reports false for a source with none of them.
+func claudeImageInputPart(source gjson.Result) ([]byte, bool) {
+	if !source.Exists() {
+		return nil, false
+	}
+	part := []byte(`{"type":"input_image"}`)
+	data := source.Get("data").String()
+	if data == "" {
+		data = source.Get("base64").String()
+	}
+	switch {
+	case data != "":
+		mediaType := source.Get("media_type").String()
+		if mediaType == "" {
+			mediaType = source.Get("mime_type").String()
+		}
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		part, _ = sjson.SetBytes(part, "image_url", fmt.Sprintf("data:%s;base64,%s", mediaType, data))
+	case source.Get("type").String() == "url" && translatorcommon.IsHTTPURL(source.Get("url").String()):
+		part, _ = sjson.SetBytes(part, "image_url", strings.TrimSpace(source.Get("url").String()))
+	case source.Get("type").String() == "file" && source.Get("file_id").String() != "":
+		part, _ = sjson.SetBytes(part, "file_id", source.Get("file_id").String())
+	default:
+		return nil, false
+	}
+	return part, true
+}
+
+func claudeDocumentDataURL(part gjson.Result) (string, bool) {
+	source := part.Get("source")
+	if source.Get("type").String() == "base64" {
+		mediaType := strings.TrimSpace(source.Get("media_type").String())
+		if !strings.EqualFold(mediaType, "application/pdf") {
+			return "", false
+		}
+		data := source.Get("data").String()
+		if data == "" {
+			data = source.Get("base64").String()
+		}
+		if data == "" {
+			return "", false
+		}
+		return fmt.Sprintf("data:%s;base64,%s", mediaType, data), true
+	}
+	return "", false
 }

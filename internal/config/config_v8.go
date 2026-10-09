@@ -21,6 +21,46 @@ var v8FieldIndexes = make(map[string][]int)
 var v8StructPaths []configPath
 var v8Paths = buildV8Paths()
 
+// Historical spellings are YAML-boundary aliases, not provider runtime fields.
+// The canonical client path wins by presence (including explicit false/null).
+// If it is absent, prefer the previous v8 OAuth path, then providers, then codex.
+var v8ClientPaths = []configPath{
+	{"oauth.providers.codex.optimize-multi-agent-v2", "client.codex.optimize-multi-agent-v2"},
+	{"providers.codex.optimize-multi-agent-v2", "client.codex.optimize-multi-agent-v2"},
+	{"codex.optimize-multi-agent-v2", "client.codex.optimize-multi-agent-v2"},
+}
+
+// Canonical upstream fields win by presence; historical OAuth fields precede globals.
+var v8SharedPaths = []configPath{
+	{"oauth.providers.codex.disable-codex-cloaking", "upstream.codex.disable-codex-cloaking"},
+	{"oauth.providers.codex.stream-bootstrap-buffering", "upstream.codex.stream-bootstrap-buffering"},
+	{"oauth.providers.codex.stream-bootstrap-timeout", "upstream.codex.stream-bootstrap-timeout"},
+	{"oauth.providers.codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
+	{"oauth.providers.codex.model-level-cooling", "upstream.codex.model-level-cooling"},
+	{"oauth.providers.codex.response-steering", "upstream.codex.response-steering"},
+	{"oauth.providers.claude.model-level-cooling", "upstream.claude.model-level-cooling"},
+	{"oauth.providers.claude.claude-code.disable-cloaking-model-list", "upstream.claude.disable-cloaking-model-list"},
+	{"oauth.providers.claude.disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
+	{"oauth.providers.claude.header-defaults.user-agent", "upstream.claude.header-defaults.user-agent"},
+	{"oauth.providers.claude.header-defaults.package-version", "upstream.claude.header-defaults.package-version"},
+	{"oauth.providers.claude.header-defaults.runtime-version", "upstream.claude.header-defaults.runtime-version"},
+	{"oauth.providers.claude.header-defaults.os", "upstream.claude.header-defaults.os"},
+	{"oauth.providers.claude.header-defaults.arch", "upstream.claude.header-defaults.arch"},
+	{"oauth.providers.claude.header-defaults.timeout", "upstream.claude.header-defaults.timeout"},
+	{"oauth.providers.claude.header-defaults.timezone", "upstream.claude.header-defaults.timezone"},
+	{"oauth.providers.claude.header-defaults.stabilize-device-profile", "upstream.claude.header-defaults.stabilize-device-profile"},
+	{"oauth.providers.xai.inject-x-search", "upstream.xai.inject-x-search"},
+}
+
+var v8Aliases = append(append([]configPath(nil), v8ClientPaths...), v8SharedPaths...)
+
+var v8SharedStructPaths = []configPath{
+	{"oauth.providers.claude.header-defaults", "upstream.claude.header-defaults"},
+	{"oauth.providers.claude.claude-code", "upstream.claude"},
+	{"oauth.providers.claude", "upstream.claude"},
+	{"oauth.providers.xai", "upstream.xai"},
+}
+
 var v8KeyFamilies = []configPath{
 	{"gemini-api-key", "gemini"}, {"interactions-api-key", "interactions"},
 	{"vertex-api-key", "vertex"}, {"codex-api-key", "codex"},
@@ -31,6 +71,7 @@ var v8KeyFamilies = []configPath{
 func buildV8Paths() []configPath {
 	prefixes := []configPath{
 		{"host", "server.host"}, {"port", "server.port"}, {"trusted-proxies", "server.trusted-proxies"},
+		{"github-token", "server.github-token"},
 		{"tls", "server.tls"}, {"commercial-mode", "server.commercial-mode"}, {"discovery", "server.discovery"},
 		{"remote-management", "management"}, {"api-keys", "access.api-keys"},
 		{"credential-concurrency", "credentials.concurrency"}, {"credential-in-flight", "credentials.in-flight"},
@@ -44,15 +85,21 @@ func buildV8Paths() []configPath {
 		{"auth-dir", "oauth.auth-dir"}, {"auth-auto-refresh-workers", "oauth.auth-auto-refresh-workers"},
 		{"oauth-model-alias", "oauth.model-alias"}, {"oauth-excluded-models", "oauth.excluded-models"},
 		{"oauth-request-scoped-errors", "oauth.request-scoped-errors"}, {"oauth-settings", "oauth.settings"}, {"ws-auth", "oauth.providers.aistudio.ws-auth"},
+		{"codex.disable-codex-cloaking", "upstream.codex.disable-codex-cloaking"},
+		{"codex.stream-bootstrap-buffering", "upstream.codex.stream-bootstrap-buffering"},
+		{"codex.stream-bootstrap-timeout", "upstream.codex.stream-bootstrap-timeout"},
+		{"codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
+		{"codex.model-level-cooling", "upstream.codex.model-level-cooling"},
+		{"codex.response-steering", "upstream.codex.response-steering"},
 		{"codex", "oauth.providers.codex"}, {"codex-header-defaults", "oauth.providers.codex.header-defaults"},
-		{"claude", "oauth.providers.claude"}, {"claude-code", "oauth.providers.claude.claude-code"},
-		{"disable-claude-cloak-mode", "oauth.providers.claude.disable-claude-cloak-mode"},
-		{"claude-header-defaults", "oauth.providers.claude.header-defaults"},
+		{"claude", "upstream.claude"}, {"claude-code", "upstream.claude"},
+		{"disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
+		{"claude-header-defaults", "upstream.claude.header-defaults"},
 		{"antigravity", "oauth.providers.antigravity"},
 		{"antigravity-signature-cache-enabled", "oauth.providers.antigravity.signature-cache-enabled"},
 		{"antigravity-signature-bypass-strict", "oauth.providers.antigravity.signature-bypass-strict"},
 		{"quota-exceeded.antigravity-credits", "oauth.providers.antigravity.antigravity-credits"},
-		{"xai", "oauth.providers.xai"}, {"devin", "oauth.providers.devin"},
+		{"xai", "upstream.xai"}, {"devin", "oauth.providers.devin"},
 		{"disable-image-generation", "multimedia.disable-image-generation"}, {"gpt-image-2-base-model", "multimedia.gpt-image-2-base-model"},
 		{"video-result-auth-cache-ttl", "multimedia.video-result-auth-cache-ttl"},
 		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},
@@ -122,6 +169,49 @@ func setYAMLPath(root *yaml.Node, path string, value *yaml.Node) {
 	*dst = *deepCopyNode(value)
 }
 
+// setYAMLPathWithComments attaches leading comments to the destination key;
+// yaml.v3 does not render a scalar value's HeadComment.
+func setYAMLPathWithComments(root *yaml.Node, path string, value *yaml.Node) {
+	setYAMLPath(root, path, value)
+	parts := strings.Split(path, ".")
+	parent := root
+	if len(parts) > 1 {
+		parent = yamlPath(root, strings.Join(parts[:len(parts)-1], "."))
+	}
+	parent.Content[findMapKeyIndex(parent, parts[len(parts)-1])].HeadComment = value.HeadComment
+	parent.Content[findMapKeyIndex(parent, parts[len(parts)-1])].FootComment = value.FootComment
+	yamlPath(root, path).HeadComment = ""
+	yamlPath(root, path).FootComment = ""
+}
+
+// copyYAMLPathValue carries key comments and comments of pruned ancestors.
+func copyYAMLPathValue(root *yaml.Node, path string) *yaml.Node {
+	copy := deepCopyNode(yamlPath(root, path))
+	parts := strings.Split(path, ".")
+	parent := root
+	parents := []*yaml.Node{root}
+	if len(parts) > 1 {
+		for _, part := range parts[:len(parts)-1] {
+			parent = yamlPath(parent, part)
+			parents = append(parents, parent)
+		}
+	}
+	if idx := findMapKeyIndex(parent, parts[len(parts)-1]); idx >= 0 {
+		key := parent.Content[idx]
+		copy.HeadComment = strings.TrimSpace(key.HeadComment + "\n" + key.LineComment + "\n" + copy.HeadComment)
+		copy.FootComment = strings.TrimSpace(copy.FootComment + "\n" + key.FootComment)
+	}
+	// A move also prunes single-child ancestors. Carry their comments with the
+	// field; section line comments become leading comments at the destination.
+	for i := len(parents) - 1; i > 0 && len(parents[i].Content) == 2; i-- {
+		idx := findMapKeyIndex(parents[i-1], parts[i-1])
+		key := parents[i-1].Content[idx]
+		copy.HeadComment = strings.TrimSpace(key.HeadComment + "\n" + key.LineComment + "\n" + parents[i].HeadComment + "\n" + parents[i].LineComment + "\n" + copy.HeadComment)
+		copy.FootComment = strings.TrimSpace(copy.FootComment + "\n" + parents[i].FootComment + "\n" + key.FootComment)
+	}
+	return copy
+}
+
 func deleteYAMLPath(root *yaml.Node, path string) bool {
 	parts := strings.SplitN(path, ".", 2)
 	idx := findMapKeyIndex(root, parts[0])
@@ -160,6 +250,9 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err = root.Decode(&decoded); err != nil {
 		return err
 	}
+	if errValidate := decoded.Models.Validate(); errValidate != nil {
+		return errValidate
+	}
 	*cfg = Config(decoded)
 	cfg.OAuthOnlyFields = nil
 	source := expandConfigAliases(node)
@@ -188,7 +281,7 @@ func flattenV8(node *yaml.Node) (*yaml.Node, error) {
 	if _, err := normalizeV8PrivateIPAlias(node, true); err != nil {
 		return nil, err
 	}
-	for _, path := range v8Paths {
+	for _, path := range append(append([]configPath(nil), v8Paths...), v8Aliases...) {
 		parts := strings.Split(path.current, ".")
 		for i := 1; i < len(parts); i++ {
 			parent := yamlPath(node, strings.Join(parts[:i], "."))
@@ -205,6 +298,32 @@ func flattenV8(node *yaml.Node) (*yaml.Node, error) {
 		}
 	}
 	root := deepCopyNode(node)
+	for _, path := range v8Aliases {
+		if yamlPath(root, path.old) != nil {
+			if yamlPath(root, path.current) == nil {
+				setYAMLPathWithComments(root, path.current, copyYAMLPathValue(root, path.old))
+			}
+			deleteYAMLPath(root, path.old)
+		}
+	}
+	for _, path := range v8SharedStructPaths {
+		value := yamlPath(root, path.old)
+		if value == nil {
+			continue
+		}
+		if value.Tag != "!!null" && value.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("%s must be a mapping", path.old)
+		}
+		if value.Tag != "!!null" && len(value.Content) != 0 {
+			continue
+		}
+		if yamlPath(root, path.current) == nil {
+			copy := copyYAMLPathValue(root, path.old)
+			copy.Kind, copy.Tag, copy.Value = yaml.MappingNode, "!!map", ""
+			setYAMLPathWithComments(root, path.current, copy)
+		}
+		deleteYAMLPath(root, path.old)
+	}
 	if version := yamlPath(root, "config-version"); version != nil && (version.Tag != "!!int" || version.Value != "8") {
 		return nil, fmt.Errorf("unsupported config-version (expected 8)")
 	}
@@ -213,9 +332,10 @@ func flattenV8(node *yaml.Node) (*yaml.Node, error) {
 		deleteYAMLPath(root, "api-keys")
 	}
 	for _, path := range v8Paths {
-		if value := yamlPath(node, path.current); value != nil {
+		if value := yamlPath(root, path.current); value != nil {
+			copy := copyYAMLPathValue(root, path.current)
 			deleteYAMLPath(root, path.current)
-			setYAMLPath(root, path.old, value)
+			setYAMLPathWithComments(root, path.old, copy)
 		}
 	}
 	for _, family := range v8KeyFamilies {
@@ -255,7 +375,14 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 		if provider == "openai-compatibility" {
 			item := deepCopyNode(group)
 			deleteYAMLPath(item, "keys")
-			setYAMLPath(item, "api-key-entries", keys)
+			deleteYAMLPath(item, "auth_index")
+			deleteYAMLPath(item, "auth-index")
+			cleanKeys := deepCopyNode(keys)
+			for _, k := range cleanKeys.Content {
+				deleteYAMLPath(k, "auth_index")
+				deleteYAMLPath(k, "auth-index")
+			}
+			setYAMLPath(item, "api-key-entries", cleanKeys)
 			out.Content = append(out.Content, item)
 			continue
 		}
@@ -280,6 +407,9 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 				}
 			}
 			for i := 0; i < len(key.Content); i += 2 {
+				if key.Content[i].Value == "auth_index" || key.Content[i].Value == "auth-index" {
+					continue
+				}
 				if key.Content[i+1].Tag != "!!null" {
 					setYAMLPath(item, key.Content[i].Value, key.Content[i+1])
 				}
@@ -346,8 +476,8 @@ func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
 	}
 	// Empty legacy structs have no leaf fields to move. Preserve them as empty v8
 	// mappings; null structs also mean defaults. User-owned maps are not included.
-	paths := append([]configPath(nil), v8Paths...)
-	for _, path := range v8StructPaths {
+	paths := append(append([]configPath(nil), v8Aliases...), v8Paths...)
+	for _, path := range append(append([]configPath(nil), v8StructPaths...), v8SharedStructPaths...) {
 		old := yamlPath(root, path.old)
 		if old == nil || (!migrate && yamlPath(root, path.current) == nil) {
 			continue
@@ -368,20 +498,10 @@ func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
 		if current == nil && !migrate {
 			continue
 		}
-		copy := deepCopyNode(old)
-		// A leading field comment belongs to its key node in yaml.v3. Carry it
-		// with the value when moving that key into a different mapping.
-		parts := strings.Split(path.old, ".")
-		parent := root
-		if len(parts) > 1 {
-			parent = yamlPath(root, strings.Join(parts[:len(parts)-1], "."))
-		}
-		if idx := findMapKeyIndex(parent, parts[len(parts)-1]); idx >= 0 {
-			copy.HeadComment = strings.TrimSpace(parent.Content[idx].HeadComment + "\n" + copy.HeadComment)
-		}
+		copy := copyYAMLPathValue(root, path.old)
 		deleteYAMLPath(root, path.old)
 		if current == nil {
-			setYAMLPath(root, path.current, copy)
+			setYAMLPathWithComments(root, path.current, copy)
 		}
 		changed = true
 	}
@@ -416,8 +536,45 @@ func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
 	return out, true, err
 }
 
+// IsV8ConfigLayout identifies a validated document by its version or v8 paths.
+// Roots shared with the legacy runtime schema do not alone indicate v8.
+func IsV8ConfigLayout(root *yaml.Node) bool {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return false
+	}
+	root = expandConfigAliases(root)
+	sections := v8AllowedRoots()
+	for _, shared := range []string{"api-keys", "plugins", "quota-exceeded", "routing", "client"} {
+		delete(sections, shared)
+	}
+	for i := 0; i < len(root.Content); i += 2 {
+		if sections[root.Content[i].Value] {
+			return true
+		}
+	}
+	if keys := yamlPath(root, "api-keys"); keys != nil && keys.Kind == yaml.MappingNode {
+		return true
+	}
+	paths := append(append(append([]configPath(nil), v8Paths...), v8StructPaths...), v8Aliases...)
+	for _, path := range paths {
+		if path.old != path.current && yamlPath(root, path.current) != nil {
+			return true
+		}
+		if strings.HasPrefix(path.old, "providers.") && yamlPath(root, path.old) != nil {
+			return true
+		}
+		if path.old != path.current && strings.HasPrefix(path.current, "routing.") {
+			child, _, _ := strings.Cut(strings.TrimPrefix(path.current, "routing."), ".")
+			if yamlPath(root, "routing."+child) != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func v8AllowedRoots() map[string]bool {
-	allowed := map[string]bool{"config-version": true, "api-keys": true, "plugins": true, "quota-exceeded": true}
+	allowed := map[string]bool{"models": true, "config-version": true, "api-keys": true, "plugins": true, "quota-exceeded": true, "client": true}
 	for _, path := range v8Paths {
 		section, _, _ := strings.Cut(path.current, ".")
 		allowed[section] = true
@@ -594,9 +751,9 @@ func restoreV8Layout(root, layout *yaml.Node, original []byte, generated *yaml.N
 		if value == nil {
 			continue
 		}
-		copy := deepCopyNode(value)
+		copy := copyYAMLPathValue(root, path.old)
 		deleteYAMLPath(root, path.old)
-		setYAMLPath(root, path.current, copy)
+		setYAMLPathWithComments(root, path.current, copy)
 	}
 	var baseline *yaml.Node
 	for _, family := range v8KeyFamilies {
@@ -711,7 +868,7 @@ func ValidateV8Config(data []byte) error {
 	}
 	root = expandConfigAliases(root)
 	allowedRoots := v8AllowedRoots()
-	for _, path := range v8Paths {
+	for _, path := range append(append(append([]configPath(nil), v8Paths...), v8Aliases...), v8SharedStructPaths...) {
 		if legacyPath(root, path.old) != nil {
 			return fmt.Errorf("legacy field %s is not accepted by v8; use %s", path.old, path.current)
 		}
@@ -754,5 +911,8 @@ func ValidateV8Config(data []byte) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(encoded))
 	decoder.KnownFields(true)
 	var cfg legacyConfig
-	return decoder.Decode(&cfg)
+	if errDecode := decoder.Decode(&cfg); errDecode != nil {
+		return errDecode
+	}
+	return cfg.Models.Validate()
 }

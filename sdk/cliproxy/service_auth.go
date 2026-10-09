@@ -387,6 +387,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		}
 		auth = current
 	}
+	s.cancelStaleAntigravityProbes(auth.ID)
 	return auth
 }
 
@@ -495,24 +496,29 @@ func (s *Service) completeModelRegistrationForAuth(ctx context.Context, auth *co
 	s.completeModelRegistrationForAuthWithCache(ctx, auth, nil)
 }
 
-func (s *Service) completeModelRegistrationForAuthWithCache(ctx context.Context, auth *coreauth.Auth, compatCache *openAICompatibilityRegistrationCache) {
+func (s *Service) completeModelRegistrationForAuthWithCache(ctx context.Context, auth *coreauth.Auth, compatCache *openAICompatibilityRegistrationCache) uint64 {
 	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" {
-		return
+		return 0
 	}
 	if ctx != nil && ctx.Err() != nil {
-		return
+		return 0
 	}
-	s.registerModelsForAuthWithCache(ctx, auth, compatCache)
+	targetAuth := auth
+	if latest, ok := s.latestAuthForModelRegistration(auth.ID); ok && latest != nil {
+		targetAuth = latest
+	}
+	s.registerModelsForAuthWithCache(ctx, targetAuth, compatCache)
 	if ctx != nil && ctx.Err() != nil {
-		return
+		return 0
 	}
-	s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
+	s.reconcileRegisteredModelStates(ctx, targetAuth)
 
 	// Refresh the scheduler entry so that the auth's supportedModelSet is rebuilt
 	// from the now-populated global model registry. Without this, newly added auths
 	// have an empty supportedModelSet (because Register/Update upserts into the
 	// scheduler before registerModelsForAuth runs) and are invisible to the scheduler.
-	s.coreManager.RefreshSchedulerEntry(auth.ID)
+	s.coreManager.RefreshSchedulerEntry(targetAuth.ID)
+	return targetAuth.Generation
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
@@ -527,8 +533,12 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
 		provider = strings.TrimSpace(existing.Provider)
 	}
-	GlobalModelRegistry().UnregisterClient(id)
+	// Invalidate the auth before advancing the registry epoch. Otherwise a
+	// refresh can adopt the tombstone epoch while the auth still exists and
+	// republish its cached models after the registry has been cleared.
 	s.coreManager.Remove(ctx, id)
+	GlobalModelRegistry().UnregisterClient(id)
+	s.cancelStaleAntigravityProbes(id)
 	if strings.EqualFold(provider, "codex") {
 		executor.CloseCodexWebsocketSessionsForAuthID(id, "auth_removed")
 	}

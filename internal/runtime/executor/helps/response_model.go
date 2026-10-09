@@ -2,8 +2,6 @@ package helps
 
 import (
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/tidwall/gjson"
@@ -12,18 +10,7 @@ import (
 const (
 	// maxResponseModelLength is a defensive bound on an upstream-controlled string
 	// reaching logs and usage records; known model ids stay under ~128 bytes.
-	maxResponseModelLength      = 128
-	maxCodexResponseModelLength = maxResponseModelLength
-
-	// modelSubstitutionWarnWindow bounds how often one credential and model pair
-	// warns: on an affected credential every request is substituted.
-	modelSubstitutionWarnWindow      = 10 * time.Minute
-	codexModelSubstitutionWarnWindow = modelSubstitutionWarnWindow
-
-	// modelSubstitutionWarnMaxEntries caps the throttle state, naturally bounded by
-	// credentials times models; memory safety wins over perfect throttling.
-	modelSubstitutionWarnMaxEntries      = 1024
-	codexModelSubstitutionWarnMaxEntries = modelSubstitutionWarnMaxEntries
+	maxResponseModelLength = 128
 )
 
 // extractResponseModelEvent returns the model an upstream reports serving, read
@@ -228,7 +215,7 @@ func extractCodexResponseModelEvent(payload []byte) (model string, terminal bool
 		return "", terminal
 	}
 	model = strings.TrimSpace(modelResult.String())
-	if len(model) > maxCodexResponseModelLength {
+	if len(model) > maxResponseModelLength {
 		return "", terminal
 	}
 	return model, terminal
@@ -253,23 +240,11 @@ func normalizeModelName(model string) string {
 	return strings.TrimSpace(thinking.ParseSuffix(strings.ToLower(strings.TrimSpace(model))).ModelName)
 }
 
-// normalizeCodexModelName lower-cases a model id and drops its thinking suffix,
-// which never reaches the upstream request body.
-func normalizeCodexModelName(model string) string {
-	return normalizeModelName(model)
-}
-
 func stripModelProviderPrefix(model string) string {
 	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx < len(model)-1 {
 		return model[idx+1:]
 	}
 	return model
-}
-
-// IsCodexModelSubstituted reports whether the upstream served a model other than the
-// requested one; a dated alias pins a snapshot of the same model and is accepted.
-func IsCodexModelSubstituted(requested, served string) bool {
-	return IsModelSubstituted(requested, served)
 }
 
 // IsModelSubstituted reports whether the upstream served a model other than the
@@ -321,12 +296,6 @@ func isDatedModelAlias(base, dated string) bool {
 	return isModelDateSuffix(suffix) || isModelNumericVersionSuffix(suffix)
 }
 
-// isCodexDatedModelAlias reports whether dated is base plus a release date suffix,
-// which upstreams use to pin the exact snapshot of the same model.
-func isCodexDatedModelAlias(base, dated string) bool {
-	return isDatedModelAlias(base, dated)
-}
-
 func isModelDateSuffix(suffix string) bool {
 	switch len(suffix) {
 	case len("YYYY-MM-DD"):
@@ -339,11 +308,6 @@ func isModelDateSuffix(suffix string) bool {
 	default:
 		return false
 	}
-}
-
-// isCodexModelDateSuffix reports whether suffix is a YYYY-MM-DD or YYYYMMDD date.
-func isCodexModelDateSuffix(suffix string) bool {
-	return isModelDateSuffix(suffix)
 }
 
 func isModelNumericVersionSuffix(suffix string) bool {
@@ -364,62 +328,3 @@ func isModelDigits(value string) bool {
 	}
 	return true
 }
-
-// isCodexModelDigits reports whether value is a non-empty run of ASCII digits.
-func isCodexModelDigits(value string) bool {
-	return isModelDigits(value)
-}
-
-type codexModelSubstitutionKey struct {
-	provider  string
-	authID    string
-	requested string
-	served    string
-}
-
-// codexModelSubstitutionThrottle records the last warning per key; nowFunc is
-// injectable so tests can advance the window without sleeping.
-type codexModelSubstitutionThrottle struct {
-	mu       sync.Mutex
-	nowFunc  func() time.Time
-	lastWarn map[codexModelSubstitutionKey]time.Time
-}
-
-func newCodexModelSubstitutionThrottle(nowFunc func() time.Time) *codexModelSubstitutionThrottle {
-	if nowFunc == nil {
-		nowFunc = time.Now
-	}
-	return &codexModelSubstitutionThrottle{
-		nowFunc:  nowFunc,
-		lastWarn: make(map[codexModelSubstitutionKey]time.Time),
-	}
-}
-
-// allow reports whether the key may emit a warning now and records the decision.
-// Suppressed repeats stay silent instead of moving to a lower level.
-func (t *codexModelSubstitutionThrottle) allow(key codexModelSubstitutionKey) bool {
-	if t == nil {
-		return true
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	now := t.nowFunc()
-	if last, ok := t.lastWarn[key]; ok && now.Sub(last) < codexModelSubstitutionWarnWindow {
-		return false
-	}
-	if len(t.lastWarn) >= codexModelSubstitutionWarnMaxEntries {
-		for storedKey, storedAt := range t.lastWarn {
-			if now.Sub(storedAt) >= codexModelSubstitutionWarnWindow {
-				delete(t.lastWarn, storedKey)
-			}
-		}
-		if len(t.lastWarn) >= codexModelSubstitutionWarnMaxEntries {
-			clear(t.lastWarn)
-		}
-	}
-	t.lastWarn[key] = now
-	return true
-}
-
-// codexModelSubstitutionWarns throttles substitution warnings process-wide.
-var codexModelSubstitutionWarns = newCodexModelSubstitutionThrottle(time.Now)

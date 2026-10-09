@@ -12,7 +12,7 @@ import (
 )
 
 func TestConvertInteractionsRequestToAntigravityWithToolMessagesDirect(t *testing.T) {
-	out := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(`{"model":"antigravity-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)
+	out, _ := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(`{"model":"antigravity-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)
 	if got := gjson.GetBytes(out, "request.systemInstruction.parts.0.text").String(); got != "be brief" {
 		t.Fatalf("request.systemInstruction.parts.0.text = %q, want be brief. Output: %s", got, string(out))
 	}
@@ -34,7 +34,7 @@ func TestConvertInteractionsRequestToAntigravityWithToolMessagesDirect(t *testin
 }
 
 func TestConvertInteractionsRequestToAntigravityPreservesGenerationConfig(t *testing.T) {
-	out := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(`{"model":"antigravity-test","input":"hi","generation_config":{"max_output_tokens":16,"top_p":0.8,"tool_choice":"auto","thinking_level":"high","thinking_summaries":"auto"},"reasoning":{"summary":"auto"},"stream":true}`), true)
+	out, _ := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(`{"model":"antigravity-test","input":"hi","generation_config":{"max_output_tokens":16,"top_p":0.8,"tool_choice":"auto","thinking_level":"high","thinking_summaries":"auto"},"reasoning":{"summary":"auto"},"stream":true}`), true)
 	if gjson.GetBytes(out, "input").Exists() {
 		t.Fatalf("raw interactions input exists in translated request. Output: %s", string(out))
 	}
@@ -84,7 +84,7 @@ func TestConvertInteractionsReasoningToAntigravityKeepsSummaryIndependent(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			body := []byte(`{"model":"antigravity-test","input":"hi","reasoning":` + test.reasoning + `}`)
-			out := ConvertInteractionsRequestToAntigravity("antigravity-test", body, false)
+			out, _ := ConvertInteractionsRequestToAntigravity("antigravity-test", body, false)
 			if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
 				t.Fatalf("thinkingLevel = %q, want high. Output: %s", got, out)
 			}
@@ -150,7 +150,7 @@ func TestConvertInteractionsRequestToAntigravityDeduplicatesAndDisambiguatesTool
 		"tool_choice":{"type":"function","function":{"name":"` + second + `"}}
 	}`)
 
-	out := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
+	out, _ := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
 	declarations := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
 	if len(declarations) != 3 {
 		t.Fatalf("declaration count = %d, want 3. Output: %s", len(declarations), out)
@@ -178,7 +178,7 @@ func TestConvertInteractionsRequestToAntigravityPreservesNameMappingWhitespace(t
 		"tool_choice":{"type":"function","function":{"name":" read/file "}}
 	}`)
 
-	out := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
+	out, _ := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
 	declarationName := gjson.GetBytes(out, "request.tools.0.functionDeclarations.0.name").String()
 	callName := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String()
 	allowedName := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String()
@@ -232,7 +232,7 @@ func TestConvertInteractionsRequestToAntigravityToolChoiceNoneOmitsTools(t *test
 				"tools":[{"type":"function","name":"get_weather","parameters":{"type":"object"}}],
 				"tool_choice":` + tc.toolChoice + `
 			}`)
-			out := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
+			out, _ := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
 			if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
 				t.Fatalf("expected mode NONE, got %q", got)
 			}
@@ -250,7 +250,7 @@ func TestConvertInteractionsRequestToAntigravityBuiltinTools(t *testing.T) {
 			"input":"read url",
 			"tools":[{"type":"url_context"}]
 		}`)
-		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 		tools := gjson.GetBytes(out, "request.tools").Array()
 		if len(tools) != 1 {
 			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
@@ -269,7 +269,7 @@ func TestConvertInteractionsRequestToAntigravityBuiltinTools(t *testing.T) {
 			"input":"execute code",
 			"tools":[{"type":"code_execution"}]
 		}`)
-		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 		tools := gjson.GetBytes(out, "request.tools").Array()
 		if len(tools) != 1 {
 			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
@@ -288,7 +288,7 @@ func TestConvertInteractionsRequestToAntigravityBuiltinTools(t *testing.T) {
 			"input":"search web",
 			"tools":[{"type":"google_search"}]
 		}`)
-		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 		tools := gjson.GetBytes(out, "request.tools").Array()
 		if len(tools) != 1 {
 			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
@@ -311,7 +311,7 @@ func TestConvertInteractionsRequestToAntigravityBuiltinTools(t *testing.T) {
 				{"type":"code_execution"}
 			]
 		}`)
-		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 		tools := gjson.GetBytes(out, "request.tools").Array()
 		if len(tools) != 3 {
 			t.Fatalf("expected 3 tools, got %d. Output: %s", len(tools), string(out))
@@ -348,7 +348,7 @@ func TestConvertInteractionsRequestToAntigravityBuiltinTools(t *testing.T) {
 				{"type":"web_search","google_search":{"mode":"search"}}
 			]
 		}`)
-		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 		tools := gjson.GetBytes(out, "request.tools").Array()
 		if len(tools) != 3 {
 			t.Fatalf("expected 3 tools, got %d. Output: %s", len(tools), string(out))
@@ -370,7 +370,7 @@ func TestConvertInteractionsRequestToAntigravityBuiltinTools(t *testing.T) {
 			"input":"native composite tools",
 			"tools":[{"googleSearch":{},"urlContext":{}}]
 		}`)
-		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 		tools := gjson.GetBytes(out, "request.tools").Array()
 		if len(tools) != 1 {
 			t.Fatalf("expected 1 tool node, got %d. Output: %s", len(tools), string(out))
@@ -389,7 +389,7 @@ func TestConvertInteractionsRequestToAntigravityBuiltinTools(t *testing.T) {
 			"input":"unrecognized tool",
 			"tools":[{"type":"file_search","file_search":{"max_results":5}}]
 		}`)
-		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 		tools := gjson.GetBytes(out, "request.tools").Array()
 		if len(tools) != 1 {
 			t.Fatalf("expected 1 tool retained, got %d. Output: %s", len(tools), string(out))
@@ -416,7 +416,7 @@ func TestConvertInteractionsRequestToAntigravity_FunctionResponseJSONRef(t *test
 			}
 		]
 	}`)
-	out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+	out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 	val := gjson.GetBytes(out, "request.contents.0.parts.0.functionResponse.response.result")
 	if val.Type != gjson.String {
 		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", val.Type, val.Raw)
@@ -440,7 +440,7 @@ func TestConvertInteractionsRequestToAntigravity_ParallelToolCallsHistory(t *tes
 			{"type": "function_result", "name": "f3", "call_id": "c3", "result": {"r": 3}}
 		]
 	}`)
-	out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+	out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 	contents := gjson.GetBytes(out, "request.contents").Array()
 	if len(contents) != 3 {
 		t.Fatalf("expected 3 contents (user, model, user), got %d: %s", len(contents), string(out))
@@ -469,7 +469,7 @@ func TestConvertInteractionsRequestToAntigravity_ThoughtSummaryAndSignature(t *t
 			{"type": "model_output", "content": [{"type": "text", "text": "my answer"}]}
 		]
 	}`)
-	out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+	out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 	contents := gjson.GetBytes(out, "request.contents").Array()
 	if len(contents) != 1 {
 		t.Fatalf("expected 1 model content, got %d: %s", len(contents), string(out))
@@ -550,7 +550,7 @@ func TestConvertInteractionsRequestToAntigravity_InterleavedModelTurnSteps(t *te
 			{"type": "function_result", "name": "f2", "call_id": "c2", "result": {"r": 2}}
 		]
 	}`)
-	out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+	out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 	contents := gjson.GetBytes(out, "request.contents").Array()
 	if len(contents) != 2 {
 		t.Fatalf("expected 2 contents (model, user), got %d: %s", len(contents), string(out))
@@ -595,7 +595,7 @@ func TestConvertInteractionsRequestToAntigravity_ResponseToRequestRoundTrip(t *t
 	}
 	turn2Input += `,{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}},{"type":"function_result","name":"search","call_id":"call_2","result":{"found":true}}]}`
 
-	reqOut := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", []byte(turn2Input), false)
+	reqOut, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", []byte(turn2Input), false)
 	contents := gjson.GetBytes(reqOut, "request.contents").Array()
 	if len(contents) != 3 {
 		t.Fatalf("expected 3 contents (user, model, user), got %d: %s", len(contents), string(reqOut))
@@ -621,7 +621,7 @@ func TestConvertInteractionsRequestToAntigravity_MultipleSignaturesPreserved(t *
 			{"type": "function_call", "name": "f1", "call_id": "c1", "arguments": {}}
 		]
 	}`)
-	out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+	out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 	contents := gjson.GetBytes(out, "request.contents").Array()
 	if len(contents) != 1 {
 		t.Fatalf("expected 1 model content, got %d: %s", len(contents), string(out))
@@ -659,7 +659,7 @@ func TestConvertInteractionsRequestToAntigravity_TrailingSignatureRoundTrip(t *t
 	steps := gjson.GetBytes(respOut, "steps").Raw
 
 	turn2Input := `{"model":"gemini-3.8-flash-high","input":` + steps + `}`
-	reqOut := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", []byte(turn2Input), false)
+	reqOut, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", []byte(turn2Input), false)
 	contents := gjson.GetBytes(reqOut, "request.contents").Array()
 	if len(contents) != 1 {
 		t.Fatalf("expected 1 model content, got %d: %s", len(contents), string(reqOut))
@@ -688,7 +688,7 @@ func TestConvertInteractionsRequestToAntigravity_ExplicitSignatureClearsPending(
 			{"type": "function_call", "name": "f2", "call_id": "c2", "arguments": {}}
 		]
 	}`)
-	out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+	out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
 	contents := gjson.GetBytes(out, "request.contents").Array()
 	if len(contents) != 1 {
 		t.Fatalf("expected 1 model content, got %d: %s", len(contents), string(out))

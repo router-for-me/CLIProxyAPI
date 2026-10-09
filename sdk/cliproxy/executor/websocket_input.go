@@ -1,6 +1,12 @@
 package executor
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNoActiveUpstreamWebsocket means response.interrupt has no live upstream socket.
+var ErrNoActiveUpstreamWebsocket = errors.New("no active upstream websocket for response.interrupt")
 
 // WebsocketInput is a frame from the single downstream reader. Err terminates
 // the connection; Payload is owned by the receiver and must not be replayed.

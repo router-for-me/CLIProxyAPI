@@ -300,6 +300,65 @@ func TestInteractionsAntigravityModelUsesTranslatorBridge(t *testing.T) {
 	}
 }
 
+func TestInteractionsVertexModelUsesNativeInteractionsEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	model := "gemini-3.8-flash"
+	var gotPath string
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			http.Error(w, errRead.Error(), http.StatusBadRequest)
+			return
+		}
+		upstreamBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"interaction_v1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"text":"vertex-ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor.NewGeminiVertexExecutor(&config.Config{RequestRetry: 1}))
+	auth := &coreauth.Auth{
+		ID:       "interactions-vertex-auth",
+		Provider: "vertex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-vertex-key",
+			"base_url":     server.URL,
+			"interactions": "true",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register(): %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader(`{"model":"`+model+`","input":"hi vertex"}`))
+	h := NewGeminiAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+
+	h.Interactions(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.HasSuffix(gotPath, "interactions") {
+		t.Fatalf("upstream path = %q, want path ending with interactions", gotPath)
+	}
+	if got := gjson.GetBytes(upstreamBody, "input").String(); got != "hi vertex" {
+		t.Fatalf("upstream input = %q, want hi vertex. Body: %s", got, string(upstreamBody))
+	}
+	if got := gjson.GetBytes(rec.Body.Bytes(), "steps.0.content.0.text").String(); got != "vertex-ok" {
+		t.Fatalf("response text = %q, want vertex-ok. Body: %s", got, rec.Body.String())
+	}
+}
+
 func TestForwardInteractionsStreamWrapsBareJSONAsSSEData(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
