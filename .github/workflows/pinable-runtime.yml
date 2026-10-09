@@ -6,14 +6,19 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - 'cmd/server/**'
+      - 'internal/**'
+      - 'sdk/**'
+      - 'go.mod'
+      - 'go.sum'
       - '.github/workflows/pinable-runtime.yml'
       - 'scripts/pinable/runtime.py'
       - 'scripts/pinable/test_runtime.py'
       - 'scripts/pinable/test_publish_runtime.py'
+      - 'scripts/pinable/test_smoke_runtime.py'
       - 'scripts/pinable/smoke_runtime.py'
       - 'scripts/pinable/publish_runtime.py'
       - 'docs/pinable/desktop-runtime.md'
-      - 'internal/watcher/**'
   workflow_dispatch:
     inputs:
       version:
