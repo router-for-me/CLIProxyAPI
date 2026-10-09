@@ -3,8 +3,10 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -41,6 +43,61 @@ func TestDecodeEnvelopeResultPreservesPluginHTTPStatus(t *testing.T) {
 	}
 	if got := statusProvider.StatusCode(); got != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
+func TestDecodeEnvelopeResultPreservesPluginRetryHints(t *testing.T) {
+	tests := []struct {
+		name             string
+		pluginErr        pluginabi.Error
+		wantRetryAfter   *time.Duration
+		wantCredentialed bool
+	}{
+		{
+			name:             "credential scoped hint",
+			pluginErr:        pluginabi.Error{Code: "quota_exhausted", Message: "monthly quota", HTTPStatus: http.StatusTooManyRequests, RetryAfterMS: 90_000, CredentialScoped: true},
+			wantRetryAfter:   new(90 * time.Second),
+			wantCredentialed: true,
+		},
+		{
+			name:      "legacy envelope without hints",
+			pluginErr: pluginabi.Error{Code: "rate_limited", Message: "slow down", HTTPStatus: http.StatusTooManyRequests},
+		},
+		{
+			name:      "negative hint is ignored",
+			pluginErr: pluginabi.Error{Code: "rate_limited", Message: "slow down", HTTPStatus: http.StatusTooManyRequests, RetryAfterMS: -5},
+		},
+		{
+			name:      "overflowing hint is ignored",
+			pluginErr: pluginabi.Error{Code: "rate_limited", Message: "slow down", HTTPStatus: http.StatusTooManyRequests, RetryAfterMS: math.MaxInt64},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pluginErr := tt.pluginErr
+			_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](pluginabi.Envelope{OK: false, Error: &pluginErr})
+			hints, ok := errDecode.(interface {
+				StatusCode() int
+				RetryAfter() *time.Duration
+				IsCredentialScoped() bool
+			})
+			if !ok {
+				t.Fatalf("error %T does not expose retry hints", errDecode)
+			}
+			if got := hints.StatusCode(); got != tt.pluginErr.HTTPStatus {
+				t.Fatalf("status = %d, want %d", got, tt.pluginErr.HTTPStatus)
+			}
+			gotRetryAfter := hints.RetryAfter()
+			switch {
+			case tt.wantRetryAfter == nil && gotRetryAfter != nil:
+				t.Fatalf("RetryAfter() = %v, want nil", *gotRetryAfter)
+			case tt.wantRetryAfter != nil && (gotRetryAfter == nil || *gotRetryAfter != *tt.wantRetryAfter):
+				t.Fatalf("RetryAfter() = %v, want %v", gotRetryAfter, *tt.wantRetryAfter)
+			}
+			if got := hints.IsCredentialScoped(); got != tt.wantCredentialed {
+				t.Fatalf("IsCredentialScoped() = %t, want %t", got, tt.wantCredentialed)
+			}
+		})
 	}
 }
 
