@@ -522,6 +522,24 @@ type SchedulerAuthCandidate struct {
 	Attributes map[string]string
 	// Metadata contains mutable host-managed auth metadata.
 	Metadata map[string]any
+	// Quota is the host's latest passive quota observation for the auth, or nil
+	// when the provider does not support observation or nothing has been observed
+	// yet. It lets a scheduler order candidates by usage-window headroom or reset
+	// time without a separate Management API round trip.
+	Quota *SchedulerQuotaObservation
+}
+
+// SchedulerQuotaObservation is the quota snapshot the host last recorded for a
+// scheduler candidate. It mirrors the "quota" object of the Management API
+// credential listing and is read-only context: cooldown state is not included,
+// because candidates are already filtered by it.
+type SchedulerQuotaObservation struct {
+	// ObservedAt is when the snapshot was recorded.
+	ObservedAt time.Time
+	// Signals holds the bounded provider-specific quota headers of that upstream
+	// response, keyed by canonical header name (for example
+	// Anthropic-Ratelimit-Unified-7d-Reset or X-Codex-Secondary-Used-Percent).
+	Signals map[string]string
 }
 
 // SchedulerPickResponse returns a scheduler plugin routing decision.
