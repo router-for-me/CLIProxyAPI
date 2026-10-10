@@ -56,7 +56,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("transient-error-cooldown-seconds: %d -> %d", oldCfg.TransientErrorCooldownSeconds, newCfg.TransientErrorCooldownSeconds))
 	}
 	if oldCfg.CooldownReprobeIntervalSeconds != newCfg.CooldownReprobeIntervalSeconds {
-		changes = append(changes, fmt.Sprintf("routing.cooldown.reprobe-interval-seconds: %d -> %d", oldCfg.CooldownReprobeIntervalSeconds, newCfg.CooldownReprobeIntervalSeconds))
+		changes = append(changes, fmt.Sprintf("cooldown-reprobe-interval-seconds: %d -> %d", oldCfg.CooldownReprobeIntervalSeconds, newCfg.CooldownReprobeIntervalSeconds))
 	}
 	if !reflect.DeepEqual(oldCfg.PoolStatusAllowedHosts, newCfg.PoolStatusAllowedHosts) {
 		changes = append(changes, fmt.Sprintf("pool-status-allowed-hosts: %d -> %d entries", len(oldCfg.PoolStatusAllowedHosts), len(newCfg.PoolStatusAllowedHosts)))
