@@ -206,6 +206,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			isHandshake := false
 			terminalSuccess := false
 
+			// Count a keepalive data frame before the Grok transformation consumes it:
+			// TransformKeepaliveSSELine rewrites both the event line and its data line into an SSE
+			// comment, and the counters describe upstream-delivered events, so the same payload
+			// must be counted for Grok clients as it already is for non-Grok ones.
+			if isGrokClient && bytes.HasPrefix(line, dataTag) && grokbuild.IsKeepaliveSSELine(line) {
+				sseEventCount++
+				sseLastEventType = gjson.GetBytes(bytes.TrimSpace(line[5:]), "type").String()
+				sseLastEventAt = nowCodexBootstrap()
+			}
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
 				isHandshake = true
@@ -406,6 +415,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			var translatedLine []byte
 			terminalSuccess := false
 
+			// Count a keepalive data frame before the Grok transformation consumes it:
+			// TransformKeepaliveSSELine rewrites both the event line and its data line into an SSE
+			// comment, and the counters describe upstream-delivered events, so the same payload
+			// must be counted for Grok clients as it already is for non-Grok ones.
+			if isGrokClient && bytes.HasPrefix(line, dataTag) && grokbuild.IsKeepaliveSSELine(line) {
+				sseEventCount++
+				sseLastEventType = gjson.GetBytes(bytes.TrimSpace(line[5:]), "type").String()
+				sseLastEventAt = nowCodexBootstrap()
+			}
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
 			} else if bytes.HasPrefix(line, dataTag) {
@@ -524,14 +542,16 @@ func logCodexStreamTerminationDiagnostics(ctx context.Context, readErr error, ev
 	if !lastEventAt.IsZero() {
 		idleSince = lastEventAt
 	}
-	helps.LogWithRequestID(ctx).Warnf(
-		"codex executor: upstream SSE stream terminated without response.completed (metadata-only diagnostics): read_error=%s events=%d last_event_type=%s idle_ms=%d total_ms=%d",
-		classifyCodexSSEReadError(readErr),
-		eventCount,
-		codexDiagnosticEventType(lastEventType),
-		time.Since(idleSince).Milliseconds(),
-		time.Since(startedAt).Milliseconds(),
-	)
+	// Structured fields, not an interpolated message: operators routing logrus to a structured or
+	// JSON sink must be able to filter, index, and aggregate every dimension; the message stays a
+	// static, human-readable summary.
+	helps.LogWithRequestID(ctx).WithFields(log.Fields{
+		"read_error":      classifyCodexSSEReadError(readErr),
+		"events":          eventCount,
+		"last_event_type": codexDiagnosticEventType(lastEventType),
+		"idle_ms":         time.Since(idleSince).Milliseconds(),
+		"total_ms":        time.Since(startedAt).Milliseconds(),
+	}).Warn("codex executor: upstream SSE stream terminated without response.completed (metadata-only diagnostics)")
 }
 
 // codexDiagnosticEventType renders an unset event type as a dash so the diagnostic line never
@@ -540,10 +560,16 @@ func logCodexStreamTerminationDiagnostics(ctx context.Context, readErr error, ev
 // lowercase letters and digits and would pass any such filter. The value therefore has to match
 // the closed vocabulary of real Codex (OpenAI Responses API) event names - after stripping control
 // characters, so a stray CRLF or NUL in an otherwise known name still renders - and anything else
-// collapses to the fixed label "unknown".
+// collapses to the fixed label "unknown". The vocabulary includes the fixed event names the
+// executor itself recognizes elsewhere (keepalive heartbeats and rate-limit/metadata frames in
+// isCodexBootstrapBufferableEvent, reasoning deltas in helps.HasMeaningfulCodexOutputDelta), so
+// the diagnostic can distinguish a known last event from hostile or unrecognized input.
 var codexDiagnosticEventTypes = map[string]struct{}{
 	"error":                                  {},
+	"keepalive":                              {},
 	"ping":                                   {},
+	"codex.rate_limits":                      {},
+	"codex.response.metadata":                {},
 	"response.completed":                     {},
 	"response.content_part.added":            {},
 	"response.content_part.done":             {},
@@ -566,6 +592,8 @@ var codexDiagnosticEventTypes = map[string]struct{}{
 	"response.reasoning_summary_part.done":   {},
 	"response.reasoning_summary_text.delta":  {},
 	"response.reasoning_summary_text.done":   {},
+	"response.reasoning_text.delta":          {},
+	"response.reasoning_text.done":           {},
 	"response.refusal.delta":                 {},
 	"response.refusal.done":                  {},
 	"response.web_search_call.completed":     {},
