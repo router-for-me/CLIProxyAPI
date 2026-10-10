@@ -86,6 +86,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
 	}
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	promptCacheKey := coreusage.PromptCacheKeyFromContext(ctx)
 	responseModel := strings.TrimSpace(record.ResponseModel)
 	clientRequestMetadata := internallogging.GetClientRequestMetadata(ctx)
 	sessionID := strings.TrimSpace(record.SessionID)
@@ -169,6 +170,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
 		ResponseModel:       responseModel,
+		CacheKeySource:      promptCacheKey.Source,
+		CacheKeyID:          promptCacheKey.ID,
 	})
 	if err != nil {
 		return
@@ -201,6 +204,11 @@ type queuedUsageDetail struct {
 	ServiceTier         string                   `json:"service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
 	ResponseModel       string                   `json:"response_model,omitempty"`
+	// CacheKeySource names who supplied the prompt-cache routing identity: caller, session,
+	// derived (hash of the stable prompt prefix) or passthrough.
+	CacheKeySource string `json:"cache_key_source,omitempty"`
+	// CacheKeyID is sha256(identity)[:16]; never the key. Joins requests that share it.
+	CacheKeyID string `json:"cache_key_id,omitempty"`
 }
 
 type requestDetail struct {

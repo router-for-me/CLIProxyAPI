@@ -98,6 +98,7 @@ type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
 type streamContextKey struct{}
+type promptCacheKeyContextKey struct{}
 type executionRequestIDContextKey struct{}
 type executionTraceIDContextKey struct{}
 type apiKeyContextKey struct{}
@@ -196,6 +197,37 @@ func ReasoningEffortFromContext(ctx context.Context) string {
 	default:
 		return ""
 	}
+}
+
+// PromptCacheKeyInfo is the log-safe prompt-cache-key attribution of one request: who
+// supplied the routing identity and a hash of it. Never the key itself.
+type PromptCacheKeyInfo struct {
+	// Source is caller, session, derived or passthrough.
+	Source string
+	// ID is sha256(identity)[:16] (hex), empty for passthrough.
+	ID string
+}
+
+// WithPromptCacheKey stores the prompt-cache-key attribution for usage sinks.
+func WithPromptCacheKey(ctx context.Context, info PromptCacheKeyInfo) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	info.Source = strings.TrimSpace(info.Source)
+	info.ID = strings.TrimSpace(info.ID)
+	if info.Source == "" && info.ID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, promptCacheKeyContextKey{}, info)
+}
+
+// PromptCacheKeyFromContext returns the prompt-cache-key attribution stored in ctx.
+func PromptCacheKeyFromContext(ctx context.Context) PromptCacheKeyInfo {
+	if ctx == nil {
+		return PromptCacheKeyInfo{}
+	}
+	info, _ := ctx.Value(promptCacheKeyContextKey{}).(PromptCacheKeyInfo)
+	return info
 }
 
 // WithServiceTier stores the client-requested service tier for usage sinks.

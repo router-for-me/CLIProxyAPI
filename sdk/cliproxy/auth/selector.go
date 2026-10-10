@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -1060,7 +1062,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
 				bind(auth.ID)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				entry.Infof("session-affinity: cache hit | session=%s session_key=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), sessionLogKey(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
 		}
@@ -1073,7 +1075,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, nil
 		}
 		bind(auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s session_key=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), sessionLogKey(primaryID), auth.ID, provider, model)
 		return auth, nil
 	}
 
@@ -1084,9 +1086,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID)
 						if isFork {
-							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+							entry.Infof("session-affinity: fork cache hit | session=%s session_key=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), sessionLogKey(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						} else {
-							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+							entry.Infof("session-affinity: fallback cache hit | session=%s session_key=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), sessionLogKey(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
 						return auth, nil
 					}
@@ -1104,9 +1106,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	bind(auth.ID)
 	if isFork && fallbackID != "" {
-		entry.Infof("session-affinity: fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+		entry.Infof("session-affinity: fork bound to new auth | session=%s session_key=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), sessionLogKey(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 	} else {
-		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		entry.Infof("session-affinity: cache miss, new binding | session=%s session_key=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), sessionLogKey(primaryID), auth.ID, provider, model)
 	}
 	return auth, nil
 }
@@ -1166,21 +1168,21 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 					delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 					opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "fork"
 				}
-				entry.Infof("session-affinity: LCP fork hit | session=%s parent=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), truncateSessionID(match.ParentSessionID), match.PrefixLength, auth.ID, provider, model)
+				entry.Infof("session-affinity: LCP fork hit | session=%s session_key=%s parent=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), sessionLogKey(match.SessionID), truncateSessionID(match.ParentSessionID), match.PrefixLength, auth.ID, provider, model)
 			} else if match.IsCompaction {
 				if opts.Metadata != nil {
 					opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey] = true
 					delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 					opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "compaction"
 				}
-				entry.Infof("session-affinity: LCP compaction hit | session=%s parent=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), truncateSessionID(match.ParentSessionID), match.PrefixLength, auth.ID, provider, model)
+				entry.Infof("session-affinity: LCP compaction hit | session=%s session_key=%s parent=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), sessionLogKey(match.SessionID), truncateSessionID(match.ParentSessionID), match.PrefixLength, auth.ID, provider, model)
 			} else {
 				if opts.Metadata != nil {
 					delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 					delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 					delete(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
 				}
-				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
+				entry.Infof("session-affinity: LCP cache hit | session=%s session_key=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), sessionLogKey(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
 			return auth, true, nil
 		}
@@ -1211,21 +1213,21 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 				opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "fork"
 			}
-			entry.Infof("session-affinity: LCP fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), truncateSessionID(bindRes.ParentSessionID), auth.ID, provider, model)
+			entry.Infof("session-affinity: LCP fork bound to new auth | session=%s session_key=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), sessionLogKey(bindRes.SessionID), truncateSessionID(bindRes.ParentSessionID), auth.ID, provider, model)
 		} else if bindRes.IsCompaction {
 			if opts.Metadata != nil {
 				opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey] = true
 				delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 				opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "compaction"
 			}
-			entry.Infof("session-affinity: LCP compaction bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), truncateSessionID(bindRes.ParentSessionID), auth.ID, provider, model)
+			entry.Infof("session-affinity: LCP compaction bound to new auth | session=%s session_key=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), sessionLogKey(bindRes.SessionID), truncateSessionID(bindRes.ParentSessionID), auth.ID, provider, model)
 		} else {
 			if opts.Metadata != nil {
 				delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 				delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 				delete(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
 			}
-			entry.Infof("session-affinity: LCP cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), auth.ID, provider, model)
+			entry.Infof("session-affinity: LCP cache miss, new binding | session=%s session_key=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), sessionLogKey(bindRes.SessionID), auth.ID, provider, model)
 		}
 	}
 	return auth, true, nil
@@ -1325,6 +1327,22 @@ func truncateSessionID(id string) string {
 		return id
 	}
 	return id[:8] + "..."
+}
+
+// sessionLogKey returns a stable, non-reversible log key for a session ID: the ID's kind
+// prefix (e.g. "claude:", "header:") followed by the first 16 hex chars of sha256(id).
+// Unlike truncateSessionID it keeps distinct sessions distinct in logs without writing the
+// raw client ID.
+func sessionLogKey(id string) string {
+	if id == "" {
+		return ""
+	}
+	prefix := ""
+	if i := strings.IndexByte(id, ':'); i > 0 && i <= 16 {
+		prefix = id[:i+1]
+	}
+	sum := sha256.Sum256([]byte(id))
+	return prefix + hex.EncodeToString(sum[:])[:16]
 }
 
 // Stop releases resources held by the selector.
