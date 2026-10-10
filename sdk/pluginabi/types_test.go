@@ -103,6 +103,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodHostAuthGetRuntime != "host.auth.get_runtime" {
 		t.Fatalf("MethodHostAuthGetRuntime = %q", MethodHostAuthGetRuntime)
 	}
+	if MethodHostAuthGetCredential != "host.auth.get_credential" {
+		t.Fatalf("MethodHostAuthGetCredential = %q", MethodHostAuthGetCredential)
+	}
 	if MethodHostAuthSave != "host.auth.save" {
 		t.Fatalf("MethodHostAuthSave = %q", MethodHostAuthSave)
 	}
