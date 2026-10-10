@@ -28,6 +28,9 @@ func TestSanitizePoolAuthID(t *testing.T) {
 		{name: "cds suffix", raw: "auths/cool-account.cds", want: "cool-account"},
 		{name: "plain label", raw: "team-a-key", want: "team-a-key"},
 		{name: "short email local part", raw: "ab@gmail.com.json", want: "ab***", noAt: true},
+		{name: "non-ascii email local part", raw: "user名字@gmail.com", want: "user***", noAt: true},
+		{name: "non-ascii email domain", raw: "user@例え.jp", want: "user***", noAt: true},
+		{name: "at token without domain", raw: "key@internal", want: "key***", noAt: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

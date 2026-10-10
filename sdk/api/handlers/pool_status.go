@@ -50,11 +50,17 @@ type poolStatusAccount struct {
 
 var poolStatusEmailPattern = regexp.MustCompile(`([a-zA-Z0-9._%+-]{1,10})[a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
 
+// poolStatusAtTokenPattern is a defensive fallback for email-like tokens the
+// strict ASCII pattern misses (for example non-ASCII local parts or domains):
+// any remaining whitespace-delimited token containing '@' is masked.
+var poolStatusAtTokenPattern = regexp.MustCompile(`([a-zA-Z0-9._%+-]{0,10})[^\s@]*@\S*`)
+
 // sanitizePoolAuthID strips path and extension noise and masks any embedded
 // email local part so the unauthenticated endpoint never leaks PII.
 func sanitizePoolAuthID(raw string) string {
 	raw = filepath.Base(strings.TrimSuffix(strings.TrimSuffix(raw, ".json"), ".cds"))
-	return poolStatusEmailPattern.ReplaceAllString(raw, "${1}***")
+	masked := poolStatusEmailPattern.ReplaceAllString(raw, "${1}***")
+	return poolStatusAtTokenPattern.ReplaceAllString(masked, "${1}***")
 }
 
 // poolAccountID picks the best operator-facing identifier for an auth.
