@@ -9,6 +9,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestManagerMarkResultPublishesErrorEventAfterAuthStateUpdate(t *testing.T) {
@@ -133,6 +134,60 @@ func TestManagerMarkResultSkipsErrorEventInHomeMode(t *testing.T) {
 	case got := <-subscriber:
 		t.Fatalf("received home-mode error event %q, want none", string(got))
 	default:
+	}
+}
+
+func TestManagerMarkResultSkipsErrorEventForReprobe(t *testing.T) {
+	withEnabledErrorQueue(t)
+	subscriber, unsubscribe := redisqueue.SubscribeErrors()
+	defer unsubscribe()
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "reprobe-auth-error-event",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "codex",
+		Model:    "gpt-5",
+		Success:  false,
+		Error: &Error{
+			Message:    "probe failed",
+			HTTPStatus: http.StatusServiceUnavailable,
+		},
+		Options: cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.CooldownReprobeMetadataKey: true,
+			},
+		},
+	})
+
+	select {
+	case got := <-subscriber:
+		t.Fatalf("received re-probe error event %q, want none", string(got))
+	default:
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "codex",
+		Model:    "gpt-5",
+		Success:  false,
+		Error: &Error{
+			Message:    "real request failed",
+			HTTPStatus: http.StatusServiceUnavailable,
+		},
+	})
+	if payload := requireErrorSubscriberPayload(t, subscriber); len(payload) == 0 {
+		t.Fatal("expected error event for non-probe result")
 	}
 }
 

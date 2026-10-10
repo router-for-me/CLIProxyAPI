@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type errorEvent struct {
@@ -49,6 +50,9 @@ type errorEventModelStatus struct {
 
 func (m *Manager) publishErrorEvent(result Result, authSnapshot *Auth) {
 	if m == nil || result.Success || authSnapshot == nil || m.HomeEnabled() {
+		return
+	}
+	if probe, _ := result.Options.Metadata[cliproxyexecutor.CooldownReprobeMetadataKey].(bool); probe {
 		return
 	}
 	payload, ok := buildErrorEventPayload(result, authSnapshot)
