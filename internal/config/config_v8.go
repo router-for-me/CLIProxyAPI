@@ -49,6 +49,7 @@ var v8SharedPaths = []configPath{
 	{"oauth.providers.claude.header-defaults.timeout", "upstream.claude.header-defaults.timeout"},
 	{"oauth.providers.claude.header-defaults.timezone", "upstream.claude.header-defaults.timezone"},
 	{"oauth.providers.claude.header-defaults.stabilize-device-profile", "upstream.claude.header-defaults.stabilize-device-profile"},
+	{"oauth.providers.claude.header-defaults.preserve-native-identity", "upstream.claude.header-defaults.preserve-native-identity"},
 	{"oauth.providers.xai.inject-x-search", "upstream.xai.inject-x-search"},
 }
 
