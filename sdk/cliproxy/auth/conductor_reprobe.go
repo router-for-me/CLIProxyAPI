@@ -139,7 +139,7 @@ func (m *Manager) collectReprobeCandidates(now time.Time) []reprobeCandidate {
 // reprobeCandidatesForAuth emits the probe candidates a single auth warrants
 // right now. The caller must hold m.mu.
 func (m *Manager) reprobeCandidatesForAuth(a *Auth, now time.Time) []reprobeCandidate {
-	if a == nil || a.Disabled || a.Status == StatusDisabled || m.cooldownDisabledForAuth(a) {
+	if a == nil || a.Disabled || a.Status == StatusDisabled || m.cooldownDisabledForAuth(a) || hasUnauthorizedAuthFailure(a) {
 		return nil
 	}
 	if len(a.ModelStates) == 0 {
