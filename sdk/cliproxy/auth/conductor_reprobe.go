@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -12,13 +11,9 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-const (
-	// cooldownReprobeConfigPollInterval bounds how often the re-probe loop
-	// re-reads the configured interval while re-probing is disabled.
-	cooldownReprobeConfigPollInterval = time.Minute
-	// cooldownReprobeHeader marks synthetic re-probe requests forwarded upstream.
-	cooldownReprobeHeader = "X-CPA-Probe"
-)
+// cooldownReprobeConfigPollInterval bounds how often the re-probe loop
+// re-reads the configured interval while re-probing is disabled.
+const cooldownReprobeConfigPollInterval = time.Minute
 
 // reprobeCandidate identifies one expired cooldown that should be actively
 // re-verified with a lightweight upstream request.
@@ -269,7 +264,6 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 		OriginalRequest: payload,
 		SourceFormat:    sdktranslator.FormatOpenAI,
 		ResponseFormat:  sdktranslator.FormatOpenAI,
-		Headers:         http.Header{cooldownReprobeHeader: []string{"true"}},
 		Metadata: map[string]any{
 			cliproxyexecutor.RequestedModelMetadataKey:  routeModel,
 			cliproxyexecutor.CooldownReprobeMetadataKey: true,
