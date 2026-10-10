@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -151,6 +152,7 @@ func (m *Manager) reprobeCandidatesForAuth(a *Auth, now time.Time) []reprobeCand
 	if blocked, _, _ := isAuthBlockedForModel(a, "", now); blocked {
 		return nil
 	}
+	capable := reprobeChatCapableModels(a.ID)
 	models := make([]string, 0, len(a.ModelStates))
 	for model := range a.ModelStates {
 		models = append(models, model)
@@ -161,6 +163,9 @@ func (m *Manager) reprobeCandidatesForAuth(a *Auth, now time.Time) []reprobeCand
 	for _, model := range models {
 		state := a.ModelStates[model]
 		if state == nil || state.Status == StatusDisabled {
+			continue
+		}
+		if _, ok := capable[canonicalModelKey(model)]; !ok {
 			continue
 		}
 		if reprobeExpiredTimer(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now) {
@@ -201,13 +206,77 @@ func firstReprobeModel(auth *Auth, now time.Time) string {
 	if len(models) == 0 {
 		return ""
 	}
+	capable := reprobeChatCapableModels(auth.ID)
 	sort.Strings(models)
 	for _, model := range models {
+		if _, ok := capable[model]; !ok {
+			continue
+		}
 		if blocked, _, _ := isAuthBlockedForModel(auth, model, now); !blocked {
 			return model
 		}
 	}
 	return ""
+}
+
+// reprobeChatCapableModels returns the canonical model keys registered for the
+// auth whose catalog metadata marks them as chat-capable. Models whose
+// capability is unknown (unregistered or user-defined compat entries) are
+// excluded so a synthetic chat ping cannot re-cool a non-chat model.
+func reprobeChatCapableModels(authID string) map[string]struct{} {
+	reg := registry.GetGlobalRegistry()
+	if reg == nil {
+		return nil
+	}
+	infos := reg.GetModelsForClient(authID)
+	capable := make(map[string]struct{}, len(infos))
+	for _, info := range infos {
+		if !reprobeChatCapableInfo(info) {
+			continue
+		}
+		if key := canonicalModelKey(info.ID); key != "" {
+			capable[key] = struct{}{}
+		}
+	}
+	return capable
+}
+
+// reprobeChatCapableInfo reports whether catalog metadata proves the model can
+// serve a chat completion. Image-endpoint, output-non-text, non-chat-method,
+// compat, and user-defined models do not qualify because a chat-shaped probe
+// would be rejected upstream.
+func reprobeChatCapableInfo(info *registry.ModelInfo) bool {
+	if info == nil || info.UserDefined || info.IsCompat {
+		return false
+	}
+	if info.Type == registry.OpenAIImageModelType {
+		return false
+	}
+	if len(info.SupportedOutputModalities) > 0 && !hasReprobeTextOutput(info.SupportedOutputModalities) {
+		return false
+	}
+	if len(info.SupportedGenerationMethods) > 0 && !hasReprobeChatMethod(info.SupportedGenerationMethods) {
+		return false
+	}
+	return true
+}
+
+func hasReprobeTextOutput(modalities []string) bool {
+	for _, modality := range modalities {
+		if strings.EqualFold(modality, "text") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasReprobeChatMethod(methods []string) bool {
+	for _, method := range methods {
+		if strings.EqualFold(method, "generateContent") || strings.EqualFold(method, "streamGenerateContent") {
+			return true
+		}
+	}
+	return false
 }
 
 // runReprobeCandidate executes a single synthetic probe and records the result

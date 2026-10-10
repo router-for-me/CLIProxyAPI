@@ -61,6 +61,16 @@ func (e *reprobeTestExecutor) HttpRequest(context.Context, *Auth, *http.Request)
 	return nil, errors.New("not supported")
 }
 
+func registerReprobeTestModels(t *testing.T, authID string, models ...string) {
+	t.Helper()
+	infos := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		infos = append(infos, &registry.ModelInfo{ID: model})
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, "reprobe-test", infos)
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+}
+
 func TestReprobeExpiredTimer(t *testing.T) {
 	t.Parallel()
 
@@ -141,6 +151,14 @@ func TestCollectReprobeCandidates(t *testing.T) {
 		{ID: "fallback-open", Provider: "reprobe-test", Unavailable: true, NextRetryAfter: past, ModelStates: map[string]*ModelState{
 			"gpt-4": {},
 		}},
+		// Image-endpoint models are never probed with a chat payload.
+		{ID: "nonchat-image", Provider: "reprobe-test", ModelStates: map[string]*ModelState{
+			"imagen-4": {Unavailable: true, NextRetryAfter: past},
+		}},
+		// User-defined compat models have unknown capability: skip, do not probe.
+		{ID: "nonchat-compat", Provider: "reprobe-test", ModelStates: map[string]*ModelState{
+			"compat-1": {Unavailable: true, NextRetryAfter: past},
+		}},
 		// Healthy credential.
 		{ID: "open", Provider: "reprobe-test"},
 	}
@@ -149,15 +167,21 @@ func TestCollectReprobeCandidates(t *testing.T) {
 			t.Fatalf("Register(%s): %v", a.ID, err)
 		}
 	}
+	registry.GetGlobalRegistry().RegisterClient("model-mixed", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-4"}, {ID: "gpt-5"}})
 	registry.GetGlobalRegistry().RegisterClient("fallback-disabled", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-5"}})
 	registry.GetGlobalRegistry().RegisterClient("fallback-blocked", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-5"}})
 	registry.GetGlobalRegistry().RegisterClient("fallback-next", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-4"}, {ID: "gpt-5"}})
 	registry.GetGlobalRegistry().RegisterClient("fallback-open", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-4"}})
+	registry.GetGlobalRegistry().RegisterClient("nonchat-image", "reprobe-test", []*registry.ModelInfo{{ID: "imagen-4", SupportedGenerationMethods: []string{"predict"}, SupportedOutputModalities: []string{"image"}}})
+	registry.GetGlobalRegistry().RegisterClient("nonchat-compat", "reprobe-test", []*registry.ModelInfo{{ID: "compat-1", UserDefined: true}})
 	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient("model-mixed")
 		registry.GetGlobalRegistry().UnregisterClient("fallback-disabled")
 		registry.GetGlobalRegistry().UnregisterClient("fallback-blocked")
 		registry.GetGlobalRegistry().UnregisterClient("fallback-next")
 		registry.GetGlobalRegistry().UnregisterClient("fallback-open")
+		registry.GetGlobalRegistry().UnregisterClient("nonchat-image")
+		registry.GetGlobalRegistry().UnregisterClient("nonchat-compat")
 	})
 
 	candidates := m.collectReprobeCandidates(now)
@@ -194,7 +218,7 @@ func TestCollectReprobeCandidates(t *testing.T) {
 	if next.routeModel != "gpt-5" {
 		t.Fatalf("fallback-next candidate = %+v, want routeModel gpt-5", next)
 	}
-	for _, absent := range []string{"cred-pending", "disabled", "model-disabled", "fallback-disabled", "fallback-blocked", "open"} {
+	for _, absent := range []string{"cred-pending", "disabled", "model-disabled", "fallback-disabled", "fallback-blocked", "nonchat-image", "nonchat-compat", "open"} {
 		if _, ok := got[absent]; ok {
 			t.Fatalf("unexpected candidate for %s", absent)
 		}
@@ -209,14 +233,15 @@ func TestRunReprobeCandidateSuccessClearsCooldown(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.RegisterExecutor(executor)
 
-	auth := &Auth{ID: "a1", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
+	auth := &Auth{ID: "a1-success", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
 		"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(-time.Minute)},
 	}}
 	if _, err := m.Register(context.Background(), auth); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	registerReprobeTestModels(t, "a1-success", "gpt-5")
 
-	m.runReprobeCandidate(context.Background(), reprobeCandidate{auth: m.auths["a1"].Clone(), routeModel: "gpt-5"})
+	m.runReprobeCandidate(context.Background(), reprobeCandidate{auth: m.auths["a1-success"].Clone(), routeModel: "gpt-5"})
 
 	if executor.calls != 1 {
 		t.Fatalf("executor calls = %d, want 1", executor.calls)
@@ -225,7 +250,7 @@ func TestRunReprobeCandidateSuccessClearsCooldown(t *testing.T) {
 		t.Fatal("expected CooldownReprobeMetadataKey marker on probe options")
 	}
 	m.mu.RLock()
-	state := m.auths["a1"].ModelStates["gpt-5"]
+	state := m.auths["a1-success"].ModelStates["gpt-5"]
 	got := state != nil && state.Unavailable
 	m.mu.RUnlock()
 	if got {
@@ -241,20 +266,21 @@ func TestRunReprobeCandidateFailureRecools(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.RegisterExecutor(executor)
 
-	auth := &Auth{ID: "a1", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
+	auth := &Auth{ID: "a1-fail", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
 		"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(-time.Minute)},
 	}}
 	if _, err := m.Register(context.Background(), auth); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	registerReprobeTestModels(t, "a1-fail", "gpt-5")
 
-	m.runReprobeCandidate(context.Background(), reprobeCandidate{auth: m.auths["a1"].Clone(), routeModel: "gpt-5"})
+	m.runReprobeCandidate(context.Background(), reprobeCandidate{auth: m.auths["a1-fail"].Clone(), routeModel: "gpt-5"})
 
 	if executor.calls != 1 {
 		t.Fatalf("executor calls = %d, want 1", executor.calls)
 	}
 	m.mu.RLock()
-	state := m.auths["a1"].ModelStates["gpt-5"]
+	state := m.auths["a1-fail"].ModelStates["gpt-5"]
 	stillCooling := state != nil && state.Unavailable && state.NextRetryAfter.After(time.Now())
 	m.mu.RUnlock()
 	if !stillCooling {
@@ -323,14 +349,15 @@ func TestRunReprobeCandidatePrepareFailurePublishesNoErrorEvent(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.RegisterExecutor(executor)
 
-	auth := &Auth{ID: "a1", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
+	auth := &Auth{ID: "a1-prepare", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
 		"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(-time.Minute)},
 	}}
 	if _, err := m.Register(context.Background(), auth); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	registerReprobeTestModels(t, "a1-prepare", "gpt-5")
 
-	m.runReprobeCandidate(context.Background(), reprobeCandidate{auth: m.auths["a1"].Clone(), routeModel: "gpt-5"})
+	m.runReprobeCandidate(context.Background(), reprobeCandidate{auth: m.auths["a1-prepare"].Clone(), routeModel: "gpt-5"})
 
 	if executor.calls != 0 {
 		t.Fatalf("executor calls = %d, want 0 after prepare failure", executor.calls)
@@ -350,16 +377,17 @@ func TestRunReprobeCandidateSkipsWhenCooldownCleared(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.RegisterExecutor(executor)
 
-	auth := &Auth{ID: "a1", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
+	auth := &Auth{ID: "a1-cleared", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
 		"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(-time.Minute)},
 	}}
 	if _, err := m.Register(context.Background(), auth); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	candidate := reprobeCandidate{auth: m.auths["a1"].Clone(), routeModel: "gpt-5"}
+	registerReprobeTestModels(t, "a1-cleared", "gpt-5")
+	candidate := reprobeCandidate{auth: m.auths["a1-cleared"].Clone(), routeModel: "gpt-5"}
 
 	m.mu.Lock()
-	live := m.auths["a1"].ModelStates["gpt-5"]
+	live := m.auths["a1-cleared"].ModelStates["gpt-5"]
 	live.Unavailable = false
 	live.NextRetryAfter = time.Time{}
 	m.mu.Unlock()
@@ -379,16 +407,17 @@ func TestRunReprobeCandidateSkipsDisabledModel(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.RegisterExecutor(executor)
 
-	auth := &Auth{ID: "a1", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
+	auth := &Auth{ID: "a1-disabled", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
 		"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(-time.Minute)},
 	}}
 	if _, err := m.Register(context.Background(), auth); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	candidate := reprobeCandidate{auth: m.auths["a1"].Clone(), routeModel: "gpt-5"}
+	registerReprobeTestModels(t, "a1-disabled", "gpt-5")
+	candidate := reprobeCandidate{auth: m.auths["a1-disabled"].Clone(), routeModel: "gpt-5"}
 
 	m.mu.Lock()
-	m.auths["a1"].ModelStates["gpt-5"].Status = StatusDisabled
+	m.auths["a1-disabled"].ModelStates["gpt-5"].Status = StatusDisabled
 	m.mu.Unlock()
 
 	m.runReprobeCandidate(context.Background(), candidate)

@@ -196,11 +196,16 @@ func (s *Server) poolStatusHostAllowed(hostHeader string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
-	if s != nil && s.cfg != nil {
-		for _, extra := range s.cfg.PoolStatusAllowedHosts {
-			if strings.EqualFold(host, normalizeHostIdentity(extra)) {
-				return true
-			}
+	var cfg *config.Config
+	if s != nil {
+		cfg = s.getConfig()
+	}
+	if cfg == nil {
+		return false
+	}
+	for _, extra := range cfg.PoolStatusAllowedHosts {
+		if strings.EqualFold(host, normalizeHostIdentity(extra)) {
+			return true
 		}
 	}
 	return false
