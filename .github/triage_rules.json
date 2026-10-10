@@ -1,0 +1,13 @@
+{
+  "ignore_patterns": [
+    "纯文档/README/错别字/格式微调 (documentation/README/typo/formatting only)",
+    "未经立项讨论的大规模代码移植（如 port kiro / rewrite in other lang） (unauthorized large-scale port or language rewrite)",
+    "未附带有效日志、配置文件或 curl 复现的纯情绪吐槽/抱怨 (complaints without logs, configs, or curl reproduction)",
+    "依赖包自动扫描生成的机械式微小 bump (automated mechanical small dependency bump)",
+    "纯前端 UI 样式小修小补 (cosmetic frontend UI/style minor tweaks)"
+  ],
+  "rules": {
+    "zero_score_instruction": "凡是命中 ignore_patterns 任意一条，必须强制打 0 分 (Level 0)，标记为 invalid / 低优先级 (Score 0 if matching any ignore pattern, mark as invalid/low priority)",
+    "high_priority_threshold": 2.5
+  }
+}
