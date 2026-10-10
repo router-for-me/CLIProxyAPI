@@ -47,6 +47,7 @@ type poolStatusAccount struct {
 	RemainingSeconds int64             `json:"remaining_seconds"`
 	ActiveSessions   int               `json:"active_sessions"`
 	ModelsCooling    map[string]string `json:"models_cooling"`
+	ModelsBlocked    []string          `json:"models_blocked,omitempty"`
 }
 
 var poolStatusEmailPattern = regexp.MustCompile(`([a-zA-Z0-9._%+-]{1,10})[a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
@@ -190,6 +191,15 @@ func buildPoolStatusAccount(auth *coreauth.Auth, now time.Time, sessionCounts ma
 		account.Status = "unavailable"
 		account.Reason = &reason
 		return account
+	}
+	if blockedModels := coreauth.ModelBlocksWithoutRetry(auth, now); len(blockedModels) > 0 {
+		account.ModelsBlocked = blockedModels
+		if coreauth.AllModelsBlockedWithoutRetry(auth, now) {
+			account.Status = "unavailable"
+			reason := "unavailable"
+			account.Reason = &reason
+			return account
+		}
 	}
 	views := coreauth.CooldownSnapshotForAuth(auth, now)
 	if len(views) == 0 {

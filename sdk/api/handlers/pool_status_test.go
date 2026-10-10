@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,10 +180,11 @@ func TestBuildPoolStatusAccountUntimedBlocks(t *testing.T) {
 
 	now := time.Now()
 	cases := []struct {
-		name       string
-		auth       *coreauth.Auth
-		wantStatus string
-		wantReason string
+		name        string
+		auth        *coreauth.Auth
+		wantStatus  string
+		wantReason  string
+		wantBlocked []string
 	}{
 		{
 			name: "terminal unauthorized",
@@ -218,6 +220,32 @@ func TestBuildPoolStatusAccountUntimedBlocks(t *testing.T) {
 			auth:       &coreauth.Auth{ID: "u5"},
 			wantStatus: "open",
 		},
+		{
+			name: "all models untimed blocked",
+			auth: &coreauth.Auth{ID: "u6", ModelStates: map[string]*coreauth.ModelState{
+				"gpt-5": {Unavailable: true},
+				"gpt-4": {Unavailable: true},
+			}},
+			wantStatus:  "unavailable",
+			wantReason:  "unavailable",
+			wantBlocked: []string{"gpt-4", "gpt-5"},
+		},
+		{
+			name: "partial model untimed blocks stay open",
+			auth: &coreauth.Auth{ID: "u7", ModelStates: map[string]*coreauth.ModelState{
+				"gpt-5": {Unavailable: true},
+				"gpt-4": {},
+			}},
+			wantStatus:  "open",
+			wantBlocked: []string{"gpt-5"},
+		},
+		{
+			name: "timed model cooldown stays cooling",
+			auth: &coreauth.Auth{ID: "u8", ModelStates: map[string]*coreauth.ModelState{
+				"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(time.Hour)},
+			}},
+			wantStatus: "cooling",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,6 +259,12 @@ func TestBuildPoolStatusAccountUntimedBlocks(t *testing.T) {
 					got = *account.Reason
 				}
 				t.Fatalf("reason = %q, want %q", got, tc.wantReason)
+			}
+			if len(tc.wantBlocked) > 0 && !slices.Equal(account.ModelsBlocked, tc.wantBlocked) {
+				t.Fatalf("models_blocked = %v, want %v", account.ModelsBlocked, tc.wantBlocked)
+			}
+			if len(tc.wantBlocked) == 0 && len(account.ModelsBlocked) > 0 {
+				t.Fatalf("models_blocked = %v, want none", account.ModelsBlocked)
 			}
 		})
 	}

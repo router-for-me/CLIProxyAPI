@@ -229,10 +229,10 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 	if upstreamModel == "" {
 		upstreamModel = routeModel
 	}
-	provider := canonicalSchedulingProvider(auth.Provider)
+	provider := executorKeyFromAuth(auth)
 
 	m.mu.RLock()
-	executor, okExecutor := m.executorLocked(executorKeyFromAuth(auth))
+	executor, okExecutor := m.executorLocked(provider)
 	m.mu.RUnlock()
 	if !okExecutor || executor == nil {
 		return
@@ -257,9 +257,16 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 		},
 	}
 
+	m.mu.RLock()
+	stillCandidate := m.reprobeCandidateStillWarranted(m.auths[auth.ID], candidate, time.Now())
+	m.mu.RUnlock()
+	if !stillCandidate {
+		return
+	}
+
 	prepared, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 	if errPrepare != nil {
-		result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+		result := Result{AuthID: auth.ID, Provider: provider, Success: false, Error: resultErrorFromError(errPrepare), Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 		m.MarkResult(execCtx, result)
 		return
 	}
@@ -279,7 +286,7 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 	// Skip the probe when the live credential no longer warrants one: real
 	// traffic may have cleared or refreshed the cooldown since collection.
 	m.mu.RLock()
-	stillCandidate := m.reprobeCandidateStillWarranted(m.auths[auth.ID], candidate, time.Now())
+	stillCandidate = m.reprobeCandidateStillWarranted(m.auths[auth.ID], candidate, time.Now())
 	m.mu.RUnlock()
 	if !stillCandidate {
 		return

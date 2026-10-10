@@ -90,6 +90,68 @@ func AuthBlockedWithoutRetry(auth *Auth, now time.Time) bool {
 	return blocked && next.IsZero()
 }
 
+// ModelBlocksWithoutRetry returns the canonical model keys whose per-model
+// state is blocked by a restriction that records no retry time (unavailability
+// or quota flags with no recovery deadline, or a disabled model). Timed model
+// restrictions are reported by CooldownSnapshotForAuth.
+func ModelBlocksWithoutRetry(auth *Auth, now time.Time) []string {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return nil
+	}
+	blockedSet := make(map[string]struct{}, len(auth.ModelStates))
+	for key, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		model := canonicalModelKey(key)
+		if model == "" {
+			continue
+		}
+		if blocked, _, next := isAuthBlockedForModel(auth, model, now); blocked && next.IsZero() {
+			blockedSet[model] = struct{}{}
+		}
+	}
+	if len(blockedSet) == 0 {
+		return nil
+	}
+	blocked := make([]string, 0, len(blockedSet))
+	for model := range blockedSet {
+		blocked = append(blocked, model)
+	}
+	sort.Strings(blocked)
+	return blocked
+}
+
+// AllModelsBlockedWithoutRetry reports whether every model the credential can
+// serve is blocked by a restriction that records no retry time, so no model is
+// selectable even though the credential itself has no untimed block.
+func AllModelsBlockedWithoutRetry(auth *Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	models := modelsForRegisteredAuth(auth.ID)
+	if len(models) == 0 {
+		for key, state := range auth.ModelStates {
+			if state == nil {
+				continue
+			}
+			if model := canonicalModelKey(key); model != "" {
+				models = append(models, model)
+			}
+		}
+	}
+	if len(models) == 0 {
+		return false
+	}
+	for _, model := range models {
+		blocked, _, next := isAuthBlockedForModel(auth, model, now)
+		if !blocked || !next.IsZero() {
+			return false
+		}
+	}
+	return true
+}
+
 func newCooldownView(scope, model string, next, now time.Time, quota QuotaState, statusMessage string, lastErr *Error) CooldownView {
 	remaining := next.Sub(now)
 	seconds := int64(remaining / time.Second)

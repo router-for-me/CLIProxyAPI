@@ -55,6 +55,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.TransientErrorCooldownSeconds != newCfg.TransientErrorCooldownSeconds {
 		changes = append(changes, fmt.Sprintf("transient-error-cooldown-seconds: %d -> %d", oldCfg.TransientErrorCooldownSeconds, newCfg.TransientErrorCooldownSeconds))
 	}
+	if oldCfg.CooldownReprobeIntervalSeconds != newCfg.CooldownReprobeIntervalSeconds {
+		changes = append(changes, fmt.Sprintf("routing.cooldown.reprobe-interval-seconds: %d -> %d", oldCfg.CooldownReprobeIntervalSeconds, newCfg.CooldownReprobeIntervalSeconds))
+	}
+	if !reflect.DeepEqual(oldCfg.PoolStatusAllowedHosts, newCfg.PoolStatusAllowedHosts) {
+		changes = append(changes, fmt.Sprintf("pool-status-allowed-hosts: %d -> %d entries", len(oldCfg.PoolStatusAllowedHosts), len(newCfg.PoolStatusAllowedHosts)))
+	}
 	if oldCfg.DisableClaudeCloakMode != newCfg.DisableClaudeCloakMode {
 		changes = append(changes, fmt.Sprintf("disable-claude-cloak-mode: %t -> %t", oldCfg.DisableClaudeCloakMode, newCfg.DisableClaudeCloakMode))
 	}
