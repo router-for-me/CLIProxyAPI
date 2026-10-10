@@ -307,3 +307,121 @@ func TestExecuteImageWithAuthManager_AllowsImageOnlyModels(t *testing.T) {
 		})
 	}
 }
+
+func TestGetRequestDetails_GeminiMissingFlashProFallback(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	geminiClientID := "test-gemini-fallback"
+	blockedClientID := "test-gemini-blocked"
+
+	modelRegistry.RegisterClient(geminiClientID, "gemini", []*registry.ModelInfo{
+		{ID: "gemini-1.5-flash", Created: now + 10},
+		{ID: "gemini-2.0-flash", Created: now + 20},
+		{ID: "gemini-2.5-flash", Created: now + 30},
+		{ID: "gemini-1.5-pro", Created: now + 15},
+		{ID: "gemini-2.5-pro", Created: now + 25},
+	})
+
+	// Model registered on registry/server but has no available provider/scope
+	modelRegistry.RegisterClient(blockedClientID, "", []*registry.ModelInfo{
+		{ID: "gemini-3.0-pro", Created: now + 40},
+	})
+
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(geminiClientID)
+		modelRegistry.UnregisterClient(blockedClientID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	tests := []struct {
+		name          string
+		inputModel    string
+		wantProviders []string
+		wantModel     string
+		wantErr       bool
+	}{
+		{
+			name:          "missing flash preview falls back to highest registered flash",
+			inputModel:    "gemini-3.1-flash-lite-preview",
+			wantProviders: []string{"gemini"},
+			wantModel:     "gemini-2.5-flash",
+			wantErr:       false,
+		},
+		{
+			name:          "missing pro preview falls back to highest registered pro",
+			inputModel:    "gemini-3.1-pro-preview",
+			wantProviders: []string{"gemini"},
+			wantModel:     "gemini-2.5-pro",
+			wantErr:       false,
+		},
+		{
+			name:          "exact registered flash unchanged",
+			inputModel:    "gemini-2.5-flash",
+			wantProviders: []string{"gemini"},
+			wantModel:     "gemini-2.5-flash",
+			wantErr:       false,
+		},
+		{
+			name:          "exact registered pro unchanged",
+			inputModel:    "gemini-2.5-pro",
+			wantProviders: []string{"gemini"},
+			wantModel:     "gemini-2.5-pro",
+			wantErr:       false,
+		},
+		{
+			name:          "unknown non-flash-pro still model_not_found",
+			inputModel:    "gemini-private",
+			wantProviders: nil,
+			wantModel:     "",
+			wantErr:       true,
+		},
+		{
+			name:          "unknown ultra-experimental still model_not_found",
+			inputModel:    "gemini-ultra-experimental",
+			wantProviders: nil,
+			wantModel:     "",
+			wantErr:       true,
+		},
+		{
+			name:          "model exists on registry but blocked fails closed (no fallback)",
+			inputModel:    "gemini-3.0-pro",
+			wantProviders: nil,
+			wantModel:     "",
+			wantErr:       true,
+		},
+		{
+			name:          "thinking suffix preserved across flash remap",
+			inputModel:    "gemini-3.1-flash-lite-preview(8192)",
+			wantProviders: []string{"gemini"},
+			wantModel:     "gemini-2.5-flash(8192)",
+			wantErr:       false,
+		},
+		{
+			name:          "thinking suffix preserved across pro remap",
+			inputModel:    "gemini-3.1-pro-preview(auto)",
+			wantProviders: []string{"gemini"},
+			wantModel:     "gemini-2.5-pro(auto)",
+			wantErr:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			providers, model, errMsg := handler.getRequestDetails(tt.inputModel)
+			if (errMsg != nil) != tt.wantErr {
+				t.Fatalf("getRequestDetails(%q) error = %v, wantErr %v", tt.inputModel, errMsg, tt.wantErr)
+			}
+			if errMsg != nil {
+				return
+			}
+			if !reflect.DeepEqual(providers, tt.wantProviders) {
+				t.Fatalf("getRequestDetails(%q) providers = %v, want %v", tt.inputModel, providers, tt.wantProviders)
+			}
+			if model != tt.wantModel {
+				t.Fatalf("getRequestDetails(%q) model = %v, want %v", tt.inputModel, model, tt.wantModel)
+			}
+		})
+	}
+}
