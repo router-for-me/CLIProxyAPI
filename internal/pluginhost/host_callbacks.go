@@ -157,6 +157,8 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostHTTPDo(ctx, request)
 	case pluginabi.MethodHostHTTPDoStream:
 		return h.callHostHTTPDoStream(ctx, request)
+	case pluginabi.MethodHostPayloadFinalize:
+		return h.callHostPayloadFinalize(ctx, request)
 	case pluginabi.MethodHostHTTPOperationOpen:
 		return h.callHostHTTPOperationOpen(ctx, request)
 	case pluginabi.MethodHostHTTPCancel:

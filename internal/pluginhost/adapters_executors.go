@@ -697,6 +697,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
+	ctx = withHostPayloadFinalization(ctx, newHostPayloadFinalizationContext(a.host.currentRuntimeConfig(), a.Identifier(), prepared))
 
 	if reporter != nil {
 		reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
@@ -755,6 +756,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
+	ctx = withHostPayloadFinalization(ctx, newHostPayloadFinalizationContext(a.host.currentRuntimeConfig(), a.Identifier(), prepared))
 
 	if reporter != nil {
 		reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())

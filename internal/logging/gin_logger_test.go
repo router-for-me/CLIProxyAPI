@@ -2,6 +2,7 @@ package logging
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -43,8 +44,35 @@ func TestGinLogrusRecoveryRepanicsErrAbortHandler(t *testing.T) {
 	engine.ServeHTTP(recorder, req)
 }
 
+func TestGinLogrusRecoveryRepanicsWrappedErrAbortHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	engine.Use(GinLogrusRecovery())
+	engine.GET("/abort", func(c *gin.Context) {
+		panic(fmt.Errorf("wrapped abort: %w", http.ErrAbortHandler))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/abort", nil)
+	recorder := httptest.NewRecorder()
+	defer func() {
+		recovered := recover()
+		if recovered != http.ErrAbortHandler {
+			t.Fatalf("panic = %#v, want exact ErrAbortHandler", recovered)
+		}
+	}()
+
+	engine.ServeHTTP(recorder, req)
+}
+
 func TestGinLogrusRecoveryHandlesRegularPanic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.ErrorLevel)
+	t.Cleanup(func() { logger.ReplaceHooks(previousHooks); logger.SetLevel(previousLevel) })
 
 	engine := gin.New()
 	engine.Use(GinLogrusRecovery())
@@ -58,6 +86,16 @@ func TestGinLogrusRecoveryHandlesRegularPanic(t *testing.T) {
 	engine.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", recorder.Code)
+	}
+	entries := hook.AllEntries()
+	if len(entries) != 1 {
+		t.Fatalf("recovery log entries = %d, want one", len(entries))
+	}
+	if entries[0].Message != "recovered from panic" || entries[0].Data["panic"] != "boom" || entries[0].Data["path"] != "/panic" {
+		t.Fatalf("recovery log entry = %#v", entries[0])
+	}
+	if stack, ok := entries[0].Data["stack"].(string); !ok || stack == "" {
+		t.Fatalf("recovery log stack = %#v, want non-empty stack", entries[0].Data["stack"])
 	}
 }
 
