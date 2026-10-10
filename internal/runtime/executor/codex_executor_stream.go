@@ -21,6 +21,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"golang.org/x/net/http2"
 )
 
 func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -154,6 +155,20 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 
+	// Termination diagnostic counters span the bootstrap-buffered scan and the unbuffered
+	// goroutine: the bootstrap loop consumes the handshake before the goroutine even starts, so
+	// seeding them here is what lets the one metadata-only line, see
+	// logCodexStreamTerminationDiagnostics, describe the events the upstream actually delivered
+	// instead of just the tail the goroutine happened to see. All timestamps come from
+	// nowCodexBootstrap so a test clock drives the whole line.
+	sseStartedAt := nowCodexBootstrap()
+	if buffering {
+		sseStartedAt = bootstrapStart
+	}
+	var sseEventCount int
+	sseLastEventType := ""
+	var sseLastEventAt time.Time
+
 	var bufferedChunks [][]byte
 	// bufferedFrames counts the scanned lines this loop holds and bufferedBytes sums each line
 	// together with the chunks it translates into. Every iteration either holds the line or leaves
@@ -200,6 +215,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
+				sseEventCount++
+				sseLastEventType = eventType
+				sseLastEventAt = nowCodexBootstrap()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -313,6 +331,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return nil, ctx.Err()
 				}
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				logCodexStreamTerminationDiagnostics(ctx, errScan, sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 				reporter.PublishFailure(ctx, errScan)
 				return nil, errScan
 			}
@@ -320,6 +339,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return nil, ctx.Err()
 			}
 			if len(bufferedChunks) == 0 && len(initialChunks) == 0 {
+				logCodexStreamTerminationDiagnostics(ctx, scanner.Err(), sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 				reporter.PublishFailure(ctx, emptyErr)
@@ -327,6 +347,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				close(closedCh)
 				return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: closedCh}, nil
 			}
+			logCodexStreamTerminationDiagnostics(ctx, scanner.Err(), sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 			streamErr := newCodexIncompleteStreamError()
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
@@ -376,12 +397,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
-		// Termination diagnostic counters: when the stream ends without a terminal event these
-		// feed one metadata-only log line, see logCodexStreamTerminationDiagnostics.
-		sseStartedAt := time.Now()
-		var sseEventCount int
-		sseLastEventType := ""
-		var sseLastEventAt time.Time
+		// sseStartedAt/sseEventCount/sseLastEventType/sseLastEventAt are declared above the
+		// bootstrap loop so this goroutine continues the counts the buffered scan seeded; see
+		// logCodexStreamTerminationDiagnostics.
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -398,7 +416,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				eventType := gjson.GetBytes(data, "type").String()
 				sseEventCount++
 				sseLastEventType = eventType
-				sseLastEventAt = time.Now()
+				sseLastEventAt = nowCodexBootstrap()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -517,9 +535,26 @@ func logCodexStreamTerminationDiagnostics(ctx context.Context, readErr error, ev
 }
 
 // codexDiagnosticEventType renders an unset event type as a dash so the diagnostic line never
-// contains an empty key=value pair.
+// contains an empty key=value pair, and reduces the upstream-supplied gjson string to a bounded,
+// log-safe form: the value goes into an operator-facing line verbatim otherwise, so a hostile or
+// broken upstream could forge log records through embedded newlines or bloat the line with an
+// oversized type. Real Codex event names are lowercase letters, digits, dots, underscores and
+// dashes; anything else is dropped and the remainder truncated.
+const codexDiagnosticEventTypeMaxLen = 64
+
 func codexDiagnosticEventType(eventType string) string {
-	if strings.TrimSpace(eventType) == "" {
+	eventType = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		default:
+			return -1
+		}
+	}, eventType)
+	if len(eventType) > codexDiagnosticEventTypeMaxLen {
+		eventType = eventType[:codexDiagnosticEventTypeMaxLen]
+	}
+	if eventType == "" {
 		return "-"
 	}
 	return eventType
@@ -542,6 +577,14 @@ func classifyCodexSSEReadError(err error) string {
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return "timeout"
+	}
+	// The uTLS path negotiates h2 through x/net/http2, and a peer RST_STREAM surfaces there as a
+	// concrete StreamError whose Error() text ("stream error: stream ID N; CODE") carries no
+	// "http2" substring, so the message matcher below cannot see it. Recognise the type itself;
+	// the substring cases stay as a fallback for other stacks that spell http/2 out in text.
+	var http2StreamErr http2.StreamError
+	if errors.As(err, &http2StreamErr) {
+		return "http2-stream-error"
 	}
 	message := strings.ToLower(err.Error())
 	switch {

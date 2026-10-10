@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/http2"
 )
 
 // codexLogCapture is a logrus hook that records entries emitted through the standard logger so
@@ -113,8 +114,16 @@ func (fakeNetTimeoutErr) Error() string   { return "some io hustle timed out" }
 func (fakeNetTimeoutErr) Timeout() bool   { return true }
 func (fakeNetTimeoutErr) Temporary() bool { return true }
 
-func TestClassifyCodexSSEReadError(t *testing.T) {
-	cases := []struct {
+// classifyCasesWithoutHttp2 is the closed vocabulary the diagnostic line may spell. The http2
+// entries below use the concrete x/net/http2.StreamError type, because that is what the uTLS h2
+// path surfaces on RST_STREAM and its Error() text ("stream error: stream ID N; CODE") contains no
+// "http2" substring for the message matcher to find.
+func classifyCasesWithoutHttp2() []struct {
+	name string
+	err  error
+	want string
+} {
+	return []struct {
 		name string
 		err  error
 		want string
@@ -131,14 +140,113 @@ func TestClassifyCodexSSEReadError(t *testing.T) {
 		{"unexpected eof in text", errors.New("http: unexpected EOF reading frame"), "unexpected-eof"},
 		{"deadline text", errors.New("context deadline exceeded while reading"), "timeout"},
 		{"tls failure class", errors.New("remote error: tls: bad certificate"), "tls-error"},
-		{"http2 class", errors.New("http2: stream closed with error code CANCEL"), "http2-stream-error"},
+		{"http2 class in text", errors.New("http2: stream closed with error code CANCEL"), "http2-stream-error"},
+		{"http/2 class in text", errors.New("http/2: stream closed with error code CANCEL"), "http2-stream-error"},
+		{"http2 stream error type", http2.StreamError{StreamID: 3, Code: http2.ErrCodeInternal}, "http2-stream-error"},
 		{"opaque error stays sanitized", errors.New("mystery transport gremlin from 10.0.0.9"), "read-error"},
 	}
-	for _, tc := range cases {
+}
+
+func TestClassifyCodexSSEReadError(t *testing.T) {
+	for _, tc := range classifyCasesWithoutHttp2() {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := classifyCodexSSEReadError(tc.err); got != tc.want {
 				t.Fatalf("classifyCodexSSEReadError(%v) = %q, want %q", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// An upstream-supplied event type is untrusted gjson text: unfiltered it could smuggle newlines or
+// tens of megabytes into the one operator-facing diagnostic line, so it must come out bounded to
+// the characters real Codex event types use.
+func TestCodexDiagnosticEventTypeSanitizesUpstreamSuppliedTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"real event types pass through", "response.output_text.delta", "response.output_text.delta"},
+		{"empty becomes a dash", "", "-"},
+		{"whitespace only becomes a dash", "  \n\t", "-"},
+		{"control characters are dropped", "res\x00po\x1bnse.created", "response.created"},
+		{"newline cannot forge a log record", "response.created\nfake line", "response.createdfakeline"},
+		{"oversized types are truncated to the cap", "response." + strings.Repeat("x", 200), "response." + strings.Repeat("x", 55)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexDiagnosticEventType(tc.in); got != tc.want {
+				t.Fatalf("codexDiagnosticEventType(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// The bootstrap-buffered scan consumes the handshake frames before the unbuffered goroutine's
+// counters exist, so the diagnostic must be seeded from the held frames: without that, a clean EOF
+// right after the handshake reports events=0 / last_event_type=- and total time near zero, and an
+// operator reads "the upstream sent nothing" when it sent - and the client received - the whole
+// opening sequence.
+func TestCodexExecutor_BootstrapBuffering_TerminationDiagnosticSeesHeldEvents(t *testing.T) {
+	server := codexSSEServer(codexCreatedEvent, codexInProgressEvent)
+	defer server.Close()
+
+	capture := attachCodexLogCapture(t)
+
+	req, opts := codexTestRequest()
+	_, err := NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+	if got := statusCodeFromTestError(t, err); got != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d (normalized client behaviour must not change)", got, http.StatusRequestTimeout)
+	}
+
+	diagnostic := ""
+	for _, message := range capture.messages() {
+		if strings.Contains(message, "upstream SSE stream terminated") {
+			diagnostic = message
+			break
+		}
+	}
+	if diagnostic == "" {
+		t.Fatalf("expected a metadata-only termination diagnostic on the operator log, got: %v", capture.messages())
+	}
+	for _, want := range []string{
+		"read_error=clean-eof",
+		"events=2",
+		"last_event_type=response.in_progress",
+	} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("termination diagnostic %q missing %q", diagnostic, want)
+		}
+	}
+}
+
+// A stream that dies before any frame at all still owes the operator the one diagnostic line: a
+// clean EOF on the very first read is exactly the silent-hang class the feature exists to explain,
+// and the buffered path ends this way without ever reaching the unbuffered goroutine.
+func TestCodexExecutor_BootstrapBuffering_TerminationDiagnosticOnEmptyStream(t *testing.T) {
+	server := codexSSEServer()
+	defer server.Close()
+
+	capture := attachCodexLogCapture(t)
+
+	req, opts := codexTestRequest()
+	// The empty-stream failure keeps its existing client-visible shape (this PR only adds the
+	// diagnostic, it does not change what the client sees), so only the log line is asserted.
+	NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+
+	diagnostic := ""
+	for _, message := range capture.messages() {
+		if strings.Contains(message, "upstream SSE stream terminated") {
+			diagnostic = message
+			break
+		}
+	}
+	if diagnostic == "" {
+		t.Fatalf("expected a metadata-only termination diagnostic on the operator log, got: %v", capture.messages())
+	}
+	for _, want := range []string{"read_error=clean-eof", "events=0", "last_event_type=-"} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("termination diagnostic %q missing %q", diagnostic, want)
+		}
 	}
 }
