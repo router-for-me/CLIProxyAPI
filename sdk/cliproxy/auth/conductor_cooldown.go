@@ -461,6 +461,10 @@ func dedupeStrings(values []string) []string {
 
 // ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
+	return m.resetQuota(ctx, authID, nil)
+}
+
+func (m *Manager) resetQuota(ctx context.Context, authID string, expected *Auth) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -475,13 +479,39 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 	registeredModels := modelsForRegisteredAuth(authID)
 	cooldownStateChanged := false
 
-	releaseMutation := m.lockAuthMutation(authID)
+	var releaseMutation func()
+	if expected != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		var errMutation error
+		releaseMutation, errMutation = m.lockAuthMutationContext(ctx, authID)
+		if errMutation != nil {
+			return nil, nil, errMutation
+		}
+	} else {
+		releaseMutation = m.lockAuthMutation(authID)
+	}
 	defer releaseMutation()
 	m.mu.Lock()
 	auth, ok := m.auths[authID]
 	if !ok || auth == nil {
 		m.mu.Unlock()
 		return nil, nil, nil
+	}
+
+	if expected != nil {
+		if errContext := ctx.Err(); errContext != nil {
+			m.mu.Unlock()
+			return nil, nil, errContext
+		}
+		if !m.quotaResetMatchesLocked(auth, expected) {
+			m.mu.Unlock()
+			return nil, nil, nil
+		}
+		// Stage recovery independently so cancellation during persistence cannot
+		// publish a partially applied recovery.
+		auth = auth.Clone()
 	}
 
 	var cooldownRecordsBefore []CooldownStateRecord
@@ -527,6 +557,22 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
 	}
 	errPersist := m.persistLocked(ctx, auth)
+	if expected != nil {
+		if errPersist != nil {
+			m.mu.Unlock()
+			return nil, nil, errPersist
+		}
+		if errContext := ctx.Err(); errContext != nil {
+			m.mu.Unlock()
+			return nil, nil, errContext
+		}
+		if !m.quotaResetMatchesLocked(m.auths[authID], expected) {
+			m.mu.Unlock()
+			return nil, nil, nil
+		}
+		m.auths[authID] = auth
+		snapshot = auth.Clone()
+	}
 	m.mu.Unlock()
 	releaseMutation()
 
