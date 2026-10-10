@@ -41,6 +41,19 @@ func (c *codexLogCapture) messages() []string {
 	return messages
 }
 
+// codexTerminationDiagnosticEntry returns the metadata-only termination diagnostic as a full
+// logrus entry, so tests can assert on its structured fields and not only on the message text.
+func (c *codexLogCapture) codexTerminationDiagnosticEntry() *log.Entry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, entry := range c.entries {
+		if strings.Contains(entry.Message, "upstream SSE stream terminated") {
+			return entry
+		}
+	}
+	return nil
+}
+
 func attachCodexLogCapture(t *testing.T) *codexLogCapture {
 	t.Helper()
 	capture := &codexLogCapture{}
@@ -85,24 +98,27 @@ func TestCodexExecutor_IncompleteStreamLogsTerminationDiagnostics(t *testing.T) 
 		t.Fatalf("status code = %d, want %d (normalized client behaviour must not change)", got, http.StatusRequestTimeout)
 	}
 
-	var diagnostic string
-	for _, message := range capture.messages() {
-		if strings.Contains(message, "upstream SSE stream terminated") {
-			diagnostic = message
-			break
-		}
-	}
-	if diagnostic == "" {
+	// The diagnostic must be structured logrus logging: every dimension belongs in Entry.Data so a
+	// JSON/structured sink can filter, index, and aggregate it; the message stays static and
+	// human-readable.
+	diagnostic := capture.codexTerminationDiagnosticEntry()
+	if diagnostic == nil {
 		t.Fatalf("expected a metadata-only termination diagnostic on the operator log, got: %v", capture.messages())
 	}
-	for _, want := range []string{
-		"read_error=clean-eof",
-		"events=2",
-		"last_event_type=response.output_text.delta",
-	} {
-		if !strings.Contains(diagnostic, want) {
-			t.Fatalf("termination diagnostic %q missing %q", diagnostic, want)
-		}
+	if got := diagnostic.Data["read_error"]; got != "clean-eof" {
+		t.Fatalf("structured field read_error = %v, want clean-eof", got)
+	}
+	if got := diagnostic.Data["events"]; got != 2 {
+		t.Fatalf("structured field events = %v, want 2", got)
+	}
+	if got := diagnostic.Data["last_event_type"]; got != "response.output_text.delta" {
+		t.Fatalf("structured field last_event_type = %v, want response.output_text.delta", got)
+	}
+	if got := diagnostic.Data["idle_ms"]; got == nil {
+		t.Fatalf("structured field idle_ms missing: %v", diagnostic.Data)
+	}
+	if got := diagnostic.Data["total_ms"]; got == nil {
+		t.Fatalf("structured field total_ms missing: %v", diagnostic.Data)
 	}
 }
 
@@ -176,6 +192,11 @@ func TestCodexDiagnosticEventTypeSanitizesUpstreamSuppliedTypes(t *testing.T) {
 		want string
 	}{
 		{"real event types pass through", "response.output_text.delta", "response.output_text.delta"},
+		{"executor-supported reasoning delta passes", "response.reasoning_text.delta", "response.reasoning_text.delta"},
+		{"executor-supported reasoning done passes", "response.reasoning_text.done", "response.reasoning_text.done"},
+		{"executor-supported keepalive passes", "keepalive", "keepalive"},
+		{"executor-supported rate limits pass", "codex.rate_limits", "codex.rate_limits"},
+		{"executor-supported response metadata passes", "codex.response.metadata", "codex.response.metadata"},
 		{"empty becomes a dash", "", "-"},
 		{"whitespace only becomes a dash", "  \n\t", "-"},
 		{"control characters around a real type are tolerated", "res\x00po\x1bnse.created", "response.created"},
@@ -210,24 +231,18 @@ func TestCodexExecutor_BootstrapBuffering_TerminationDiagnosticSeesHeldEvents(t 
 		t.Fatalf("status code = %d, want %d (normalized client behaviour must not change)", got, http.StatusRequestTimeout)
 	}
 
-	diagnostic := ""
-	for _, message := range capture.messages() {
-		if strings.Contains(message, "upstream SSE stream terminated") {
-			diagnostic = message
-			break
-		}
-	}
-	if diagnostic == "" {
+	diagnostic := capture.codexTerminationDiagnosticEntry()
+	if diagnostic == nil {
 		t.Fatalf("expected a metadata-only termination diagnostic on the operator log, got: %v", capture.messages())
 	}
-	for _, want := range []string{
-		"read_error=clean-eof",
-		"events=2",
-		"last_event_type=response.in_progress",
-	} {
-		if !strings.Contains(diagnostic, want) {
-			t.Fatalf("termination diagnostic %q missing %q", diagnostic, want)
-		}
+	if got := diagnostic.Data["read_error"]; got != "clean-eof" {
+		t.Fatalf("structured field read_error = %v, want clean-eof", got)
+	}
+	if got := diagnostic.Data["events"]; got != 2 {
+		t.Fatalf("structured field events = %v, want 2", got)
+	}
+	if got := diagnostic.Data["last_event_type"]; got != "response.in_progress" {
+		t.Fatalf("structured field last_event_type = %v, want response.in_progress", got)
 	}
 }
 
@@ -245,19 +260,53 @@ func TestCodexExecutor_BootstrapBuffering_TerminationDiagnosticOnEmptyStream(t *
 	// diagnostic, it does not change what the client sees), so only the log line is asserted.
 	NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
 
-	diagnostic := ""
-	for _, message := range capture.messages() {
-		if strings.Contains(message, "upstream SSE stream terminated") {
-			diagnostic = message
-			break
-		}
-	}
-	if diagnostic == "" {
+	diagnostic := capture.codexTerminationDiagnosticEntry()
+	if diagnostic == nil {
 		t.Fatalf("expected a metadata-only termination diagnostic on the operator log, got: %v", capture.messages())
 	}
-	for _, want := range []string{"read_error=clean-eof", "events=0", "last_event_type=-"} {
-		if !strings.Contains(diagnostic, want) {
-			t.Fatalf("termination diagnostic %q missing %q", diagnostic, want)
-		}
+	if got := diagnostic.Data["read_error"]; got != "clean-eof" {
+		t.Fatalf("structured field read_error = %v, want clean-eof", got)
+	}
+	if got := diagnostic.Data["events"]; got != 0 {
+		t.Fatalf("structured field events = %v, want 0", got)
+	}
+	if got := diagnostic.Data["last_event_type"]; got != "-" {
+		t.Fatalf("structured field last_event_type = %v, want -", got)
+	}
+}
+
+// For Grok clients the keepalive SSE line and its JSON data line are both rewritten into an SSE
+// comment by TransformKeepaliveSSELine before the counters are reached, so keepalive frames
+// vanished from the termination diagnostics (a stream of only keepalives and then EOF logged
+// events=0 / last_event_type=-). The counters describe upstream-delivered events, and the same
+// upstream payload is counted for non-Grok clients, so the data frame must be observed before the
+// transformation consumes it. A leading keepalive ahead of the handshake frames makes the count
+// observable without changing what the client sees.
+func TestCodexExecutor_GrokKeepaliveStream_CountedInTerminationDiagnostics(t *testing.T) {
+	server := codexSSEServer(codexKeepaliveEvent, codexCreatedEvent)
+	defer server.Close()
+
+	capture := attachCodexLogCapture(t)
+
+	req, opts := codexTestRequest()
+	opts.Headers = http.Header{"User-Agent": []string{"grok-pager/1.0"}}
+	result, err := NewCodexExecutor(&config.Config{}).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+	if err != nil {
+		t.Fatalf("stream start must not fail synchronously: %v", err)
+	}
+	_, streamErr := drainChunks(result)
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d (normalized client behaviour must not change)", got, http.StatusRequestTimeout)
+	}
+
+	diagnostic := capture.codexTerminationDiagnosticEntry()
+	if diagnostic == nil {
+		t.Fatalf("expected a metadata-only termination diagnostic on the operator log, got: %v", capture.messages())
+	}
+	if got := diagnostic.Data["events"]; got != 2 {
+		t.Fatalf("structured field events = %v, want 2 (the keepalive data frame is an upstream-delivered event)", got)
+	}
+	if got := diagnostic.Data["last_event_type"]; got != "response.created" {
+		t.Fatalf("structured field last_event_type = %v, want response.created", got)
 	}
 }
