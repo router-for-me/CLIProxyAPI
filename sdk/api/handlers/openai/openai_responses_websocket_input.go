@@ -19,16 +19,29 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+type responsesLocalInterruptResult uint8
+
+const (
+	responsesLocalInterruptRejected responsesLocalInterruptResult = iota
+	responsesLocalInterruptQueued
+	responsesLocalInterruptAlreadyTerminal
+)
+
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
 // does not use it; that interrupt is written to the existing socket instead.
 type responsesLocalInterrupt struct {
-	mu     sync.Mutex
-	active bool
-	frames chan []byte
+	mu          sync.Mutex
+	active      bool
+	responseID  string
+	terminalIDs map[string]struct{}
+	frames      chan []byte
 }
 
 func newResponsesLocalInterrupt() *responsesLocalInterrupt {
-	return &responsesLocalInterrupt{frames: make(chan []byte, 1)}
+	return &responsesLocalInterrupt{
+		terminalIDs: make(map[string]struct{}),
+		frames:      make(chan []byte, 1),
+	}
 }
 
 func (s *responsesLocalInterrupt) begin() {
@@ -37,6 +50,7 @@ func (s *responsesLocalInterrupt) begin() {
 	}
 	s.mu.Lock()
 	s.active = true
+	s.responseID = ""
 	s.mu.Unlock()
 }
 
@@ -45,28 +59,88 @@ func (s *responsesLocalInterrupt) end() {
 		return
 	}
 	s.mu.Lock()
+	if s.responseID != "" {
+		s.terminalIDs[s.responseID] = struct{}{}
+	}
 	s.active = false
-	select {
-	case <-s.frames:
-	default:
+	s.responseID = ""
+	s.drainLocked()
+	s.mu.Unlock()
+}
+
+func (s *responsesLocalInterrupt) observeCreated(responseID string) {
+	if s == nil || responseID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.active && s.responseID != responseID {
+		s.responseID = responseID
+		s.drainLocked()
 	}
 	s.mu.Unlock()
 }
 
-func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
+func (s *responsesLocalInterrupt) observeTerminal(responseID string) {
 	if s == nil {
-		return false
+		return
 	}
 	s.mu.Lock()
+	if responseID == "" {
+		responseID = s.responseID
+	}
+	if responseID != "" {
+		s.terminalIDs[responseID] = struct{}{}
+		if s.responseID == responseID {
+			s.responseID = ""
+			s.drainLocked()
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *responsesLocalInterrupt) deliver(payload []byte) responsesLocalInterruptResult {
+	if s == nil {
+		return responsesLocalInterruptRejected
+	}
+	responseID := gjson.GetBytes(payload, "response_id").String()
+	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.active {
-		return false
+	if _, terminal := s.terminalIDs[responseID]; terminal {
+		return responsesLocalInterruptAlreadyTerminal
+	}
+	if !s.active || s.responseID == "" || responseID != s.responseID {
+		return responsesLocalInterruptRejected
 	}
 	select {
 	case s.frames <- bytes.Clone(payload):
 	default:
 	}
-	return true
+	return responsesLocalInterruptQueued
+}
+
+// claim revalidates queued frames and ends the matching turn under the same lock.
+// A frame that lost a race with completion must never cancel the next response.
+func (s *responsesLocalInterrupt) claim(payload []byte) string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.active || s.responseID == "" || gjson.GetBytes(payload, "response_id").String() != s.responseID {
+		return ""
+	}
+	responseID := s.responseID
+	s.terminalIDs[responseID] = struct{}{}
+	s.responseID = ""
+	s.drainLocked()
+	return responseID
+}
+
+func (s *responsesLocalInterrupt) drainLocked() {
+	select {
+	case <-s.frames:
+	default:
+	}
 }
 
 func (s *responsesLocalInterrupt) framesChan() <-chan []byte {
@@ -99,27 +173,34 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 			if json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "response.interrupt" {
 				appendResponsesInterruptDiagnostic(timeline, payload, "")
 				errInterrupt := interrupt(payload)
-				switch {
-				case errInterrupt == nil:
+				if errInterrupt == nil {
 					appendResponsesInterruptDiagnostic(timeline, payload, "handled")
 					continue
-				case errors.Is(errInterrupt, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) && local.deliver(payload):
-					appendResponsesInterruptDiagnostic(timeline, payload, "local_http")
-					continue
-				default:
-					appendResponsesInterruptDiagnostic(timeline, payload, "rejected")
-					// The sanitized outcome replaces raw error logging here: errors
-					// from transport dependencies may contain credentials or URLs.
-					_, errWrite := writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
-						StatusCode: http.StatusBadRequest,
-						Error:      errInterrupt,
-					})
-					if errWrite != nil {
-						cancel(errWrite)
-						return
-					}
-					continue
 				}
+				if errors.Is(errInterrupt, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) {
+					switch local.deliver(payload) {
+					case responsesLocalInterruptQueued:
+						appendResponsesInterruptDiagnostic(timeline, payload, "local_http")
+						continue
+					case responsesLocalInterruptAlreadyTerminal:
+						appendResponsesInterruptDiagnostic(timeline, payload, "already_terminal")
+						continue
+					default:
+						errInterrupt = fmt.Errorf("response.interrupt does not target an active response")
+					}
+				}
+				appendResponsesInterruptDiagnostic(timeline, payload, "rejected")
+				// The sanitized outcome replaces raw error logging here: errors
+				// from transport dependencies may contain credentials or URLs.
+				_, errWrite := writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
+					StatusCode: http.StatusBadRequest,
+					Error:      errInterrupt,
+				})
+				if errWrite != nil {
+					cancel(errWrite)
+					return
+				}
+				continue
 			}
 			select {
 			case input <- cliproxyexecutor.WebsocketInput{Payload: payload}:
