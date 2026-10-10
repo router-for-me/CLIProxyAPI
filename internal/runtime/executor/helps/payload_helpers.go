@@ -48,15 +48,18 @@ func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fro
 }
 
 // ApplyPayloadConfigWithTrackedPathsForExecutor applies payload config with target executor awareness.
-// When headers indicate a Codex client and the target executor is not Codex or Codex WebSocket,
-// it normalizes tool parameter integer types to satisfy client-side integer deserialization (#6237).
-// For Codex and Codex WebSocket targets, integer normalization is skipped (#6244).
+// For Codex clients, tool parameter integer types are normalized for targets
+// that do not preserve Codex's native schemas (#6237). Native Codex targets and
+// Copilot's native Responses endpoint keep the original schema (#6244).
 func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPaths ...string) ([]byte, map[string]bool) {
 	touched := make(map[string]bool)
 	if len(payload) == 0 {
 		return payload, touched
 	}
-	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
+	copilotNativeResponsesRequest := strings.EqualFold(strings.TrimSpace(targetExecutor), "copilot") &&
+		strings.EqualFold(strings.TrimSpace(protocol), "openai-response") &&
+		normalizePayloadFromProtocol(fromProtocol) == "responses"
+	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) && !copilotNativeResponsesRequest {
 		payload = NormalizeCodexToolIntegerTypes(payload, headers)
 	}
 	if cfg == nil {
