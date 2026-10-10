@@ -52,10 +52,10 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
 
-	// Local pool observability: unauthenticated; loopback sockets without an
-	// Origin header only. A same-host reverse proxy still exposes this
-	// endpoint to the proxy's remote clients.
-	s.engine.GET("/v1/pool/status", loopbackOnlyMiddleware(), s.handlers.PoolStatus)
+	// Local pool observability: unauthenticated; loopback sockets with a
+	// loopback Host header and no Origin header only. A same-host reverse
+	// proxy still exposes this endpoint to the proxy's remote clients.
+	s.engine.GET("/v1/pool/status", s.loopbackOnlyMiddleware(), s.handlers.PoolStatus)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)

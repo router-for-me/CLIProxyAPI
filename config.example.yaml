@@ -42,6 +42,12 @@ server:
   #   - 127.0.0.1
   #   - 192.0.2.0/24
 
+  # Extra Host header names accepted by the local-only /v1/pool/status endpoint.
+  # Loopback IPs and "localhost" are always allowed; list custom local hostnames
+  # here when the endpoint is reached through one (for example a same-host reverse
+  # proxy serving it under a dedicated name).
+  pool-status-allowed-hosts: []
+
   # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
   tls:
     enable: false

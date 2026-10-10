@@ -13,16 +13,15 @@ func TestLoopbackOnlyMiddleware(t *testing.T) {
 	t.Parallel()
 
 	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	router.GET("/v1/pool/status", loopbackOnlyMiddleware(), func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
 
 	cases := []struct {
-		name       string
-		remoteAddr string
-		origin     string
-		want       int
+		name         string
+		remoteAddr   string
+		origin       string
+		host         string
+		hostSet      bool
+		allowedHosts []string
+		want         int
 	}{
 		{name: "ipv4 loopback", remoteAddr: "127.0.0.1:55555", want: http.StatusOK},
 		{name: "ipv6 loopback", remoteAddr: "[::1]:55555", want: http.StatusOK},
@@ -33,12 +32,33 @@ func TestLoopbackOnlyMiddleware(t *testing.T) {
 		{name: "malformed remote addr", remoteAddr: "not-an-ip", want: http.StatusForbidden},
 		{name: "loopback with browser origin", remoteAddr: "127.0.0.1:55555", origin: "http://localhost:8080", want: http.StatusForbidden},
 		{name: "remote with origin", remoteAddr: "192.168.1.50:55555", origin: "https://example.com", want: http.StatusForbidden},
+		{name: "localhost host header", remoteAddr: "127.0.0.1:55555", host: "localhost:8317", hostSet: true, want: http.StatusOK},
+		{name: "localhost without port", remoteAddr: "127.0.0.1:55555", host: "localhost", hostSet: true, want: http.StatusOK},
+		{name: "localhost uppercase", remoteAddr: "127.0.0.1:55555", host: "LOCALHOST:8317", hostSet: true, want: http.StatusOK},
+		{name: "loopback ipv4 host header", remoteAddr: "127.0.0.1:55555", host: "127.0.0.1:8317", hostSet: true, want: http.StatusOK},
+		{name: "loopback ipv6 host header", remoteAddr: "[::1]:55555", host: "[::1]:8317", hostSet: true, want: http.StatusOK},
+		{name: "rebound hostile hostname", remoteAddr: "127.0.0.1:55555", host: "attacker.example.com", hostSet: true, want: http.StatusForbidden},
+		{name: "rebound hostname with port", remoteAddr: "127.0.0.1:55555", host: "attacker.example.com:443", hostSet: true, want: http.StatusForbidden},
+		{name: "empty host header", remoteAddr: "127.0.0.1:55555", hostSet: true, want: http.StatusForbidden},
+		{name: "nonloopback ip host", remoteAddr: "127.0.0.1:55555", host: "192.168.1.1:8317", hostSet: true, want: http.StatusForbidden},
+		{name: "configured custom hostname", remoteAddr: "127.0.0.1:55555", host: "status.lan:8317", hostSet: true, allowedHosts: []string{"status.lan"}, want: http.StatusOK},
+		{name: "unconfigured custom hostname", remoteAddr: "127.0.0.1:55555", host: "status.lan:8317", hostSet: true, allowedHosts: []string{"other.lan"}, want: http.StatusForbidden},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{cfg: &config.Config{PoolStatusAllowedHosts: tc.allowedHosts}}
+			router := gin.New()
+			router.GET("/v1/pool/status", s.loopbackOnlyMiddleware(), func(c *gin.Context) {
+				c.Status(http.StatusOK)
+			})
 			recorder := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/v1/pool/status", nil)
 			req.RemoteAddr = tc.remoteAddr
+			if tc.hostSet {
+				req.Host = tc.host
+			} else {
+				req.Host = "localhost"
+			}
 			// X-Forwarded-For must never grant loopback access.
 			req.Header.Set("X-Forwarded-For", "127.0.0.1")
 			if tc.origin != "" {
@@ -46,7 +66,7 @@ func TestLoopbackOnlyMiddleware(t *testing.T) {
 			}
 			router.ServeHTTP(recorder, req)
 			if recorder.Code != tc.want {
-				t.Fatalf("RemoteAddr %q origin %q → status %d, want %d", tc.remoteAddr, tc.origin, recorder.Code, tc.want)
+				t.Fatalf("RemoteAddr %q origin %q host %q → status %d, want %d", tc.remoteAddr, tc.origin, tc.host, recorder.Code, tc.want)
 			}
 		})
 	}

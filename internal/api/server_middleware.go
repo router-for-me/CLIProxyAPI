@@ -152,21 +152,25 @@ func corsMiddleware() gin.HandlerFunc {
 // local machine. It inspects the socket peer address (never X-Forwarded-For),
 // so remote clients cannot spoof loopback access, and rejects requests that
 // carry an Origin header: browsers attach one to fetches, which would make
-// any web page opened on this machine a valid loopback client.
-func loopbackOnlyMiddleware() gin.HandlerFunc {
+// any web page opened on this machine a valid loopback client. The Host header
+// must also name a loopback identity, because DNS rebinding lets a remote page
+// keep its own hostname while resolving to a loopback peer.
+func (s *Server) loopbackOnlyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		remoteAddr := ""
 		origin := ""
+		hostHeader := ""
 		if c != nil && c.Request != nil {
 			remoteAddr = strings.TrimSpace(c.Request.RemoteAddr)
 			origin = strings.TrimSpace(c.Request.Header.Get("Origin"))
+			hostHeader = c.Request.Host
 		}
 		host := remoteAddr
 		if parsedHost, _, err := net.SplitHostPort(remoteAddr); err == nil {
 			host = parsedHost
 		}
 		ip := net.ParseIP(strings.TrimSpace(host))
-		if ip == nil || !ip.IsLoopback() || origin != "" {
+		if ip == nil || !ip.IsLoopback() || origin != "" || !s.poolStatusHostAllowed(hostHeader) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": "forbidden",
 			})
@@ -174,6 +178,34 @@ func loopbackOnlyMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// poolStatusHostAllowed reports whether a request Host header names a loopback
+// identity: a loopback IP, "localhost", or a hostname configured through
+// pool-status-allowed-hosts. Matching is port-agnostic and case-insensitive.
+func (s *Server) poolStatusHostAllowed(hostHeader string) bool {
+	host := strings.TrimSpace(hostHeader)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if s != nil && s.cfg != nil {
+		for _, extra := range s.cfg.PoolStatusAllowedHosts {
+			if strings.EqualFold(host, strings.TrimSpace(extra)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests

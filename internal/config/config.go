@@ -23,6 +23,12 @@ type Config struct {
 	// The server applies this list at startup; changing it requires a restart.
 	TrustedProxies []string `yaml:"trusted-proxies" json:"trusted-proxies"`
 
+	// PoolStatusAllowedHosts lists additional Host header names accepted by the
+	// loopback-only /v1/pool/status endpoint. Loopback IPs and "localhost" are
+	// always allowed; add custom local hostnames here when the endpoint is
+	// served under one.
+	PoolStatusAllowedHosts []string `yaml:"pool-status-allowed-hosts" json:"pool-status-allowed-hosts"`
+
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
