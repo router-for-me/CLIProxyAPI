@@ -390,6 +390,8 @@ func (r *xaiNamespaceRestorer) restore(data []byte) []byte {
 					r.dispatcherItemIDs[itemID] = ref.namespace
 				}
 				data, _ = sjson.SetBytes(data, "item.namespace", ref.namespace)
+			} else {
+				data = r.restoreAtPath(data, "item")
 			}
 		}
 		return data
