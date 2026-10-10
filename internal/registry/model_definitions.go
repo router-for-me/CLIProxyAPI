@@ -79,6 +79,38 @@ func GetCodexProModels() []*ModelInfo {
 	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
 }
 
+// GetCodexDaybreakModel returns the Codex Daybreak alias model for a tier ("blue" or "red"), or nil.
+// Daybreak tiers are approved per account, so they are not part of any plan's model list.
+func GetCodexDaybreakModel(tier string) *ModelInfo {
+	tier = strings.ToLower(strings.TrimSpace(tier))
+	model := &ModelInfo{
+		ID:                       "gpt-daybreak-" + tier + "-latest",
+		Object:                   "model",
+		Created:                  1790035200,
+		OwnedBy:                  "openai",
+		Type:                     "openai",
+		Version:                  "gpt-daybreak-" + tier + "-latest",
+		MaxCompletionTokens:      128000,
+		SupportedParameters:      []string{"tools"},
+		SupportedInputModalities: []string{"text", "image"},
+	}
+	switch tier {
+	case "blue":
+		model.DisplayName = "Daybreak Blue"
+		model.Description = "Latest frontier agentic coding model for broad defensive cybersecurity work."
+		model.ContextLength = 872000
+		model.Thinking = &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}}
+	case "red":
+		model.DisplayName = "Daybreak Red"
+		model.Description = "Advanced cybersecurity model for authorized vulnerability research and security testing."
+		model.ContextLength = 272000
+		model.Thinking = &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}}
+	default:
+		return nil
+	}
+	return model
+}
+
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
