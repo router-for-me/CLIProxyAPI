@@ -205,6 +205,12 @@ routing:
     # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
     transient-error-cooldown-seconds: 0
 
+    # Interval in seconds between background re-probes of credentials whose cooldown
+    # timer expired. A synthetic minimal request verifies upstream recovery before
+    # the credential rejoins the pool, so the next user request is not the canary.
+    # Set to 0 or below to disable re-probing.
+    reprobe-interval-seconds: 30
+
 # Shared request/response behavior.
 requests:
   # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/

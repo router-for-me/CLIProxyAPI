@@ -84,6 +84,10 @@ const (
 	SessionAffinityProviderMetadataKey = "session_affinity_provider"
 	// SessionAffinityModelMetadataKey carries the model used during session affinity selection.
 	SessionAffinityModelMetadataKey = "session_affinity_model"
+	// CooldownReprobeMetadataKey marks executions issued by the background
+	// cooldown re-probe loop so hooks and logging can distinguish them from
+	// client-initiated traffic.
+	CooldownReprobeMetadataKey = "cooldown_reprobe"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

@@ -1340,6 +1340,15 @@ func (s *SessionAffinitySelector) Stop() {
 	}
 }
 
+// ActiveSessionCounts returns per-auth counts of unexpired session bindings
+// for observability. Aliases of the same logical session count once.
+func (s *SessionAffinitySelector) ActiveSessionCounts(now time.Time) map[string]int {
+	if s == nil || s.cache == nil {
+		return nil
+	}
+	return s.cache.ActiveSessionCounts(now)
+}
+
 // InvalidateAuth removes all session bindings for a specific auth.
 // Called when an auth becomes rate-limited or unavailable.
 func (s *SessionAffinitySelector) InvalidateAuth(authID string) {

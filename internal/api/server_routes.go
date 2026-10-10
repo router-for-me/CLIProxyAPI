@@ -52,6 +52,9 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
 
+	// Local pool observability: unauthenticated, loopback-only by middleware.
+	s.engine.GET("/v1/pool/status", loopbackOnlyMiddleware(), s.handlers.PoolStatus)
+
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net"
 	"net/http"
 	"strings"
 
@@ -141,6 +142,30 @@ func corsMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		c.Next()
+	}
+}
+
+// loopbackOnlyMiddleware restricts a route to connections originating from the
+// local machine. It inspects the socket peer address (never X-Forwarded-For),
+// so remote clients cannot spoof loopback access.
+func loopbackOnlyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		remoteAddr := ""
+		if c != nil && c.Request != nil {
+			remoteAddr = strings.TrimSpace(c.Request.RemoteAddr)
+		}
+		host := remoteAddr
+		if parsedHost, _, err := net.SplitHostPort(remoteAddr); err == nil {
+			host = parsedHost
+		}
+		ip := net.ParseIP(strings.TrimSpace(host))
+		if ip == nil || !ip.IsLoopback() {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": "forbidden",
+			})
+			return
+		}
 		c.Next()
 	}
 }

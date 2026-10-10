@@ -168,3 +168,30 @@ func TestSessionCache_StopNilChannelNoPanic(t *testing.T) {
 	zeroCache := &SessionCache{}
 	zeroCache.Stop()
 }
+
+func TestSessionCache_ActiveSessionCounts(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCacheWithCapacity(time.Hour, 16)
+	defer cache.Stop()
+
+	// Two aliases of one logical session count once.
+	cache.SetAliases("auth-1", "s1-a", "s1-b")
+	cache.SetAliases("auth-1", "s2")
+	cache.Set("s3", "auth-2")
+
+	now := time.Now()
+	counts := cache.ActiveSessionCounts(now)
+	if counts["auth-1"] != 2 {
+		t.Fatalf("ActiveSessionCounts[auth-1] = %d, want 2", counts["auth-1"])
+	}
+	if counts["auth-2"] != 1 {
+		t.Fatalf("ActiveSessionCounts[auth-2] = %d, want 1", counts["auth-2"])
+	}
+
+	// After the TTL elapses, no group is active.
+	counts = cache.ActiveSessionCounts(now.Add(2 * time.Hour))
+	if len(counts) != 0 {
+		t.Fatalf("ActiveSessionCounts after expiry = %v, want empty", counts)
+	}
+}

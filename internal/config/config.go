@@ -85,6 +85,11 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
+	// CooldownReprobeIntervalSeconds controls how often expired credential cooldowns are
+	// actively re-probed with a minimal synthetic request before restoring traffic.
+	// Values <= 0 disable background re-probing.
+	CooldownReprobeIntervalSeconds int `yaml:"cooldown-reprobe-interval-seconds" json:"cooldown-reprobe-interval-seconds"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh and manual refresh-all worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
