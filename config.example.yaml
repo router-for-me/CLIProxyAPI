@@ -205,6 +205,12 @@ routing:
     # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
     transient-error-cooldown-seconds: 0
 
+    # HTTP status code returned to clients when a cooled-down model is requested.
+    # Set to 0 to keep the legacy 429; values in 400-599 are used as-is (e.g. 529
+    # surfaces an Anthropic-compatible "overloaded_error" that Claude Code keeps
+    # retrying until the cooldown clears, instead of halting on 429).
+    status-code: 0
+
 # Shared request/response behavior.
 requests:
   # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
