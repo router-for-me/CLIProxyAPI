@@ -74,12 +74,15 @@ func (m *Manager) cooldownReprobeInterval() time.Duration {
 }
 
 func (m *Manager) runCooldownReprobe(ctx context.Context) {
+	lastSweep := time.Now()
 	for {
-		interval := m.cooldownReprobeInterval()
-		if interval <= 0 {
-			interval = cooldownReprobeConfigPollInterval
+		wait := cooldownReprobeConfigPollInterval
+		if interval := m.cooldownReprobeInterval(); interval > 0 {
+			if remaining := interval - time.Since(lastSweep); remaining < wait {
+				wait = max(remaining, 0)
+			}
 		}
-		timer := time.NewTimer(interval)
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -90,6 +93,7 @@ func (m *Manager) runCooldownReprobe(ctx context.Context) {
 			continue
 		}
 		m.reprobeExpiredCooldowns(ctx)
+		lastSweep = time.Now()
 	}
 }
 

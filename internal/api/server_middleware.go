@@ -186,11 +186,7 @@ func (s *Server) loopbackOnlyMiddleware() gin.HandlerFunc {
 // identity: a loopback IP, "localhost", or a hostname configured through
 // pool-status-allowed-hosts. Matching is port-agnostic and case-insensitive.
 func (s *Server) poolStatusHostAllowed(hostHeader string) bool {
-	host := strings.TrimSpace(hostHeader)
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
-	host = strings.Trim(strings.TrimSpace(host), "[]")
+	host := normalizeHostIdentity(hostHeader)
 	if host == "" {
 		return false
 	}
@@ -202,12 +198,22 @@ func (s *Server) poolStatusHostAllowed(hostHeader string) bool {
 	}
 	if s != nil && s.cfg != nil {
 		for _, extra := range s.cfg.PoolStatusAllowedHosts {
-			if strings.EqualFold(host, strings.TrimSpace(extra)) {
+			if strings.EqualFold(host, normalizeHostIdentity(extra)) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// normalizeHostIdentity strips an optional port and IP-literal brackets so a
+// Host header or configured hostname can be compared by name.
+func normalizeHostIdentity(raw string) string {
+	host := strings.TrimSpace(raw)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	return strings.Trim(strings.TrimSpace(host), "[]")
 }
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests

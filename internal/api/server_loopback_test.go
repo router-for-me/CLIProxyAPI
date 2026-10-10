@@ -42,6 +42,8 @@ func TestLoopbackOnlyMiddleware(t *testing.T) {
 		{name: "empty host header", remoteAddr: "127.0.0.1:55555", hostSet: true, want: http.StatusForbidden},
 		{name: "nonloopback ip host", remoteAddr: "127.0.0.1:55555", host: "192.168.1.1:8317", hostSet: true, want: http.StatusForbidden},
 		{name: "configured custom hostname", remoteAddr: "127.0.0.1:55555", host: "status.lan:8317", hostSet: true, allowedHosts: []string{"status.lan"}, want: http.StatusOK},
+		{name: "configured hostname entry with port", remoteAddr: "127.0.0.1:55555", host: "status.lan", hostSet: true, allowedHosts: []string{"status.lan:9443"}, want: http.StatusOK},
+		{name: "configured bracketed hostname entry", remoteAddr: "127.0.0.1:55555", host: "status.lan:8317", hostSet: true, allowedHosts: []string{"[status.lan]"}, want: http.StatusOK},
 		{name: "unconfigured custom hostname", remoteAddr: "127.0.0.1:55555", host: "status.lan:8317", hostSet: true, allowedHosts: []string{"other.lan"}, want: http.StatusForbidden},
 	}
 	for _, tc := range cases {
