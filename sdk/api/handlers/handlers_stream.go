@@ -115,6 +115,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			SourceFormat:    responseProtocol,
 			Model:           modelName,
 			RequestedModel:  originalRequestedModel,
+			Provider:        executorPluginID,
 			RequestHeaders:  cloneHeader(streamRequestHeaders),
 			ResponseHeaders: cloneHeader(rawStreamHeaders),
 			OriginalRequest: cloneBytes(streamOriginalRequest),
@@ -214,6 +215,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					SourceFormat:    responseProtocol,
 					Model:           modelName,
 					RequestedModel:  originalRequestedModel,
+					Provider:        executorPluginID,
 					RequestHeaders:  cloneHeader(streamRequestHeaders),
 					ResponseHeaders: cloneHeader(rawStreamHeaders),
 					Body:            payload,
@@ -369,6 +371,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		close(errChan)
 		return nil, nil, errChan
 	}
+	// streamProvider tracks the provider of the attempt actually being streamed. A
+	// bootstrap retry re-executes the request and may land on a different upstream,
+	// so the value read by the interceptor closures is refreshed alongside the
+	// headers and chunk channel.
+	streamProvider := streamResult.Provider
 	executedRequest := func() (coreexecutor.Request, coreexecutor.Options) {
 		return afterAuthCapture.apply(req, opts)
 	}
@@ -415,6 +422,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			SourceFormat:    responseProtocol,
 			Model:           normalizedModel,
 			RequestedModel:  originalRequestedModel,
+			Provider:        streamProvider,
 			RequestHeaders:  cloneHeader(streamRequestHeaders),
 			ResponseHeaders: cloneHeader(rawStreamHeaders),
 			OriginalRequest: cloneBytes(streamOriginalRequest),
@@ -440,6 +448,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				SourceFormat:    responseProtocol,
 				Model:           normalizedModel,
 				RequestedModel:  originalRequestedModel,
+				Provider:        streamProvider,
 				RequestHeaders:  cloneHeader(streamRequestHeaders),
 				ResponseHeaders: cloneHeader(rawStreamHeaders),
 				Body:            payload,
@@ -569,6 +578,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 		rawStreamHeaders = cloneHeader(retryResult.Headers)
 		baseStreamHeaders = cloneHeader(retryResult.Headers)
+		streamProvider = retryResult.Provider
 		streamHeaderInitialized = false
 		streamClosedBeforeRead = false
 		bootstrapStreamErr = nil

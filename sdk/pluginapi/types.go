@@ -116,6 +116,24 @@ type Capabilities struct {
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
+	// StreamChunkInterceptorProviders limits stream chunk interceptor calls to these
+	// upstream providers, matched against StreamChunkInterceptRequest.Provider.
+	// Matching is case-insensitive. An empty list means every provider, which keeps
+	// the pre-existing behavior for plugins that do not declare a scope.
+	StreamChunkInterceptorProviders []string
+	// StreamChunkInterceptorModels limits stream chunk interceptor calls to these
+	// models. Matching is case-insensitive and an entry matches when it equals the
+	// model or is a path-style prefix of it, so "vendor-a/" matches
+	// "vendor-a/Model-X". An empty list means every model.
+	//
+	// Only client-visible names are matched: the model the client asked for, and the
+	// name left after thinking-suffix and "auto" resolution. A name that only exists
+	// upstream (an auth model alias or model-pool target) never reaches this filter,
+	// so declare the name your clients send.
+	//
+	// A chunk is delivered when both filters accept it; an empty list accepts
+	// everything.
+	StreamChunkInterceptorModels []string
 	// WebSocketResponseObserver receives upstream WebSocket response events during execution.
 	WebSocketResponseObserver WebSocketResponseObserver
 	// ThinkingApplier applies validated thinking configuration to provider payloads.
@@ -1229,10 +1247,27 @@ type ResponseInterceptResponse struct {
 
 // StreamChunkInterceptRequest describes a successful stream chunk before downstream delivery.
 type StreamChunkInterceptRequest struct {
-	RequestID       string
-	SourceFormat    string
-	Model           string
-	RequestedModel  string
+	RequestID    string
+	SourceFormat string
+	// Model is the client-visible model name: the request model after thinking
+	// suffix and "auto" resolution, but before auth model alias or model-pool
+	// rewriting. It is therefore not always the name sent upstream.
+	Model string
+	// RequestedModel is the model the client asked for, verbatim.
+	RequestedModel string
+	// Provider identifies the upstream serving this stream. It carries the
+	// executor key of the selected credential, which is what a scope should be
+	// written against, but the exact spelling depends on the route:
+	//
+	//   - a built-in provider uses its executor key, for example "openai",
+	//     "claude", or "openai-compatible-<name>" for an OpenAI-compatible entry
+	//     (the bare name when the entry itself is named "openai-compatibility");
+	//   - a plugin executor route uses the executor plugin ID;
+	//   - a Home route uses the lowercased auth provider, which does not apply the
+	//     "openai-compatible-" prefix or the "kimi.com" to "kimi" mapping.
+	//
+	// It is empty only when no provider could be resolved.
+	Provider        string
 	RequestHeaders  http.Header
 	ResponseHeaders http.Header
 	// OriginalRequest contains the raw client request body.

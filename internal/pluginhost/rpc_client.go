@@ -150,6 +150,8 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
+		plugin.Capabilities.StreamChunkInterceptorProviders = append([]string(nil), resp.Capabilities.StreamChunkInterceptorProviders...)
+		plugin.Capabilities.StreamChunkInterceptorModels = append([]string(nil), resp.Capabilities.StreamChunkInterceptorModels...)
 	}
 	if resp.Capabilities.WebSocketResponseObserver {
 		plugin.Capabilities.WebSocketResponseObserver = adapter
