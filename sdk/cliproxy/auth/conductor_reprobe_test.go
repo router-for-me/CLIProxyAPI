@@ -119,6 +119,15 @@ func TestCollectReprobeCandidates(t *testing.T) {
 			"gpt-5": {Status: StatusDisabled},
 			"gpt-4": {},
 		}},
+		// Aggregate cooldown must not probe a model still inside its own cooldown.
+		{ID: "fallback-blocked", Provider: "reprobe-test", Unavailable: true, NextRetryAfter: past, ModelStates: map[string]*ModelState{
+			"gpt-5": {Unavailable: true, NextRetryAfter: future},
+		}},
+		// Aggregate cooldown skips blocked registered models for a free one.
+		{ID: "fallback-next", Provider: "reprobe-test", Unavailable: true, NextRetryAfter: past, ModelStates: map[string]*ModelState{
+			"gpt-4": {Unavailable: true, NextRetryAfter: future},
+			"gpt-5": {},
+		}},
 		// Aggregate cooldown probes a healthy registered model.
 		{ID: "fallback-open", Provider: "reprobe-test", Unavailable: true, NextRetryAfter: past, ModelStates: map[string]*ModelState{
 			"gpt-4": {},
@@ -132,9 +141,13 @@ func TestCollectReprobeCandidates(t *testing.T) {
 		}
 	}
 	registry.GetGlobalRegistry().RegisterClient("fallback-disabled", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-5"}})
+	registry.GetGlobalRegistry().RegisterClient("fallback-blocked", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-5"}})
+	registry.GetGlobalRegistry().RegisterClient("fallback-next", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-4"}, {ID: "gpt-5"}})
 	registry.GetGlobalRegistry().RegisterClient("fallback-open", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-4"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient("fallback-disabled")
+		registry.GetGlobalRegistry().UnregisterClient("fallback-blocked")
+		registry.GetGlobalRegistry().UnregisterClient("fallback-next")
 		registry.GetGlobalRegistry().UnregisterClient("fallback-open")
 	})
 
@@ -165,7 +178,14 @@ func TestCollectReprobeCandidates(t *testing.T) {
 	if fallback.routeModel != "gpt-4" || fallback.credentialScope {
 		t.Fatalf("fallback-open candidate = %+v, want routeModel gpt-4", fallback)
 	}
-	for _, absent := range []string{"cred-pending", "disabled", "model-disabled", "fallback-disabled", "open"} {
+	next, ok := got["fallback-next"]
+	if !ok {
+		t.Fatal("expected fallback candidate for fallback-next")
+	}
+	if next.routeModel != "gpt-5" || next.credentialScope {
+		t.Fatalf("fallback-next candidate = %+v, want routeModel gpt-5", next)
+	}
+	for _, absent := range []string{"cred-pending", "disabled", "model-disabled", "fallback-disabled", "fallback-blocked", "open"} {
 		if _, ok := got[absent]; ok {
 			t.Fatalf("unexpected candidate for %s", absent)
 		}

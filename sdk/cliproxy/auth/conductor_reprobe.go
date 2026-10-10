@@ -175,10 +175,8 @@ func (m *Manager) reprobeCandidatesForAuth(a *Auth, now time.Time) []reprobeCand
 		// Aggregate unavailability outlived the per-model timers (for
 		// example after a state restore); verify the credential once so it
 		// can rejoin the pool.
-		if routeModel := firstReprobeModel(a); routeModel != "" {
-			if _, reason, _ := isAuthBlockedForModel(a, routeModel, now); reason != blockReasonDisabled {
-				candidates = append(candidates, reprobeCandidate{auth: a.Clone(), routeModel: routeModel})
-			}
+		if routeModel := firstReprobeModel(a, now); routeModel != "" {
+			candidates = append(candidates, reprobeCandidate{auth: a.Clone(), routeModel: routeModel})
 		}
 	}
 	return candidates
@@ -196,8 +194,9 @@ func (m *Manager) reprobeCandidateStillWarranted(live *Auth, candidate reprobeCa
 }
 
 // firstReprobeModel picks a deterministic registered model for probing an auth
-// whose cooldown did not record a model key.
-func firstReprobeModel(auth *Auth) string {
+// whose cooldown did not record a model key. Models still blocked by a live
+// restriction are skipped so the probe cannot clear another cooldown early.
+func firstReprobeModel(auth *Auth, now time.Time) string {
 	if auth == nil {
 		return ""
 	}
@@ -206,7 +205,12 @@ func firstReprobeModel(auth *Auth) string {
 		return ""
 	}
 	sort.Strings(models)
-	return models[0]
+	for _, model := range models {
+		if blocked, _, _ := isAuthBlockedForModel(auth, model, now); !blocked {
+			return model
+		}
+	}
+	return ""
 }
 
 // runReprobeCandidate executes a single synthetic probe and records the result
@@ -219,7 +223,7 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 	}
 	routeModel := strings.TrimSpace(candidate.routeModel)
 	if routeModel == "" {
-		routeModel = firstReprobeModel(auth)
+		routeModel = firstReprobeModel(auth, time.Now())
 	}
 	if routeModel == "" {
 		return
