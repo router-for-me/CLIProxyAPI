@@ -866,7 +866,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
 							state.NextRetryAfter = now.Add(*result.RetryAfter)
 						} else {
-							next := now.Add(12 * time.Hour)
+							next := now.Add(modelSupportCooldown)
 							state.NextRetryAfter = next
 						}
 					} else if isCloudflareChallengeResultError(result.Error) {
@@ -902,8 +902,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = time.Time{}
 							} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
 								state.NextRetryAfter = now.Add(*result.RetryAfter)
+							} else if isExplicitModelNotFoundForState(result.Error, modelKey, result.UpstreamModel) {
+								// A 404 that explicitly names this model as unsupported is
+								// demonstrably persistent and keeps the long cooldown. The
+								// structured message names the upstream identifier, which
+								// differs from the route alias under alias mapping.
+								state.NextRetryAfter = now.Add(modelSupportCooldown)
 							} else {
-								next := now.Add(12 * time.Hour)
+								// Concurrent in-flight failures complete in any order: a
+								// transient 404 must not shorten a still-live longer
+								// deadline recorded by an earlier result.
+								next := now.Add(notFoundCooldown)
+								if state.NextRetryAfter.After(next) && state.NextRetryAfter.After(now) {
+									next = state.NextRetryAfter
+								}
 								state.NextRetryAfter = next
 							}
 						case 429:
@@ -1579,6 +1591,24 @@ func resultErrorFromError(err error) *Error {
 		}
 	}
 	return resultErr
+}
+
+// isExplicitModelNotFoundForState reports whether a 404 result explicitly
+// names the attempted model — by route key or by the alias-resolved upstream
+// identifier, since structured provider errors quote the upstream name — as
+// unsupported (#5476 review).
+func isExplicitModelNotFoundForState(err *Error, modelKey, upstreamModel string) bool {
+	if err == nil {
+		return false
+	}
+	if isExplicitModelNotFoundError(err, thinking.ParseSuffix(modelKey).ModelName) {
+		return true
+	}
+	upstream := strings.TrimSpace(upstreamModel)
+	if upstream == "" || strings.EqualFold(upstream, modelKey) {
+		return false
+	}
+	return isExplicitModelNotFoundError(err, thinking.ParseSuffix(upstream).ModelName)
 }
 
 // shouldSkipCredentialCooldown reports failures that must not mark auth/model cooling.
@@ -2341,7 +2371,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			} else if retryAfter != nil && *retryAfter > 0 {
 				auth.NextRetryAfter = now.Add(*retryAfter)
 			} else {
-				auth.NextRetryAfter = now.Add(12 * time.Hour)
+				auth.NextRetryAfter = now.Add(notFoundCooldown)
 			}
 		case 429:
 			auth.StatusMessage = "quota exhausted"
