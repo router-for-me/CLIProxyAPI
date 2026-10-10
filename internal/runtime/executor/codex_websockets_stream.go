@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -358,7 +359,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					// Deliver quota failures through the conductor before downstream closure
+					// can cancel the request and discard credential cooldown accounting.
+					e.invalidateUpstreamConnWithNotify(sess, conn, "upstream_error", wsErr, clienterror.HTTPStatusFromError(wsErr) != http.StatusTooManyRequests)
 					sess.clearActive(conn, readCh)
 					unlockStreamSession()
 				} else {
@@ -380,11 +383,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return nil, wsErr
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
-				// A transient capacity rejection is retried on another credential, so the
-				// downstream websocket session must survive this upstream teardown. Notifying
-				// the disconnect here would close the client connection before the retry can
-				// deliver anything. Every other terminal failure is forwarded in-stream and
-				// legitimately terminates the session, so it keeps the notifying variant.
+				// Capacity rejections may retry during bootstrap. Quota failures must
+				// reach the conductor before downstream closure cancels their cooldown
+				// accounting. Other terminal failures retain disconnect notification.
 				failoverPending := isCodexOverloadBootstrapFailure(terminalBody)
 				if failoverPending && timeoutReached {
 					failoverPending = false
@@ -392,11 +393,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				if sess != nil {
 					unlockStreamSession()
-					if failoverPending {
-						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "terminal_failure", streamErr)
-					} else {
-						e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
-					}
+					e.invalidateUpstreamConnWithNotify(sess, conn, "terminal_failure", streamErr, !failoverPending && streamErr.StatusCode() != http.StatusTooManyRequests)
 					sess.clearActive(conn, readCh)
 				} else {
 					logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "terminal_failure", streamErr)
@@ -624,7 +621,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					// Quota error chunks own downstream closure after cooldown accounting.
+					e.invalidateUpstreamConnWithNotify(sess, conn, "upstream_error", wsErr, clienterror.HTTPStatusFromError(wsErr) != http.StatusTooManyRequests)
 				}
 				if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
 					terminateErr = errClearReplay
@@ -643,7 +641,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateErr = streamErr
 				if sess != nil {
 					unlockStreamSession()
-					e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
+					e.invalidateUpstreamConnWithNotify(sess, conn, "terminal_failure", streamErr, streamErr.StatusCode() != http.StatusTooManyRequests)
 				}
 				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 					terminateErr = errClearReplay
