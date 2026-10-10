@@ -802,6 +802,13 @@ upstream:
 #   # OpenAI compatibility providers
 #
 #   openai-compatibility:
+#     # OpenCode (Zen) provider (Zero-config models & auto-fingerprinting bypass)
+#     - name: "opencode"
+#       base-url: "https://opencode.ai/zen/v1"
+#       keys:
+#         - api-key: "oc_sk_..."
+#       # models is optional: all OpenCode 1M free tier & Zen models are auto-registered when omitted!
+#
 #     - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #       disabled: false # optional: set to true to disable this provider without removing it
 #       prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials

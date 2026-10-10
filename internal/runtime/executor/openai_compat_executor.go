@@ -66,6 +66,9 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	if e.isOpenCode(auth) {
+		applyOpenCodeHeaders(req)
+	}
 	return nil
 }
 
@@ -147,6 +150,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
+	isOC := e.isOpenCode(auth)
+	if isOC {
+		var errOC error
+		translated, errOC = applyOpenCodePayload(translated, true)
+		if errOC != nil {
+			return resp, errOC
+		}
+	}
+
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -157,7 +169,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	if isOC {
+		applyOpenCodeHeaders(httpReq)
+	} else {
+		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -201,10 +217,23 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		err = newOpenAICompatStatusError(httpResp.StatusCode, httpResp.Header, b)
 		return resp, err
 	}
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	var body []byte
+	if isOC {
+		var errAgg error
+		body, errAgg = aggregateOpenCodeSSEToChatCompletion(httpResp.Body, baseModel)
+		if errAgg != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errAgg)
+			err = errAgg
+			return resp, err
+		}
+	} else {
+		var errRead error
+		body, errRead = io.ReadAll(httpResp.Body)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			err = errRead
+			return resp, err
+		}
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 	reporter.ObserveResponseModel(body)
@@ -372,6 +401,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
+	isOC := e.isOpenCode(auth)
+	if isOC {
+		var errOC error
+		translated, errOC = applyOpenCodePayload(translated, true)
+		if errOC != nil {
+			return nil, errOC
+		}
+	}
+
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -382,7 +420,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	if isOC {
+		applyOpenCodeHeaders(httpReq)
+	} else {
+		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -975,6 +1017,18 @@ func (e *OpenAICompatExecutor) applyPromptCacheKey(ctx context.Context, auth *cl
 	}, "\x00")
 	promptCacheKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
 	return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
+}
+
+func (e *OpenAICompatExecutor) isOpenCode(auth *cliproxyauth.Auth) bool {
+	if e == nil {
+		return false
+	}
+	baseURL, _ := e.resolveCredentials(auth)
+	compatName := ""
+	if auth != nil && auth.Attributes != nil {
+		compatName = auth.Attributes["compat_name"]
+	}
+	return isOpenCodeTarget(baseURL, e.provider, compatName)
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {

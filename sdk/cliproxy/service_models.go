@@ -193,6 +193,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "opencode", "opencode-zen", "zen":
+		models = registry.GetOpenCodeModels()
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -787,7 +790,18 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
-	if compat == nil || len(compat.Models) == 0 {
+	if compat == nil {
+		return nil
+	}
+	if len(compat.Models) == 0 {
+		baseURL := strings.TrimSpace(compat.BaseURL)
+		name := strings.TrimSpace(compat.Name)
+		if strings.Contains(strings.ToLower(baseURL), "opencode.ai") || strings.EqualFold(name, "opencode") {
+			return registry.GetOpenCodeModels()
+		}
+		if registry.IsOpenRouterTarget(baseURL, name) {
+			return registry.GetOpenRouterModels()
+		}
 		return nil
 	}
 	now := time.Now().Unix()

@@ -533,6 +533,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetDevinModels()
 	case "meta", "muse":
 		return GetMetaModels()
+	case "opencode", "opencode-zen", "zen":
+		return GetOpenCodeModels()
 	default:
 		return nil
 	}
@@ -577,6 +579,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.XAI,
 		data.Devin,
 		staticDevinModels,
+		GetOpenCodeModels(),
 		data.Meta,
 	}
 	for _, models := range allModels {
