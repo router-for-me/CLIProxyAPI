@@ -269,6 +269,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
+		// Credential files do not store passive quota observations, so reloading one
+		// must not erase the live snapshot. The newest observation wins.
+		auth.Quota = mergeQuotaObservation(auth.Quota, existing.Quota)
 		if credChanged || mode == updateModeRefresh {
 			auth.RejectedAccessToken = ""
 			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {

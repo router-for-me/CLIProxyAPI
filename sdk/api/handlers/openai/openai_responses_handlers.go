@@ -76,15 +76,14 @@ type responsesSSEFramer struct {
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
-	if len(chunk) == 0 || f.terminalEvent != "" {
+	// Frames after an error terminal are dropped outright. After any other
+	// terminal they are still framed so writeFrame can pass trailing events.
+	if len(chunk) == 0 || f.terminalError != nil {
 		return
 	}
 	if responsesSSEStartsNewDataFrame(f.pending, chunk) {
 		f.writeFrame(w, f.pending)
 		f.pending = f.pending[:0]
-		if f.terminalEvent != "" {
-			return
-		}
 	}
 	if responsesSSENeedsLineBreak(f.pending, chunk) {
 		f.pending = append(f.pending, '\n')
@@ -98,7 +97,7 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 		f.writeFrame(w, f.pending[:frameLen])
 		copy(f.pending, f.pending[frameLen:])
 		f.pending = f.pending[:len(f.pending)-frameLen]
-		if f.terminalEvent != "" {
+		if f.terminalError != nil {
 			f.pending = f.pending[:0]
 			return
 		}
@@ -115,7 +114,7 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 }
 
 func (f *responsesSSEFramer) Flush(w io.Writer) {
-	if len(f.pending) == 0 || f.terminalEvent != "" {
+	if len(f.pending) == 0 || f.terminalError != nil {
 		return
 	}
 	if len(bytes.TrimSpace(f.pending)) == 0 {
@@ -131,9 +130,31 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 }
 
 func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
-	if f.writeErr == nil {
-		f.writeErr = writeResponsesSSEChunk(w, f.repairFrame(frame))
+	if f.writeErr != nil {
+		return
 	}
+	if f.terminalEvent != "" {
+		// The response is over for the client; only trailing events still belong to it.
+		if responsesSSETrailingFrame(frame) {
+			f.writeErr = writeResponsesSSEChunk(w, frame)
+		}
+		return
+	}
+	f.writeErr = writeResponsesSSEChunk(w, f.repairFrame(frame))
+}
+
+// responsesSubscriptionUsageEvent is the event Meta sends after response.completed
+// with the account's subscription usage. The Muse CLI reads it to show its quota.
+const responsesSubscriptionUsageEvent = "response.subscription_usage"
+
+// responsesSSETrailingFrame reports whether a frame that arrives after the
+// terminal event is still forwarded.
+func responsesSSETrailingFrame(frame []byte) bool {
+	if responsesSSEEventName(frame) == responsesSubscriptionUsageEvent {
+		return true
+	}
+	payload, ok := responsesSSEDataPayload(frame)
+	return ok && json.Valid(payload) && gjson.GetBytes(payload, "type").String() == responsesSubscriptionUsageEvent
 }
 
 func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType string) bool {

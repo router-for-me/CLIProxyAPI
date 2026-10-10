@@ -150,6 +150,35 @@ func TestQuotaStateObserveResponseHeadersDropsKimiGrokAndAntigravitySignals(t *t
 	}
 }
 
+func TestQuotaSignalsKeepMetaSubscriptionUsageForMetaOnly(t *testing.T) {
+	headers := http.Header{
+		"X-Meta-Tier":                  []string{"tier-1"},
+		"X-Meta-Window-Used-Percent":   []string{"12"},
+		"X-Meta-Window-Minutes":        []string{"300"},
+		"X-Meta-Window-Reset-At":       []string{"1791465557"},
+		"X-Meta-Weekly-Used-Percent":   []string{"5"},
+		"X-Meta-Weekly-Reset-At":       []string{"1791763200"},
+		"X-Meta-Ai-Gateway-Error":      []string{"not a quota signal"},
+		"X-Request-Id":                 []string{"req-1"},
+		"X-Codex-Primary-Used-Percent": []string{"50"},
+	}
+	var meta QuotaState
+	if !meta.ObserveResponseHeadersForProvider("meta", headers, time.Unix(1791447762, 0)) {
+		t.Fatal("meta subscription usage was not observed")
+	}
+	if len(meta.Signals) != 6 || meta.Signals["X-Meta-Weekly-Used-Percent"] != "5" || meta.Signals["X-Meta-Tier"] != "tier-1" {
+		t.Fatalf("meta signals = %#v, want only the six subscription usage signals", meta.Signals)
+	}
+
+	var codex QuotaState
+	codex.ObserveResponseHeadersForProvider("codex", headers, time.Now())
+	for key := range codex.Signals {
+		if strings.HasPrefix(strings.ToLower(key), "x-meta-") {
+			t.Fatalf("codex kept Meta signal %s: %#v", key, codex.Signals)
+		}
+	}
+}
+
 func TestCooldownEqualityIgnoresObservationSignals(t *testing.T) {
 	base := QuotaState{
 		Exceeded:      true,
@@ -257,6 +286,32 @@ func TestResetModelStatePreservesObservationSignals(t *testing.T) {
 	}
 	if !state.Quota.ObservedAt.Equal(time.Unix(10, 0)) || state.Quota.Signals["X-Codex-Active-Limit"] != "premium" {
 		t.Fatalf("observation signals were lost during reset: %#v", state.Quota)
+	}
+}
+
+func TestUpdateFromCredentialFileKeepsObservation(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "meta-reload", Provider: "meta"}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	// A finished request records the subscription usage its response carried.
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeaders(ctx, http.Header{
+		"X-Meta-Weekly-Used-Percent": []string{"5"},
+		"X-Meta-Weekly-Reset-At":     []string{"1791763200"},
+	})
+	manager.MarkResult(ctx, Result{AuthID: "meta-reload", Provider: "meta", Model: "muse-spark-1.3", Success: true})
+	observed, ok := manager.GetByID("meta-reload")
+	if !ok || observed.Quota.Signals["X-Meta-Weekly-Used-Percent"] != "5" || observed.Quota.ObservedAt.IsZero() {
+		t.Fatalf("observation was not recorded: %#v", observed.Quota)
+	}
+	// The file watcher reloads a saved credential without any observation in it.
+	if _, errUpdate := manager.Update(context.Background(), &Auth{ID: "meta-reload", Provider: "meta"}); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	reloaded, ok := manager.GetByID("meta-reload")
+	if !ok || reloaded.Quota.Signals["X-Meta-Weekly-Used-Percent"] != "5" || !reloaded.Quota.ObservedAt.Equal(observed.Quota.ObservedAt) {
+		t.Fatalf("reloading the credential erased its observation: %#v", reloaded.Quota)
 	}
 }
 

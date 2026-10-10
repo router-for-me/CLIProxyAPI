@@ -145,6 +145,9 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		return resp, wrapMetaUpstreamError(httpResp.StatusCode, data)
 	}
+	// Meta sends subscription usage after response.completed, which is where the
+	// translation below stops reading.
+	helps.ObserveMetaSubscriptionUsageSSE(ctx, data)
 
 	var upstreamUsage helps.StreamUsageBuffer
 	out, errCompleted := e.translateMetaCompleted(ctx, req, prepared, data, &upstreamUsage)

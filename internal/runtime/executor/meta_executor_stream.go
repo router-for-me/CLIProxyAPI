@@ -146,6 +146,8 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 					streamUsage.Observe(detail, true)
 				}
 				eventData = patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+			case helps.MetaSubscriptionUsageEventType:
+				helps.ObserveMetaSubscriptionUsage(ctx, eventData)
 			}
 			if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
 				return

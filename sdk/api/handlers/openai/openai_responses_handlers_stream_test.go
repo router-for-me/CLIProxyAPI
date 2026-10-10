@@ -68,6 +68,62 @@ func TestResponsesSSEFramerFlushesMultilineDataWithoutDelimiter(t *testing.T) {
 	}
 }
 
+func TestResponsesSSEFramerForwardsSubscriptionUsageAfterCompleted(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{}
+	// The Meta executor forwards the stream one line at a time.
+	for _, line := range []string{
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp-1","status":"completed"}}`,
+		"",
+		"event: response.output_text.delta",
+		`data: {"type":"response.output_text.delta","delta":"late"}`,
+		"",
+		"event: response.subscription_usage",
+		`data: {"type":"response.subscription_usage","subscription":{"weekly":{"used_percent":5,"resets_at":1791763200}}}`,
+		"",
+	} {
+		framer.WriteChunk(&output, []byte(line+"\n"))
+	}
+	framer.Flush(&output)
+
+	got := output.String()
+	if framer.terminalEvent != "response.completed" {
+		t.Fatalf("terminal event = %q, want response.completed", framer.terminalEvent)
+	}
+	if strings.Count(got, "event: response.subscription_usage") != 1 || !strings.Contains(got, `"used_percent":5`) {
+		t.Fatalf("subscription usage after response.completed was not forwarded once: %q", got)
+	}
+	if strings.Contains(got, "late") {
+		t.Fatalf("an ordinary event after response.completed was forwarded: %q", got)
+	}
+	if strings.Index(got, "response.completed") > strings.Index(got, "response.subscription_usage") {
+		t.Fatalf("subscription usage was written before the terminal event: %q", got)
+	}
+}
+
+func TestResponsesSSEFramerForwardsUndelimitedSubscriptionUsageOnFlush(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{}
+	framer.WriteChunk(&output, []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\"}}\n\n"))
+	framer.WriteChunk(&output, []byte("data: {\"type\":\"response.subscription_usage\",\"subscription\":{}}"))
+	framer.Flush(&output)
+	if !strings.Contains(output.String(), "response.subscription_usage") {
+		t.Fatalf("undelimited subscription usage frame was dropped on flush: %q", output.String())
+	}
+}
+
+func TestResponsesSSEFramerDropsSubscriptionUsageAfterErrorTerminal(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{}
+	framer.WriteChunk(&output, []byte("event: error\ndata: {\"type\":\"error\",\"message\":\"failed\"}\n\n"))
+	framer.WriteChunk(&output, []byte("event: response.subscription_usage\ndata: {\"type\":\"response.subscription_usage\",\"subscription\":{}}\n\n"))
+	framer.Flush(&output)
+	if strings.Contains(output.String(), "response.subscription_usage") {
+		t.Fatalf("frame after an error terminal was forwarded: %q", output.String())
+	}
+}
+
 func TestResponsesSSEFramerUsesPayloadErrorOverCompletedEvent(t *testing.T) {
 	var output bytes.Buffer
 	framer := &responsesSSEFramer{failureEvent: "response.failed"}
