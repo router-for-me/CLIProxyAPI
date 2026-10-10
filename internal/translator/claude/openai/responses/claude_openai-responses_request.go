@@ -608,7 +608,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			case "auto":
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 			case "none":
-				// Leave unset; implies no tools
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
 			case "required":
 				if len(includedToolNames) > 0 {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
@@ -616,7 +616,9 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 		case gjson.JSON:
 			choiceType := toolChoice.Get("type").String()
-			if choiceType == "function" || choiceType == "custom" {
+			if choiceType == "none" {
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
+			} else if choiceType == "function" || choiceType == "custom" {
 				fn := toolChoice.Get("function.name").String()
 				if fn == "" {
 					fn = toolChoice.Get("custom.name").String()
