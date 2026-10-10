@@ -1723,7 +1723,26 @@ func ensureCacheControl(payload []byte) []byte {
 	}
 	payload = injectSystemCacheControl(payload)
 	payload = injectMessagesCacheControl(payload)
+	payload = foldTopLevelCacheControl(payload)
 	return payload
+}
+
+// foldTopLevelCacheControl removes the request-level cache_control once CPA
+// owns placement. The top-level form (the Anthropic SDKs' default) asks for a
+// breakpoint on the last block of the prompt, which injectMessagesCacheControl
+// has just placed as an explicit marker. Anthropic counts the top-level form
+// as its own block against the four-breakpoint limit even when it lands on a
+// block that already carries a marker, and it must also agree with that
+// block's ttl; folding it into the explicit marker avoids both.
+func foldTopLevelCacheControl(payload []byte) []byte {
+	if !gjson.GetBytes(payload, "cache_control").Exists() {
+		return payload
+	}
+	updated, err := sjson.DeleteBytes(payload, "cache_control")
+	if err != nil {
+		return payload
+	}
+	return updated
 }
 
 // claudePayloadHasCacheableSystem reports whether the payload has a system prompt
@@ -1782,7 +1801,7 @@ func upgradeClaudeCacheControlTTL(payload []byte, ttl string) []byte {
 			upgraded += `,"scope":` + scope.Raw
 		}
 		upgraded += "}"
-		updated, errSet := sjson.SetRawBytes(payload, path+".cache_control", []byte(upgraded))
+		updated, errSet := sjson.SetRawBytes(payload, claudeCacheControlPath(path), []byte(upgraded))
 		if errSet != nil {
 			return
 		}
@@ -1791,6 +1810,16 @@ func upgradeClaudeCacheControlTTL(payload []byte, ttl string) []byte {
 
 	forEachClaudeCacheControlBlock(payload, upgrade)
 	return payload
+}
+
+// claudeCacheControlPath is the sjson path of the cache_control object on the
+// block at path; the empty path is the request itself, whose top-level
+// cache_control Anthropic applies to the last block of the prompt.
+func claudeCacheControlPath(path string) string {
+	if path == "" {
+		return "cache_control"
+	}
+	return path + ".cache_control"
 }
 
 // stripClaudeCacheControlTTL removes any ttl field from cache_control blocks in payload,
@@ -1808,7 +1837,7 @@ func stripClaudeCacheControlTTL(payload []byte) []byte {
 		if !cacheControl.IsObject() || !cacheControl.Get("ttl").Exists() {
 			return
 		}
-		updated, errDel := sjson.DeleteBytes(payload, path+".cache_control.ttl")
+		updated, errDel := sjson.DeleteBytes(payload, claudeCacheControlPath(path)+".ttl")
 		if errDel != nil {
 			return
 		}
@@ -1820,7 +1849,12 @@ func stripClaudeCacheControlTTL(payload []byte) []byte {
 }
 
 // forEachClaudeCacheControlBlock walks every block that can carry cache_control
-// in Anthropic's evaluation order: tools, then system, then messages.
+// in Anthropic's evaluation order: tools, then system, then messages, then the
+// request's own top-level cache_control, which Anthropic applies to the last
+// block and so evaluates last. The top-level marker is visited with the empty
+// path; see claudeCacheControlPath. It must carry the same ttl as the block it
+// lands on: a top-level marker without a ttl is 5m, and Anthropic rejects the
+// request when that block was upgraded to 1h.
 func forEachClaudeCacheControlBlock(payload []byte, visit func(path string, block gjson.Result)) {
 	if tools := gjson.GetBytes(payload, "tools"); tools.IsArray() {
 		tools.ForEach(func(idx, item gjson.Result) bool {
@@ -1846,6 +1880,9 @@ func forEachClaudeCacheControlBlock(payload []byte, visit func(path string, bloc
 			})
 			return true
 		})
+	}
+	if gjson.GetBytes(payload, "cache_control").Exists() {
+		visit("", gjson.ParseBytes(payload))
 	}
 }
 
@@ -1974,7 +2011,7 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 		if !seen5m {
 			return
 		}
-		ttlPath := path + ".cache_control.ttl"
+		ttlPath := claudeCacheControlPath(path) + ".ttl"
 		updated, errDel := sjson.DeleteBytes(payload, ttlPath)
 		if errDel != nil {
 			return
@@ -2012,6 +2049,11 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 			})
 			return true
 		})
+	}
+
+	// The top-level marker lands on the last block, so it evaluates last.
+	if gjson.GetBytes(payload, "cache_control").Exists() {
+		processBlock("", gjson.ParseBytes(payload))
 	}
 
 	if !modified {
