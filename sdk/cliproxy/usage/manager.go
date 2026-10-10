@@ -62,9 +62,14 @@ type Record struct {
 	RequestedAt time.Time
 	Latency     time.Duration
 	TTFT        time.Duration
-	Failed      bool
-	Fail        Failure
-	Detail      Detail
+	// GenerationStarted is the offset, on the same clock origin as TTFT, at which upstream
+	// announced the first model-produced output item. It never exceeds TTFT; on reasoning
+	// models the gap is time the model spent generating before emitting any delta. Zero
+	// means the protocol or path did not expose it.
+	GenerationStarted time.Duration
+	Failed            bool
+	Fail              Failure
+	Detail            Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }

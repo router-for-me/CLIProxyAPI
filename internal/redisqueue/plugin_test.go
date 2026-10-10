@@ -184,6 +184,52 @@ func TestUsageQueuePluginPublishesStreamFlag(t *testing.T) {
 	}
 }
 
+func TestUsageQueuePluginPublishesGenerationStartedOnlyWhenObserved(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider:          "codex",
+			Model:             "gpt-5.6-luna",
+			Stream:            true,
+			Latency:           42420 * time.Millisecond,
+			TTFT:              20039 * time.Millisecond,
+			GenerationStarted: 2520 * time.Millisecond,
+			Detail: coreusage.Detail{
+				OutputTokens: 1294,
+				TotalTokens:  1629,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireIntField(t, payload, "latency_ms", 42420)
+		requireIntField(t, payload, "ttft_ms", 20039)
+		requireIntField(t, payload, "generation_started_ms", 2520)
+	})
+
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "openai",
+			Model:    "gpt-5.4",
+			Stream:   true,
+			Latency:  1500 * time.Millisecond,
+			TTFT:     300 * time.Millisecond,
+			Detail: coreusage.Detail{
+				OutputTokens: 20,
+				TotalTokens:  30,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireIntField(t, payload, "ttft_ms", 300)
+		requireMissingField(t, payload, "generation_started_ms")
+	})
+}
+
 func TestUsageQueuePluginPreservesLegacyCachedOnlyUsage(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithResponseStatusHolder(context.Background())

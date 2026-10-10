@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 func TestIsResponsesTokenEvent_Classification(t *testing.T) {
@@ -303,5 +305,97 @@ func TestObserveResponsesTokenEvent_FirstPacketFallback(t *testing.T) {
 	// First packet fallback must be returned
 	if !reporter.IsFirstPacketSet() {
 		t.Fatalf("expected IsFirstPacketSet() == true")
+	}
+}
+
+func TestIsResponsesGenerationStartEvent_Classification(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{"reasoning item added", `{"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[]}}`, true},
+		{"message item added", `{"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`, true},
+		{"function call item added", `{"type":"response.output_item.added","item":{"type":"function_call","name":"shell","arguments":""}}`, true},
+		{"custom tool call item added", `{"type":"response.output_item.added","item":{"type":"custom_tool_call","input":""}}`, true},
+		{"sse data line", `data: {"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}`, true},
+		{"server side web search item", `{"type":"response.output_item.added","item":{"type":"web_search_call","status":"in_progress"}}`, false},
+		{"item done is not a start", `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[]}}`, false},
+		{"text delta is not a start", `{"type":"response.output_text.delta","delta":"hi"}`, false},
+		{"response created", `{"type":"response.created","response":{"id":"resp_1"}}`, false},
+		{"empty", ``, false},
+		{"sse done marker", `data: [DONE]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsResponsesGenerationStartEvent([]byte(tc.payload)); got != tc.want {
+				t.Fatalf("IsResponsesGenerationStartEvent(%s) = %v, want %v", tc.payload, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestObserveResponsesTokenEvent_GenerationStartPrecedesTTFT replays the frame order a
+// reasoning model produces: the reasoning item is announced, its summary streams later, and
+// the visible message follows. Generation start must come from the announcement, TTFT from
+// the first delta, and the second announcement must not move the recorded start.
+func TestObserveResponsesTokenEvent_GenerationStartPrecedesTTFT(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	reporter.StartResponseTTFT()
+
+	ObserveResponsesTokenEvent(reporter, []byte(`{"type":"response.created","response":{"id":"resp_1"}}`))
+	if reporter.IsGenerationStartSet() {
+		t.Fatalf("response.created must not record a generation start")
+	}
+
+	ObserveResponsesTokenEvent(reporter, []byte(`{"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}`))
+	if !reporter.IsGenerationStartSet() {
+		t.Fatalf("reasoning output_item.added must record a generation start")
+	}
+	if reporter.IsTTFTSet() {
+		t.Fatalf("output_item.added must not set TTFT")
+	}
+	if _, got := reporter.recordTimings(); got != 0 {
+		t.Fatalf("generation start %v must be withheld until an effective TTFT exists", got)
+	}
+	started := reporter.rawGenerationStart()
+
+	ObserveResponsesTokenEvent(reporter, []byte(`{"type":"response.reasoning_summary_text.delta","delta":"Thinking"}`))
+	if !reporter.IsTTFTSet() {
+		t.Fatalf("reasoning summary delta must set TTFT")
+	}
+	ttft, reported := reporter.recordTimings()
+	if reported != started {
+		t.Fatalf("recordTimings generation start = %v, want %v", reported, started)
+	}
+	if ttft < started {
+		t.Fatalf("ttft %v precedes generation start %v", ttft, started)
+	}
+
+	ObserveResponsesTokenEvent(reporter, []byte(`{"type":"response.output_item.added","item":{"type":"message","content":[]}}`))
+	if got := reporter.rawGenerationStart(); got != started {
+		t.Fatalf("second output_item.added changed generation start from %v to %v", started, got)
+	}
+
+	record := reporter.buildRecord(usage.Detail{OutputTokens: 5, TotalTokens: 5}, false)
+	if record.GenerationStarted != started {
+		t.Fatalf("record generation started = %v, want %v", record.GenerationStarted, started)
+	}
+}
+
+func TestObserveResponsesTokenEvent_GenerationStartAbsentWithoutAnnouncement(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	reporter.StartResponseTTFT()
+
+	ObserveResponsesTokenEvent(reporter, []byte(`{"type":"response.output_text.delta","delta":"First word"}`))
+	if !reporter.IsTTFTSet() {
+		t.Fatalf("output_text.delta must set TTFT")
+	}
+	if reporter.IsGenerationStartSet() {
+		t.Fatalf("a token delta alone must not invent a generation start")
+	}
+	record := reporter.buildRecord(usage.Detail{OutputTokens: 5, TotalTokens: 5}, false)
+	if record.GenerationStarted != 0 {
+		t.Fatalf("record generation started = %v, want 0 when unobserved", record.GenerationStarted)
 	}
 }

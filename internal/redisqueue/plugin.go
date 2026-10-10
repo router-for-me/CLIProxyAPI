@@ -114,22 +114,23 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	detail := requestDetail{
-		Timestamp:        timestamp,
-		LatencyMs:        record.Latency.Milliseconds(),
-		TTFTMs:           record.TTFT.Milliseconds(),
-		Source:           record.Source,
-		AuthIndex:        record.AuthIndex,
-		AccessTokenHash:  record.AccessTokenSHA256,
-		ClientIP:         clientRequestMetadata.ClientIP,
-		ResolvedClientIP: clientRequestMetadata.ResolvedClientIP,
-		XForwardedFor:    clientRequestMetadata.XForwardedFor,
-		UserAgent:        clientRequestMetadata.UserAgent,
-		Tokens:           tokens,
-		Failed:           failed,
-		Generate:         coreusage.GenerateEnabled(record.Generate),
-		Stream:           stream,
-		Fail:             fail,
-		ResponseHeaders:  record.ResponseHeaders,
+		Timestamp:           timestamp,
+		LatencyMs:           record.Latency.Milliseconds(),
+		TTFTMs:              record.TTFT.Milliseconds(),
+		GenerationStartedMs: generationStartedMs(record.GenerationStarted),
+		Source:              record.Source,
+		AuthIndex:           record.AuthIndex,
+		AccessTokenHash:     record.AccessTokenSHA256,
+		ClientIP:            clientRequestMetadata.ClientIP,
+		ResolvedClientIP:    clientRequestMetadata.ResolvedClientIP,
+		XForwardedFor:       clientRequestMetadata.XForwardedFor,
+		UserAgent:           clientRequestMetadata.UserAgent,
+		Tokens:              tokens,
+		Failed:              failed,
+		Generate:            coreusage.GenerateEnabled(record.Generate),
+		Stream:              stream,
+		Fail:                fail,
+		ResponseHeaders:     record.ResponseHeaders,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
@@ -188,22 +189,35 @@ type queuedUsageDetail struct {
 }
 
 type requestDetail struct {
-	Timestamp        time.Time   `json:"timestamp"`
-	LatencyMs        int64       `json:"latency_ms"`
-	TTFTMs           int64       `json:"ttft_ms"`
-	Source           string      `json:"source"`
-	AuthIndex        string      `json:"auth_index"`
-	AccessTokenHash  string      `json:"access_token_sha256,omitempty"`
-	ClientIP         string      `json:"client_ip"`
-	ResolvedClientIP string      `json:"resolved_client_ip"`
-	XForwardedFor    string      `json:"x_forwarded_for"`
-	UserAgent        string      `json:"user_agent"`
-	Tokens           tokenStats  `json:"tokens"`
-	Failed           bool        `json:"failed"`
-	Generate         bool        `json:"generate"`
-	Stream           bool        `json:"stream"`
-	Fail             failDetail  `json:"fail"`
-	ResponseHeaders  http.Header `json:"response_headers,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+	LatencyMs int64     `json:"latency_ms"`
+	TTFTMs    int64     `json:"ttft_ms"`
+	// GenerationStartedMs is omitted when the executor did not observe a generation start.
+	GenerationStartedMs *int64      `json:"generation_started_ms,omitempty"`
+	Source              string      `json:"source"`
+	AuthIndex           string      `json:"auth_index"`
+	AccessTokenHash     string      `json:"access_token_sha256,omitempty"`
+	ClientIP            string      `json:"client_ip"`
+	ResolvedClientIP    string      `json:"resolved_client_ip"`
+	XForwardedFor       string      `json:"x_forwarded_for"`
+	UserAgent           string      `json:"user_agent"`
+	Tokens              tokenStats  `json:"tokens"`
+	Failed              bool        `json:"failed"`
+	Generate            bool        `json:"generate"`
+	Stream              bool        `json:"stream"`
+	Fail                failDetail  `json:"fail"`
+	ResponseHeaders     http.Header `json:"response_headers,omitempty"`
+}
+
+// generationStartedMs converts a recorded generation start into the payload field. A zero
+// duration means the executor never observed one, so the field stays absent instead of
+// claiming a zero-millisecond start.
+func generationStartedMs(started time.Duration) *int64 {
+	if started <= 0 {
+		return nil
+	}
+	ms := started.Milliseconds()
+	return &ms
 }
 
 type tokenStats struct {

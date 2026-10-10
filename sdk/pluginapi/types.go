@@ -1531,6 +1531,9 @@ type UsageRecord struct {
 	Latency time.Duration
 	// TTFT is the time to first token for streaming requests.
 	TTFT time.Duration
+	// GenerationStarted is the offset, on the TTFT clock origin, at which upstream announced
+	// the first model-produced output item. Zero when the protocol did not expose it.
+	GenerationStarted time.Duration
 	// Failed reports whether the request failed.
 	Failed bool
 	// Failure contains failure details when Failed is true.

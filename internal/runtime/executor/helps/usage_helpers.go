@@ -53,7 +53,15 @@ type UsageReporter struct {
 	firstPacketSet      bool
 	ttftStart           time.Time
 	ttftSet             bool
-	once                sync.Once
+	// generationStarted is the offset from the TTFT clock origin at which upstream
+	// announced the first model-produced output item. It is guarded by ttftMu and
+	// only meaningful when generationStartedSet is true.
+	generationStarted    time.Duration
+	generationStartedSet bool
+	// timingOrigin is the instant StartResponseTTFT armed the clock. Unlike ttftStart it
+	// survives the TTFT mark so later generation timings share the same origin.
+	timingOrigin time.Time
+	once         sync.Once
 
 	responseModelMu sync.RWMutex
 	// responseModel holds the latest model name reported by the upstream response.
@@ -402,8 +410,70 @@ func (r *UsageReporter) StartResponseTTFT() {
 	r.ttftMu.Lock()
 	if !r.ttftSet && r.ttftStart.IsZero() {
 		r.ttftStart = time.Now()
+		if r.timingOrigin.IsZero() {
+			r.timingOrigin = r.ttftStart
+		}
 	}
 	r.ttftMu.Unlock()
+}
+
+// ObserveGenerationStart records the moment upstream announced that the model started
+// producing an output item. Protocol-aware executors call it on the frame that precedes
+// the item's first delta. Upstream emits no delta while a reasoning item is being
+// generated unless a summary is streamed, so on reasoning models the gap between this
+// instant and TTFT is generation time spent before the first delta. Only the first
+// observation is kept. Nothing is recorded before StartResponseTTFT has armed the clock, and nothing is
+// recorded once TTFT is set, so a recorded start never follows TTFT.
+func (r *UsageReporter) ObserveGenerationStart() {
+	if r == nil {
+		return
+	}
+	r.ttftMu.RLock()
+	done := r.generationStartedSet || r.ttftSet || r.timingOrigin.IsZero()
+	r.ttftMu.RUnlock()
+	if done {
+		return
+	}
+	r.ttftMu.Lock()
+	defer r.ttftMu.Unlock()
+	if r.generationStartedSet || r.ttftSet || r.timingOrigin.IsZero() {
+		return
+	}
+	r.generationStarted = time.Since(r.timingOrigin)
+	r.generationStartedSet = true
+}
+
+// IsGenerationStartSet reports whether ObserveGenerationStart has recorded a value.
+func (r *UsageReporter) IsGenerationStartSet() bool {
+	if r == nil {
+		return false
+	}
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	return r.generationStartedSet
+}
+
+// recordTimings reads TTFT and the generation start under one lock so a record never
+// pairs a first-packet fallback TTFT with a start observed after a token arrived.
+// The generation start is withheld when no effective token TTFT exists: ttftDuration then
+// falls back to the first packet time, which precedes any output item announcement, and
+// withholding keeps GenerationStarted <= TTFT on every published record.
+func (r *UsageReporter) recordTimings() (ttft, generationStarted time.Duration) {
+	if r == nil {
+		return 0, 0
+	}
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	switch {
+	case r.ttftSet:
+		ttft = r.ttft
+	case r.firstPacketSet:
+		ttft = r.firstPacketDuration
+	}
+	if r.generationStartedSet && r.ttftSet {
+		generationStarted = r.generationStarted
+	}
+	return ttft, generationStarted
 }
 
 func (r *UsageReporter) IsTTFTSet() bool {
@@ -609,6 +679,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	if model == r.model {
 		responseModel = r.ResponseModel()
 	}
+	ttft, generationStarted := r.recordTimings()
 	return usage.Record{
 		RequestID:           r.requestID,
 		TraceID:             r.traceID,
@@ -633,7 +704,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Stream:              r.stream,
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
-		TTFT:                r.ttftDuration(),
+		TTFT:                ttft,
+		GenerationStarted:   generationStarted,
 		Failed:              failed,
 		Fail:                fail,
 		Detail:              detail,
@@ -689,6 +761,12 @@ func (r *UsageReporter) setTTFT(ttft time.Duration) {
 	r.ttft = ttft
 	r.ttftSet = true
 	r.ttftStart = time.Time{}
+	// MarkFirstResponseByte samples its duration before taking this lock. A generation
+	// start observed in between would postdate the TTFT being committed, so drop it.
+	if r.generationStartedSet && r.generationStarted > ttft {
+		r.generationStarted = 0
+		r.generationStartedSet = false
+	}
 	r.ttftMu.Unlock()
 }
 
