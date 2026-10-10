@@ -89,7 +89,8 @@ func (m *Manager) runCooldownReprobe(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		if ctx.Err() != nil || m.cooldownReprobeInterval() <= 0 {
+		interval := m.cooldownReprobeInterval()
+		if ctx.Err() != nil || interval <= 0 || time.Since(lastSweep) < interval {
 			continue
 		}
 		m.reprobeExpiredCooldowns(ctx)
