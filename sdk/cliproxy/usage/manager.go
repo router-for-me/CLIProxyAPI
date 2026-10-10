@@ -75,6 +75,13 @@ type Failure struct {
 	Body       string
 }
 
+// CacheCreationDetail is the upstream cache-write split by TTL.
+// A nil detail means the upstream payload did not report the split.
+type CacheCreationDetail struct {
+	Ephemeral5mInputTokens int64
+	Ephemeral1hInputTokens int64
+}
+
 // Detail holds the token usage breakdown.
 type Detail struct {
 	InputTokens         int64
@@ -83,6 +90,9 @@ type Detail struct {
 	CachedTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
+	// CacheCreationDetail preserves the 5-minute and 1-hour cache-write split
+	// when the upstream reports it. The aggregate CacheCreationTokens stays unchanged.
+	CacheCreationDetail *CacheCreationDetail
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string

@@ -120,6 +120,69 @@ func TestUsageQueuePluginNormalizesDirectSDKUsageByProvider(t *testing.T) {
 	}
 }
 
+func TestUsageQueuePluginPayloadIncludesCacheCreationDetail(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "claude",
+			Model:    "claude-opus-5-5",
+			Detail: coreusage.Detail{
+				InputTokens:         2,
+				OutputTokens:        28,
+				CacheReadTokens:     182458,
+				CacheCreationTokens: 7828,
+				CacheCreationDetail: &coreusage.CacheCreationDetail{
+					Ephemeral5mInputTokens: 0,
+					Ephemeral1hInputTokens: 7828,
+				},
+				TotalTokens: 190316,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		tokens := requireTokensPayload(t, payload)
+		requireIntField(t, tokens, "cache_creation_tokens", 7828)
+		raw, ok := tokens["cache_creation_detail"]
+		if !ok {
+			t.Fatal("tokens missing cache_creation_detail")
+		}
+		var detail struct {
+			Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
+			Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
+		}
+		if err := json.Unmarshal(raw, &detail); err != nil {
+			t.Fatalf("unmarshal cache_creation_detail: %v", err)
+		}
+		if detail.Ephemeral5mInputTokens != 0 || detail.Ephemeral1hInputTokens != 7828 {
+			t.Fatalf("cache_creation_detail = %+v", detail)
+		}
+	})
+}
+
+func TestUsageQueuePluginPayloadOmitsCacheCreationDetailWhenAbsent(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "claude",
+			Model:    "claude-opus-5-5",
+			Detail: coreusage.Detail{
+				InputTokens:         2,
+				CacheCreationTokens: 10,
+				TotalTokens:         12,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		tokens := requireTokensPayload(t, payload)
+		requireIntField(t, tokens, "cache_creation_tokens", 10)
+		requireMissingField(t, tokens, "cache_creation_detail")
+	})
+}
+
 func TestUsageQueuePluginPayloadIncludesGenerateFalse(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithResponseStatusHolder(context.Background())

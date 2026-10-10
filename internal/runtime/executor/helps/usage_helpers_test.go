@@ -332,6 +332,37 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	if detail.TokenBreakdown.Input.TotalTokens != 22606 || detail.TokenBreakdown.Input.UncachedTokens != 3085 {
 		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
 	}
+	if detail.CacheCreationDetail != nil {
+		t.Fatalf("cache creation detail = %+v, want nil", detail.CacheCreationDetail)
+	}
+}
+
+func TestParseClaudeUsageIncludesCacheCreationDetail(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":2,"cache_creation_input_tokens":7828,"cache_read_input_tokens":182458,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":7828},"output_tokens":28}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.CacheCreationTokens != 7828 {
+		t.Fatalf("cache creation tokens = %d, want 7828", detail.CacheCreationTokens)
+	}
+	if detail.CacheCreationDetail == nil {
+		t.Fatal("cache creation detail is nil")
+	}
+	if detail.CacheCreationDetail.Ephemeral5mInputTokens != 0 || detail.CacheCreationDetail.Ephemeral1hInputTokens != 7828 {
+		t.Fatalf("cache creation detail = %+v", detail.CacheCreationDetail)
+	}
+}
+
+func TestParseClaudeStreamUsageCacheCreationDetailFromIteration(t *testing.T) {
+	line := []byte(`data: {"type":"message_delta","usage":{"input_tokens":2,"cache_creation_input_tokens":4243,"cache_read_input_tokens":126576,"output_tokens":451,"iterations":[{"type":"message","cache_creation_input_tokens":4243,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":4143}}]}}`)
+	detail, ok := ParseClaudeStreamUsage(line)
+	if !ok {
+		t.Fatal("expected stream usage to parse")
+	}
+	if detail.CacheCreationTokens != 4243 {
+		t.Fatalf("cache creation tokens = %d, want 4243", detail.CacheCreationTokens)
+	}
+	if detail.CacheCreationDetail == nil || detail.CacheCreationDetail.Ephemeral5mInputTokens != 100 || detail.CacheCreationDetail.Ephemeral1hInputTokens != 4143 {
+		t.Fatalf("cache creation detail = %+v", detail.CacheCreationDetail)
+	}
 }
 
 func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
@@ -1049,6 +1080,26 @@ func TestStreamUsageBufferObserveClaudeStream_MergesStartAndDelta(t *testing.T) 
 	wantTotal := int64(2095 + 15 + 355598 + 7185)
 	if detail.TotalTokens != wantTotal {
 		t.Errorf("TotalTokens = %d, want %d", detail.TotalTokens, wantTotal)
+	}
+}
+
+func TestStreamUsageBufferObserveClaudeStream_PreservesCacheCreationDetail(t *testing.T) {
+	var buffer StreamUsageBuffer
+	lineStart := []byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":7828,"cache_read_input_tokens":182458,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":7828},"output_tokens":28}}}`)
+	buffer.ObserveClaudeStream(lineStart)
+
+	lineDelta := []byte(`data: {"type":"message_delta","usage":{"input_tokens":2,"cache_creation_input_tokens":7828,"cache_read_input_tokens":182458,"output_tokens":331}}`)
+	buffer.ObserveClaudeStream(lineDelta)
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected buffer to contain usage detail")
+	}
+	if detail.OutputTokens != 331 {
+		t.Fatalf("OutputTokens = %d, want 331", detail.OutputTokens)
+	}
+	if detail.CacheCreationDetail == nil || detail.CacheCreationDetail.Ephemeral5mInputTokens != 0 || detail.CacheCreationDetail.Ephemeral1hInputTokens != 7828 {
+		t.Fatalf("cache creation detail = %+v", detail.CacheCreationDetail)
 	}
 }
 

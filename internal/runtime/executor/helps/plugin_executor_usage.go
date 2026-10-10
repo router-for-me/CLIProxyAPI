@@ -175,6 +175,12 @@ func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
 		merged.CacheCreationTokens = existing.CacheCreationTokens
 	}
+	// A split from an earlier frame only remains valid while the aggregate is unchanged.
+	if merged.CacheCreationDetail == nil && existing.CacheCreationDetail != nil &&
+		merged.CacheCreationTokens == existing.CacheCreationTokens {
+		copied := *existing.CacheCreationDetail
+		merged.CacheCreationDetail = &copied
+	}
 	if merged.OutputTokens == 0 && existing.OutputTokens > 0 {
 		merged.OutputTokens = existing.OutputTokens
 	}

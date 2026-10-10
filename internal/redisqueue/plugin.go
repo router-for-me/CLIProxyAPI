@@ -99,6 +99,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheReadTokens:        usageDetail.CacheReadTokens,
 		CacheReadTokensPresent: true,
 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
+		CacheCreationDetail:    cacheCreationDetailStatsFrom(usageDetail.CacheCreationDetail),
 		TotalTokens:            usageDetail.TotalTokens,
 	}
 
@@ -207,14 +208,30 @@ type requestDetail struct {
 }
 
 type tokenStats struct {
-	InputTokens            int64 `json:"input_tokens"`
-	OutputTokens           int64 `json:"output_tokens"`
-	ReasoningTokens        int64 `json:"reasoning_tokens"`
-	CachedTokens           int64 `json:"cached_tokens"`
-	CacheReadTokens        int64 `json:"cache_read_tokens"`
-	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
-	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
-	TotalTokens            int64 `json:"total_tokens"`
+	InputTokens            int64                     `json:"input_tokens"`
+	OutputTokens           int64                     `json:"output_tokens"`
+	ReasoningTokens        int64                     `json:"reasoning_tokens"`
+	CachedTokens           int64                     `json:"cached_tokens"`
+	CacheReadTokens        int64                     `json:"cache_read_tokens"`
+	CacheReadTokensPresent bool                      `json:"cache_read_tokens_present"`
+	CacheCreationTokens    int64                     `json:"cache_creation_tokens"`
+	CacheCreationDetail    *cacheCreationDetailStats `json:"cache_creation_detail,omitempty"`
+	TotalTokens            int64                     `json:"total_tokens"`
+}
+
+type cacheCreationDetailStats struct {
+	Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
+}
+
+func cacheCreationDetailStatsFrom(detail *coreusage.CacheCreationDetail) *cacheCreationDetailStats {
+	if detail == nil {
+		return nil
+	}
+	return &cacheCreationDetailStats{
+		Ephemeral5mInputTokens: detail.Ephemeral5mInputTokens,
+		Ephemeral1hInputTokens: detail.Ephemeral1hInputTokens,
+	}
 }
 
 type failDetail struct {

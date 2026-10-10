@@ -1146,6 +1146,7 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
+		CacheCreationDetail: claudeCacheCreationDetail(usageNode),
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
@@ -1161,6 +1162,75 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		detail.ReasoningTokens,
 		detail.TotalTokens,
 	)
+	return detail
+}
+
+// claudeCacheCreationDetail reads the complete TTL split for the aggregate
+// cache_creation_input_tokens. Without a top-level split, only message iterations
+// contribute to that aggregate; compaction and advisor usage are separate.
+func claudeCacheCreationDetail(usageNode gjson.Result) *usage.CacheCreationDetail {
+	readSplit := func(node gjson.Result) *usage.CacheCreationDetail {
+		fiveMinute := node.Get("ephemeral_5m_input_tokens")
+		oneHour := node.Get("ephemeral_1h_input_tokens")
+		if !node.IsObject() || fiveMinute.Type != gjson.Number || oneHour.Type != gjson.Number ||
+			fiveMinute.Int() < 0 || oneHour.Int() < 0 {
+			return nil
+		}
+		return &usage.CacheCreationDetail{
+			Ephemeral5mInputTokens: fiveMinute.Int(),
+			Ephemeral1hInputTokens: oneHour.Int(),
+		}
+	}
+
+	var detail *usage.CacheCreationDetail
+	if node := usageNode.Get("cache_creation"); node.Exists() && node.Type != gjson.Null {
+		// The documented top-level split is authoritative; if it is malformed,
+		// report no split instead of mixing it with per-iteration data.
+		detail = readSplit(node)
+	} else {
+		iterations := usageNode.Get("iterations").Array()
+		if len(iterations) == 0 {
+			return nil
+		}
+		detail = &usage.CacheCreationDetail{}
+		messageCount := 0
+		for _, iteration := range iterations {
+			switch iteration.Get("type").String() {
+			case "message":
+				messageCount++
+			case "compaction", "advisor_message":
+				continue
+			default:
+				// Unknown or fallback iterations may have a different aggregation
+				// contract. Do not guess their contribution to the parent split.
+				return nil
+			}
+			split := readSplit(iteration.Get("cache_creation"))
+			if split == nil {
+				return nil
+			}
+			var ok bool
+			detail.Ephemeral5mInputTokens, ok = safeUsageTokenSum(detail.Ephemeral5mInputTokens, split.Ephemeral5mInputTokens)
+			if !ok {
+				return nil
+			}
+			detail.Ephemeral1hInputTokens, ok = safeUsageTokenSum(detail.Ephemeral1hInputTokens, split.Ephemeral1hInputTokens)
+			if !ok {
+				return nil
+			}
+		}
+		if messageCount == 0 {
+			return nil
+		}
+	}
+	if detail == nil {
+		return nil
+	}
+	total, ok := safeUsageTokenSum(detail.Ephemeral5mInputTokens, detail.Ephemeral1hInputTokens)
+	aggregate := usageNode.Get("cache_creation_input_tokens")
+	if !ok || aggregate.Type != gjson.Number || total != aggregate.Int() {
+		return nil
+	}
 	return detail
 }
 
