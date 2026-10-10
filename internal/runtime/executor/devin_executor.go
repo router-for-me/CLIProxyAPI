@@ -523,7 +523,9 @@ func (e *DevinExecutor) streamDevinFrames(
 	var accumulatedSignature []byte
 	var signatureType string
 
-	claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, sdktranslator.FormatInteractions, responseFormat, opts.OriginalRequest)
+	// Devin reports final cache-aware usage. Seeding the start event with a
+	// full-input estimate makes zero uncached usage retain that estimate in clients.
+	var claudeInputTokens *helps.ClaudeInputTokenState
 	var translateParam any
 	helps.InitializeApplyPatchStream(ctx, sdktranslator.FormatInteractions, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), req.Payload, &translateParam)
 	translationFailed := false

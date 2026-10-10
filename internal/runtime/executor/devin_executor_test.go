@@ -4866,3 +4866,60 @@ func TestDevinApplyPatchExecutorReuse(t *testing.T) {
 	assertWire(<-requests)
 	assertExecutorPatchStream(t, stream.Chunks)
 }
+
+func TestDevinClaudeStreamDoesNotSeedEstimatedUncachedInput(t *testing.T) {
+	for _, uncached := range []uint64{0, 5} {
+		t.Run(fmt.Sprint(uncached), func(t *testing.T) {
+			var usage []byte
+			usage = appendVarintField(usage, 2, uncached+7)
+			usage = appendVarintField(usage, 3, 4)
+			usage = appendVarintField(usage, 4, 7)
+			usage = appendVarintField(usage, 5, 50000)
+			frame := appendDevinFieldBytes(nil, 7, usage)
+			frame = appendDevinFieldBytes(frame, 3, []byte("OK"))
+			var buf bytes.Buffer
+			buf.Write(helps.WrapConnectEnvelope(frame))
+			buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+			out := make(chan cliproxyexecutor.StreamChunk, 30)
+			original := []byte(`{"system":"A stable prefix that is already cached","messages":[{"role":"user","content":"OK"}]}`)
+			e := &DevinExecutor{}
+			go func() {
+				defer close(out)
+				e.streamDevinFrames(context.Background(), &buf, cliproxyexecutor.Request{Model: "devin/claude-opus-5-5"}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: original}, "test", sdktranslator.FormatClaude, nil, out)
+			}()
+			var start, delta gjson.Result
+			for chunk := range out {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				for _, line := range strings.Split(string(chunk.Payload), "\n") {
+					if !strings.HasPrefix(line, "data: ") {
+						continue
+					}
+					event := gjson.Parse(strings.TrimPrefix(line, "data: "))
+					switch event.Get("type").String() {
+					case "message_start":
+						start = event
+					case "message_delta":
+						delta = event
+					}
+				}
+			}
+			if !start.Exists() || !delta.Exists() {
+				t.Fatal("missing usage events")
+			}
+			if got := start.Get("message.usage.input_tokens").Int(); got != 0 {
+				t.Fatalf("start input=%d; must not seed full-input estimate", got)
+			}
+			if got := delta.Get("usage.input_tokens").Uint(); got != uncached {
+				t.Fatalf("final input=%d, want %d", got, uncached)
+			}
+			if got := delta.Get("usage.cache_read_input_tokens").Int(); got != 50000 {
+				t.Fatalf("cache read=%d", got)
+			}
+			if got := delta.Get("usage.cache_creation_input_tokens").Int(); got != 7 {
+				t.Fatalf("cache write=%d", got)
+			}
+		})
+	}
+}
