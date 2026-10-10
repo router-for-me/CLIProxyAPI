@@ -154,7 +154,9 @@ func corsMiddleware() gin.HandlerFunc {
 // carry an Origin header: browsers attach one to fetches, which would make
 // any web page opened on this machine a valid loopback client. The Host header
 // must also name a loopback identity, because DNS rebinding lets a remote page
-// keep its own hostname while resolving to a loopback peer.
+// keep its own hostname while resolving to a loopback peer. This is not an
+// access-control boundary: any local process, tunnel, or reverse proxy on the
+// host presents a loopback peer, so the route must not be proxied.
 func (s *Server) loopbackOnlyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		remoteAddr := ""

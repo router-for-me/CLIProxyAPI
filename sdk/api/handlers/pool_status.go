@@ -95,7 +95,9 @@ func poolActiveSessionCounts(manager *coreauth.Manager, now time.Time) map[strin
 
 // PoolStatus reports per-provider credential pool health for local operators.
 // The route is registered with loopback-only middleware; keep this response
-// free of credentials, tokens, and raw email addresses.
+// free of credentials, tokens, and raw email addresses. The loopback gate is
+// not an access-control boundary: any local process, tunnel, or reverse proxy
+// on the host reaches it, so the path must not be exposed through a proxy.
 func (h *BaseAPIHandler) PoolStatus(c *gin.Context) {
 	if h == nil || h.AuthManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager unavailable"})

@@ -44,8 +44,11 @@ server:
 
   # Extra Host header names accepted by the local-only /v1/pool/status endpoint.
   # Loopback IPs and "localhost" are always allowed; list custom local hostnames
-  # here when the endpoint is reached through one (for example a same-host reverse
-  # proxy serving it under a dedicated name).
+  # here when the endpoint is reached through one. This list only narrows
+  # Host-header-based bypasses (DNS rebinding); it is NOT an access-control
+  # boundary. Any local process, tunnel, or reverse proxy on this host reaches
+  # the endpoint with a loopback peer, so do not expose this path through any
+  # reverse proxy, tunnel, or port forwarder.
   pool-status-allowed-hosts: []
 
   # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.

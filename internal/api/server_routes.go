@@ -53,8 +53,12 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	// Local pool observability: unauthenticated; loopback sockets with a
-	// loopback Host header and no Origin header only. A same-host reverse
-	// proxy still exposes this endpoint to the proxy's remote clients.
+	// loopback Host header and no Origin header only. The loopback gate does
+	// not protect against same-host TCP forwarders or reverse proxies — any
+	// local process on this host reaches the endpoint with a loopback peer,
+	// so do not expose this path through any reverse proxy, tunnel, or port
+	// forwarder. The allowed-hosts list only narrows Host-header-based
+	// bypasses (DNS rebinding); it is not an access-control boundary.
 	s.engine.GET("/v1/pool/status", s.loopbackOnlyMiddleware(), s.handlers.PoolStatus)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
