@@ -136,6 +136,68 @@ func TestPoolStatusHandler(t *testing.T) {
 	}
 }
 
+func TestBuildPoolStatusAccountUntimedBlocks(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := []struct {
+		name       string
+		auth       *coreauth.Auth
+		wantStatus string
+		wantReason string
+	}{
+		{
+			name: "terminal unauthorized",
+			auth: &coreauth.Auth{
+				ID: "u1", Unavailable: true, Status: coreauth.StatusError,
+				LastError: &coreauth.Error{HTTPStatus: http.StatusUnauthorized},
+			},
+			wantStatus: "unavailable",
+			wantReason: "unauthorized",
+		},
+		{
+			name: "expired access token",
+			auth: &coreauth.Auth{
+				ID:       "u2",
+				Metadata: map[string]any{"access_token": "opaque-token", "expired": now.Add(-time.Hour).UTC().Format(time.RFC3339)},
+			},
+			wantStatus: "unavailable",
+			wantReason: "expired_token",
+		},
+		{
+			name:       "permanent unavailable",
+			auth:       &coreauth.Auth{ID: "u3", Unavailable: true},
+			wantStatus: "unavailable",
+			wantReason: "unavailable",
+		},
+		{
+			name:       "timed cooldown stays cooling",
+			auth:       &coreauth.Auth{ID: "u4", Unavailable: true, NextRetryAfter: now.Add(time.Hour)},
+			wantStatus: "cooling",
+		},
+		{
+			name:       "healthy stays open",
+			auth:       &coreauth.Auth{ID: "u5"},
+			wantStatus: "open",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			account := buildPoolStatusAccount(tc.auth, now, nil)
+			if account.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", account.Status, tc.wantStatus)
+			}
+			if tc.wantReason != "" && (account.Reason == nil || *account.Reason != tc.wantReason) {
+				got := ""
+				if account.Reason != nil {
+					got = *account.Reason
+				}
+				t.Fatalf("reason = %q, want %q", got, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestPoolStatusHandlerNoManager(t *testing.T) {
 	t.Parallel()
 

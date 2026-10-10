@@ -80,6 +80,16 @@ func CooldownSnapshotForAuth(auth *Auth, now time.Time) []CooldownView {
 	return views
 }
 
+// AuthBlockedWithoutRetry reports whether the credential is blocked by a
+// restriction that records no retry time: disablement, a terminal
+// unauthorized failure, an expired access token, or unavailability and quota
+// flags with no recovery deadline. Timed restrictions are reported by
+// CooldownSnapshotForAuth.
+func AuthBlockedWithoutRetry(auth *Auth, now time.Time) bool {
+	blocked, _, next := isAuthBlockedForModel(auth, "", now)
+	return blocked && next.IsZero()
+}
+
 func newCooldownView(scope, model string, next, now time.Time, quota QuotaState, statusMessage string, lastErr *Error) CooldownView {
 	remaining := next.Sub(now)
 	seconds := int64(remaining / time.Second)

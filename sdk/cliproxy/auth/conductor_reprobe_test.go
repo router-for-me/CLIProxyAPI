@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -109,6 +110,19 @@ func TestCollectReprobeCandidates(t *testing.T) {
 		}},
 		// Disabled credentials are never probed.
 		{ID: "disabled", Provider: "reprobe-test", Disabled: true, Unavailable: true, NextRetryAfter: past},
+		// Disabled model states are never probed, even with elapsed timers.
+		{ID: "model-disabled", Provider: "reprobe-test", ModelStates: map[string]*ModelState{
+			"gpt-5": {Status: StatusDisabled, Unavailable: true, NextRetryAfter: past},
+		}},
+		// Aggregate cooldown with a disabled route model must not probe it.
+		{ID: "fallback-disabled", Provider: "reprobe-test", Unavailable: true, NextRetryAfter: past, ModelStates: map[string]*ModelState{
+			"gpt-5": {Status: StatusDisabled},
+			"gpt-4": {},
+		}},
+		// Aggregate cooldown probes a healthy registered model.
+		{ID: "fallback-open", Provider: "reprobe-test", Unavailable: true, NextRetryAfter: past, ModelStates: map[string]*ModelState{
+			"gpt-4": {},
+		}},
 		// Healthy credential.
 		{ID: "open", Provider: "reprobe-test"},
 	}
@@ -117,6 +131,12 @@ func TestCollectReprobeCandidates(t *testing.T) {
 			t.Fatalf("Register(%s): %v", a.ID, err)
 		}
 	}
+	registry.GetGlobalRegistry().RegisterClient("fallback-disabled", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-5"}})
+	registry.GetGlobalRegistry().RegisterClient("fallback-open", "reprobe-test", []*registry.ModelInfo{{ID: "gpt-4"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient("fallback-disabled")
+		registry.GetGlobalRegistry().UnregisterClient("fallback-open")
+	})
 
 	candidates := m.collectReprobeCandidates(now)
 	got := make(map[string]reprobeCandidate, len(candidates))
@@ -138,7 +158,14 @@ func TestCollectReprobeCandidates(t *testing.T) {
 	if mixed.routeModel != "gpt-5" || mixed.credentialScope {
 		t.Fatalf("model-mixed candidate = %+v, want routeModel gpt-5", mixed)
 	}
-	for _, absent := range []string{"cred-pending", "disabled", "open"} {
+	fallback, ok := got["fallback-open"]
+	if !ok {
+		t.Fatal("expected fallback candidate for fallback-open")
+	}
+	if fallback.routeModel != "gpt-4" || fallback.credentialScope {
+		t.Fatalf("fallback-open candidate = %+v, want routeModel gpt-4", fallback)
+	}
+	for _, absent := range []string{"cred-pending", "disabled", "model-disabled", "fallback-disabled", "open"} {
 		if _, ok := got[absent]; ok {
 			t.Fatalf("unexpected candidate for %s", absent)
 		}
@@ -203,5 +230,61 @@ func TestRunReprobeCandidateFailureRecools(t *testing.T) {
 	m.mu.RUnlock()
 	if !stillCooling {
 		t.Fatal("expected fresh model cooldown after failed re-probe")
+	}
+}
+
+func TestRunReprobeCandidateSkipsWhenCooldownCleared(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	executor := &reprobeTestExecutor{}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "a1", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
+		"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(-time.Minute)},
+	}}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	candidate := reprobeCandidate{auth: m.auths["a1"].Clone(), routeModel: "gpt-5"}
+
+	m.mu.Lock()
+	live := m.auths["a1"].ModelStates["gpt-5"]
+	live.Unavailable = false
+	live.NextRetryAfter = time.Time{}
+	m.mu.Unlock()
+
+	m.runReprobeCandidate(context.Background(), candidate)
+
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0 after the live cooldown cleared", executor.calls)
+	}
+}
+
+func TestRunReprobeCandidateSkipsDisabledModel(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	executor := &reprobeTestExecutor{}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "a1", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
+		"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(-time.Minute)},
+	}}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	candidate := reprobeCandidate{auth: m.auths["a1"].Clone(), routeModel: "gpt-5"}
+
+	m.mu.Lock()
+	m.auths["a1"].ModelStates["gpt-5"].Status = StatusDisabled
+	m.mu.Unlock()
+
+	m.runReprobeCandidate(context.Background(), candidate)
+
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0 for a disabled model state", executor.calls)
 	}
 }

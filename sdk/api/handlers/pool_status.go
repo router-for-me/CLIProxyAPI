@@ -174,6 +174,11 @@ func buildPoolStatusAccount(auth *coreauth.Auth, now time.Time, sessionCounts ma
 		account.Reason = &reason
 		return account
 	}
+	if reason, blocked := poolUntimedBlockReason(auth, now); blocked {
+		account.Status = "unavailable"
+		account.Reason = &reason
+		return account
+	}
 	views := coreauth.CooldownSnapshotForAuth(auth, now)
 	if len(views) == 0 {
 		return account
@@ -205,6 +210,24 @@ func buildPoolStatusAccount(auth *coreauth.Auth, now time.Time, sessionCounts ma
 		account.RemainingSeconds = primary.RemainingSeconds
 	}
 	return account
+}
+
+// poolUntimedBlockReason reports a public reason when the credential is
+// blocked by a restriction that carries no retry timer (terminal unauthorized
+// failure, expired access token, or unavailability without a recovery
+// deadline). An empty cooldown snapshot does not imply usability, so these
+// gates are checked separately from CooldownSnapshotForAuth.
+func poolUntimedBlockReason(auth *coreauth.Auth, now time.Time) (string, bool) {
+	if coreauth.HasUnauthorizedAuthFailure(auth) {
+		return "unauthorized", true
+	}
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		return "expired_token", true
+	}
+	if coreauth.AuthBlockedWithoutRetry(auth, now) {
+		return "unavailable", true
+	}
+	return "", false
 }
 
 // poolCooldownReason normalizes internal cooldown reason codes for the public schema.

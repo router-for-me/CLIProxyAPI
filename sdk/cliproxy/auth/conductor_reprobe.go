@@ -132,46 +132,67 @@ func (m *Manager) collectReprobeCandidates(now time.Time) []reprobeCandidate {
 	defer m.mu.RUnlock()
 	var candidates []reprobeCandidate
 	for _, a := range m.auths {
-		if a == nil || a.Disabled || a.Status == StatusDisabled || m.cooldownDisabledForAuth(a) {
+		candidates = append(candidates, m.reprobeCandidatesForAuth(a, now)...)
+	}
+	return candidates
+}
+
+// reprobeCandidatesForAuth emits the probe candidates a single auth warrants
+// right now. The caller must hold m.mu.
+func (m *Manager) reprobeCandidatesForAuth(a *Auth, now time.Time) []reprobeCandidate {
+	if a == nil || a.Disabled || a.Status == StatusDisabled || m.cooldownDisabledForAuth(a) {
+		return nil
+	}
+	if len(a.ModelStates) == 0 {
+		if reprobeExpiredTimer(a.Unavailable, a.Quota.Exceeded, a.NextRetryAfter, a.Quota.NextRecoverAt, now) {
+			return []reprobeCandidate{{auth: a.Clone(), credentialScope: true}}
+		}
+		return nil
+	}
+	// A still-active credential-level gate (e.g. credential quota) makes
+	// per-model probes pointless until its own timer elapses.
+	if blocked, _, _ := isAuthBlockedForModel(a, "", now); blocked {
+		return nil
+	}
+	models := make([]string, 0, len(a.ModelStates))
+	for model := range a.ModelStates {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	var candidates []reprobeCandidate
+	emitted := false
+	for _, model := range models {
+		state := a.ModelStates[model]
+		if state == nil || state.Status == StatusDisabled {
 			continue
 		}
-		if len(a.ModelStates) == 0 {
-			if reprobeExpiredTimer(a.Unavailable, a.Quota.Exceeded, a.NextRetryAfter, a.Quota.NextRecoverAt, now) {
-				candidates = append(candidates, reprobeCandidate{auth: a.Clone(), credentialScope: true})
-			}
-			continue
+		if reprobeExpiredTimer(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now) {
+			candidates = append(candidates, reprobeCandidate{auth: a.Clone(), routeModel: model})
+			emitted = true
 		}
-		// A still-active credential-level gate (e.g. credential quota) makes
-		// per-model probes pointless until its own timer elapses.
-		if blocked, _, _ := isAuthBlockedForModel(a, "", now); blocked {
-			continue
-		}
-		models := make([]string, 0, len(a.ModelStates))
-		for model := range a.ModelStates {
-			models = append(models, model)
-		}
-		sort.Strings(models)
-		emitted := false
-		for _, model := range models {
-			state := a.ModelStates[model]
-			if state == nil {
-				continue
-			}
-			if reprobeExpiredTimer(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now) {
-				candidates = append(candidates, reprobeCandidate{auth: a.Clone(), routeModel: model})
-				emitted = true
-			}
-		}
-		if !emitted && a.Unavailable {
-			// Aggregate unavailability outlived the per-model timers (for
-			// example after a state restore); verify the credential once so it
-			// can rejoin the pool.
-			if routeModel := firstReprobeModel(a); routeModel != "" {
+	}
+	if !emitted && a.Unavailable {
+		// Aggregate unavailability outlived the per-model timers (for
+		// example after a state restore); verify the credential once so it
+		// can rejoin the pool.
+		if routeModel := firstReprobeModel(a); routeModel != "" {
+			if _, reason, _ := isAuthBlockedForModel(a, routeModel, now); reason != blockReasonDisabled {
 				candidates = append(candidates, reprobeCandidate{auth: a.Clone(), routeModel: routeModel})
 			}
 		}
 	}
 	return candidates
+}
+
+// reprobeCandidateStillWarranted reports whether the live auth still needs
+// the collected probe. The caller must hold m.mu.
+func (m *Manager) reprobeCandidateStillWarranted(live *Auth, candidate reprobeCandidate, now time.Time) bool {
+	for _, reEmitted := range m.reprobeCandidatesForAuth(live, now) {
+		if reEmitted.routeModel == candidate.routeModel && reEmitted.credentialScope == candidate.credentialScope {
+			return true
+		}
+	}
+	return false
 }
 
 // firstReprobeModel picks a deterministic registered model for probing an auth
@@ -255,6 +276,15 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 			cliproxyexecutor.RequestedModelMetadataKey:  routeModel,
 			cliproxyexecutor.CooldownReprobeMetadataKey: true,
 		},
+	}
+
+	// Skip the probe when the live credential no longer warrants one: real
+	// traffic may have cleared or refreshed the cooldown since collection.
+	m.mu.RLock()
+	stillCandidate := m.reprobeCandidateStillWarranted(m.auths[auth.ID], candidate, time.Now())
+	m.mu.RUnlock()
+	if !stillCandidate {
+		return
 	}
 
 	resp, errExec := executor.Execute(execCtx, auth, req, execOpts)
