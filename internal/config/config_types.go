@@ -134,7 +134,7 @@ type ClaudeHeaderDefaults struct {
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
 	// PreserveNativeIdentity keeps a confirmed native Claude Code caller's own
 	// metadata.user_id and software headers instead of the per-credential identity.
-	PreserveNativeIdentity bool `yaml:"preserve-native-identity,omitempty" json:"preserve-native-identity,omitempty"`
+	PreserveNativeIdentity bool `yaml:"preserve-native-identity" json:"preserve-native-identity"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex

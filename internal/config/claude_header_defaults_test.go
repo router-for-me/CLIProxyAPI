@@ -83,3 +83,31 @@ func TestParseConfigBytes_ClaudeHeaderDefaultsPreserveNativeIdentityV8Layout(t *
 		t.Fatalf("PreserveNativeIdentity lost after migration:\n%s", migrated)
 	}
 }
+
+func TestSaveConfigPreserveComments_DisablesPreserveNativeIdentity(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("upstream:\n  claude:\n    header-defaults:\n      preserve-native-identity: true\n"), 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+	if !cfg.ClaudeHeaderDefaults.PreserveNativeIdentity {
+		t.Fatal("PreserveNativeIdentity = false, want true before disabling")
+	}
+
+	cfg.ClaudeHeaderDefaults.PreserveNativeIdentity = false
+	if err := SaveConfigPreserveComments(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfigPreserveComments() error = %v", err)
+	}
+	reloaded, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional(reloaded) error = %v", err)
+	}
+	if reloaded.ClaudeHeaderDefaults.PreserveNativeIdentity {
+		saved, _ := os.ReadFile(configPath)
+		t.Fatalf("PreserveNativeIdentity re-enabled after save:\n%s", saved)
+	}
+}
