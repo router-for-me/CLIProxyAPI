@@ -210,6 +210,51 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 	}
 }
 
+func TestAntigravityWebSearchModelForHonorsNativeCapability(t *testing.T) {
+	enabled, disabled := true, false
+	registryRef := GetGlobalRegistry()
+	registryRef.RegisterClient("test-antigravity-native-search", "antigravity", []*ModelInfo{
+		{ID: "ag-search-legacy-only", SupportsWebSearch: true},
+		{ID: "ag-search-native-only", NativeCapabilities: &NativeCapabilities{WebSearch: &enabled}},
+		{ID: "ag-search-native-veto", SupportsWebSearch: true, NativeCapabilities: &NativeCapabilities{WebSearch: &disabled}},
+		{ID: "ag-search-none"},
+	})
+	t.Cleanup(func() { registryRef.UnregisterClient("test-antigravity-native-search") })
+
+	for modelID, want := range map[string]bool{
+		"ag-search-legacy-only":       true,
+		"ag-search-native-only":       true,
+		"ag-search-native-only(high)": true,
+		"ag-search-native-veto":       false,
+		"ag-search-none":              false,
+	} {
+		if got := AntigravityWebSearchModelFor(modelID) != ""; got != want {
+			t.Fatalf("AntigravityWebSearchModelFor(%q) supported = %v, want %v", modelID, got, want)
+		}
+	}
+}
+
+func TestAntigravityModelSupportsWebSearch(t *testing.T) {
+	enabled, disabled := true, false
+	tests := []struct {
+		name string
+		info *ModelInfo
+		want bool
+	}{
+		{name: "nil", info: nil, want: false},
+		{name: "none", info: &ModelInfo{}, want: false},
+		{name: "legacy only", info: &ModelInfo{SupportsWebSearch: true}, want: true},
+		{name: "native only", info: &ModelInfo{NativeCapabilities: &NativeCapabilities{WebSearch: &enabled}}, want: true},
+		{name: "native veto", info: &ModelInfo{SupportsWebSearch: true, NativeCapabilities: &NativeCapabilities{WebSearch: &disabled}}, want: false},
+		{name: "native unknown", info: &ModelInfo{SupportsWebSearch: true, NativeCapabilities: &NativeCapabilities{}}, want: true},
+	}
+	for _, tt := range tests {
+		if got := AntigravityModelSupportsWebSearch(tt.info); got != tt.want {
+			t.Fatalf("%s: got %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestValidateModelsCatalog_Meta(t *testing.T) {
 	valid := &staticModelsJSON{
 		Meta: []*ModelInfo{

@@ -78,15 +78,15 @@ type ModelInfo struct {
 	SupportedInputModalities []string `json:"supportedInputModalities,omitempty"`
 	// SupportedOutputModalities lists supported output modalities (e.g., TEXT, IMAGE)
 	SupportedOutputModalities []string `json:"supportedOutputModalities,omitempty"`
-	// SupportsWebSearch indicates this Antigravity model is listed by
-	// fetchAvailableModels.webSearchModelIds and can execute native googleSearch.
+	// SupportsWebSearch declares native web search support from models.json.
+	// Account entitlement probes do not override this model capability.
 	SupportsWebSearch bool `json:"supports_web_search,omitempty"`
 
 	// SupportConfigurationUpdate reports internal support for configuration_update.
 	SupportConfigurationUpdate bool `json:"-"`
 
 	// NativeCapabilities contains internal, static per-model capability metadata.
-	// It is intentionally separate from Antigravity's dynamically probed capability.
+	// For Antigravity, an explicit WebSearch value overrides SupportsWebSearch.
 	NativeCapabilities *NativeCapabilities `json:"-"`
 
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.

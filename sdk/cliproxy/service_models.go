@@ -124,7 +124,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				return
 			}
 		} else {
-			models = registry.GetAntigravityModels()
+			models = s.antigravityCatalogModels()
 		}
 		models = applyExcludedModels(models, excluded)
 	case "claude":

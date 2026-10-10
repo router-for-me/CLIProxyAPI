@@ -214,6 +214,19 @@ var staticDevinModels = []*ModelInfo{
 	},
 }
 
+// AntigravityModelSupportsWebSearch reports catalog-declared native web search
+// support for one Antigravity model. An explicit native_capabilities.web_search
+// value wins; otherwise the supports_web_search catalog flag is used.
+func AntigravityModelSupportsWebSearch(info *ModelInfo) bool {
+	if info == nil {
+		return false
+	}
+	if capabilities := info.NativeCapabilities; capabilities != nil && capabilities.WebSearch != nil {
+		return *capabilities.WebSearch
+	}
+	return info.SupportsWebSearch
+}
+
 // AntigravityWebSearchModelFor returns the Antigravity model that should run a
 // native web search request for modelID.
 func AntigravityWebSearchModelFor(modelID string) string {
@@ -230,7 +243,7 @@ func AntigravityWebSearchModelFor(modelID string) string {
 			continue
 		}
 		if currentModelID == modelID {
-			if model.SupportsWebSearch {
+			if AntigravityModelSupportsWebSearch(model) {
 				return currentModelID
 			}
 			return ""

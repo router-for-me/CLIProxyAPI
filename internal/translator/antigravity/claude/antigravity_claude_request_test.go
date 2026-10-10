@@ -400,6 +400,38 @@ func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchForUnsupporte
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_TypedWebSearchHonorsNativeCapability(t *testing.T) {
+	enabled, disabled := true, false
+	const clientID = "test-antigravity-claude-websearch-native"
+	registry.GetGlobalRegistry().RegisterClient(clientID, "antigravity", []*registry.ModelInfo{
+		{ID: "ag-claude-search-legacy-only", SupportsWebSearch: true},
+		{ID: "ag-claude-search-native-only", NativeCapabilities: &registry.NativeCapabilities{WebSearch: &enabled}},
+		{ID: "ag-claude-search-native-veto", SupportsWebSearch: true, NativeCapabilities: &registry.NativeCapabilities{WebSearch: &disabled}},
+		{ID: "ag-claude-search-none"},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(clientID) })
+
+	for modelID, want := range map[string]bool{
+		"ag-claude-search-legacy-only": true,
+		"ag-claude-search-native-only": true,
+		"ag-claude-search-native-veto": false,
+		"ag-claude-search-none":        false,
+	} {
+		inputJSON := []byte(`{
+			"model": "` + modelID + `",
+			"messages": [{"role": "user", "content": "Perform a web search"}],
+			"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
+		}`)
+		output := ConvertClaudeRequestToAntigravity(modelID, inputJSON, true)
+		if got := gjson.GetBytes(output, "request.tools.#(googleSearch)").Exists(); got != want {
+			t.Fatalf("%s: googleSearch present = %v, want %v; output=%s", modelID, got, want, output)
+		}
+		if got := gjson.GetBytes(output, "requestType").String() == "web_search"; got != want {
+			t.Fatalf("%s: web_search requestType = %v, want %v; output=%s", modelID, got, want, output)
+		}
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchForFlashAgentWithoutCapability(t *testing.T) {
 	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-flash-agent", "antigravity", []*registry.ModelInfo{
 		{ID: "gemini-3-flash-agent"},
