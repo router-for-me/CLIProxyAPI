@@ -251,3 +251,52 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
 	}
 }
+
+func TestManager_UpdateRefreshedAuthPreservesQuotaObservationDuringCredentialCooldown(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	baseObservedAt := time.Unix(10, 0)
+	refreshedObservedAt := time.Unix(20, 0)
+	recoverAt := time.Now().Add(time.Hour)
+
+	base, errRegister := manager.Register(ctx, &Auth{
+		ID:       "auth-devin-quota-refresh",
+		Provider: "devin",
+		Status:   StatusActive,
+		Quota: QuotaState{
+			ObservedAt: baseObservedAt,
+			Signals:    map[string]string{"plan": "free"},
+		},
+	})
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	concurrent := base.Clone()
+	concurrent.Status = StatusError
+	concurrent.Unavailable = true
+	concurrent.Quota.Exceeded = true
+	concurrent.Quota.Reason = "credential_quota"
+	concurrent.Quota.NextRecoverAt = recoverAt
+	concurrent.Quota.BackoffLevel = 2
+	if _, errUpdate := manager.Update(ctx, concurrent); errUpdate != nil {
+		t.Fatalf("Update() concurrent cooldown error = %v", errUpdate)
+	}
+
+	refreshed := base.Clone()
+	refreshed.Quota.ObservedAt = refreshedObservedAt
+	refreshed.Quota.Signals = map[string]string{
+		"plan":                          "pro",
+		"daily_quota_remaining_percent": "75%",
+	}
+	merged, errRefresh := manager.UpdateRefreshedAuth(ctx, base, refreshed)
+	if errRefresh != nil {
+		t.Fatalf("UpdateRefreshedAuth() error = %v", errRefresh)
+	}
+	if !merged.Quota.ObservedAt.Equal(refreshedObservedAt) || merged.Quota.Signals["plan"] != "pro" || merged.Quota.Signals["daily_quota_remaining_percent"] != "75%" {
+		t.Fatalf("refreshed quota observation was not preserved: %#v", merged.Quota)
+	}
+	if !merged.Quota.Exceeded || merged.Quota.Reason != "credential_quota" || !merged.Quota.NextRecoverAt.Equal(recoverAt) || merged.Quota.BackoffLevel != 2 {
+		t.Fatalf("concurrent cooldown was not preserved: %#v", merged.Quota)
+	}
+}
