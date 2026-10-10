@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -77,6 +80,25 @@ func poolAccountID(auth *coreauth.Auth) string {
 	return sanitizePoolAuthID(raw)
 }
 
+// disambiguatePoolAccountID rewrites an account identifier shared by sibling
+// credentials so every account stays individually identifiable. The sanitized
+// auth ID is already unique per registered credential; a short stable hash of
+// the full auth ID covers the rare cases where even that repeats — different
+// storage paths ending in the same file name, for example — or where another
+// credential's preferred identifier already claims the same string.
+func disambiguatePoolAccountID(auth *coreauth.Auth, fallback string, prefCount, uniqCount map[string]int) string {
+	want := sanitizePoolAuthID(strings.TrimSpace(auth.ID))
+	usable := want != "" && want != "."
+	if !usable {
+		want = fallback
+	}
+	if !usable || uniqCount[want] > 1 || (want != fallback && prefCount[want] > 0) {
+		sum := sha256.Sum256([]byte(auth.ID))
+		want = fmt.Sprintf("%s#%s", want, hex.EncodeToString(sum[:])[:8])
+	}
+	return want
+}
+
 // poolSessionCounter is implemented by selectors that can report active
 // session affinity bindings (currently *coreauth.SessionAffinitySelector).
 type poolSessionCounter interface {
@@ -106,8 +128,22 @@ func (h *BaseAPIHandler) PoolStatus(c *gin.Context) {
 	}
 	now := time.Now()
 	sessionCounts := poolActiveSessionCounts(h.AuthManager, now)
+	auths := h.AuthManager.List()
+	// Count how many credentials share each identifier. Generic labels —
+	// the provider-level labels config API keys all carry, for example —
+	// would collapse several accounts onto the same auth_id, so colliding
+	// accounts fall back to the unique auth ID in the loop below.
+	prefCount := make(map[string]int, len(auths))
+	uniqCount := make(map[string]int, len(auths))
+	for _, a := range auths {
+		if a == nil {
+			continue
+		}
+		prefCount[poolAccountID(a)]++
+		uniqCount[sanitizePoolAuthID(strings.TrimSpace(a.ID))]++
+	}
 	providers := make(map[string]*poolStatusProvider)
-	for _, a := range h.AuthManager.List() {
+	for _, a := range auths {
 		if a == nil {
 			continue
 		}
@@ -121,6 +157,9 @@ func (h *BaseAPIHandler) PoolStatus(c *gin.Context) {
 			providers[provider] = entry
 		}
 		account := buildPoolStatusAccount(a, now, sessionCounts)
+		if prefCount[account.AuthID] > 1 {
+			account.AuthID = disambiguatePoolAccountID(a, account.AuthID, prefCount, uniqCount)
+		}
 		entry.Accounts = append(entry.Accounts, account)
 		entry.Total++
 		entry.ActiveSessionsTotal += account.ActiveSessions

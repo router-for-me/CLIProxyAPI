@@ -270,6 +270,76 @@ func TestBuildPoolStatusAccountUntimedBlocks(t *testing.T) {
 	}
 }
 
+func TestPoolStatusDisambiguatesSharedLabels(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	ctx := context.Background()
+	auths := []*coreauth.Auth{
+		{ID: "gemini:apikey:aaa111bbb222", Provider: "gemini", Label: "gemini-apikey"},
+		{ID: "gemini:apikey:ccc333ddd444", Provider: "gemini", Label: "gemini-apikey"},
+		{ID: "store/dir1/key.json", Provider: "gemini", Label: "shared"},
+		{ID: "store/dir2/key.json", Provider: "gemini", Label: "shared"},
+		{ID: "claude:apikey:eee555fff666", Provider: "claude", Label: "claude-apikey"},
+	}
+	for _, a := range auths {
+		if _, err := manager.Register(ctx, a); err != nil {
+			t.Fatalf("Register(%s): %v", a.ID, err)
+		}
+	}
+
+	handler := &BaseAPIHandler{AuthManager: manager}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/pool/status", nil)
+	handler.PoolStatus(c)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var resp struct {
+		Providers map[string]struct {
+			Accounts []struct {
+				AuthID string `json:"auth_id"`
+			} `json:"accounts"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	gemini, ok := resp.Providers["gemini"]
+	if !ok || len(gemini.Accounts) != 4 {
+		t.Fatalf("gemini accounts = %d, want 4", len(gemini.Accounts))
+	}
+	seen := make(map[string]int, len(gemini.Accounts))
+	var apikeyIDs, hashSuffixIDs int
+	for _, account := range gemini.Accounts {
+		seen[account.AuthID]++
+		if strings.HasPrefix(account.AuthID, "gemini:apikey:") {
+			apikeyIDs++
+		}
+		if strings.Contains(account.AuthID, "#") {
+			hashSuffixIDs++
+		}
+	}
+	if len(seen) != len(gemini.Accounts) {
+		t.Fatalf("gemini auth_ids not unique: %v", seen)
+	}
+	if apikeyIDs != 2 {
+		t.Fatalf("gemini apikey auth_ids = %d, want 2 unique auth IDs: %v", apikeyIDs, seen)
+	}
+	if hashSuffixIDs != 2 {
+		t.Fatalf("same-basename auth_ids = %d, want 2 hash-suffixed: %v", hashSuffixIDs, seen)
+	}
+	claude, ok := resp.Providers["claude"]
+	if !ok || len(claude.Accounts) != 1 {
+		t.Fatalf("claude accounts = %d, want 1", len(claude.Accounts))
+	}
+	if claude.Accounts[0].AuthID != "claude-apikey" {
+		t.Fatalf("claude auth_id = %q, want claude-apikey (unique label kept)", claude.Accounts[0].AuthID)
+	}
+}
+
 func TestPoolStatusHandlerNoManager(t *testing.T) {
 	t.Parallel()
 
