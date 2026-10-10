@@ -19,16 +19,33 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const responsesLocalTerminalResponseLimit = 128
+
+type responsesLocalInterruptResult uint8
+
+const (
+	responsesLocalInterruptRejected responsesLocalInterruptResult = iota
+	responsesLocalInterruptQueued
+	responsesLocalInterruptAlreadyTerminal
+)
+
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
 // does not use it; that interrupt is written to the existing socket instead.
 type responsesLocalInterrupt struct {
-	mu     sync.Mutex
-	active bool
-	frames chan []byte
+	mu            sync.Mutex
+	active        bool
+	responseID    string
+	pending       []byte
+	terminalIDs   map[string]struct{}
+	terminalOrder []string
+	frames        chan struct{}
 }
 
 func newResponsesLocalInterrupt() *responsesLocalInterrupt {
-	return &responsesLocalInterrupt{frames: make(chan []byte, 1)}
+	return &responsesLocalInterrupt{
+		terminalIDs: make(map[string]struct{}),
+		frames:      make(chan struct{}, 1),
+	}
 }
 
 func (s *responsesLocalInterrupt) begin() {
@@ -37,6 +54,9 @@ func (s *responsesLocalInterrupt) begin() {
 	}
 	s.mu.Lock()
 	s.active = true
+	s.responseID = ""
+	s.pending = nil
+	s.drainFrameSignalLocked()
 	s.mu.Unlock()
 }
 
@@ -46,30 +66,102 @@ func (s *responsesLocalInterrupt) end() {
 	}
 	s.mu.Lock()
 	s.active = false
-	select {
-	case <-s.frames:
-	default:
+	s.responseID = ""
+	s.pending = nil
+	s.drainFrameSignalLocked()
+	s.mu.Unlock()
+}
+
+func (s *responsesLocalInterrupt) observeResponseCreated(responseID string) {
+	if s == nil || responseID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.active {
+		s.responseID = responseID
+		s.pending = nil
+		s.drainFrameSignalLocked()
 	}
 	s.mu.Unlock()
 }
 
-func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
+func (s *responsesLocalInterrupt) observeResponseTerminal(responseID string) {
 	if s == nil {
-		return false
+		return
+	}
+	s.mu.Lock()
+	if responseID == "" && s.active {
+		responseID = s.responseID
+	}
+	if responseID == "" {
+		s.mu.Unlock()
+		return
+	}
+	if _, exists := s.terminalIDs[responseID]; !exists {
+		if len(s.terminalOrder) == responsesLocalTerminalResponseLimit {
+			delete(s.terminalIDs, s.terminalOrder[0])
+			s.terminalOrder = s.terminalOrder[1:]
+		}
+		s.terminalIDs[responseID] = struct{}{}
+		s.terminalOrder = append(s.terminalOrder, responseID)
+	}
+	if s.active && s.responseID == responseID {
+		s.responseID = ""
+		s.pending = nil
+		s.drainFrameSignalLocked()
+	}
+	s.mu.Unlock()
+}
+
+func (s *responsesLocalInterrupt) deliver(payload []byte) responsesLocalInterruptResult {
+	if s == nil {
+		return responsesLocalInterruptRejected
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	responseID := gjson.GetBytes(payload, "response_id").String()
+	if _, terminal := s.terminalIDs[responseID]; terminal {
+		return responsesLocalInterruptAlreadyTerminal
+	}
 	if !s.active {
-		return false
+		return responsesLocalInterruptRejected
 	}
-	select {
-	case s.frames <- bytes.Clone(payload):
-	default:
+	if s.responseID == "" || responseID != s.responseID {
+		return responsesLocalInterruptRejected
 	}
-	return true
+	if s.pending == nil {
+		s.pending = bytes.Clone(payload)
+		select {
+		case s.frames <- struct{}{}:
+		default:
+		}
+	}
+	return responsesLocalInterruptQueued
 }
 
-func (s *responsesLocalInterrupt) framesChan() <-chan []byte {
+func (s *responsesLocalInterrupt) take() []byte {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.active || s.pending == nil || s.responseID == "" || gjson.GetBytes(s.pending, "response_id").String() != s.responseID {
+		s.pending = nil
+		return nil
+	}
+	payload := s.pending
+	s.pending = nil
+	return payload
+}
+
+func (s *responsesLocalInterrupt) drainFrameSignalLocked() {
+	select {
+	case <-s.frames:
+	default:
+	}
+}
+
+func (s *responsesLocalInterrupt) framesChan() <-chan struct{} {
 	if s == nil {
 		return nil
 	}
@@ -99,27 +191,34 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 			if json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "response.interrupt" {
 				appendResponsesInterruptDiagnostic(timeline, payload, "")
 				errInterrupt := interrupt(payload)
-				switch {
-				case errInterrupt == nil:
+				if errInterrupt == nil {
 					appendResponsesInterruptDiagnostic(timeline, payload, "handled")
 					continue
-				case errors.Is(errInterrupt, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) && local.deliver(payload):
-					appendResponsesInterruptDiagnostic(timeline, payload, "local_http")
-					continue
-				default:
-					appendResponsesInterruptDiagnostic(timeline, payload, "rejected")
-					// The sanitized outcome replaces raw error logging here: errors
-					// from transport dependencies may contain credentials or URLs.
-					_, errWrite := writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
-						StatusCode: http.StatusBadRequest,
-						Error:      errInterrupt,
-					})
-					if errWrite != nil {
-						cancel(errWrite)
-						return
-					}
-					continue
 				}
+				if errors.Is(errInterrupt, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) {
+					switch local.deliver(payload) {
+					case responsesLocalInterruptQueued:
+						appendResponsesInterruptDiagnostic(timeline, payload, "local_http")
+						continue
+					case responsesLocalInterruptAlreadyTerminal:
+						appendResponsesInterruptDiagnostic(timeline, payload, "already_terminal")
+						continue
+					default:
+						errInterrupt = fmt.Errorf("response.interrupt does not target an active response")
+					}
+				}
+				appendResponsesInterruptDiagnostic(timeline, payload, "rejected")
+				// The sanitized outcome replaces raw error logging here: errors
+				// from transport dependencies may contain credentials or URLs.
+				_, errWrite := writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
+					StatusCode: http.StatusBadRequest,
+					Error:      errInterrupt,
+				})
+				if errWrite != nil {
+					cancel(errWrite)
+					return
+				}
+				continue
 			}
 			select {
 			case input <- cliproxyexecutor.WebsocketInput{Payload: payload}:

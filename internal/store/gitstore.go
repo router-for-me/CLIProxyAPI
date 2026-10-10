@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
+	"github.com/go-git/go-git/v6/storage/filesystem"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -1527,9 +1528,22 @@ func isRepositoryCorruptionError(err error) bool {
 	return errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound)
 }
 
-func verifyRepositoryHead(repo *git.Repository) error {
+func verifyRepositoryHead(repo *git.Repository) (errResult error) {
 	if repo == nil {
 		return fmt.Errorf("repository is nil")
+	}
+	if diskStorage, ok := repo.Storer.(*filesystem.Storage); ok {
+		verificationStorage := filesystem.NewStorage(diskStorage.Filesystem(), nil)
+		defer func() {
+			if errClose := verificationStorage.Close(); errClose != nil {
+				errResult = errors.Join(errResult, fmt.Errorf("close repository verification storage: %w", errClose))
+			}
+		}()
+		verificationRepo, errOpen := git.Open(verificationStorage, nil)
+		if errOpen != nil {
+			return fmt.Errorf("open repository verification storage: %w", errOpen)
+		}
+		repo = verificationRepo
 	}
 	head, errHead := repo.Head()
 	if errHead != nil {
@@ -1538,6 +1552,11 @@ func verifyRepositoryHead(repo *git.Repository) error {
 		}
 		return errHead
 	}
+	defer func() {
+		if errors.Is(errResult, fs.ErrNotExist) {
+			errResult = errors.Join(plumbing.ErrObjectNotFound, errResult)
+		}
+	}()
 	commit, errCommit := repo.CommitObject(head.Hash())
 	if errCommit != nil {
 		return errCommit

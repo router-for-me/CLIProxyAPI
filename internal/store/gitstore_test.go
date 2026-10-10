@@ -16,6 +16,7 @@ import (
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/storage/memory"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -26,6 +27,15 @@ type testBranchSpec struct {
 
 type callbackTokenStorage struct {
 	save func(string) error
+}
+
+type failingGitObjectStorage struct {
+	*memory.Storage
+	objectError error
+}
+
+func (s *failingGitObjectStorage) EncodedObject(plumbing.ObjectType, plumbing.Hash) (plumbing.EncodedObject, error) {
+	return nil, s.objectError
 }
 
 func (s *callbackTokenStorage) SaveTokenToFile(path string) error {
@@ -1471,6 +1481,98 @@ func TestGitTokenStoreCorruptionRecoveryPreservesOnlyNonConflictingLocalChanges(
 		assertLocalFileContents(t, victimPath, localContents)
 		assertRemoteFileContents(t, owner.remote, "master", "auths/victim.json", `{"access_token":"remote-new","disabled":false,"type":"codex"}`)
 	})
+}
+
+func TestVerifyRepositoryHeadClassifiesObjectLookupErrors(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		cause          error
+		wantCorruption bool
+	}{
+		{name: "missing packed object", cause: &os.PathError{Op: "stat", Path: "objects/pack/missing.pack", Err: os.ErrNotExist}, wantCorruption: true},
+		{name: "permission denied", cause: &os.PathError{Op: "open", Path: "objects/pack/unreadable.pack", Err: os.ErrPermission}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			storage := &failingGitObjectStorage{Storage: memory.NewStorage(), objectError: test.cause}
+			repo, errInit := git.Init(storage, nil)
+			if errInit != nil {
+				t.Fatalf("init repository: %v", errInit)
+			}
+			if errReference := storage.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), plumbing.NewHash(strings.Repeat("1", 40)))); errReference != nil {
+				t.Fatalf("set head branch: %v", errReference)
+			}
+			errVerify := verifyRepositoryHead(repo)
+			if !errors.Is(errVerify, test.cause) {
+				t.Fatalf("verify error = %v, want original cause %v", errVerify, test.cause)
+			}
+			if gotCorruption := isRepositoryCorruptionError(errVerify); gotCorruption != test.wantCorruption {
+				t.Fatalf("verify corruption = %v, want %v: %v", gotCorruption, test.wantCorruption, errVerify)
+			}
+		})
+	}
+}
+
+func TestVerifyRepositoryHeadDetectsRemovedCachedPackfile(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	repoDir := filepath.Join(root, "workspace")
+	repo, errClone := git.PlainClone(repoDir, &git.CloneOptions{URL: remoteDir})
+	if errClone != nil {
+		t.Fatalf("clone repository: %v", errClone)
+	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close repository: %v", errClose)
+		}
+	}()
+	head, errHead := repo.Head()
+	if errHead != nil {
+		t.Fatalf("read head: %v", errHead)
+	}
+	commit, errCommit := repo.CommitObject(head.Hash())
+	if errCommit != nil {
+		t.Fatalf("read commit: %v", errCommit)
+	}
+	tree, errTree := commit.Tree()
+	if errTree != nil {
+		t.Fatalf("read tree: %v", errTree)
+	}
+	if errFiles := tree.Files().ForEach(func(file *object.File) error {
+		_, errContents := file.Contents()
+		return errContents
+	}); errFiles != nil {
+		t.Fatalf("warm packed object readers: %v", errFiles)
+	}
+	if errVerify := verifyRepositoryHead(repo); errVerify != nil {
+		t.Fatalf("verify intact repository: %v", errVerify)
+	}
+	packfiles, errGlob := filepath.Glob(filepath.Join(repoDir, ".git", "objects", "pack", "*.pack"))
+	if errGlob != nil || len(packfiles) != 1 {
+		t.Fatalf("find cloned packfile: files=%v error=%v", packfiles, errGlob)
+	}
+	packfile := packfiles[0]
+	contents, errRead := os.ReadFile(packfile)
+	if errRead != nil {
+		t.Fatalf("read packfile: %v", errRead)
+	}
+	if errRemove := os.Remove(packfile); errRemove != nil {
+		t.Fatalf("remove packfile: %v", errRemove)
+	}
+	errVerify := verifyRepositoryHead(repo)
+	if !isRepositoryCorruptionError(errVerify) {
+		t.Fatalf("verify removed cached packfile error = %v, want repository corruption", errVerify)
+	}
+	if errWrite := os.WriteFile(packfile, contents, 0o600); errWrite != nil {
+		t.Fatalf("restore packfile: %v", errWrite)
+	}
+	if errVerify := verifyRepositoryHead(repo); errVerify != nil {
+		t.Fatalf("verify restored repository: %v", errVerify)
+	}
+	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
+		t.Fatalf("use caller repository after verification: %v", errRepack)
+	}
 }
 
 func TestGitTokenStoreFullPackfileCorruptionFailsClosedWithDirtyManagedFile(t *testing.T) {

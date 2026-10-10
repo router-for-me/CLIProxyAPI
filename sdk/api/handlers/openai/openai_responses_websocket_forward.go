@@ -79,7 +79,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 	for {
 		select {
-		case interruptPayload := <-localFrames:
+		case <-localFrames:
+			interruptPayload := opts.localInterrupt.take()
+			if len(interruptPayload) == 0 {
+				continue
+			}
+			opts.localInterrupt.observeResponseTerminal(gjson.GetBytes(interruptPayload, "response_id").String())
 			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
@@ -160,15 +165,20 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
-				if gjson.GetBytes(payloads[i], "type").String() == "response.created" {
+				eventType := gjson.GetBytes(payloads[i], "type").String()
+				responseID := gjson.GetBytes(payloads[i], "response.id").String()
+				if eventType == "response.created" {
 					responseStarted = true
 					completed = false
 					outputItemsByIndex = make(map[int64][]byte)
 					outputItemsFallback = nil
 					pendingToolCallIDs = make(map[string]struct{})
+					opts.localInterrupt.observeResponseCreated(responseID)
+				}
+				if isResponsesWebsocketInterruptTerminalEvent(eventType) {
+					opts.localInterrupt.observeResponseTerminal(responseID)
 				}
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
-				eventType := gjson.GetBytes(payloads[i], "type").String()
 				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(payloads[i], outputItemsByIndex, outputItemsFallback)
 				}
@@ -241,6 +251,15 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 			}
 		}
+	}
+}
+
+func isResponsesWebsocketInterruptTerminalEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.done", "response.incomplete", "response.failed", "error":
+		return true
+	default:
+		return false
 	}
 }
 
