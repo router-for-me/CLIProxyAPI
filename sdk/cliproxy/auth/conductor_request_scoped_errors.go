@@ -253,3 +253,20 @@ func applyRequestScopedActionToResult(action string, okAction bool, result *Resu
 func isRequestScopedStop(action string, okAction bool) bool {
 	return okAction && (action == RequestScopedActionStop || action == RequestScopedActionStopAndCooldown)
 }
+
+func isContinueRequestScopedAction(action string, okAction bool) bool {
+	return okAction && (action == RequestScopedActionContinue || action == RequestScopedActionContinueAndCooldown)
+}
+
+// IsRequestScopedContinueAction reports whether err matches a request-scoped error
+// rule on auth whose action keeps the request alive by rotating the credential
+// (continue / continue-and-cooldown).
+//
+// Executors consult this before signalling an upstream teardown to the downstream
+// websocket session: the conductor answers such a rejection by retrying the request
+// on another credential, so notifying the disconnect listener first would close the
+// client websocket before the retry can deliver anything.
+func IsRequestScopedContinueAction(auth *Auth, err error, cfg *internalconfig.Config) bool {
+	action, okAction := matchRequestScopedErrorAction(auth, err, cfg)
+	return isContinueRequestScopedAction(action, okAction)
+}
