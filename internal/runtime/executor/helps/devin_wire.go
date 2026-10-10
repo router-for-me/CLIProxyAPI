@@ -284,6 +284,15 @@ func BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName string) []by
 	return f1Bytes
 }
 
+// sanitizeDevinWireToolDescription rewrites the exec_command/write_stdin phrases
+// wherever they appear in a tool description sent to Devin. Clients may embed
+// those descriptions inside another tool (for example the Codex code-mode "exec"
+// tool), and Devin rejects them regardless of the tool name.
+func sanitizeDevinWireToolDescription(desc string) string {
+	desc = translatorcommon.ObfuscateExecCommandDescription(desc)
+	return translatorcommon.ObfuscateWriteStdinDescription(desc)
+}
+
 // BuildDevinGetChatMessageRequest encodes an entire GetChatMessageRequest protobuf payload.
 func BuildDevinGetChatMessageRequest(
 	sessionToken string,
@@ -461,7 +470,7 @@ func BuildDevinGetChatMessageRequest(
 		if strings.Contains(desc, "Takes a task_id parameter identifying the task") {
 			desc = strings.ReplaceAll(desc, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task")
 		}
-		desc = translatorcommon.SanitizeDevinToolDescription(tool.Name, desc)
+		desc = sanitizeDevinWireToolDescription(desc)
 		if desc != "" {
 			tBytes = protowire.AppendTag(tBytes, 2, protowire.BytesType)
 			tBytes = protowire.AppendString(tBytes, desc)
@@ -1176,7 +1185,7 @@ func BuildDevinUpstreamLogBody(
 		if strings.Contains(desc, "Takes a task_id parameter identifying the task") {
 			desc = strings.ReplaceAll(desc, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task")
 		}
-		desc = translatorcommon.SanitizeDevinToolDescription(t.Name, desc)
+		desc = sanitizeDevinWireToolDescription(desc)
 		var params json.RawMessage
 		if len(t.Parameters) > 0 && json.Valid(t.Parameters) {
 			params = json.RawMessage(t.Parameters)
