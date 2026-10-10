@@ -126,6 +126,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	}
 
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
+	auth.RecordDirectHttpUpstreamResult(selected, handshakeResponse, errDial)
 	if errDial != nil {
 		status := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
 		helpConfig := h.currentConfig()
