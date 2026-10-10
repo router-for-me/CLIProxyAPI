@@ -1105,3 +1105,67 @@ func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
 		t.Fatalf("restoredLine = %s, want %s forwarded unchanged", string(restoredLine), string(line))
 	}
 }
+
+func TestReverseRemapOAuthToolNames_BareToolComponentRestoresOriginal(t *testing.T) {
+	// The model sometimes drops the "mcp__<server>__" prefix and emits only the
+	// alias tool component ("<toolID>_<semantic>"). The caller never declared
+	// that name, so it must be restored like any other drifted alias.
+	body := []byte(`{"tools":[{"name":"shell","input_schema":{"type":"object"}},{"name":"fs_search","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "bare-tool-component-caller"})
+
+	for index, original := range []string{"shell", "fs_search"} {
+		alias := gjson.GetBytes(remapped, fmt.Sprintf("tools.%d.name", index)).String()
+		parts, ok := parseClaudeMCPAlias(alias)
+		if !ok {
+			t.Fatalf("parseClaudeMCPAlias(%q) failed", alias)
+		}
+		bare := parts.toolID + "_" + parts.semantic
+
+		resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, bare))
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+		if err != nil {
+			t.Fatalf("restoreClaudeOAuthToolNamesFromResponse(%q) error = %v", bare, err)
+		}
+		if got := gjson.GetBytes(restored, "content.0.name").String(); got != original {
+			t.Fatalf("bare tool component %q restored as %q, want %q", bare, got, original)
+		}
+
+		line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, bare))
+		restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+		if errStream != nil {
+			t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine(%q) error = %v", bare, errStream)
+		}
+		if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != original {
+			t.Fatalf("stream bare tool component %q restored as %q, want %q", bare, got, original)
+		}
+	}
+}
+
+func TestReverseRemapOAuthToolNames_BareNameLeavesDeclaredAndUnknownNames(t *testing.T) {
+	secret := "bare-declared-name-caller"
+	_, probeMap := remapOAuthToolNamesWithOptions([]byte(`{"tools":[{"name":"shell"}]}`), claudeMCPAliasOptions{secret: secret})
+	var shellBare string
+	for alias := range probeMap {
+		parts, ok := parseClaudeMCPAlias(alias)
+		if !ok {
+			t.Fatalf("parseClaudeMCPAlias(%q) failed", alias)
+		}
+		shellBare = parts.toolID + "_" + parts.semantic
+	}
+
+	// The caller declares a tool whose own name equals the bare tool component of
+	// the shell alias. That name already is what the client expects.
+	body := []byte(fmt.Sprintf(`{"tools":[{"name":"shell"},{"name":%q}]}`, shellBare))
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: secret})
+
+	for _, name := range []string{shellBare, "shell", "bash", "unknown_shell"} {
+		resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, name))
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+		if err != nil {
+			t.Fatalf("restoreClaudeOAuthToolNamesFromResponse(%q) error = %v", name, err)
+		}
+		if got := gjson.GetBytes(restored, "content.0.name").String(); got != name {
+			t.Fatalf("name %q restored as %q, want it forwarded unchanged", name, got)
+		}
+	}
+}
