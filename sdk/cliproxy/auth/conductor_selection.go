@@ -1525,6 +1525,35 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+// GetByIndex retrieves an isolated snapshot by stable auth index. It scans
+// under the read lock but clones only the matching entry, not the whole pool.
+func (m *Manager) GetByIndex(index string) (*Auth, bool) {
+	index = strings.TrimSpace(index)
+	if m == nil || index == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		authIndex := strings.TrimSpace(auth.Index)
+		if authIndex == "" {
+			// Normal registration and loading assign the index. Preserve lazy
+			// derivation without mutating manager-owned state under a read lock.
+			candidate := *auth
+			authIndex = candidate.EnsureIndex()
+		}
+		if authIndex == index {
+			snapshot := auth.Clone()
+			snapshot.EnsureIndex()
+			return snapshot, true
+		}
+	}
+	return nil, false
+}
+
 // GetByID retrieves an auth entry by its ID.
 func (m *Manager) GetByID(id string) (*Auth, bool) {
 	if id == "" {
