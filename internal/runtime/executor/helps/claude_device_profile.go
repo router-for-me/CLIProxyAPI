@@ -111,6 +111,12 @@ func ClaudeDeviceProfileStabilizationEnabled(cfg *config.Config) bool {
 	return *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile
 }
 
+// ClaudeNativeIdentityPreserved reports whether confirmed native Claude Code
+// callers keep their own identity (metadata.user_id and software headers).
+func ClaudeNativeIdentityPreserved(cfg *config.Config) bool {
+	return cfg != nil && cfg.ClaudeHeaderDefaults.PreserveNativeIdentity
+}
+
 func ResetClaudeDeviceProfileCache() {
 	claudeDeviceProfileCacheMu.Lock()
 	claudeDeviceProfileCache = make(map[string]claudeDeviceProfileCacheEntry)
@@ -619,11 +625,24 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	}
 
 	if confirmedClaudeCode {
-		miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, func(value string) bool { return value == profile.RuntimeVersion })
-		miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, func(value string) bool { return value == profile.PackageVersion })
+		clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent"))
+		clientUAAccepted := plausibleClaudeCodeUserAgent(clientUA, cfg)
+		clientPackage := strings.TrimSpace(ginHeaders.Get("X-Stainless-Package-Version"))
+		clientRuntime := strings.TrimSpace(ginHeaders.Get("X-Stainless-Runtime-Version"))
+		if clientUAAccepted && ClaudeNativeIdentityPreserved(cfg) &&
+			claudePackageVersionPattern.MatchString(clientPackage) && claudeRuntimeVersionPattern.MatchString(clientRuntime) {
+			// The caller's own User-Agent is forwarded, so its SDK and runtime
+			// versions are forwarded together with it; a partial pair falls back
+			// to the baseline pair below to keep the tuple coherent.
+			r.Header.Set("X-Stainless-Runtime-Version", clientRuntime)
+			r.Header.Set("X-Stainless-Package-Version", clientPackage)
+		} else {
+			miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, func(value string) bool { return value == profile.RuntimeVersion })
+			miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, func(value string) bool { return value == profile.PackageVersion })
+		}
 		miscEnsure("X-Stainless-Os", mapStainlessOS(), nil)
 		miscEnsure("X-Stainless-Arch", mapStainlessArch(), nil)
-		if clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent")); plausibleClaudeCodeUserAgent(clientUA, cfg) {
+		if clientUAAccepted {
 			r.Header.Set("User-Agent", clientUA)
 			return
 		}

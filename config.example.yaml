@@ -427,6 +427,13 @@ upstream:
     #   timeout: "600"
     #   timezone: "Asia/Singapore"  # fallback IANA timezone for cloaked currentDate; a credential JSON "timezone" takes priority
     #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth fingerprint pinning
+    #   # Optional, default false. When true, a confirmed native Claude Code caller keeps its own
+    #   # metadata.user_id (device_id/account_uuid/session_id) instead of the per-credential
+    #   # identity, and in legacy mode its X-Stainless package/runtime versions stay paired with
+    #   # its own forwarded User-Agent. Requests whose identity is missing or not bound to the
+    #   # X-Claude-Code-Session-Id header keep the per-credential identity. Intended for setups
+    #   # where the Claude Code user owns the credentials it is routed to.
+    #   preserve-native-identity: false
 
   xai:
     # When true, inject the native x_search tool when the request does not declare it.
