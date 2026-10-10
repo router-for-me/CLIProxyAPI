@@ -113,6 +113,17 @@ func TestStandardRealtimeCallMapsModelAndLocation(t *testing.T) {
 	if got := modelFromJSON(executor.body); got != defaultLiveModel {
 		t.Fatalf("upstream model = %q, want %q; body=%s", got, defaultLiveModel, executor.body)
 	}
+	var upstreamPayload struct {
+		Session struct {
+			Type string `json:"type"`
+		} `json:"session"`
+	}
+	if errUnmarshal := json.Unmarshal(executor.body, &upstreamPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream request: %v; body=%s", errUnmarshal, executor.body)
+	}
+	if upstreamPayload.Session.Type != "quicksilver" {
+		t.Fatalf("upstream session type = %q, want quicksilver", upstreamPayload.Session.Type)
+	}
 }
 
 func TestClientSecretStoreRejectsExpiredToken(t *testing.T) {
