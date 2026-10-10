@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **AOCI Code Cognition & Baseline Assets**:
+  - Initialized AOCI v0.1.0-rc18 code cognition layer (`aoci.txt`, `aoci.meta.txt`, `aoci.code.txt`, `.gitattributes`).
+  - Established project baseline across 1,882 managed files with Claude Code MCP hooks and settings integration.
 - **Native OpenCode Provider & Free Tier Support**:
   - Implemented OpenCode Zen reverse-engineered fingerprint engine (`internal/runtime/executor/opencode_cloaking.go`):
     - Injects dynamic 48-bit bitwise-inverted Base62 session and request IDs (`ses_` and `msg_`).

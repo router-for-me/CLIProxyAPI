@@ -1,0 +1,20 @@
+#AOCI-META-VOLUME: 1
+#Object-Protocol: repository-cognition-object/v2
+#FRAS-Discipline: 2
+#FRAS-v2-Limits-Authority: machine-contract
+#S-Admission: non-inferable-and-error-preventing
+#S配额: C9-8≤600 C7-4≤200 C3-1≤50
+#Object-Kinds: code=file database=table
+#Canonical-Tag-Authoring: compact A+B+C+[D]+E; dotted形态仅用于读取兼容
+#Code canonical identity example: code:path/to/file.go
+#Code Entry example: file.go[EG7T]: F:运行示例应用 | R:code:config/load.go | A:main | S:配置文件缺失时直接非零退出，不回退到内置默认值
+#[Tag dictionary: code]
+#A Layer: C-共享基础 E-入口边界 A-应用编排 D-领域逻辑 K-算法计算 M-中间件 P-持久化 I-集成适配 R-运行基础 L-库与SDK F-声明配置 O-运维交付 T-测试验证 S-文档规范 X-开发工具 Z-其他
+#B Module: G-跨域通用 U-用户交互 B-核心业务 D-数据状态 I-身份权限 N-网络协议 M-消息事件 S-安全隐私 C-配置策略 O-可观测性 R-可靠性恢复 P-性能资源 W-流程调度 A-分析智能 H-硬件设备 L-本地化 V-构建发布 Q-质量保障 E-扩展插件 Z-其他
+#C Importance: 9-最高 8-很高 7-高 6-较高 5-中等 4-较低 3-低 2-很低 1-最低
+#E Scale: L-大>400 M-中200-400 S-小100-200 T-微<100
+#[Tag dictionary: database]
+#A Layer: E-实体主表 T-事务事实 R-关联映射 M-明细从属 C-参考字典 S-状态存储 H-历史版本 L-日志审计 Q-队列发件 A-聚合投影 K-键值配置 B-文档大对象 Z-其他
+#B Module: G-跨域通用 B-核心业务 I-身份权限 T-组织租户 U-用户体验 F-财务计费 K-内容知识 C-配置策略 W-流程任务 M-消息事件 N-外部集成 S-安全隐私 O-可观测审计 R-可靠性恢复 P-性能资源 A-分析智能 H-硬件设备 L-本地化 V-构建发布 Q-质量测试 E-扩展插件 Z-其他
+#C Importance: 9-最高 8-很高 7-高 6-较高 5-中等 4-较低 3-低 2-很低 1-最低
+#E Scale: L-大>400 M-中200-400 S-小100-200 T-微<100

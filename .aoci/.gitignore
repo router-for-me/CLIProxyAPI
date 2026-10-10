@@ -1,0 +1,15 @@
+# AOCI .aoci 资产边界
+#
+# 默认规则：本目录中的未知文件均视为当前机器的运行时产物，不进入 Git。
+# 正式认知与治理资产通过下方白名单显式放行。
+
+*
+
+# 本边界文件自身必须进入 Git。
+!.gitignore
+
+# AOCI 正式认知与治理资产。
+!baseline.json
+!database-baseline.json
+!config.json
+!curation.json
