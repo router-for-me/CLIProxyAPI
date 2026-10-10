@@ -102,6 +102,25 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 	return resolveCodexKeyConfig(e.cfg, auth)
 }
 
+// codexImageGenerationDisabledForAuth reports whether this credential opts out
+// of the proxy-injected image_generation tool. The auth attribute (published by
+// the config synthesizer) wins over the credential config entry; both default to
+// injecting. The global multimedia.disable-image-generation modes are handled by
+// the callers.
+func codexImageGenerationDisabledForAuth(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil && len(auth.Attributes) > 0 {
+		if val, ok := auth.Attributes[cliproxyauth.AttributeCodexDisableImageGeneration]; ok {
+			if parsed, errParse := strconv.ParseBool(strings.TrimSpace(val)); errParse == nil {
+				return parsed
+			}
+		}
+	}
+	if entry := resolveCodexKeyConfig(cfg, auth); entry != nil && entry.DisableImageGeneration != nil {
+		return *entry.DisableImageGeneration
+	}
+	return false
+}
+
 func resolveCodexKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CodexKey {
 	if auth == nil || cfg == nil {
 		return nil

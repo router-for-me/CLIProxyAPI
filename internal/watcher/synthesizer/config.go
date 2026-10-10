@@ -261,6 +261,9 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		if provider == "codex" && entry.DisableCodexCloaking != nil {
 			attrs[coreauth.AttributeCodexDisableCloaking] = strconv.FormatBool(*entry.DisableCodexCloaking)
 		}
+		if provider == "codex" && entry.DisableImageGeneration != nil {
+			attrs[coreauth.AttributeCodexDisableImageGeneration] = strconv.FormatBool(*entry.DisableImageGeneration)
+		}
 		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}

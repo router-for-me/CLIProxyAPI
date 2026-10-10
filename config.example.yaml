@@ -622,6 +622,7 @@ upstream:
 #         - api-key: "sk-atSM..."
 #           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #           disable-codex-cloaking: false # optional: true disables cloaking; OAuth provider settings do not apply here
+#           disable-image-generation: false # optional: true stops the proxy from injecting the image_generation tool into requests sent with this key (e.g. Azure OpenAI endpoints that reject it)
 #           alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #           websockets: false # optional: use the Codex upstream WebSocket transport
 #
