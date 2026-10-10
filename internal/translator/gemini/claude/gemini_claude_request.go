@@ -183,7 +183,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 							part, _ = sjson.SetBytes(part, "functionResponse.response.result", toolResult.Result)
 						}
 						partItems = append(partItems, part)
-						for _, img := range toolResult.Images {
+						for _, img := range toolResult.InlineData {
 							imagePart := []byte(`{"inline_data":{"mime_type":"","data":""}}`)
 							imagePart, _ = sjson.SetBytes(imagePart, "inline_data.mime_type", img.MimeType)
 							imagePart, _ = sjson.SetBytes(imagePart, "inline_data.data", img.Data)

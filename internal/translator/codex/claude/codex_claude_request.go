@@ -126,6 +126,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 			}
 			pendingToolUseIDs = nil
 			contentItems := make([][]byte, 0, 4)
+			var toolResultFiles [][]byte
 			// Counts only what this turn itself sends, not system reminders flushed beside it.
 			// Empty text is forwarded but does not count: it can hide an emptied attachment.
 			turnSendable := 0
@@ -163,9 +164,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 			}
 
 			appendDocumentContent := func(dataURL string) {
-				content := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
-				content, _ = sjson.SetBytes(content, "file_data", dataURL)
-				contentItems = append(contentItems, content)
+				contentItems = append(contentItems, codexInputFile(dataURL))
 				bufferedSendable++
 			}
 
@@ -264,37 +263,18 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 							contentResults := contentResult.Array()
 							toolResultContentItems := make([][]byte, 0, len(contentResults))
 							for k := 0; k < len(contentResults); k++ {
-								toolResultContentType := contentResults[k].Get("type").String()
-								if toolResultContentType == "image" {
-									sourceResult := contentResults[k].Get("source")
-									if sourceResult.Exists() {
-										data := sourceResult.Get("data").String()
-										if data == "" {
-											data = sourceResult.Get("base64").String()
-										}
-										if data != "" {
-											mediaType := sourceResult.Get("media_type").String()
-											if mediaType == "" {
-												mediaType = sourceResult.Get("mime_type").String()
-											}
-											if mediaType == "" {
-												mediaType = "application/octet-stream"
-											}
-											dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-
-											toolResultContent := []byte(`{"type":"input_image","image_url":""}`)
-											toolResultContent, _ = sjson.SetBytes(toolResultContent, "image_url", dataURL)
-											toolResultContentItems = append(toolResultContentItems, toolResultContent)
-										}
-									}
-								} else if toolResultContentType == "text" {
-									toolResultContent := []byte(`{"type":"input_text","text":""}`)
-									toolResultContent, _ = sjson.SetBytes(toolResultContent, "text", contentResults[k].Get("text").String())
-									toolResultContentItems = append(toolResultContentItems, toolResultContent)
+								item, file := codexToolResultItem(contentResults[k])
+								if file != nil {
+									toolResultFiles = append(toolResultFiles, file)
+								}
+								if item != nil {
+									toolResultContentItems = append(toolResultContentItems, item)
 								}
 							}
 							if len(toolResultContentItems) > 0 {
 								functionCallOutputMessage, _ = sjson.SetRawBytes(functionCallOutputMessage, "output", translatorcommon.JoinRawArray(toolResultContentItems))
+							} else if len(toolResultFiles) > 0 {
+								functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "output", codexToolResultFilePlaceholder)
 							} else {
 								functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
 							}
@@ -307,6 +287,9 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					}
 				}
 				flushMessage()
+				if len(toolResultFiles) > 0 {
+					inputItems = append(inputItems, codexToolResultFileRelay(toolResultFiles))
+				}
 				if len(pendingSystemReminders) > 0 {
 					inputItems = append(inputItems, pendingSystemReminders...)
 					pendingSystemReminders = nil
@@ -836,6 +819,53 @@ func codexSchemaMissesRequired(schema gjson.Result) bool {
 		}
 	}
 	return false
+}
+
+// A Responses function_call_output has no file part, so a file a tool returns follows the
+// outputs in a user message. The placeholder keeps the output itself non-empty.
+const (
+	codexToolResultFilePlaceholder = "[Tool returned a file; it follows in the next user message.]"
+	codexToolResultFileRelayNotice = "Files returned by the preceding tool call(s):"
+)
+
+// codexInputFile wraps a PDF data URL as a Responses input_file part.
+func codexInputFile(dataURL string) []byte {
+	part := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
+	part, _ = sjson.SetBytes(part, "file_data", dataURL)
+	return part
+}
+
+// codexToolResultItem maps one Claude tool_result content block onto a Responses
+// function_call_output item, or onto a file that has to follow the outputs in a user
+// message. A block with no Responses equivalent stays as its own JSON text, so the
+// model still sees that something was returned.
+func codexToolResultItem(block gjson.Result) (item, file []byte) {
+	switch block.Get("type").String() {
+	case "text":
+		item = []byte(`{"type":"input_text","text":""}`)
+		item, _ = sjson.SetBytes(item, "text", block.Get("text").String())
+		return item, nil
+	case "image":
+		if part, ok := claudeImageInputPart(block.Get("source")); ok {
+			return part, nil
+		}
+	case "document":
+		if dataURL, ok := claudeDocumentDataURL(block); ok {
+			return nil, codexInputFile(dataURL)
+		}
+	}
+	item = []byte(`{"type":"input_text","text":""}`)
+	item, _ = sjson.SetBytes(item, "text", block.Raw)
+	return item, nil
+}
+
+// codexToolResultFileRelay is the user message that carries the files tools returned.
+func codexToolResultFileRelay(files [][]byte) []byte {
+	notice := []byte(`{"type":"input_text","text":""}`)
+	notice, _ = sjson.SetBytes(notice, "text", codexToolResultFileRelayNotice)
+	message := []byte(`{"type":"message","role":"user"}`)
+	message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(append([][]byte{notice}, files...)))
+	return message
 }
 
 // claudeDocumentDataURL turns an inline PDF into a Codex input_file URL. Anything
