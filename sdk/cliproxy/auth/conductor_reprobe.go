@@ -25,9 +25,10 @@ type reprobeCandidate struct {
 	routeModel string
 }
 
-// startCooldownReprobe launches a background loop that actively re-verifies
-// expired cooldowns with a minimal synthetic request instead of letting the
-// next client request act as the canary. Only one loop is kept alive.
+// startCooldownReprobe launches a background loop that periodically re-verifies
+// expired cooldowns with a minimal synthetic request, reducing the chance that
+// a client request acts as the canary. Only one loop is kept alive, and it is
+// only started when Home mode is disabled.
 func (m *Manager) startCooldownReprobe(parent context.Context) {
 	if m == nil || parent == nil {
 		return

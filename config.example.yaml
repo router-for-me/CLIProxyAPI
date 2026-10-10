@@ -216,9 +216,10 @@ routing:
     transient-error-cooldown-seconds: 0
 
     # Interval in seconds between background re-probes of credentials whose cooldown
-    # timer expired. A synthetic minimal request verifies upstream recovery before
-    # the credential rejoins the pool, so the next user request is not the canary.
+    # timer expired. A synthetic minimal request periodically re-verifies upstream
+    # recovery, reducing the chance that a user request acts as the canary.
     # Disabled by default; set to a positive interval (for example 30) to opt in.
+    # Has no effect while Home mode is enabled: the loop only runs outside Home.
     reprobe-interval-seconds: 0
 
 # Shared request/response behavior.
