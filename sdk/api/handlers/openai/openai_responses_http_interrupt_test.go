@@ -69,7 +69,7 @@ func (*identityHTTPExecutor) InterruptExecutionSession(context.Context, string, 
 
 func TestResponsesHTTPInterruptResponseIdentity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, scenario := range []string{"late_idle", "stale_active", "unknown_active"} {
+	for _, scenario := range []string{"late_idle", "stale_active", "unknown_active", "prewarm_late_idle", "prewarm_stale_active"} {
 		t.Run(scenario, func(t *testing.T) {
 			executor := &identityHTTPExecutor{canceled: make(chan string, 1)}
 			cfg := &config.Config{}
@@ -138,15 +138,31 @@ func TestResponsesHTTPInterruptResponseIdentity(t *testing.T) {
 			create("")
 			expect("response.created", "http-response-1")
 			expect("response.completed", "http-response-1")
-			if scenario == "late_idle" {
-				interrupt("http-response-1")
-				interrupt("http-response-1")
+			staleResponseID := "http-response-1"
+			if strings.HasPrefix(scenario, "prewarm_") {
+				send(fmt.Sprintf(`{"type":"response.create","model":%q,"generate":false,"input":[]}`, model))
+				_, created, errRead := client.ReadMessage()
+				if errRead != nil {
+					t.Fatal(errRead)
+				}
+				staleResponseID = gjson.GetBytes(created, "response.id").String()
+				if gjson.GetBytes(created, "type").String() != "response.created" || !strings.HasPrefix(staleResponseID, "resp_prewarm_") {
+					t.Fatalf("expected synthetic prewarm response, got %s", created)
+				}
+				expect("response.completed", staleResponseID)
+				if executor.calls.Load() != 1 {
+					t.Fatal("synthetic prewarm dispatched an upstream request")
+				}
 			}
-			create("http-response-1")
+			if scenario == "late_idle" || scenario == "prewarm_late_idle" {
+				interrupt(staleResponseID)
+				interrupt(staleResponseID)
+			}
+			create(staleResponseID)
 			expect("response.created", "http-response-2")
-			if scenario == "stale_active" {
-				interrupt("http-response-1")
-				interrupt("http-response-1")
+			if scenario == "stale_active" || scenario == "prewarm_stale_active" {
+				interrupt(staleResponseID)
+				interrupt(staleResponseID)
 			}
 			// The unknown frame is a reader-order barrier: both preceding stale
 			// frames must be handled before this error can reach the client.
