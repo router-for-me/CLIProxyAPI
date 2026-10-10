@@ -46,7 +46,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		if c != nil && c.Request != nil {
 			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v8/management/") || path == "/v8/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
+			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v8/management/") || path == "/v8/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" || path == "/v1/pool/status" {
 				c.Next()
 				return
 			}
@@ -112,6 +112,8 @@ func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
 
 func isExampleAPIKeySafeModeProxyPath(path string) bool {
 	switch {
+	case path == "/v1/pool/status":
+		return false
 	case path == "/v1" || strings.HasPrefix(path, "/v1/"):
 		return true
 	case path == "/v1beta" || strings.HasPrefix(path, "/v1beta/"):
@@ -148,19 +150,23 @@ func corsMiddleware() gin.HandlerFunc {
 
 // loopbackOnlyMiddleware restricts a route to connections originating from the
 // local machine. It inspects the socket peer address (never X-Forwarded-For),
-// so remote clients cannot spoof loopback access.
+// so remote clients cannot spoof loopback access, and rejects requests that
+// carry an Origin header: browsers attach one to fetches, which would make
+// any web page opened on this machine a valid loopback client.
 func loopbackOnlyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		remoteAddr := ""
+		origin := ""
 		if c != nil && c.Request != nil {
 			remoteAddr = strings.TrimSpace(c.Request.RemoteAddr)
+			origin = strings.TrimSpace(c.Request.Header.Get("Origin"))
 		}
 		host := remoteAddr
 		if parsedHost, _, err := net.SplitHostPort(remoteAddr); err == nil {
 			host = parsedHost
 		}
 		ip := net.ParseIP(strings.TrimSpace(host))
-		if ip == nil || !ip.IsLoopback() {
+		if ip == nil || !ip.IsLoopback() || origin != "" {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": "forbidden",
 			})

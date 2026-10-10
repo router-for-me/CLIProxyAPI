@@ -208,8 +208,8 @@ routing:
     # Interval in seconds between background re-probes of credentials whose cooldown
     # timer expired. A synthetic minimal request verifies upstream recovery before
     # the credential rejoins the pool, so the next user request is not the canary.
-    # Set to 0 or below to disable re-probing.
-    reprobe-interval-seconds: 30
+    # Disabled by default; set to a positive interval (for example 30) to opt in.
+    reprobe-interval-seconds: 0
 
 # Shared request/response behavior.
 requests:

@@ -27,9 +27,6 @@ type reprobeCandidate struct {
 	// routeModel is the model key to probe for model-scoped cooldowns. Empty
 	// means the credential-level cooldown expired and any registered model works.
 	routeModel string
-	// credentialScope marks candidates recorded via the credential-level result
-	// path (empty Result.Model), used when the auth has no per-model states.
-	credentialScope bool
 }
 
 // startCooldownReprobe launches a background loop that actively re-verifies
@@ -145,7 +142,7 @@ func (m *Manager) reprobeCandidatesForAuth(a *Auth, now time.Time) []reprobeCand
 	}
 	if len(a.ModelStates) == 0 {
 		if reprobeExpiredTimer(a.Unavailable, a.Quota.Exceeded, a.NextRetryAfter, a.Quota.NextRecoverAt, now) {
-			return []reprobeCandidate{{auth: a.Clone(), credentialScope: true}}
+			return []reprobeCandidate{{auth: a.Clone()}}
 		}
 		return nil
 	}
@@ -186,7 +183,7 @@ func (m *Manager) reprobeCandidatesForAuth(a *Auth, now time.Time) []reprobeCand
 // the collected probe. The caller must hold m.mu.
 func (m *Manager) reprobeCandidateStillWarranted(live *Auth, candidate reprobeCandidate, now time.Time) bool {
 	for _, reEmitted := range m.reprobeCandidatesForAuth(live, now) {
-		if reEmitted.routeModel == candidate.routeModel && reEmitted.credentialScope == candidate.credentialScope {
+		if reEmitted.routeModel == candidate.routeModel {
 			return true
 		}
 	}
@@ -248,10 +245,7 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 	}
 	execCtx = newUpstreamAttemptContext(execCtx)
 
-	stateModel := ""
-	if !candidate.credentialScope {
-		stateModel = m.stateModelForExecution(auth, routeModel, upstreamModel, false)
-	}
+	stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, false)
 
 	prepared, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 	if errPrepare != nil {

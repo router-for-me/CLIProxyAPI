@@ -34,6 +34,7 @@ type poolStatusProvider struct {
 	ActiveSessionsTotal int                  `json:"active_sessions_total"`
 	Accounts            []*poolStatusAccount `json:"accounts"`
 	coolingCount        int
+	unavailableCount    int
 }
 
 // poolStatusAccount describes a single credential without leaking secrets or PII.
@@ -134,6 +135,9 @@ func (h *BaseAPIHandler) PoolStatus(c *gin.Context) {
 		if account.Status == "cooling" {
 			entry.coolingCount++
 		}
+		if account.Status == "unavailable" {
+			entry.unavailableCount++
+		}
 		if account.ResetsAt != nil && (entry.EarliestRecovery == nil || *account.ResetsAt < *entry.EarliestRecovery) {
 			entry.EarliestRecovery = account.ResetsAt
 		}
@@ -149,7 +153,7 @@ func (h *BaseAPIHandler) PoolStatus(c *gin.Context) {
 		switch {
 		case open == 0:
 			entry.Status = "unavailable"
-		case entry.coolingCount > 0:
+		case entry.coolingCount > 0 || entry.unavailableCount > 0:
 			entry.Status = "degraded"
 		default:
 			entry.Status = "healthy"

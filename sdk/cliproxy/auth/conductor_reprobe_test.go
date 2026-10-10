@@ -161,28 +161,28 @@ func TestCollectReprobeCandidates(t *testing.T) {
 	if !ok {
 		t.Fatal("expected credential-scope candidate for cred-expired")
 	}
-	if !cred.credentialScope || cred.routeModel != "" {
-		t.Fatalf("cred-expired candidate = %+v, want credentialScope with empty routeModel", cred)
+	if cred.routeModel != "" {
+		t.Fatalf("cred-expired candidate = %+v, want empty routeModel", cred)
 	}
 	mixed, ok := got["model-mixed"]
 	if !ok {
 		t.Fatal("expected model candidate for model-mixed")
 	}
-	if mixed.routeModel != "gpt-5" || mixed.credentialScope {
+	if mixed.routeModel != "gpt-5" {
 		t.Fatalf("model-mixed candidate = %+v, want routeModel gpt-5", mixed)
 	}
 	fallback, ok := got["fallback-open"]
 	if !ok {
 		t.Fatal("expected fallback candidate for fallback-open")
 	}
-	if fallback.routeModel != "gpt-4" || fallback.credentialScope {
+	if fallback.routeModel != "gpt-4" {
 		t.Fatalf("fallback-open candidate = %+v, want routeModel gpt-4", fallback)
 	}
 	next, ok := got["fallback-next"]
 	if !ok {
 		t.Fatal("expected fallback candidate for fallback-next")
 	}
-	if next.routeModel != "gpt-5" || next.credentialScope {
+	if next.routeModel != "gpt-5" {
 		t.Fatalf("fallback-next candidate = %+v, want routeModel gpt-5", next)
 	}
 	for _, absent := range []string{"cred-pending", "disabled", "model-disabled", "fallback-disabled", "fallback-blocked", "open"} {

@@ -139,6 +139,41 @@ func TestPoolStatusHandler(t *testing.T) {
 	}
 }
 
+func TestPoolStatusDegradedWithTerminallyUnavailable(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	ctx := context.Background()
+	auths := []*coreauth.Auth{
+		{ID: "open-1", Provider: "codex"},
+		{ID: "dead-1", Provider: "codex", Unavailable: true},
+	}
+	for _, a := range auths {
+		if _, err := manager.Register(ctx, a); err != nil {
+			t.Fatalf("Register %s: %v", a.ID, err)
+		}
+	}
+
+	handler := &BaseAPIHandler{AuthManager: manager}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/pool/status", nil)
+	handler.PoolStatus(c)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	providers, _ := resp["providers"].(map[string]any)
+	codex, _ := providers["codex"].(map[string]any)
+	if got := codex["status"]; got != "degraded" {
+		t.Fatalf("provider status = %v, want degraded (1 open + 1 terminally unavailable)", got)
+	}
+}
+
 func TestBuildPoolStatusAccountUntimedBlocks(t *testing.T) {
 	t.Parallel()
 
