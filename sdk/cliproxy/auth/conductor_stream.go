@@ -99,10 +99,16 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			ok    bool
 		)
 		if ctx != nil {
+			// Prefer a chunk that is already available so an upstream error delivered together
+			// with a context cancellation is not discarded.
 			select {
-			case <-ctx.Done():
-				return nil, false, ctx.Err()
 			case chunk, ok = <-ch:
+			default:
+				select {
+				case <-ctx.Done():
+					return nil, false, ctx.Err()
+				case chunk, ok = <-ch:
+				}
 			}
 		} else {
 			chunk, ok = <-ch
@@ -118,6 +124,22 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			return buffered, false, nil
 		}
 	}
+}
+
+// recordCanceledUpstreamCooldown keeps an upstream-confirmed cooldown (an error carrying
+// RetryAfter) when the request context was canceled while the executor was returning, for
+// example because the downstream connection was closed in response to the same upstream error.
+// Errors without RetryAfter, such as plain client cancellations, are not recorded.
+func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, opts cliproxyexecutor.Options, err error, ephemeral bool) {
+	retryAfter := retryAfterFromError(err)
+	if m == nil || auth == nil || retryAfter == nil {
+		return
+	}
+	action, okAction := matchRequestScopedErrorAction(auth, err, m.runtimeConfigSnapshot())
+	result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(err), Options: opts, RetryAfter: retryAfter, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+	result.CredentialScope = isCredentialScopedError(err)
+	applyRequestScopedActionToResult(action, okAction, &result)
+	m.recordExecutionResult(context.WithoutCancel(ctx), result, auth, ephemeral)
 }
 
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options) *cliproxyexecutor.StreamResult {
@@ -248,6 +270,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		durationStream := time.Since(startStream)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
+				m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, errStream, ephemeralResult)
 				return nil, errCtx
 			}
 			if allowRetry && !ephemeralResult {
@@ -269,6 +292,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					if errStream != nil {
 						warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, durationRetry, errStream)
 						if errCtx := ctx.Err(); errCtx != nil {
+							m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, errStream, ephemeralResult)
 							return nil, errCtx
 						}
 					}
@@ -323,6 +347,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
+				m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, bootstrapErr, ephemeralResult)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
@@ -342,6 +367,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					if retryErr != nil {
 						if errCtx := ctx.Err(); errCtx != nil {
+							m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, retryErr, ephemeralResult)
 							return nil, errCtx
 						}
 						bootstrapErr = retryErr
