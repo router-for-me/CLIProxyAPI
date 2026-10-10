@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"golang.org/x/net/http2"
 )
 
 func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -152,6 +155,20 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 
+	// Termination diagnostic counters span the bootstrap-buffered scan and the unbuffered
+	// goroutine: the bootstrap loop consumes the handshake before the goroutine even starts, so
+	// seeding them here is what lets the one metadata-only line, see
+	// logCodexStreamTerminationDiagnostics, describe the events the upstream actually delivered
+	// instead of just the tail the goroutine happened to see. All timestamps come from
+	// nowCodexBootstrap so a test clock drives the whole line.
+	sseStartedAt := nowCodexBootstrap()
+	if buffering {
+		sseStartedAt = bootstrapStart
+	}
+	var sseEventCount int
+	sseLastEventType := ""
+	var sseLastEventAt time.Time
+
 	var bufferedChunks [][]byte
 	// bufferedFrames counts the scanned lines this loop holds and bufferedBytes sums each line
 	// together with the chunks it translates into. Every iteration either holds the line or leaves
@@ -189,6 +206,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			isHandshake := false
 			terminalSuccess := false
 
+			// Count a keepalive data frame before the Grok transformation consumes it:
+			// TransformKeepaliveSSELine rewrites both the event line and its data line into an SSE
+			// comment, and the counters describe upstream-delivered events, so the same payload
+			// must be counted for Grok clients as it already is for non-Grok ones.
+			if isGrokClient && bytes.HasPrefix(line, dataTag) && grokbuild.IsKeepaliveSSELine(line) {
+				sseEventCount++
+				sseLastEventType = gjson.GetBytes(bytes.TrimSpace(line[5:]), "type").String()
+				sseLastEventAt = nowCodexBootstrap()
+			}
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
 				isHandshake = true
@@ -198,6 +224,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
+				sseEventCount++
+				sseLastEventType = eventType
+				sseLastEventAt = nowCodexBootstrap()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -311,6 +340,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return nil, ctx.Err()
 				}
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				logCodexStreamTerminationDiagnostics(ctx, errScan, sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 				reporter.PublishFailure(ctx, errScan)
 				return nil, errScan
 			}
@@ -318,6 +348,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return nil, ctx.Err()
 			}
 			if len(bufferedChunks) == 0 && len(initialChunks) == 0 {
+				logCodexStreamTerminationDiagnostics(ctx, scanner.Err(), sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 				reporter.PublishFailure(ctx, emptyErr)
@@ -325,6 +356,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				close(closedCh)
 				return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: closedCh}, nil
 			}
+			logCodexStreamTerminationDiagnostics(ctx, scanner.Err(), sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 			streamErr := newCodexIncompleteStreamError()
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
@@ -374,12 +406,24 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
+		// sseStartedAt/sseEventCount/sseLastEventType/sseLastEventAt are declared above the
+		// bootstrap loop so this goroutine continues the counts the buffered scan seeded; see
+		// logCodexStreamTerminationDiagnostics.
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			terminalSuccess := false
 
+			// Count a keepalive data frame before the Grok transformation consumes it:
+			// TransformKeepaliveSSELine rewrites both the event line and its data line into an SSE
+			// comment, and the counters describe upstream-delivered events, so the same payload
+			// must be counted for Grok clients as it already is for non-Grok ones.
+			if isGrokClient && bytes.HasPrefix(line, dataTag) && grokbuild.IsKeepaliveSSELine(line) {
+				sseEventCount++
+				sseLastEventType = gjson.GetBytes(bytes.TrimSpace(line[5:]), "type").String()
+				sseLastEventAt = nowCodexBootstrap()
+			}
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
 			} else if bytes.HasPrefix(line, dataTag) {
@@ -388,6 +432,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
+				sseEventCount++
+				sseLastEventType = eventType
+				sseLastEventAt = nowCodexBootstrap()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -460,16 +507,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			if ctx.Err() != nil {
+				helps.LogWithRequestID(ctx).Debugf("codex executor: upstream SSE stream read interrupted by downstream cancellation after %d events, last event type %s", sseEventCount, codexDiagnosticEventType(sseLastEventType))
 				return
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		}
 		if emittedCount == 0 {
+			logCodexStreamTerminationDiagnostics(ctx, scanner.Err(), sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 			helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 			reporter.PublishFailure(ctx, emptyErr)
 			return
 		}
+		logCodexStreamTerminationDiagnostics(ctx, scanner.Err(), sseEventCount, sseLastEventType, sseLastEventAt, sseStartedAt)
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
@@ -479,4 +529,162 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// logCodexStreamTerminationDiagnostics emits the one metadata-only warning an operator gets when
+// an upstream SSE stream ends without a recognized terminal event. The client-facing 408 stays
+// normalized on purpose, which leaves no evidence of whether the stream ended on a clean EOF or a
+// transport failure; request-log could say more but captures private prompt and tool bodies, so
+// this line is limited to counters, event classes and sanitized read-error classes. It never
+// carries request or response content.
+func logCodexStreamTerminationDiagnostics(ctx context.Context, readErr error, eventCount int, lastEventType string, lastEventAt, startedAt time.Time) {
+	idleSince := startedAt
+	if !lastEventAt.IsZero() {
+		idleSince = lastEventAt
+	}
+	// Structured fields, not an interpolated message: operators routing logrus to a structured or
+	// JSON sink must be able to filter, index, and aggregate every dimension; the message stays a
+	// static, human-readable summary.
+	helps.LogWithRequestID(ctx).WithFields(log.Fields{
+		"read_error":      classifyCodexSSEReadError(readErr),
+		"events":          eventCount,
+		"last_event_type": codexDiagnosticEventType(lastEventType),
+		"idle_ms":         time.Since(idleSince).Milliseconds(),
+		"total_ms":        time.Since(startedAt).Milliseconds(),
+	}).Warn("codex executor: upstream SSE stream terminated without response.completed (metadata-only diagnostics)")
+}
+
+// codexDiagnosticEventType renders an unset event type as a dash so the diagnostic line never
+// contains an empty key=value pair. The upstream-supplied gjson string is untrusted: a character
+// allow-list alone cannot keep it out of operator logs, because prompt or token text is typically
+// lowercase letters and digits and would pass any such filter. The value therefore has to match
+// the closed vocabulary of real Codex (OpenAI Responses API) event names - after stripping control
+// characters, so a stray CRLF or NUL in an otherwise known name still renders - and anything else
+// collapses to the fixed label "unknown". The vocabulary includes the fixed event names the
+// executor itself recognizes elsewhere (keepalive heartbeats and rate-limit/metadata frames in
+// isCodexBootstrapBufferableEvent, reasoning deltas in helps.HasMeaningfulCodexOutputDelta), so
+// the diagnostic can distinguish a known last event from hostile or unrecognized input. The set
+// is the union of every event-type literal the codebase itself recognizes on Responses/Codex SSE
+// streams: the executor's terminal and bootstrap-bufferable switches, the token events the
+// executor feeds to helps.ObserveResponsesTokenEvent, and the frames the Codex-specific
+// translator consumes - so any event a valid stream can carry renders verbatim instead of
+// collapsing to "unknown".
+var codexDiagnosticEventTypes = map[string]struct{}{
+	"error":                                        {},
+	"keepalive":                                    {},
+	"ping":                                         {},
+	"codex.rate_limits":                            {},
+	"codex.response.metadata":                      {},
+	"response.completed":                           {},
+	"response.content_part.added":                  {},
+	"response.content_part.done":                   {},
+	"response.created":                             {},
+	"response.failed":                              {},
+	"response.file_search_call.completed":          {},
+	"response.file_search_call.in_progress":        {},
+	"response.file_search_call.searching":          {},
+	"response.function_call_arguments.delta":       {},
+	"response.function_call_arguments.done":        {},
+	"response.in_progress":                         {},
+	"response.incomplete":                          {},
+	"response.output_item.added":                   {},
+	"response.output_item.done":                    {},
+	"response.output_text.annotation.added":        {},
+	"response.output_text.delta":                   {},
+	"response.output_text.done":                    {},
+	"response.queued":                              {},
+	"response.reasoning_summary_part.added":        {},
+	"response.reasoning_summary_part.done":         {},
+	"response.reasoning_summary_text.delta":        {},
+	"response.reasoning_summary_text.done":         {},
+	"response.reasoning_text.delta":                {},
+	"response.reasoning_text.done":                 {},
+	"response.refusal.delta":                       {},
+	"response.refusal.done":                        {},
+	"response.web_search_call.completed":           {},
+	"response.web_search_call.in_progress":         {},
+	"response.web_search_call.searching":           {},
+	"response.done":                                {},
+	"response.error":                               {},
+	"response.custom_tool_call_input.delta":        {},
+	"response.custom_tool_call_input.done":         {},
+	"response.image_generation_call.partial_image": {},
+	"response.reasoning.delta":                     {},
+	"response.text.delta":                          {},
+	"response.audio.delta":                         {},
+	"response.audio.transcript.delta":              {},
+	"response.code_interpreter_call_code.delta":    {},
+	"response.code_interpreter_call_code.done":     {},
+	"response.mcp_call_arguments.delta":            {},
+	"response.mcp_call_arguments.done":             {},
+	"response.shell_call_command.added":            {},
+	"response.shell_call_command.delta":            {},
+	"response.shell_call_command.done":             {},
+	"response.shell_call_output_content.delta":     {},
+	"response.shell_call_output_content.done":      {},
+}
+
+func codexDiagnosticEventType(eventType string) string {
+	eventType = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		default:
+			return -1
+		}
+	}, eventType)
+	if eventType == "" {
+		return "-"
+	}
+	if _, ok := codexDiagnosticEventTypes[eventType]; ok {
+		return eventType
+	}
+	return "unknown"
+}
+
+// classifyCodexSSEReadError reduces a transport read failure to a sanitized class for the
+// termination diagnostics. The raw error text is deliberately never logged: transport errors may
+// embed peer addresses or credential material that request-log keeps out of operator-visible
+// lines, so only the closed vocabulary below may appear.
+func classifyCodexSSEReadError(err error) string {
+	if err == nil {
+		return "clean-eof"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "unexpected-eof"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "client-cancelled"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	// Both h2 stacks spell a peer RST_STREAM without any "http2" substring. The uTLS path surfaces
+	// x/net/http2's concrete StreamError (recognised by errors.As above); the standard-library
+	// transport on the fallback round-tripper path carries its own unexported stream error that
+	// errors.As cannot reach, but its Error() text has the stable "stream error: stream ID" prefix.
+	// The substring cases stay as a final fallback for other stacks that spell http/2 out in text.
+	var http2StreamErr http2.StreamError
+	if errors.As(err, &http2StreamErr) {
+		return "http2-stream-error"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "unexpected eof"):
+		return "unexpected-eof"
+	case strings.Contains(message, "reset by peer"), strings.Contains(message, "connection reset"):
+		return "connection-reset"
+	case strings.Contains(message, "broken pipe"):
+		return "broken-pipe"
+	case strings.Contains(message, "timeout"), strings.Contains(message, "deadline exceeded"):
+		return "timeout"
+	case strings.Contains(message, "tls:"):
+		return "tls-error"
+	case strings.Contains(message, "http2"), strings.Contains(message, "http/2"),
+		strings.Contains(message, "stream error: stream id"):
+		return "http2-stream-error"
+	default:
+		return "read-error"
+	}
 }

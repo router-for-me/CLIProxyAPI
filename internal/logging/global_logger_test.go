@@ -42,6 +42,36 @@ func TestLogFormatterPrintsVersionField(t *testing.T) {
 	}
 }
 
+func TestLogFormatterPrintsCodexTerminationDiagnosticFields(t *testing.T) {
+	entry := log.NewEntry(log.New())
+	entry.Time = time.Date(2026, 10, 10, 12, 0, 0, 0, time.Local)
+	entry.Level = log.WarnLevel
+	entry.Message = "codex executor: upstream SSE stream terminated without response.completed (metadata-only diagnostics)"
+	entry.Data["read_error"] = "http2-stream-error"
+	entry.Data["events"] = 42
+	entry.Data["last_event_type"] = "response.output_text.delta"
+	entry.Data["idle_ms"] = 22000
+	entry.Data["total_ms"] = 905000
+
+	formatted, errFormat := (&LogFormatter{}).Format(entry)
+	if errFormat != nil {
+		t.Fatalf("Format() error = %v", errFormat)
+	}
+
+	line := string(formatted)
+	for _, want := range []string{
+		"read_error=http2-stream-error",
+		"events=42",
+		"last_event_type=response.output_text.delta",
+		"idle_ms=22000",
+		"total_ms=905000",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("formatted line %q missing diagnostic field %q", line, want)
+		}
+	}
+}
+
 func TestLogFormatterPrintsMediaForwardingFields(t *testing.T) {
 	entry := log.NewEntry(log.New())
 	entry.Time = time.Date(2026, 7, 25, 7, 36, 4, 0, time.Local)
