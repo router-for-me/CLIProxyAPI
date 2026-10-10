@@ -1,0 +1,57 @@
+name: Pinable upstream check
+
+on:
+  push:
+    branches: ['sync/upstream-*', main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinable-upstream-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.repository == 'PinableAgents/CLIProxyAPI'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify synchronization baseline ancestry
+        run: |
+          git merge-base --is-ancestor fa10525c30391ebade420d23302425eecc9678c1 HEAD
+          git merge-base --is-ancestor 67465884ca179a8f9098328d03a361b50003fdd7 HEAD
+      - name: Test safe synchronization script
+        run: |
+          bash -n scripts/pinable/sync-upstream.sh
+          python3 scripts/pinable/test_sync_upstream.py -v
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build server
+        run: go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server
+      - name: Run regression tests
+        run: go test ./...
+      - name: Repeat timeout ordering regressions
+        run: go test ./internal/runtime/executor -run 'TestCodex(Websockets)?Executor_BootstrapBuffering_(TimeBudgetReleasesStream|OverloadDirectlyAfterTimeoutDeliveredInStream|StatusBearingErrorAfterTimeoutDeliveredInStream)$' -count=20
+      - name: Repeat shutdown acknowledgement regressions with race detection
+        run: go test -race ./internal/api/handlers/management -run '^TestPostRuntimeShutdown(WaitsForResponseFlush|AcknowledgesBeforeImmediateConnectionClose)$' -count=50
+      - name: Repeat HTTP interrupt cancellation regression
+        run: go test ./sdk/api/handlers/openai -run '^TestResponsesInterruptStopsHTTPUpstream$' -count=100
+      - name: Probe version and discovery output
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/cli-proxy-api" --version
+          "$RUNNER_TEMP/cli-proxy-api" discover --json --timeout 1 > "$RUNNER_TEMP/discovery.json"
+          python3 -m json.tool "$RUNNER_TEMP/discovery.json" > /dev/null
+          "$RUNNER_TEMP/cli-proxy-api" --discover-json --discover-timeout 1 > "$RUNNER_TEMP/legacy-discovery.json"
+          python3 -m json.tool "$RUNNER_TEMP/legacy-discovery.json" > /dev/null

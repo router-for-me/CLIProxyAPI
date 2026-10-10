@@ -6,27 +6,51 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type serverOptionConfig struct {
-	extraMiddleware       []gin.HandlerFunc
-	engineConfigurator    func(*gin.Engine)
-	routerConfigurator    func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
-	requestLoggerFactory  func(*config.Config, string) logging.RequestLogger
-	localPassword         string
-	keepAliveEnabled      bool
-	keepAliveTimeout      time.Duration
-	keepAliveOnTimeout    func()
-	postAuthHook          auth.PostAuthHook
-	postAuthPersistHook   auth.PostAuthHook
-	pluginHost            *pluginhost.Host
-	configReloadHook      func(context.Context, *config.Config)
-	exampleAPIKeySafeMode bool
+	extraMiddleware        []gin.HandlerFunc
+	engineConfigurator     func(*gin.Engine)
+	routerConfigurator     func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
+	requestLoggerFactory   func(*config.Config, string) logging.RequestLogger
+	localPassword          string
+	keepAliveEnabled       bool
+	keepAliveTimeout       time.Duration
+	keepAliveOnTimeout     func()
+	postAuthHook           auth.PostAuthHook
+	postAuthPersistHook    auth.PostAuthHook
+	pluginHost             *pluginhost.Host
+	configReloadHook       func(context.Context, *config.Config)
+	exampleAPIKeySafeMode  bool
+	runtimeInfo            *managementHandlers.RuntimeInfo
+	runtimeShutdown        func()
+	runtimeAccessProviders []sdkaccess.Provider
+}
+
+// WithRuntimeAccessProviders preserves in-memory providers across config reloads.
+func WithRuntimeAccessProviders(providers ...sdkaccess.Provider) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		for _, provider := range providers {
+			if provider != nil {
+				cfg.runtimeAccessProviders = append(cfg.runtimeAccessProviders, provider)
+			}
+		}
+	}
+}
+
+// WithHostRuntimeControl exposes runtime metadata and graceful shutdown to a supervising host.
+func WithHostRuntimeControl(info managementHandlers.RuntimeInfo, shutdown func()) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.runtimeInfo = &info
+		cfg.runtimeShutdown = shutdown
+	}
 }
 
 // ServerOption customises HTTP server construction.

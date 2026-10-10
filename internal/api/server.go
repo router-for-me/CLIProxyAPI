@@ -106,6 +106,8 @@ type Server struct {
 
 	exampleAPIKeySafeModeEnabled bool
 	exampleAPIKeySafeModeActive  atomic.Bool
+	hostRuntimeControlEnabled    bool
+	runtimeAccessProviders       []sdkaccess.Provider
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -191,6 +193,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		pluginHost:          optionState.pluginHost,
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
+		hostRuntimeControlEnabled:    optionState.runtimeInfo != nil,
+		runtimeAccessProviders:       append([]sdkaccess.Provider(nil), optionState.runtimeAccessProviders...),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
@@ -214,6 +218,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
+	if optionState.runtimeInfo != nil {
+		s.mgmt.SetRuntimeControl(*optionState.runtimeInfo, optionState.runtimeShutdown)
+	}
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}

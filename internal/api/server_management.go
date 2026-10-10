@@ -28,6 +28,10 @@ func (s *Server) registerManagementRoutes() {
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
+		if s.hostRuntimeControlEnabled {
+			mgmt.GET("/runtime-info", s.mgmt.GetRuntimeInfo)
+			mgmt.POST("/runtime-shutdown", s.mgmt.PostRuntimeShutdown)
+		}
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)

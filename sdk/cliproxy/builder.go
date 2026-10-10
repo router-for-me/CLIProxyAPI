@@ -62,6 +62,8 @@ type Builder struct {
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
+
+	ephemeralAPIKey string
 }
 
 // Hooks allows callers to plug into service lifecycle stages.
@@ -302,6 +304,7 @@ func (b *Builder) Build() (*Service, error) {
 			service.reloadConfigFromWatcher()
 		}),
 	)
+	service.configureRuntimeAccess(b.ephemeralAPIKey)
 	return service, nil
 }
 
