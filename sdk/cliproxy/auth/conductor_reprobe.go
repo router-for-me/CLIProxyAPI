@@ -242,9 +242,19 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 
 	stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, false)
 
+	execOpts := cliproxyexecutor.Options{
+		Stream:         false,
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey:  routeModel,
+			cliproxyexecutor.CooldownReprobeMetadataKey: true,
+		},
+	}
+
 	prepared, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 	if errPrepare != nil {
-		result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+		result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 		m.MarkResult(execCtx, result)
 		return
 	}
@@ -258,17 +268,8 @@ func (m *Manager) runReprobeCandidate(ctx context.Context, candidate reprobeCand
 		logEntryWithRequestID(execCtx).Debugf("cooldown re-probe payload build failed for %s: %v", provider, errPayload)
 		return
 	}
+	execOpts.OriginalRequest = payload
 	req := cliproxyexecutor.Request{Model: upstreamModel, Payload: payload}
-	execOpts := cliproxyexecutor.Options{
-		Stream:          false,
-		OriginalRequest: payload,
-		SourceFormat:    sdktranslator.FormatOpenAI,
-		ResponseFormat:  sdktranslator.FormatOpenAI,
-		Metadata: map[string]any{
-			cliproxyexecutor.RequestedModelMetadataKey:  routeModel,
-			cliproxyexecutor.CooldownReprobeMetadataKey: true,
-		},
-	}
 
 	// Skip the probe when the live credential no longer warrants one: real
 	// traffic may have cleared or refreshed the cooldown since collection.

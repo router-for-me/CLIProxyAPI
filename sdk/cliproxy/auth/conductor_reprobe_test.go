@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -20,12 +21,20 @@ func (e reprobeTestStatusError) Error() string   { return e.msg }
 func (e reprobeTestStatusError) StatusCode() int { return e.code }
 
 type reprobeTestExecutor struct {
-	calls    int
-	err      error
-	lastOpts cliproxyexecutor.Options
+	calls      int
+	err        error
+	lastOpts   cliproxyexecutor.Options
+	prepare    bool
+	prepareErr error
 }
 
 func (e *reprobeTestExecutor) Identifier() string { return "reprobe-test" }
+
+func (e *reprobeTestExecutor) ShouldPrepareRequestAuth(*Auth) bool { return e.prepare }
+
+func (e *reprobeTestExecutor) PrepareRequestAuth(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, e.prepareErr
+}
 
 func (e *reprobeTestExecutor) Execute(_ context.Context, _ *Auth, _ cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.calls++
@@ -250,6 +259,36 @@ func TestRunReprobeCandidateFailureRecools(t *testing.T) {
 	m.mu.RUnlock()
 	if !stillCooling {
 		t.Fatal("expected fresh model cooldown after failed re-probe")
+	}
+}
+
+func TestRunReprobeCandidatePrepareFailurePublishesNoErrorEvent(t *testing.T) {
+	t.Parallel()
+	withEnabledErrorQueue(t)
+	subscriber, unsubscribe := redisqueue.SubscribeErrors()
+	defer unsubscribe()
+
+	now := time.Now()
+	executor := &reprobeTestExecutor{prepare: true, prepareErr: errors.New("token refresh failed")}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "a1", Provider: "reprobe-test", Status: StatusActive, ModelStates: map[string]*ModelState{
+		"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(-time.Minute)},
+	}}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	m.runReprobeCandidate(context.Background(), reprobeCandidate{auth: m.auths["a1"].Clone(), routeModel: "gpt-5"})
+
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0 after prepare failure", executor.calls)
+	}
+	select {
+	case got := <-subscriber:
+		t.Fatalf("received prepare-failure probe event %q, want none", string(got))
+	default:
 	}
 }
 
