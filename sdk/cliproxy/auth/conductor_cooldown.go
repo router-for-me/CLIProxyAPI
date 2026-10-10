@@ -994,6 +994,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
+					// An explicit rule cooldown is a minimum rest: it extends, never shortens,
+					// the deadline derived from status, provider hints, or quota backoff.
+					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown && result.Cooldown > 0 {
+						next := now.Add(result.Cooldown)
+						if next.After(state.NextRetryAfter) {
+							state.NextRetryAfter = next
+						}
+						state.Unavailable = true
+					}
+
 					if disableCooling && state.NextRetryAfter.IsZero() && state.Quota.NextRecoverAt.IsZero() {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
@@ -1017,7 +1027,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					disableCooling = false
 				}
 				if !wasTerminalUnauthorized {
-					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					applyAuthFailureState(auth, result.Error, result.RetryAfter, result.Cooldown, now, disableCooling)
 				}
 			}
 		}
@@ -2277,7 +2287,7 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, cooldown time.Duration, now time.Time, disableCooling bool) {
 	if auth == nil {
 		return
 	}
@@ -2375,6 +2385,15 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 			auth.Unavailable = !auth.NextRetryAfter.IsZero()
 		}
+	}
+	// An explicit rule cooldown is a minimum rest: it extends, never shortens,
+	// the deadline derived from status, provider hints, or quota backoff.
+	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && cooldown > 0 {
+		next := now.Add(cooldown)
+		if next.After(auth.NextRetryAfter) {
+			auth.NextRetryAfter = next
+		}
+		auth.Unavailable = true
 	}
 	// A later failure only extends a still-live credential cooldown; a
 	// deliberate zero write (disableCooling) still clears it.

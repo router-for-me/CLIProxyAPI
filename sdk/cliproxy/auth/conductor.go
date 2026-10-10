@@ -64,6 +64,8 @@ type Result struct {
 	Success bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
+	// Cooldown carries an explicit request-scoped cooldown duration.
+	Cooldown time.Duration
 	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
 	CredentialScope bool
 	// Error describes the failure when Success is false.

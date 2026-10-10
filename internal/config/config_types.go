@@ -22,6 +22,8 @@ type RequestScopedErrorRule struct {
 	MatchRegexr []string `yaml:"match-regexr,omitempty" json:"match-regexr,omitempty"`
 	// Action specifies the handling behavior: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown".
 	Action string `yaml:"action,omitempty" json:"action,omitempty"`
+	// Cooldown optionally overrides the transient cooldown for cooldown actions (for example, "1h").
+	Cooldown string `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
 }
 
 // PluginsConfig holds dynamic plugin system settings.

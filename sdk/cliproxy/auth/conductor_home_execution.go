@@ -271,8 +271,8 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true
 			}
-			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
-			applyRequestScopedActionToResult(action, okAction, &result)
+			action, cooldown, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
+			applyRequestScopedActionToResult(action, cooldown, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			lastErr = errExecute
 			if okAction {
