@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -714,13 +715,16 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	if e == nil || sess == nil || conn == nil {
 		return
 	}
+	quotaFailurePending := false
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
 			sess.markTerminalError(conn, errRead)
 			invalidate := func() {
-				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
+				// A queued quota failure must reach the conductor even if the peer
+				// closes immediately after sending it.
+				e.invalidateUpstreamConnWithNotify(sess, conn, "upstream_disconnected", errRead, !quotaFailurePending)
 			}
 			invalidated := false
 			ch, done := sess.activeForConn(conn)
@@ -760,8 +764,8 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		}
 
 		payload = bytes.TrimSpace(payload)
+		eventType := gjson.GetBytes(payload, "type").String()
 		if len(payload) > 0 {
-			eventType := gjson.GetBytes(payload, "type").String()
 			if eventType != "" {
 				sess.setLastEventType(conn, eventType)
 			}
@@ -783,6 +787,16 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		}
 		select {
 		case ch <- codexWebsocketRead{conn: conn, msgType: msgType, payload: payload}:
+			switch eventType {
+			case "error":
+				if wsErr, ok := parseCodexWebsocketError(payload); ok {
+					quotaFailurePending = clienterror.HTTPStatusFromError(wsErr) == http.StatusTooManyRequests
+				}
+			case "response.failed":
+				if streamErr, _, ok := codexTerminalFailureErr(payload); ok {
+					quotaFailurePending = streamErr.StatusCode() == http.StatusTooManyRequests
+				}
+			}
 		case <-done:
 		}
 	}
