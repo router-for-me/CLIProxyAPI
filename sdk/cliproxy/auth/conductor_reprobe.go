@@ -30,7 +30,7 @@ type reprobeCandidate struct {
 // a client request acts as the canary. Only one loop is kept alive, and it is
 // only started when Home mode is disabled.
 func (m *Manager) startCooldownReprobe(parent context.Context) {
-	if m == nil || parent == nil {
+	if m == nil || parent == nil || m.HomeEnabled() {
 		return
 	}
 	m.mu.Lock()
