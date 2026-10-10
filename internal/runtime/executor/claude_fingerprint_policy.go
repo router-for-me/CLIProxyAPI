@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -115,12 +116,19 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 
 // preserveNativeClaudeIdentity reports whether a confirmed native Claude Code
 // request keeps its own metadata.user_id. It only applies when the operator
-// opted in and the caller's identity is well formed and bound to its session.
-func preserveNativeClaudeIdentity(cfg *config.Config, confirmedClaudeCode bool, headers http.Header, body []byte) bool {
+// opted in and the caller's identity is well formed and bound to both its
+// incoming session header and the outbound session ID. Requests whose outbound
+// session is derived (for example agent-scoped subagent sessions) keep the
+// per-credential identity so body and X-Claude-Code-Session-Id stay consistent.
+func preserveNativeClaudeIdentity(cfg *config.Config, confirmedClaudeCode bool, headers http.Header, body []byte, outboundSessionID string) bool {
 	if !confirmedClaudeCode || !helps.ClaudeNativeIdentityPreserved(cfg) {
 		return false
 	}
-	return helps.ClaudeNativeMetadataUserIDMatches(headers, body)
+	if !helps.ClaudeNativeMetadataUserIDMatches(headers, body) {
+		return false
+	}
+	identity := gjson.GetBytes(body, "metadata.user_id").String()
+	return outboundSessionID != "" && gjson.Get(identity, "session_id").String() == outboundSessionID
 }
 
 // applyClaudeCLIIdentity applies the Claude Code CLI credential identity to the

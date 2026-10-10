@@ -32,7 +32,7 @@ func runPreserveNativeIdentityRequest(t *testing.T, cfg *config.Config, stream b
 	return body, headers
 }
 
-func runPreserveNativeIdentityPayload(t *testing.T, cfg *config.Config, stream bool, sessionHeader string, payload []byte) ([]byte, http.Header, error) {
+func runPreserveNativeIdentityPayload(t *testing.T, cfg *config.Config, stream bool, sessionHeader string, payload []byte, extraHeaders ...http.Header) ([]byte, http.Header, error) {
 	t.Helper()
 	var seenBody []byte
 	var seenHeaders http.Header
@@ -58,6 +58,11 @@ func runPreserveNativeIdentityPayload(t *testing.T, cfg *config.Config, stream b
 		"X-Stainless-Runtime-Version": {"v26.3.0"},
 		"X-Stainless-Os":              {"Linux"},
 		"X-Stainless-Arch":            {"x64"},
+	}
+	for _, extra := range extraHeaders {
+		for key, values := range extra {
+			incoming[key] = values
+		}
 	}
 	executor := NewClaudeExecutor(cfg)
 	auth := &cliproxyauth.Auth{
@@ -149,5 +154,23 @@ func TestClaudeExecutor_PreserveNativeIdentityRejectsDuplicateMetadata(t *testin
 	// either fail or at least never forward one of the caller identities.
 	if errRun == nil && (strings.Contains(string(body), strings.Repeat("a", 64)) || strings.Contains(string(body), strings.Repeat("c", 64))) {
 		t.Fatalf("upstream body forwarded a caller identity from a duplicated metadata member: %s", body)
+	}
+}
+
+func TestClaudeExecutor_PreserveNativeIdentityKeepsBodyAndHeaderSessionConsistentForSubagents(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			payload := []byte(`{"model":"claude-opus-4-6","stream":` + fmt.Sprint(stream) + `,"system":[{"type":"text","text":"interactive-system"}],"messages":[{"role":"user","content":"x"}],"metadata":{"user_id":` + fmt.Sprintf("%q", preserveNativeIdentityUserID) + `}}`)
+			body, headers, errRun := runPreserveNativeIdentityPayload(t, preserveNativeIdentityConfig(true), stream, preserveNativeIdentitySessionID, payload,
+				http.Header{"X-Claude-Code-Agent-Id": {"agent-preserve-sub"}})
+			if errRun != nil {
+				t.Fatal(errRun)
+			}
+
+			bodySession := gjson.Get(gjson.GetBytes(body, "metadata.user_id").String(), "session_id").String()
+			if got := headers.Get("X-Claude-Code-Session-Id"); got != bodySession {
+				t.Fatalf("X-Claude-Code-Session-Id = %q, body session_id = %q; want them equal", got, bodySession)
+			}
+		})
 	}
 }

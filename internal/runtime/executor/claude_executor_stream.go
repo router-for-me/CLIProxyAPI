@@ -210,7 +210,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
-	if fp.ApplyCLIIdentity && !preserveNativeClaudeIdentity(e.cfg, confirmedClaudeCode, incomingHeaders, bodyForUpstream) {
+	if fp.ApplyCLIIdentity && !preserveNativeClaudeIdentity(e.cfg, confirmedClaudeCode, incomingHeaders, bodyForUpstream, claudeSessionID) {
 		bodyForUpstream, err = applyClaudeCLIIdentity(bodyForUpstream, auth, apiKey, url, claudeSessionID, fp.SynthesizeIdentity)
 		if err != nil {
 			return nil, err
