@@ -1789,6 +1789,12 @@ func HasDisabledInvalidGrantFailure(auth *Auth) bool {
 	return hasDisabledInvalidGrantFailure(auth)
 }
 
+func hasDisabledInvalidRefreshTokenFailure(auth *Auth) bool {
+	return auth != nil && (auth.Disabled || auth.Status == StatusDisabled) &&
+		auth.LastError != nil && auth.LastError.HTTPStatus == http.StatusUnauthorized &&
+		auth.LastError.Code == "invalid_refresh_token"
+}
+
 func refreshErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
@@ -1801,6 +1807,9 @@ func refreshErrorFromError(err error) *Error {
 	if statusCode == http.StatusUnauthorized {
 		authErr.Code = "unauthorized"
 		authErr.Retryable = false
+		if isInvalidRefreshTokenError(err) {
+			authErr.Code = "invalid_refresh_token"
+		}
 	}
 	return authErr
 }
@@ -1909,6 +1918,36 @@ func isInvalidGrantResultError(err *Error) bool {
 	status := statusCodeFromResult(err)
 	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == 0 {
 		return true
+	}
+	return false
+}
+
+func isInvalidRefreshTokenError(err error) bool {
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		status := statusCodeFromError(current)
+		if status != 0 && status != http.StatusUnauthorized {
+			return false
+		}
+		if authErr, ok := current.(*Error); ok && status == http.StatusUnauthorized && authErr.Code == "invalid_refresh_token" {
+			return true
+		}
+		body := current.Error()
+		if payload, ok := strings.CutPrefix(body, "token refresh failed with status 401: "); ok {
+			// RefreshTokens returns a plain error; this exact prefix carries its HTTP status.
+			status, body = http.StatusUnauthorized, payload
+		}
+		if status != http.StatusUnauthorized {
+			continue
+		}
+		var payload struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(body), &payload) != nil {
+			continue
+		}
+		return payload.Error.Code == "invalid_refresh_token"
 	}
 	return false
 }

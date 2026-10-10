@@ -118,7 +118,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
-	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
+	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) || hasDisabledInvalidRefreshTokenFailure(a) {
 		return false
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
@@ -325,7 +325,7 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, registrationEpoch uint64, now time.Time) *authRefreshJob {
 	m.mu.Lock()
 	auth := m.auths[id]
-	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
+	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) || hasDisabledInvalidRefreshTokenFailure(auth) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -539,7 +539,6 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
 	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
 	if errRefresh != nil || refreshed == nil {
-		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
 		return auth, false
 	}
 	return refreshed, true
@@ -656,6 +655,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if hasDisabledInvalidGrantFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is disabled with invalid grant")
 	}
+	if hasDisabledInvalidRefreshTokenFailure(auth) && !forceRefresh {
+		return nil, errors.New("auth is disabled with invalid refresh token")
+	}
 	if hasUnauthorizedAuthFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is unauthorized")
 	}
@@ -686,13 +688,25 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		m.queueRefreshReschedule(id)
 		return nil, err
 	}
-	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
+	if err == nil {
+		log.Debugf("refreshed %s, %s", auth.Provider, auth.ID)
+	}
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
+		invalidRefreshToken := isInvalidRefreshTokenError(err)
 		shouldReschedule := false
 		isDisabled := false
 		shouldUnschedule := false
+		credential := strings.TrimSpace(auth.FileName)
+		if credential == "" {
+			credential = strings.TrimSpace(auth.ID)
+		}
+		log.WithFields(log.Fields{
+			"provider": auth.Provider,
+			"auth_id":  auth.ID,
+			"file":     credential,
+		}).Warnf("credential refresh failed: %s", safeErrorDiagnosticForLog(err))
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
@@ -732,12 +746,17 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			// failedAccessToken is set only when upstream rejected this exact access
 			// token. Its expiry time no longer proves it is usable.
 			accessTokenRejected := failedAccessToken != "" && authAccessToken(current) == failedAccessToken
-			if isDisabled && invalidGrant {
+			if isDisabled && (invalidGrant || invalidRefreshToken) {
 				current.Unavailable = true
 				current.Status = StatusDisabled
 				current.NextRefreshAfter = time.Time{}
 				current.RefreshFailures = 0
-				current.StatusMessage = "disabled (invalid grant)"
+				switch {
+				case invalidGrant:
+					current.StatusMessage = "disabled (invalid grant)"
+				default:
+					current.StatusMessage = "disabled (refresh token invalid)"
+				}
 				shouldUnschedule = true
 			} else if isDisabled {
 				current.Unavailable = true
@@ -793,9 +812,6 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.NextRefreshAfter = nextRetry
 				shouldReschedule = true
 
-				if !current.Unavailable {
-					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
-				}
 			}
 			m.auths[id] = current
 			if m.scheduler != nil {
