@@ -353,8 +353,8 @@ upstream:
     # wait. Neither is made worse by this option - with it off the same stalled line stalls the
     # conductor instead, which waits on the same context - but a client-side request timeout, not
     # proxy_read_timeout, is what bounds them.
-    # Default: false
-    stream-bootstrap-buffering: false
+    # Default: true
+    stream-bootstrap-buffering: true
     # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
     # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
     # the stream is released to the client and further in-stream overloads are delivered rather
@@ -371,8 +371,8 @@ upstream:
     # commit when that first token arrives).
     # When unset or set to "0", "0s", "none", "unlimited", "disabled", "off", or "never", no time ceiling
     # is applied, and buffering relies purely on the 48-frame and 1MB byte budget.
-    # Default: "0" (unlimited)
-    stream-bootstrap-timeout: "0"
+    # Default: "30s"
+    stream-bootstrap-timeout: "30s"
     # When true, enable opt-in compatibility for orphan Codex delegation outputs.
     # Converts orphan function_call_output items from codex_app/create_thread and
     # codex_app/send_message_to_thread (which lack a valid call_id or matching function_call)
@@ -1005,6 +1005,9 @@ oauth:
 
     # Codex provider behavior.
     codex:
+      # Preserve a coherent first-party Codex client's User-Agent and Originator.
+      # Other requests still use the configured Codex identity headers.
+      preserve-native-client-identity: true
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
       live-media-relay:
@@ -1036,6 +1039,7 @@ oauth:
       # These are used only for file-backed/OAuth Codex requests when the client
       # does not send the header. `user-agent` applies to HTTP and websocket requests;
       # `beta-features` only applies to websocket requests. They do not apply to api-keys.codex entries.
+      # A native Codex User-Agent takes precedence when preserve-native-client-identity is enabled.
       # header-defaults:
       #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
       #   beta-features: "multi_agent"
