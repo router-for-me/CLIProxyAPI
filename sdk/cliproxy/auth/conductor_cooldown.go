@@ -994,6 +994,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
+					// An explicit rule cooldown is a minimum rest: it extends, never shortens,
+					// the deadline derived from status, provider hints, or quota backoff.
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown && result.Cooldown > 0 {
 						next := now.Add(result.Cooldown)
 						if next.After(state.NextRetryAfter) {
@@ -2384,6 +2386,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.Unavailable = !auth.NextRetryAfter.IsZero()
 		}
 	}
+	// An explicit rule cooldown is a minimum rest: it extends, never shortens,
+	// the deadline derived from status, provider hints, or quota backoff.
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && cooldown > 0 {
 		next := now.Add(cooldown)
 		if next.After(auth.NextRetryAfter) {

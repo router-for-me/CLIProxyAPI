@@ -185,20 +185,21 @@ func TestRequestScopedCooldown_InvalidValueIgnoresRule(t *testing.T) {
 	}
 }
 
-func TestRequestScopedCooldown_ExplicitDurationWinsForStatusAndDisabledTransient(t *testing.T) {
+func TestRequestScopedCooldown_ExplicitDurationIsMinimumForStatusAndDisabledTransient(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		cooldown string
+		parsed   time.Duration
 		want     time.Duration
 	}{
-		{name: "longer than status default", cooldown: "1h", want: time.Hour},
-		{name: "shorter than status default", cooldown: "1m", want: time.Minute},
+		{name: "longer than status default", cooldown: "1h", parsed: time.Hour, want: time.Hour},
+		{name: "shorter than status default keeps the longer 402 deadline", cooldown: "1m", parsed: time.Minute, want: 30 * time.Minute},
 	} {
-		t.Run(tc.name, func(t *testing.T) { assertExplicitRequestScopedCooldown(t, tc.cooldown, tc.want) })
+		t.Run(tc.name, func(t *testing.T) { assertExplicitRequestScopedCooldown(t, tc.cooldown, tc.parsed, tc.want) })
 	}
 }
 
-func assertExplicitRequestScopedCooldown(t *testing.T, configured string, want time.Duration) {
+func assertExplicitRequestScopedCooldown(t *testing.T, configured string, parsed, want time.Duration) {
 	t.Helper()
 	previousCooling := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -225,8 +226,8 @@ func assertExplicitRequestScopedCooldown(t *testing.T, configured string, want t
 
 	matchedErr := requestScopedCooldownError{status: 402, body: "explicit payment cooldown"}
 	action, cooldown, okAction := matchRequestScopedErrorAction(newAuth("probe"), matchedErr, nil)
-	if !okAction || action != RequestScopedActionStopAndCooldown || cooldown != want {
-		t.Fatalf("matchRequestScopedErrorAction() = %q, %v, %v; want stop-and-cooldown, %v, true", action, cooldown, okAction, want)
+	if !okAction || action != RequestScopedActionStopAndCooldown || cooldown != parsed {
+		t.Fatalf("matchRequestScopedErrorAction() = %q, %v, %v; want stop-and-cooldown, %v, true", action, cooldown, okAction, parsed)
 	}
 
 	modelManager := NewManager(nil, nil, nil)

@@ -469,7 +469,7 @@ upstream:
 #             - "^context_length_exceeded"
 #           action: "stop"     # "stop" (return error, no cooling), "stop-and-cooldown" (return error and cool down),
 #                              # "continue" (try next credential, no cooling), "continue-and-cooldown" (try next credential and cool down)
-#           cooldown: "1h"     # optional Go duration override for cooldown actions; invalid values ignore the rule
+#           cooldown: "1h"     # optional minimum rest (Go duration) for cooldown actions; never shortens a longer built-in or quota cooldown; invalid values ignore the rule
 #       base-url: "https://generativelanguage.googleapis.com"
 #       headers:
 #         X-Custom-Header: "custom-value"
