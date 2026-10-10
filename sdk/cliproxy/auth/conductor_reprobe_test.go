@@ -262,8 +262,58 @@ func TestRunReprobeCandidateFailureRecools(t *testing.T) {
 	}
 }
 
-func TestRunReprobeCandidatePrepareFailurePublishesNoErrorEvent(t *testing.T) {
+func TestReprobeResultSkipsSessionAffinityMutation(t *testing.T) {
 	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+
+	authA := &Auth{ID: "auth-a"}
+	authB := &Auth{ID: "auth-b"}
+	auths := []*Auth{authA, authB}
+	payload := []byte(`{"messages":[{"role":"user","content":"ping"}]}`)
+	pickOpts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	first, errFirst := selector.Pick(context.Background(), "reprobe-test", "gpt-5", pickOpts, auths)
+	if errFirst != nil || first == nil {
+		t.Fatalf("first Pick() = (%v, %v)", first, errFirst)
+	}
+
+	probeResult := Result{
+		AuthID:   first.ID,
+		Provider: "reprobe-test",
+		Model:    "gpt-5",
+		Success:  false,
+		Error:    &Error{Code: "rate_limited", Message: "rate limited"},
+		Options: cliproxyexecutor.Options{
+			OriginalRequest: payload,
+			Metadata:        map[string]any{cliproxyexecutor.CooldownReprobeMetadataKey: true},
+		},
+	}
+	selector.OnResult(probeResult)
+
+	second, errSecond := selector.Pick(context.Background(), "reprobe-test", "gpt-5", pickOpts, auths)
+	if errSecond != nil || second == nil {
+		t.Fatalf("second Pick() = (%v, %v)", second, errSecond)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("marked re-probe result released session binding: got %q, want %q", second.ID, first.ID)
+	}
+
+	unmarked := probeResult
+	unmarked.Options = cliproxyexecutor.Options{OriginalRequest: payload}
+	selector.OnResult(unmarked)
+
+	third, errThird := selector.Pick(context.Background(), "reprobe-test", "gpt-5", pickOpts, auths)
+	if errThird != nil || third == nil {
+		t.Fatalf("third Pick() = (%v, %v)", third, errThird)
+	}
+	if third.ID == first.ID {
+		t.Fatal("expected unmarked identical failure to release the session binding")
+	}
+}
+
+func TestRunReprobeCandidatePrepareFailurePublishesNoErrorEvent(t *testing.T) {
 	withEnabledErrorQueue(t)
 	subscriber, unsubscribe := redisqueue.SubscribeErrors()
 	defer unsubscribe()

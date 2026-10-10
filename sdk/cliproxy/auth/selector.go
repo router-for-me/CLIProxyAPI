@@ -1468,6 +1468,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if s == nil || res.AuthID == "" {
 		return
 	}
+	if probe, _ := res.Options.Metadata[cliproxyexecutor.CooldownReprobeMetadataKey].(bool); probe {
+		return
+	}
 
 	explicitID, explicitFallbackID := extractExplicitSessionIDs(res.Options.Headers, res.Options.OriginalRequest, res.Options.Metadata)
 	if explicitID != "" {
