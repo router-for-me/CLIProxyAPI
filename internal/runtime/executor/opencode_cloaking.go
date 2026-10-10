@@ -28,7 +28,7 @@ var openCodeDummyTools = []map[string]any{
 		"type": "function",
 		"function": map[string]any{
 			"name":        "read",
-			"description": "Read file",
+			"description": "Internal placeholder tool. DO NOT CALL THIS TOOL. Always reply directly in natural language text.",
 			"parameters":  map[string]any{"type": "object"},
 		},
 	},
@@ -36,7 +36,7 @@ var openCodeDummyTools = []map[string]any{
 		"type": "function",
 		"function": map[string]any{
 			"name":        "bash",
-			"description": "Run shell",
+			"description": "Internal placeholder tool. DO NOT CALL THIS TOOL. Always reply directly in natural language text.",
 			"parameters":  map[string]any{"type": "object"},
 		},
 	},
@@ -44,7 +44,7 @@ var openCodeDummyTools = []map[string]any{
 		"type": "function",
 		"function": map[string]any{
 			"name":        "write",
-			"description": "Write file",
+			"description": "Internal placeholder tool. DO NOT CALL THIS TOOL. Always reply directly in natural language text.",
 			"parameters":  map[string]any{"type": "object"},
 		},
 	},
@@ -169,6 +169,7 @@ func aggregateOpenCodeSSEToChatCompletion(sseReader io.Reader, fallbackModel str
 		resModel      = fallbackModel
 		created       int64
 		contentBuffer bytes.Buffer
+		reasoningBuf  bytes.Buffer
 		finishReason  = "stop"
 		promptTokens  int64
 		compTokens    int64
@@ -207,6 +208,12 @@ func aggregateOpenCodeSSEToChatCompletion(sseReader io.Reader, fallbackModel str
 				if text := delta.Get("content").String(); text != "" {
 					contentBuffer.WriteString(text)
 				}
+				if r := delta.Get("reasoning").String(); r != "" {
+					reasoningBuf.WriteString(r)
+				}
+				if rc := delta.Get("reasoning_content").String(); rc != "" {
+					reasoningBuf.WriteString(rc)
+				}
 			}
 			if fr := choice.Get("finish_reason").String(); fr != "" {
 				finishReason = fr
@@ -244,6 +251,11 @@ func aggregateOpenCodeSSEToChatCompletion(sseReader io.Reader, fallbackModel str
 		}
 	}
 
+	finalContent := contentBuffer.String()
+	if finalContent == "" && reasoningBuf.Len() > 0 {
+		finalContent = reasoningBuf.String()
+	}
+
 	finalResponse := map[string]any{
 		"id":      resID,
 		"object":  "chat.completion",
@@ -254,7 +266,7 @@ func aggregateOpenCodeSSEToChatCompletion(sseReader io.Reader, fallbackModel str
 				"index": 0,
 				"message": map[string]any{
 					"role":    "assistant",
-					"content": contentBuffer.String(),
+					"content": finalContent,
 				},
 				"finish_reason": finishReason,
 			},
