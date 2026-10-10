@@ -535,12 +535,43 @@ func logCodexStreamTerminationDiagnostics(ctx context.Context, readErr error, ev
 }
 
 // codexDiagnosticEventType renders an unset event type as a dash so the diagnostic line never
-// contains an empty key=value pair, and reduces the upstream-supplied gjson string to a bounded,
-// log-safe form: the value goes into an operator-facing line verbatim otherwise, so a hostile or
-// broken upstream could forge log records through embedded newlines or bloat the line with an
-// oversized type. Real Codex event names are lowercase letters, digits, dots, underscores and
-// dashes; anything else is dropped and the remainder truncated.
-const codexDiagnosticEventTypeMaxLen = 64
+// contains an empty key=value pair. The upstream-supplied gjson string is untrusted: a character
+// allow-list alone cannot keep it out of operator logs, because prompt or token text is typically
+// lowercase letters and digits and would pass any such filter. The value therefore has to match
+// the closed vocabulary of real Codex (OpenAI Responses API) event names - after stripping control
+// characters, so a stray CRLF or NUL in an otherwise known name still renders - and anything else
+// collapses to the fixed label "unknown".
+var codexDiagnosticEventTypes = map[string]struct{}{
+	"error":                                  {},
+	"ping":                                   {},
+	"response.completed":                     {},
+	"response.content_part.added":            {},
+	"response.content_part.done":             {},
+	"response.created":                       {},
+	"response.failed":                        {},
+	"response.file_search_call.completed":    {},
+	"response.file_search_call.in_progress":  {},
+	"response.file_search_call.searching":    {},
+	"response.function_call_arguments.delta": {},
+	"response.function_call_arguments.done":  {},
+	"response.in_progress":                   {},
+	"response.incomplete":                    {},
+	"response.output_item.added":             {},
+	"response.output_item.done":              {},
+	"response.output_text.annotation.added":  {},
+	"response.output_text.delta":             {},
+	"response.output_text.done":              {},
+	"response.queued":                        {},
+	"response.reasoning_summary_part.added":  {},
+	"response.reasoning_summary_part.done":   {},
+	"response.reasoning_summary_text.delta":  {},
+	"response.reasoning_summary_text.done":   {},
+	"response.refusal.delta":                 {},
+	"response.refusal.done":                  {},
+	"response.web_search_call.completed":     {},
+	"response.web_search_call.in_progress":   {},
+	"response.web_search_call.searching":     {},
+}
 
 func codexDiagnosticEventType(eventType string) string {
 	eventType = strings.Map(func(r rune) rune {
@@ -551,13 +582,13 @@ func codexDiagnosticEventType(eventType string) string {
 			return -1
 		}
 	}, eventType)
-	if len(eventType) > codexDiagnosticEventTypeMaxLen {
-		eventType = eventType[:codexDiagnosticEventTypeMaxLen]
-	}
 	if eventType == "" {
 		return "-"
 	}
-	return eventType
+	if _, ok := codexDiagnosticEventTypes[eventType]; ok {
+		return eventType
+	}
+	return "unknown"
 }
 
 // classifyCodexSSEReadError reduces a transport read failure to a sanitized class for the
@@ -578,10 +609,11 @@ func classifyCodexSSEReadError(err error) string {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return "timeout"
 	}
-	// The uTLS path negotiates h2 through x/net/http2, and a peer RST_STREAM surfaces there as a
-	// concrete StreamError whose Error() text ("stream error: stream ID N; CODE") carries no
-	// "http2" substring, so the message matcher below cannot see it. Recognise the type itself;
-	// the substring cases stay as a fallback for other stacks that spell http/2 out in text.
+	// Both h2 stacks spell a peer RST_STREAM without any "http2" substring. The uTLS path surfaces
+	// x/net/http2's concrete StreamError (recognised by errors.As above); the standard-library
+	// transport on the fallback round-tripper path carries its own unexported stream error that
+	// errors.As cannot reach, but its Error() text has the stable "stream error: stream ID" prefix.
+	// The substring cases stay as a final fallback for other stacks that spell http/2 out in text.
 	var http2StreamErr http2.StreamError
 	if errors.As(err, &http2StreamErr) {
 		return "http2-stream-error"
@@ -598,7 +630,8 @@ func classifyCodexSSEReadError(err error) string {
 		return "timeout"
 	case strings.Contains(message, "tls:"):
 		return "tls-error"
-	case strings.Contains(message, "http2"), strings.Contains(message, "http/2"):
+	case strings.Contains(message, "http2"), strings.Contains(message, "http/2"),
+		strings.Contains(message, "stream error: stream id"):
 		return "http2-stream-error"
 	default:
 		return "read-error"

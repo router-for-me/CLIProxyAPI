@@ -143,6 +143,14 @@ func classifyCasesWithoutHttp2() []struct {
 		{"http2 class in text", errors.New("http2: stream closed with error code CANCEL"), "http2-stream-error"},
 		{"http/2 class in text", errors.New("http/2: stream closed with error code CANCEL"), "http2-stream-error"},
 		{"http2 stream error type", http2.StreamError{StreamID: 3, Code: http2.ErrCodeInternal}, "http2-stream-error"},
+		// The standard-library transport (net/http's bundled http2 stack, reachable through
+		// http.DefaultTransport on the fallback round-tripper path) returns its own unexported
+		// stream error, so errors.As cannot match it; its Error() text has a stable prefix instead.
+		{
+			"stdlib bundled h2 stream error text",
+			errors.New("stream error: stream ID 7; INTERNAL_ERROR; received from peer"),
+			"http2-stream-error",
+		},
 		{"opaque error stays sanitized", errors.New("mystery transport gremlin from 10.0.0.9"), "read-error"},
 	}
 }
@@ -157,9 +165,10 @@ func TestClassifyCodexSSEReadError(t *testing.T) {
 	}
 }
 
-// An upstream-supplied event type is untrusted gjson text: unfiltered it could smuggle newlines or
-// tens of megabytes into the one operator-facing diagnostic line, so it must come out bounded to
-// the characters real Codex event types use.
+// An upstream-supplied event type is untrusted gjson text: the diagnostic line is metadata-only,
+// so it may never echo upstream-controlled content. A character allow-list is not enough - prompt
+// text is usually lowercase letters and digits and would sail through - so only the closed
+// vocabulary of real Codex event names may appear; anything else collapses to "unknown".
 func TestCodexDiagnosticEventTypeSanitizesUpstreamSuppliedTypes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -169,9 +178,11 @@ func TestCodexDiagnosticEventTypeSanitizesUpstreamSuppliedTypes(t *testing.T) {
 		{"real event types pass through", "response.output_text.delta", "response.output_text.delta"},
 		{"empty becomes a dash", "", "-"},
 		{"whitespace only becomes a dash", "  \n\t", "-"},
-		{"control characters are dropped", "res\x00po\x1bnse.created", "response.created"},
-		{"newline cannot forge a log record", "response.created\nfake line", "response.createdfakeline"},
-		{"oversized types are truncated to the cap", "response." + strings.Repeat("x", 200), "response." + strings.Repeat("x", 55)},
+		{"control characters around a real type are tolerated", "res\x00po\x1bnse.created", "response.created"},
+		{"lowercase prompt-like text never passes", "someleakedpromptcontent", "unknown"},
+		{"unknown vocabulary types map to unknown", "response.brand_new_event.done", "unknown"},
+		{"newline cannot forge a log record", "response.created\nfake line", "unknown"},
+		{"oversized unknown text maps to unknown", "response." + strings.Repeat("x", 200), "unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
