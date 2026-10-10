@@ -184,3 +184,31 @@ func TestErrorInterfaceAndConstructor(t *testing.T) {
 		t.Fatalf("default envelope JSON unexpectedly contained http_status: %s", string(defaultEnvBytes))
 	}
 }
+
+func TestErrorRetryHintsRoundTripAndStayOptional(t *testing.T) {
+	raw, errMarshal := json.Marshal(Envelope{OK: false, Error: &Error{
+		Code:             "quota_exhausted",
+		Message:          "monthly quota",
+		HTTPStatus:       429,
+		RetryAfterMS:     3_600_000,
+		CredentialScoped: true,
+	}})
+	if errMarshal != nil {
+		t.Fatalf("marshal envelope: %v", errMarshal)
+	}
+	var decoded Envelope
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("unmarshal envelope: %v", errUnmarshal)
+	}
+	if decoded.Error == nil || decoded.Error.RetryAfterMS != 3_600_000 || !decoded.Error.CredentialScoped {
+		t.Fatalf("decoded error = %+v, want retry hint and credential scope", decoded.Error)
+	}
+
+	legacy, errLegacy := NewErrorEnvelope("rate_limit_exceeded", "too many requests", 429)
+	if errLegacy != nil {
+		t.Fatalf("NewErrorEnvelope() error = %v", errLegacy)
+	}
+	if strings.Contains(string(legacy), "retry_after_ms") || strings.Contains(string(legacy), "credential_scoped") {
+		t.Fatalf("legacy envelope unexpectedly contained retry hints: %s", legacy)
+	}
+}
