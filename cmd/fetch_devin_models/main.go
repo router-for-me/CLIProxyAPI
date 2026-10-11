@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -39,11 +38,10 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"google.golang.org/protobuf/encoding/protowire"
 )
 
 const (
-	devinGetCliModelConfigsURL = "https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCliModelConfigs"
+	devinGetCliModelConfigsURL = helps.DevinDefaultBaseURL + helps.DevinGetCliModelConfigsPath
 	devinDefaultUserAgent      = "connect-go/1.19.1 (go1.25.0)"
 )
 
@@ -73,14 +71,7 @@ type devinThinkingJSON struct {
 	Levels []string `json:"levels,omitempty"`
 }
 
-type rawDevinModel struct {
-	UID           string
-	Label         string
-	ContextLength int
-	Multimodal    bool
-	VendorID      uint64
-	EffortTier    string
-}
+type rawDevinModel = registry.DevinUpstreamModel
 
 func main() {
 	var authsDir string
@@ -220,10 +211,7 @@ func fetchRawDevinModels(ctx context.Context, cfg *config.Config, auth *coreauth
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	f1Bytes := helps.BuildDevinClientMetadataBytes(apiKey, "", "")
-	var reqBody []byte
-	reqBody = protowire.AppendTag(reqBody, 1, protowire.BytesType)
-	reqBody = protowire.AppendBytes(reqBody, f1Bytes)
+	reqBody := helps.BuildDevinGetCliModelConfigsRequest(apiKey, "")
 
 	req, err := http.NewRequestWithContext(fetchCtx, http.MethodPost, devinGetCliModelConfigsURL, bytes.NewReader(reqBody))
 	if err != nil {
@@ -260,130 +248,7 @@ func fetchRawDevinModels(ctx context.Context, cfg *config.Config, auth *coreauth
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 
-	return parseRawDevinModelsProto(respBytes)
-}
-
-func parseRawDevinModelsProto(b []byte) ([]rawDevinModel, error) {
-	var results []rawDevinModel
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			return nil, errors.New("malformed protobuf tag")
-		}
-		b = b[n:]
-
-		if num == 1 && typ == protowire.BytesType {
-			subBytes, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				return nil, errors.New("malformed protobuf submessage")
-			}
-			b = b[m:]
-
-			model := parseSingleModelConfig(subBytes)
-			if model.UID != "" {
-				results = append(results, model)
-			}
-		} else {
-			skip := protowire.ConsumeFieldValue(num, typ, b)
-			if skip < 0 {
-				return nil, errors.New("failed to skip field")
-			}
-			b = b[skip:]
-		}
-	}
-	return results, nil
-}
-
-func parseSingleModelConfig(b []byte) rawDevinModel {
-	var m rawDevinModel
-	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			break
-		}
-		b = b[n:]
-
-		switch num {
-		case 1: // label
-			if typ == protowire.BytesType {
-				val, mLen := protowire.ConsumeString(b)
-				if mLen >= 0 {
-					m.Label = val
-					b = b[mLen:]
-					continue
-				}
-			}
-		case 5: // multimodal
-			if typ == protowire.VarintType {
-				val, mLen := protowire.ConsumeVarint(b)
-				if mLen >= 0 {
-					m.Multimodal = (val == 1)
-					b = b[mLen:]
-					continue
-				}
-			}
-		case 10: // vendor
-			if typ == protowire.VarintType {
-				val, mLen := protowire.ConsumeVarint(b)
-				if mLen >= 0 {
-					m.VendorID = val
-					b = b[mLen:]
-					continue
-				}
-			}
-		case 18: // context length
-			if typ == protowire.VarintType {
-				val, mLen := protowire.ConsumeVarint(b)
-				if mLen >= 0 {
-					m.ContextLength = int(val)
-					b = b[mLen:]
-					continue
-				}
-			}
-		case 22: // chat_model_uid
-			if typ == protowire.BytesType {
-				val, mLen := protowire.ConsumeString(b)
-				if mLen >= 0 {
-					m.UID = val
-					b = b[mLen:]
-					continue
-				}
-			}
-		}
-
-		skip := protowire.ConsumeFieldValue(num, typ, b)
-		if skip < 0 {
-			break
-		}
-		b = b[skip:]
-	}
-	return m
-}
-
-func vendorName(id uint64, uid string) string {
-	switch id {
-	case 1:
-		return "cognition"
-	case 2:
-		return "openai"
-	case 3:
-		return "anthropic"
-	case 4:
-		return "google"
-	case 6:
-		return "deepseek"
-	case 7:
-		return "moonshot"
-	case 9:
-		return "zhipu"
-	case 11:
-		return "nvidia"
-	default:
-		if strings.Contains(strings.ToLower(uid), "grok") {
-			return "xai"
-		}
-		return "devin"
-	}
+	return helps.ParseDevinCliModelConfigs(respBytes)
 }
 
 func formatRawModels(raw []rawDevinModel) []devinModelJSON {
@@ -397,7 +262,7 @@ func formatRawModels(raw []rawDevinModel) []devinModelJSON {
 			ID:                        r.UID,
 			Object:                    "model",
 			Type:                      "devin",
-			OwnedBy:                   vendorName(r.VendorID, r.UID),
+			OwnedBy:                   registry.DevinVendorName(r.VendorID, r.UID),
 			DisplayName:               r.Label,
 			ContextLength:             r.ContextLength,
 			MaxCompletionTokens:       64000,
@@ -575,7 +440,7 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 			ID:                        entry.baseID,
 			Object:                    "model",
 			Type:                      "devin",
-			OwnedBy:                   vendorName(entry.vendorID, entry.baseID),
+			OwnedBy:                   registry.DevinVendorName(entry.vendorID, entry.baseID),
 			DisplayName:               entry.displayName,
 			ContextLength:             entry.contextLength,
 			MaxCompletionTokens:       64000,
