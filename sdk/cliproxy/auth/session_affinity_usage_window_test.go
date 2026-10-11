@@ -57,6 +57,21 @@ func TestIsCredentialScopedErrorClassifiesUsageWindow(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "organization quota wording",
+			err:  usageLimitProbeError{code: http.StatusTooManyRequests, msg: `{"error":{"message":"organization quota exceeded"}}`},
+			want: true,
+		},
+		{
+			name: "model scoped quota stays model scoped",
+			err:  usageLimitProbeError{code: http.StatusTooManyRequests, msg: `{"error":{"message":"quota exceeded for model foo"}}`},
+			want: false,
+		},
+		{
+			name: "bare usage limit wording without account scope",
+			err:  usageLimitProbeError{code: http.StatusTooManyRequests, msg: `{"error":{"message":"usage limit exceeded"}}`},
+			want: false,
+		},
+		{
 			name: "per-minute token rate limit stays model scoped",
 			err:  usageLimitProbeError{code: http.StatusTooManyRequests, msg: `{"error":{"message":"Rate limit reached for gpt-5.6-luna in organization org-x on tokens per min (TPM): Limit 200000, Used 200000"}}`},
 			want: false,

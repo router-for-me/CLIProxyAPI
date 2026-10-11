@@ -1720,20 +1720,31 @@ func isCredentialScopedError(err error) bool {
 	return isCredentialUsageLimitError(err)
 }
 
-// credentialUsageLimitMarkers match upstream bodies that report an account- or
-// credential-wide usage window (as opposed to a per-model rate limit).
+// credentialUsageLimitMarkers identify account- or credential-wide usage windows:
+// the upstream refused the whole credential, not one model. Only explicit
+// account/credential scoping counts here, so a model-scoped refusal never matches.
 var credentialUsageLimitMarkers = [...]string{
-	"usagelimiterror",     // opencode-go: {"error":{"type":"GoUsageLimitError",...}}
-	"usage_limit_reached", // Codex/OpenAI account window
-	"usage limit",         // "You've hit your usage limit."
-	"insufficient_quota",  // OpenAI account quota
-	"exceeded your current quota",
-	"quota exceeded",
+	"usagelimiterror",             // opencode-go: {"error":{"type":"GoUsageLimitError",...}}
+	"usage_limit_reached",         // Codex/OpenAI account window
+	"insufficient_quota",          // OpenAI account quota code
+	"exceeded your current quota", // OpenAI account quota message
+	"account quota",
+	"account-level",
+	"account usage limit",
+	"account rate limit",
+	"credential quota",
+	"organization quota",
+	"org quota",
+	"plan quota",
+	"subscription quota",
+	"billing quota",
 }
 
-// credentialUsageLimitExceptions describe per-request token or request rate limits
-// that must stay scoped to the requested model even when the body mentions a limit.
-var credentialUsageLimitExceptions = [...]string{
+// credentialUsageLimitScopedExceptions describe refusals that must stay scoped to the
+// requested model even when the body mentions a limit or a quota: per-minute token or
+// request limits, and any wording that names a model. They win over the markers above,
+// so "quota exceeded for model foo" never takes an entire credential offline.
+var credentialUsageLimitScopedExceptions = [...]string{
 	"tokens per min",
 	"tokens per minute",
 	"requests per min",
@@ -1741,32 +1752,47 @@ var credentialUsageLimitExceptions = [...]string{
 	"per-minute",
 	"tpm limit",
 	"rpm limit",
+	"for model",
+	"per model",
+	"per-model",
+	"model-scoped",
+	"this model",
+	"model quota",
 }
 
-// isCredentialUsageLimitError reports a 429 that describes an upstream account-wide
-// usage window rather than a transient per-model rate limit.
-func isCredentialUsageLimitError(err error) bool {
-	if err == nil {
+// IsCredentialUsageLimit reports whether an upstream refusal carrying this HTTP status
+// and message describes an account- or credential-wide usage window rather than a
+// per-model rate limit. Such a window consumes every model the credential serves, so
+// selection must treat the credential as unavailable for all of them and session
+// affinity must release the bindings pinned to it. Matching stays deliberately narrow:
+// account-wide wording is required, and model-scoped wording always disqualifies.
+func IsCredentialUsageLimit(statusCode int, message string) bool {
+	if statusCode != http.StatusTooManyRequests {
 		return false
 	}
-	if statusCodeFromError(err) != http.StatusTooManyRequests {
+	lower := strings.ToLower(message)
+	if lower == "" {
 		return false
 	}
-	message := strings.ToLower(err.Error())
-	if message == "" {
-		return false
-	}
-	for _, exception := range credentialUsageLimitExceptions {
-		if strings.Contains(message, exception) {
+	for _, exception := range credentialUsageLimitScopedExceptions {
+		if strings.Contains(lower, exception) {
 			return false
 		}
 	}
 	for _, marker := range credentialUsageLimitMarkers {
-		if strings.Contains(message, marker) {
+		if strings.Contains(lower, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// isCredentialUsageLimitError is the error-shaped form of IsCredentialUsageLimit.
+func isCredentialUsageLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return IsCredentialUsageLimit(statusCodeFromError(err), err.Error())
 }
 
 func statusCodeFromResult(err *Error) int {

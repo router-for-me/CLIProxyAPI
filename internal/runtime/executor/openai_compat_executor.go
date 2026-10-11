@@ -649,7 +649,11 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+		return nil, statusErr{
+			code:             httpResp.StatusCode,
+			msg:              string(body),
+			credentialScoped: cliproxyauth.IsCredentialUsageLimit(httpResp.StatusCode, string(body)),
+		}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1009,7 +1013,11 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 	if status < http.StatusBadRequest || status > 599 {
 		status = http.StatusBadGateway
 	}
-	return statusErr{code: status, msg: string(payload)}, true
+	return statusErr{
+		code:             status,
+		msg:              string(payload),
+		credentialScoped: cliproxyauth.IsCredentialUsageLimit(status, string(payload)),
+	}, true
 }
 
 type statusErr struct {
@@ -1036,6 +1044,10 @@ func newOpenAICompatStatusError(status int, headers http.Header, body []byte) st
 		code:       status,
 		msg:        string(body),
 		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
+		// An account-wide usage window consumes every model this credential serves, so
+		// the cooldown must not be scoped to the requested model (a pinned session would
+		// otherwise keep failing on an exhausted key). Per-minute limits stay model-scoped.
+		credentialScoped: cliproxyauth.IsCredentialUsageLimit(status, string(body)),
 	}
 }
 
