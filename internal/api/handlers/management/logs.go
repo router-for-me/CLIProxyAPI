@@ -24,6 +24,11 @@ import (
 
 const (
 	defaultLogFileName      = "main.log"
+	// defaultLogPageSize keeps an unbounded management request from scanning and
+	// serializing an entire log history. Callers can request a larger page with
+	// limit, up to maxLogPageSize.
+	defaultLogPageSize      = 500
+	maxLogPageSize          = 10_000
 	logScannerInitialBuffer = 64 * 1024
 	logScannerMaxBuffer     = 8 * 1024 * 1024
 	logCursorVersion        = 1
@@ -36,7 +41,9 @@ const (
 // compatibility. Cursor and tail reads avoid scanning older files, so line-count
 // is the number of returned lines there. A cursor emitted by the legacy path
 // points at the latest complete log boundary; combining after with limit is
-// therefore tail semantics and does not replay lines trimmed by limit.
+// therefore tail semantics and does not replay lines trimmed by limit. When
+// limit is omitted, a bounded default page is used; follow next-cursor to poll
+// for newer lines or provide an explicit limit (up to maxLogPageSize).
 func (h *Handler) GetLogs(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -1299,7 +1306,7 @@ func parseCutoff(raw string) int64 {
 func parseLimit(raw string) (int, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return 0, nil
+		return defaultLogPageSize, nil
 	}
 	limit, err := strconv.Atoi(value)
 	if err != nil {
@@ -1307,6 +1314,9 @@ func parseLimit(raw string) (int, error) {
 	}
 	if limit <= 0 {
 		return 0, fmt.Errorf("must be greater than zero")
+	}
+	if limit > maxLogPageSize {
+		return 0, fmt.Errorf("must not exceed %d", maxLogPageSize)
 	}
 	return limit, nil
 }
