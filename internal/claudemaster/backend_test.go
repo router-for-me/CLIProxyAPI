@@ -643,7 +643,7 @@ func TestBackendThroughNativeLikeTLSProxy(t *testing.T) {
 func TestBackendErrorOnlyPreservesValidRetryAfter(t *testing.T) {
 	for _, value := range []string{"60", "Wed, 21 Oct 2015 07:28:00 GMT", "private-account", "-1"} {
 		w := httptest.NewRecorder()
-		writeBackendUpstreamError(w, &interfaces.ErrorMessage{StatusCode: 429, Error: errors.New("private-error"), Addon: http.Header{"Retry-After": {value}, "X-Account": {"private-account"}}})
+		writeBackendUpstreamError(context.Background(), w, &interfaces.ErrorMessage{StatusCode: 429, Error: errors.New("private-error"), Addon: http.Header{"Retry-After": {value}, "X-Account": {"private-account"}}})
 		want := ""
 		if value == "60" || strings.HasPrefix(value, "Wed,") {
 			want = value

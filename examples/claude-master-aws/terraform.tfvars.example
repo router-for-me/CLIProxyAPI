@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in.
+region       = "us-east-1"
+vpc_id       = "vpc-0123456789abcdef0"
+subnet_id    = "subnet-0123456789abcdef0"
+private_ip   = "10.0.0.10"                # inside that subnet; client certificates name it
+client_cidrs = ["10.0.0.0/16"]            # the networks your client boxes are in
+
+# profiles = ["claude-alice", "claude-bob"]   # one name per subscription, any number
+# backup_api_key_secret_id = "claude-master/backup-api-key"

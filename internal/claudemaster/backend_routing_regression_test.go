@@ -96,7 +96,7 @@ func TestBackendSeriesReserveKeepsUsableBindingWhenAlternativeModelCools(t *test
 func TestBackendSeriesUnknownOpaqueOrMalformedOriginNeverGuessesAccount(t *testing.T) {
 	selector, auths, _ := backendAPIBackupTestSelector(t)
 	for _, opts := range []struct{ session, body string }{
-		{"unknown-opaque", `{"model":"claude-test","messages":[{"role":"assistant","content":[{"type":"thinking","signature":"opaque"}]}]}`},
+		{"unknown-opaque", `{"model":"claude-test","messages":[{"role":"assistant","content":[{"type":"compaction","content":"summary","signature":"opaque"}]}]}`},
 		{"unknown-malformed", `{`},
 	} {
 		request := backendAPIBackupTestOptions(opts.session, false)

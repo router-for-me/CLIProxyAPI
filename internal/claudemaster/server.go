@@ -24,8 +24,17 @@ type ServeOptions struct {
 	// loopback address (e.g. 127.0.0.1:8444), for clients that arrive through an authenticating
 	// tunnel. Whatever can reach that address is trusted.
 	OpenLoopback string
-	StateDir     string    // the server's CA lives here (private, 0700)
-	Out          io.Writer // one status line; never a secret
+	// SnapshotInterval is how often the quota and proxy summaries are logged (default 5 minutes).
+	SnapshotInterval time.Duration
+	// DrainTimeout is how long a stopping server lets running requests finish before it cancels
+	// them (default 60 seconds; systemd's default stop timeout is 90, so raise TimeoutStopSec with it).
+	DrainTimeout time.Duration
+	// Balanced says a load balancer in front stops sending new connections here once a rollout
+	// begins: a draining server then serves requests on its existing connections, each closing its
+	// connection, instead of answering them with a retryable 529.
+	Balanced bool
+	StateDir string    // the server's CA lives here (private, 0700)
+	Out      io.Writer // one status line; never a secret
 }
 
 // Serve runs the proxy for other boxes until ctx ends. The caller holds every profile lock.
@@ -43,7 +52,11 @@ func Serve(ctx context.Context, profiles []Profile, opts ServeOptions) error {
 	if err != nil {
 		return err
 	}
-	backend, err := newInferenceBackend(ctx, profiles, opts.LaunchOptions)
+	launch := opts.LaunchOptions
+	if launch.SnapshotInterval == 0 {
+		launch.SnapshotInterval = opts.SnapshotInterval
+	}
+	backend, err := newInferenceBackend(serveBackendLifetime(ctx), profiles, launch)
 	if err != nil {
 		return errors.New("cannot start the inference backend; check the profiles")
 	}
@@ -53,6 +66,10 @@ func Serve(ctx context.Context, profiles []Profile, opts ServeOptions) error {
 		return err
 	}
 	defer func() { _ = proxy.Close() }()
+	proxy.setBalanced(opts.Balanced)
+	lg().Info("claude-master server started", "listen", proxy.Addr(), "open_loopback", proxy.OpenAddr(), "api_backup", opts.BackupAPIKey != "", "balanced", opts.Balanced)
+	summaryDone := startProxySummary(ctx, proxy, opts.SnapshotInterval)
+	defer func() { <-summaryDone; lg().Info("claude-master server stopped") }()
 	if opts.Out != nil {
 		fmt.Fprintf(opts.Out, "claude-master serving on %s; clients trust %s\n", proxy.Addr(), certs.caPath)
 		if proxy.OpenAddr() != "" {
@@ -60,8 +77,22 @@ func Serve(ctx context.Context, profiles []Profile, opts ServeOptions) error {
 		}
 	}
 	<-ctx.Done()
+	drain := opts.DrainTimeout
+	if drain <= 0 {
+		drain = defaultDrainTimeout
+	}
+	proxy.Drain(drain)
 	return nil
 }
+
+const defaultDrainTimeout = 60 * time.Second
+
+// serveBackendLifetime keeps ctx's values but not its cancellation. Every request handler stops
+// when the backend's lifetime ends, and ctx ends on the signal that stops the server, so with ctx
+// itself a SIGTERM cancelled every running request before the drain began: on 2026-10-10 06:57 the
+// drain found 2 running and "waited 2ms". The backend now stops when Serve's deferred Close cancels
+// it, which runs after the drain.
+func serveBackendLifetime(ctx context.Context) context.Context { return context.WithoutCancel(ctx) }
 
 // serverNames are the addresses the server's certificate vouches for: the one it listens on, and
 // loopback, so a client can reach it through a local tunnel (an SSH or SSM port forward, a
@@ -126,28 +157,23 @@ func Connect(ctx context.Context, opts ConnectOptions, args []string) (int, erro
 	if err != nil {
 		return 1, err
 	}
-	env, err := ChildEnvironment(environ, args, "https://"+net.JoinHostPort(ip.String(), port), identity.CAPath, identity.CertPath, identity.KeyPath)
+	config, err := serverTLSConfig(ip, identity)
 	if err != nil {
 		return 1, err
 	}
-	return runNativeChild(ctx, bin, args, env)
+	return runThroughForwarder(ctx, bin, args, environ, identity.CAPath, tlsUpstream(net.JoinHostPort(ip.String(), port), config))
 }
 
 // checkServer completes one TLS handshake with this box's client certificate, so a wrong address, a
 // certificate the server does not accept, or a server that is down is reported now and clearly.
 func checkServer(ctx context.Context, ip net.IP, port string, identity ClientIdentity) error {
-	pair, err := tls.LoadX509KeyPair(identity.CertPath, identity.KeyPath)
+	config, err := serverTLSConfig(ip, identity)
 	if err != nil {
-		return errors.New("cannot load this box's client certificate")
+		return err
 	}
-	caPEM, err := os.ReadFile(identity.CAPath)
-	if err != nil {
-		return errors.New("cannot read ca.pem")
-	}
-	roots := x509CertPool(caPEM)
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	dialer := &tls.Dialer{Config: &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{pair}, ServerName: ip.String(), MinVersion: tls.VersionTLS12}}
+	dialer := &tls.Dialer{Config: config}
 	conn, err := dialer.DialContext(dialCtx, "tcp", net.JoinHostPort(ip.String(), port))
 	if err != nil {
 		return serverError(net.JoinHostPort(ip.String(), port), err)
@@ -162,6 +188,20 @@ func checkServer(ctx context.Context, ip net.IP, port string, identity ClientIde
 		return serverError(net.JoinHostPort(ip.String(), port), err)
 	}
 	return nil
+}
+
+// serverTLSConfig is how this box reaches a server: its own client certificate, the server's CA,
+// and the server's address as the name to verify.
+func serverTLSConfig(ip net.IP, identity ClientIdentity) (*tls.Config, error) {
+	pair, err := tls.LoadX509KeyPair(identity.CertPath, identity.KeyPath)
+	if err != nil {
+		return nil, errors.New("cannot load this box's client certificate")
+	}
+	caPEM, err := os.ReadFile(identity.CAPath)
+	if err != nil {
+		return nil, errors.New("cannot read ca.pem")
+	}
+	return &tls.Config{RootCAs: x509CertPool(caPEM), Certificates: []tls.Certificate{pair}, ServerName: ip.String(), MinVersion: tls.VersionTLS12}, nil
 }
 
 // probeProxy asks the connection for the proxy's own probe response and requires the header only a
@@ -225,11 +265,7 @@ func connectOpen(ctx context.Context, opts ConnectOptions, args []string) (int, 
 	if err != nil {
 		return 1, err
 	}
-	env, err := ChildEnvironment(environ, args, "http://"+endpoint, opts.CAFile, "", "")
-	if err != nil {
-		return 1, err
-	}
-	return runNativeChild(ctx, bin, args, env)
+	return runThroughForwarder(ctx, bin, args, environ, opts.CAFile, plainUpstream(endpoint))
 }
 
 // checkOpen asks the open listener for one response, so a tunnel that is down or leads nowhere is
@@ -247,4 +283,41 @@ func checkOpen(ctx context.Context, endpoint string) error {
 		return fmt.Errorf("%s is not a claude-master proxy: does the tunnel lead to the server's open listener?", endpoint)
 	}
 	return nil
+}
+
+// startProxySummary logs what the proxy did since the last line, every interval (default 5 minutes;
+// negative turns it off). The returned channel closes when the goroutine has stopped.
+func startProxySummary(ctx context.Context, proxy *Proxy, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	if interval < 0 {
+		close(done)
+		return done
+	}
+	if interval == 0 {
+		interval = defaultSnapshotInterval
+	}
+	go func() {
+		defer close(done)
+		previous := proxy.Snapshot()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				now := proxy.Snapshot()
+				lg().Info("proxy summary", "interval", interval.String(),
+					"connects_accepted", now.ConnectAccepted-previous.ConnectAccepted,
+					"connects_rejected", now.ConnectRejected-previous.ConnectRejected,
+					"api_requests", now.APIRequests-previous.APIRequests,
+					"inference_requests", now.InferenceRequests-previous.InferenceRequests,
+					"control_requests", now.ControlRequests-previous.ControlRequests,
+					"blocked_requests", now.BlockedRequests-previous.BlockedRequests,
+					"active_connections", now.ActiveConnections)
+				previous = now
+			}
+		}
+	}()
+	return done
 }

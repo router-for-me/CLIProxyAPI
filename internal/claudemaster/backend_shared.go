@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,20 +70,24 @@ func (e *sharedClaudeExecutor) Refresh(ctx context.Context, auth *coreauth.Auth)
 	}
 	defer unlock()
 	if disk, errDisk := store.diskSnapshot(); errDisk == nil && diskAhead(disk, auth.Metadata) {
+		observeRefresh(store.name(), "adopted")
+		lg().Info("login refresh adopted from another claude-master process", "profile", store.name())
 		return adoptDiskTokens(auth, disk), nil
 	}
-	return e.rotateLocked(ctx, store, auth)
+	return e.rotateLocked(ctx, store, auth, "scheduled")
 }
 
 // rotateLocked refreshes at Anthropic and saves before releasing the lock, so the next process to
 // look finds the new credential on disk.
-func (e *sharedClaudeExecutor) rotateLocked(ctx context.Context, store *backendStore, auth *coreauth.Auth) (*coreauth.Auth, error) {
+func (e *sharedClaudeExecutor) rotateLocked(ctx context.Context, store *backendStore, auth *coreauth.Auth, why string) (*coreauth.Auth, error) {
 	rotate := e.ClaudeExecutor.Refresh
 	if e.rotate != nil {
 		rotate = e.rotate
 	}
 	refreshed, err := rotate(ctx, auth.Clone())
 	if err != nil {
+		observeRefresh(store.name(), "failed")
+		lg().Warn("login refresh failed", "profile", store.name(), "why", why, "reason", refreshFailureReason(err))
 		return nil, err
 	}
 	// The executor stamps whole seconds; stamp this rotation precisely so two rotations (or a
@@ -90,9 +96,34 @@ func (e *sharedClaudeExecutor) rotateLocked(ctx context.Context, store *backendS
 		refreshed.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	if _, err := store.saveLocked(refreshed); err != nil {
+		lg().Error("a refreshed login could not be saved", "profile", store.name())
 		return nil, err
 	}
+	observeRefresh(store.name(), "rotated_"+why)
+	lg().Info("login refreshed", "profile", store.name(), "why", why, "expires_in", expiresIn(refreshed.Metadata))
 	return refreshed, nil
+}
+
+// refreshFailureReason says what kind of failure it was without the upstream's words.
+var refreshStatus = regexp.MustCompile(`status (\d{3})`)
+
+func refreshFailureReason(err error) string {
+	text := err.Error()
+	if m := refreshStatus.FindStringSubmatch(text); m != nil {
+		return "http_" + m[1]
+	}
+	if strings.Contains(text, "deadline") || strings.Contains(text, "timeout") {
+		return "timeout"
+	}
+	return "error"
+}
+
+// expiresIn is how long until a credential's access token expires, or "unknown".
+func expiresIn(metadata map[string]any) string {
+	if t, err := time.Parse(time.RFC3339, credentialString(metadata, "expired")); err == nil {
+		return time.Until(t).Round(time.Second).String()
+	}
+	return "unknown"
 }
 
 const unauthorizedRotateCooldown = 30 * time.Second
@@ -113,13 +144,17 @@ func (e *sharedClaudeExecutor) recoverUnauthorized(ctx context.Context, rejected
 	rejectedToken := credentialString(rejected.Metadata, "access_token")
 	if disk, errDisk := store.diskSnapshot(); errDisk == nil {
 		if saved := credentialString(disk, "access_token"); saved != "" && saved != rejectedToken {
+			observeRefresh(store.name(), "adopted_after_401")
+			lg().Info("adopted a newer login after a 401", "profile", store.name())
 			return adoptDiskTokens(rejected, disk), true
 		}
 	}
 	if !store.allowRotation(unauthorizedRotateCooldown) {
+		lg().Debug("a 401 on a current login: not refreshing again so soon", "profile", store.name())
 		return nil, false
 	}
-	refreshed, err := e.rotateLocked(ctx, store, rejected)
+	lg().Warn("Anthropic rejected a login that looked current (401): refreshing it", "profile", store.name())
+	refreshed, err := e.rotateLocked(ctx, store, rejected, "after_401")
 	if err != nil {
 		return nil, false
 	}
@@ -165,7 +200,7 @@ func (e *sharedClaudeExecutor) CountTokens(ctx context.Context, auth *coreauth.A
 }
 
 // HttpRequest carries the newest credential but is not retried: its body may be spent, and its
-// callers (the usage poll) simply ask again a minute later.
+// callers (the usage poll) simply ask again at the next interval.
 func (e *sharedClaudeExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
 	return e.ClaudeExecutor.HttpRequest(ctx, e.current(auth), req)
 }
@@ -220,9 +255,10 @@ func (s *backendStore) allowRotation(cooldown time.Duration) bool {
 
 // ---- shared usage cache -------------------------------------------------------------------
 
-// usageCacheTTL is shorter than the one-minute poll, so N processes polling the same account make
-// about one request per minute between them rather than N.
-const usageCacheTTL = 45 * time.Second
+// usageCacheTTL is shorter than the shortest jittered poll interval, so N processes polling the same
+// account (two colors during a rollout, a new color's startup load) make about one request per
+// interval between them rather than N.
+const usageCacheTTL = 2 * time.Minute
 
 // sharedUsageRequest answers the subscription usage poll from a small cache file beside the profile
 // when another process fetched it in the last usageCacheTTL. Only the usage endpoint is cached; the
@@ -245,6 +281,7 @@ func sharedUsageRequest(next ClaudeQuotaRequestFunc, stores []*backendStore) Cla
 		}
 		path := filepath.Clean(store.opts.AuthDir) + ".usage"
 		if body, ok := readUsageCache(path, usageCacheTTL); ok {
+			observeUsagePoll(store.name(), "cache_hit")
 			return &http.Response{
 				StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
 				Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(body)),
@@ -297,4 +334,9 @@ func writeUsageCache(path string, body []byte) {
 	if errWrite != nil || errClose != nil || os.Rename(name, path) != nil {
 		_ = os.Remove(name)
 	}
+}
+
+// name is the profile's own name for logs and metrics.
+func (s *backendStore) name() string {
+	return safeProfileName(s.opts.Name, s.opts.AuthID)
 }
