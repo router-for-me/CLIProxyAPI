@@ -54,6 +54,8 @@ func (f *fakeCodexOAuthService) CreateTokenStorage(bundle *codex.CodexAuthBundle
 	}
 }
 
+func (f *fakeCodexOAuthService) ApplyDaybreakTiers(context.Context, map[string]any, string, string) {}
+
 func TestRequestCodexTokenCompletionKeepsConcurrentSessionPending(t *testing.T) {
 	originalNewCodexOAuthService := newCodexOAuthService
 	newCodexOAuthService = func(cfg *config.Config) codexOAuthService {
@@ -174,6 +176,9 @@ func (f *fakeCustomPlanCodexOAuthService) CreateTokenStorage(bundle *codex.Codex
 		Expire:       bundle.TokenData.Expire,
 		PlanType:     planType,
 	}
+}
+
+func (f *fakeCustomPlanCodexOAuthService) ApplyDaybreakTiers(context.Context, map[string]any, string, string) {
 }
 
 func TestRequestCodexToken_PlanTypeSavedToAuthFile(t *testing.T) {

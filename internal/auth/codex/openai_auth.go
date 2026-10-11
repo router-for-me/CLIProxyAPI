@@ -366,3 +366,61 @@ func (o *CodexAuth) UpdateTokenStorage(storage *CodexTokenStorage, tokenData *Co
 	}
 	storage.PlanType = planType
 }
+
+// codexModelsURL is the per-account Codex model catalog; client_version is required by the backend.
+const codexModelsURL = "https://chatgpt.com/backend-api/codex/models?client_version=0.154.0"
+
+// ApplyDaybreakTiers stores the account's Daybreak tiers (e.g. ["blue"]) in metadata["daybreak"].
+// Tokens carry no Daybreak claim, so this reads the account's Codex model catalog the same way
+// the Codex client does. Metadata is left unchanged when the catalog cannot be read.
+func (o *CodexAuth) ApplyDaybreakTiers(ctx context.Context, metadata map[string]any, accessToken, accountID string) {
+	tiers, err := o.fetchDaybreakTiers(ctx, accessToken, accountID)
+	if err != nil {
+		log.Warnf("codex: daybreak lookup failed, keeping previous value: %v", err)
+		return
+	}
+	metadata["daybreak"] = tiers
+}
+
+func (o *CodexAuth) fetchDaybreakTiers(ctx context.Context, accessToken, accountID string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, codexRefreshTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexModelsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if accountID != "" {
+		req.Header.Set("Chatgpt-Account-Id", accountID)
+	}
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codex: close models response: %v", errClose)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("models request returned status %d", resp.StatusCode)
+	}
+	var catalog struct {
+		Models []struct {
+			Slug string `json:"slug"`
+		} `json:"models"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+		return nil, fmt.Errorf("decode models response: %w", err)
+	}
+	// Daybreak aliases are listed only for approved accounts, as gpt-daybreak-<tier>-latest.
+	tiers := []string{}
+	for _, model := range catalog.Models {
+		if tier, ok := strings.CutPrefix(model.Slug, "gpt-daybreak-"); ok {
+			if tier, ok = strings.CutSuffix(tier, "-latest"); ok {
+				tiers = append(tiers, tier)
+			}
+		}
+	}
+	return tiers, nil
+}

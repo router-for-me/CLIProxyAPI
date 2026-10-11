@@ -304,3 +304,26 @@ func TestCreateAndUpdateTokenStorage_PlanType(t *testing.T) {
 		t.Fatalf("updated storage.PlanType = %q, want free", storage.PlanType)
 	}
 }
+
+func TestApplyDaybreakTiers(t *testing.T) {
+	status, body := http.StatusOK, `{"models":[{"slug":"gpt-5.5"},{"slug":"gpt-daybreak-blue-latest"}]}`
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Authorization") != "Bearer token" || req.Header.Get("Chatgpt-Account-Id") != "acc" || req.URL.Query().Get("client_version") == "" {
+			t.Fatalf("unexpected models request: %s %v", req.URL, req.Header)
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}}
+
+	metadata := map[string]any{}
+	auth.ApplyDaybreakTiers(context.Background(), metadata, "token", "acc")
+	if got, _ := metadata["daybreak"].([]string); len(got) != 1 || got[0] != "blue" {
+		t.Fatalf("daybreak = %#v, want [blue]", metadata["daybreak"])
+	}
+
+	// A failed lookup must keep the previous value.
+	status, body = http.StatusUnauthorized, `{}`
+	auth.ApplyDaybreakTiers(context.Background(), metadata, "token", "acc")
+	if got, _ := metadata["daybreak"].([]string); len(got) != 1 || got[0] != "blue" {
+		t.Fatalf("daybreak after failed lookup = %#v, want [blue]", metadata["daybreak"])
+	}
+}

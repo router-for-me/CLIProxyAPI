@@ -122,7 +122,11 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	record, err := a.buildAuthRecord(authSvc, authBundle)
+	if err == nil {
+		authSvc.ApplyDaybreakTiers(ctx, record.Metadata, authBundle.TokenData.AccessToken, authBundle.TokenData.AccountID)
+	}
+	return record, err
 }
 
 func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*codexDeviceUserCodeResponse, error) {
