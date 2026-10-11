@@ -187,17 +187,40 @@ func TestProxyInferenceFailureNeverFallsBack(t *testing.T) {
 }
 
 func TestProxyRejectsUnknownOrAmbiguousPaths(t *testing.T) {
-	var calls atomic.Int32
-	p, client, pool := proxyTestStart(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }), proxyTestTransport(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return proxyTestResponse(200, "unexpected"), nil
+	var upstream, pool atomic.Int32
+	var seen []string
+	var mu sync.Mutex
+	p, client, certPool := proxyTestStart(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { pool.Add(1) }), proxyTestTransport(func(r *http.Request) (*http.Response, error) {
+		upstream.Add(1)
+		mu.Lock()
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		return proxyTestResponse(200, "anthropic"), nil
 	}))
+	// Compatibility first: a route the pool does not serve goes to Anthropic unchanged, on the session's own
+	// login, as Claude Code would send it without claude-master. None of them reaches the pool.
+	relayed := []struct{ method, path string }{
+		{"POST", "/v1/messages/batches"}, {"POST", "/v1/messages/"}, {"POST", "/v1/complete"}, {"POST", "/v1/responses"},
+		{"POST", "/v1/unknown"}, {"POST", "/api/claude_cli/new_inference"}, {"POST", "/v1/code/agent-proxy"},
+		{"GET", "/v2/messages"}, {"POST", "/v1/files"}, {"GET", "/v1/environments/bridge"},
+		{"POST", "/v1/environments/env_1/work/work_2/messages"},
+	}
+	for _, test := range relayed {
+		t.Run("relayed"+test.path, func(t *testing.T) {
+			resp, body := proxyTestRequest(t, client, test.method, test.path, `{}`, nil)
+			if resp.StatusCode != 200 || body != "anthropic" {
+				t.Fatalf("got %d %q, want Anthropic's answer", resp.StatusCode, body)
+			}
+		})
+	}
+	if int(upstream.Load()) != len(relayed) || pool.Load() != 0 {
+		t.Fatalf("upstream %d pool %d, want %d and 0", upstream.Load(), pool.Load(), len(relayed))
+	}
+	// The pool's own routes with the wrong method, and anything ambiguous or encoded, never leave the proxy.
 	for _, test := range []struct {
 		method, path string
 		status       int
 	}{
-		{"POST", "/v1/messages/batches", 403}, {"POST", "/v1/messages/", 403}, {"POST", "/v1/complete", 403},
-		{"POST", "/v1/responses", 403}, {"POST", "/v1/unknown", 403}, {"POST", "/api/claude_cli/new_inference", 403},
 		{"GET", "/v1/messages", 405}, {"GET", "/v1/messages/count_tokens", 405},
 		{"POST", "/v1/%6dessages", 400}, {"POST", "/v1/messages%2Fcount_tokens", 400},
 		{"POST", "/v1/code/sessions/../../messages", 400}, {"POST", "//v1/messages", 400},
@@ -215,7 +238,7 @@ func TestProxyRejectsUnknownOrAmbiguousPaths(t *testing.T) {
 		"POST /v1/messages HTTP/1.1\r\nHost: other.invalid\r\nContent-Length: 2\r\n\r\n{}",
 		"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nProxy-Authorization: SECRET\r\nContent-Length: 2\r\n\r\n{}",
 	} {
-		conn := proxyTestTLSConnection(t, p, pool, "api.anthropic.com:443")
+		conn := proxyTestTLSConnection(t, p, certPool, "api.anthropic.com:443")
 		_, _ = io.WriteString(conn, raw)
 		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 		if err != nil {
@@ -227,8 +250,8 @@ func TestProxyRejectsUnknownOrAmbiguousPaths(t *testing.T) {
 			t.Fatalf("ambiguous HTTP target returned %d", resp.StatusCode)
 		}
 	}
-	if calls.Load() != 0 {
-		t.Fatal("rejected request reached an upstream")
+	if int(upstream.Load()) != len(relayed) || pool.Load() != 0 {
+		t.Fatalf("a refused request reached an upstream: upstream %d pool %d (%v)", upstream.Load(), pool.Load(), seen)
 	}
 }
 
@@ -567,9 +590,31 @@ func TestProxyControlRouteInventory(t *testing.T) {
 		{"POST", "/api/claude_cli_feedback", true},
 		{"POST", "/api/claude_code/unknown", false},
 		{"GET", "/api/web/domain_info", true},
+		{"GET", "/api/hello", true},
+		{"POST", "/api/artifacts/mcp", true},
+		{"GET", "/v1/code/mcp/ccr-artifacts", true},
+		{"POST", "/api/event_logging/v2/batch", true},
+		{"POST", "/v1/mcp/srv_123", true},
+		{"POST", "/v1/toolbox/shttp/mcp/srv_123", true},
+		{"GET", "/v1/me", true},
+		{"GET", "/v1/ultrareview/quota", true},
+		{"GET", "/v1/filestore/fs/readFile", true},
+		{"POST", "/v1/complete", false},
+		{"POST", "/v1/files", false},
+		{"POST", "/v1/messages/batches", false},
+		{"POST", "/v1/messages/cache_touch", false},
+		{"HEAD", "/api/hello", true},
+		{"POST", "/api/hello", false},
+		{"GET", "/api/hello/extra", false},
 		{"POST", "/api/web/domain_info", false},
 		{"GET", "/api/web/domain_info/extra", false},
 		{"GET", "/api/web/fetch", false},
+		{"POST", "/api/eval/sdk-exampleClientKey", true},
+		{"GET", "/api/eval/sdk-exampleClientKey", false},
+		{"POST", "/api/eval", false},
+		{"POST", "/api/eval/", false},
+		{"POST", "/api/eval/sdk-exampleClientKey/extra", false},
+		{"POST", "/api/eval/..", false},
 	} {
 		if got := proxyControlPath(test.method, test.path); got != test.allowed {
 			t.Errorf("%s %s allowed=%v, expected %v", test.method, test.path, got, test.allowed)
@@ -579,11 +624,13 @@ func TestProxyControlRouteInventory(t *testing.T) {
 
 func TestProxyEnvironmentControlsUseMasterControlOnly(t *testing.T) {
 	var calls atomic.Int32
+	var verifying atomic.Bool
+	verifying.Store(true)
 	_, client, _ := proxyTestStart(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("environment control reached inference")
 	}), proxyTestTransport(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
-		if r.URL.Host != masterAPIHost || r.URL.RawQuery != "cursor=synthetic%2Bvalue" || r.Header.Get("Authorization") != "Bearer SYNTHETIC-CONTROL" {
+		if r.URL.Host != masterAPIHost || (verifying.Load() && (r.URL.RawQuery != "cursor=synthetic%2Bvalue" || r.Header.Get("Authorization") != "Bearer SYNTHETIC-CONTROL")) {
 			t.Error("environment control lost fixed target, raw query, or native auth")
 		}
 		body, err := io.ReadAll(r.Body)
@@ -607,15 +654,18 @@ func TestProxyEnvironmentControlsUseMasterControlOnly(t *testing.T) {
 	if calls.Load() != 5 {
 		t.Fatal("not all five environment controls reached fixed control transport")
 	}
+	// Environment routes this release does not know are relayed as well (compatibility first); encoded or
+	// ambiguous ones never leave the proxy.
+	verifying.Store(false)
 	for _, route := range []struct {
 		method, path string
 		status       int
 	}{
-		{http.MethodPost, "/v1/environments/env_test/work/poll", http.StatusForbidden},
-		{http.MethodGet, "/v1/environments/env_test/work/work_test/ack", http.StatusForbidden},
-		{http.MethodPut, "/v1/environments/env_test/work/work_test/heartbeat", http.StatusForbidden},
-		{http.MethodPost, "/v1/environments/env_test/work/work_test/result", http.StatusForbidden},
-		{http.MethodPost, "/v1/environments/env_test/work/work_test/ack/extra", http.StatusForbidden},
+		{http.MethodPost, "/v1/environments/env_test/work/poll", http.StatusOK},
+		{http.MethodGet, "/v1/environments/env_test/work/work_test/ack", http.StatusOK},
+		{http.MethodPut, "/v1/environments/env_test/work/work_test/heartbeat", http.StatusOK},
+		{http.MethodPost, "/v1/environments/env_test/work/work_test/result", http.StatusOK},
+		{http.MethodPost, "/v1/environments/env_test/work/work_test/ack/extra", http.StatusOK},
 		{http.MethodGet, "/v1/environments/../work/poll", http.StatusBadRequest},
 		{http.MethodGet, "/v1/environments/env%2Fother/work/poll", http.StatusBadRequest},
 		{http.MethodPost, "/v1/environments/env_test/work/../ack", http.StatusBadRequest},
@@ -626,8 +676,8 @@ func TestProxyEnvironmentControlsUseMasterControlOnly(t *testing.T) {
 			t.Fatalf("invalid environment request returned %d, expected %d", response.StatusCode, route.status)
 		}
 	}
-	if calls.Load() != 5 {
-		t.Fatal("invalid environment route reached upstream")
+	if calls.Load() != 10 {
+		t.Fatalf("want the five unknown routes relayed and the four encoded ones refused; upstream saw %d", calls.Load())
 	}
 }
 
@@ -710,7 +760,7 @@ func TestProxySnapshotCountsOnlyRoutingEvents(t *testing.T) {
 	_ = resp.Body.Close()
 	_ = conn.Close()
 	snapshot := p.Snapshot()
-	if snapshot.ConnectAccepted == 0 || snapshot.ConnectRejected != 1 || snapshot.APIRequests != 3 || snapshot.InferenceRequests != 1 || snapshot.ControlRequests != 1 || snapshot.BlockedRequests != 1 || snapshot.ActiveConnections == 0 {
+	if snapshot.ConnectAccepted == 0 || snapshot.ConnectRejected != 1 || snapshot.APIRequests != 3 || snapshot.InferenceRequests != 1 || snapshot.ControlRequests != 2 || snapshot.BlockedRequests != 0 || snapshot.ActiveConnections == 0 {
 		t.Fatalf("unexpected routing counters: %+v", snapshot)
 	}
 	// Concurrent reads must never race request counters or the owned socket map.
@@ -768,5 +818,45 @@ func TestProxyRelaysTheWebFetchDomainCheck(t *testing.T) {
 	}
 	if snapshot := p.Snapshot(); snapshot.ControlRequests != 1 || snapshot.BlockedRequests != 0 || snapshot.InferenceRequests != 0 {
 		t.Fatalf("snapshot = %+v, want one control request", snapshot)
+	}
+}
+
+// An unlisted route outside the token-spending surface goes through on the session's own login (a new Claude
+// Code release keeps working); each shape is noted once. Inference-like ones are refused and never reach
+// Anthropic or the pool.
+func TestProxyRelaysUnlistedControlRoutesAndNotesEachShapeOnce(t *testing.T) {
+	var seen []string
+	control := proxyTestTransport(func(r *http.Request) (*http.Response, error) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		return proxyTestResponse(http.StatusOK, `{}`), nil
+	})
+	p, client, _ := proxyTestStart(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("an unlisted route reached the pool") }), control)
+	for _, path := range []string{"/api/claude_code/new_feature", "/v1/code/mcp/ccr-artifacts", "/api/artifacts/mcp", "/mcp-registry/v0/servers"} {
+		resp, _ := proxyTestRequest(t, client, http.MethodGet, path, "", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s = %d, want relayed", path, resp.StatusCode)
+		}
+	}
+	if len(seen) != 4 || seen[1] != "GET /v1/code/mcp/ccr-artifacts" {
+		t.Fatalf("Anthropic saw %v", seen)
+	}
+	if snapshot := p.Snapshot(); snapshot.ControlRequests != 4 || snapshot.BlockedRequests != 0 {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	// once per shape: two ids of the same route are one shape
+	p.noteRoute("GET", "/v1/code/sessions/abc123/extra")
+	p.noteRoute("GET", "/v1/code/sessions/def456/extra")
+	count := 0
+	p.routes.Range(func(k, _ any) bool {
+		if strings.Contains(k.(string), "/v1/code/sessions/:id/extra") {
+			count++
+		}
+		return true
+	})
+	if count != 1 {
+		t.Fatalf("route shapes noted %d times, want 1", count)
+	}
+	if got := proxyRouteShape("/v1/code/sessions/session_01ABCdefGHIjklMNOpqrSTUvw/events"); got != "/v1/code/sessions/:id/events" {
+		t.Fatalf("shape %q", got)
 	}
 }

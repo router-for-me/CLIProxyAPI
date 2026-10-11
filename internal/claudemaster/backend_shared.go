@@ -200,7 +200,7 @@ func (e *sharedClaudeExecutor) CountTokens(ctx context.Context, auth *coreauth.A
 }
 
 // HttpRequest carries the newest credential but is not retried: its body may be spent, and its
-// callers (the usage poll) simply ask again a minute later.
+// callers (the usage poll) simply ask again at the next interval.
 func (e *sharedClaudeExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
 	return e.ClaudeExecutor.HttpRequest(ctx, e.current(auth), req)
 }
@@ -255,9 +255,10 @@ func (s *backendStore) allowRotation(cooldown time.Duration) bool {
 
 // ---- shared usage cache -------------------------------------------------------------------
 
-// usageCacheTTL is shorter than the one-minute poll, so N processes polling the same account make
-// about one request per minute between them rather than N.
-const usageCacheTTL = 45 * time.Second
+// usageCacheTTL is shorter than the shortest jittered poll interval, so N processes polling the same
+// account (two colors during a rollout, a new color's startup load) make about one request per
+// interval between them rather than N.
+const usageCacheTTL = 2 * time.Minute
 
 // sharedUsageRequest answers the subscription usage poll from a small cache file beside the profile
 // when another process fetched it in the last usageCacheTTL. Only the usage endpoint is cached; the

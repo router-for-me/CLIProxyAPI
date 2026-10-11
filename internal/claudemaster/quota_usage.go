@@ -101,9 +101,35 @@ func fetchClaudeUsage(ctx context.Context, auth *coreauth.Auth, do ClaudeQuotaRe
 		return nil, errors.New("Claude quota response exceeds size limit")
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("fetch Claude quota: unexpected HTTP status %d", response.StatusCode)
+		return nil, &claudeUsageStatusError{status: response.StatusCode, retryAfter: claudeRetryAfter(response.Header.Get("Retry-After"), time.Now())}
 	}
 	return payload, nil
+}
+
+// claudeUsageStatusError is a usage request Anthropic answered with a non-2xx status, with the wait its
+// Retry-After asked for (zero without one).
+type claudeUsageStatusError struct {
+	status     int
+	retryAfter time.Duration
+}
+
+func (e *claudeUsageStatusError) Error() string {
+	if e.retryAfter > 0 {
+		return fmt.Sprintf("fetch Claude quota: unexpected HTTP status %d (retry after %s)", e.status, e.retryAfter.Round(time.Second))
+	}
+	return fmt.Sprintf("fetch Claude quota: unexpected HTTP status %d", e.status)
+}
+
+// claudeRetryAfter reads a Retry-After value, delta-seconds or an HTTP date, as a wait from now.
+func claudeRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseUint(value, 10, 32); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	if date, err := http.ParseTime(value); err == nil && date.After(now) {
+		return date.Sub(now)
+	}
+	return 0
 }
 
 // ParseClaudeFiveHourQuota reads the five-hour window from the same shapes as the weekly one: a

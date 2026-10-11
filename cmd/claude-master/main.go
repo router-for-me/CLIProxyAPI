@@ -179,14 +179,17 @@ func run(args []string) (int, error) {
 	var backupAPIKeySource string
 	var modelMap modelMapFlag
 	var listen, stateDir, openLoopback string
+	var balanced bool
+	var drainTimeout time.Duration
 	var logLevel, logFile, logFormat string
 	var logMaxMB, logKeep int
 	var quotaLogInterval, otlpInterval time.Duration
-	var otlpEndpoint, accountLabelsFile string
+	var otlpEndpoint, accountLabelsFile, instance string
 	var accountLabels stringListFlag
 	if command == "run" || command == "serve" {
 		flags.StringVar(&otlpEndpoint, "otlp-endpoint", os.Getenv("CLAUDE_MASTER_OTLP_ENDPOINT"), "export OpenTelemetry metrics to this OTLP/HTTP base URL, e.g. http://127.0.0.1:4318")
 		flags.DurationVar(&otlpInterval, "otlp-interval", 30*time.Second, "how often metrics are exported")
+		flags.StringVar(&instance, "instance", "", "this process's service.instance.id in metrics, so several servers stay apart (default: the hostname)")
 		flags.Var(&accountLabels, "account-label", "name an incoming user's Anthropic account in metrics: ACCOUNT_UUID=NAME (repeatable; see: claude-master account-key)")
 		flags.StringVar(&accountLabelsFile, "account-labels-file", "", "a file of ACCOUNT_UUID=NAME lines")
 		flags.StringVar(&logLevel, "log-level", "", "debug, info, warn, error or off (default: info for serve, off for run)")
@@ -204,6 +207,8 @@ func run(args []string) (int, error) {
 		flags.StringVar(&listen, "listen", "", "private ADDRESS:PORT to serve client boxes on")
 		flags.StringVar(&stateDir, "state-dir", "", "private directory holding the server's CA")
 		flags.StringVar(&openLoopback, "open-loopback", "", "also serve plain HTTP with NO client certificate on this loopback ADDRESS:PORT, for an authenticating tunnel")
+		flags.BoolVar(&balanced, "balanced", false, "a load balancer in front stops sending new connections here once a rollout begins: a stopping server serves its existing connections, closing each, instead of refusing their requests")
+		flags.DurationVar(&drainTimeout, "drain-timeout", 0, "how long a stopping server lets running requests finish (default 60s; keep systemd's TimeoutStopSec above it)")
 	case "probe":
 		flags.StringVar(&model, "model", "", "diagnostic model")
 	case "run":
@@ -249,9 +254,14 @@ func run(args []string) (int, error) {
 		if err != nil {
 			return 2, err
 		}
-		stopTelemetry, err := claudemaster.StartTelemetry(claudemaster.TelemetryOptions{Endpoint: otlpEndpoint, Interval: otlpInterval, AccountLabels: labels})
+		stopTelemetry, err := claudemaster.StartTelemetry(claudemaster.TelemetryOptions{Endpoint: otlpEndpoint, Interval: otlpInterval, Instance: metricInstance(instance, os.Hostname), AccountLabels: labels})
 		if err != nil {
 			return 2, err
+		}
+		if command == "serve" && accountLabelsFile != "" {
+			go claudemaster.WatchAccountLabels(ctx, accountLabelsFile, accountLabelsCheckInterval, func() (map[string]string, error) {
+				return loadAccountLabels(accountLabels, accountLabelsFile)
+			})
 		}
 		defer func() {
 			// No deadline of ours (repository policy). If a collector hangs the final export, the service
@@ -300,6 +310,7 @@ func run(args []string) (int, error) {
 		if err := claudemaster.Serve(ctx, profiles, claudemaster.ServeOptions{
 			LaunchOptions: claudemaster.LaunchOptions{BackupAPIKey: backupAPIKey, BackupAPIKeyEnv: consumedKeyEnv, ModelMap: modelMap},
 			Listen:        listen, StateDir: stateDir, OpenLoopback: openLoopback, Out: os.Stderr, SnapshotInterval: quotaLogInterval,
+			Balanced: balanced, DrainTimeout: drainTimeout,
 		}); err != nil {
 			return 1, err
 		}
@@ -462,6 +473,18 @@ var accountIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{8,64}$`)
 
 // loadAccountLabels reads ACCOUNT_UUID=NAME pairs from flags and an optional file. The UUID is only a key
 // into a lookup table: metrics carry the name, never the id.
+// metricInstance is the service.instance.id metrics carry: --instance when given, else the hostname,
+// else none.
+func metricInstance(flag string, hostname func() (string, error)) string {
+	if instance := strings.TrimSpace(flag); instance != "" {
+		return instance
+	}
+	if name, err := hostname(); err == nil {
+		return strings.TrimSpace(name)
+	}
+	return ""
+}
+
 func loadAccountLabels(pairs []string, file string) (map[string]string, error) {
 	labels := make(map[string]string)
 	add := func(line string) error {
@@ -498,6 +521,9 @@ func loadAccountLabels(pairs []string, file string) (map[string]string, error) {
 	}
 	return labels, nil
 }
+
+// accountLabelsCheckInterval is how often serve looks at --account-labels-file for a change.
+const accountLabelsCheckInterval = time.Minute
 
 // runAccountKey prints the key the dashboards use for an Anthropic account id, so a label can be written
 // for it: claude-master account-key UUID...

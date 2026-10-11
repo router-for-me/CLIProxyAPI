@@ -59,7 +59,8 @@ func finishRequest(c *gin.Context, ctx context.Context, opts BackendOptions, w *
 	}
 	obs := requestObservation{
 		Route: route, Model: modelLabel(model), Client: clientFromContext(c.Request.Context()), Account: "unknown",
-		Stream: isStream, Status: w.Status(), Duration: time.Since(started),
+		Project: projectFromContext(c.Request.Context()),
+		Stream:  isStream, Status: w.Status(), Duration: time.Since(started),
 		ReqBytes: int64(len(raw)), RespBytes: int64(max(w.Size(), 0)),
 		// The headers the client is about to see: Anthropic's own rate-limit headers are forwarded on the
 		// response. (The executor keeps its own isolated copy, which is not readable from here.)

@@ -446,3 +446,22 @@ func TestTelemetryOffCostsNothingAndNeverFails(t *testing.T) {
 	observeRequest(requestObservation{Route: "inference", Profile: "p", Status: 200, Duration: time.Millisecond})
 	observeSwitch("a", "b", "c")
 }
+
+func TestTheInstanceIsOnTheResourceOnlyWhenSet(t *testing.T) {
+	for instance, want := range map[string]bool{"example-host": true, "": false} {
+		reader := sdkmetric.NewManualReader()
+		stop, err := StartTelemetry(TelemetryOptions{Reader: reader, Instance: instance})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rm := collect(t, reader)
+		_ = stop(context.Background())
+		got, ok := rm.Resource.Set().Value("service.instance.id")
+		if ok != want || (want && got.AsString() != instance) {
+			t.Errorf("Instance %q: service.instance.id = %q (%v)", instance, got.AsString(), ok)
+		}
+		if name, _ := rm.Resource.Set().Value("service.name"); name.AsString() != "claude-master" {
+			t.Errorf("service.name = %q", name.AsString())
+		}
+	}
+}
