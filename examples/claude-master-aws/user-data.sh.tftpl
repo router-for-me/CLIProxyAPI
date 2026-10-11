@@ -1,0 +1,350 @@
+#!/bin/bash
+# Bootstrap for the claude-master server. Idempotent: running it again converges the box (it swaps the pinned binary
+# atomically and rewrites the unit; it never restarts a running server).
+set -uxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+TAG='${release_tag}'
+SHA='${binary_sha256}'
+HOME_DIR=/var/lib/claude-master
+
+# ---------------------------------------------------------------- swap first: a 1 GB box's first boot is its memory peak
+if ! swapon --show=NAME --noheadings | grep -q .; then
+  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+apt-get update -y || true
+apt-get install -y curl jq unzip || echo "WARNING: some base packages failed"
+
+%{ if backup_secret_id != "" ~}
+# The AWS CLI reads the optional backup API key at service start.
+if ! command -v aws >/dev/null 2>&1; then
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip
+  (cd /tmp && unzip -qo awscliv2.zip && ./aws/install) ; rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
+%{ endif ~}
+
+# ---------------------------------------------------------------- the service account
+# Its own unix user: the logins and the CA key are readable by this account and root, not by the login user.
+id claude-master >/dev/null 2>&1 || useradd --system --create-home --home-dir "$HOME_DIR" --shell /usr/sbin/nologin claude-master
+install -d -m 0700 -o claude-master -g claude-master "$HOME_DIR" "$HOME_DIR/state"
+
+# ---------------------------------------------------------------- the pinned binary (refuses a download that does not match)
+current=$(sha256sum /usr/local/bin/claude-master 2>/dev/null | cut -d' ' -f1)
+if [ "$current" != "$SHA" ]; then
+  if curl -fsSL "https://github.com/ejc3/CLIProxyAPI/releases/download/$TAG/claude-master-linux-arm64" -o /tmp/claude-master.new \
+     && echo "$SHA  /tmp/claude-master.new" | sha256sum -c - ; then
+    install -m 0755 /tmp/claude-master.new /usr/local/bin/claude-master.new && mv -f /usr/local/bin/claude-master.new /usr/local/bin/claude-master
+    echo "claude-master $TAG installed; a running server keeps its old binary until it is restarted"
+  else
+    echo "ERROR: claude-master $TAG did not download or did not match its sha256; leaving the installed binary alone" >&2
+  fi
+  rm -f /tmp/claude-master.new
+fi
+
+# ---------------------------------------------------------------- how the server starts
+mkdir -p /etc/claude-master
+cat > /usr/local/bin/claude-master-serve <<'EOF2'
+#!/bin/bash
+set -u
+%{ if backup_secret_id != "" ~}
+{ set +x; } 2>/dev/null   # the value below must never reach a trace
+key=$(aws secretsmanager get-secret-value --region ${region} --secret-id '${backup_secret_id}' --query SecretString --output text 2>/dev/null) || key=""
+if [ -n "$key" ] && [ "$key" != "None" ]; then export CLAUDE_MASTER_BACKUP_API_KEY="$key"; else echo "claude-master-serve: no backup API key; subscriptions only" >&2; fi
+unset key
+%{ endif ~}
+# One of the two servers behind Envoy, by color: its own port, log file and metrics instance.
+case "$1" in
+  blue) port=${server_ports.blue} ;;
+  green) port=${server_ports.green} ;;
+  *) echo "usage: claude-master-serve blue|green" >&2; exit 2 ;;
+esac
+exec /usr/local/bin/claude-master serve ${profiles[0]}%{ for p in slice(profiles, 1, length(profiles)) } --next-profile ${p}%{ endfor } \
+  --listen ${private_ip}:$port --state-dir /var/lib/claude-master/state \
+  --log-level info --log-file /var/log/claude-master/server-$1.log --log-max-mb 20 --log-keep 5 --quota-log-interval 5m \
+%{ if enable_cloudwatch ~}
+  --otlp-endpoint http://127.0.0.1:4318 --otlp-interval 60s \
+%{ endif ~}
+  --account-labels-file /etc/claude-master/account-labels \
+  --instance ${name}-$1 --balanced --drain-timeout ${drain_seconds}s
+EOF2
+chmod 0755 /usr/local/bin/claude-master-serve
+
+# Names for the INCOMING users' Anthropic accounts in dashboards, one ACCOUNT_UUID=NAME per line (kept if it exists).
+if [ ! -e /etc/claude-master/account-labels ]; then
+  printf '%s\n' '# ACCOUNT_UUID=NAME, one per line. The UUID is oauthAccount.accountUuid in a user'"'"'s ~/.claude.json;' '# `claude-master account-key UUID` shows the key an unnamed account gets (acct-<8 hex>).' > /etc/claude-master/account-labels
+  chmod 0644 /etc/claude-master/account-labels
+fi
+
+# Small box: cap the journal.
+mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nSystemMaxUse=200M\nMaxRetentionSec=30day\n' > /etc/systemd/journald.conf.d/claude-master.conf
+
+# One unit per color (claude-master-server@blue, @green); claude-master-rollout starts, enables and stops them.
+cat > /etc/systemd/system/claude-master-server@.service <<'EOF2'
+[Unit]
+Description=claude-master server %i (shared Claude subscription pool, behind Envoy)
+After=network-online.target
+Wants=network-online.target
+# Idle until every profile has a login: `sudo claude-master-login PROFILE` for each, then `sudo claude-master-rollout`.
+%{ for p in profiles ~}
+ConditionPathExists=/var/lib/claude-master/.local/share/claude-master/profiles/${p}/current
+%{ endfor ~}
+
+[Service]
+User=claude-master
+Group=claude-master
+Environment=HOME=/var/lib/claude-master
+LogsDirectory=claude-master
+LogsDirectoryMode=0750
+ExecStart=/usr/local/bin/claude-master-serve %i
+Restart=on-failure
+RestartSec=10
+# A stop drains for up to the drain timeout; systemd must not cut it short.
+TimeoutStopSec=${drain_seconds + 60}
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/claude-master
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+systemctl daemon-reload
+
+# ---------------------------------------------------------------- Envoy (rolling restarts)
+# Envoy listens on the port clients dial and passes TCP through, unchanged, to the active server: it never sees
+# inside the TLS, and client certificates are still checked by claude-master. A rollout points its new
+# connections at the other server by replacing an endpoint file Envoy watches.
+ENVOY_VERSION='${envoy_version}'
+ENVOY_SHA='${envoy_sha256}'
+current=$(sha256sum /usr/local/bin/envoy 2>/dev/null | cut -d' ' -f1)
+if [ "$current" != "$ENVOY_SHA" ]; then
+  if curl -fsSL "https://github.com/envoyproxy/envoy/releases/download/v$ENVOY_VERSION/envoy-$ENVOY_VERSION-linux-aarch_64" -o /tmp/envoy.new \
+     && echo "$ENVOY_SHA  /tmp/envoy.new" | sha256sum -c - ; then
+    install -m 0755 /tmp/envoy.new /usr/local/bin/envoy.new && mv -f /usr/local/bin/envoy.new /usr/local/bin/envoy
+  else
+    echo "ERROR: envoy $ENVOY_VERSION did not download or did not match its sha256; leaving the installed binary alone" >&2
+  fi
+  rm -f /tmp/envoy.new
+fi
+id envoy >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin envoy
+install -d -m 0755 /etc/envoy /etc/envoy/eds
+
+cat > /etc/envoy/envoy.yaml <<'EOF2'
+node: { id: claude-master, cluster: claude-master }
+admin: { address: { socket_address: { address: 127.0.0.1, port_value: 9901 } } }
+overload_manager:
+  resource_monitors:
+  - name: envoy.resource_monitors.global_downstream_max_connections
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+      max_active_downstream_connections: 10000
+static_resources:
+  listeners:
+  - name: cert
+    address: { socket_address: { address: ${private_ip}, port_value: ${port} } }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.tcp_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+          stat_prefix: cert
+          cluster: cert
+          idle_timeout: 3600s
+  clusters:
+  - name: cert
+    type: EDS
+    connect_timeout: 2s
+    eds_cluster_config:
+      eds_config:
+        resource_api_version: V3
+        path_config_source:
+          path: /etc/envoy/eds/cert.yaml
+          watched_directory: { path: /etc/envoy/eds }
+EOF2
+
+# claude-master-envoy-endpoints COLOR: point Envoy's new connections at that color (a rename, so atomically).
+cat > /usr/local/bin/claude-master-envoy-endpoints <<'EOF2'
+#!/bin/bash
+set -euo pipefail
+case "$1" in
+  blue) port=${server_ports.blue} ;;
+  green) port=${server_ports.green} ;;
+  *) echo "usage: claude-master-envoy-endpoints blue|green" >&2; exit 2 ;;
+esac
+tmp=$(mktemp /etc/envoy/eds/.cert.XXXXXX)
+printf '%s\n' 'resources:' '- "@type": type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment' '  cluster_name: cert' \
+  '  endpoints:' '  - lb_endpoints:' "    - endpoint: { address: { socket_address: { address: ${private_ip}, port_value: $port } } }" > "$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" /etc/envoy/eds/cert.yaml
+EOF2
+chmod 0755 /usr/local/bin/claude-master-envoy-endpoints
+[ -s /etc/claude-master/active-color ] || echo blue > /etc/claude-master/active-color
+[ -e /etc/envoy/eds/cert.yaml ] || /usr/local/bin/claude-master-envoy-endpoints "$(cat /etc/claude-master/active-color)"
+
+cat > /etc/systemd/system/envoy.service <<'EOF2'
+[Unit]
+Description=Envoy in front of the claude-master servers (TCP passthrough, rolling restarts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=envoy
+Group=envoy
+ExecStart=/usr/local/bin/envoy -c /etc/envoy/envoy.yaml --log-level warn --disable-hot-restart
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+systemctl daemon-reload
+systemctl enable envoy.service >/dev/null 2>&1 || true
+systemctl is-active --quiet envoy.service || systemctl start envoy.service || true
+
+# Moves the pool to a fresh server process without a session noticing: start the idle color, wait until it
+# listens, point Envoy at it, check Envoy reports it, then stop the old color. The old one drains (--balanced):
+# it serves the connections it has, each response closing its connection, so every client moves over on its
+# next request, and running requests get up to drain_seconds.
+cat > /usr/local/bin/claude-master-rollout <<'EOF2'
+#!/bin/bash
+set -uo pipefail
+[ "$(id -u)" = 0 ] || { echo "run as root: sudo claude-master-rollout" >&2; exit 2; }
+port_of() { case "$1" in blue) echo ${server_ports.blue} ;; green) echo ${server_ports.green} ;; esac; }
+active=$(cat /etc/claude-master/active-color 2>/dev/null || echo blue)
+if systemctl is-active --quiet "claude-master-server@$active"; then
+  next=$([ "$active" = blue ] && echo green || echo blue)
+else
+  next=$active; active=none
+fi
+systemctl restart "claude-master-server@$next"
+ready=0
+for _ in $(seq 1 90); do
+  ss -ltnH | awk '{print $4}' | grep -qx "${private_ip}:$(port_of "$next")" && { ready=1; break; }
+  systemctl is-active --quiet "claude-master-server@$next" || break
+  sleep 1
+done
+if [ "$ready" != 1 ]; then
+  echo "claude-master-server@$next did not start listening; nothing was switched" >&2
+  systemctl stop "claude-master-server@$next"; exit 1
+fi
+/usr/local/bin/claude-master-envoy-endpoints "$next"
+systemctl is-active --quiet envoy.service || systemctl start envoy.service
+switched=0
+for _ in $(seq 1 20); do
+  curl -fsS http://127.0.0.1:9901/clusters 2>/dev/null | grep -q "^cert::${private_ip}:$(port_of "$next")::" && { switched=1; break; }
+  sleep 0.5
+done
+if [ "$switched" != 1 ]; then
+  # Envoy may already be sending some new connections to $next: point it back at the recorded color, so the
+  # record and Envoy agree and a retry does not restart the server that is taking traffic.
+  if [ "$active" != none ]; then
+    /usr/local/bin/claude-master-envoy-endpoints "$active"
+    for _ in $(seq 1 20); do
+      curl -fsS http://127.0.0.1:9901/clusters 2>/dev/null | grep -q "^cert::${private_ip}:$(port_of "$active")::" && break
+      sleep 0.5
+    done
+    systemctl stop "claude-master-server@$next"
+    echo "Envoy did not report $next; pointed it back at $active and stopped $next" >&2
+  else
+    echo "Envoy did not report $next; $next keeps running (nothing else is serving)" >&2
+  fi
+  exit 1
+fi
+echo "$next" > /etc/claude-master/active-color
+systemctl enable "claude-master-server@$next" >/dev/null 2>&1 || true
+echo "new connections go to $next"
+if [ "$active" != none ]; then
+  systemctl disable "claude-master-server@$active" >/dev/null 2>&1 || true
+  systemctl stop --no-block "claude-master-server@$active"
+  echo "claude-master-server@$active is draining (up to ${drain_seconds}s)"
+fi
+EOF2
+chmod 0755 /usr/local/bin/claude-master-rollout
+
+%{ if enable_cloudwatch ~}
+# ---------------------------------------------------------------- CloudWatch agent (OTLP metrics + the log file)
+# Receives the proxy's OTLP metrics on 127.0.0.1:4318 (it turns cumulative counters into deltas), publishes them in the
+# ${metrics_namespace} namespace with memory and swap, and ships /var/log/claude-master/server-<color>.log to ${log_group}.
+CWA_VERSION='${cwagent_version}'
+CWA_SHA='${cwagent_sha256}'
+if ! dpkg-query -W -f='$${Version}' amazon-cloudwatch-agent 2>/dev/null | grep -q "^$CWA_VERSION"; then
+  if curl -fsSL --retry 3 "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/arm64/$CWA_VERSION/amazon-cloudwatch-agent.deb" -o /tmp/cwagent.deb \
+     && echo "$CWA_SHA  /tmp/cwagent.deb" | sha256sum -c - >/dev/null; then
+    dpkg -i /tmp/cwagent.deb >/dev/null 2>&1 || apt-get install -y -f >/dev/null 2>&1
+  else
+    echo "ERROR: cloudwatch agent $CWA_VERSION did not download or did not match its sha256; metrics and logs will not ship" >&2
+  fi
+  rm -f /tmp/cwagent.deb
+fi
+if [ -d /opt/aws/amazon-cloudwatch-agent/etc ]; then
+  cat > /tmp/cwagent.json <<'EOF2'
+{
+  "agent": { "metrics_collection_interval": 60, "run_as_user": "root", "omit_hostname": true },
+  "metrics": {
+    "namespace": "${metrics_namespace}",
+    "metrics_collected": {
+      "otlp": { "http_endpoint": "127.0.0.1:4318" },
+      "mem": { "measurement": ["mem_used_percent"] },
+      "swap": { "measurement": ["swap_used_percent"] }
+    }
+  },
+  "logs": { "logs_collected": { "files": { "collect_list": [
+    { "file_path": "/var/log/claude-master/server*.log", "log_group_name": "${log_group}", "log_stream_name": "{instance_id}" }
+  ] } } }
+}
+EOF2
+  if ! cmp -s /tmp/cwagent.json /etc/claude-master/cwagent.json || ! systemctl is-active --quiet amazon-cloudwatch-agent; then
+    cp /tmp/cwagent.json /tmp/cwagent.apply.json
+    if /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/tmp/cwagent.apply.json -s >/dev/null 2>&1; then
+      install -m 0644 /tmp/cwagent.json /etc/claude-master/cwagent.json
+    else
+      echo "WARNING: cloudwatch agent did not accept its configuration; it will be tried again at the next convergence" >&2
+    fi
+    rm -f /tmp/cwagent.apply.json
+  fi
+  rm -f /tmp/cwagent.json
+fi
+%{ endif ~}
+
+# ---------------------------------------------------------------- operator helpers
+# A login is interactive (paste a code); it runs as the service account so the profile belongs to the service.
+cat > /usr/local/bin/claude-master-login <<'EOF2'
+#!/bin/bash
+[ $# -eq 1 ] || { echo "usage: claude-master-login PROFILE" >&2; exit 2; }
+exec runuser -u claude-master -- env HOME=/var/lib/claude-master /usr/local/bin/claude-master login "$1"
+EOF2
+chmod 0755 /usr/local/bin/claude-master-login
+
+# Signs a client's certificate request (base64 on stdin) and prints the client certificate, then the CA certificate.
+cat > /usr/local/bin/claude-master-sign <<'EOF2'
+#!/bin/bash
+set -euo pipefail
+days=$${1:-30}
+tmp=$(mktemp -d); chmod 755 "$tmp"; trap 'rm -rf "$tmp"' EXIT
+base64 -d > "$tmp/request.csr"; chmod 644 "$tmp/request.csr"
+runuser -u claude-master -- env HOME=/var/lib/claude-master /usr/local/bin/claude-master issue --state-dir /var/lib/claude-master/state --request "$tmp/request.csr" --days "$days"
+cat /var/lib/claude-master/state/ca.pem
+EOF2
+chmod 0755 /usr/local/bin/claude-master-sign
+
+# Which logins exist, whether the server is up, and the installed binary against the pinned one.
+cat > /usr/local/bin/claude-master-status <<'EOF2'
+#!/bin/bash
+for p in ${join(" ", profiles)}; do
+  if [ -d "/var/lib/claude-master/.local/share/claude-master/profiles/$p/current" ]; then echo "login $p: present"; else echo "login $p: MISSING"; fi
+done
+active=$(cat /etc/claude-master/active-color 2>/dev/null || echo none)
+echo "server: $(systemctl is-active "claude-master-server@$active") ($active)   blue: $(systemctl is-active claude-master-server@blue)   green: $(systemctl is-active claude-master-server@green)"
+echo "envoy: $(systemctl is-active envoy)   new connections go to: $(grep -o 'port_value: [0-9]*' /etc/envoy/eds/cert.yaml 2>/dev/null | grep -o '[0-9]*$')"
+echo "installed: $(sha256sum /usr/local/bin/claude-master | cut -c1-16)  pinned: ${substr(binary_sha256, 0, 16)}  (${release_tag})"
+EOF2
+chmod 0755 /usr/local/bin/claude-master-status
