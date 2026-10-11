@@ -1,7 +1,7 @@
 # CLI Proxy API
 
 This fork adds an experimental, account-pinned Claude Code launcher. See
-[Claude master with separate inference profiles](docs/claude-master.md) for its
+[Claude master with separate inference profiles](docs/claw-master.md) for its
 architecture, security boundaries, setup, and verification status. The original
 CLIProxyAPI server remains available unchanged.
 

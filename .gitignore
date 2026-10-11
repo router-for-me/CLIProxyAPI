@@ -31,8 +31,8 @@ auths/*
 # Documentation
 docs/*
 !docs/management-api-v8.md
-!docs/claude-master.md
-!docs/claude-master-aws.md
+!docs/claw-master.md
+!docs/claw-master-aws.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -69,5 +69,5 @@ docker-compose.override.yml
 
 # Local LLM Wiki vault
 .llm-wiki
-examples/claude-master-aws/.terraform/
-examples/claude-master-aws/.terraform.lock.hcl
+examples/claw-master-aws/.terraform/
+examples/claw-master-aws/.terraform.lock.hcl
