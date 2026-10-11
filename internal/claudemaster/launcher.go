@@ -2,10 +2,12 @@ package claudemaster
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -156,11 +158,42 @@ func LaunchProfilesWithOptions(ctx context.Context, profiles []Profile, args []s
 			}{observation.result()})
 		}
 	}()
-	env, err := ChildEnvironment(environ, args, proxy.URL(), certs.caPath, clientCert, clientKey)
+	pair, err := tls.LoadX509KeyPair(clientCert, clientKey)
+	if err != nil {
+		return 1, errors.New("cannot load this launch's client certificate")
+	}
+	config := &tls.Config{RootCAs: certs.clientPool(), Certificates: []tls.Certificate{pair}, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12}
+	return runThroughForwarder(ctx, bin, args, environ, certs.caPath, tlsUpstream(proxy.Addr(), config))
+}
+
+// runThroughForwarder puts a local forwarder in front of the claude-master proxy that upstream
+// reaches, gives Claude the forwarder as its proxy, and runs Claude until it exits.
+func runThroughForwarder(ctx context.Context, bin string, args, environ []string, caPath string, upstream upstreamDialer) (int, error) {
+	cwd, _ := os.Getwd()
+	forwarder, err := startLocalForwarder(upstream, projectLabel(cwd))
+	if err != nil {
+		return 1, err
+	}
+	defer func() { _ = forwarder.Close() }()
+	env, err := ChildEnvironment(environ, args, forwarder.URL(), caPath)
 	if err != nil {
 		return 1, err
 	}
 	return runNativeChild(ctx, bin, args, env)
+}
+
+// tlsUpstream reaches a claude-master proxy's certificate listener.
+func tlsUpstream(address string, config *tls.Config) upstreamDialer {
+	return func(ctx context.Context) (net.Conn, error) {
+		return (&tls.Dialer{Config: config}).DialContext(ctx, "tcp", address)
+	}
+}
+
+// plainUpstream reaches a claude-master proxy's open loopback listener, typically through a tunnel.
+func plainUpstream(address string) upstreamDialer {
+	return func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	}
 }
 
 // newInferenceBackend opens the profiles as one backend: a single profile, or a quota-aware series.
@@ -173,7 +206,7 @@ func newInferenceBackend(ctx context.Context, profiles []Profile, opts LaunchOpt
 	for _, profile := range profiles {
 		credentials = append(credentials, BackendCredential{AuthDir: profile.AuthDir, Provider: profile.Provider, AuthID: profile.AuthID, Name: profile.Name})
 	}
-	return NewBackendSeries(ctx, BackendSeriesOptions{Credentials: credentials, BackupAPIKey: opts.BackupAPIKey, ModelMap: opts.ModelMap, SnapshotInterval: opts.SnapshotInterval})
+	return NewBackendSeries(ctx, BackendSeriesOptions{Credentials: credentials, BackupAPIKey: opts.BackupAPIKey, CheckBackupCredit: true, ModelMap: opts.ModelMap, SnapshotInterval: opts.SnapshotInterval})
 }
 
 // runNativeChild runs the native Claude with its prepared environment and returns its exit code.
@@ -212,7 +245,7 @@ func Preflight(ctx context.Context, args []string) (string, error) {
 }
 
 func preflight(ctx context.Context, args, environ []string) (string, error) {
-	if _, err := ChildEnvironment(environ, args, "https://127.0.0.1:1", "/unused", "", ""); err != nil {
+	if _, err := ChildEnvironment(environ, args, "http://127.0.0.1:1", "/unused"); err != nil {
 		return "", err
 	}
 	if err := validateNativeSettings(ctx, environ); err != nil {
@@ -223,8 +256,10 @@ func preflight(ctx context.Context, args, environ []string) (string, error) {
 
 // ChildEnvironment preserves the master login while denying configuration that bypasses the
 // process proxy or switches Claude to an API/third-party mode that disables native Remote Control.
-// The proxy URL contains a private capability and must never be printed or placed in argv.
-func ChildEnvironment(environ, args []string, proxyURL, caPath, clientCert, clientKey string) ([]string, error) {
+// The proxy URL (the local forwarder's) contains a private capability and must never be printed or
+// placed in argv. Everything Claude starts inherits it, which is safe: the forwarder is transparent
+// to anything but api.anthropic.com.
+func ChildEnvironment(environ, args []string, proxyURL, caPath string) ([]string, error) {
 	removed := map[string]bool{
 		"HTTPS_PROXY": true, "https_proxy": true, "HTTP_PROXY": true, "http_proxy": true,
 		"ALL_PROXY": true, "all_proxy": true, "NO_PROXY": true, "no_proxy": true,
@@ -260,10 +295,11 @@ func ChildEnvironment(environ, args []string, proxyURL, caPath, clientCert, clie
 		if !ok {
 			continue
 		}
-		if forbiddenProviderEnv(key) && strings.TrimSpace(value) != "" {
+		allowed := allowedNodeOptions(key, value)
+		if forbiddenProviderEnv(key) && strings.TrimSpace(value) != "" && !allowed {
 			return nil, errors.New("clear custom Claude provider, login-directory, or Node bypass settings before launching")
 		}
-		if removed[key] || forbiddenProviderEnv(key) {
+		if removed[key] || (forbiddenProviderEnv(key) && !allowed) {
 			continue
 		}
 		// The selected inference login is held by the backend, never passed into the native master.
@@ -273,10 +309,6 @@ func ChildEnvironment(environ, args []string, proxyURL, caPath, clientCert, clie
 		out = append(out, entry)
 	}
 	out = append(out, "HTTPS_PROXY="+proxyURL, "https_proxy="+proxyURL, "NODE_EXTRA_CA_CERTS="+caPath, "DISABLE_AUTOUPDATER=1")
-	if clientCert != "" && clientKey != "" {
-		// Claude offers this certificate to its HTTPS proxy, which is how the proxy knows its caller.
-		out = append(out, "CLAUDE_CODE_CLIENT_CERT="+clientCert, "CLAUDE_CODE_CLIENT_KEY="+clientKey)
-	}
 	return out, nil
 }
 
@@ -329,7 +361,11 @@ func launcherSettingsConflict(value string) error {
 		if err := json.Unmarshal(raw, &env); err != nil {
 			return errors.New("Claude launcher settings env is not an object; refusing because its effect is unknown")
 		}
-		for name := range env {
+		for name, value := range env {
+			var text string
+			if json.Unmarshal(value, &text) == nil && allowedNodeOptions(name, text) {
+				continue
+			}
 			if forbiddenProviderEnv(name) || proxySettingsEnv[name] {
 				return fmt.Errorf("Claude launcher settings cannot override master identity or provider routing (env %s)", name)
 			}

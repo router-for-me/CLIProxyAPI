@@ -43,7 +43,7 @@ import (
 type TelemetryOptions struct {
 	Endpoint      string        // OTLP/HTTP base URL, e.g. http://127.0.0.1:4318; empty disables export
 	Interval      time.Duration // export interval (default 30 s)
-	Instance      string        // service.instance.id (default: the hostname)
+	Instance      string        // service.instance.id; empty adds none (the command line defaults it to the hostname)
 	AccountLabels map[string]string
 	Reader        sdkmetric.Reader // tests supply a manual reader instead of the OTLP exporter
 }
@@ -64,6 +64,10 @@ type instruments struct {
 	inferenceByModel  metric.Int64Counter
 	inferenceByClient metric.Int64Counter
 	inferenceErrors   metric.Int64Counter
+	tokens            metric.Int64Counter
+	tokensByAccount   metric.Int64Counter
+	tokensByClient    metric.Int64Counter
+	tokensByProject   metric.Int64Counter
 	picks             metric.Int64Counter
 	switches          metric.Int64Counter
 	backup            metric.Int64Counter
@@ -86,6 +90,8 @@ type instruments struct {
 	quotaUsed         metric.Float64ObservableGauge
 	quotaResets       metric.Float64ObservableGauge
 	quotaBlocked      metric.Float64ObservableGauge
+	fiveHourUsed      metric.Float64ObservableGauge
+	fiveHourResets    metric.Float64ObservableGauge
 	tokenExpires      metric.Float64ObservableGauge
 	quotaBand         metric.Int64ObservableGauge
 	sessions          metric.Int64ObservableGauge
@@ -96,7 +102,7 @@ type instruments struct {
 	goroutines        metric.Int64ObservableGauge
 	heap              metric.Int64ObservableGauge
 	startedAt         time.Time
-	accountLabelsMap  map[string]string
+	accountLabelsMap  atomic.Pointer[map[string]string] // swapped whole by SetAccountLabels
 }
 
 var activeInstruments atomic.Pointer[instruments]
@@ -129,8 +135,8 @@ func StartTelemetry(opts TelemetryOptions) (func(context.Context) error, error) 
 		}
 		reader = sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(interval))
 	}
-	// Resource attributes can become dimensions downstream, and one server needs no instance id: it is added
-	// only when one is configured.
+	// Resource attributes can become dimensions downstream; the instance id keeps several servers' series
+	// apart and is added only when there is one.
 	resAttrs := []attribute.KeyValue{attribute.String("service.name", "claude-master")}
 	if opts.Instance != "" {
 		resAttrs = append(resAttrs, attribute.String("service.instance.id", opts.Instance))
@@ -140,10 +146,7 @@ func StartTelemetry(opts TelemetryOptions) (func(context.Context) error, error) 
 		return nil, err
 	}
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithResource(res))
-	labels := make(map[string]string, len(opts.AccountLabels))
-	for id, label := range opts.AccountLabels {
-		labels[strings.ToLower(strings.TrimSpace(id))] = strings.TrimSpace(label)
-	}
+	labels := normalizeAccountLabels(opts.AccountLabels)
 	inst := buildInstruments(provider.Meter("claude-master"), labels)
 	activeInstruments.Store(inst)
 	lg().Info("telemetry started", "endpoint_host", endpointHost(opts.Endpoint), "account_labels", len(labels))
@@ -157,7 +160,8 @@ func StartTelemetry(opts TelemetryOptions) (func(context.Context) error, error) 
 }
 
 func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
-	i := &instruments{quantiles: newQuantileSet(512), limitGauges: newLimitGaugeStore(), startedAt: time.Now(), accountLabelsMap: labels}
+	i := &instruments{quantiles: newQuantileSet(512), limitGauges: newLimitGaugeStore(), startedAt: time.Now()}
+	i.accountLabelsMap.Store(&labels)
 	counter := func(name, desc string) metric.Int64Counter {
 		c, _ := m.Int64Counter(name, metric.WithDescription(desc))
 		return c
@@ -174,6 +178,10 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.inferenceByModel = counter("claude_master.inference.requests.by_model", "Inference requests by model and status class")
 	i.inferenceByClient = counter("claude_master.inference.requests.by_client", "Inference requests by client (the connecting box) and client account")
 	i.inferenceErrors = counter("claude_master.inference.errors", "Inference requests that ended in an error status, by profile, status and client account")
+	i.tokens = counter("claude_master.inference.tokens", "Tokens by profile and type (input, output, cache_read, cache_creation), from the responses' usage")
+	i.tokensByAccount = counter("claude_master.inference.tokens.by_client_account", "Tokens by client account and type")
+	i.tokensByClient = counter("claude_master.inference.tokens.by_client", "Tokens by client (the connecting box) and type")
+	i.tokensByProject = counter("claude_master.inference.tokens.by_project", "Tokens by project (the launch directory's repository name) and type")
 	i.picks = counter("claude_master.routing.picks", "Routing decisions by chosen profile")
 	i.switches = counter("claude_master.routing.switches", "Conversations moved to another account, by from, to and reason")
 	i.backup = counter("claude_master.routing.backup_requests", "Requests served by the paid API-key backup")
@@ -194,6 +202,8 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.quotaUsed, _ = m.Float64ObservableGauge("claude_master.quota.used_fraction", metric.WithDescription("Weekly subscription allowance used, 0 to 1"))
 	i.quotaResets, _ = m.Float64ObservableGauge("claude_master.quota.resets_in_seconds", metric.WithUnit("s"))
 	i.quotaBlocked, _ = m.Float64ObservableGauge("claude_master.quota.rate_limited_for_seconds", metric.WithUnit("s"))
+	i.fiveHourUsed, _ = m.Float64ObservableGauge("claude_master.quota.five_hour.used_fraction", metric.WithDescription("Five-hour subscription window used, 0 to 1, from the usage poll; 0 once the window has reset"))
+	i.fiveHourResets, _ = m.Float64ObservableGauge("claude_master.quota.five_hour.resets_in_seconds", metric.WithUnit("s"), metric.WithDescription("Until the five-hour window resets; absent while no window is open"))
 	i.quotaBand, _ = m.Int64ObservableGauge("claude_master.quota.band", metric.WithDescription("0 ok, 1 reserve (last tenth), 2 exhausted, -1 unknown"))
 	i.tokenExpires, _ = m.Float64ObservableGauge("claude_master.auth.token_expires_in_seconds", metric.WithUnit("s"))
 	i.sessions, _ = m.Int64ObservableGauge("claude_master.sessions.tracked")
@@ -205,7 +215,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.heap, _ = m.Int64ObservableGauge("claude_master.process.heap_bytes", metric.WithUnit("By"))
 
 	i.registration, _ = m.RegisterCallback(i.observe,
-		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.quotaBand, i.tokenExpires, i.sessions, i.activeConns,
+		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.quotaBand, i.tokenExpires, i.sessions, i.activeConns,
 		i.upstreamLimit, i.latencyQuantile, i.uptime, i.goroutines, i.heap)
 	return i
 }
@@ -223,6 +233,11 @@ type profileState struct {
 	Band            int64
 	TokenExpiresIn  float64
 	TokenKnown      bool
+	// The five-hour window from the usage poll.
+	FiveHourUsed        float64
+	FiveHourKnown       bool
+	FiveHourResetsIn    float64
+	FiveHourResetsKnown bool
 }
 
 type stateSnapshot struct {
@@ -252,6 +267,12 @@ func (i *instruments) observe(_ context.Context, o metric.Observer) error {
 				o.ObserveFloat64(i.quotaResets, p.ResetsInSeconds, attrs)
 			}
 			o.ObserveFloat64(i.quotaBlocked, p.BlockedSeconds, attrs)
+			if p.FiveHourKnown {
+				o.ObserveFloat64(i.fiveHourUsed, p.FiveHourUsed, attrs)
+			}
+			if p.FiveHourResetsKnown {
+				o.ObserveFloat64(i.fiveHourResets, p.FiveHourResetsIn, attrs)
+			}
 			o.ObserveInt64(i.quotaBand, p.Band, attrs)
 			if p.TokenKnown {
 				o.ObserveFloat64(i.tokenExpires, p.TokenExpiresIn, attrs)
@@ -307,11 +328,33 @@ func clientAccountKey(raw []byte) string {
 	if id == "" {
 		return "unknown"
 	}
-	if label, ok := tm().accountLabelsMap[id]; ok && label != "" {
-		return sanitizeDimension(label) // bounded by the labels file
+	if labels := tm().accountLabelsMap.Load(); labels != nil {
+		if label, ok := (*labels)[id]; ok && label != "" {
+			return sanitizeDimension(label) // bounded by the labels file
+		}
 	}
 	sum := sha256.Sum256([]byte(id))
 	return accounts.admit("acct-"+hex.EncodeToString(sum[:4]), "other")
+}
+
+func normalizeAccountLabels(in map[string]string) map[string]string {
+	labels := make(map[string]string, len(in))
+	for id, label := range in {
+		labels[strings.ToLower(strings.TrimSpace(id))] = strings.TrimSpace(label)
+	}
+	return labels
+}
+
+// SetAccountLabels replaces the running telemetry's account labels (ACCOUNT_UUID -> NAME) in one swap, so
+// a changed labels file takes effect without a restart. It returns false when telemetry is not running.
+func SetAccountLabels(labels map[string]string) bool {
+	inst := activeInstruments.Load()
+	if inst == nil {
+		return false
+	}
+	normalized := normalizeAccountLabels(labels)
+	inst.accountLabelsMap.Store(&normalized)
+	return true
 }
 
 // AccountKeyFor is what the dashboards will call an account id: use it to build --account-label values
@@ -351,6 +394,7 @@ type requestObservation struct {
 	Profile    string
 	Model      string
 	Client     string
+	Project    string // the project the client's tunnel named (projectHeader), or ""
 	Account    string
 	Stream     bool
 	Status     int
@@ -360,6 +404,34 @@ type requestObservation struct {
 	ReqBytes   int64
 	RespBytes  int64
 	RateLimits http.Header // the upstream response headers
+	Tokens     tokenCounts // the usage the response reported, when HasTokens
+	HasTokens  bool
+}
+
+// observeTokens counts one request's tokens. Like the request metrics, each axis (profile, user
+// account, client, project) is its own projection with the token type.
+func observeTokens(profile, client, account, project string, counts tokenCounts) {
+	projectAttr := attribute.String("project", projectMetricLabel(project))
+	t := tm()
+	ctx := context.Background()
+	for _, kind := range []struct {
+		name  string
+		count int64
+	}{
+		{"input", counts.input},
+		{"output", counts.output},
+		{"cache_read", counts.cacheRead},
+		{"cache_creation", counts.cacheCreation},
+	} {
+		if kind.count <= 0 {
+			continue
+		}
+		typ := attribute.String("type", kind.name)
+		t.tokens.Add(ctx, kind.count, metric.WithAttributes(attribute.String("profile", profile), typ))
+		t.tokensByAccount.Add(ctx, kind.count, metric.WithAttributes(attribute.String("client_account", account), typ))
+		t.tokensByClient.Add(ctx, kind.count, metric.WithAttributes(attribute.String("client", client), typ))
+		t.tokensByProject.Add(ctx, kind.count, metric.WithAttributes(projectAttr, typ))
+	}
 }
 
 func observeRequest(o requestObservation) {
@@ -386,6 +458,9 @@ func observeRequest(o requestObservation) {
 	t.inference.Add(ctx, 1, metric.WithAttributes(profile, account, class))
 	t.inferenceByModel.Add(ctx, 1, metric.WithAttributes(model, class))
 	t.inferenceByClient.Add(ctx, 1, metric.WithAttributes(client, account))
+	if o.HasTokens {
+		observeTokens(o.Profile, o.Client, o.Account, o.Project, o.Tokens)
+	}
 	if o.Status >= 400 || o.Status == 0 {
 		t.inferenceErrors.Add(ctx, 1, metric.WithAttributes(profile, attribute.String("status", strconv.Itoa(o.Status)), account))
 	}

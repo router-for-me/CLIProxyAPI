@@ -2,7 +2,6 @@ package claudemaster
 
 import (
 	"context"
-	"errors"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -20,7 +19,7 @@ func (s *backendSeriesSelector) sessionBindingLocked(sessionID string, auths []*
 		return "", false, nil
 	}
 	if opaque && ambiguous {
-		return "", false, errors.New("conversation routing replicas have an unfinished handoff; refusing to move opaque state")
+		return "", false, backendRefuse(backendRefusalInvalid, "conversation routing replicas have an unfinished handoff; refusing to move opaque state")
 	}
 	for _, auth := range auths {
 		if origin := s.routes.origin(auth); auth != nil && origin != "" {
@@ -51,7 +50,7 @@ func (s *backendSeriesSelector) bindInheritedSessionLocked(ctx context.Context, 
 		}
 		proven = found && parent.Committed && parent.Revision == 1 && parent.Origin == s.routes.origin(auth)
 		if !proven {
-			return nil, errors.New("cannot establish the first opaque child's unchanged parent origin")
+			return nil, backendRefuse(backendRefusalInvalid, "cannot establish the first opaque child's unchanged parent origin")
 		}
 	}
 	return s.bindSessionOriginLocked(ctx, sessionID, auth, proven)
@@ -68,13 +67,13 @@ func (s *backendSeriesSelector) bindSessionOriginLocked(ctx context.Context, ses
 		if s.prepareIdentity != nil && s.routes.origin(auth) == "" {
 			prepared, errPrepare := s.prepareIdentity(ctx, auth)
 			if errPrepare != nil || prepared == nil {
-				return nil, errors.New("cannot acquire Claude conversation origin identity")
+				return nil, backendRefuse(backendRefusalInternal, "cannot acquire Claude conversation origin identity")
 			}
 			auth = prepared
 		}
 		for origin, count := range s.activeRoutes[sessionID] {
 			if count > 0 && origin != s.routes.origin(auth) {
-				return nil, errors.New("the Claude conversation still has an active request on its current account; retry clean handoff after it finishes")
+				return nil, backendRefuse(backendRefusalUnavailable, "the Claude conversation still has an active request on its current account; retry clean handoff after it finishes")
 			}
 		}
 		if errBind := s.routes.bindWithProof(sessionID, auth, originProven); errBind != nil {
@@ -82,7 +81,7 @@ func (s *backendSeriesSelector) bindSessionOriginLocked(ctx context.Context, ses
 		}
 		route, found, errLookup := s.routes.lookup(sessionID)
 		if errLookup != nil || !found {
-			return nil, errors.New("cannot confirm pending conversation routing")
+			return nil, backendRefuse(backendRefusalInternal, "cannot confirm pending conversation routing")
 		}
 		recordBackendRouteAttempt(ctx, s, sessionID, auth.ID, route)
 	}

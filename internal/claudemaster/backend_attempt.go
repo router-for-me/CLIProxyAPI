@@ -2,7 +2,9 @@ package claudemaster
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +18,11 @@ type backendAttemptKey struct{}
 // A stream result may arrive on a detached observer, so access is synchronized.
 type backendAttempt struct {
 	mu               sync.Mutex
-	failures         map[string]map[string]bool
+	failures         map[string]map[string]int // model key -> auth id -> upstream HTTP status (0 when none)
+	refusal          error                     // the selector's refusal in this request, for the client's error
+	refusalGeneric   bool                      // the refusal is a bare core error; a specific one replaces it
+	upstream         *backendUpstreamError     // the latest upstream error response of this request, exactly
+	notFoundRetried  bool                      // the one same-subscription retry of a 404 with no Anthropic error was spent
 	route            *backendRouteAttempt
 	pickedAt         time.Time // when an account was chosen: claude-master's own time ends here
 	count            bool
@@ -179,13 +185,84 @@ func recordBackendAttempt(ctx context.Context, result coreauth.Result) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.failures == nil {
-		state.failures = make(map[string]map[string]bool)
+		state.failures = make(map[string]map[string]int)
 	}
 	model := backendBlockedModelKey(result.Model)
 	if state.failures[model] == nil {
-		state.failures[model] = make(map[string]bool)
+		state.failures[model] = make(map[string]int)
 	}
-	state.failures[model][result.AuthID] = true
+	state.failures[model][result.AuthID] = result.Error.HTTPStatus
+}
+
+// backendAttemptStatus reports the upstream HTTP status of this request's failed attempt on
+// authID for model (0 when the failure carried none), and whether there was one.
+func backendAttemptStatus(ctx context.Context, authID, model string) (int, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	state, _ := ctx.Value(backendAttemptKey{}).(*backendAttempt)
+	if state == nil {
+		return 0, false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	for _, key := range []string{backendBlockedModelKey(model), ""} {
+		if status, ok := state.failures[key][authID]; ok {
+			return status, true
+		}
+	}
+	return 0, false
+}
+
+// noteBackendRefusal keeps the reason the selector refused this request, for the client's error
+// in place of the generic "configured inference failed". The reason is claude-master's own text
+// (a profile name, a model, an HTTP status), never upstream text. A request can be refused more
+// than once (the scheduler asks again after an attempt fails): the first SPECIFIC refusal wins,
+// and a bare core error ("auth_unavailable: no auth available") only fills an empty slot and is
+// replaced by a specific one. Observed 2026-10-09: a bound subscription in model cooldown made
+// the core's generic error come first and the session saw that instead of the reason.
+func noteBackendRefusal(ctx context.Context, err error) {
+	state := backendRequestAttempt(ctx)
+	if state == nil || err == nil || strings.TrimSpace(err.Error()) == "" {
+		return
+	}
+	generic := backendGenericRefusal(err)
+	state.mu.Lock()
+	switch {
+	case state.refusal == nil:
+		state.refusal, state.refusalGeneric = err, generic
+	case state.refusalGeneric && !generic:
+		state.refusal, state.refusalGeneric = err, false
+	}
+	state.mu.Unlock()
+}
+
+func backendRefusalErrorFrom(ctx context.Context) error {
+	state := backendRequestAttempt(ctx)
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.refusal
+}
+
+// backendGenericRefusal reports a core auth error (auth_unavailable, auth_not_found, a model
+// cooldown) as opposed to a reason the selector wrote itself.
+func backendGenericRefusal(err error) bool {
+	var refusal *backendRefusalError
+	if errors.As(err, &refusal) {
+		return false
+	}
+	var authErr *coreauth.Error
+	return errors.As(err, &authErr)
+}
+
+func backendRefusal(ctx context.Context) string {
+	if err := backendRefusalErrorFrom(ctx); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 func backendAttemptFailed(ctx context.Context, authID, model string) bool {
