@@ -92,11 +92,55 @@ func TestReferenceDeploymentMovesAnInstallFromBeforeTheRename(t *testing.T) {
 	}
 	for _, step := range []string{
 		`usermod --login claw-master --home "$HOME_DIR" --move-home claude-master`,
-		`mv "$HOME_DIR/.local/share/claude-master" "$HOME_DIR/.local/share/claw-master"`,
 		"systemctl stop 'claude-master-server@blue' 'claude-master-server@green'",
 	} {
 		if !strings.Contains(bootstrap[migrate:create], step) {
 			t.Fatalf("the move of an old install lacks: %s", step)
 		}
+	}
+	// The profiles stay where both the old pinned binary and a new one find them.
+	if strings.Contains(bootstrap, `mv "$HOME_DIR/.local/share/claude-master"`) {
+		t.Fatal("the bootstrap moves the profiles away from the old pinned binary")
+	}
+}
+
+// The unit starts only when every login exists where the binary looks for it, by the binary's own
+// rule (dataDir), for an old pinned release and a new one alike.
+func TestReferenceDeploymentFindsLoginsWhereTheBinaryDoes(t *testing.T) {
+	bootstrap := repoFile(t, "examples/claw-master-aws/user-data.sh.tftpl")
+	unit := bootstrap[strings.Index(bootstrap, "claw-master-server@.service <<'EOF2'"):]
+	unit = unit[:strings.Index(unit, "\nEOF2")]
+	service := unit[strings.Index(unit, "[Service]"):]
+	if !strings.Contains(service, "ExecCondition=/usr/local/bin/claw-master-has-logins") || strings.Contains(unit, "ConditionPathExists=") {
+		t.Fatal("the unit must start on claw-master-has-logins in [Service], not on fixed login paths")
+	}
+	helper := regexp.MustCompile(`(?s)claw-master-profile-root <<'EOF2'\n(.*?)\nEOF2`).FindStringSubmatch(bootstrap)
+	if helper == nil {
+		t.Fatal("no claw-master-profile-root")
+	}
+	share := t.TempDir()
+	root := func() string {
+		script := strings.ReplaceAll(helper[1], "/var/lib/claw-master/.local/share", share)
+		out, err := exec.Command("bash", "-c", script).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if err := os.MkdirAll(filepath.Join(share, "claude-master"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := root(), filepath.Join(dataDir(share), "profiles"); got != want {
+		t.Fatalf("with only the old directory the helper says %q, the binary %q", got, want)
+	}
+	if err := os.MkdirAll(filepath.Join(share, "claw-master"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := root(), filepath.Join(dataDir(share), "profiles"); got != want {
+		t.Fatalf("with both the helper says %q, the binary %q", got, want)
+	}
+	// The backup key under the name both an old and a new binary read (serve launches no Claude).
+	if !strings.Contains(bootstrap, `export CLAUDE_MASTER_BACKUP_API_KEY="$key"`) {
+		t.Fatal("the serve wrapper must export the backup key under the name the old pinned binary reads")
 	}
 }

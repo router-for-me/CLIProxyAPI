@@ -44,3 +44,72 @@ class TargetOf(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import datetime as dt
+from unittest import mock
+
+
+class FakeCloudWatch:
+    def __init__(self, fail_put_call=None, statuses=None):
+        self.puts = []
+        self.put_calls = 0
+        self.fail_put_call = fail_put_call
+        self.statuses = list(statuses or [])
+
+    def put_metric_data(self, Namespace, MetricData):
+        self.put_calls += 1
+        if self.put_calls == self.fail_put_call:
+            raise RuntimeError("interrupted")
+        self.puts.extend(MetricData)
+
+    def get_metric_data(self, **kwargs):
+        status = self.statuses.pop(0) if self.statuses else "Complete"
+        t = dt.datetime(2026, 10, 9, tzinfo=dt.timezone.utc)
+        return {
+            "MetricDataResults": [
+                {"Id": q["Id"], "StatusCode": status, "Timestamps": [t], "Values": [1.0]}
+                for q in kwargs["MetricDataQueries"]
+            ]
+        }
+
+
+def minutes(n):
+    t0 = dt.datetime(2026, 10, 9, tzinfo=dt.timezone.utc)
+    return {
+        t0 + dt.timedelta(minutes=i): {"SampleCount": 1.0, "Sum": float(i), "Minimum": float(i), "Maximum": float(i)}
+        for i in range(n)
+    }
+
+
+class Writing(unittest.TestCase):
+    TARGET = {"MetricName": "claw_master.x", "Dimensions": []}
+
+    def test_reads_only_what_cloudwatch_still_accepts(self):
+        self.assertLess(migrate.LOOKBACK, dt.timedelta(days=14))
+
+    def test_a_resumed_stream_writes_each_minute_once(self):
+        data = minutes(1201)
+        cw = FakeCloudWatch(fail_put_call=2)
+        last = []
+        with self.assertRaises(RuntimeError):
+            migrate.put_minutes(cw, "ClawMaster", self.TARGET, data, None, None, last.append)
+        cw.fail_put_call = None
+        migrate.put_minutes(cw, "ClawMaster", self.TARGET, data, None, last[-1], last.append)
+        stamps = [d["Timestamp"] for d in cw.puts]
+        self.assertEqual(len(stamps), len(set(stamps)))
+        self.assertEqual(sorted(stamps), sorted(data))
+
+    def test_keeps_the_streams_unit(self):
+        cw = FakeCloudWatch()
+        migrate.put_minutes(cw, "ClawMaster", self.TARGET, minutes(2), "Percent", None, lambda t: None)
+        self.assertEqual({d.get("Unit") for d in cw.puts}, {"Percent"})
+
+    def test_a_failed_read_is_retried_then_fatal(self):
+        metric = {"MetricName": "claude_master.x", "Dimensions": []}
+        start, end = dt.datetime(2026, 10, 8, tzinfo=dt.timezone.utc), dt.datetime(2026, 10, 10, tzinfo=dt.timezone.utc)
+        with mock.patch.object(migrate.time, "sleep"):
+            got = migrate.read_minutes(FakeCloudWatch(statuses=["InternalError", "Complete"]), "ClaudeMaster", metric, start, end)
+            self.assertEqual(len(got), 1)
+            with self.assertRaises(RuntimeError):
+                migrate.read_minutes(FakeCloudWatch(statuses=["InternalError"] * 9), "ClaudeMaster", metric, start, end)

@@ -14,9 +14,11 @@ minimum, maximum), so every statistic of the copy equals the original's:
   exports them.
 
 CloudWatch keeps one-minute data for 15 days and accepts datapoints up to two weeks old, so the
-copy must run within two weeks of the oldest data. It reads by default (a dry run that says what
-it would write); --write writes, up to --until (the moment the server switched to the new names,
-so no minute is counted twice), and records each finished stream in --state so a rerun resumes.
+copy must run within two weeks of the oldest data (it reads the last 14 days less an hour). Each
+stream keeps its unit. It reads by default (a dry run that says what it would write); --write
+writes, up to --until (the moment the server switched to the new names, so no minute is counted
+twice), and records in --state the last minute written of each stream after every batch, so a
+rerun resumes after it and never writes a minute twice.
 --verify compares each copied stream's total sample count and sum with its source.
 
 Needs boto3 and cloudwatch:ListMetrics and GetMetricData on the source; PutMetricData on the
@@ -35,7 +37,9 @@ import time
 import boto3
 
 PERIOD = 60
-LOOKBACK = dt.timedelta(days=15)
+# CloudWatch takes datapoints up to two weeks old; an hour's margin keeps a slow run inside it.
+LOOKBACK = dt.timedelta(days=14) - dt.timedelta(hours=1)
+READ_TRIES = 3
 # Pool-level measurements: no provider dimension (internal/clawmaster/metrics.go).
 POOL_LEVEL = {
     "claude_master.proxy.connections",
@@ -99,26 +103,56 @@ def read_minutes(cw, namespace: str, metric: dict, start, end) -> dict[dt.dateti
         }
         for i, stat in enumerate(STATS)
     ]
-    minutes: dict[dt.datetime, dict] = {}
-    token = None
-    while True:
-        kwargs = dict(MetricDataQueries=queries, StartTime=start, EndTime=end, ScanBy="TimestampAscending")
-        if token:
-            kwargs["NextToken"] = token
-        resp = cw.get_metric_data(**kwargs)
-        for result in resp["MetricDataResults"]:
-            stat = STATS[int(result["Id"][1:])]
-            for t, v in zip(result["Timestamps"], result["Values"]):
-                minutes.setdefault(t, {})[stat] = v
-        token = resp.get("NextToken")
-        if not token:
-            return {t: s for t, s in minutes.items() if all(k in s for k in STATS) and s["SampleCount"] > 0}
+    for attempt in range(READ_TRIES):
+        minutes: dict[dt.datetime, dict] = {}
+        token = None
+        failed = None
+        while True:
+            kwargs = dict(MetricDataQueries=queries, StartTime=start, EndTime=end, ScanBy="TimestampAscending")
+            if token:
+                kwargs["NextToken"] = token
+            resp = cw.get_metric_data(**kwargs)
+            for result in resp["MetricDataResults"]:
+                # Complete, or PartialData with more pages to come; anything else lost data.
+                if result.get("StatusCode", "Complete") not in ("Complete", "PartialData"):
+                    failed = result.get("StatusCode")
+                stat = STATS[int(result["Id"][1:])]
+                for t, v in zip(result["Timestamps"], result["Values"]):
+                    minutes.setdefault(t, {})[stat] = v
+            token = resp.get("NextToken")
+            if not token:
+                break
+        if failed is None:
+            incomplete = [t for t, s in minutes.items() if not all(k in s for k in STATS)]
+            if incomplete:
+                raise RuntimeError(f"{metric['MetricName']}: {len(incomplete)} minutes lack a statistic")
+            return {t: s for t, s in minutes.items() if s["SampleCount"] > 0}
+        time.sleep(2**attempt)
+    raise RuntimeError(f"{metric['MetricName']}: reading failed ({failed}) after {READ_TRIES} tries")
 
 
-def put_minutes(cw, namespace: str, target: dict, minutes: dict) -> None:
+def unit_of(cw, namespace: str, metric: dict, start, end) -> str | None:
+    """The unit the stream was published with (GetMetricData does not say; GetMetricStatistics does)."""
+    resp = cw.get_metric_statistics(
+        Namespace=namespace,
+        MetricName=metric["MetricName"],
+        Dimensions=metric["Dimensions"],
+        StartTime=start,
+        EndTime=end,
+        Period=86400,
+        Statistics=["SampleCount"],
+    )
+    units = {p["Unit"] for p in resp.get("Datapoints", []) if p.get("Unit")}
+    return units.pop() if len(units) == 1 else None
+
+
+def put_minutes(cw, namespace: str, target: dict, minutes: dict, unit, after, written) -> None:
+    """Writes the minutes after `after` (the last one written before), calling written(t) with the
+    last minute of each batch once that batch is stored."""
     datums = [
         {
             **target,
+            **({"Unit": unit} if unit else {}),
             "Timestamp": t,
             "StatisticValues": {
                 "SampleCount": s["SampleCount"],
@@ -129,10 +163,13 @@ def put_minutes(cw, namespace: str, target: dict, minutes: dict) -> None:
             "StorageResolution": 60,
         }
         for t, s in sorted(minutes.items())
+        if after is None or t > after
     ]
     # At most 1000 datums (and well under 1 MB) per call.
     for i in range(0, len(datums), 500):
-        cw.put_metric_data(Namespace=namespace, MetricData=datums[i : i + 500])
+        batch = datums[i : i + 500]
+        cw.put_metric_data(Namespace=namespace, MetricData=batch)
+        written(batch[-1]["Timestamp"])
 
 
 def totals(minutes: dict) -> tuple[float, float]:
@@ -160,15 +197,24 @@ def main() -> int:
         end = end.replace(tzinfo=dt.timezone.utc)
 
     cw = boto3.client("cloudwatch", region_name=args.region)
-    done: set[str] = set()
+    # Each stream's last minute written, as ISO text; "done" once the stream is complete.
+    progress: dict[str, str] = {}
     if os.path.exists(args.state):
         with open(args.state) as f:
-            done = set(json.load(f))
+            progress = json.load(f)
+
+    def save() -> None:
+        os.makedirs(os.path.dirname(args.state) or ".", exist_ok=True)
+        tmp = args.state + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(progress, f)
+        os.replace(tmp, args.state)
 
     metrics = list_metrics(cw, args.source)
     if args.limit:
         metrics = metrics[: args.limit]
-    print(f"{len(metrics)} streams in {args.source}, {len(done)} already copied", file=sys.stderr)
+    finished = sum(1 for v in progress.values() if v == "done")
+    print(f"{len(metrics)} streams in {args.source}, {finished} already copied", file=sys.stderr)
     points = streams = mismatches = 0
     for n, metric in enumerate(metrics, 1):
         source = {"MetricName": metric["MetricName"], "Dimensions": metric.get("Dimensions", [])}
@@ -189,19 +235,20 @@ def main() -> int:
             if n <= 3:
                 print(f"would copy {len(minutes)} minutes: {key} -> {key_of(target)}")
             continue
-        if key in done:
+        if progress.get(key) == "done":
             continue
-        put_minutes(cw, args.target, target, minutes)
-        done.add(key)
+        after = dt.datetime.fromisoformat(progress[key]) if key in progress else None
+
+        def written(t: dt.datetime, key: str = key) -> None:
+            progress[key] = t.isoformat()
+            save()
+
+        put_minutes(cw, args.target, target, minutes, unit_of(cw, args.source, source, start, end), after, written)
+        progress[key] = "done"
+        save()
         if n % 25 == 0 or n == len(metrics):
-            os.makedirs(os.path.dirname(args.state) or ".", exist_ok=True)
-            with open(args.state, "w") as f:
-                json.dump(sorted(done), f)
             print(f"{n}/{len(metrics)} streams, {points} minutes", file=sys.stderr)
         time.sleep(0.05)
-    if args.write:
-        with open(args.state, "w") as f:
-            json.dump(sorted(done), f)
     if args.verify:
         print(f"verified {len(metrics)} streams, {mismatches} mismatched")
         return 1 if mismatches else 0

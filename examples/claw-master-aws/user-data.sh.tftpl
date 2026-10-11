@@ -29,17 +29,16 @@ fi
 %{ endif ~}
 
 # ---------------------------------------------------------------- an install from before the rename
-# Its service account, home (profiles, logins, the CA), settings and logs move to the new names, so
-# running this again keeps every login and every enrolled client. The old units are stopped first;
-# the new ones are written below and started by claw-master-rollout.
+# Its service account, home (logins, the CA), settings and logs move to the new names, so running
+# this again keeps every login and every enrolled client. The profiles stay in
+# ~/.local/share/claude-master, which binaries of both names use while ~/.local/share/claw-master
+# does not exist (claw-master-profile-root below). The old units are stopped first; the new ones are
+# written below and started by claw-master-rollout.
 if id claude-master >/dev/null 2>&1 && ! id claw-master >/dev/null 2>&1; then
   systemctl stop 'claude-master-server@blue' 'claude-master-server@green' 2>/dev/null || true
   systemctl disable 'claude-master-server@blue' 'claude-master-server@green' 2>/dev/null || true
   usermod --login claw-master --home "$HOME_DIR" --move-home claude-master
   groupmod --new-name claw-master claude-master 2>/dev/null || true
-  if [ -d "$HOME_DIR/.local/share/claude-master" ] && [ ! -e "$HOME_DIR/.local/share/claw-master" ]; then
-    mv "$HOME_DIR/.local/share/claude-master" "$HOME_DIR/.local/share/claw-master"
-  fi
   for d in /etc /var/log; do
     if [ -d "$d/claude-master" ] && [ ! -e "$d/claw-master" ]; then mv "$d/claude-master" "$d/claw-master"; fi
   done
@@ -73,7 +72,7 @@ set -u
 %{ if backup_secret_id != "" ~}
 { set +x; } 2>/dev/null   # the value below must never reach a trace
 key=$(aws secretsmanager get-secret-value --region ${region} --secret-id '${backup_secret_id}' --query SecretString --output text 2>/dev/null) || key=""
-if [ -n "$key" ] && [ "$key" != "None" ]; then export CLAW_MASTER_BACKUP_API_KEY="$key"; else echo "claw-master-serve: no backup API key; subscriptions only" >&2; fi
+if [ -n "$key" ] && [ "$key" != "None" ]; then export CLAUDE_MASTER_BACKUP_API_KEY="$key"; else echo "claw-master-serve: no backup API key; subscriptions only" >&2; fi
 unset key
 %{ endif ~}
 # One of the two servers behind Envoy, by color: its own port, log file and metrics instance.
@@ -104,17 +103,32 @@ mkdir -p /etc/systemd/journald.conf.d
 printf '[Journal]\nSystemMaxUse=200M\nMaxRetentionSec=30day\n' > /etc/systemd/journald.conf.d/claw-master.conf
 
 # One unit per color (claw-master-server@blue, @green); claw-master-rollout starts, enables and stops them.
+# Where the profiles are, by the binary's own rule: ~/.local/share/claw-master, or claude-master (its
+# name before the rename) while only that exists. Both binaries agree, so the old pinned release and a
+# new one find the same logins.
+cat > /usr/local/bin/claw-master-profile-root <<'EOF2'
+#!/bin/bash
+share=/var/lib/claw-master/.local/share
+if [ ! -e "$share/claw-master" ] && [ -d "$share/claude-master" ]; then echo "$share/claude-master/profiles"; else echo "$share/claw-master/profiles"; fi
+EOF2
+chmod 0755 /usr/local/bin/claw-master-profile-root
+# Whether every profile has a login: the server unit's start condition.
+cat > /usr/local/bin/claw-master-has-logins <<'EOF2'
+#!/bin/bash
+root=$(/usr/local/bin/claw-master-profile-root)
+for p in ${join(" ", profiles)}; do [ -d "$root/$p/current" ] || exit 1; done
+EOF2
+chmod 0755 /usr/local/bin/claw-master-has-logins
+
 cat > /etc/systemd/system/claw-master-server@.service <<'EOF2'
 [Unit]
 Description=claw-master server %i (shared Claude subscription pool, behind Envoy)
 After=network-online.target
 Wants=network-online.target
 # Idle until every profile has a login: `sudo claw-master-login PROFILE` for each, then `sudo claw-master-rollout`.
-%{ for p in profiles ~}
-ConditionPathExists=/var/lib/claw-master/.local/share/claw-master/profiles/${p}/current
-%{ endfor ~}
 
 [Service]
+ExecCondition=/usr/local/bin/claw-master-has-logins
 User=claw-master
 Group=claw-master
 Environment=HOME=/var/lib/claw-master
@@ -361,8 +375,9 @@ chmod 0755 /usr/local/bin/claw-master-sign
 # Which logins exist, whether the server is up, and the installed binary against the pinned one.
 cat > /usr/local/bin/claw-master-status <<'EOF2'
 #!/bin/bash
+root=$(/usr/local/bin/claw-master-profile-root)
 for p in ${join(" ", profiles)}; do
-  if [ -d "/var/lib/claw-master/.local/share/claw-master/profiles/$p/current" ]; then echo "login $p: present"; else echo "login $p: MISSING"; fi
+  if [ -d "$root/$p/current" ]; then echo "login $p: present"; else echo "login $p: MISSING"; fi
 done
 active=$(cat /etc/claw-master/active-color 2>/dev/null || echo none)
 echo "server: $(systemctl is-active "claw-master-server@$active") ($active)   blue: $(systemctl is-active claw-master-server@blue)   green: $(systemctl is-active claw-master-server@green)"
