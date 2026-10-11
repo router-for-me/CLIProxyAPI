@@ -345,7 +345,7 @@ func TestBackendSeriesSelectorReservesTenPercentForContinuation(t *testing.T) {
 	signed := plain
 	signed.Headers = plain.Headers.Clone()
 	signed.Headers.Set("X-CC-Context-Compacted", "manual")
-	signed.OriginalRequest = []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","signature":"opaque"}]}]}`)
+	signed.OriginalRequest = []byte(`{"messages":[{"role":"assistant","content":[{"type":"compaction","content":"summary","signature":"opaque"}]}]}`)
 	got, err = selector.Pick(t.Context(), "claude", "", signed, auths)
 	if err != nil || got.ID != "profile-a" {
 		t.Fatalf("continuation Pick() = %#v, %v, want reserved profile-a", got, err)
@@ -369,7 +369,7 @@ func TestBackendSeriesSelectorDoesNotMoveOpaqueStateWhenBoundAuthUnavailable(t *
 		t.Fatal(err)
 	}
 	got, err := selector.Pick(t.Context(), "claude", "", coreexecutor.Options{
-		Headers: headers, OriginalRequest: []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","signature":"opaque"}]}]}`),
+		Headers: headers, OriginalRequest: []byte(`{"messages":[{"role":"assistant","content":[{"type":"compaction","content":"summary","signature":"opaque"}]}]}`),
 	}, []*coreauth.Auth{authB})
 	if err == nil || got != nil {
 		t.Fatalf("opaque continuation moved accounts: got %#v, err %v", got, err)
@@ -432,7 +432,7 @@ func TestBackendSeriesSelectorSubagentUsesParentBindingForOpaqueState(t *testing
 	childHeaders.Set("X-Claude-Code-Parent-Agent-Id", "main")
 	got, err := selector.Pick(t.Context(), "claude", "", coreexecutor.Options{
 		Headers:         childHeaders,
-		OriginalRequest: []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","signature":"opaque"}]}]}`),
+		OriginalRequest: []byte(`{"messages":[{"role":"assistant","content":[{"type":"compaction","content":"summary","signature":"opaque"}]}]}`),
 	}, auths)
 	if err != nil || got == nil || got.ID != "profile-a" {
 		t.Fatalf("opaque subagent Pick() = %#v, %v, want parent's profile-a", got, err)
@@ -611,5 +611,28 @@ func TestBackendSeriesSelectorStopIsTerminalDuringPick(t *testing.T) {
 	selector.mu.Unlock()
 	if sessions != nil {
 		t.Fatal("Pick() after Stop recreated the session cache")
+	}
+}
+
+// The 2026-10-09 outage: every conversation Claude Code had run on a now-exhausted login carried
+// signed thinking, and the pool refused to move any of them. The API accepts (Opus, Fable) or
+// drops (Sonnet 5.5, Haiku 5.5) such blocks across accounts, so they must move like plain text.
+func TestBackendSeriesSelectorMovesSignedThinkingWhenBoundAuthUnavailable(t *testing.T) {
+	selector := &backendSeriesSelector{authIDs: []string{"profile-a", "profile-b"}, provider: "claude"}
+	t.Cleanup(selector.Stop)
+	authA := backendSeriesTestAuth("profile-a", "claude")
+	authB := backendSeriesTestAuth("profile-b", "claude")
+	headers := http.Header{"X-Claude-Code-Session-Id": []string{"session-signed-thinking"}}
+	if _, err := selector.Pick(t.Context(), "claude", "", coreexecutor.Options{
+		Headers: headers, OriginalRequest: []byte(`{"messages":[{"role":"user","content":"start"}]}`),
+	}, []*coreauth.Auth{authA, authB}); err != nil {
+		t.Fatal(err)
+	}
+	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 1, resetsAt: selector.now().Add(72 * time.Hour)})
+	got, err := selector.Pick(t.Context(), "claude", "", coreexecutor.Options{
+		Headers: headers, OriginalRequest: []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"opaque"},{"type":"text","text":"hi"}]},{"role":"user","content":"more"}]}`),
+	}, []*coreauth.Auth{authB})
+	if err != nil || got == nil || got.ID != "profile-b" {
+		t.Fatalf("signed-thinking continuation did not move off the exhausted account: got %#v, err %v", got, err)
 	}
 }

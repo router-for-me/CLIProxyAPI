@@ -3,6 +3,7 @@ package claudemaster
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,7 +30,7 @@ func (e *backendMarkedDirectError) ResponseBody() []byte         { return append
 func TestWriteBackendUpstreamErrorPreservesExplicitDirectResponse(t *testing.T) {
 	body := gzipBackendTestBody(t, []byte("first line\r\nsecond line\n"))
 	w := httptest.NewRecorder()
-	writeBackendNativeUpstreamError(w, &interfaces.ErrorMessage{
+	writeBackendNativeUpstreamError(context.Background(), w, &interfaces.ErrorMessage{
 		StatusCode:     http.StatusUnprocessableEntity,
 		DirectResponse: true,
 		Body:           body,
@@ -79,7 +80,7 @@ func TestWriteBackendNativeResultPreservesRawRepresentation(t *testing.T) {
 		"Content-Encoding": {"gzip"},
 		"Content-Length":   {fmt.Sprint(len(body))},
 	})
-	writeBackendNativeResult(w, body, nil)
+	writeBackendNativeResult(context.Background(), w, body, nil)
 
 	if !bytes.Equal(w.Body.Bytes(), body) {
 		t.Fatalf("native response body changed: got %x want %x", w.Body.Bytes(), body)
@@ -113,7 +114,7 @@ func TestWriteBackendUpstreamErrorFindsWrappedRequestTermination(t *testing.T) {
 		Body: body,
 	}
 	w := httptest.NewRecorder()
-	writeBackendNativeUpstreamError(w, &interfaces.ErrorMessage{
+	writeBackendNativeUpstreamError(context.Background(), w, &interfaces.ErrorMessage{
 		StatusCode: http.StatusBadGateway,
 		Error:      fmt.Errorf("wrapped: %w", direct),
 	})
@@ -137,7 +138,7 @@ func TestWriteBackendUpstreamErrorFindsMarkedDirectResponse(t *testing.T) {
 		body: body,
 	}
 	w := httptest.NewRecorder()
-	writeBackendNativeUpstreamError(w, &interfaces.ErrorMessage{
+	writeBackendNativeUpstreamError(context.Background(), w, &interfaces.ErrorMessage{
 		StatusCode: http.StatusInternalServerError,
 		Error:      errors.Join(errors.New("outer"), direct),
 	})

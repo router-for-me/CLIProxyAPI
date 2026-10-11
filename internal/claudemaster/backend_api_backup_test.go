@@ -27,7 +27,7 @@ func backendAPIBackupTestSelector(t *testing.T) (*backendSeriesSelector, []*core
 func backendAPIBackupTestOptions(session string, opaque bool) coreexecutor.Options {
 	body := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"hello"}]}`)
 	if opaque {
-		body = []byte(`{"model":"claude-test","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"private","signature":"opaque-state"}]}]}`)
+		body = []byte(`{"model":"claude-test","messages":[{"role":"assistant","content":[{"type":"compaction","content":"summary","signature":"opaque-state"}]}]}`)
 	}
 	return coreexecutor.Options{
 		Headers:         http.Header{"X-Claude-Code-Session-Id": {session}},
