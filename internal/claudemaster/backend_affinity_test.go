@@ -11,6 +11,10 @@ func TestNativeRequestRequiresAccountAffinity(t *testing.T) {
 		want bool
 	}{
 		{name: "plain conversation", body: `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]}]}`},
+		// A thread continuation moves like a person switching accounts: the new account answers 404
+		// thread_not_found and Claude Code replays the conversation with a create (docs/claude-master.md).
+		{name: "thread continuation moves like an account switch", body: `{"thread":{"type":"continue","previous_message_id":"msg_example"},"messages":[{"role":"user","content":"next"}]}`},
+		{name: "thread create is self contained", body: `{"thread":{"type":"create"},"messages":[{"role":"user","content":"hello"}]}`},
 		{name: "signed thinking moves with the conversation", body: `{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"opaque","signature":"sig"}]}]}`},
 		{name: "redacted thinking moves with the conversation", body: `{"messages":[{"role":"assistant","content":[{"type":"redacted_thinking","data":"ciphertext"}]}]}`},
 		{name: "signed thinking before a tool round", body: `{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}]}`},

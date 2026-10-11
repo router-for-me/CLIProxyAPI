@@ -785,6 +785,11 @@ func proxyControlPath(method, path string) bool {
 	if path == "/api/artifacts/mcp" || path == "/v1/code/mcp/ccr-artifacts" {
 		return true
 	}
+	// Claude Code's feature flags, evaluated remotely under its SDK client key (one segment): reviewed
+	// 2026-10-10 from the unlisted-route log, where it reappeared after every server restart. Not inference.
+	if key, ok := strings.CutPrefix(path, "/api/eval/"); ok {
+		return method == http.MethodPost && proxyControlID(key)
+	}
 	// Reviewed 2026-10-10 against every endpoint Claude Code 2.1.296 carries: settings, telemetry, onboarding,
 	// memory, plugins, frames, transcript sharing, voice, claude.ai MCP connectors, skills, design, the
 	// filestore reader and ultrareview's checks. None of them is inference the pool could serve; they belong
