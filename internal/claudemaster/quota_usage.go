@@ -38,56 +38,212 @@ type ClaudeWeeklyQuota struct {
 // sending the request.
 type ClaudeQuotaRequestFunc func(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error)
 
+// ClaudeFiveHourQuota is the five-hour (session) window. UsedFraction is in [0, 1]. ResetsAt is
+// zero when no window is open, which the usage endpoint reports as a null reset.
+type ClaudeFiveHourQuota struct {
+	UsedFraction float64
+	ResetsAt     time.Time
+}
+
 // FetchClaudeWeeklyQuota fetches and parses one subscription's weekly quota.
 // Only caller cancellation controls the established HTTP connection/body read.
 //
 // The callback owns authentication. This helper never accepts, stores, or logs
 // credential material.
 func FetchClaudeWeeklyQuota(ctx context.Context, auth *coreauth.Auth, do ClaudeQuotaRequestFunc) (ClaudeWeeklyQuota, bool, error) {
+	payload, err := fetchClaudeUsage(ctx, auth, do)
+	if err != nil {
+		return ClaudeWeeklyQuota{}, false, err
+	}
+	quota, known, errParse := ParseClaudeWeeklyQuota(payload)
+	if errParse != nil {
+		return ClaudeWeeklyQuota{}, false, fmt.Errorf("parse Claude quota response: %w", errParse)
+	}
+	return quota, known, nil
+}
+
+// fetchClaudeUsage returns one subscription's usage endpoint body, so one poll can be read for
+// every window it reports.
+func fetchClaudeUsage(ctx context.Context, auth *coreauth.Auth, do ClaudeQuotaRequestFunc) ([]byte, error) {
 	if ctx == nil {
-		return ClaudeWeeklyQuota{}, false, errors.New("Claude quota request requires a context")
+		return nil, errors.New("Claude quota request requires a context")
 	}
 	if auth == nil {
-		return ClaudeWeeklyQuota{}, false, errors.New("Claude quota request requires an account")
+		return nil, errors.New("Claude quota request requires an account")
 	}
 	if do == nil {
-		return ClaudeWeeklyQuota{}, false, errors.New("Claude quota request requires a callback")
+		return nil, errors.New("Claude quota request requires a callback")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, ClaudeOAuthUsageEndpoint, nil)
 	if err != nil {
-		return ClaudeWeeklyQuota{}, false, fmt.Errorf("create Claude quota request: %w", err)
+		return nil, fmt.Errorf("create Claude quota request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 
 	response, err := do(ctx, auth, request)
 	if err != nil {
-		return ClaudeWeeklyQuota{}, false, fmt.Errorf("fetch Claude quota: %w", err)
+		return nil, fmt.Errorf("fetch Claude quota: %w", err)
 	}
 	if response == nil || response.Body == nil {
-		return ClaudeWeeklyQuota{}, false, errors.New("fetch Claude quota: empty response")
+		return nil, errors.New("fetch Claude quota: empty response")
 	}
 
 	payload, errRead := io.ReadAll(io.LimitReader(response.Body, claudeQuotaMaxBodyBytes+1))
 	errClose := response.Body.Close()
 	if errRead != nil {
-		return ClaudeWeeklyQuota{}, false, fmt.Errorf("read Claude quota response: %w", errRead)
+		return nil, fmt.Errorf("read Claude quota response: %w", errRead)
 	}
 	if errClose != nil {
-		return ClaudeWeeklyQuota{}, false, fmt.Errorf("close Claude quota response: %w", errClose)
+		return nil, fmt.Errorf("close Claude quota response: %w", errClose)
 	}
 	if len(payload) > claudeQuotaMaxBodyBytes {
-		return ClaudeWeeklyQuota{}, false, errors.New("Claude quota response exceeds size limit")
+		return nil, errors.New("Claude quota response exceeds size limit")
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return ClaudeWeeklyQuota{}, false, fmt.Errorf("fetch Claude quota: unexpected HTTP status %d", response.StatusCode)
+		return nil, &claudeUsageStatusError{status: response.StatusCode, retryAfter: claudeRetryAfter(response.Header.Get("Retry-After"), time.Now())}
 	}
+	return payload, nil
+}
 
-	quota, known, errParse := ParseClaudeWeeklyQuota(payload)
-	if errParse != nil {
-		return ClaudeWeeklyQuota{}, false, fmt.Errorf("parse Claude quota response: %w", errParse)
+// claudeUsageStatusError is a usage request Anthropic answered with a non-2xx status, with the wait its
+// Retry-After asked for (zero without one).
+type claudeUsageStatusError struct {
+	status     int
+	retryAfter time.Duration
+}
+
+func (e *claudeUsageStatusError) Error() string {
+	if e.retryAfter > 0 {
+		return fmt.Sprintf("fetch Claude quota: unexpected HTTP status %d (retry after %s)", e.status, e.retryAfter.Round(time.Second))
 	}
-	return quota, known, nil
+	return fmt.Sprintf("fetch Claude quota: unexpected HTTP status %d", e.status)
+}
+
+// claudeRetryAfter reads a Retry-After value, delta-seconds or an HTTP date, as a wait from now.
+func claudeRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseUint(value, 10, 32); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	if date, err := http.ParseTime(value); err == nil && date.After(now) {
+		return date.Sub(now)
+	}
+	return 0
+}
+
+// ParseClaudeFiveHourQuota reads the five-hour window from the same shapes as the weekly one: a
+// limits row (top-level, or wrapped in rate_limits) whose kind or name is five_hour or 5h, else the
+// top-level five_hour object. Utilization is a percentage. A window with utilization and no reset
+// is reported with a zero ResetsAt: no window is open. Unknown valid schemas are not errors.
+func ParseClaudeFiveHourQuota(payload []byte) (ClaudeFiveHourQuota, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var root any
+	if err := decoder.Decode(&root); err != nil {
+		return ClaudeFiveHourQuota{}, false, err
+	}
+	if err := rejectTrailingJSON(decoder); err != nil {
+		return ClaudeFiveHourQuota{}, false, err
+	}
+	object, ok := root.(map[string]any)
+	if !ok {
+		return ClaudeFiveHourQuota{}, false, nil
+	}
+	var rows []any
+	if limits, okLimits := quotaMapValue(object, "limits"); okLimits {
+		rows = append(rows, limits)
+	}
+	if wrapped, okWrapped := quotaMapValue(object, "rate_limits"); okWrapped {
+		if rateLimits, okMap := wrapped.(map[string]any); okMap {
+			if limits, okLimits := quotaMapValue(rateLimits, "limits"); okLimits {
+				rows = append(rows, limits)
+			}
+		}
+	}
+	for _, limits := range rows {
+		if quota, found := fiveHourLimitsRow(limits); found {
+			return quota, true, nil
+		}
+	}
+	if legacy, okLegacy := quotaMapValue(object, "five_hour"); okLegacy {
+		if quota, okQuota := parseClaudeFiveHourCandidate(legacy); okQuota {
+			return quota, true, nil
+		}
+	}
+	return ClaudeFiveHourQuota{}, false, nil
+}
+
+func fiveHourLimitsRow(limits any) (ClaudeFiveHourQuota, bool) {
+	matches := func(name string, object map[string]any) bool {
+		if isFiveHourName(name) {
+			return true
+		}
+		for _, field := range []string{"kind", "type", "rate_limit_type", "limit_type", "name", "id", "key"} {
+			if value, present := quotaMapValue(object, field); present {
+				if text, okText := value.(string); okText && isFiveHourName(text) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	switch typed := limits.(type) {
+	case []any:
+		for _, value := range typed {
+			if object, ok := value.(map[string]any); ok && matches("", object) {
+				if quota, okQuota := parseClaudeFiveHourCandidate(object); okQuota {
+					return quota, true
+				}
+			}
+		}
+	case map[string]any:
+		names := make([]string, 0, len(typed))
+		for name := range typed {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if object, ok := typed[name].(map[string]any); ok && matches(name, object) {
+				if quota, okQuota := parseClaudeFiveHourCandidate(object); okQuota {
+					return quota, true
+				}
+			}
+		}
+	}
+	return ClaudeFiveHourQuota{}, false
+}
+
+func isFiveHourName(value string) bool {
+	switch strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(value))) {
+	case "five_hour", "5h":
+		return true
+	}
+	return false
+}
+
+func parseClaudeFiveHourCandidate(value any) (ClaudeFiveHourQuota, bool) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return ClaudeFiveHourQuota{}, false
+	}
+	utilizationValue, okUtilization := quotaMapValueAny(object, "utilization", "used_percent", "usage_percent", "utilization_percent", "percentage", "percent")
+	if !okUtilization {
+		return ClaudeFiveHourQuota{}, false
+	}
+	used, okUsed := parseQuotaNumber(utilizationValue)
+	if !okUsed || used < 0 {
+		return ClaudeFiveHourQuota{}, false
+	}
+	quota := ClaudeFiveHourQuota{UsedFraction: min(used/100, 1)}
+	if resetValue, okReset := quotaMapValueAny(object, "resets_at", "reset_at"); okReset && resetValue != nil {
+		reset, okTime := parseQuotaTime(resetValue)
+		if !okTime {
+			return ClaudeFiveHourQuota{}, false
+		}
+		quota.ResetsAt = reset
+	}
+	return quota, true
 }
 
 // ParseClaudeWeeklyQuota parses the current top-level limits rows, the legacy

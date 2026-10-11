@@ -98,8 +98,8 @@ func TestBackendQuotaPollingRetriesStartupFailureForAllSubscriptionsOnly(t *test
 	if len(calls) != len(selector.authIDs) {
 		t.Fatalf("quota requests included an API key or missing account: %#v", calls)
 	}
-	if backendQuotaPollInterval != time.Minute {
-		t.Fatalf("quota polling interval = %s, want one minute", backendQuotaPollInterval)
+	if backendQuotaPollInterval != 3*time.Minute {
+		t.Fatalf("quota polling interval = %s, want three minutes", backendQuotaPollInterval)
 	}
 }
 

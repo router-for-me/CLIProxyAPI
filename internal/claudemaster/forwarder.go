@@ -49,25 +49,29 @@ type localForwarder struct {
 	closed   bool
 	conns    map[net.Conn]struct{}
 	wg       sync.WaitGroup
+	// project names the launch's project (projectLabel) on each tunnel to the claude-master proxy,
+	// so its token counts can be split by project; empty sends none.
+	project string
 }
 
 // startLocalForwarder binds an ephemeral IPv4 loopback port. Whatever else on this box can reach the
 // port can also tunnel through it, which grants nothing it could not do directly; only the token
 // reaches the claude-master proxy.
-func startLocalForwarder(upstream upstreamDialer) (*localForwarder, error) {
+func startLocalForwarder(upstream upstreamDialer, project string) (*localForwarder, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, errors.New("cannot bind the local forwarder")
 	}
-	return serveLocalForwarder(listener, upstream), nil
+	return serveLocalForwarder(listener, upstream, project), nil
 }
 
 // serveLocalForwarder serves on listener, which it owns from here on.
-func serveLocalForwarder(listener net.Listener, upstream upstreamDialer) *localForwarder {
+func serveLocalForwarder(listener net.Listener, upstream upstreamDialer, project string) *localForwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &localForwarder{
 		listener: listener, token: rand.Text(), upstream: upstream,
 		dial: forwarderDial, ctx: ctx, cancel: cancel, conns: make(map[net.Conn]struct{}),
+		project: sanitizeProject(project),
 	}
 	f.server = &http.Server{
 		Handler: http.HandlerFunc(f.handle), BaseContext: func(net.Listener) context.Context { return ctx },
@@ -220,7 +224,7 @@ func (f *localForwarder) open(toMaster bool, address string) (net.Conn, net.Conn
 	if !toMaster {
 		return conn, conn, nil
 	}
-	tunnel, err := connectMaster(conn)
+	tunnel, err := connectMaster(conn, f.project)
 	if err != nil {
 		f.untrack(conn)
 		return nil, nil, err
@@ -228,10 +232,15 @@ func (f *localForwarder) open(toMaster bool, address string) (net.Conn, net.Conn
 	return tunnel, conn, nil
 }
 
-// connectMaster asks the claude-master proxy on conn for a tunnel to api.anthropic.com.
-func connectMaster(conn net.Conn) (net.Conn, error) {
+// connectMaster asks the claude-master proxy on conn for a tunnel to api.anthropic.com, naming the
+// launch's project when there is one (already sanitized: no CR or LF can reach the request).
+func connectMaster(conn net.Conn, project string) (net.Conn, error) {
 	authority := masterAPIHost + ":443"
-	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", authority, authority); err != nil {
+	extra := ""
+	if project != "" {
+		extra = projectHeader + ": " + project + "\r\n"
+	}
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", authority, authority, extra); err != nil {
 		return nil, err
 	}
 	reader := bufio.NewReader(conn)
