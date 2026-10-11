@@ -152,6 +152,35 @@ func AllModelsBlockedWithoutRetry(auth *Auth, now time.Time) bool {
 	return true
 }
 
+// AllModelsBlocked reports whether every model the credential can serve is
+// blocked by an active restriction (either timed cooldown or untimed block).
+func AllModelsBlocked(auth *Auth, now time.Time) bool {
+	if auth == nil {
+		return true
+	}
+	models := modelsForRegisteredAuth(auth.ID)
+	if len(models) == 0 {
+		for key, state := range auth.ModelStates {
+			if state == nil {
+				continue
+			}
+			if model := canonicalModelKey(key); model != "" {
+				models = append(models, model)
+			}
+		}
+	}
+	if len(models) == 0 {
+		return false
+	}
+	for _, model := range models {
+		blocked, _, _ := isAuthBlockedForModel(auth, model, now)
+		if !blocked {
+			return false
+		}
+	}
+	return true
+}
+
 func newCooldownView(scope, model string, next, now time.Time, quota QuotaState, statusMessage string, lastErr *Error) CooldownView {
 	remaining := next.Sub(now)
 	seconds := int64(remaining / time.Second)

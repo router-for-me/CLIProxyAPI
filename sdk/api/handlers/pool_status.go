@@ -38,6 +38,7 @@ type poolStatusProvider struct {
 	Accounts            []*poolStatusAccount `json:"accounts"`
 	coolingCount        int
 	unavailableCount    int
+	hasModelRestriction bool
 }
 
 // poolStatusAccount describes a single credential without leaking secrets or PII.
@@ -129,20 +130,7 @@ func (h *BaseAPIHandler) PoolStatus(c *gin.Context) {
 	now := time.Now()
 	sessionCounts := poolActiveSessionCounts(h.AuthManager, now)
 	auths := h.AuthManager.List()
-	// Count how many credentials share each identifier. Generic labels —
-	// the provider-level labels config API keys all carry, for example —
-	// would collapse several accounts onto the same auth_id, so colliding
-	// accounts fall back to the unique auth ID in the loop below.
-	prefCount := make(map[string]int, len(auths))
-	uniqCount := make(map[string]int, len(auths))
-	for _, a := range auths {
-		if a == nil {
-			continue
-		}
-		prefCount[poolAccountID(a)]++
-		uniqCount[sanitizePoolAuthID(strings.TrimSpace(a.ID))]++
-	}
-	providers := make(map[string]*poolStatusProvider)
+	byProvider := make(map[string][]*coreauth.Auth)
 	for _, a := range auths {
 		if a == nil {
 			continue
@@ -151,37 +139,58 @@ func (h *BaseAPIHandler) PoolStatus(c *gin.Context) {
 		if provider == "" {
 			provider = "unknown"
 		}
-		entry := providers[provider]
-		if entry == nil {
-			entry = &poolStatusProvider{}
-			providers[provider] = entry
+		byProvider[provider] = append(byProvider[provider], a)
+	}
+	providers := make(map[string]*poolStatusProvider, len(byProvider))
+	for provider, pAuths := range byProvider {
+		entry := &poolStatusProvider{}
+		providers[provider] = entry
+		prefCount := make(map[string]int, len(pAuths))
+		uniqCount := make(map[string]int, len(pAuths))
+		for _, a := range pAuths {
+			prefCount[poolAccountID(a)]++
+			uniqCount[sanitizePoolAuthID(strings.TrimSpace(a.ID))]++
 		}
-		account := buildPoolStatusAccount(a, now, sessionCounts)
-		if prefCount[account.AuthID] > 1 {
-			account.AuthID = disambiguatePoolAccountID(a, account.AuthID, prefCount, uniqCount)
-		}
-		entry.Accounts = append(entry.Accounts, account)
-		entry.Total++
-		entry.ActiveSessionsTotal += account.ActiveSessions
-		if account.Priority >= 0 {
-			entry.PrimaryTotal++
-			switch account.Status {
-			case "open":
-				entry.PrimaryOpen++
-			case "cooling":
-				entry.PrimaryCooling++
+		for _, a := range pAuths {
+			account := buildPoolStatusAccount(a, now, sessionCounts)
+			if prefCount[account.AuthID] > 1 {
+				account.AuthID = disambiguatePoolAccountID(a, account.AuthID, prefCount, uniqCount)
 			}
-		} else if account.Status == "open" {
-			entry.LastResortOpen++
-		}
-		if account.Status == "cooling" {
-			entry.coolingCount++
-		}
-		if account.Status == "unavailable" {
-			entry.unavailableCount++
-		}
-		if account.ResetsAt != nil && (entry.EarliestRecovery == nil || *account.ResetsAt < *entry.EarliestRecovery) {
-			entry.EarliestRecovery = account.ResetsAt
+			entry.Accounts = append(entry.Accounts, account)
+			entry.Total++
+			entry.ActiveSessionsTotal += account.ActiveSessions
+			if account.Priority >= 0 {
+				entry.PrimaryTotal++
+				switch account.Status {
+				case "open":
+					entry.PrimaryOpen++
+				case "cooling":
+					entry.PrimaryCooling++
+				}
+			} else if account.Status == "open" {
+				entry.LastResortOpen++
+			}
+			if account.Status == "cooling" {
+				entry.coolingCount++
+			}
+			if account.Status == "unavailable" {
+				entry.unavailableCount++
+			}
+			if len(account.ModelsCooling) > 0 || len(account.ModelsBlocked) > 0 {
+				entry.hasModelRestriction = true
+			}
+			if account.ResetsAt != nil && (entry.EarliestRecovery == nil || *account.ResetsAt < *entry.EarliestRecovery) {
+				entry.EarliestRecovery = account.ResetsAt
+			}
+			for _, resetStr := range account.ModelsCooling {
+				if resetStr == "" {
+					continue
+				}
+				if entry.EarliestRecovery == nil || resetStr < *entry.EarliestRecovery {
+					reset := resetStr
+					entry.EarliestRecovery = &reset
+				}
+			}
 		}
 	}
 	for _, entry := range providers {
@@ -195,7 +204,7 @@ func (h *BaseAPIHandler) PoolStatus(c *gin.Context) {
 		switch {
 		case open == 0:
 			entry.Status = "unavailable"
-		case entry.coolingCount > 0 || entry.unavailableCount > 0:
+		case entry.coolingCount > 0 || entry.unavailableCount > 0 || entry.hasModelRestriction:
 			entry.Status = "degraded"
 		default:
 			entry.Status = "healthy"
@@ -244,7 +253,6 @@ func buildPoolStatusAccount(auth *coreauth.Auth, now time.Time, sessionCounts ma
 	if len(views) == 0 {
 		return account
 	}
-	account.Status = "cooling"
 	var credential *coreauth.CooldownView
 	earliest := -1
 	for i := range views {
@@ -259,16 +267,19 @@ func buildPoolStatusAccount(auth *coreauth.Auth, now time.Time, sessionCounts ma
 			earliest = i
 		}
 	}
-	primary := credential
-	if primary == nil && earliest >= 0 {
-		primary = &views[earliest]
-	}
-	if primary != nil {
-		reason := poolCooldownReason(primary.Reason)
-		account.Reason = &reason
-		resetsAt := primary.RetryAt.UTC().Format(time.RFC3339)
-		account.ResetsAt = &resetsAt
-		account.RemainingSeconds = primary.RemainingSeconds
+	if credential != nil || coreauth.AllModelsBlocked(auth, now) {
+		account.Status = "cooling"
+		primary := credential
+		if primary == nil && earliest >= 0 {
+			primary = &views[earliest]
+		}
+		if primary != nil {
+			reason := poolCooldownReason(primary.Reason)
+			account.Reason = &reason
+			resetsAt := primary.RetryAt.UTC().Format(time.RFC3339)
+			account.ResetsAt = &resetsAt
+			account.RemainingSeconds = primary.RemainingSeconds
+		}
 	}
 	return account
 }

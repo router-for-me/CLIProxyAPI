@@ -246,6 +246,14 @@ func TestBuildPoolStatusAccountUntimedBlocks(t *testing.T) {
 			}},
 			wantStatus: "cooling",
 		},
+		{
+			name: "partial model timed cooldown stays open",
+			auth: &coreauth.Auth{ID: "u9", ModelStates: map[string]*coreauth.ModelState{
+				"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(time.Hour)},
+				"gpt-4": {},
+			}},
+			wantStatus: "open",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -351,5 +359,119 @@ func TestPoolStatusHandlerNoManager(t *testing.T) {
 	handler.PoolStatus(c)
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("PoolStatus without manager = %d, want 503", recorder.Code)
+	}
+}
+
+func TestPoolStatusDegradedWithPartialModelCooling(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	now := time.Now()
+	manager := coreauth.NewManager(nil, nil, nil)
+	ctx := context.Background()
+	auth := &coreauth.Auth{
+		ID:       "codex-cred-1",
+		Provider: "codex",
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5": {Unavailable: true, NextRetryAfter: now.Add(time.Hour)},
+			"gpt-4": {},
+		},
+	}
+	if _, err := manager.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	handler := &BaseAPIHandler{AuthManager: manager}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/pool/status", nil)
+	handler.PoolStatus(c)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var resp struct {
+		Providers map[string]struct {
+			Status           string  `json:"status"`
+			PrimaryOpen      int     `json:"primary_open"`
+			PrimaryCooling   int     `json:"primary_cooling"`
+			EarliestRecovery *string `json:"earliest_recovery"`
+			Accounts         []struct {
+				AuthID        string            `json:"auth_id"`
+				Status        string            `json:"status"`
+				ModelsCooling map[string]string `json:"models_cooling"`
+			} `json:"accounts"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	codex, ok := resp.Providers["codex"]
+	if !ok {
+		t.Fatal("missing codex provider")
+	}
+	if codex.Status != "degraded" {
+		t.Fatalf("provider status = %q, want degraded", codex.Status)
+	}
+	if codex.PrimaryOpen != 1 || codex.PrimaryCooling != 0 {
+		t.Fatalf("open/cooling = %d/%d, want 1/0", codex.PrimaryOpen, codex.PrimaryCooling)
+	}
+	if codex.EarliestRecovery == nil {
+		t.Fatal("earliest_recovery should be set for partial model cooldown")
+	}
+	if len(codex.Accounts) != 1 || codex.Accounts[0].Status != "open" {
+		t.Fatalf("account status = %v, want open", codex.Accounts)
+	}
+	if _, ok := codex.Accounts[0].ModelsCooling["gpt-5"]; !ok {
+		t.Fatalf("account missing gpt-5 in models_cooling: %v", codex.Accounts[0].ModelsCooling)
+	}
+}
+
+func TestPoolStatusPreservesCrossProviderLabels(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	ctx := context.Background()
+	auths := []*coreauth.Auth{
+		{ID: "openai-key-1", Provider: "openai", Label: "prod"},
+		{ID: "claude-key-1", Provider: "claude", Label: "prod"},
+	}
+	for _, a := range auths {
+		if _, err := manager.Register(ctx, a); err != nil {
+			t.Fatalf("Register(%s): %v", a.ID, err)
+		}
+	}
+
+	handler := &BaseAPIHandler{AuthManager: manager}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/pool/status", nil)
+	handler.PoolStatus(c)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var resp struct {
+		Providers map[string]struct {
+			Accounts []struct {
+				AuthID string `json:"auth_id"`
+			} `json:"accounts"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	openai, ok := resp.Providers["openai"]
+	if !ok || len(openai.Accounts) != 1 {
+		t.Fatalf("openai accounts = %v", resp.Providers["openai"])
+	}
+	if openai.Accounts[0].AuthID != "prod" {
+		t.Fatalf("openai auth_id = %q, want prod", openai.Accounts[0].AuthID)
+	}
+	claude, ok := resp.Providers["claude"]
+	if !ok || len(claude.Accounts) != 1 {
+		t.Fatalf("claude accounts = %v", resp.Providers["claude"])
+	}
+	if claude.Accounts[0].AuthID != "prod" {
+		t.Fatalf("claude auth_id = %q, want prod", claude.Accounts[0].AuthID)
 	}
 }
