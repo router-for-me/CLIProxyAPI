@@ -175,6 +175,10 @@ func nativeCompatibilitySmoke(t *testing.T, binary, mode string) {
 		t.Fatal(err)
 	}
 	proxyURL.Host = guardURL.Host
+	// The guard in front of the proxy is a plain HTTP server (it hands CONNECT to the proxy's own
+	// handler), while proxy.URL() is the real listener's https address. Native Claude must speak
+	// plain HTTP to the guard, or it attempts TLS against a server that is not TLS and hangs.
+	proxyURL.Scheme = guardURL.Scheme
 
 	// This is a test-process limit, not a production network timeout. Empty Env,
 	// an isolated config directory, disabled settings sources/MCP/hooks and no

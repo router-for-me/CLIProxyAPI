@@ -33,8 +33,11 @@ type profileMetadata struct {
 	AuthID   string `json:"auth_id"`
 }
 
-// ProfileLock serializes login, execution, and SDK token refresh for one profile.
-// Keep it open until the backend and native child have both stopped.
+// ProfileLock holds a profile for one claude-master process. A login holds it EXCLUSIVELY (it only
+// ever creates a profile that has no runners); runs and probes hold it SHARED, so any number of
+// Claude Code windows can use the same profile, coordinating their token refreshes through
+// lockRefresh (see profile_shared.go). Keep it open until the backend and native child have both
+// stopped.
 type ProfileLock struct {
 	dir  string
 	name string
@@ -78,9 +81,13 @@ func openProfileAt(root, name string, create bool) (*ProfileLock, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	how := unix.LOCK_SH
+	if create {
+		how = unix.LOCK_EX
+	}
+	if err := unix.Flock(fd, how|unix.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, errors.New("profile is already in use; wait for its current login or run to finish")
+		return nil, errors.New("profile is busy: it is being logged in, or a login is waiting on its runs; wait for it to finish")
 	}
 	return &ProfileLock{dir: dir, name: name, file: f}, nil
 }
@@ -126,6 +133,18 @@ func (l *ProfileLock) Profile() (Profile, error) {
 		return Profile{}, errors.New("profile metadata is invalid")
 	}
 	authDir := filepath.Join(current, "auth")
+	if meta.Provider != "claude" {
+		// Only the Claude credential has the cross-process refresh protocol. Any other provider
+		// keeps the old rule: one process per profile.
+		if err := unix.Flock(int(l.file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			return Profile{}, errors.New("this provider's profile cannot be shared; it is in use by another claude-master")
+		}
+	}
+	unlock, err := lockRefresh(context.Background(), authDir)
+	if err != nil {
+		return Profile{}, err
+	}
+	defer unlock()
 	if err := recoverStagedRefresh(authDir, meta.AuthID, meta.Provider); err != nil {
 		return Profile{}, err
 	}
