@@ -107,4 +107,12 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// HTTP2HealthCheckSeconds enables the HTTP/2 health check on the upstream connections the uTLS
+	// client opens for ChatGPT (Codex): after this many seconds without a frame, a PING is sent and the
+	// connection is closed if it is not acknowledged within 15 seconds, so a stream whose network path
+	// died silently fails instead of waiting for the client to give up. A live upstream acknowledges
+	// the PING, so silent reasoning is not cut.
+	// <= 0 disables the health check. Default is 0.
+	HTTP2HealthCheckSeconds int `yaml:"http2-health-check-seconds,omitempty" json:"http2-health-check-seconds,omitempty"`
 }

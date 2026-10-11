@@ -27,18 +27,13 @@ import (
 // request gets a dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
 	dialer proxy.Dialer
+	// http2ReadIdleTimeout enables the HTTP/2 health check (streaming.http2-health-check-seconds); 0 disables it.
+	http2ReadIdleTimeout time.Duration
 }
 
-// utlsHTTP2ReadIdleTimeout and utlsHTTP2PingTimeout turn on the HTTP/2 health check for the dedicated
-// uTLS connection: after ReadIdleTimeout without a frame the transport sends a PING, and closes the
-// connection if no PING ACK arrives within PingTimeout. Without it, a stream whose path stopped
-// delivering packets without a FIN or RST - which a NAT or a TCP-terminating proxy can leave behind,
-// and which TCP keepalive cannot see past - blocks its body read until the caller gives up. A silent
-// but live upstream acknowledges the PING, so long reasoning pauses are not cut.
-var (
-	utlsHTTP2ReadIdleTimeout = 30 * time.Second
-	utlsHTTP2PingTimeout     = 15 * time.Second
-)
+// utlsHTTP2PingTimeout bounds the wait for the ACK of an HTTP/2 health-check PING. A variable so tests
+// can shorten it.
+var utlsHTTP2PingTimeout = 15 * time.Second
 
 type closeConnectionBody struct {
 	io.ReadCloser
@@ -65,7 +60,7 @@ func (b *closeConnectionBody) Close() error {
 	return b.err
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string, http2ReadIdleTimeout time.Duration) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
@@ -75,7 +70,7 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 			dialer = proxyDialer
 		}
 	}
-	return &utlsRoundTripper{dialer: dialer}
+	return &utlsRoundTripper{dialer: dialer, http2ReadIdleTimeout: http2ReadIdleTimeout}
 }
 
 func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*tls.UConn, error) {
@@ -116,12 +111,12 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	if err != nil {
 		return nil, err
 	}
-	return roundTripUtlsConnection(req, tlsConn)
+	return roundTripUtlsConnection(req, tlsConn, t.http2ReadIdleTimeout)
 }
 
 // roundTripUtlsConnection selects the HTTP protocol before sending the request.
 // Empty ALPN is HTTP/1.1, including when a TLS-inspecting proxy omits ALPN.
-func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Response, error) {
+func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn, http2ReadIdleTimeout time.Duration) (*http.Response, error) {
 	closeConnection := func() error {
 		// The HTTP/1.1 transport may already have closed its non-pooled
 		// connection after reading the response or canceling the request.
@@ -134,7 +129,15 @@ func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Respo
 	var err error
 	switch protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol {
 	case "h2":
-		h2Transport := &http2.Transport{ReadIdleTimeout: utlsHTTP2ReadIdleTimeout, PingTimeout: utlsHTTP2PingTimeout}
+		h2Transport := &http2.Transport{}
+		if http2ReadIdleTimeout > 0 {
+			// Opt-in health check: after this long without a frame, send a PING and close the connection
+			// if it is not acknowledged, so a stream whose path died without a FIN or RST (a NAT or a
+			// TCP-terminating proxy that lost its far side) fails instead of blocking until the caller
+			// gives up. A live upstream acknowledges the PING, so silent reasoning is not cut.
+			h2Transport.ReadIdleTimeout = http2ReadIdleTimeout
+			h2Transport.PingTimeout = utlsHTTP2PingTimeout
+		}
 		h2Conn, errClientConn := h2Transport.NewClientConn(tlsConn)
 		if errClientConn != nil {
 			err = fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
@@ -415,7 +418,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL, utlsHTTP2HealthCheck(cfg))
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
@@ -439,4 +442,14 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		client.Timeout = timeout
 	}
 	return client
+}
+
+// utlsHTTP2HealthCheck returns the configured HTTP/2 health-check idle time for uTLS connections.
+// It is off unless streaming.http2-health-check-seconds is positive: a deadline on an established
+// upstream connection is an explicit operator choice.
+func utlsHTTP2HealthCheck(cfg *config.Config) time.Duration {
+	if cfg == nil || cfg.Streaming.HTTP2HealthCheckSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.Streaming.HTTP2HealthCheckSeconds) * time.Second
 }

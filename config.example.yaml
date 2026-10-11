@@ -222,6 +222,11 @@ requests:
   # streaming:
   #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
   #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+  #   # HTTP/2 health check for upstream ChatGPT (Codex) connections: after this many seconds without
+  #   # a frame, send a PING and close the connection if it is not acknowledged within 15s, so a
+  #   # stream whose network path died silently (e.g. behind a NAT or transparent proxy) fails
+  #   # instead of hanging. A live upstream acknowledges the PING, so silent reasoning is not cut.
+  #   http2-health-check-seconds: 30 # Default: 0 (disabled).
 
   # Optional payload configuration
   # payload:

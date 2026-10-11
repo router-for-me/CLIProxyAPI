@@ -15,6 +15,7 @@ import (
 	"time"
 
 	tls "github.com/refraction-networking/utls"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // deadPathConn models a connection whose far side stopped answering without a FIN or RST, as a NAT or
@@ -94,13 +95,15 @@ func newALPNTestConnectionThrough(t *testing.T, protocol string, handler http.Ha
 	return tlsConn, server.URL
 }
 
-// shortenUtlsHTTP2HealthCheck makes the health check ping after 100ms without a frame. The PING timeout
+// testHTTP2ReadIdle is the health-check idle time the tests enable. The PING timeout is shortened but
 // stays generous, so a slow ACK on a loaded machine cannot fail a healthy connection.
-func shortenUtlsHTTP2HealthCheck(t *testing.T) {
+const testHTTP2ReadIdle = 100 * time.Millisecond
+
+func shortenUtlsHTTP2PingTimeout(t *testing.T) {
 	t.Helper()
-	readIdle, ping := utlsHTTP2ReadIdleTimeout, utlsHTTP2PingTimeout
-	utlsHTTP2ReadIdleTimeout, utlsHTTP2PingTimeout = 100*time.Millisecond, time.Second
-	t.Cleanup(func() { utlsHTTP2ReadIdleTimeout, utlsHTTP2PingTimeout = readIdle, ping })
+	ping := utlsHTTP2PingTimeout
+	utlsHTTP2PingTimeout = time.Second
+	t.Cleanup(func() { utlsHTTP2PingTimeout = ping })
 }
 
 // sseUntilReleased writes one event, then holds the stream open and silent until release closes,
@@ -124,58 +127,75 @@ func sseUntilReleased(t *testing.T, release <-chan struct{}) http.Handler {
 	})
 }
 
-func TestUtlsHTTP2StreamFailsWhenThePathGoesDead(t *testing.T) {
-	shortenUtlsHTTP2HealthCheck(t)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	var path *deadPathConn
-	tlsConn, serverURL := newALPNTestConnectionThrough(t, "h2", sseUntilReleased(t, release), func(conn net.Conn) net.Conn {
-		path = newDeadPathConn(conn)
-		return path
-	})
-	req, errRequest := http.NewRequestWithContext(t.Context(), http.MethodPost, serverURL, strings.NewReader("{}"))
-	if errRequest != nil {
-		t.Fatal(errRequest)
-	}
-	resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn)
-	if errRoundTrip != nil {
-		t.Fatal(errRoundTrip)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	reader := bufio.NewReader(resp.Body)
-	if line, errRead := reader.ReadString('\n'); errRead != nil || !strings.Contains(line, "response.created") {
-		t.Fatalf("first line = %q, error = %v", line, errRead)
-	}
-	path.stall()
-	started := time.Now()
-	done := make(chan error, 1)
-	go func() {
-		_, errRead := reader.ReadString('\n')
-		for errRead == nil {
-			_, errRead = reader.ReadString('\n')
-		}
-		done <- errRead
-	}()
-	select {
-	case errRead := <-done:
-		if errRead == nil || errors.Is(errRead, http.ErrBodyReadAfterClose) {
-			t.Fatalf("read error = %v, want a lost-connection error", errRead)
-		}
-		t.Logf("dead path detected after %v: %v", time.Since(started), errRead)
-	case <-time.After(10 * time.Second):
-		t.Fatal("stream read still blocked on a dead path; the HTTP/2 health check did not close the connection")
+func TestUtlsHTTP2HealthCheckOnADeadPath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		readIdle time.Duration
+	}{
+		{"enabled fails the stream", testHTTP2ReadIdle},
+		{"disabled by default keeps waiting", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortenUtlsHTTP2PingTimeout(t)
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			var path *deadPathConn
+			tlsConn, serverURL := newALPNTestConnectionThrough(t, "h2", sseUntilReleased(t, release), func(conn net.Conn) net.Conn {
+				path = newDeadPathConn(conn)
+				return path
+			})
+			req, errRequest := http.NewRequestWithContext(t.Context(), http.MethodPost, serverURL, strings.NewReader("{}"))
+			if errRequest != nil {
+				t.Fatal(errRequest)
+			}
+			resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn, tc.readIdle)
+			if errRoundTrip != nil {
+				t.Fatal(errRoundTrip)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			reader := bufio.NewReader(resp.Body)
+			if line, errRead := reader.ReadString('\n'); errRead != nil || !strings.Contains(line, "response.created") {
+				t.Fatalf("first line = %q, error = %v", line, errRead)
+			}
+			path.stall()
+			done := make(chan error, 1)
+			go func() {
+				_, errRead := reader.ReadString('\n')
+				for errRead == nil {
+					_, errRead = reader.ReadString('\n')
+				}
+				done <- errRead
+			}()
+			if tc.readIdle == 0 {
+				// Several PING timeouts pass without a health check closing the connection.
+				select {
+				case errRead := <-done:
+					t.Fatalf("stream failed without the health check enabled: %v", errRead)
+				case <-time.After(3 * utlsHTTP2PingTimeout):
+				}
+				return
+			}
+			select {
+			case errRead := <-done:
+				if errRead == nil || errors.Is(errRead, http.ErrBodyReadAfterClose) {
+					t.Fatalf("read error = %v, want a lost-connection error", errRead)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("stream read still blocked on a dead path; the HTTP/2 health check did not close the connection")
+			}
+		})
 	}
 }
 
 func TestUtlsHTTP2HealthCheckKeepsASilentHealthyStream(t *testing.T) {
-	shortenUtlsHTTP2HealthCheck(t)
+	shortenUtlsHTTP2PingTimeout(t)
 	release := make(chan struct{})
 	tlsConn, _, serverURL := newALPNTestConnection(t, "h2", sseUntilReleased(t, release))
 	req, errRequest := http.NewRequestWithContext(t.Context(), http.MethodPost, serverURL, strings.NewReader("{}"))
 	if errRequest != nil {
 		t.Fatal(errRequest)
 	}
-	resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn)
+	resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn, testHTTP2ReadIdle)
 	if errRoundTrip != nil {
 		t.Fatal(errRoundTrip)
 	}
@@ -185,7 +205,7 @@ func TestUtlsHTTP2HealthCheckKeepsASilentHealthyStream(t *testing.T) {
 		t.Fatalf("first line = %q, error = %v", line, errRead)
 	}
 	// Ten health-check periods of silence: the server answers each PING, so the stream survives.
-	time.AfterFunc(10*utlsHTTP2ReadIdleTimeout, func() { close(release) })
+	time.AfterFunc(10*testHTTP2ReadIdle, func() { close(release) })
 	for {
 		line, errRead := reader.ReadString('\n')
 		if errRead != nil {
@@ -194,5 +214,31 @@ func TestUtlsHTTP2HealthCheckKeepsASilentHealthyStream(t *testing.T) {
 		if strings.Contains(line, "response.completed") {
 			return
 		}
+	}
+}
+
+func TestUtlsHTTP2HealthCheckIsConfiguredExplicitly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want time.Duration
+	}{
+		{"unset", "port: 8317\n", 0},
+		{"disabled", "streaming:\n  http2-health-check-seconds: 0\n", 0},
+		{"legacy layout", "streaming:\n  http2-health-check-seconds: 30\n", 30 * time.Second},
+		{"v8 layout", "requests:\n  streaming:\n    http2-health-check-seconds: 30\n", 30 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, errParse := config.ParseConfigBytes([]byte(tc.yaml))
+			if errParse != nil {
+				t.Fatal(errParse)
+			}
+			if got := utlsHTTP2HealthCheck(cfg); got != tc.want {
+				t.Fatalf("health-check idle time = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got := utlsHTTP2HealthCheck(nil); got != 0 {
+		t.Fatalf("health-check idle time without config = %v, want 0", got)
 	}
 }

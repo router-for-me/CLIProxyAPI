@@ -118,7 +118,7 @@ func TestUtlsRoundTripUsesNegotiatedProtocol(t *testing.T) {
 				if chunked {
 					req.ContentLength = -1
 				}
-				resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn)
+				resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn, 0)
 				if errRoundTrip != nil {
 					t.Fatal(errRoundTrip)
 				}
@@ -162,7 +162,7 @@ func TestUtlsRoundTripCancellationAfterHandshake(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() {
-				resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn)
+				resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn, 0)
 				if resp != nil {
 					errRoundTrip = errors.Join(errRoundTrip, resp.Body.Close())
 				}
@@ -204,7 +204,7 @@ func TestUtlsHTTP1FailureDoesNotReplayPost(t *testing.T) {
 	if errRequest != nil {
 		t.Fatal(errRequest)
 	}
-	resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn)
+	resp, errRoundTrip := roundTripUtlsConnection(req, tlsConn, 0)
 	if resp != nil {
 		if errClose := resp.Body.Close(); errClose != nil {
 			t.Errorf("close unexpected response: %v", errClose)
