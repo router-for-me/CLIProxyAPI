@@ -3,6 +3,7 @@ package claudemaster
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,7 @@ import (
 type meteredWriter struct {
 	gin.ResponseWriter
 	firstWrite time.Time
+	usage      usageScanner // the token usage in the body, read as it is written
 }
 
 func newMeteredWriter(w gin.ResponseWriter) *meteredWriter { return &meteredWriter{ResponseWriter: w} }
@@ -23,10 +25,27 @@ func (w *meteredWriter) mark() {
 	}
 }
 
-func (w *meteredWriter) Write(b []byte) (int, error) { w.mark(); return w.ResponseWriter.Write(b) }
+func (w *meteredWriter) Write(b []byte) (int, error) {
+	w.mark()
+	n, err := w.ResponseWriter.Write(b)
+	w.observeBody(b[:max(n, 0)])
+	return n, err
+}
+
 func (w *meteredWriter) WriteString(s string) (int, error) {
 	w.mark()
-	return w.ResponseWriter.WriteString(s)
+	n, err := w.ResponseWriter.WriteString(s)
+	w.observeBody([]byte(s[:max(n, 0)]))
+	return n, err
+}
+
+// observeBody feeds what reached the client to the usage scanner, which decides on the first
+// write, once the status and content type are final, whether and how to read the body.
+func (w *meteredWriter) observeBody(b []byte) {
+	if w.usage.mode == usageUndecided {
+		w.usage.start(w.Status(), w.Header().Get("Content-Type"), strings.Join(w.Header().Values("Content-Encoding"), ","))
+	}
+	w.usage.write(b)
 }
 func (w *meteredWriter) WriteHeaderNow() { w.mark(); w.ResponseWriter.WriteHeaderNow() }
 func (w *meteredWriter) Flush()          { w.mark(); w.ResponseWriter.Flush() }
@@ -40,7 +59,8 @@ func finishRequest(c *gin.Context, ctx context.Context, opts BackendOptions, w *
 	}
 	obs := requestObservation{
 		Route: route, Model: modelLabel(model), Client: clientFromContext(c.Request.Context()), Account: "unknown",
-		Stream: isStream, Status: w.Status(), Duration: time.Since(started),
+		Project: projectFromContext(c.Request.Context()),
+		Stream:  isStream, Status: w.Status(), Duration: time.Since(started),
 		ReqBytes: int64(len(raw)), RespBytes: int64(max(w.Size(), 0)),
 		// The headers the client is about to see: Anthropic's own rate-limit headers are forwarded on the
 		// response. (The executor keeps its own isolated copy, which is not readable from here.)
@@ -53,6 +73,7 @@ func finishRequest(c *gin.Context, ctx context.Context, opts BackendOptions, w *
 	if !w.firstWrite.IsZero() {
 		obs.TTFB = w.firstWrite.Sub(started)
 	}
+	obs.Tokens, obs.HasTokens = w.usage.result()
 	if attempt := backendRequestAttempt(ctx); attempt != nil {
 		attempt.mu.Lock()
 		route, pickedAt := attempt.route, attempt.pickedAt
