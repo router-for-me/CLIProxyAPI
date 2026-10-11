@@ -69,7 +69,7 @@ func TestBackendAPIBackupDoesNotMoveAccountBoundProviderState(t *testing.T) {
 			opts := backendAPIBackupTestOptions("provider-state-"+test.name, false)
 			requireBackendAPIBackupPick(t, selector, opts, auths, "subscription-a")
 			for _, id := range selector.authIDs {
-				selector.observeQuota(id, backendWeeklyQuota{known: true, used: 1, resetsAt: reset})
+				exhaustByAnthropic(selector, id, reset)
 			}
 			opts.OriginalRequest = []byte(test.body)
 			if got, err := selector.Pick(t.Context(), "claude", backendAuthSelectionModel, opts, auths); got != nil || err == nil {

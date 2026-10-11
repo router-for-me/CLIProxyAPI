@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -684,8 +685,6 @@ type backendSelector struct {
 	provider string
 }
 
-const backendWeeklyReserve = 0.10
-
 type backendWeeklyQuota struct {
 	known    bool
 	used     float64
@@ -698,9 +697,14 @@ type backendSeriesCandidate struct {
 	order int
 }
 
-// backendSeriesSelector drains the account whose weekly allocation resets
-// first. It keeps the last ten percent of an account for opaque continuations
-// whenever another account still has quota.
+// backendSeriesSelector picks the subscription for a request. The usage poll (and the weekly
+// figures in response headers) only ORDER the candidates: a subscription in its ok band before one in
+// its reserve band before one the poll calls exhausted, and within a band the one whose weekly
+// allocation resets first. The poll never refuses a request and never moves a conversation: Anthropic
+// served at a polled weekly 100% (2026-10-11, the same account native and through the pool), so the
+// figure is advisory and the enforcement point is Anthropic's answer to a real request. Only that
+// answer takes a subscription out: a 429 carrying anthropic-ratelimit-unified-status: rejected
+// (quotaBlockedUntil, for its retry-after or unified reset) or a dead login, which the core handles.
 type backendSeriesSelector struct {
 	mu                sync.Mutex
 	authIDs           []string
@@ -723,8 +727,11 @@ type backendSeriesSelector struct {
 	names       map[string]string // runtime auth id -> the profile's own name, for logs and metrics
 	quotaBands  map[string]string
 	rateLimited map[string]bool
-	stats       *selectorStats
-	limiter     *every
+	// overPoll: the poll band for which "Anthropic accepted a request the poll calls exhausted/reserve"
+	// was last logged per profile, so the line is written once per band change, not per request.
+	overPoll map[string]string
+	stats    *selectorStats
+	limiter  *every
 
 	// The API-key backup's health (backend_backup_health.go). Unknown until the first check, which runs at start.
 	backupChecked     bool
@@ -807,8 +814,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 				return picked, err
 			}
 			if bound := backendSeriesAuthByID(auths, s.provider, boundID); bound != nil {
-				available := backendSeriesAvailableAuths(ctx, s.provider, backendAvailabilityModel(model, opts), opts, auths)
-				if !switchable || !s.shouldMoveCleanWorkLocked(boundID, available) {
+				if !switchable || !s.shouldMoveCleanWorkLocked(boundID) {
 					picked, err := s.pickAuthLocked(ctx, model, opts, bound)
 					if err == nil && picked != nil {
 						if inheritedParent && opaque {
@@ -825,6 +831,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 					}
 					return picked, err
 				}
+				available := backendSeriesAvailableAuths(ctx, s.provider, backendAvailabilityModel(model, opts), opts, auths)
 				selected := s.preferredAvailableAuthLocked(available, boundID)
 				if selected == nil {
 					picked, err := s.pickAuthLocked(ctx, model, opts, bound)
@@ -844,9 +851,8 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 				}
 				// Manager-side model cooldowns and request-scoped failures also
 				// remove an auth from this candidate slice. They must not rotate a
-				// subscription; only the weekly reserve policy may move clean work.
-				quota := s.currentQuotaLocked(boundID)
-				if backendAttemptFailed(ctx, boundID, backendAvailabilityModel(model, opts)) || (!strings.HasPrefix(boundID, "missing:") && !s.quotaBlockedLocked(boundID) && (!quota.known || quota.used < 1)) {
+				// subscription; only Anthropic's own rejection (a real 429) moves clean work.
+				if backendAttemptFailed(ctx, boundID, backendAvailabilityModel(model, opts)) || (!strings.HasPrefix(boundID, "missing:") && !s.quotaBlockedLocked(boundID)) {
 					return nil, s.boundUnavailableErrorLocked(ctx, boundID, backendAvailabilityModel(model, opts))
 				}
 			}
@@ -859,7 +865,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 
 	selected := s.preferredAuthLocked(auths, excludedAuthID)
 	if selected == nil {
-		return nil, s.quotaRefusalLocked("ordered inference subscriptions are exhausted; no fallback is configured")
+		return nil, s.noSubscriptionRefusalLocked(ctx, excludedAuthID, backendAvailabilityModel(model, opts))
 	}
 	picked, err := s.pickAuthLocked(ctx, model, opts, selected)
 	if err != nil {
@@ -942,17 +948,30 @@ func backendSeriesSessionIDs(opts coreexecutor.Options) (sessionID, parentSessio
 	return sessionID, parentSessionID
 }
 
+// subscriptionsExhaustedLocked: every subscription is held back by Anthropic's own rejection of a real
+// request (a 429 whose retry-after or unified reset has not passed). A polled 100% does not count.
 func (s *backendSeriesSelector) subscriptionsExhaustedLocked() bool {
 	if len(s.authIDs) == 0 {
 		return false
 	}
 	for _, authID := range s.authIDs {
-		quota := s.currentQuotaLocked(authID)
-		if (!quota.known || quota.used < 1) && !s.quotaBlockedLocked(authID) {
+		if !s.quotaBlockedLocked(authID) {
 			return false
 		}
 	}
 	return true
+}
+
+// noSubscriptionRefusalLocked explains why no subscription was chosen. Either Anthropic has rejected
+// every candidate (a real 429 each, still in force): Anthropic's 429 with the earliest time one comes
+// back. Or the first candidate is held back by this request (an attempt that already failed, which the
+// session receives as Anthropic sent it) or by a cooldown: said as that, never as "exhausted".
+func (s *backendSeriesSelector) noSubscriptionRefusalLocked(ctx context.Context, excludedAuthID, model string) error {
+	ranked := s.rankedCandidatesLocked(nil, excludedAuthID, false)
+	if len(ranked) == 0 {
+		return s.quotaRefusalLocked("ordered inference subscriptions are all rate limited by Anthropic (HTTP 429); no fallback is configured")
+	}
+	return s.boundUnavailableErrorLocked(ctx, ranked[0].auth.ID, model)
 }
 
 func (s *backendSeriesSelector) pickBackupLocked(ctx context.Context, model string, opts coreexecutor.Options, auths []*coreauth.Auth, sessionID string) (*coreauth.Auth, error) {
@@ -964,7 +983,7 @@ func (s *backendSeriesSelector) pickBackupLocked(ctx context.Context, model stri
 		s.limiter = newEvery(time.Minute)
 	}
 	if s.limiter.allow("backup") {
-		lg().Warn("every subscription is exhausted or rate limited: using the paid API-key backup", "session", sessionTag(sessionID))
+		lg().Warn("every subscription is rate limited by Anthropic: using the paid API-key backup", "session", sessionTag(sessionID))
 	}
 	picked, err := s.pickAuthLocked(ctx, model, opts, backup)
 	if err == nil && sessionID != "" && picked != nil {
@@ -1010,11 +1029,10 @@ func (s *backendSeriesSelector) Stop() {
 }
 
 func (s *backendSeriesSelector) pickAuthLocked(ctx context.Context, model string, opts coreexecutor.Options, auth *coreauth.Auth) (*coreauth.Auth, error) {
-	if auth != nil && auth.ID != s.backupAuthID {
-		quota := s.currentQuotaLocked(auth.ID)
-		if s.quotaBlockedLocked(auth.ID) || (quota.known && quota.used >= 1) {
-			return nil, s.quotaRefusalLocked("the current Claude subscription quota is exhausted")
-		}
+	// Only Anthropic's own rejection of a real request holds a subscription back. A polled weekly 100%
+	// does not: the request goes to Anthropic, which decides (it served at that figure on 2026-10-11).
+	if auth != nil && auth.ID != s.backupAuthID && s.quotaBlockedLocked(auth.ID) {
+		return nil, s.blockedRefusalLocked(auth.ID)
 	}
 	return (&coreauth.FillFirstSelector{}).Pick(ctx, s.provider, backendAvailabilityModel(model, opts), opts, []*coreauth.Auth{auth})
 }
@@ -1028,27 +1046,11 @@ func backendSeriesAuthByID(auths []*coreauth.Auth, provider, authID string) *cor
 	return nil
 }
 
-func (s *backendSeriesSelector) shouldMoveCleanWorkLocked(boundID string, auths []*coreauth.Auth) bool {
-	if s.quotaBlockedLocked(boundID) {
-		return true
-	}
-	quota := s.currentQuotaLocked(boundID)
-	if !quota.known || quota.used < 1-backendWeeklyReserve {
-		return false
-	}
-	for _, auth := range auths {
-		if auth == nil || auth.Provider != s.provider || auth.ID == boundID || auth.ID == s.backupAuthID || s.quotaBlockedLocked(auth.ID) {
-			continue
-		}
-		other := s.currentQuotaLocked(auth.ID)
-		if !other.known || other.used < 1-backendWeeklyReserve {
-			return true
-		}
-	}
-	// Once every usable subscription is in reserve, drain the earliest reset
-	// instead of excluding the current binding and bouncing each clean turn.
-	preferred := s.preferredAvailableAuthLocked(auths, "")
-	return preferred != nil && preferred.ID != boundID
+// shouldMoveCleanWorkLocked: a conversation moves only when Anthropic has rejected its subscription
+// (a real 429 still in force). The poll's weekly figure, reserve band or 100%, never moves one: moving
+// costs the conversation its prompt cache, and Anthropic serves past the polled figure.
+func (s *backendSeriesSelector) shouldMoveCleanWorkLocked(boundID string) bool {
+	return s.quotaBlockedLocked(boundID)
 }
 
 func backendSeriesAvailableAuths(ctx context.Context, provider, model string, opts coreexecutor.Options, auths []*coreauth.Auth) []*coreauth.Auth {
@@ -1076,7 +1078,19 @@ func (s *backendSeriesSelector) preferredAvailableAuthLocked(auths []*coreauth.A
 }
 
 func (s *backendSeriesSelector) preferredAuthWithAvailabilityLocked(auths []*coreauth.Auth, excludedAuthID string, availableOnly bool) *coreauth.Auth {
-	available := make([]backendSeriesCandidate, 0, len(s.authIDs))
+	ranked := s.rankedCandidatesLocked(auths, excludedAuthID, availableOnly)
+	if len(ranked) == 0 {
+		return nil
+	}
+	return backendSeriesAuthByID(auths, s.provider, ranked[0].auth.ID)
+}
+
+// rankedCandidatesLocked is every configured subscription that Anthropic has not rejected (no real 429
+// in force), best first. The poll orders them and excludes none: ok band, then unknown, then reserve,
+// then what the poll calls exhausted; within a band, the earliest weekly reset first, then the
+// configured order.
+func (s *backendSeriesSelector) rankedCandidatesLocked(auths []*coreauth.Auth, excludedAuthID string, availableOnly bool) []backendSeriesCandidate {
+	ranked := make([]backendSeriesCandidate, 0, len(s.authIDs))
 	for order, authID := range s.authIDs {
 		if authID == excludedAuthID || s.quotaBlockedLocked(authID) {
 			continue
@@ -1084,37 +1098,29 @@ func (s *backendSeriesSelector) preferredAuthWithAvailabilityLocked(auths []*cor
 		if availableOnly && backendSeriesAuthByID(auths, s.provider, authID) == nil {
 			continue
 		}
-		available = append(available, backendSeriesCandidate{auth: &coreauth.Auth{ID: authID, Provider: s.provider}, quota: s.currentQuotaLocked(authID), order: order})
+		ranked = append(ranked, backendSeriesCandidate{auth: &coreauth.Auth{ID: authID, Provider: s.provider}, quota: s.currentQuotaLocked(authID), order: order})
 	}
-	if len(available) == 0 {
-		return nil
-	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if bi, bj := backendQuotaBandRank(ranked[i].quota), backendQuotaBandRank(ranked[j].quota); bi != bj {
+			return bi < bj
+		}
+		return backendQuotaBefore(ranked[i], ranked[j])
+	})
+	return ranked
+}
 
-	choose := func(allowReserve bool) *coreauth.Auth {
-		var best *backendSeriesCandidate
-		for i := range available {
-			item := &available[i]
-			if item.quota.known {
-				if item.quota.used >= 1 {
-					continue
-				}
-				if !allowReserve && item.quota.used >= 1-backendWeeklyReserve {
-					continue
-				}
-			}
-			if best == nil || backendQuotaBefore(*item, *best) {
-				best = item
-			}
-		}
-		if best == nil {
-			return nil
-		}
-		return backendSeriesAuthByID(auths, s.provider, best.auth.ID)
+// backendQuotaBandRank: lower is preferred. Unknown sits after ok (a measured allowance beats a guess)
+// and before reserve, as it always has.
+func backendQuotaBandRank(q backendWeeklyQuota) int {
+	switch quotaBand(q) {
+	case "ok":
+		return 0
+	case "unknown":
+		return 1
+	case "reserve":
+		return 2
 	}
-	if selected := choose(false); selected != nil {
-		return selected
-	}
-	return choose(true)
+	return 3
 }
 
 func backendQuotaBefore(a, b backendSeriesCandidate) bool {
@@ -1231,6 +1237,7 @@ func (s *backendSeriesSelector) OnResult(result coreauth.Result) {
 		if !s.quotaBlockedLocked(result.AuthID) {
 			delete(s.quotaBackoffLevel, result.AuthID)
 		}
+		s.noteAcceptedOverPollLocked(result.AuthID)
 		s.noteResultLocked(result, 0, time.Time{}, false)
 		return
 	}
@@ -1509,7 +1516,7 @@ func classifyBackendError(err error) BackendErrorStage {
 			strings.HasPrefix(prefix, "inference provider differs from the pinned profile"),
 			strings.HasPrefix(prefix, "inference provider differs from the ordered profiles"),
 			strings.HasPrefix(prefix, "active ordered inference account is unavailable;"),
-			strings.HasPrefix(prefix, "ordered inference subscriptions are exhausted;"):
+			strings.HasPrefix(prefix, "ordered inference subscriptions are all rate limited by Anthropic"):
 			return BackendErrorAuthSelection
 		}
 	}

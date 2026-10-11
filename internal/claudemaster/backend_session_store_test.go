@@ -114,7 +114,7 @@ func TestBackendSessionRoutesAPIBackupSameKeyRestoresDifferentKeyRefuses(t *test
 	first := backendPersistedSelector(t, credentials, auths, "synthetic-key-never-persisted")
 	reset := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, id := range first.authIDs {
-		first.observeQuota(id, backendWeeklyQuota{known: true, used: 1, resetsAt: reset})
+		exhaustByAnthropic(first, id, reset)
 	}
 	requireBackendAPIBackupPick(t, first, backendAPIBackupTestOptions("api-resume", false), auths, api.ID)
 	first.Stop()
@@ -208,6 +208,7 @@ func TestBackendSessionRoutesPendingAndPartialSuccessRemainSafeForSubset(t *test
 	reset := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
 	selector.observeQuota("runtime-a", backendWeeklyQuota{known: true, used: .95, resetsAt: reset})
 	selector.observeQuota("runtime-b", backendWeeklyQuota{known: true, used: .2, resetsAt: reset.Add(time.Hour)})
+	rejectByAnthropic(selector, "runtime-a", time.Hour)
 	ctx := withBackendAttempt(t.Context())
 	if picked, err := selector.Pick(ctx, "claude", backendAuthSelectionModel, opts, auths); err != nil || picked.ID != "runtime-b" {
 		t.Fatalf("handoff selection failed: %v %v", picked, err)
@@ -262,7 +263,9 @@ func TestBackendSessionRoutesParentEpochProtectsDelayedOpaqueChild(t *testing.T)
 	reset := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
 	selector.observeQuota("runtime-a", backendWeeklyQuota{known: true, used: .95, resetsAt: reset})
 	selector.observeQuota("runtime-b", backendWeeklyQuota{known: true, used: .2, resetsAt: reset.Add(time.Hour)})
+	rejectByAnthropic(selector, "runtime-a", time.Hour)
 	requireBackendAPIBackupPick(t, selector, parent, auths, "runtime-b")
+	liftRejection(selector, "runtime-a") // Anthropic's retry-after has passed
 	requireBackendAPIBackupPick(t, selector, child, auths, "runtime-a")
 	selector.Stop()
 	restarted := backendPersistedSelector(t, credentials, auths, "")
@@ -292,6 +295,7 @@ func TestBackendSessionRoutesCountDoesNotRebindAndActiveGenerationBlocksHandoff(
 	reset := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
 	selector.observeQuota("runtime-a", backendWeeklyQuota{known: true, used: .95, resetsAt: reset})
 	selector.observeQuota("runtime-b", backendWeeklyQuota{known: true, used: .2, resetsAt: reset.Add(time.Hour)})
+	rejectByAnthropic(selector, "runtime-a", time.Hour)
 	countCtx := withBackendAttempt(t.Context())
 	backendSetCountRequest(countCtx)
 	if picked, err := selector.Pick(countCtx, "claude", backendAuthSelectionModel, opts, auths); err != nil || picked.ID != "runtime-b" {

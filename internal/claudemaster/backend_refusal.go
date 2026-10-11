@@ -518,25 +518,43 @@ func backendAnthropicError(w http.ResponseWriter, status int, errorType, message
 	_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":%q,"message":%q}}`, errorType, message)
 }
 
-// earliestResetLocked: when the first of the pool's subscriptions gets its weekly quota back.
+// earliestResetLocked: when the first of the pool's subscriptions can be asked again. A subscription
+// Anthropic rejected comes back when Anthropic said (its retry-after or unified reset), whatever the
+// poll's weekly reset says; one not rejected is available now, so the polled reset only answers when no
+// subscription is under a rejection at all.
 func (s *backendSeriesSelector) earliestResetLocked() time.Time {
-	var earliest time.Time
+	var earliest, earliestPolled time.Time
 	for _, authID := range s.authIDs {
-		candidates := []time.Time{s.currentQuotaLocked(authID).resetsAt}
-		if until, blocked := s.quotaBlockedUntil[authID]; blocked {
-			candidates = append(candidates, until)
-		}
-		for _, at := range candidates {
-			if !at.IsZero() && (earliest.IsZero() || at.Before(earliest)) {
-				earliest = at
+		if until, blocked := s.quotaBlockedUntil[authID]; blocked && !until.IsZero() {
+			if earliest.IsZero() || until.Before(earliest) {
+				earliest = until
 			}
+			continue
 		}
+		if at := s.currentQuotaLocked(authID).resetsAt; !at.IsZero() && (earliestPolled.IsZero() || at.Before(earliestPolled)) {
+			earliestPolled = at
+		}
+	}
+	if earliest.IsZero() {
+		return earliestPolled
 	}
 	return earliest
 }
 
 func (s *backendSeriesSelector) quotaRefusalLocked(reason string) error {
 	return &backendRefusalError{kind: backendRefusalQuota, reason: reason, resetAt: s.earliestResetLocked()}
+}
+
+// blockedRefusalLocked: a subscription Anthropic rejected (a real 429, still in force) and that this
+// request cannot leave (opaque state bound to it): Anthropic's 429 again, until the time Anthropic gave.
+func (s *backendSeriesSelector) blockedRefusalLocked(authID string) error {
+	until := s.quotaBlockedUntil[authID]
+	return &backendRefusalError{
+		kind:    backendRefusalQuota,
+		reason:  fmt.Sprintf("subscription %s was rate limited by Anthropic (HTTP 429) until %s", s.profileNameLocked(authID), until.UTC().Format(time.RFC3339)),
+		resetAt: until,
+		authID:  authID,
+	}
 }
 
 var _ = strings.TrimSpace

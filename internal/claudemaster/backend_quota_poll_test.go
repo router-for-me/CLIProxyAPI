@@ -265,11 +265,13 @@ func TestBackendQuotaPollRechargeReturnsCleanAPIWorkToSubscription(t *testing.T)
 		auth, _ := manager.GetByID(id)
 		auths = append(auths, auth)
 		if id != selector.backupAuthID {
-			selector.observeQuota(id, backendWeeklyQuota{known: true, used: 1, resetsAt: now.Add(24 * time.Hour)})
+			exhaustByAnthropic(selector, id, now.Add(24*time.Hour))
 		}
 	}
 	plain := backendAPIBackupTestOptions("polled-recharge", false)
 	requireBackendAPIBackupPick(t, selector, plain, auths, "poll-api")
+	// Anthropic's rejection of poll-a has passed and the poll shows the week recharged.
+	liftRejection(selector, "poll-a")
 	loadBackendWeeklyQuotas(t.Context(), manager, selector, []string{"poll-a"}, func(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 		return backendQuotaPollResponse(0, now.Add(7*24*time.Hour)), nil
 	})

@@ -21,8 +21,8 @@ import (
 
 const defaultSnapshotInterval = 5 * time.Minute
 
-// reserveFraction is the share of a weekly allowance kept for continuations of conversations already on
-// that account (see shouldMoveCleanWorkLocked).
+// reserveFraction is where a polled weekly allowance enters its reserve band. The band only orders
+// candidates (rankedCandidatesLocked) and labels the gauges; it never refuses or moves anything.
 const reserveFraction = 0.9
 
 // selectorStats is what the selector counts between two snapshots.
@@ -74,7 +74,8 @@ func (s *backendSeriesSelector) profileName(authID string) string {
 	return s.profileNameLocked(authID)
 }
 
-// quotaBand names where a weekly allowance stands: ok, reserve (the kept-back last tenth) or exhausted.
+// quotaBand names where a polled weekly allowance stands: ok, reserve (the last tenth) or exhausted.
+// "exhausted" is what Anthropic's usage poll says, not a refusal: Anthropic decides on each request.
 func quotaBand(q backendWeeklyQuota) string {
 	switch {
 	case !q.known:
@@ -181,14 +182,12 @@ func (s *backendSeriesSelector) switchReasonLocked(fromID, toID string) string {
 	case s.backupAuthID != "" && fromID == s.backupAuthID:
 		return "subscription_capacity_returned"
 	case s.quotaBlockedLocked(fromID):
+		// Only Anthropic's rejection of a real request moves a conversation. When the poll agrees the
+		// week is used up, say so; otherwise it was another limit (the five-hour window, say).
+		if from := s.currentQuotaLocked(fromID); from.known && from.used >= 1 {
+			return "weekly_exhausted"
+		}
 		return "rate_limited"
-	}
-	from := s.currentQuotaLocked(fromID)
-	switch {
-	case from.known && from.used >= 1:
-		return "weekly_exhausted"
-	case from.known && from.used >= reserveFraction:
-		return "reserve_reached"
 	}
 	return "rebalanced"
 }
@@ -212,12 +211,35 @@ func (s *backendSeriesSelector) noteQuotaLocked(authID string, q backendWeeklyQu
 	s.quotaBands[authID] = band
 	name := s.profileNameLocked(authID)
 	lg().Debug("quota observed", "profile", name, "used_pct", usedPct(q), "resets_in", s.resetsIn(q))
+	if previous != band {
+		delete(s.overPoll, authID) // a new band: the next request Anthropic accepts above the poll is logged again
+	}
 	switch {
 	case previous == "" && band != "ok":
 		lg().Info("quota band", "profile", name, "band", band, "used_pct", usedPct(q), "resets_in", s.resetsIn(q))
 	case previous != "" && previous != band:
 		lg().Info("quota band changed", "profile", name, "from", previous, "to", band, "used_pct", usedPct(q), "resets_in", s.resetsIn(q))
 	}
+}
+
+// noteAcceptedOverPollLocked logs, once per profile per band, that Anthropic accepted a request on a
+// subscription its usage poll puts in the reserve band or calls exhausted. The pool used to refuse those
+// requests itself; Anthropic serves them, and this line is the evidence.
+func (s *backendSeriesSelector) noteAcceptedOverPollLocked(authID string) {
+	q := s.currentQuotaLocked(authID)
+	band := quotaBand(q)
+	if band != "exhausted" && band != "reserve" {
+		return
+	}
+	if s.overPoll == nil {
+		s.overPoll = make(map[string]string, len(s.authIDs))
+	}
+	if s.overPoll[authID] == band {
+		return
+	}
+	s.overPoll[authID] = band
+	lg().Info("Anthropic accepted a request on a subscription the usage poll calls "+band, "profile", s.profileNameLocked(authID),
+		"band", band, "used_pct", usedPct(q), "resets_in", s.resetsIn(q))
 }
 
 // noteResultLocked logs what a finished upstream call says about a profile. Only the status and the

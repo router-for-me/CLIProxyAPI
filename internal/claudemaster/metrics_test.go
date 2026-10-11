@@ -297,7 +297,7 @@ func TestRoutingEventsBecomeMetrics(t *testing.T) {
 	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 0.5, resetsAt: reset})
 	selector.observeQuota("profile-b", backendWeeklyQuota{known: true, used: 0.2, resetsAt: reset.Add(24 * time.Hour)})
 	requireBackendSeriesPickWith(t, selector, plainRequest("m-1"), auths, "profile-a")
-	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 0.95, resetsAt: reset})
+	exhaustByAnthropic(selector, "profile-a", reset)
 	requireBackendSeriesPickWith(t, selector, plainRequest("m-1"), auths, "profile-b")
 	selector.OnResult(backendSeriesQuotaResult("profile-b"))
 	rm := collect(t, reader)
@@ -305,7 +305,7 @@ func TestRoutingEventsBecomeMetrics(t *testing.T) {
 		sumOf(rm, "claude_master.routing.picks", map[string]string{"profile": "claude-ejc3"}) != 1 {
 		t.Error("picks were not counted per profile")
 	}
-	if got := sumOf(rm, "claude_master.routing.switches", map[string]string{"from": "claude-connor", "to": "claude-ejc3", "reason": "reserve_reached"}); got != 1 {
+	if got := sumOf(rm, "claude_master.routing.switches", map[string]string{"from": "claude-connor", "to": "claude-ejc3", "reason": "weekly_exhausted"}); got != 1 {
 		t.Errorf("the switch was counted %d times", got)
 	}
 	if sumOf(rm, "claude_master.quota.rate_limited", map[string]string{"profile": "claude-ejc3"}) != 1 {

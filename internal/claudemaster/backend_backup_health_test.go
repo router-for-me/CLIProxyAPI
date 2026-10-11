@@ -20,8 +20,8 @@ const creditRefusal = `{"type":"error","error":{"type":"invalid_request_error","
 // weekly-limit refusal (Anthropic's 429) and waits, instead of the backup's credit error.
 func TestExhaustedPoolSkipsABackupThatCannotPay(t *testing.T) {
 	selector, auths, reset := backendAPIBackupTestSelector(t)
-	selector.observeQuota("subscription-a", backendWeeklyQuota{known: true, used: 1, resetsAt: reset})
-	selector.observeQuota("subscription-b", backendWeeklyQuota{known: true, used: 1, resetsAt: reset.Add(time.Hour)})
+	exhaustByAnthropic(selector, "subscription-a", reset)
+	exhaustByAnthropic(selector, "subscription-b", reset.Add(time.Hour))
 	requireBackendAPIBackupPick(t, selector, backendAPIBackupTestOptions("funded", false), auths, "api-backup")
 
 	selector.setBackupHealth(false, "credit balance too low")
