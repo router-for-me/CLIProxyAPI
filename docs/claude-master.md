@@ -36,9 +36,13 @@ parse/rebuild, or synthesize SSE events. HTTP
 hop-by-hop fields and connection framing are necessarily regenerated for the local
 connection.
 
-Known control and Remote Control routes continue to Anthropic with the master login.
-Unknown Anthropic routes fail closed instead of accidentally using the master account
-for inference. There is no Bedrock or master-account inference fallback. An explicitly
+Inference (`POST /v1/messages`, `POST /v1/messages/count_tokens`) goes to the pool. Every other
+Anthropic route goes to Anthropic unchanged, on the session's own login, exactly as Claude Code
+would send it without claude-master: compatibility comes first, so a new Claude Code release that
+calls a new endpoint keeps working. claude-master adds no credential to these requests, so relaying
+them grants nothing. A route not in the reviewed list (`proxyControlPath`) is logged once per shape
+(`relayed an unlisted Anthropic route`, method and path with ids replaced). Only an ambiguous or
+encoded path, or the pool's own routes with the wrong method, are refused. There is no Bedrock or master-account inference fallback. An explicitly
 provided Anthropic API key can serve as the final backup after subscription quota is
 exhausted; without one, inference stays subscription-only.
 
@@ -156,6 +160,13 @@ standard API-key variable and removes it from native startup, so Claude Code con
 to use its normal subscription login and Remote Control. An explicit file or environment
 source overrides the optional dedicated environment variable.
 
+The backup is used only while it can pay. claude-master checks it at start and every five minutes with a
+token count (not billed; an organization with no credit is refused there too), and marks it unavailable at
+once when a real request to it is refused for credit. While it is unavailable the pool behaves as if there
+were no backup: a session gets Anthropic's weekly-limit 429 with `retry-after` and waits, instead of the
+credit error. The next check that passes brings it back. The log says each change (`API-key backup
+available` / `unavailable`) and the routing summary carries `backup=`.
+
 ### Optional exact model mappings
 
 Use repeatable `--map INCOMING:TARGET` options before `--` to change a model explicitly:
@@ -205,8 +216,13 @@ it does not turn a five-hour rejection into exhausted weekly usage. Request-scop
 model-scoped, authentication, validation, and transport failures do not drain or rotate
 the account.
 
-After startup, the usage API is polled every 60 seconds for all subscription profiles,
-never the API-key backup. This retries failed startup reads and picks up weekly resets,
+After startup, the usage API is polled about every 3 minutes (each round jittered 20% either
+way) for all subscription profiles, never the API-key backup. The profiles do not ask at once:
+each waits its own fixed phase after the round starts, spread across the first half of the
+interval. Anthropic limits this endpoint per account (polled every minute, every other request
+was refused with 429), so a 429 holds that profile's poll back for its `Retry-After`, or one
+more interval without one, at most 15 minutes. Busy profiles are also updated from every
+inference response's rate-limit headers; the poll keeps idle ones and reset times current. This retries failed startup reads and picks up weekly resets,
 quota grants, and usage from other processes. Accounts are queried independently, with
 at most one usage request in flight per account, so a stalled account does not stop
 the others from updating. Failed or unknown responses keep the last known quota.
@@ -237,10 +253,10 @@ configured order and subsequently observed rate-limit headers.
 
 ## Payload-based continuation affinity
 
-Claude's Messages API receives the complete active context on each request. Prompt
-caching changes server work and billing, not the request into an opaque session handle.
-After compaction, Claude Code sends the compacted active context rather than all
-discarded history.
+Claude's Messages API receives the complete active context on each request, except for a
+thread continuation (below). Prompt caching changes server work and billing, not the request
+into an opaque session handle. After compaction, Claude Code sends the compacted active context
+rather than all discarded history.
 
 The selector therefore inspects the request body itself; it does not depend on a
 version-specific "compaction happened" header. Ordinary text plus client-side
@@ -303,6 +319,30 @@ Any upstream SSE error
 remains exactly the event Claude Code received, and routing changes can affect only a
 later request.
 
+### Server-side threads (`thread`, `previous_message_id`)
+
+Claude Code 2.1.29x sends most turns as a thread continuation: `thread: {"type": "continue",
+"previous_message_id": ...}` with only the messages after that one, and Anthropic supplies the
+rest from the thread it keeps for the account that served the earlier turns. A continuation
+that reaches an account without that thread, or after the thread has expired, is answered 404
+`not_found_error` "No thread state was found for the requested `previous_message_id`" (details
+`error_code: thread_not_found`). Claude Code then resends the whole conversation with
+`thread: {"type": "create"}` and the turn succeeds; its debug log shows
+`[tether] forcing create for retry: replay_not_found`.
+
+claude-master does not pin a conversation to its account for `thread`, and does not hide the 404:
+it behaves as if the person had switched accounts, and Claude Code's own replay is how a client
+recovers from that. The 404 is relayed as sent (logged as `upstream error` at warn and
+`request ended with Anthropic's error, relayed as sent` at info).
+
+Most of these 404s are expiry, not moves. Measured on 2026-10-11 through the pool, one Claude Code
+process with two turns on the same subscription: a 290-second pause continued the thread; a
+400-second pause got the 404 and the replay. Claude Code decides when a thread has expired from
+its feature flags, which it fetches on the person's own login, while the thread lives on the
+pooled subscription; it still sent a continuation at 400 seconds. So a turn after a pause of
+more than about five minutes costs one fast 404 round trip. The replay sends what a fresh
+create would have sent anyway, and no turn fails.
+
 ## Profiles and process boundaries
 
 - Profiles live under `~/.local/share/claude-master/profiles/` in private directories.
@@ -319,8 +359,9 @@ later request.
   - a 401 adopts a newer saved credential, or rotates under the lock (at most once per 30 seconds
     per launcher), then retries once before any response is exposed;
   - a save never writes older tokens over newer ones;
-  - the usage poll is served from a short-lived cache file (`auth.usage`, 45 s) when another
-    launcher fetched it, so N launchers make about one usage request a minute per account.
+  - the usage poll is served from a short-lived cache file (`auth.usage`, 2 minutes, shorter
+    than the shortest jittered interval) when another launcher fetched it, so N launchers make about
+    one usage request per interval per account.
   The kernel releases the lock when its holder dies, so a crashed launcher cannot wedge the rest.
   Conversation routing records are one file per session and need no coordination. A Codex profile
   keeps the old rule of one launcher at a time.
@@ -449,6 +490,9 @@ claude-master connect --server 10.0.0.10:8443 --dir ~/.config/claude-master -- -
 - The server accepts `CONNECT` only from a certificate-bearing client, and terminates TLS only
   for `api.anthropic.com`, exactly as a local launch does.
 
+**Running the shared server on AWS:** [claude-master-aws.md](claude-master-aws.md) walks through it, with a working
+Terraform example in [`examples/claude-master-aws`](../examples/claude-master-aws).
+
 ### Clients that arrive through a tunnel (no certificate)
 
 A client certificate is the right credential between machines you control. For a machine that is
@@ -476,6 +520,22 @@ claude-master connect --open 127.0.0.1:8444 --ca ca.pem -- --remote-control
 - **A tunnel that is down is reported clearly** (nothing listening, or not a claude-master proxy)
   instead of as a hang inside Claude.
 - Defaults come from `CLAUDE_MASTER_OPEN` and `CLAUDE_MASTER_CA`.
+
+### Stopping and rolling restarts
+
+A stopping server drains: requests already running get up to `--drain-timeout` (default 60s) to
+finish before they are cancelled, and a cancelled request is answered with a retryable `529
+overloaded_error`, never a 499, so Claude Code retries it. Keep the service manager's stop timeout
+(systemd `TimeoutStopSec`, default 90s) above the drain timeout.
+
+For restarts no session notices, run two servers behind a TCP load balancer on the same box (for
+example Envoy with a `tcp_proxy` listener on the client-facing address) and pass `--balanced` to
+both. A rollout starts the idle server, points the balancer's new connections at it, then stops the
+old one. A `--balanced` server that is draining keeps serving the connections it already has, and
+each response closes its connection, so the client's next request opens a new connection, which the
+balancer sends to the new server. Give the two servers distinct `--instance` names so their metrics
+stay apart, and the same `--state-dir`: the CA and the server certificate are shared, and the
+certificate must name the address clients dial (listen on that address with another port).
 
 ## Logging
 
@@ -509,9 +569,14 @@ backs that discipline up by masking secret-shaped keys and values.
 
 ## Metrics (OpenTelemetry)
 
+> An overview of what the metrics answer, example CloudWatch queries and alarm suggestions are in
+> [claude-master-aws.md](claude-master-aws.md#metrics-at-a-glance). The reference below is the full catalogue.
+
 `serve` and `run` can export metrics over OTLP/HTTP to anything that accepts it (a CloudWatch agent, an
 OpenTelemetry Collector): `--otlp-endpoint http://127.0.0.1:4318 --otlp-interval 30s`. Nothing in claude-master
-is specific to a cloud.
+is specific to a cloud. Every metric carries the resource attributes `service.name` (`claude-master`) and
+`service.instance.id`, which is `--instance NAME` or by default the hostname, so several servers exporting to one
+backend stay apart.
 
 ```bash
 # which dashboard key is which Anthropic account? (the account id is never exported, only this key)
@@ -519,6 +584,10 @@ claude-master account-key 11111111-2222-3333-4444-555555555555     # -> acct-666
 # give an account a readable name in every dashboard
 claude-master serve ... --account-label 11111111-2222-3333-4444-555555555555=colton --account-labels-file labels.txt
 ```
+
+`serve` looks at `--account-labels-file` every minute and, when the file has changed (replace it with a rename),
+loads it again and swaps the labels in: no restart. A file with a line that is not `ACCOUNT_UUID=NAME` is not
+loaded; the labels already in use stay and the log says why.
 
 **Dimensions.** `profile` (the subscription profile's own name, or `api-backup`), `client` (the connecting box's
 certificate name, `tunnel` on the open listener), **`client_account`** (the INCOMING user's Anthropic account: your
@@ -536,9 +605,10 @@ from its credential file name (those carry the account's email address).
 | `claude_master.proxy.overhead` {profile} | histogram ms | claude-master's own added time (request in to account chosen) |
 | `claude_master.inference.duration_quantile` {profile, quantile 0.5/0.95/0.99} | gauge ms | recent p50/p95/p99, so CloudWatch can chart percentiles |
 | `claude_master.inference.errors` {profile, status, client_account} | counter | Anthropic errors by status |
+| `claude_master.inference.tokens` {profile, type}, `.tokens.by_client_account` {client_account, type}, `.tokens.by_client` {client, type}, `.tokens.by_project` {project, type} | counter | tokens each subscription (or `api-backup`) served, each user used, each box carried and each project asked for (`project` is the name of the git repository a launch was started in, or of its directory, sent by the launch's forwarder on its tunnel; `none` without one, `other` past 100 names per process); `type` is `input`, `output`, `cache_read` or `cache_creation` (input excludes the cache fields, output includes thinking), from the usage Anthropic reports in each successful response |
 | `claude_master.inference.request_bytes`, `.response_bytes` {profile} | histogram | sizes |
 | `claude_master.quota.used_fraction`, `.resets_in_seconds`, `.rate_limited_for_seconds`, `.band` {profile} | gauge | each subscription's weekly allowance, when it resets, any cooldown, band (0 ok, 1 reserve, 2 exhausted, -1 unknown) |
-| `claude_master.quota.five_hour.used_fraction`, `.five_hour.resets_in_seconds` {profile} | gauge | each subscription's five-hour window from the usage poll (about once a minute, idle or not); 0 once the window has reset, and no countdown while no window is open |
+| `claude_master.quota.five_hour.used_fraction`, `.five_hour.resets_in_seconds` {profile} | gauge | each subscription's five-hour window from the usage poll (about every 3 minutes, idle or not); 0 once the window has reset, and no countdown while no window is open |
 | `claude_master.anthropic.ratelimit` {profile, window, measure} | gauge | EVERY `Anthropic-Ratelimit-*` header: windows `5h`, `7d`, `api`; measures `utilization`, `resets_in_seconds`, `remaining`, `limit` ... |
 | `claude_master.anthropic.ratelimit.state` {profile, window, measure, value} | counter | status words: `allowed`, `allowed_warning`, `rejected` |
 | `claude_master.routing.picks` {profile}, `.switches` {from, to, reason}, `.backup_requests`, `.pick_duration` | counter / histogram | routing and failover |
@@ -556,7 +626,8 @@ attributes (a test enforces it). You can still split by any one axis, and `infer
 profile x account x status; what you give up is the full cross-product (say, one model on one box for one user).
 Through the CloudWatch agent: counters arrive as deltas (a Sum is a count), histograms as approximate statistic
 sets (Sum, SampleCount and Min/Max, no percentiles: use `inference.duration_quantile`), and the resource's
-`service.name` is an extra dimension.
+`service.name` and `service.instance.id` are extra dimensions (a query that names a metric's exact dimension set,
+such as a Metrics Insights `SCHEMA(...)`, includes both).
 
 **Bounded by design.** The model and the user's account come from the client's request, so neither is used as
 written. A `model` must look like a Claude model name (it contains `claude`) and at most 64 distinct ones are
@@ -564,5 +635,10 @@ kept; at most 256 unlabelled accounts are kept; everything else is `other` (or `
 accounts are bounded by your labels file. A client cannot create series, or put text of its own in a metric or
 a log, by choosing a model or an account.
 
-Not exported: token counts per request (the stream is forwarded untouched and never parsed), tokens, bodies, URLs,
-account ids, upstream error text.
+**Token counts** are read from the usage Anthropic reports in each successful response, on the bytes' way to the
+client, without changing them: in a stream, `message_start` and then the cumulative `message_delta`; in a JSON
+answer, its `usage` object. Only usage-sized stream lines and the last 64 KiB of a JSON answer are held while
+reading. `count_tokens` is a question, not consumption, and is not counted. The paid API-key backup's tokens are
+under `profile=api-backup`, so its cost can be derived.
+
+Not exported: credentials, bodies, URLs, account ids, upstream error text.

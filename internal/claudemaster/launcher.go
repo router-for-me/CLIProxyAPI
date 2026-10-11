@@ -169,7 +169,8 @@ func LaunchProfilesWithOptions(ctx context.Context, profiles []Profile, args []s
 // runThroughForwarder puts a local forwarder in front of the claude-master proxy that upstream
 // reaches, gives Claude the forwarder as its proxy, and runs Claude until it exits.
 func runThroughForwarder(ctx context.Context, bin string, args, environ []string, caPath string, upstream upstreamDialer) (int, error) {
-	forwarder, err := startLocalForwarder(upstream)
+	cwd, _ := os.Getwd()
+	forwarder, err := startLocalForwarder(upstream, projectLabel(cwd))
 	if err != nil {
 		return 1, err
 	}
@@ -205,7 +206,7 @@ func newInferenceBackend(ctx context.Context, profiles []Profile, opts LaunchOpt
 	for _, profile := range profiles {
 		credentials = append(credentials, BackendCredential{AuthDir: profile.AuthDir, Provider: profile.Provider, AuthID: profile.AuthID, Name: profile.Name})
 	}
-	return NewBackendSeries(ctx, BackendSeriesOptions{Credentials: credentials, BackupAPIKey: opts.BackupAPIKey, ModelMap: opts.ModelMap, SnapshotInterval: opts.SnapshotInterval})
+	return NewBackendSeries(ctx, BackendSeriesOptions{Credentials: credentials, BackupAPIKey: opts.BackupAPIKey, CheckBackupCredit: true, ModelMap: opts.ModelMap, SnapshotInterval: opts.SnapshotInterval})
 }
 
 // runNativeChild runs the native Claude with its prepared environment and returns its exit code.

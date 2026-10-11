@@ -27,10 +27,14 @@ type ServeOptions struct {
 	// SnapshotInterval is how often the quota and proxy summaries are logged (default 5 minutes).
 	SnapshotInterval time.Duration
 	// DrainTimeout is how long a stopping server lets running requests finish before it cancels
-	// them (default 60 seconds; systemd's default stop timeout is 90).
+	// them (default 60 seconds; systemd's default stop timeout is 90, so raise TimeoutStopSec with it).
 	DrainTimeout time.Duration
-	StateDir     string    // the server's CA lives here (private, 0700)
-	Out          io.Writer // one status line; never a secret
+	// Balanced says a load balancer in front stops sending new connections here once a rollout
+	// begins: a draining server then serves requests on its existing connections, each closing its
+	// connection, instead of answering them with a retryable 529.
+	Balanced bool
+	StateDir string    // the server's CA lives here (private, 0700)
+	Out      io.Writer // one status line; never a secret
 }
 
 // Serve runs the proxy for other boxes until ctx ends. The caller holds every profile lock.
@@ -62,7 +66,8 @@ func Serve(ctx context.Context, profiles []Profile, opts ServeOptions) error {
 		return err
 	}
 	defer func() { _ = proxy.Close() }()
-	lg().Info("claude-master server started", "listen", proxy.Addr(), "open_loopback", proxy.OpenAddr(), "api_backup", opts.BackupAPIKey != "")
+	proxy.setBalanced(opts.Balanced)
+	lg().Info("claude-master server started", "listen", proxy.Addr(), "open_loopback", proxy.OpenAddr(), "api_backup", opts.BackupAPIKey != "", "balanced", opts.Balanced)
 	summaryDone := startProxySummary(ctx, proxy, opts.SnapshotInterval)
 	defer func() { <-summaryDone; lg().Info("claude-master server stopped") }()
 	if opts.Out != nil {

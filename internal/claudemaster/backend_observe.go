@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -30,6 +31,7 @@ type selectorStats struct {
 	switches  uint64
 	backup    uint64
 	refusals  uint64
+	relayed   uint64 // requests that ended with Anthropic's own error, which the session receives as sent
 	rateLimit uint64
 }
 
@@ -124,11 +126,23 @@ func (s *backendSeriesSelector) noteSelection(sessionID, model string, picked *c
 	defer s.mu.Unlock()
 	stats := s.statsLocked()
 	if err != nil {
-		stats.refusals++
-		// The messages are this package's own fixed sentences, never upstream text.
 		if s.limiter == nil {
 			s.limiter = newEvery(time.Minute)
 		}
+		// Anthropic answered with an error and the session receives it as sent: the pool did have an
+		// account. Logged apart from a real refusal, so the NoAccountAvailable alarm (a metric filter on
+		// the refusal line) fires only when no account could take the request. Before this, Anthropic's
+		// own 404s on the scheduler's retry held that alarm in ALARM (2026-10-10).
+		var refusal *backendRefusalError
+		if errors.As(err, &refusal) && refusal.relayed {
+			stats.relayed++
+			if s.limiter.allow("relayed:" + err.Error()) {
+				lg().Info("request ended with Anthropic's error, relayed as sent", "session", sessionTag(sessionID), "model", modelLabel(model), "reason", err.Error())
+			}
+			return
+		}
+		stats.refusals++
+		// The messages are this package's own fixed sentences, never upstream text.
 		if s.limiter.allow("refusal:" + err.Error()) {
 			lg().Warn("no inference account could be chosen", "session", sessionTag(sessionID), "model", modelLabel(model), "reason", err.Error())
 		}
@@ -283,7 +297,7 @@ func (s *backendSeriesSelector) logSnapshot(interval time.Duration) {
 	}
 	sort.Strings(names)
 	attrs := []any{"interval", interval.String(), "switches", stats.switches, "backup_picks", stats.backup,
-		"rate_limited", stats.rateLimit, "refused", stats.refusals}
+		"rate_limited", stats.rateLimit, "refused", stats.refusals, "relayed", stats.relayed, "backup", s.backupStateLocked()}
 	for _, name := range names {
 		attrs = append(attrs, "requests_"+name, stats.picks[name])
 	}
