@@ -75,6 +75,8 @@ func TestSettingsBlocksEmptyProxyAndCredentialHelpers(t *testing.T) {
 		`{"env":{"HOME":"elsewhere"}}`, `{"apiKeyHelper":"credential-canary"}`,
 		`{"policyHelper":"policy-canary"}`, `{"awsCredentialExport":"credential-canary"}`,
 		`{"forceLoginOrgUUID":"other"}`, `{"env":null}`, `{"env":{"EDITOR":3}}`,
+		`{"env":{"NODE_OPTIONS":"--require /tmp/x.js"}}`, `{"env":{"NODE_OPTIONS":"--max-old-space-size=3072 --import x"}}`,
+		`{"env":{"NODE_OPTIONS":"--max-old-space-size=big"}}`, `{"env":{"NODE_OPTIONS":""}}`, `{"env":{"NODE_OPTIONS":3}}`,
 		`null`, `[]`, `{bad json`,
 	} {
 		if err := validateSettingsJSON([]byte(raw)); err == nil {
@@ -251,5 +253,16 @@ func TestNativeProjectRootsCancelsRunningGit(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("cancelled Git process did not stop")
+	}
+}
+
+func TestSettingsAllowHeapSizeNodeOptions(t *testing.T) {
+	for _, raw := range []string{
+		`{"env":{"NODE_OPTIONS":"--max-old-space-size=3072"}}`,
+		`{"env":{"NODE_OPTIONS":"--max_old_space_size=4096 --max-semi-space-size=64"}}`,
+	} {
+		if err := validateSettingsJSON([]byte(raw)); err != nil {
+			t.Errorf("refused a heap-size-only NODE_OPTIONS %s: %v", raw, err)
+		}
 	}
 }

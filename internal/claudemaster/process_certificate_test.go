@@ -35,7 +35,15 @@ func TestProcessCertificateRenewsAfterWeeklyBoundaryWithoutChangingCA(t *testing
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(ca)
-	proxy, err := StartProxy(ProxyOptions{GetCertificate: certs.getCertificate, Inference: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	clientCert, clientKey, err := certs.writeClientCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPair, err := tls.LoadX509KeyPair(clientCert, clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := StartProxy(ProxyOptions{GetCertificate: certs.getCertificate, ProxyCertificate: certs.proxyServerCertificate, ClientCAs: certs.clientPool(), Inference: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "native-response")
 	})})
 	if err != nil {
@@ -49,7 +57,7 @@ func TestProcessCertificateRenewsAfterWeeklyBoundaryWithoutChangingCA(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true, TLSClientConfig: &tls.Config{RootCAs: roots, Time: now, MinVersion: tls.VersionTLS12}}
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true, TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{clientPair}, Time: now, MinVersion: tls.VersionTLS12}}
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport}
 	for _, days := range []int{0, 8, 16} {

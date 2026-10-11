@@ -104,10 +104,6 @@ func (s *nativeContinuationScan) continuationValue(value any) {
 			s.requiresAccount = true
 			return
 		}
-		if blockType == "redacted_thinking" && valuePresent(typed["data"]) {
-			s.requiresAccount = true
-			return
-		}
 		// Encrypted provider payloads can be nested inside server-tool result
 		// blocks. Never inspect or rewrite them; presence alone pins the turn.
 		for _, key := range []string{"thought_signature", "encrypted_content", "encrypted_stdout", "encrypted_stderr", "encrypted_index"} {
@@ -120,7 +116,14 @@ func (s *nativeContinuationScan) continuationValue(value any) {
 			s.requiresAccount = true
 			return
 		}
-		if (blockType == "thinking" || blockType == "compaction") && valuePresent(typed["signature"]) {
+		// A thinking block's signature does not pin the account. Verified 2026-10-09 on this
+		// pool's own subscriptions with the thinking-binding-controls beta: an Opus 5.5 block
+		// minted on one subscription replays on another with input_transformations [] even
+		// in "error" mode; a Sonnet 5.5 block is dropped by the API (end_user_binding_mismatch)
+		// and the request still succeeds. redacted_thinking is the same encrypted reasoning
+		// (its data plays the role of the signature). A signed compaction block is different:
+		// it stands in for the whole history, so losing it would answer with no context.
+		if blockType == "compaction" && valuePresent(typed["signature"]) {
 			s.requiresAccount = true
 			return
 		}

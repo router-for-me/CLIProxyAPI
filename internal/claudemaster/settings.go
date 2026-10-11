@@ -141,12 +141,13 @@ func validateSettingsJSON(raw []byte) error {
 			return errors.New("native settings env must be an object")
 		}
 		for key, value := range env {
+			var text string
+			isString := json.Unmarshal(value, &text) == nil
 			// Even an empty proxy value can undo the wrapper. Presence is rejected, not just truthiness.
-			if forbiddenSettingsEnv(key) {
+			if forbiddenSettingsEnv(key) && !(isString && allowedNodeOptions(key, text)) {
 				return errors.New("native settings override provider, credential, proxy, or process routing; remove that override before launching")
 			}
-			var text string
-			if json.Unmarshal(value, &text) != nil {
+			if !isString {
 				return errors.New("native settings env values must be strings")
 			}
 		}
@@ -168,6 +169,33 @@ func forbiddenSettingsEnv(name string) bool {
 		return true
 	}
 	return false
+}
+
+// allowedNodeOptions reports whether NODE_OPTIONS only sizes the V8 heap. A project commonly caps its builds'
+// memory that way (settings env reaches every tool subprocess); those flags cannot load code, change TLS trust or
+// route traffic, so they are not a bypass. Anything else in NODE_OPTIONS (--require, --import, --use-openssl-ca, ...)
+// stays refused, and so does an empty value.
+func allowedNodeOptions(name, value string) bool {
+	if strings.ToUpper(name) != "NODE_OPTIONS" {
+		return false
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return false
+	}
+	for _, field := range fields {
+		flag, size, ok := strings.Cut(field, "=")
+		flag = strings.ReplaceAll(flag, "_", "-")
+		if !ok || (flag != "--max-old-space-size" && flag != "--max-semi-space-size") || size == "" || len(size) > 9 {
+			return false
+		}
+		for _, r := range size {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func forbiddenProviderEnv(name string) bool {
