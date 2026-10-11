@@ -43,8 +43,8 @@ calls a new endpoint keeps working. claude-master adds no credential to these re
 them grants nothing. A route not in the reviewed list (`proxyControlPath`) is logged once per shape
 (`relayed an unlisted Anthropic route`, method and path with ids replaced). Only an ambiguous or
 encoded path, or the pool's own routes with the wrong method, are refused. There is no Bedrock or master-account inference fallback. An explicitly
-provided Anthropic API key can serve as the final backup after subscription quota is
-exhausted; without one, inference stays subscription-only.
+provided Anthropic API key can serve as the final backup after Anthropic has rejected every
+subscription; without one, inference stays subscription-only.
 
 ## Install, login, and run
 
@@ -125,9 +125,9 @@ export CLAUDE_MASTER_BACKUP_API_KEY
 unset CLAUDE_MASTER_BACKUP_API_KEY
 ```
 
-The launcher uses this key only for a self-contained request after every subscription
-has exhausted its credential-scoped quota. The 10% continuation reserve is still usable
-subscription quota, not a reason to switch to the key. Authentication, request, model,
+The launcher uses this key only for a self-contained request after Anthropic has rejected
+every subscription (a credential-scoped `429` still in force on each). A usage poll at 100% is
+not a rejection and never sends work to the key. Authentication, request, model,
 and transport failures do not trigger the backup. Account-bound opaque continuations
 stay on their originating subscription; an exposed streaming response is never replayed
 on the key.
@@ -210,6 +210,18 @@ weekly quota resets soonest, draining the quota that will be replenished first. 
 configured profile order is the deterministic fallback when usage is unavailable or
 reset times tie.
 
+**The poll is advisory; Anthropic decides.** The polled weekly figure (and the one in response
+headers) only orders the candidates: a subscription in its ok band before an unknown one, before
+one in its reserve band (90%), before one the poll calls exhausted (100%); within a band, the
+earliest reset first. It never refuses a request and never moves a conversation. On 2026-10-11
+every profile polled at 100% and the pool refused every request itself, while a native Claude
+Code session on the same Anthropic account as one of those profiles kept being served. A
+subscription is taken out only by Anthropic's own answer to a real request: a credential-scoped
+`429` (`anthropic-ratelimit-unified-status: rejected`), for its `retry-after` or unified reset,
+or a dead login. When Anthropic accepts a request on a subscription the poll puts in its reserve
+band or calls exhausted, the log says so once per profile per band
+(`Anthropic accepted a request on a subscription the usage poll calls exhausted`).
+
 Quota state is refreshed from Anthropic's rate-limit response headers. A
 credential-scoped `429` temporarily blocks that account until its retry/reset deadline;
 it does not turn a five-hour rejection into exhausted weekly usage. Request-scoped,
@@ -236,16 +248,16 @@ confirming the actual state. Polling never changes opaque continuation bindings 
 replays a stream. Backend shutdown cancels and joins usage requests before releasing
 profile locks. The separate OAuth refresh loop renews login tokens.
 
-When another account still has capacity, the final 10% of an account is reserved for
-continuations carrying account-bound state:
+A conversation moves only on Anthropic's rejection:
 
-- Below 90%, a session remains on its selected account.
-- At or above 90%, a self-contained request may move to another usable account.
-- Opaque/account-bound continuations remain on their bound account and may consume the
-  reserve.
-- When every usable account is in its reserve, the earliest-reset account remains
-  eligible and is drained instead of alternating accounts every turn.
-- After the reported weekly reset, that account becomes eligible again.
+- Whatever the poll says (ok, reserve or 100%), a session remains on its selected account.
+- After a credential-scoped `429` on its account, a self-contained request moves to the
+  best-ranked account Anthropic has not rejected.
+- Opaque/account-bound continuations remain on their bound account; while Anthropic's
+  rejection holds they get Anthropic's `429` back with the time it ends.
+- When Anthropic has rejected every account, the pool answers Anthropic's `429` with the
+  earliest time one comes back (or uses the API-key backup, if configured and able to pay).
+- When the rejection's deadline passes, the account is asked again, whatever the poll says.
 
 The usage endpoint is an OAuth product endpoint used by Claude Code rather than a
 publicly versioned API. Failure to read it does not block startup; routing falls back to
@@ -260,8 +272,8 @@ rather than all discarded history.
 
 The selector therefore inspects the request body itself; it does not depend on a
 version-specific "compaction happened" header. Ordinary text plus client-side
-`tool_use`/`tool_result` history is self-contained and can move once the 90% boundary
-is reached. A request stays on its current account when it contains known opaque or
+`tool_use`/`tool_result` history is self-contained and can move once Anthropic rejects its
+account. A request stays on its current account when it contains known opaque or
 provider-side state, including:
 
 - container or uploaded/file identifiers;
@@ -424,7 +436,7 @@ explicit action.
 ## Verification and compatibility
 
 Automated tests cover credential separation, weekly-quota parsing and selection, the
-10% reserve, durable payload affinity, parent/subagent bindings, pre-response retry, raw compressed
+poll as ordering only, durable payload affinity, parent/subagent bindings, pre-response retry, raw compressed
 responses, exact streaming chunks, request/response header boundaries, token counting,
 profile locking, and cancellation/shutdown.
 
@@ -559,8 +571,8 @@ backs that discipline up by masking secret-shaped keys and values.
 
 | level | event |
 |---|---|
-| info | `inference account switched` (conversation moved: `from`, `to`, `reason` = `reserve_reached`, `weekly_exhausted`, `rate_limited`, `rebalanced`, `subscriptions_exhausted`, `subscription_capacity_returned`) |
-| info | `profile rate limited` / `profile available again`; `quota band changed` (`ok` / `reserve` at 90% / `exhausted`) |
+| info | `inference account switched` (conversation moved: `from`, `to`, `reason` = `weekly_exhausted` (Anthropic rejected it and the poll agrees the week is used up), `rate_limited` (rejected for another limit), `rebalanced`, `subscriptions_exhausted`, `subscription_capacity_returned`) |
+| info | `profile rate limited` / `profile available again`; `quota band changed` (`ok` / `reserve` at 90% / `exhausted`: what the poll says, not a refusal); `Anthropic accepted a request on a subscription the usage poll calls exhausted` (or `reserve`), once per profile per band |
 | info | `login refreshed`, `login refresh adopted from another claude-master process`, `adopted a newer login after a 401` |
 | info | `quota` per profile (weekly, plus `five_hour_used_pct` and `five_hour_resets_in`) and `routing summary` (requests per profile, switches, backup picks, refusals) every 5 minutes; `proxy summary` (connections, requests, active) every 5 minutes |
 | info | `client connected for the first time` (certificate name, or `tunnel`), `proxy listening`, `inference backend started` |

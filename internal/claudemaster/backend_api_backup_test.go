@@ -55,6 +55,7 @@ func TestBackendAPIBackupIsLastAfterSubscriptionCapacity(t *testing.T) {
 		usedA    float64
 		usedB    float64
 		unknownB bool
+		rejected bool // Anthropic rejected a real request on both (a 429, unified-status rejected)
 		want     string
 	}{
 		{name: "normal_capacity", usedA: 0.2, usedB: 0.4, want: "subscription-a"},
@@ -63,13 +64,19 @@ func TestBackendAPIBackupIsLastAfterSubscriptionCapacity(t *testing.T) {
 		{name: "both_reserved", usedA: 0.95, usedB: 0.96, want: "subscription-a"},
 		{name: "remaining_reserve", usedA: 1, usedB: 0.96, want: "subscription-b"},
 		{name: "unknown_is_not_exhausted", usedA: 1, unknownB: true, want: "subscription-b"},
-		{name: "all_exhausted", usedA: 1, usedB: 1, want: "api-backup"},
+		// The poll is advisory: at a polled 100% the request still goes to a subscription.
+		{name: "all_polled_full", usedA: 1, usedB: 1, want: "subscription-a"},
+		{name: "all_rejected_by_anthropic", usedA: 1, usedB: 1, rejected: true, want: "api-backup"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			selector, auths, reset := backendAPIBackupTestSelector(t)
 			selector.observeQuota("subscription-a", backendWeeklyQuota{known: true, used: tc.usedA, resetsAt: reset})
 			if !tc.unknownB {
 				selector.observeQuota("subscription-b", backendWeeklyQuota{known: true, used: tc.usedB, resetsAt: reset.Add(24 * time.Hour)})
+			}
+			if tc.rejected {
+				rejectByAnthropic(selector, "subscription-a", time.Hour)
+				rejectByAnthropic(selector, "subscription-b", time.Hour)
 			}
 			requireBackendAPIBackupPick(t, selector, backendAPIBackupTestOptions("last-resort", false), auths, tc.want)
 		})
@@ -119,7 +126,7 @@ func TestBackendAPIBackupNeverMovesOpaqueSubscriptionContinuation(t *testing.T) 
 	plain := backendAPIBackupTestOptions("bound-opaque", false)
 	requireBackendAPIBackupPick(t, selector, plain, auths, "subscription-a")
 	for _, id := range selector.authIDs {
-		selector.observeQuota(id, backendWeeklyQuota{known: true, used: 1, resetsAt: reset})
+		exhaustByAnthropic(selector, id, reset)
 	}
 	opaque := backendAPIBackupTestOptions("bound-opaque", true)
 	if got, err := selector.Pick(t.Context(), "claude", backendAuthSelectionModel, opaque, auths); err == nil || got != nil {
@@ -137,8 +144,8 @@ func TestBackendAPIBackupReturnsCleanWorkAfterResetButKeepsOpaqueState(t *testin
 	selector, auths, reset := backendAPIBackupTestSelector(t)
 	now := reset.Add(-time.Minute)
 	selector.now = func() time.Time { return now }
-	selector.observeQuota("subscription-a", backendWeeklyQuota{known: true, used: 1, resetsAt: reset})
-	selector.observeQuota("subscription-b", backendWeeklyQuota{known: true, used: 1, resetsAt: reset.Add(24 * time.Hour)})
+	exhaustByAnthropic(selector, "subscription-a", reset)
+	exhaustByAnthropic(selector, "subscription-b", reset.Add(24*time.Hour))
 	plain := backendAPIBackupTestOptions("bound-api", false)
 	requireBackendAPIBackupPick(t, selector, plain, auths, "api-backup")
 	now = reset

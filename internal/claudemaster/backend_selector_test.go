@@ -324,7 +324,7 @@ func TestBackendSeriesSelectorReopensQuotaAtWeeklyReset(t *testing.T) {
 	}
 }
 
-func TestBackendSeriesSelectorReservesTenPercentForContinuation(t *testing.T) {
+func TestBackendSeriesSelectorReserveBandOrdersNewWorkButKeepsTheConversation(t *testing.T) {
 	selector := &backendSeriesSelector{authIDs: []string{"profile-a", "profile-b"}, provider: "claude"}
 	t.Cleanup(selector.Stop)
 	reset := time.Date(2026, time.October, 2, 0, 0, 0, 0, time.UTC)
@@ -351,9 +351,17 @@ func TestBackendSeriesSelectorReservesTenPercentForContinuation(t *testing.T) {
 		t.Fatalf("continuation Pick() = %#v, %v, want reserved profile-a", got, err)
 	}
 
+	// The bound conversation stays: the poll's reserve band never moves one.
 	got, err = selector.Pick(t.Context(), "claude", "", plain, auths)
+	if err != nil || got.ID != "profile-a" {
+		t.Fatalf("clean Pick() = %#v, %v, want bound profile-a in its reserve band", got, err)
+	}
+	// A new conversation prefers the subscription still in its ok band.
+	fresh := plain
+	fresh.Headers = http.Header{"X-Claude-Code-Session-Id": []string{"session-2"}}
+	got, err = selector.Pick(t.Context(), "claude", "", fresh, auths)
 	if err != nil || got.ID != "profile-b" {
-		t.Fatalf("clean Pick() = %#v, %v, want profile-b after reserve threshold", got, err)
+		t.Fatalf("new conversation Pick() = %#v, %v, want profile-b in its ok band", got, err)
 	}
 }
 
@@ -458,6 +466,7 @@ func TestBackendSeriesSelectorCanReselectFromSelfContainedPayloadWithoutCompacti
 	require(coreexecutor.Options{Headers: headers, OriginalRequest: []byte(`{"messages":[{"role":"user","content":"start"}]}`)}, "profile-a")
 	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 0.90, resetsAt: reset.Add(48 * time.Hour)})
 	selector.observeQuota("profile-b", backendWeeklyQuota{known: true, used: 0.2, resetsAt: reset})
+	selector.OnResult(backendSeriesQuotaResult("profile-a")) // Anthropic rejected profile-a
 	require(coreexecutor.Options{Headers: headers, OriginalRequest: []byte(`{"messages":[{"role":"user","content":"self-contained continuation"}]}`)}, "profile-b")
 }
 
@@ -493,7 +502,7 @@ func TestBackendSeriesSelectorSelfContainedSubagentStartsOwnBinding(t *testing.T
 	}
 }
 
-func TestBackendSeriesSelectorReserveMoveUsesAvailableAlternative(t *testing.T) {
+func TestBackendSeriesSelectorRejectionMoveUsesAvailableAlternative(t *testing.T) {
 	selector := &backendSeriesSelector{authIDs: []string{"profile-a", "profile-c", "profile-b"}, provider: "claude"}
 	t.Cleanup(selector.Stop)
 	reset := time.Date(2026, time.October, 2, 0, 0, 0, 0, time.UTC)
@@ -511,9 +520,10 @@ func TestBackendSeriesSelectorReserveMoveUsesAvailableAlternative(t *testing.T) 
 	}
 	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 0.9, resetsAt: reset.Add(4 * time.Hour)})
 	selector.observeQuota("profile-c", backendWeeklyQuota{known: true, used: 0.2, resetsAt: reset})
+	selector.OnResult(backendSeriesQuotaResult("profile-a")) // Anthropic rejected profile-a
 	got, err := selector.Pick(t.Context(), "claude", "", opts, []*coreauth.Auth{authA, authB})
 	if err != nil || got == nil || got.ID != "profile-b" {
-		t.Fatalf("reserve Pick() = %#v, %v, want available profile-b", got, err)
+		t.Fatalf("rejection Pick() = %#v, %v, want available profile-b", got, err)
 	}
 }
 
@@ -628,7 +638,7 @@ func TestBackendSeriesSelectorMovesSignedThinkingWhenBoundAuthUnavailable(t *tes
 	}, []*coreauth.Auth{authA, authB}); err != nil {
 		t.Fatal(err)
 	}
-	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 1, resetsAt: selector.now().Add(72 * time.Hour)})
+	exhaustByAnthropic(selector, "profile-a", time.Now().Add(72*time.Hour))
 	got, err := selector.Pick(t.Context(), "claude", "", coreexecutor.Options{
 		Headers: headers, OriginalRequest: []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"opaque"},{"type":"text","text":"hi"}]},{"role":"user","content":"more"}]}`),
 	}, []*coreauth.Auth{authB})

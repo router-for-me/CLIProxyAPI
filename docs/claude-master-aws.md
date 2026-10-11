@@ -157,7 +157,7 @@ catalogue, with dimensions, is in [claude-master.md](claude-master.md#metrics-op
 
 | Question | Metric (dimensions) | Look at |
 |---|---|---|
-| Is the pool healthy? | `claude_master.quota.used_fraction`, `.band`, `.resets_in_seconds` (`profile`) | each subscription's weekly allowance; band 0 ok, 1 reserve (90%), 2 exhausted |
+| Is the pool healthy? | `claude_master.quota.used_fraction`, `.band`, `.resets_in_seconds` (`profile`) | each subscription's weekly allowance; band 0 ok, 1 reserve (90%), 2 exhausted, as the usage poll reports it (it orders routing, never refuses: Anthropic's own 429 does) |
 | Who is using it? | `claude_master.inference.requests` (`profile`, `client_account`, `status_class`), `.by_client` (`client`, `client_account`), `.by_model` (`model`) | which subscription served which user, from which box, on which model |
 | Is it fast? | `inference.ttfb`, `.upstream_ttfb`, `proxy.overhead` (histograms), `inference.duration_quantile` (`profile`, `quantile`) | Anthropic's own first-byte time against claude-master's added overhead; p50/p95/p99 gauges |
 | Is it failing? | `inference.errors` (`profile`, `status`, `client_account`), `anthropic.ratelimit` (`profile`, `window`, `measure`), `quota.rate_limited` | Anthropic errors by status; every `Anthropic-Ratelimit-*` header (`5h`, `7d` windows) |

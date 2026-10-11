@@ -38,7 +38,9 @@ func TestBackendSeriesSelectorShortQuotaBlockPreservesWeeklyMeter(t *testing.T) 
 	}
 }
 
-func TestBackendSeriesSelectorShortResetDoesNotClearMeasuredWeeklyExhaustion(t *testing.T) {
+// Once Anthropic's own retry-after passes, the subscription is asked again even though the poll still
+// says 100%: Anthropic, not the poll, decides (it served at a polled 100% on 2026-10-11).
+func TestBackendSeriesSelectorShortResetAsksAnthropicAgainDespitePolledExhaustion(t *testing.T) {
 	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	selector := &backendSeriesSelector{authIDs: []string{"profile-a"}, provider: "claude", now: func() time.Time { return now }}
 	t.Cleanup(selector.Stop)
@@ -48,16 +50,16 @@ func TestBackendSeriesSelectorShortResetDoesNotClearMeasuredWeeklyExhaustion(t *
 	result := backendSeriesQuotaResult("profile-a")
 	result.RetryAfter = &retryAfter
 	selector.OnResult(result)
-	now = now.Add(retryAfter)
 	auths := []*coreauth.Auth{backendSeriesTestAuth("profile-a", "claude")}
+	now = now.Add(retryAfter - time.Nanosecond)
 	if got, err := selector.Pick(t.Context(), "claude", "", coreexecutor.Options{}, auths); got != nil || err == nil {
-		t.Fatalf("weekly-exhausted credential reopened at short reset: %#v, %v", got, err)
+		t.Fatalf("rejected credential reopened before Anthropic's retry-after: %#v, %v", got, err)
 	}
+	now = now.Add(time.Nanosecond)
+	requireBackendSeriesPick(t, selector, "claude", auths, "profile-a")
 	if quota := selector.quota["profile-a"]; quota.used != 1 || !quota.resetsAt.Equal(reset) {
 		t.Fatalf("weekly allocation changed at short reset: %+v", quota)
 	}
-	now = reset
-	requireBackendSeriesPick(t, selector, "claude", auths, "profile-a")
 }
 
 func TestBackendSeriesSelectorUnknownQuotaUsesRecoverableBackoff(t *testing.T) {

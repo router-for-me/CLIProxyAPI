@@ -66,11 +66,14 @@ func TestInfoLogSaysWhenAConversationMovesToAnotherAccount(t *testing.T) {
 	requireBackendSeriesPickWith(t, selector, plainRequest(rawSession), auths, "profile-a")
 
 	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 0.93, resetsAt: reset})
+	// The reserve band alone does not move it; Anthropic's rejection of a real request does.
+	requireBackendSeriesPickWith(t, selector, plainRequest(rawSession), auths, "profile-a")
+	selector.OnResult(backendSeriesQuotaResult("profile-a"))
 	requireBackendSeriesPickWith(t, selector, plainRequest(rawSession), auths, "profile-b")
 
 	out := logs.String()
 	for _, want := range []string{
-		"inference account switched", "from=claude-connor", "to=claude-ejc3", "reason=reserve_reached",
+		"inference account switched", "from=claude-connor", "to=claude-ejc3", "reason=rate_limited",
 		"quota band changed", "profile=claude-connor", "from=ok", "to=reserve", "level=info",
 	} {
 		if !strings.Contains(out, want) {
@@ -151,7 +154,7 @@ func TestTheBackupBeingUsedIsAWarningOncePerMinute(t *testing.T) {
 	selector, auths, reset := backendAPIBackupTestSelector(t)
 	selector.names = map[string]string{"subscription-a": "claude-connor", "subscription-b": "claude-ejc3"}
 	for _, id := range []string{"subscription-a", "subscription-b"} {
-		selector.observeQuota(id, backendWeeklyQuota{known: true, used: 1, resetsAt: reset})
+		exhaustByAnthropic(selector, id, reset)
 	}
 	for i := 0; i < 3; i++ {
 		requireBackendAPIBackupPick(t, selector, backendAPIBackupTestOptions("exhausted-"+string(rune('a'+i)), false), auths, "api-backup")

@@ -24,6 +24,7 @@ func TestBackendAPIBackupHistoricalFailureDoesNotVetoNewRequest(t *testing.T) {
 		if !selector.observePolledQuota(id, backendWeeklyQuota{known: true, used: 1, resetsAt: reset}, revision) {
 			t.Fatal("failed to apply authoritative exhaustion")
 		}
+		rejectByAnthropic(selector, id, reset.Sub(selector.nowOrReal()))
 	}
 	opts := backendAPIBackupTestOptions("new-request", false)
 	if got, err := selector.Pick(oldCtx, "claude", backendAuthSelectionModel, opts, auths); err == nil || got != nil {
@@ -36,7 +37,7 @@ func TestBackendAPIBackupHistoricalFailureDoesNotVetoNewRequest(t *testing.T) {
 	}
 }
 
-func TestBackendSeriesAllReserveDrainsEarliestResetWithoutPingPong(t *testing.T) {
+func TestBackendSeriesAllReserveKeepsBindingWithoutPingPong(t *testing.T) {
 	selector, auths, reset := backendAPIBackupTestSelector(t)
 	selector.observeQuota("subscription-a", backendWeeklyQuota{known: true, used: .95, resetsAt: reset})
 	selector.observeQuota("subscription-b", backendWeeklyQuota{known: true, used: .95, resetsAt: reset.Add(time.Hour)})
@@ -44,11 +45,11 @@ func TestBackendSeriesAllReserveDrainsEarliestResetWithoutPingPong(t *testing.T)
 	for turn := 0; turn < 8; turn++ {
 		requireBackendAPIBackupPick(t, selector, opts, auths, "subscription-a")
 	}
-	// A session already on the later-reset reserve moves once to the earliest.
+	// A session already on the later-reset reserve stays there: the poll never moves a conversation.
 	identity, _ := backendSeriesSessionIDs(opts)
 	selector.sessions.Set(identity, "subscription-b")
 	for turn := 0; turn < 8; turn++ {
-		requireBackendAPIBackupPick(t, selector, opts, auths, "subscription-a")
+		requireBackendAPIBackupPick(t, selector, opts, auths, "subscription-b")
 	}
 }
 
