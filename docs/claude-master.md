@@ -253,10 +253,10 @@ configured order and subsequently observed rate-limit headers.
 
 ## Payload-based continuation affinity
 
-Claude's Messages API receives the complete active context on each request. Prompt
-caching changes server work and billing, not the request into an opaque session handle.
-After compaction, Claude Code sends the compacted active context rather than all
-discarded history.
+Claude's Messages API receives the complete active context on each request, except for a
+thread continuation (below). Prompt caching changes server work and billing, not the request
+into an opaque session handle. After compaction, Claude Code sends the compacted active context
+rather than all discarded history.
 
 The selector therefore inspects the request body itself; it does not depend on a
 version-specific "compaction happened" header. Ordinary text plus client-side
@@ -318,6 +318,30 @@ profile. Once successful streaming headers are delivered, that request is never 
 Any upstream SSE error
 remains exactly the event Claude Code received, and routing changes can affect only a
 later request.
+
+### Server-side threads (`thread`, `previous_message_id`)
+
+Claude Code 2.1.29x sends most turns as a thread continuation: `thread: {"type": "continue",
+"previous_message_id": ...}` with only the messages after that one, and Anthropic supplies the
+rest from the thread it keeps for the account that served the earlier turns. A continuation
+that reaches an account without that thread, or after the thread has expired, is answered 404
+`not_found_error` "No thread state was found for the requested `previous_message_id`" (details
+`error_code: thread_not_found`). Claude Code then resends the whole conversation with
+`thread: {"type": "create"}` and the turn succeeds; its debug log shows
+`[tether] forcing create for retry: replay_not_found`.
+
+claude-master does not pin a conversation to its account for `thread`, and does not hide the 404:
+it behaves as if the person had switched accounts, and Claude Code's own replay is how a client
+recovers from that. The 404 is relayed as sent (logged as `upstream error` at warn and
+`request ended with Anthropic's error, relayed as sent` at info).
+
+Most of these 404s are expiry, not moves. Measured on 2026-10-11 through the pool, one Claude Code
+process with two turns on the same subscription: a 290-second pause continued the thread; a
+400-second pause got the 404 and the replay. Claude Code decides when a thread has expired from
+its feature flags, which it fetches on the person's own login, while the thread lives on the
+pooled subscription; it still sent a continuation at 400 seconds. So a turn after a pause of
+more than about five minutes costs one fast 404 round trip. The replay sends what a fresh
+create would have sent anyway, and no turn fails.
 
 ## Profiles and process boundaries
 
@@ -575,7 +599,7 @@ from its credential file name (those carry the account's email address).
 | `claude_master.proxy.overhead` {profile} | histogram ms | claude-master's own added time (request in to account chosen) |
 | `claude_master.inference.duration_quantile` {profile, quantile 0.5/0.95/0.99} | gauge ms | recent p50/p95/p99, so CloudWatch can chart percentiles |
 | `claude_master.inference.errors` {profile, status, client_account} | counter | Anthropic errors by status |
-| `claude_master.inference.tokens` {profile, type}, `.tokens.by_client_account` {client_account, type}, `.tokens.by_client` {client, type} | counter | tokens each subscription (or `api-backup`) served, each user used and each box carried; `type` is `input`, `output`, `cache_read` or `cache_creation` (input excludes the cache fields, output includes thinking), from the usage Anthropic reports in each successful response |
+| `claude_master.inference.tokens` {profile, type}, `.tokens.by_client_account` {client_account, type}, `.tokens.by_client` {client, type}, `.tokens.by_project` {project, type} | counter | tokens each subscription (or `api-backup`) served, each user used, each box carried and each project asked for (`project` is the name of the git repository a launch was started in, or of its directory, sent by the launch's forwarder on its tunnel; `none` without one, `other` past 100 names per process); `type` is `input`, `output`, `cache_read` or `cache_creation` (input excludes the cache fields, output includes thinking), from the usage Anthropic reports in each successful response |
 | `claude_master.inference.request_bytes`, `.response_bytes` {profile} | histogram | sizes |
 | `claude_master.quota.used_fraction`, `.resets_in_seconds`, `.rate_limited_for_seconds`, `.band` {profile} | gauge | each subscription's weekly allowance, when it resets, any cooldown, band (0 ok, 1 reserve, 2 exhausted, -1 unknown) |
 | `claude_master.quota.five_hour.used_fraction`, `.five_hour.resets_in_seconds` {profile} | gauge | each subscription's five-hour window from the usage poll (about every 3 minutes, idle or not); 0 once the window has reset, and no countdown while no window is open |

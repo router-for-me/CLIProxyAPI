@@ -170,10 +170,15 @@ func StartProxy(opts ProxyOptions) (*Proxy, error) {
 	p.outer = &http.Server{Handler: p.ownedHandler(p.handleConnect), BaseContext: baseContext, ErrorLog: log.New(newHandshakeErrorWriter(observeHandshakeError), "", 0)}
 	p.inner = &http.Server{
 		Handler: p.ownedHandler(p.handleAPI), BaseContext: baseContext, ErrorLog: log.New(io.Discard, "", 0),
-		// Every request on an inner connection knows which client opened the tunnel.
+		// Every request on an inner connection knows which client opened the tunnel, and for which
+		// project when the tunnel named one.
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
-			if name, ok := p.clients.Load(c); ok {
-				return context.WithValue(ctx, clientCtxKey{}, name)
+			if v, ok := p.clients.Load(c); ok {
+				tunnel := v.(tunnelOwner)
+				ctx = context.WithValue(ctx, clientCtxKey{}, tunnel.client)
+				if tunnel.project != "" {
+					ctx = context.WithValue(ctx, projectCtxKey{}, tunnel.project)
+				}
 			}
 			return ctx
 		},
@@ -379,6 +384,13 @@ const (
 	proxyProbeHeader = "X-Claude-Master"
 )
 
+// tunnelOwner is who opened a tunnel to api.anthropic.com: the client's name, and the project its
+// CONNECT named (projectHeader), if any.
+type tunnelOwner struct {
+	client  string
+	project string
+}
+
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && r.URL.Path == proxyProbePath {
 		w.Header().Set(proxyProbeHeader, "1")
@@ -438,7 +450,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tlsConn := tls.Server(stream, p.tlsConfig)
-		p.clients.Store(tlsConn, clientName)
+		p.clients.Store(tlsConn, tunnelOwner{client: clientName, project: sanitizeProject(r.Header.Get(projectHeader))})
 		select {
 		case p.innerListen.connections <- tlsConn:
 		case <-p.ctx.Done():
@@ -772,6 +784,11 @@ func proxyControlPath(method, path string) bool {
 	// The MCP artifacts feature (Claude Code 2.1.296): reviewed when it first appeared; not inference.
 	if path == "/api/artifacts/mcp" || path == "/v1/code/mcp/ccr-artifacts" {
 		return true
+	}
+	// Claude Code's feature flags, evaluated remotely under its SDK client key (one segment): reviewed
+	// 2026-10-10 from the unlisted-route log, where it reappeared after every server restart. Not inference.
+	if key, ok := strings.CutPrefix(path, "/api/eval/"); ok {
+		return method == http.MethodPost && proxyControlID(key)
 	}
 	// Reviewed 2026-10-10 against every endpoint Claude Code 2.1.296 carries: settings, telemetry, onboarding,
 	// memory, plugins, frames, transcript sharing, voice, claude.ai MCP connectors, skills, design, the

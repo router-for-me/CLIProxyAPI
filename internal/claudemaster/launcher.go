@@ -169,7 +169,8 @@ func LaunchProfilesWithOptions(ctx context.Context, profiles []Profile, args []s
 // runThroughForwarder puts a local forwarder in front of the claude-master proxy that upstream
 // reaches, gives Claude the forwarder as its proxy, and runs Claude until it exits.
 func runThroughForwarder(ctx context.Context, bin string, args, environ []string, caPath string, upstream upstreamDialer) (int, error) {
-	forwarder, err := startLocalForwarder(upstream)
+	cwd, _ := os.Getwd()
+	forwarder, err := startLocalForwarder(upstream, projectLabel(cwd))
 	if err != nil {
 		return 1, err
 	}

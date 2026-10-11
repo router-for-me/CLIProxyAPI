@@ -609,6 +609,12 @@ func TestProxyControlRouteInventory(t *testing.T) {
 		{"POST", "/api/web/domain_info", false},
 		{"GET", "/api/web/domain_info/extra", false},
 		{"GET", "/api/web/fetch", false},
+		{"POST", "/api/eval/sdk-exampleClientKey", true},
+		{"GET", "/api/eval/sdk-exampleClientKey", false},
+		{"POST", "/api/eval", false},
+		{"POST", "/api/eval/", false},
+		{"POST", "/api/eval/sdk-exampleClientKey/extra", false},
+		{"POST", "/api/eval/..", false},
 	} {
 		if got := proxyControlPath(test.method, test.path); got != test.allowed {
 			t.Errorf("%s %s allowed=%v, expected %v", test.method, test.path, got, test.allowed)

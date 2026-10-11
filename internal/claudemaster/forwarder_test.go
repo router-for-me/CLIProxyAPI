@@ -72,7 +72,7 @@ func (e *forwarderTestEcho) dialer() upstreamDialer { return plainUpstream(e.add
 
 func startForwarderForTest(t *testing.T, upstream upstreamDialer) *localForwarder {
 	t.Helper()
-	f, err := startLocalForwarder(upstream)
+	f, err := startLocalForwarder(upstream, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestForwarderCloseEndsTunnelsEvenMidHandshake(t *testing.T) {
 		}
 	}()
 	target := startForwarderTestEcho(t, false)
-	f, err := startLocalForwarder(plainUpstream(listener.Addr().String()))
+	f, err := startLocalForwarder(plainUpstream(listener.Addr().String()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
