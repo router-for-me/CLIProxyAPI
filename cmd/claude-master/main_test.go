@@ -492,3 +492,20 @@ func TestServeAndRunAcceptTheInstanceFlag(t *testing.T) {
 		t.Fatalf("serve --instance: code=%d err=%v; want the later --log-level check", code, err)
 	}
 }
+
+// --balanced and --drain-timeout are flags of serve; an unknown flag would fail before the later checks.
+func TestServeAcceptsTheBalancerFlags(t *testing.T) {
+	home := canonicalHome(t)
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	installRunProfileFixture(t, home, "alpha")
+	code, err := run([]string{"serve", "alpha", "--balanced", "--drain-timeout", "10m", "--listen", "127.0.0.1:0", "--state-dir", filepath.Join(home, "state"), "--log-level", "loud"})
+	if err == nil || code != 2 || strings.Contains(err.Error(), "launcher arguments") {
+		t.Fatalf("serve --balanced --drain-timeout: code=%d err=%v; want the later --log-level check", code, err)
+	}
+	if code, err := run([]string{"serve", "alpha", "--drain-timeout", "soon"}); err == nil || code != 2 {
+		t.Fatalf("a malformed --drain-timeout must be refused: code=%d err=%v", code, err)
+	}
+}

@@ -47,6 +47,7 @@ type backendRefusalError struct {
 	reason  string
 	resetAt time.Time // quota: when the earliest subscription resets, for retry-after
 	authID  string    // bound-subscription refusals: which subscription, for the remembered upstream error
+	relayed bool      // Anthropic answered this request with an error, and the session receives that error as sent
 	model   string
 	cause   error
 }
@@ -111,27 +112,26 @@ func noteBackendUpstreamError(ctx context.Context, err error) {
 	noteBackendUpstreamErrorFor(ctx, "", "", err)
 }
 
-func noteBackendUpstreamErrorFor(ctx context.Context, authID, model string, err error) {
+func noteBackendUpstreamErrorFor(ctx context.Context, authID, model string, err error) *backendUpstreamError {
 	if err == nil {
-		return
+		return nil
 	}
 	var upstream backendUpstreamResponseError
 	if !errors.As(err, &upstream) || upstream == nil {
-		return
+		return nil
 	}
 	status := upstream.StatusCode()
 	if status < 400 || status > 599 {
-		return
+		return nil
 	}
 	record := backendUpstreamRecord(upstream)
 	logBackendUpstreamError(authID, model, record)
-	state := backendRequestAttempt(ctx)
-	if state == nil {
-		return
+	if state := backendRequestAttempt(ctx); state != nil {
+		state.mu.Lock()
+		state.upstream = record
+		state.mu.Unlock()
 	}
-	state.mu.Lock()
-	state.upstream = record
-	state.mu.Unlock()
+	return record
 }
 
 func backendUpstreamRecord(upstream backendUpstreamResponseError) *backendUpstreamError {
@@ -367,16 +367,27 @@ func backendUpstreamErrorFrom(ctx context.Context) *backendUpstreamError {
 // executor serves it, including one that arrives inside a stream.
 type backendRecordingExecutor struct {
 	coreauth.ProviderExecutor
+	observe func(authID string, record *backendUpstreamError) // sees every upstream error (the backup's health uses it)
 }
 
 func withBackendUpstreamRecording(executor coreauth.ProviderExecutor) coreauth.ProviderExecutor {
+	return withBackendUpstreamRecordingObserved(executor, nil)
+}
+
+func withBackendUpstreamRecordingObserved(executor coreauth.ProviderExecutor, observe func(string, *backendUpstreamError)) coreauth.ProviderExecutor {
 	if executor == nil {
 		return nil
 	}
 	if _, already := executor.(*backendRecordingExecutor); already {
 		return executor
 	}
-	return &backendRecordingExecutor{ProviderExecutor: executor}
+	return &backendRecordingExecutor{ProviderExecutor: executor, observe: observe}
+}
+
+func (e *backendRecordingExecutor) note(ctx context.Context, authID, model string, err error) {
+	if record := noteBackendUpstreamErrorFor(ctx, authID, model, err); record != nil && e.observe != nil {
+		e.observe(authID, record)
+	}
 }
 
 func (e *backendRecordingExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
@@ -384,7 +395,7 @@ func (e *backendRecordingExecutor) Execute(ctx context.Context, auth *coreauth.A
 	if backendRetryNotFound(ctx, backendAuthID(auth), req.Model, err) {
 		resp, err = e.ProviderExecutor.Execute(ctx, auth, req, opts)
 	}
-	noteBackendUpstreamErrorFor(ctx, backendAuthID(auth), req.Model, err)
+	e.note(ctx, backendAuthID(auth), req.Model, err)
 	return resp, err
 }
 
@@ -393,7 +404,7 @@ func (e *backendRecordingExecutor) CountTokens(ctx context.Context, auth *coreau
 	if backendRetryNotFound(ctx, backendAuthID(auth), req.Model, err) {
 		resp, err = e.ProviderExecutor.CountTokens(ctx, auth, req, opts)
 	}
-	noteBackendUpstreamErrorFor(ctx, backendAuthID(auth), req.Model, err)
+	e.note(ctx, backendAuthID(auth), req.Model, err)
 	return resp, err
 }
 
@@ -404,7 +415,7 @@ func (e *backendRecordingExecutor) ExecuteStream(ctx context.Context, auth *core
 	if backendRetryNotFound(ctx, authID, model, err) {
 		result, err = e.ProviderExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
-	noteBackendUpstreamErrorFor(ctx, authID, model, err)
+	e.note(ctx, authID, model, err)
 	if err != nil || result == nil || result.Chunks == nil {
 		return result, err
 	}
@@ -414,7 +425,7 @@ func (e *backendRecordingExecutor) ExecuteStream(ctx context.Context, auth *core
 		defer close(out)
 		for chunk := range in {
 			if chunk.Err != nil {
-				noteBackendUpstreamErrorFor(ctx, authID, model, chunk.Err)
+				e.note(ctx, authID, model, chunk.Err)
 			}
 			select {
 			case out <- chunk:

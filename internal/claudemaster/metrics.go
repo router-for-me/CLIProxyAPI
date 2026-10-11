@@ -67,6 +67,7 @@ type instruments struct {
 	tokens            metric.Int64Counter
 	tokensByAccount   metric.Int64Counter
 	tokensByClient    metric.Int64Counter
+	tokensByProject   metric.Int64Counter
 	picks             metric.Int64Counter
 	switches          metric.Int64Counter
 	backup            metric.Int64Counter
@@ -101,7 +102,7 @@ type instruments struct {
 	goroutines        metric.Int64ObservableGauge
 	heap              metric.Int64ObservableGauge
 	startedAt         time.Time
-	accountLabelsMap  map[string]string
+	accountLabelsMap  atomic.Pointer[map[string]string] // swapped whole by SetAccountLabels
 }
 
 var activeInstruments atomic.Pointer[instruments]
@@ -145,10 +146,7 @@ func StartTelemetry(opts TelemetryOptions) (func(context.Context) error, error) 
 		return nil, err
 	}
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithResource(res))
-	labels := make(map[string]string, len(opts.AccountLabels))
-	for id, label := range opts.AccountLabels {
-		labels[strings.ToLower(strings.TrimSpace(id))] = strings.TrimSpace(label)
-	}
+	labels := normalizeAccountLabels(opts.AccountLabels)
 	inst := buildInstruments(provider.Meter("claude-master"), labels)
 	activeInstruments.Store(inst)
 	lg().Info("telemetry started", "endpoint_host", endpointHost(opts.Endpoint), "account_labels", len(labels))
@@ -162,7 +160,8 @@ func StartTelemetry(opts TelemetryOptions) (func(context.Context) error, error) 
 }
 
 func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
-	i := &instruments{quantiles: newQuantileSet(512), limitGauges: newLimitGaugeStore(), startedAt: time.Now(), accountLabelsMap: labels}
+	i := &instruments{quantiles: newQuantileSet(512), limitGauges: newLimitGaugeStore(), startedAt: time.Now()}
+	i.accountLabelsMap.Store(&labels)
 	counter := func(name, desc string) metric.Int64Counter {
 		c, _ := m.Int64Counter(name, metric.WithDescription(desc))
 		return c
@@ -182,6 +181,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.tokens = counter("claude_master.inference.tokens", "Tokens by profile and type (input, output, cache_read, cache_creation), from the responses' usage")
 	i.tokensByAccount = counter("claude_master.inference.tokens.by_client_account", "Tokens by client account and type")
 	i.tokensByClient = counter("claude_master.inference.tokens.by_client", "Tokens by client (the connecting box) and type")
+	i.tokensByProject = counter("claude_master.inference.tokens.by_project", "Tokens by project (the launch directory's repository name) and type")
 	i.picks = counter("claude_master.routing.picks", "Routing decisions by chosen profile")
 	i.switches = counter("claude_master.routing.switches", "Conversations moved to another account, by from, to and reason")
 	i.backup = counter("claude_master.routing.backup_requests", "Requests served by the paid API-key backup")
@@ -328,11 +328,33 @@ func clientAccountKey(raw []byte) string {
 	if id == "" {
 		return "unknown"
 	}
-	if label, ok := tm().accountLabelsMap[id]; ok && label != "" {
-		return sanitizeDimension(label) // bounded by the labels file
+	if labels := tm().accountLabelsMap.Load(); labels != nil {
+		if label, ok := (*labels)[id]; ok && label != "" {
+			return sanitizeDimension(label) // bounded by the labels file
+		}
 	}
 	sum := sha256.Sum256([]byte(id))
 	return accounts.admit("acct-"+hex.EncodeToString(sum[:4]), "other")
+}
+
+func normalizeAccountLabels(in map[string]string) map[string]string {
+	labels := make(map[string]string, len(in))
+	for id, label := range in {
+		labels[strings.ToLower(strings.TrimSpace(id))] = strings.TrimSpace(label)
+	}
+	return labels
+}
+
+// SetAccountLabels replaces the running telemetry's account labels (ACCOUNT_UUID -> NAME) in one swap, so
+// a changed labels file takes effect without a restart. It returns false when telemetry is not running.
+func SetAccountLabels(labels map[string]string) bool {
+	inst := activeInstruments.Load()
+	if inst == nil {
+		return false
+	}
+	normalized := normalizeAccountLabels(labels)
+	inst.accountLabelsMap.Store(&normalized)
+	return true
 }
 
 // AccountKeyFor is what the dashboards will call an account id: use it to build --account-label values
@@ -372,6 +394,7 @@ type requestObservation struct {
 	Profile    string
 	Model      string
 	Client     string
+	Project    string // the project the client's tunnel named (projectHeader), or ""
 	Account    string
 	Stream     bool
 	Status     int
@@ -386,8 +409,9 @@ type requestObservation struct {
 }
 
 // observeTokens counts one request's tokens. Like the request metrics, each axis (profile, user
-// account, client) is its own projection with the token type.
-func observeTokens(profile, client, account string, counts tokenCounts) {
+// account, client, project) is its own projection with the token type.
+func observeTokens(profile, client, account, project string, counts tokenCounts) {
+	projectAttr := attribute.String("project", projectMetricLabel(project))
 	t := tm()
 	ctx := context.Background()
 	for _, kind := range []struct {
@@ -406,6 +430,7 @@ func observeTokens(profile, client, account string, counts tokenCounts) {
 		t.tokens.Add(ctx, kind.count, metric.WithAttributes(attribute.String("profile", profile), typ))
 		t.tokensByAccount.Add(ctx, kind.count, metric.WithAttributes(attribute.String("client_account", account), typ))
 		t.tokensByClient.Add(ctx, kind.count, metric.WithAttributes(attribute.String("client", client), typ))
+		t.tokensByProject.Add(ctx, kind.count, metric.WithAttributes(projectAttr, typ))
 	}
 }
 
@@ -434,7 +459,7 @@ func observeRequest(o requestObservation) {
 	t.inferenceByModel.Add(ctx, 1, metric.WithAttributes(model, class))
 	t.inferenceByClient.Add(ctx, 1, metric.WithAttributes(client, account))
 	if o.HasTokens {
-		observeTokens(o.Profile, o.Client, o.Account, o.Tokens)
+		observeTokens(o.Profile, o.Client, o.Account, o.Project, o.Tokens)
 	}
 	if o.Status >= 400 || o.Status == 0 {
 		t.inferenceErrors.Add(ctx, 1, metric.WithAttributes(profile, attribute.String("status", strconv.Itoa(o.Status)), account))

@@ -149,8 +149,27 @@ func TestTokensOfAnInferenceRequestAreCounted(t *testing.T) {
 				if got := sumOf(rm, "claude_master.inference.tokens.by_client", map[string]string{"client": "unknown", "type": typ}); got != n {
 					t.Errorf("tokens.by_client{type=%s} = %d, want %d", typ, got, n)
 				}
+				// No tunnel named a project.
+				if got := sumOf(rm, "claude_master.inference.tokens.by_project", map[string]string{"project": "none", "type": typ}); got != n {
+					t.Errorf("tokens.by_project{project=none,type=%s} = %d, want %d", typ, got, n)
+				}
 			}
 		})
+	}
+}
+
+// A request on a tunnel that named a project counts its tokens under that project.
+func TestTokensAreCountedByTheProjectTheTunnelNamed(t *testing.T) {
+	reader := startMetrics(t, nil)
+	observeRequest(requestObservation{
+		Route: "inference", Profile: "claude-test", Client: "box", Account: "unknown", Project: "my-app",
+		Status: http.StatusOK, Tokens: tokenCounts{input: 7, output: 3}, HasTokens: true,
+	})
+	rm := collect(t, reader)
+	for typ, n := range map[string]int64{"input": 7, "output": 3} {
+		if got := sumOf(rm, "claude_master.inference.tokens.by_project", map[string]string{"project": "my-app", "type": typ}); got != n {
+			t.Errorf("tokens.by_project{project=my-app,type=%s} = %d, want %d", typ, got, n)
+		}
 	}
 }
 

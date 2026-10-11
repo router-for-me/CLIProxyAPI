@@ -142,7 +142,7 @@ func FuzzForwarderRequest(f *testing.F) {
 			near, far := forwarderTestPair(t)
 			go forwarderTestFarEnd(far, 'M', true)
 			return near, nil
-		})
+		}, "")
 		fw.dial = func(context.Context, string, string) (net.Conn, error) {
 			directDials.Add(1)
 			near, far := forwarderTestPair(t)
@@ -285,7 +285,7 @@ func forwarderChaos(t *testing.T, seed uint64, steps int) {
 	direct := startForwarderChaosEnd(t, 'D', false)
 	public := startForwarderChaosEnd(t, 'P', false)
 
-	fw, err := startLocalForwarder(plainUpstream(master.listener.Addr().String()))
+	fw, err := startLocalForwarder(plainUpstream(master.listener.Addr().String()), "")
 	if err != nil {
 		t.Fatal(err)
 	}

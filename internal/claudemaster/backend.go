@@ -74,12 +74,17 @@ type BackendSeriesOptions struct {
 	ModelMap     map[string]string
 	// SnapshotInterval is how often the quota snapshot is logged (default 5 minutes, negative: never).
 	SnapshotInterval time.Duration
+	// CheckBackupCredit turns on the periodic check that the API-key backup can pay (a token count with its key, at
+	// start and every 5 minutes; backend_backup_health.go). Off, a backup refused for credit is still marked
+	// unavailable by the passive check. The launcher turns it on; a backend built in a test makes no such call.
+	CheckBackupCredit bool
 }
 
 type backendRoutingOptions struct {
-	backupAPIKey     string
-	modelMap         map[string]string
-	snapshotInterval time.Duration
+	backupAPIKey      string
+	modelMap          map[string]string
+	snapshotInterval  time.Duration
+	checkBackupCredit bool
 }
 
 // Backend embeds inference, credential refresh, and subscription usage polling. It has no listener,
@@ -94,6 +99,7 @@ type Backend struct {
 	authIDs        []string
 	seriesSelector *backendSeriesSelector
 	quotaPollDone  <-chan struct{}
+	backupDone     <-chan struct{} // the API-key backup's periodic credit check
 	observeDone    <-chan struct{}
 	stores         []*backendStore
 	cancel         context.CancelFunc
@@ -115,7 +121,7 @@ func NewBackendSeries(ctx context.Context, opts BackendSeriesOptions) (*Backend,
 	if opts.Credentials[0].Provider != "claude" {
 		return nil, errors.New("ordered inference currently supports Claude profiles only")
 	}
-	return newBackend(ctx, opts.Credentials, "", true, false, opts.QuotaRequest, backendRoutingOptions{backupAPIKey: opts.BackupAPIKey, modelMap: opts.ModelMap, snapshotInterval: opts.SnapshotInterval})
+	return newBackend(ctx, opts.Credentials, "", true, false, opts.QuotaRequest, backendRoutingOptions{backupAPIKey: opts.BackupAPIKey, checkBackupCredit: opts.CheckBackupCredit, modelMap: opts.ModelMap, snapshotInterval: opts.SnapshotInterval})
 }
 
 func newBackend(ctx context.Context, credentials []BackendCredential, modelName string, useRequestModel, pinSingle bool, quotaRequest ClaudeQuotaRequestFunc, routing backendRoutingOptions) (*Backend, error) {
@@ -229,7 +235,11 @@ func newBackend(ctx context.Context, credentials []BackendCredential, modelName 
 	switch provider {
 	case "claude":
 		executor := newSharedClaudeExecutor(runtimeexecutor.NewClaudeExecutor(cfg), stores)
-		manager.RegisterExecutor(withBackendUpstreamRecording(executor))
+		manager.RegisterExecutor(withBackendUpstreamRecordingObserved(executor, func(authID string, record *backendUpstreamError) {
+			if seriesSelector != nil {
+				seriesSelector.noteBackupUpstream(authID, record)
+			}
+		}))
 		if quotaRequest == nil {
 			quotaRequest = manager.HttpRequest // the default requester, resolved here so the cache wraps it
 		}
@@ -281,6 +291,9 @@ func newBackend(ctx context.Context, credentials []BackendCredential, modelName 
 	if pollQuota {
 		backend.quotaPollDone = startBackendQuotaPolling(runCtx, manager, seriesSelector, subscriptionAuthIDs, quotaRequest, nil)
 	}
+	if seriesSelector != nil && backupAuthID != "" && routing.checkBackupCredit {
+		backend.backupDone = startBackupCreditChecks(runCtx, seriesSelector, newBackupCreditCheck(backupAPIKey, backendBackupCheckBaseURL, &http.Client{Timeout: 20 * time.Second}), nil)
+	}
 	if seriesSelector != nil {
 		subscriptions := make([]string, 0, len(subscriptionAuthIDs))
 		for _, id := range subscriptionAuthIDs {
@@ -303,6 +316,9 @@ func (b *Backend) Close() error {
 	}
 	b.once.Do(func() {
 		b.cancel()
+		if b.backupDone != nil {
+			<-b.backupDone
+		}
 		if b.quotaPollDone != nil {
 			<-b.quotaPollDone
 		}
@@ -701,6 +717,7 @@ type backendSeriesSelector struct {
 	prepareIdentity   func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
 	activeRoutes      map[string]map[string]int
 	now               func() time.Time
+	usagePollAfter    map[string]time.Time // an account's usage poll waits until then after a 429
 	stopped           bool
 
 	names       map[string]string // runtime auth id -> the profile's own name, for logs and metrics
@@ -708,6 +725,11 @@ type backendSeriesSelector struct {
 	rateLimited map[string]bool
 	stats       *selectorStats
 	limiter     *every
+
+	// The API-key backup's health (backend_backup_health.go). Unknown until the first check, which runs at start.
+	backupChecked     bool
+	backupUnavailable bool
+	backupWhy         string
 }
 
 // Pick chooses an account for a request and then records the decision (log and metrics).
@@ -742,7 +764,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 	s.initializeLocked()
 	// A paid API credential is not subscription capacity: do not use it to
 	// bypass the ten-percent reserve or an ordinary provider/request failure.
-	if switchable && s.backupAuthID != "" && !backendAttemptFailed(ctx, "", backendAvailabilityModel(model, opts)) && s.subscriptionsExhaustedLocked() {
+	if switchable && s.backupAuthID != "" && s.backupUsableLocked() && !backendAttemptFailed(ctx, "", backendAvailabilityModel(model, opts)) && s.subscriptionsExhaustedLocked() {
 		return s.pickBackupLocked(ctx, model, opts, auths, sessionID)
 	}
 	excludedAuthID := ""
@@ -860,6 +882,7 @@ func (s *backendSeriesSelector) boundUnavailableErrorLocked(ctx context.Context,
 	}
 	refusal := &backendRefusalError{kind: backendRefusalUnavailable, authID: boundID, model: model}
 	if status, failed := backendAttemptStatus(ctx, boundID, model); failed {
+		refusal.relayed = status != 0
 		switch {
 		case status == http.StatusNotFound && backendUpstreamErrorFrom(ctx).notFoundWithoutAnthropicError():
 			// Not "model not found": Anthropic names that. Retried once already (backendRetryNotFound).
@@ -1339,6 +1362,10 @@ func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, sel
 				auth = refreshed
 			}
 			payload, errFetch := fetchClaudeUsage(ctx, auth, quotaRequest)
+			var statusErr *claudeUsageStatusError
+			if errors.As(errFetch, &statusErr) && statusErr.status == http.StatusTooManyRequests {
+				selector.deferUsagePoll(authID, statusErr.retryAfter)
+			}
 			if errFetch == nil {
 				if fiveHour, okFiveHour, errFiveHour := ParseClaudeFiveHourQuota(payload); errFiveHour == nil && okFiveHour {
 					selector.observeFiveHourQuota(authID, fiveHour)
