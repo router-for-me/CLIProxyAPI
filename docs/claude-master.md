@@ -490,6 +490,9 @@ claude-master connect --server 10.0.0.10:8443 --dir ~/.config/claude-master -- -
 - The server accepts `CONNECT` only from a certificate-bearing client, and terminates TLS only
   for `api.anthropic.com`, exactly as a local launch does.
 
+**Running the shared server on AWS:** [claude-master-aws.md](claude-master-aws.md) walks through it, with a working
+Terraform example in [`examples/claude-master-aws`](../examples/claude-master-aws).
+
 ### Clients that arrive through a tunnel (no certificate)
 
 A client certificate is the right credential between machines you control. For a machine that is
@@ -565,6 +568,9 @@ backs that discipline up by masking secret-shaped keys and values.
 | debug | every routing decision (`account chosen`), `conversation bound`, every quota observation, each client tunnel |
 
 ## Metrics (OpenTelemetry)
+
+> An overview of what the metrics answer, example CloudWatch queries and alarm suggestions are in
+> [claude-master-aws.md](claude-master-aws.md#metrics-at-a-glance). The reference below is the full catalogue.
 
 `serve` and `run` can export metrics over OTLP/HTTP to anything that accepts it (a CloudWatch agent, an
 OpenTelemetry Collector): `--otlp-endpoint http://127.0.0.1:4318 --otlp-interval 30s`. Nothing in claude-master
