@@ -24,7 +24,7 @@ jobs:
           go build -o test-output ./cmd/server
           rm -f test-output
 
-  claude-master:
+  claw-master:
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +42,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test Claude master boundaries
-        run: go test -race ./internal/claudemaster ./cmd/claude-master ./sdk/auth ./sdk/api/handlers ./sdk/cliproxy/auth ./internal/auth/claude ./sdk/cliproxy/executor
+        run: go test -race ./internal/clawmaster ./cmd/claw-master ./sdk/auth ./sdk/api/handlers ./sdk/cliproxy/auth ./internal/auth/claude ./sdk/cliproxy/executor
       - name: Test native Claude executor and credential concurrency
         run: go test -race -run 'TestNativeClaude|TestClaudeExecutor|TestClaudeSetupToken|TestClaude.*Header|TestClassifyClaude|TestKimiExecutorClaudeErrorClears' ./internal/runtime/executor
       - name: Download current verified native Claude for isolated transport test
@@ -58,7 +58,7 @@ jobs:
             Darwin-x86_64) native_platform=darwin-x64 ;;
             *) exit 1 ;;
           esac
-          native_dir=$(mktemp -d "${RUNNER_TEMP}/claude-master-native.XXXXXX")
+          native_dir=$(mktemp -d "${RUNNER_TEMP}/claw-master-native.XXXXXX")
           native_base="https://downloads.claude.ai/claude-code-releases/${native_version}"
           curl -fsSL --proto '=https' --proto-redir '=https' -o "${native_dir}/manifest.json" "${native_base}/manifest.json"
           native_checksum=$(jq -er --arg version "$native_version" --arg platform "$native_platform" 'select(.version == $version) | .platforms[$platform].checksum | select(test("^[a-f0-9]{64}$"))' "${native_dir}/manifest.json")
@@ -68,11 +68,11 @@ jobs:
           chmod 0700 "${native_dir}/claude"
           native_reported=$(DISABLE_AUTOUPDATER=1 "${native_dir}/claude" --version)
           test "$native_reported" = "${native_version} (Claude Code)"
-          printf 'CLAUDE_MASTER_NATIVE_TEST_BINARY=%s/claude\n' "$native_dir" >> "$GITHUB_ENV"
+          printf 'CLAW_MASTER_NATIVE_TEST_BINARY=%s/claude\n' "$native_dir" >> "$GITHUB_ENV"
       - name: Test real native Claude against synthetic transport
-        run: go test -race -count=1 -run '^TestNativeCompatibilitySmoke$' ./internal/claudemaster
+        run: go test -race -count=1 -run '^TestNativeCompatibilitySmoke$' ./internal/clawmaster
       - name: Build
         run: |
           go build -o test-output ./cmd/server
-          go build -o claude-master-test-output ./cmd/claude-master
-          rm -f test-output claude-master-test-output
+          go build -o claw-master-test-output ./cmd/claw-master
+          rm -f test-output claw-master-test-output

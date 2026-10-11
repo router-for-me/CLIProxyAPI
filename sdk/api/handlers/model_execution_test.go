@@ -699,7 +699,7 @@ func TestExecuteProtocolWithAuthManagerAgentUsesSelectionModelForAuth(t *testing
 }
 
 func TestCountProtocolWithAuthManagerUsesForcedProviderAndSelectionModel(t *testing.T) {
-	selectionModel := "claude-master-auth-selection-count"
+	selectionModel := "claw-master-auth-selection-count"
 	nativeModel := "claude-native-model-from-request"
 	requestBody := []byte(`{"model":"claude-native-model-from-request","messages":[{"role":"user","content":"hi"}]}`)
 	executor := &modelExecutionCaptureExecutor{
