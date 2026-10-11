@@ -1787,12 +1787,33 @@ func IsCredentialUsageLimit(statusCode int, message string) bool {
 	return false
 }
 
+// errorCodeProvider exposes a machine-readable error code carried outside the human
+// message, such as the plugin ABI envelope code preserved by rpcError.
+type errorCodeProvider interface {
+	ErrorCode() string
+}
+
 // isCredentialUsageLimitError is the error-shaped form of IsCredentialUsageLimit.
 func isCredentialUsageLimitError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return IsCredentialUsageLimit(statusCodeFromError(err), err.Error())
+	status := statusCodeFromError(err)
+	if IsCredentialUsageLimit(status, err.Error()) {
+		return true
+	}
+	// A plugin ABI failure keeps its machine code outside Error(): the message can be a
+	// plain sentence ("plan limit reached") while the classified code lives in the
+	// envelope, so the code has to be classified too.
+	var coded errorCodeProvider
+	if !errors.As(err, &coded) || coded == nil {
+		return false
+	}
+	code := strings.TrimSpace(coded.ErrorCode())
+	if code == "" {
+		return false
+	}
+	return IsCredentialUsageLimit(status, code+" "+err.Error())
 }
 
 func statusCodeFromResult(err *Error) int {

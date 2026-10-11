@@ -56,6 +56,13 @@ func (e rpcError) StatusCode() int {
 	return e.statusCode
 }
 
+// ErrorCode exposes the plugin ABI envelope code. It is deliberately separate from
+// Error(), which only carries the human message: classifiers that need the machine
+// code (for example to recognise an account-wide usage window) must be able to read it.
+func (e rpcError) ErrorCode() string {
+	return e.Code
+}
+
 type rpcResponseNormalizer struct {
 	*rpcPluginAdapter
 	method string

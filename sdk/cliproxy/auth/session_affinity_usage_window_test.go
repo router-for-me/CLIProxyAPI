@@ -33,6 +33,18 @@ func (e modelScopedProbeError) Error() string            { return e.msg }
 func (e modelScopedProbeError) StatusCode() int          { return e.code }
 func (e modelScopedProbeError) IsCredentialScoped() bool { return false }
 
+// codedProbeError mimics a plugin ABI failure: the machine code travels outside the
+// human message, exactly like rpcError.Code in the plugin envelope.
+type codedProbeError struct {
+	code    int
+	machine string
+	msg     string
+}
+
+func (e codedProbeError) Error() string     { return e.msg }
+func (e codedProbeError) StatusCode() int   { return e.code }
+func (e codedProbeError) ErrorCode() string { return e.machine }
+
 func TestIsCredentialScopedErrorClassifiesUsageWindow(t *testing.T) {
 	t.Parallel()
 
@@ -84,6 +96,16 @@ func TestIsCredentialScopedErrorClassifiesUsageWindow(t *testing.T) {
 		{
 			name: "executor opt-out wins",
 			err:  modelScopedProbeError{code: http.StatusTooManyRequests, msg: testGoUsageLimitBody},
+			want: false,
+		},
+		{
+			name: "plugin envelope code carries the account scope",
+			err:  codedProbeError{code: http.StatusTooManyRequests, machine: "insufficient_quota", msg: "plan limit reached"},
+			want: true,
+		},
+		{
+			name: "plugin envelope code without account scope",
+			err:  codedProbeError{code: http.StatusTooManyRequests, machine: "rate_limit_exceeded", msg: "too many requests for model foo"},
 			want: false,
 		},
 	}

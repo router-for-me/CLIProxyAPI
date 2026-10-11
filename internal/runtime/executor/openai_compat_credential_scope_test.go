@@ -3,6 +3,7 @@ package executor
 import (
 	"net/http"
 	"testing"
+	"time"
 )
 
 // TestNewOpenAICompatStatusErrorClassifiesAccountUsageWindow pins the classification at
@@ -81,5 +82,59 @@ func TestOpenAICompatStreamDataErrorClassifiesAccountUsageWindow(t *testing.T) {
 	}
 	if perMinute.IsCredentialScoped() {
 		t.Fatalf("per-minute limit must stay model scoped: %+v", perMinute)
+	}
+}
+
+// TestOpenAICompatStreamDataErrorInfersStatusForUsageWindow covers the status-less SSE
+// shape emitted by BuildOpenAIResponsesStreamErrorChunk: without the inference the
+// payload is normalized to 502, stays model scoped, and the spent credential keeps being
+// selected for its other models.
+func TestOpenAICompatStreamDataErrorInfersStatusForUsageWindow(t *testing.T) {
+	t.Parallel()
+
+	err, ok := openAICompatStreamDataError(
+		[]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":300}}`), "error")
+	if !ok {
+		t.Fatal("expected an error for the status-less usage window payload")
+	}
+	if err.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %d, want 429", err.StatusCode())
+	}
+	if !err.IsCredentialScoped() {
+		t.Fatalf("status-less usage window must be credential scoped: %+v", err)
+	}
+	if err.RetryAfter() == nil || *err.RetryAfter() != 300*time.Second {
+		t.Fatalf("RetryAfter() = %v, want 300s from resets_in_seconds", err.RetryAfter())
+	}
+
+	perMinute, ok := openAICompatStreamDataError(
+		[]byte(`{"type":"error","error":{"message":"Rate limit reached on tokens per min (TPM)"}}`), "error")
+	if !ok {
+		t.Fatal("expected an error for the status-less per-minute payload")
+	}
+	if perMinute.StatusCode() != http.StatusBadGateway || perMinute.IsCredentialScoped() {
+		t.Fatalf("status-less per-minute limit must stay a model-scoped 502: %+v", perMinute)
+	}
+}
+
+// TestNewOpenAICompatStatusErrorHonorsUsageWindowReset checks that a recognized account
+// window uses the reset advertised by the body instead of the one-second initial ramp.
+func TestNewOpenAICompatStatusErrorHonorsUsageWindowReset(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}}`)
+	err := newOpenAICompatStatusError(http.StatusTooManyRequests, http.Header{}, body)
+	if !err.IsCredentialScoped() {
+		t.Fatalf("usage window must be credential scoped: %+v", err)
+	}
+	if err.RetryAfter() == nil || *err.RetryAfter() != time.Hour {
+		t.Fatalf("RetryAfter() = %v, want 1h from resets_in_seconds", err.RetryAfter())
+	}
+
+	// An explicit Retry-After header still wins.
+	headers := http.Header{"Retry-After": []string{"120"}}
+	withHeader := newOpenAICompatStatusError(http.StatusTooManyRequests, headers, body)
+	if withHeader.RetryAfter() == nil || *withHeader.RetryAfter() != 120*time.Second {
+		t.Fatalf("RetryAfter() = %v, want the Retry-After header value", withHeader.RetryAfter())
 	}
 }
