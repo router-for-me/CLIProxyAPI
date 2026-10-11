@@ -92,8 +92,9 @@ type Config struct {
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
 	// CooldownReprobeIntervalSeconds controls how often expired credential cooldowns are
-	// actively re-probed with a minimal synthetic request before restoring traffic.
-	// Values <= 0 disable background re-probing.
+	// periodically re-probed with a minimal synthetic request, reducing the chance that
+	// a client request acts as the canary. Values <= 0 disable background re-probing.
+	// Has no effect while Home mode is enabled.
 	CooldownReprobeIntervalSeconds int `yaml:"cooldown-reprobe-interval-seconds" json:"cooldown-reprobe-interval-seconds"`
 
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh and manual refresh-all worker pool.
