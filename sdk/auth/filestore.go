@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -428,7 +429,7 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 			return fileName, nil
 		}
 		if dir := s.baseDirSnapshot(); dir != "" {
-			return filepath.Join(dir, fileName), nil
+			return joinWithinDir(dir, fileName)
 		}
 		return fileName, nil
 	}
@@ -442,7 +443,52 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 	if dir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
-	return filepath.Join(dir, auth.ID), nil
+	return joinWithinDir(dir, auth.ID)
+}
+
+// joinWithinDir joins a relative auth file name onto the configured auth directory
+// and refuses the result when it resolves outside that directory. Provider file
+// names embed untrusted values (a Codex JWT email claim, for one), so the join is
+// the last point where a "../" sequence can still turn a credential write into an
+// arbitrary file write. Nested names inside the directory stay allowed.
+func joinWithinDir(dir, name string) (string, error) {
+	joined := filepath.Join(dir, name)
+
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("auth filestore: resolve auth directory %q: %w", dir, err)
+	}
+	absPath, err := filepath.Abs(joined)
+	if err != nil {
+		return "", fmt.Errorf("auth filestore: resolve auth path %q: %w", joined, err)
+	}
+
+	rel, err := filepath.Rel(absDir, absPath)
+	if err != nil {
+		return "", fmt.Errorf("auth filestore: %q escapes the auth directory %q: %w", name, absDir, err)
+	}
+	if rel == ".." || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("auth filestore: %q escapes the auth directory %q", name, absDir)
+	}
+
+	// The check above is LEXICAL and therefore blind to a SYMLINK. A link that
+	// already exists inside the auth directory, named exactly like the destination
+	// file, satisfies every test above and then makes Save() write THROUGH it to
+	// wherever it points. The name embeds an untrusted value (a Codex JWT email
+	// claim), so an attacker who can pre-place such a link picks the target, and
+	// the write is a credential file. Refuse anything that is not a regular file.
+	if info, errStat := os.Lstat(joined); errStat == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("auth filestore: %q is a symlink; refusing to write through it", joined)
+		}
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("auth filestore: %q is not a regular file; refusing to write to it", joined)
+		}
+	} else if !errors.Is(errStat, fs.ErrNotExist) {
+		return "", fmt.Errorf("auth filestore: stat auth path %q: %w", joined, errStat)
+	}
+
+	return joined, nil
 }
 
 func (s *FileTokenStore) labelFor(metadata map[string]any) string {
