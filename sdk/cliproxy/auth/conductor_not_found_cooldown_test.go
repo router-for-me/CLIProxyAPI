@@ -2,10 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -208,5 +210,80 @@ func TestWrapStreamResult_TerminalErrorCarriesUpstreamModel(t *testing.T) {
 	}
 	if state.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
 		t.Fatalf("stream terminal 404 fell into the transient branch: %v", state.NextRetryAfter.Sub(before))
+	}
+}
+
+// Selection-override executions send a different model than the recorded route
+// candidate: when the auth-selection metadata names "tenant/public" while the
+// wire request executes "gpt-6-astra", the provider's structured 404 names the
+// sent model. The recorded result must carry the executed model as
+// UpstreamModel so classification matches and keeps the long model-support
+// cooldown instead of the short transient window (#5514 review).
+type selectionOverrideExecutor struct {
+	calls     int
+	gotModels []string
+}
+
+func (e *selectionOverrideExecutor) Identifier() string { return "selection-override-provider" }
+
+func (e *selectionOverrideExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.calls++
+	e.gotModels = append(e.gotModels, req.Model)
+	return cliproxyexecutor.Response{}, &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"type":"not_found_error","message":"model gpt-6-astra was not found"}`,
+	}
+}
+
+func (e *selectionOverrideExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, errors.New("stream not supported")
+}
+
+func (e *selectionOverrideExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *selectionOverrideExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, errors.New("not supported")
+}
+
+func (e *selectionOverrideExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not supported")
+}
+
+func TestManager_Execute_SelectionOverrideRecordsSentModelOn404(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	executor := &selectionOverrideExecutor{}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "auth-selection-404", Provider: executor.Identifier(), Status: StatusActive}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "tenant/public"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	req := cliproxyexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"input":"hi"}`)}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.AuthSelectionModelMetadataKey: "tenant/public"}}
+
+	if _, errExec := m.Execute(context.Background(), []string{executor.Identifier()}, req, opts); errExec == nil {
+		t.Fatal("Execute expected the structured 404, got nil")
+	}
+	if len(executor.gotModels) != 1 || executor.gotModels[0] != "gpt-6-astra" {
+		t.Fatalf("executor saw models %v, want [gpt-6-astra]", executor.gotModels)
+	}
+
+	before := time.Now()
+	updated, _ := m.GetByID(auth.ID)
+	state := existingModelState(updated, canonicalModelKey("tenant/public"))
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("selection-override 404 fell into the transient branch: %v", state.NextRetryAfter.Sub(before))
 	}
 }
