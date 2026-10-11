@@ -51,6 +51,8 @@ type backendSeriesCapture struct {
 	drainAll   bool
 	failure    error
 	streamMode string
+	failOnce   bool // the drained profile fails its first call only: Anthropic's 2026-10-09 404s did not repeat
+	failed     bool
 }
 
 type backendSeriesBlockingHook struct {
@@ -92,7 +94,18 @@ func (e *backendSeriesCapture) selectedFailure() error {
 }
 
 func (e *backendSeriesCapture) shouldFail(auth *coreauth.Auth, model string) bool {
-	return (e.failModel == "" || e.failModel == model) && (e.drainAll || auth.ID == e.drained)
+	if !((e.failModel == "" || e.failModel == model) && (e.drainAll || auth.ID == e.drained)) {
+		return false
+	}
+	if e.failOnce {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.failed {
+			return false
+		}
+		e.failed = true
+	}
+	return true
 }
 
 func (e *backendSeriesCapture) Execute(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
@@ -507,5 +520,99 @@ func TestBackendSeriesRetriesConfirmedDrainThenStaysOnNextProfile(t *testing.T) 
 		if pinned != nil {
 			t.Fatalf("series request was hard-pinned: %v", capture.pinned)
 		}
+	}
+}
+
+type backendSeriesNotFoundError struct{}
+
+const backendSeriesNotFoundBody = `{"type":"error","error":{"type":"not_found_error","message":"model: not served here"},"request_id":"req_series_404"}`
+
+func (backendSeriesNotFoundError) Error() string   { return "private not found body" }
+func (backendSeriesNotFoundError) StatusCode() int { return http.StatusNotFound }
+func (backendSeriesNotFoundError) ResponseHeaders() http.Header {
+	return http.Header{"Request-Id": {"req_series_404"}, "Content-Type": {"application/json"}}
+}
+func (backendSeriesNotFoundError) ResponseBody() []byte { return []byte(backendSeriesNotFoundBody) }
+
+// The 2026-10-09 outage as the session saw it: a conversation whose subscription answers 404 for
+// its model got "Configured inference failed … check status.claude.com". Through the real handler,
+// stream and not, the session must get Anthropic's 404 exactly, even though the pool refused on
+// the retry that followed (the writers must be handed the request's attempt context, not a bare one).
+func TestBackendSeriesRefusalReachesTheSessionBody(t *testing.T) {
+	model := t.Name() + "-model"
+	first, second := t.Name()+"-first", t.Name()+"-second"
+	selector := &backendSeriesSelector{authIDs: []string{first, second}, provider: "claude"}
+	capture := &backendSeriesCapture{drained: first, failModel: model, failure: backendSeriesNotFoundError{}}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.SetRetryConfig(0, 0, 2)
+	setBackendSeriesResultPolicy(manager, selector)
+	manager.RegisterExecutor(withBackendUpstreamRecording(capture))
+	for _, authID := range []string{first, second} {
+		registry.GetGlobalRegistry().RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: backendAuthSelectionModel}})
+		if _, err := manager.Register(t.Context(), &coreauth.Auth{ID: authID, Provider: "claude", Status: coreauth.StatusActive, Metadata: map[string]any{"disable_cooling": false}}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	}
+	handler := newBackendHandler(t.Context(), BackendOptions{Provider: "claude", UseRequestModel: true}, handlers.NewBaseAPIHandlers(&config.SDKConfig{}, manager))
+	for _, stream := range []bool{false, true} {
+		writer := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(fmt.Sprintf(`{"model":%q,"stream":%t,"messages":[{"role":"user","content":"hello"}]}`, model, stream)))
+		req.Header.Set("X-Claude-Code-Session-Id", t.Name()+"-session")
+		handler.ServeHTTP(writer, req)
+		body := writer.Body.String()
+		// Anthropic's own answer, exactly: its status, its body, its request id; not the pool's
+		// refusal that followed, not the generic line.
+		if writer.Code != http.StatusNotFound || body != backendSeriesNotFoundBody {
+			t.Fatalf("stream=%t: Anthropic's 404 was not relayed exactly: status=%d body=%s", stream, writer.Code, body)
+		}
+		if writer.Header().Get("Request-Id") != "req_series_404" {
+			t.Fatalf("stream=%t: request-id dropped: %v", stream, writer.Header())
+		}
+		if backendRefusal(req.Context()) != "" {
+			t.Fatalf("stream=%t: the handler's refusal leaked onto the bare request context", stream)
+		}
+	}
+}
+
+// Anthropic answered a subscription's Opus request with a 404 that it did not repeat. The session
+// gets that 404 exactly; the NEXT request of the same conversation goes to the same subscription
+// and succeeds, because a failure that is not a dead login or a used-up quota benches nothing.
+func TestBackendSeriesDoesNotBenchASubscriptionOnAPassingFailure(t *testing.T) {
+	model := t.Name() + "-model"
+	first, second := t.Name()+"-first", t.Name()+"-second"
+	selector := &backendSeriesSelector{authIDs: []string{first, second}, provider: "claude"}
+	capture := &backendSeriesCapture{drained: first, failModel: model, failure: backendSeriesNotFoundError{}, failOnce: true}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.SetRetryConfig(0, 0, 2)
+	setBackendSeriesResultPolicy(manager, selector)
+	manager.RegisterExecutor(withBackendUpstreamRecording(capture))
+	for _, authID := range []string{first, second} {
+		registry.GetGlobalRegistry().RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: backendAuthSelectionModel}})
+		if _, err := manager.Register(t.Context(), &coreauth.Auth{ID: authID, Provider: "claude", Status: coreauth.StatusActive, Metadata: map[string]any{"disable_cooling": false}}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	}
+	handler := newBackendHandler(t.Context(), BackendOptions{Provider: "claude", UseRequestModel: true}, handlers.NewBaseAPIHandlers(&config.SDKConfig{}, manager))
+	request := func() *httptest.ResponseRecorder {
+		writer := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, model)))
+		req.Header.Set("X-Claude-Code-Session-Id", t.Name()+"-session")
+		handler.ServeHTTP(writer, req)
+		return writer
+	}
+	failed := request()
+	if failed.Code != http.StatusNotFound || failed.Body.String() != backendSeriesNotFoundBody {
+		t.Fatalf("the passing 404 was not relayed exactly: %d %s", failed.Code, failed.Body.String())
+	}
+	next := request()
+	if next.Code != http.StatusOK {
+		t.Fatalf("the next request of the conversation did not succeed: %d %s", next.Code, next.Body.String())
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if got := strings.Join(capture.calls, ","); got != first+","+first {
+		t.Fatalf("the subscription was benched or the conversation moved after a passing failure: calls=%v", capture.calls)
 	}
 }

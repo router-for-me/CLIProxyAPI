@@ -538,3 +538,31 @@ func TestUpdateTokenStoragePreservesAccountWhenRefreshOmitsIt(t *testing.T) {
 		t.Fatalf("organization = %q/%q, want preserved", storage.OrganizationUUID, storage.OrganizationName)
 	}
 }
+
+func TestManualRedirectIsUsedForTheURLAndTheExchange(t *testing.T) {
+	auth := &ClaudeAuth{}
+	u, state, err := auth.GenerateAuthURLWithRedirect("st", &PKCECodes{CodeChallenge: "ch"}, ManualRedirectURI)
+	if err != nil || state != "st" {
+		t.Fatalf("GenerateAuthURLWithRedirect: %v, %q", err, state)
+	}
+	if !strings.Contains(u, "redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback") || !strings.Contains(u, "code=true") {
+		t.Fatalf("manual URL = %s", u)
+	}
+	def, _, _ := auth.GenerateAuthURL("st", &PKCECodes{CodeChallenge: "ch"})
+	if !strings.Contains(def, "localhost%3A54545") {
+		t.Fatalf("the default flow must keep its local callback: %s", def)
+	}
+
+	var body []byte
+	auth = &ClaudeAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() == TokenURL {
+			body, _ = io.ReadAll(req.Body)
+			return jsonResponse(req, `{"access_token":"a","refresh_token":"r","expires_in":28800}`), nil
+		}
+		return jsonResponse(req, `{}`), nil
+	})}}
+	_, _ = auth.ExchangeCodeForTokensWithRedirect(t.Context(), "c", "s", &PKCECodes{CodeVerifier: "v"}, ManualRedirectURI)
+	if !strings.Contains(string(body), `"redirect_uri":"`+ManualRedirectURI+`"`) {
+		t.Fatalf("exchange must repeat the redirect the URL used: %s", body)
+	}
+}

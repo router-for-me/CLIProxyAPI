@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -365,9 +366,15 @@ func TestOpenRunProfilesPreservesRequestedOrderAndReleasesAllLocks(t *testing.T)
 	if len(profiles) != 2 || profiles[0].Name != "zeta" || profiles[1].Name != "alpha" {
 		t.Fatalf("profile order changed: %#v", profiles)
 	}
-	if competing, errOpen := claudemaster.OpenProfile("alpha", false); errOpen == nil {
+	// Runs share a profile (several Claude Code windows, one login); a login needs it alone.
+	other, errShared := claudemaster.OpenProfile("alpha", false)
+	if errShared != nil {
+		t.Fatalf("a second run could not share the profile: %v", errShared)
+	}
+	_ = other.Close()
+	if competing, errOpen := claudemaster.OpenProfile("alpha", true); errOpen == nil {
 		_ = competing.Close()
-		t.Fatal("series did not reserve every profile")
+		t.Fatal("a login took a profile that a run is using")
 	}
 	closeProfileLocks(locks)
 	for _, name := range []string{"alpha", "zeta"} {
@@ -394,4 +401,111 @@ func TestOpenRunProfilesReleasesPartialLockSet(t *testing.T) {
 		t.Fatalf("partial acquisition leaked alpha lock: %v", err)
 	}
 	_ = lock.Close()
+}
+
+// A server that cannot start must exit non-zero: systemd's Restart=on-failure and any deploy
+// script judge it by the exit status alone.
+func TestServeThatCannotStartExitsNonZero(t *testing.T) {
+	home := canonicalHome(t)
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	installRunProfileFixture(t, home, "alpha")
+	code, err := run([]string{"serve", "alpha", "--listen", "8.8.8.8:8443", "--state-dir", filepath.Join(home, "state")})
+	if err == nil || code == 0 {
+		t.Fatalf("serve with a public listen address returned code %d, error %v", code, err)
+	}
+}
+
+// canonicalHome is a private temp directory with symlinks resolved: macOS places TempDir below /var,
+// a symlink to /private/var, and profile paths with symlinks are (rightly) refused.
+func canonicalHome(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The open (no certificate) listener must never be offered on anything but loopback.
+func TestServeRefusesANonLoopbackOpenListener(t *testing.T) {
+	home := canonicalHome(t)
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	installRunProfileFixture(t, home, "alpha")
+	code, err := run([]string{"serve", "alpha", "--listen", "127.0.0.1:0", "--open-loopback", "10.0.0.10:8444", "--state-dir", filepath.Join(home, "state")})
+	if err == nil || code == 0 {
+		t.Fatalf("a non-loopback --open-loopback returned code %d, error %v", code, err)
+	}
+}
+
+// run's stderr is Claude's terminal, so logging there must go to a file.
+func TestRunLoggingNeedsAFileAndServeLevelsAreValidated(t *testing.T) {
+	home := canonicalHome(t)
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	installRunProfileFixture(t, home, "alpha")
+	code, err := run([]string{"run", "alpha", "--log-level", "info", "--", "--version"})
+	if err == nil || code != 2 || !strings.Contains(err.Error(), "--log-file") {
+		t.Fatalf("run --log-level info without a file: code=%d err=%v", code, err)
+	}
+	code, err = run([]string{"serve", "alpha", "--listen", "127.0.0.1:0", "--state-dir", filepath.Join(home, "state"), "--log-level", "loud"})
+	if err == nil || code != 2 {
+		t.Fatalf("an unknown level was accepted: code=%d err=%v", code, err)
+	}
+}
+
+// Several servers exporting to one backend must not merge into one series: each carries an instance.
+func TestMetricInstanceIsTheFlagElseTheHostname(t *testing.T) {
+	hostname := func() (string, error) { return "example-host\n", nil }
+	if got := metricInstance(" server-b ", hostname); got != "server-b" {
+		t.Errorf("--instance server-b gave %q", got)
+	}
+	if got := metricInstance("", hostname); got != "example-host" {
+		t.Errorf("no --instance gave %q, want the hostname", got)
+	}
+	if got := metricInstance("", func() (string, error) { return "", errors.New("no hostname") }); got != "" {
+		t.Errorf("with no hostname the instance is %q, want none", got)
+	}
+}
+
+// --instance is a flag of serve and run; an unknown flag would fail before the later checks.
+func TestServeAndRunAcceptTheInstanceFlag(t *testing.T) {
+	home := canonicalHome(t)
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	installRunProfileFixture(t, home, "alpha")
+	code, err := run([]string{"run", "alpha", "--instance", "server-b", "--log-level", "info", "--", "--version"})
+	if err == nil || code != 2 || !strings.Contains(err.Error(), "--log-file") {
+		t.Fatalf("run --instance: code=%d err=%v; want the later --log-file check", code, err)
+	}
+	code, err = run([]string{"serve", "alpha", "--instance", "server-b", "--listen", "127.0.0.1:0", "--state-dir", filepath.Join(home, "state"), "--log-level", "loud"})
+	if err == nil || code != 2 || strings.Contains(err.Error(), "instance") {
+		t.Fatalf("serve --instance: code=%d err=%v; want the later --log-level check", code, err)
+	}
+}
+
+// --balanced and --drain-timeout are flags of serve; an unknown flag would fail before the later checks.
+func TestServeAcceptsTheBalancerFlags(t *testing.T) {
+	home := canonicalHome(t)
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	installRunProfileFixture(t, home, "alpha")
+	code, err := run([]string{"serve", "alpha", "--balanced", "--drain-timeout", "10m", "--listen", "127.0.0.1:0", "--state-dir", filepath.Join(home, "state"), "--log-level", "loud"})
+	if err == nil || code != 2 || strings.Contains(err.Error(), "launcher arguments") {
+		t.Fatalf("serve --balanced --drain-timeout: code=%d err=%v; want the later --log-level check", code, err)
+	}
+	if code, err := run([]string{"serve", "alpha", "--drain-timeout", "soon"}); err == nil || code != 2 {
+		t.Fatalf("a malformed --drain-timeout must be refused: code=%d err=%v", code, err)
+	}
 }

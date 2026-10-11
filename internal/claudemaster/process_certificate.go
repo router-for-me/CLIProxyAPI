@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -25,6 +26,9 @@ type processCertificate struct {
 	caDER  []byte
 	caKey  *ecdsa.PrivateKey
 	now    func() time.Time
+
+	proxySlot leafSlot // the proxy's own certificate (see pki_server.go)
+	proxyIPs  []net.IP // its names; loopback when empty
 }
 
 func newProcessCertificate() (*processCertificate, error) {
@@ -36,7 +40,20 @@ func newProcessCertificateWithClock(nowFunc func() time.Time) (*processCertifica
 	if err != nil {
 		return nil, errors.New("cannot create private process certificate directory")
 	}
-	cleanup := true
+	certs, err := newProcessCertificateIn(dir, nowFunc)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	return certs, nil
+}
+
+// newProcessCertificateIn makes a CA in dir whose DNS names are constrained to api.anthropic.com, so
+// a leaked CA key cannot impersonate any other site by name. It deliberately carries NO IP-range
+// constraint: Claude's TLS stack rejects a trusted CA that has one ("unsupported name constraint
+// type"), which breaks every connection Claude makes, not just ours.
+func newProcessCertificateIn(dir string, nowFunc func() time.Time) (*processCertificate, error) {
+	cleanup := false
 	defer func() {
 		if cleanup {
 			_ = os.RemoveAll(dir)
@@ -53,11 +70,19 @@ func newProcessCertificateWithClock(nowFunc func() time.Time) (*processCertifica
 	now := nowFunc()
 	// Only this child trusts this CA. Its key never leaves the process, and
 	// longer validity lets short-lived leaves renew without restarting Claude.
-	ca := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "claude-master process CA"}, NotBefore: now.Add(-time.Minute), NotAfter: now.AddDate(10, 0, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
+	ca := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "claude-master process CA"}, NotBefore: now.Add(-time.Minute), NotAfter: now.AddDate(10, 0, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		PermittedDNSDomainsCritical: true, PermittedDNSDomains: []string{masterAPIHost}}
 	caDER, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
 	if err != nil {
 		return nil, errors.New("cannot create process CA certificate")
 	}
+	// Keep the PARSED certificate: the template has no raw subject, and a pool built from it would
+	// advertise an empty CA name to clients.
+	parsedCA, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		return nil, errors.New("cannot inspect the process CA certificate")
+	}
+	ca = parsedCA
 	caPath := filepath.Join(dir, "ca.pem")
 	if err := writePrivateFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})); err != nil {
 		return nil, err

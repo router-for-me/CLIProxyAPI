@@ -49,6 +49,10 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		opts = &LoginOptions{}
 	}
 
+	if opts.ManualCode {
+		return a.loginManual(ctx, cfg, opts)
+	}
+
 	callbackPort := a.CallbackPort
 	if opts.CallbackPort > 0 {
 		callbackPort = opts.CallbackPort

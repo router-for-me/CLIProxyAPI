@@ -127,8 +127,8 @@ func TestPreflightConsumesBackupKeyBeforeSettingsDiscovery(t *testing.T) {
 }
 
 func TestChildEnvironmentPreservesMasterAndScopesProxy(t *testing.T) {
-	const proxyURL = "http://private-capability@127.0.0.1:1234"
-	env, err := ChildEnvironment([]string{"PATH=/usr/bin", "USER=alice", "HTTPS_PROXY=http://old", "NO_PROXY=*", "no_proxy=api.anthropic.com", "CLAUDE_CODE_CHILD_SESSION=parent", "CLAUDE_CODE_SESSION_ID=old", "REMOTE_CLAW_SECRET_FILE=private", "CLAUDE_MASTER_TEST_SECRET=secret"}, []string{"--remote-control"}, proxyURL, "/process/ca.pem")
+	const proxyURL = "http://claude-master:token@127.0.0.1:1234"
+	env, err := ChildEnvironment([]string{"PATH=/usr/bin", "USER=alice", "HTTPS_PROXY=http://old", "NO_PROXY=*", "no_proxy=api.anthropic.com", "CLAUDE_CODE_CHILD_SESSION=parent", "CLAUDE_CODE_SESSION_ID=old", "REMOTE_CLAW_SECRET_FILE=private", "CLAUDE_MASTER_TEST_SECRET=secret", "CLAUDE_CODE_CLIENT_CERT=/home/user/own.pem", "CLAUDE_CODE_CLIENT_KEY=/home/user/own.key", "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE=hunter2"}, []string{"--remote-control"}, proxyURL, "/process/ca.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +136,13 @@ func TestChildEnvironmentPreservesMasterAndScopesProxy(t *testing.T) {
 	for _, key := range []string{"NO_PROXY", "no_proxy", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "REMOTE_CLAW_SECRET_FILE", "CLAUDE_MASTER_TEST_SECRET"} {
 		if _, ok := got[key]; ok {
 			t.Errorf("leaked %s", key)
+		}
+	}
+	// The local forwarder presents the client certificate; Claude holds none, and never one the
+	// caller had configured.
+	for _, key := range []string{"CLAUDE_CODE_CLIENT_CERT", "CLAUDE_CODE_CLIENT_KEY", "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE"} {
+		if _, ok := got[key]; ok {
+			t.Errorf("the child was given %s", key)
 		}
 	}
 	if got["PATH"] != "/usr/bin" || got["USER"] != "alice" || got["HTTPS_PROXY"] != proxyURL || got["https_proxy"] != proxyURL || got["NODE_EXTRA_CA_CERTS"] != "/process/ca.pem" || got["DISABLE_AUTOUPDATER"] != "1" {
@@ -178,6 +185,108 @@ func TestChildEnvironmentRejectsBypassConfiguration(t *testing.T) {
 	for _, arg := range []string{"--settings=canary", "--setting-sources", "--sdk-url=wss://bad", "--api-key=canary", "--base-url=https://bad"} {
 		if _, err := ChildEnvironment(nil, []string{arg}, "proxy", "ca"); err == nil {
 			t.Errorf("accepted flag %s", arg)
+		}
+	}
+}
+
+func TestChildEnvironmentKeepsHeapSizeNodeOptions(t *testing.T) {
+	env, err := ChildEnvironment([]string{"NODE_OPTIONS=--max-old-space-size=3072"}, nil, "proxy", "ca")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range env {
+		if entry == "NODE_OPTIONS=--max-old-space-size=3072" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("heap-size NODE_OPTIONS was dropped")
+	}
+	for _, value := range []string{"--max-old-space-size=3072 --require /tmp/sensitive-canary.js", "--use-openssl-ca"} {
+		if _, err := ChildEnvironment([]string{"NODE_OPTIONS=" + value}, nil, "proxy", "ca"); err == nil {
+			t.Errorf("accepted NODE_OPTIONS %q", value)
+		}
+	}
+	path := writeLauncherSettings(t, `{"env":{"NODE_OPTIONS":"--max-old-space-size=3072"}}`)
+	if _, err := ChildEnvironment(nil, []string{"--settings", path}, "proxy", "ca"); err != nil {
+		t.Fatalf("refused heap-size NODE_OPTIONS in --settings: %v", err)
+	}
+}
+
+func writeLauncherSettings(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestChildEnvironmentAllowsSettingsThatDoNotConflict(t *testing.T) {
+	hooks := `{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"/bin/true"}]}]},"preferredNotifChannel":"terminal_bell","env":{"HARMLESS_FLAG":"1"},"model":"sonnet"}`
+	path := writeLauncherSettings(t, hooks)
+	for _, args := range [][]string{{"--settings", path}, {"--settings=" + path}, {"--settings", hooks}, {"--settings=" + hooks}, {"-p", "x", "--settings", path, "--remote-control"}} {
+		if _, err := ChildEnvironment(nil, args, "proxy", "ca"); err != nil {
+			t.Errorf("refused harmless settings %v: %v", args[:1], err)
+		}
+	}
+}
+
+func TestChildEnvironmentRefusesSettingsKnownToConflict(t *testing.T) {
+	cases := map[string]string{
+		"apiKeyHelper":        `{"apiKeyHelper":"/bin/echo sensitive-canary"}`,
+		"awsAuthRefresh":      `{"awsAuthRefresh":"aws sso login"}`,
+		"awsCredentialExport": `{"awsCredentialExport":"x"}`,
+		"gcpAuthRefresh":      `{"gcpAuthRefresh":"x"}`,
+		"forceLoginMethod":    `{"forceLoginMethod":"console"}`,
+		"forceLoginOrgUUID":   `{"forceLoginOrgUUID":"00000000-0000-0000-0000-000000000000"}`,
+		"env base url":        `{"env":{"ANTHROPIC_BASE_URL":"https://sensitive-canary.invalid"}}`,
+		"env api key":         `{"env":{"ANTHROPIC_API_KEY":"sensitive-canary"}}`,
+		"env bedrock":         `{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}`,
+		"env https proxy":     `{"env":{"HTTPS_PROXY":"http://sensitive-canary.invalid:1"}}`,
+		"env no proxy":        `{"env":{"NO_PROXY":"*"}}`,
+		"env extra ca":        `{"env":{"NODE_EXTRA_CA_CERTS":"/tmp/sensitive-canary.pem"}}`,
+		"env node options":    `{"env":{"NODE_OPTIONS":"--require /tmp/sensitive-canary.js"}}`,
+		"conflict with hooks": `{"hooks":{},"apiKeyHelper":"x"}`,
+	}
+	for name, content := range cases {
+		for form, args := range map[string][]string{"file": {"--settings", writeLauncherSettings(t, content)}, "inline": {"--settings=" + content}} {
+			t.Run(name+"/"+form, func(t *testing.T) {
+				_, err := ChildEnvironment(nil, args, "proxy", "ca")
+				if err == nil {
+					t.Fatal("accepted conflicting settings")
+				}
+				if strings.Contains(err.Error(), "sensitive-canary") {
+					t.Fatal("a settings value leaked in the error")
+				}
+			})
+		}
+	}
+}
+
+func TestChildEnvironmentRefusesSettingsItCannotUnderstand(t *testing.T) {
+	dir := t.TempDir()
+	big := writeLauncherSettings(t, `{"padding":"`+strings.Repeat("x", launcherSettingsLimit)+`"}`)
+	for name, args := range map[string][]string{
+		"missing file":           {"--settings", filepath.Join(dir, "absent.json")},
+		"a directory":            {"--settings", dir},
+		"not json":               {"--settings", writeLauncherSettings(t, "not json")},
+		"json but not an object": {"--settings", writeLauncherSettings(t, `["x"]`)},
+		"env not an object":      {"--settings", writeLauncherSettings(t, `{"env":"x"}`)},
+		"too large":              {"--settings", big},
+		"no value":               {"--settings"},
+		"bare word":              {"--settings=canary"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ChildEnvironment(nil, args, "proxy", "ca"); err == nil {
+				t.Fatal("accepted settings it could not understand")
+			}
+		})
+	}
+	for _, flag := range []string{"--setting-sources", "--sdk-url=wss://bad", "--api-key=canary", "--base-url=https://bad", "--cwd=/x", "--worktree", "-w"} {
+		if _, err := ChildEnvironment(nil, []string{flag}, "proxy", "ca"); err == nil {
+			t.Errorf("accepted flag %s", flag)
 		}
 	}
 }
