@@ -73,13 +73,13 @@ variable "profiles" {
 }
 
 variable "release_tag" {
-  description = "Release of ejc3/CLIProxyAPI that carries the claw-master-linux-arm64 binary. Pinned together with binary_sha256: change both to roll forward."
+  description = "Release of ejc3/CLIProxyAPI that carries the server binary, <tag prefix>-linux-arm64 (claude-master-* releases before the rename, claw-master-* after). Pinned together with binary_sha256: change both to roll forward."
   type        = string
-  default     = "claw-master-957ec56"
+  default     = "claude-master-957ec56"
 }
 
 variable "binary_sha256" {
-  description = "SHA-256 of the claw-master-linux-arm64 asset of release_tag. The bootstrap refuses a download that does not match."
+  description = "SHA-256 of the linux-arm64 asset of release_tag. The bootstrap refuses a download that does not match."
   type        = string
   default     = "850334a53ad430ab06325c4fe6636286fa8f04b6ca69e70abfbc9909693ccd75"
 }

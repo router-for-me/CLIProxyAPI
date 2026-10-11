@@ -238,7 +238,8 @@ func connectMaster(conn net.Conn, project string) (net.Conn, error) {
 	authority := masterAPIHost + ":443"
 	extra := ""
 	if project != "" {
-		extra = projectHeader + ": " + project + "\r\n"
+		// Under both names, so a server from before the rename still counts the project.
+		extra = projectHeader + ": " + project + "\r\n" + legacyProjectHeader + ": " + project + "\r\n"
 	}
 	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", authority, authority, extra); err != nil {
 		return nil, err

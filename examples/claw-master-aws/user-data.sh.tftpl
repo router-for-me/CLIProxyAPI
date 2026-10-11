@@ -6,6 +6,9 @@ export DEBIAN_FRONTEND=noninteractive
 
 TAG='${release_tag}'
 SHA='${binary_sha256}'
+# The asset is named for the release's prefix: claude-master-linux-arm64 in releases from before the
+# rename, claw-master-linux-arm64 after.
+ASSET="$${TAG%-*}-linux-arm64"
 HOME_DIR=/var/lib/claw-master
 
 # ---------------------------------------------------------------- swap first: a 1 GB box's first boot is its memory peak
@@ -25,6 +28,25 @@ if ! command -v aws >/dev/null 2>&1; then
 fi
 %{ endif ~}
 
+# ---------------------------------------------------------------- an install from before the rename
+# Its service account, home (profiles, logins, the CA), settings and logs move to the new names, so
+# running this again keeps every login and every enrolled client. The old units are stopped first;
+# the new ones are written below and started by claw-master-rollout.
+if id claude-master >/dev/null 2>&1 && ! id claw-master >/dev/null 2>&1; then
+  systemctl stop 'claude-master-server@blue' 'claude-master-server@green' 2>/dev/null || true
+  systemctl disable 'claude-master-server@blue' 'claude-master-server@green' 2>/dev/null || true
+  usermod --login claw-master --home "$HOME_DIR" --move-home claude-master
+  groupmod --new-name claw-master claude-master 2>/dev/null || true
+  if [ -d "$HOME_DIR/.local/share/claude-master" ] && [ ! -e "$HOME_DIR/.local/share/claw-master" ]; then
+    mv "$HOME_DIR/.local/share/claude-master" "$HOME_DIR/.local/share/claw-master"
+  fi
+  for d in /etc /var/log; do
+    if [ -d "$d/claude-master" ] && [ ! -e "$d/claw-master" ]; then mv "$d/claude-master" "$d/claw-master"; fi
+  done
+  rm -f /etc/systemd/system/claude-master-server@.service /usr/local/bin/claude-master-serve /usr/local/bin/claude-master
+  systemctl daemon-reload || true
+fi
+
 # ---------------------------------------------------------------- the service account
 # Its own unix user: the logins and the CA key are readable by this account and root, not by the login user.
 id claw-master >/dev/null 2>&1 || useradd --system --create-home --home-dir "$HOME_DIR" --shell /usr/sbin/nologin claw-master
@@ -33,7 +55,7 @@ install -d -m 0700 -o claw-master -g claw-master "$HOME_DIR" "$HOME_DIR/state"
 # ---------------------------------------------------------------- the pinned binary (refuses a download that does not match)
 current=$(sha256sum /usr/local/bin/claw-master 2>/dev/null | cut -d' ' -f1)
 if [ "$current" != "$SHA" ]; then
-  if curl -fsSL "https://github.com/ejc3/CLIProxyAPI/releases/download/$TAG/claw-master-linux-arm64" -o /tmp/claw-master.new \
+  if curl -fsSL "https://github.com/ejc3/CLIProxyAPI/releases/download/$TAG/$ASSET" -o /tmp/claw-master.new \
      && echo "$SHA  /tmp/claw-master.new" | sha256sum -c - ; then
     install -m 0755 /tmp/claw-master.new /usr/local/bin/claw-master.new && mv -f /usr/local/bin/claw-master.new /usr/local/bin/claw-master
     echo "claw-master $TAG installed; a running server keeps its old binary until it is restarted"

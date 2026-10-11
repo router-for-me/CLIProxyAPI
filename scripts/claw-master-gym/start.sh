@@ -79,7 +79,7 @@ parse_profiles() {
 lane_a_value=${CLAW_MASTER_GYM_LANE_A_PROFILES:-}
 lane_b_value=${CLAW_MASTER_GYM_LANE_B_PROFILES:-}
 if [[ -z $lane_a_value || -z $lane_b_value ]]; then
-  profile_root="$HOME/.local/share/claw-master/profiles"
+  profile_root=$(gym_profile_root)
   echo "Two disjoint, normally logged-in Claw Master profiles are required." >&2
   echo "Only profile names are inspected; no credential files are read." >&2
   echo "Available profiles:" >&2
@@ -115,7 +115,7 @@ for profile in "${lane_b_profiles[@]}"; do
   done
 done
 
-profile_root="$HOME/.local/share/claw-master/profiles"
+profile_root=$(gym_profile_root)
 for profile in "${lane_a_profiles[@]}" "${lane_b_profiles[@]}"; do
   if [[ ! -f $profile_root/$profile/current/profile.json || ! -d $profile_root/$profile/current/auth ]]; then
     echo "Profile '$profile' is not logged in under $profile_root." >&2

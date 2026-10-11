@@ -173,7 +173,7 @@ func TestTheForwarderNamesItsProjectOnTheTunnelToTheProxy(t *testing.T) {
 			got <- "unreadable"
 			return
 		}
-		got <- req.Method + " " + req.RequestURI + " " + req.Header.Get(projectHeader)
+		got <- req.Method + " " + req.RequestURI + " " + req.Header.Get(projectHeader) + " " + req.Header.Get(legacyProjectHeader)
 		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
 	}()
 	f, err := startLocalForwarder(plainUpstream(listener.Addr().String()), "my app")
@@ -185,7 +185,8 @@ func TestTheForwarderNamesItsProjectOnTheTunnelToTheProxy(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("CONNECT = %d", resp.StatusCode)
 	}
-	if line := <-got; line != "CONNECT "+masterAPIHost+":443 my-app" {
-		t.Fatalf("the proxy saw %q, want the CONNECT naming the sanitized project", line)
+	// Under both header names, so a server from before the rename still counts it.
+	if line := <-got; line != "CONNECT "+masterAPIHost+":443 my-app my-app" {
+		t.Fatalf("the proxy saw %q, want the CONNECT naming the sanitized project under both headers", line)
 	}
 }

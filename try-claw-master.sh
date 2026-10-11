@@ -108,6 +108,11 @@ go build -o "$binary" ./cmd/claw-master
 "${preflight_env[@]}" "$binary" check
 
 profile_root="$HOME/.local/share/claw-master/profiles"
+# Before the rename the profiles lived under claude-master; claw-master keeps using that directory
+# while the new one does not exist, and so does this check.
+if [[ ! -e $HOME/.local/share/claw-master && -d $HOME/.local/share/claude-master ]]; then
+  profile_root="$HOME/.local/share/claude-master/profiles"
+fi
 for profile in "${profiles[@]}"; do
   if [[ -d "$profile_root/$profile/current" ]]; then
     echo "Using existing profile: $profile"

@@ -2,6 +2,27 @@
 
 # Shared helpers for the manual Claw Master tmux gym.
 
+# Settings under their names from before the rename (CLAUDE_MASTER_GYM_*) still apply.
+for gym_setting in LANE_A_PROFILES LANE_B_PROFILES REMOTE_CONTROL STATE_DIR TMUX_SESSION; do
+  gym_new="CLAW_MASTER_GYM_$gym_setting"
+  gym_old="CLAUDE_MASTER_GYM_$gym_setting"
+  if [[ -z ${!gym_new:-} && -n ${!gym_old:-} ]]; then
+    export "$gym_new=${!gym_old}"
+  fi
+done
+unset gym_setting gym_new gym_old
+
+# Where the profiles are: ~/.local/share/claw-master, or claude-master (its name before the rename)
+# while only that one exists, as claw-master itself decides.
+gym_profile_root() {
+  local share="$HOME/.local/share"
+  if [[ ! -e $share/claw-master && -d $share/claude-master ]]; then
+    printf '%s\n' "$share/claude-master/profiles"
+  else
+    printf '%s\n' "$share/claw-master/profiles"
+  fi
+}
+
 gym_script_dir() {
   cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd
 }
