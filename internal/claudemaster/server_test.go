@@ -54,7 +54,7 @@ func newTestServer(t *testing.T) (stateDir string, certs *processCertificate, pr
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy, err = startServerProxy(certs, "127.0.0.1:0", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "served") }))
+	proxy, err = startServerProxy(certs, "127.0.0.1:0", "", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "served") }))
 	if err != nil {
 		t.Fatal(err)
 	}

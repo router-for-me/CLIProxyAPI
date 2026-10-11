@@ -60,6 +60,21 @@ func privateIP(host string) (net.IP, error) {
 	return nil, errors.New("the address must be loopback or private (10/8, 172.16/12, 192.168/16, fc00::/7)")
 }
 
+// loopbackEndpoint splits HOST:PORT and checks that HOST is a literal loopback address. The open
+// (no certificate) listener and its client both insist on it: nothing is ever offered unauthenticated
+// to a network, and a client never sends a plain proxy request across one.
+func loopbackEndpoint(endpoint string) (net.IP, string, error) {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || port == "" {
+		return nil, "", errors.New("expected ADDRESS:PORT")
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil || !ip.IsLoopback() {
+		return nil, "", errors.New("the address must be a literal loopback address (127.0.0.1 or ::1)")
+	}
+	return ip, port, nil
+}
+
 // privateEndpoint splits HOST:PORT and checks that HOST is a private IP.
 func privateEndpoint(endpoint string) (net.IP, string, error) {
 	host, port, err := net.SplitHostPort(endpoint)

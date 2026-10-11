@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -38,6 +40,10 @@ type ProxyOptions struct {
 	ClientCAs        *x509.CertPool
 	// Listen is the address to bind; the default is an ephemeral IPv4 loopback port.
 	Listen string
+	// OpenListen, when set, adds a SECOND listener that is plain HTTP and asks for no certificate.
+	// It must be a loopback address: whatever can reach it is trusted, so an authenticating tunnel
+	// (cloudflared, an SSH forward) is expected to be the only thing that does.
+	OpenListen string
 }
 
 // ProxyStats is a best-effort, counter-only diagnostic snapshot. It never
@@ -67,6 +73,7 @@ type proxyCounters struct {
 // Only api.anthropic.com is TLS-terminated; other HTTPS hosts are blind tunnels.
 type Proxy struct {
 	url         string
+	openAddr    string
 	ctx         context.Context
 	cancel      context.CancelFunc
 	outer       *http.Server
@@ -78,10 +85,17 @@ type Proxy struct {
 	control     *httputil.ReverseProxy
 	mu          sync.Mutex
 	closed      bool
+	draining    bool         // Drain has begun
+	balanced    bool         // a load balancer stops sending new connections here once a rollout begins
+	running     atomic.Int64 // inference requests being served (the listeners are in wg, not here)
 	conns       map[*proxyConn]struct{}
 	wg          sync.WaitGroup
 	closeOnce   sync.Once
 	counters    proxyCounters
+
+	clients sync.Map // inner *tls.Conn -> the client's name (see proxy_observe.go)
+	routes  sync.Map // route shapes already logged by noteRoute
+	seen    sync.Map // client name -> first connection logged
 }
 
 // StartProxy binds an ephemeral IPv4 loopback port. It never reads account
@@ -97,9 +111,22 @@ func StartProxy(opts ProxyOptions) (*Proxy, error) {
 	if opts.Listen != "" {
 		network, address = "tcp", opts.Listen
 	}
+	var openListener net.Listener
+	if opts.OpenListen != "" {
+		if _, _, err := loopbackEndpoint(opts.OpenListen); err != nil {
+			return nil, fmt.Errorf("the open listener: %w", err)
+		}
+	}
 	rawListener, err := net.Listen(network, address)
 	if err != nil {
 		return nil, errors.New("cannot bind the proxy")
+	}
+	if opts.OpenListen != "" {
+		openListener, err = net.Listen("tcp", opts.OpenListen)
+		if err != nil {
+			_ = rawListener.Close()
+			return nil, errors.New("cannot bind the open loopback listener")
+		}
 	}
 	listener := tls.NewListener(rawListener, &tls.Config{
 		GetCertificate: opts.ProxyCertificate, ClientCAs: opts.ClientCAs, ClientAuth: tls.RequireAndVerifyClientCert,
@@ -140,16 +167,45 @@ func StartProxy(opts ProxyOptions) (*Proxy, error) {
 		},
 	}
 	baseContext := func(net.Listener) context.Context { return ctx }
-	p.outer = &http.Server{Handler: p.ownedHandler(p.handleConnect), BaseContext: baseContext, ErrorLog: log.New(io.Discard, "", 0)}
-	p.inner = &http.Server{Handler: p.ownedHandler(p.handleAPI), BaseContext: baseContext, ErrorLog: log.New(io.Discard, "", 0)}
+	p.outer = &http.Server{Handler: p.ownedHandler(p.handleConnect), BaseContext: baseContext, ErrorLog: log.New(newHandshakeErrorWriter(observeHandshakeError), "", 0)}
+	p.inner = &http.Server{
+		Handler: p.ownedHandler(p.handleAPI), BaseContext: baseContext, ErrorLog: log.New(io.Discard, "", 0),
+		// Every request on an inner connection knows which client opened the tunnel, and for which
+		// project when the tunnel named one.
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if v, ok := p.clients.Load(c); ok {
+				tunnel := v.(tunnelOwner)
+				ctx = context.WithValue(ctx, clientCtxKey{}, tunnel.client)
+				if tunnel.project != "" {
+					ctx = context.WithValue(ctx, projectCtxKey{}, tunnel.project)
+				}
+			}
+			return ctx
+		},
+		ConnState: func(c net.Conn, state http.ConnState) {
+			if state == http.StateClosed || state == http.StateHijacked {
+				p.clients.Delete(c)
+			}
+		},
+	}
 	p.wg.Add(2)
 	go func() { defer p.wg.Done(); _ = p.outer.Serve(listener) }()
+	if openListener != nil {
+		p.openAddr = openListener.Addr().String()
+		p.wg.Add(1)
+		go func() { defer p.wg.Done(); _ = p.outer.Serve(openListener) }()
+	}
 	go func() { defer p.wg.Done(); _ = p.inner.Serve(p.innerListen) }()
+	lg().Info("proxy listening", "addr", p.Addr(), "open_loopback_addr", p.openAddr)
+	registerStateSource(p)
 	return p, nil
 }
 
 // URL is the proxy's https address. It carries no credential: clients authenticate with a certificate.
 func (p *Proxy) URL() string { return p.url }
+
+// OpenAddr is the plain loopback listener's address, or "" when there is none.
+func (p *Proxy) OpenAddr() string { return p.openAddr }
 
 // Addr is the address the proxy listens on.
 func (p *Proxy) Addr() string { return strings.TrimPrefix(p.url, "https://") }
@@ -172,10 +228,106 @@ func (p *Proxy) Snapshot() ProxyStats {
 	}
 }
 
+// beginInference admits an inference request unless the proxy is closed, or draining without a
+// balancer in front. Behind a balancer a draining proxy keeps serving the connections it has (the
+// balancer sends new ones elsewhere), and each response closes its connection (handleAPI), so the
+// client's next request opens a new one through the balancer.
+func (p *Proxy) beginInference() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || (p.draining && !p.balanced) {
+		return false
+	}
+	p.running.Add(1)
+	return true
+}
+
+// setBalanced says a load balancer is in front (serve --balanced).
+func (p *Proxy) setBalanced(balanced bool) {
+	p.mu.Lock()
+	p.balanced = balanced
+	p.mu.Unlock()
+}
+
+func (p *Proxy) isDraining() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.draining
+}
+
+func (p *Proxy) endInference() { p.running.Add(-1) }
+
+// writeProxyRestarting answers an inference request that arrives while the server stops: what
+// Anthropic answers when it cannot take a request now (529 overloaded_error, x-should-retry), so
+// Claude Code backs off and retries, and finds the server again once it is back.
+func writeProxyRestarting(w http.ResponseWriter) {
+	w.Header().Set("X-Should-Retry", "true")
+	w.Header().Set("Connection", "close")
+	backendAnthropicError(w, 529, "overloaded_error", "claude-master is restarting; retry")
+}
+
+// Drain lets the requests already running finish before Close cancels them, and returns when
+// none is running or timeout passes, whichever is first. Without a balancer, new inference requests
+// are answered with a retryable 529 meanwhile; with one (serve --balanced), requests on the
+// connections this proxy already has are served and each closes its connection, so the client
+// moves to the other server without an error. Every response during a drain carries
+// Connection: close. Before this a restart cancelled every running request at once and the session
+// got a 499 it does not retry (2026-10-10 05:45).
+func (p *Proxy) Drain(timeout time.Duration) {
+	p.mu.Lock()
+	if p.closed || p.draining {
+		p.mu.Unlock()
+		return
+	}
+	p.draining = true
+	balanced := p.balanced
+	p.mu.Unlock()
+	if balanced {
+		// Close every idle keep-alive connection now, and every busy one after its response: a client's next
+		// request then opens a new connection, which the balancer sends to the server taking over. Without this
+		// each client's first request after a rollout still landed here, on the old configuration: on 2026-10-10
+		// the old server, which did not know a subscription the new one had just added, sent 30 requests to an
+		// API-key backup with no credit while the new server had capacity.
+		p.inner.SetKeepAlivesEnabled(false)
+	}
+	running := p.running.Load()
+	if running == 0 && !balanced {
+		lg().Info("proxy draining: no request running")
+		return
+	}
+	start := time.Now()
+	lg().Info("proxy draining", "running", running, "balanced", balanced, "timeout", timeout)
+	// Polled, not waited on: behind a balancer requests still start while draining. Two quiet
+	// samples in a row end it; a request that starts between the last sample and Close is
+	// cancelled, and a cancelled request is answered with a retryable 529.
+	deadline := start.Add(timeout)
+	quiet := 0
+	for {
+		if p.running.Load() == 0 {
+			quiet++
+			if quiet >= 2 {
+				lg().Info("proxy drained", "waited", time.Since(start).Round(time.Millisecond))
+				return
+			}
+		} else {
+			quiet = 0
+		}
+		if !time.Now().Before(deadline) {
+			lg().Warn("proxy drain timed out; the requests still running are cancelled", "running", p.running.Load())
+			return
+		}
+		time.Sleep(drainPoll)
+	}
+}
+
+var drainPoll = 25 * time.Millisecond
+
 // Close cancels handlers and closes both normal and CONNECT-hijacked sockets.
 // It is safe to call concurrently or more than once.
 func (p *Proxy) Close() error {
 	p.closeOnce.Do(func() {
+		lg().Info("proxy stopping")
+		unregisterStateSource(p)
 		p.mu.Lock()
 		p.closed = true
 		p.cancel()
@@ -225,35 +377,66 @@ func (p *Proxy) track(conn net.Conn) *proxyConn {
 	return tracked
 }
 
+// proxyProbePath is the one request a proxy answers for itself. A client uses it to tell a claude-master
+// proxy from some other service at the same address; it reveals nothing and changes nothing.
+const (
+	proxyProbePath   = "/.claude-master/probe"
+	proxyProbeHeader = "X-Claude-Master"
+)
+
+// tunnelOwner is who opened a tunnel to api.anthropic.com: the client's name, and the project its
+// CONNECT named (projectHeader), if any.
+type tunnelOwner struct {
+	client  string
+	project string
+}
+
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == proxyProbePath {
+		w.Header().Set(proxyProbeHeader, "1")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodConnect {
 		p.counters.connectRejected.Add(1)
+		observeConnection("unknown", "rejected")
 		http.Error(w, "proxy expects HTTPS CONNECT", http.StatusBadRequest)
 		return
 	}
 	host, err := proxyAuthority(r.RequestURI)
 	if err != nil || r.Host != r.RequestURI || r.ContentLength > 0 || len(r.TransferEncoding) != 0 {
 		p.counters.connectRejected.Add(1)
+		observeConnection("unknown", "rejected")
+		lg().Debug("CONNECT refused: not an acceptable HTTPS authority")
 		http.Error(w, "invalid CONNECT authority", http.StatusBadRequest)
 		return
 	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		p.counters.connectRejected.Add(1)
+		observeConnection("unknown", "rejected")
 		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
 		return
 	}
 	raw, buffered, err := hijacker.Hijack()
 	if err != nil {
 		p.counters.connectRejected.Add(1)
+		observeConnection("unknown", "rejected")
 		return
 	}
 	client := p.track(raw)
 	if client == nil {
 		p.counters.connectRejected.Add(1)
+		observeConnection("unknown", "rejected")
 		return
 	}
 	p.counters.connectAccepted.Add(1)
+	clientName, listenerKind := identifyClient(raw)
+	observeConnection(listenerKind, "accepted")
+	if _, seen := p.seen.LoadOrStore(clientName+"|"+listenerKind, true); !seen {
+		lg().Info("client connected for the first time", "client", clientName, "listener", listenerKind)
+	}
+	lg().Debug("client tunnel", "client", clientName, "listener", listenerKind, "host", host)
 	// Read any TLS ClientHello bytes pipelined with CONNECT before reading the
 	// raw socket. The bytes must go through TLS, not into decrypted HTTP.
 	stream := &proxyBufferedConn{Conn: client, reader: buffered.Reader}
@@ -267,6 +450,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tlsConn := tls.Server(stream, p.tlsConfig)
+		p.clients.Store(tlsConn, tunnelOwner{client: clientName, project: sanitizeProject(r.Header.Get(projectHeader))})
 		select {
 		case p.innerListen.connections <- tlsConn:
 		case <-p.ctx.Done():
@@ -334,6 +518,11 @@ func proxyAuthority(authority string) (string, error) {
 }
 
 func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
+	if p.isDraining() {
+		// The client's next request opens a new connection, which the balancer (if any) sends to the
+		// server that is taking over.
+		w.Header().Set("Connection", "close")
+	}
 	p.counters.apiRequests.Add(1)
 	host := r.Host
 	if !strings.Contains(host, ":") {
@@ -372,28 +561,66 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 		request.Header = coreexecutor.NativeClaudeProtocolHeaders(r.Header)
 		request.Header.Set("Content-Type", "application/json")
 		request = request.WithContext(coreexecutor.WithNativeClaudeProtocolHeaders(request.Context(), request.Header))
+		if !p.beginInference() {
+			p.counters.blockedRequests.Add(1)
+			writeProxyRestarting(w)
+			return
+		}
+		defer p.endInference()
 		p.counters.inferenceRequests.Add(1)
 		p.inference.ServeHTTP(w, request)
 		return
 	}
-	if path == "/v1/sessions" || strings.HasPrefix(path, "/v1/sessions/") {
-		if !proxyLegacySessionPath(r.Method, path) || !proxyLegacySessionRequest(r) {
-			p.counters.blockedRequests.Add(1)
-			http.Error(w, "unrecognized legacy Remote Control request; request blocked", http.StatusForbidden)
-			return
-		}
-		p.counters.controlRequests.Add(1)
-		p.control.ServeHTTP(w, r)
-		return
-	}
-	if !proxyControlPath(r.Method, path) {
-		p.counters.blockedRequests.Add(1)
-		// Never send an unknown/future inference endpoint to the master account.
-		http.Error(w, "unrecognized control endpoint; request blocked", http.StatusForbidden)
-		return
+	// Everything else goes to Anthropic unchanged, on the session's own login: exactly what Claude Code does
+	// without claude-master. claude-master adds no credential to these requests, so relaying them grants
+	// nothing; refusing them only broke sessions (WebFetch's domain check, 2.1.296's /api/hello, claude.ai MCP
+	// connectors, telemetry). Compatibility comes first. A route not in the reviewed list is logged once per
+	// shape, for visibility only.
+	if !proxyListedRoute(r, path) {
+		p.noteRoute(r.Method, path)
 	}
 	p.counters.controlRequests.Add(1)
+	observeControl(r)
 	p.control.ServeHTTP(w, r)
+}
+
+// proxyListedRoute: routes reviewed as Claude Code control traffic (proxyControlPath, the legacy Remote
+// Control sessions). Only the "unlisted route" log line depends on it; every route is relayed.
+func proxyListedRoute(r *http.Request, path string) bool {
+	if path == "/v1/sessions" || strings.HasPrefix(path, "/v1/sessions/") {
+		return proxyLegacySessionPath(r.Method, path) && proxyLegacySessionRequest(r)
+	}
+	return proxyControlPath(r.Method, path)
+}
+
+// noteRoute logs the first request of each unlisted route shape this process relays: the method and the
+// path with id-like segments replaced, never a query or an id. The reference deployment alarms on the
+// line (UnlistedRoute) as a review queue: the route already works; list it once it is reviewed.
+func (p *Proxy) noteRoute(method, path string) {
+	shape := proxyRouteShape(path)
+	if _, seen := p.routes.LoadOrStore(method+" "+shape, struct{}{}); seen {
+		return
+	}
+	lg().Info("relayed an unlisted Anthropic route", "method", method, "route", shape)
+}
+
+// proxyRouteShape replaces id-like segments (with a digit, or longer than 24 characters) by :id; an API
+// version segment (v1, v0) is kept.
+func proxyRouteShape(path string) string {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		if proxyVersionSegment(segment) {
+			continue
+		}
+		if len(segment) > 24 || strings.ContainsAny(segment, "0123456789") {
+			segments[i] = ":id"
+		}
+	}
+	shape := strings.Join(segments, "/")
+	if len(shape) > 120 {
+		shape = shape[:120]
+	}
+	return shape
 }
 
 // The legacy namespace also hosts managed agents. Permit only the native BYOC
@@ -545,6 +772,48 @@ func proxyControlPath(method, path string) bool {
 	if path == "/v1/code/auth/refresh" || path == "/v1/oauth/token" {
 		return method == http.MethodPost
 	}
+	// WebFetch asks whether a domain may be fetched before fetching it; it carries no credential.
+	if path == "/api/web/domain_info" {
+		return method == http.MethodGet
+	}
+	// Claude Code checks it can reach Anthropic before an interactive session starts (2.1.296 aborts startup
+	// with "Unable to connect to Anthropic services" on a 403 here). It carries no credential.
+	if path == "/api/hello" {
+		return method == http.MethodGet || method == http.MethodHead
+	}
+	// The MCP artifacts feature (Claude Code 2.1.296): reviewed when it first appeared; not inference.
+	if path == "/api/artifacts/mcp" || path == "/v1/code/mcp/ccr-artifacts" {
+		return true
+	}
+	// Claude Code's feature flags, evaluated remotely under its SDK client key (one segment): reviewed
+	// 2026-10-10 from the unlisted-route log, where it reappeared after every server restart. Not inference.
+	if key, ok := strings.CutPrefix(path, "/api/eval/"); ok {
+		return method == http.MethodPost && proxyControlID(key)
+	}
+	// Reviewed 2026-10-10 against every endpoint Claude Code 2.1.296 carries: settings, telemetry, onboarding,
+	// memory, plugins, frames, transcript sharing, voice, claude.ai MCP connectors, skills, design, the
+	// filestore reader and ultrareview's checks. None of them is inference the pool could serve; they belong
+	// on the person's own login. Before this the MCP connectors and the rest under /v1 were refused for every
+	// pooled session. Still closed: /v1/complete and /v1/messages/batches (inference), /v1/files (uploads
+	// would land on the person's account, where pooled inference cannot see them) and
+	// /v1/messages/cache_touch (it must reach the conversation's own subscription).
+	for _, prefix := range []string{
+		"/api/event_logging/", "/api/frame/", "/api/organizations/", "/api/users/",
+		"/v1/code/memory/", "/v1/code/local/memory/", "/v1/mcp/", "/v1/toolbox/shttp/mcp/", "/v1/design/",
+		"/v1/filestore/fs/", "/v1/ultrareview/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	switch path {
+	case "/api/claude_code/notification/preferences", "/api/claude_code/organizations/metrics_enabled",
+		"/api/claude_code/skills", "/api/claude_code_grove", "/api/claude_code_shared_session_transcripts",
+		"/api/directory/plugins", "/api/organization/claude_code_first_token_date", "/api/v2/rum",
+		"/api/ws/speech_to_text/voice_stream", "/v1/code/mcp/hearthbot",
+		"/v1/me", "/v1/organizations/spend_limits", "/v1/skills", "/v1/pages/mcp", "/v1/logs", "/v1/metrics", "/v1/traces":
+		return true
+	}
 	if strings.HasPrefix(path, "/v1/code/runners/self-hosted/") {
 		return method == http.MethodGet || method == http.MethodPost || method == http.MethodDelete
 	}
@@ -560,9 +829,9 @@ func proxyControlPath(method, path string) bool {
 	return false
 }
 
-// Audited native Claude Code releases use these exact control-plane routes to acquire,
-// acknowledge, renew, stop, and reconnect bridge work. Do not permit the whole
-// environments subtree: an unknown endpoint must still fail closed.
+// The environment routes audited native Claude Code releases use to acquire, acknowledge, renew, stop
+// and reconnect bridge work. Being listed only keeps a route out of the unlisted-route log; every route
+// is relayed.
 func proxyEnvironmentControl(method, suffix string) bool {
 	parts := strings.Split(suffix, "/")
 	if (len(parts) != 3 && len(parts) != 4) || !proxyControlID(parts[0]) {
@@ -641,3 +910,21 @@ func (listener *proxyListener) Close() error {
 }
 
 func (listener *proxyListener) Addr() net.Addr { return listener.addr }
+
+// metricsState feeds the active-connection gauge.
+func (p *Proxy) metricsState() stateSnapshot {
+	snap := p.Snapshot()
+	return stateSnapshot{ActiveConns: int64(snap.ActiveConnections), HasActiveConns: true}
+}
+
+func proxyVersionSegment(segment string) bool {
+	if len(segment) < 2 || len(segment) > 3 || segment[0] != 'v' {
+		return false
+	}
+	for _, c := range segment[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
