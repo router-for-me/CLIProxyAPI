@@ -623,8 +623,9 @@ func logCodexStreamTerminationDiagnostics(ctx context.Context, readErr error, ev
 // isCodexBootstrapBufferableEvent, reasoning deltas in helps.HasMeaningfulCodexOutputDelta), so
 // the diagnostic can distinguish a known last event from hostile or unrecognized input. The set
 // is the union of every event-type literal the codebase itself recognizes on Responses/Codex SSE
-// streams: the executor's terminal and bootstrap-bufferable switches, the token events the
-// executor feeds to helps.ObserveResponsesTokenEvent, and the frames the Codex-specific
+// streams: the executor's terminal and bootstrap-bufferable switches, the token events and the
+// tool-lifecycle frames (in-progress/interpreting state machines) the executor feeds to
+// helps.ObserveResponsesTokenEvent, and the frames the Codex-specific
 // translator consumes - so any event a valid stream can carry renders verbatim instead of
 // collapsing to "unknown".
 var codexDiagnosticEventTypes = map[string]struct{}{
@@ -671,8 +672,10 @@ var codexDiagnosticEventTypes = map[string]struct{}{
 	"response.text.delta":                          {},
 	"response.audio.delta":                         {},
 	"response.audio.transcript.delta":              {},
+	"response.code_interpreter_call.interpreting":  {},
 	"response.code_interpreter_call_code.delta":    {},
 	"response.code_interpreter_call_code.done":     {},
+	"response.mcp_call.in_progress":                {},
 	"response.mcp_call_arguments.delta":            {},
 	"response.mcp_call_arguments.done":             {},
 	"response.shell_call_command.added":            {},
