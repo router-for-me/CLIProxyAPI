@@ -109,3 +109,62 @@ func TestManager_Remove_UnschedulesAutoRefresh(t *testing.T) {
 	}
 	loop.mu.Unlock()
 }
+
+func TestManager_Remove_PreservesSharedExecutorSessions(t *testing.T) {
+	for _, provider := range []string{"codex", "xai"} {
+		t.Run(provider, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			executor := &replaceAwareExecutor{id: provider}
+			manager.RegisterExecutor(executor)
+			ctx := context.Background()
+			for _, id := range []string{"removed-auth", "remaining-auth"} {
+				if _, err := manager.Register(ctx, &Auth{ID: id, Provider: provider, Status: StatusActive}); err != nil {
+					t.Fatalf("register auth: %v", err)
+				}
+			}
+			manager.Remove(ctx, "removed-auth")
+			if _, ok := manager.GetByID("removed-auth"); ok {
+				t.Fatal("removed auth remains registered")
+			}
+			if _, ok := manager.GetByID("remaining-auth"); !ok {
+				t.Fatal("unrelated auth was removed")
+			}
+			if closed := executor.ClosedSessionIDs(); len(closed) != 0 {
+				t.Fatalf("removing one auth closed shared executor sessions: %v", closed)
+			}
+			if current, ok := manager.Executor(provider); !ok || current != executor {
+				t.Fatal("removing one auth replaced the shared executor")
+			}
+		})
+	}
+}
+
+type authRemovalAwareExecutor struct {
+	replaceAwareExecutor
+	closedAuthIDs []string
+}
+
+func (e *authRemovalAwareExecutor) CloseExecutionSessionsForAuth(authID string) {
+	e.closedAuthIDs = append(e.closedAuthIDs, authID)
+}
+
+func TestManager_Remove_ClosesOnlyRemovedAuthSessions(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	executor := &authRemovalAwareExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}}
+	manager.RegisterExecutor(executor)
+	ctx := context.Background()
+	for _, id := range []string{"removed-auth", "remaining-auth"} {
+		if _, err := manager.Register(ctx, &Auth{ID: id, Provider: "codex", Status: StatusActive}); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+	}
+	manager.Remove(ctx, "removed-auth")
+	manager.Remove(ctx, "removed-auth")
+	manager.Remove(ctx, "unknown-auth")
+	if len(executor.closedAuthIDs) != 1 || executor.closedAuthIDs[0] != "removed-auth" {
+		t.Fatalf("closed auth IDs = %v, want only removed-auth", executor.closedAuthIDs)
+	}
+	if closed := executor.ClosedSessionIDs(); len(closed) != 0 {
+		t.Fatalf("removing auth closed shared executor sessions: %v", closed)
+	}
+}
