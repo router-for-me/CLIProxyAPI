@@ -29,6 +29,17 @@ type utlsRoundTripper struct {
 	dialer proxy.Dialer
 }
 
+// utlsHTTP2ReadIdleTimeout and utlsHTTP2PingTimeout turn on the HTTP/2 health check for the dedicated
+// uTLS connection: after ReadIdleTimeout without a frame the transport sends a PING, and closes the
+// connection if no PING ACK arrives within PingTimeout. Without it, a stream whose path stopped
+// delivering packets without a FIN or RST - which a NAT or a TCP-terminating proxy can leave behind,
+// and which TCP keepalive cannot see past - blocks its body read until the caller gives up. A silent
+// but live upstream acknowledges the PING, so long reasoning pauses are not cut.
+var (
+	utlsHTTP2ReadIdleTimeout = 30 * time.Second
+	utlsHTTP2PingTimeout     = 15 * time.Second
+)
+
 type closeConnectionBody struct {
 	io.ReadCloser
 	closeConnection func() error
@@ -123,7 +134,8 @@ func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Respo
 	var err error
 	switch protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol {
 	case "h2":
-		h2Conn, errClientConn := (&http2.Transport{}).NewClientConn(tlsConn)
+		h2Transport := &http2.Transport{ReadIdleTimeout: utlsHTTP2ReadIdleTimeout, PingTimeout: utlsHTTP2PingTimeout}
+		h2Conn, errClientConn := h2Transport.NewClientConn(tlsConn)
 		if errClientConn != nil {
 			err = fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
 			break
