@@ -624,6 +624,9 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 
 	rawJSON, err := handlers.ReadRequestBody(c)
 	if err != nil {
+		if handlers.WriteRequestBodyError(c, err) {
+			return
+		}
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
@@ -912,6 +915,9 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
 	if err != nil {
+		if handlers.WriteRequestBodyError(c, err) {
+			return
+		}
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
