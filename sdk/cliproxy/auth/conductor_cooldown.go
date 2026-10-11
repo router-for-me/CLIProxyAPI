@@ -1706,7 +1706,67 @@ func isCredentialScopedError(err error) bool {
 		IsCredentialScoped() bool
 	}
 	var csp credentialScopedProvider
-	return errors.As(err, &csp) && csp != nil && csp.IsCredentialScoped()
+	if errors.As(err, &csp) && csp != nil {
+		// Executors that classify their own failures (Claude, Codex, meta, OpenAI
+		// compatible) stay authoritative in both directions: an explicit false keeps
+		// the cooldown scoped to the requested model.
+		return csp.IsCredentialScoped()
+	}
+	// Executors and native plugins that do not implement the interface still report an
+	// account-wide usage window as a 429 whose body names it. Such a window consumes
+	// every model served by the credential, so recording it as a per-model cooldown
+	// leaves the credential selectable for its other models and lets session affinity
+	// pin recurring workloads to a key that is already exhausted.
+	return isCredentialUsageLimitError(err)
+}
+
+// credentialUsageLimitMarkers match upstream bodies that report an account- or
+// credential-wide usage window (as opposed to a per-model rate limit).
+var credentialUsageLimitMarkers = [...]string{
+	"usagelimiterror",     // opencode-go: {"error":{"type":"GoUsageLimitError",...}}
+	"usage_limit_reached", // Codex/OpenAI account window
+	"usage limit",         // "You've hit your usage limit."
+	"insufficient_quota",  // OpenAI account quota
+	"exceeded your current quota",
+	"quota exceeded",
+}
+
+// credentialUsageLimitExceptions describe per-request token or request rate limits
+// that must stay scoped to the requested model even when the body mentions a limit.
+var credentialUsageLimitExceptions = [...]string{
+	"tokens per min",
+	"tokens per minute",
+	"requests per min",
+	"requests per minute",
+	"per-minute",
+	"tpm limit",
+	"rpm limit",
+}
+
+// isCredentialUsageLimitError reports a 429 that describes an upstream account-wide
+// usage window rather than a transient per-model rate limit.
+func isCredentialUsageLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if statusCodeFromError(err) != http.StatusTooManyRequests {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if message == "" {
+		return false
+	}
+	for _, exception := range credentialUsageLimitExceptions {
+		if strings.Contains(message, exception) {
+			return false
+		}
+	}
+	for _, marker := range credentialUsageLimitMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func statusCodeFromResult(err *Error) int {

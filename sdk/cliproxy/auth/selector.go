@@ -820,6 +820,26 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
+// credentialQuotaScopeReason marks a credential-wide quota window: the upstream
+// refused this credential for every model it serves, not only for the model that
+// happened to report the failure.
+const credentialQuotaScopeReason = "credential_quota"
+
+// credentialQuotaWindowBlocked reports whether the credential sits under a live
+// credential-wide quota window. Such a window outranks per-model cooldown isolation:
+// the credential must not be selected for any of its models, and session affinity
+// must not keep a pinned session on it, otherwise one key's exhausted window turns
+// into a persistent outage for every recurring workload bound to that key.
+func credentialQuotaWindowBlocked(auth *Auth, now time.Time) (bool, time.Time) {
+	if auth == nil {
+		return false, time.Time{}
+	}
+	if auth.Quota.Exceeded && auth.Quota.Reason == credentialQuotaScopeReason && auth.Quota.NextRecoverAt.After(now) {
+		return true, auth.Quota.NextRecoverAt
+	}
+	return false, time.Time{}
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
@@ -833,8 +853,8 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
-		return true, blockReasonCooldown, auth.Quota.NextRecoverAt
+	if blocked, next := credentialQuotaWindowBlocked(auth, now); blocked {
+		return true, blockReasonCooldown, next
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
@@ -876,7 +896,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	// is an aggregate of single-model quota cooldowns (reason "quota"). As long as the credential
 	// itself is not unavailable (not all models failed) and not under a credential-wide quota,
 	// do not treat individual model cooldowns as blocking the entire credential.
-	if len(auth.ModelStates) > 0 && auth.Quota.Reason != "credential_quota" && !auth.Unavailable {
+	if len(auth.ModelStates) > 0 && auth.Quota.Reason != credentialQuotaScopeReason && !auth.Unavailable {
 		quotaExceeded = false
 	}
 	return availabilityBlock(auth.Unavailable, quotaExceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
@@ -1056,11 +1076,20 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
-			if auth.ID == cachedAuthID {
-				bind(auth.ID)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				return auth, nil
+			if auth.ID != cachedAuthID {
+				continue
 			}
+			// An exhausted credential-wide window invalidates the binding even when the
+			// caller pre-validated the candidate slice, because that validation may have run
+			// for another model (alias or route/target mismatch). Keeping the binding would
+			// pin a recurring workload to a credential whose window is already spent.
+			if blocked, next := credentialQuotaWindowBlocked(auth, now); blocked {
+				entry.Infof("session-affinity: bound auth under credential quota window, reselected | session=%s auth=%s until=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, next.UTC().Format(time.RFC3339), provider, model)
+				break
+			}
+			bind(auth.ID)
+			entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+			return auth, nil
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
@@ -1079,6 +1108,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
+					if blocked, _ := credentialQuotaWindowBlocked(auth, now); blocked {
+						break
+					}
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID)
 						if isFork {
@@ -1143,6 +1175,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		for _, auth := range available {
 			if auth == nil || auth.ID != match.AuthID {
 				continue
+			}
+			// Same guard as the explicit-binding path: an exhausted credential window must
+			// release the LCP sequence so the workload rebinds to a healthy key.
+			if blocked, next := credentialQuotaWindowBlocked(auth, time.Now()); blocked {
+				entry.Infof("session-affinity: LCP binding under credential quota window, reselected | session=%s prefix=%d auth=%s until=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, next.UTC().Format(time.RFC3339), provider, model)
+				break
 			}
 			if match.SessionID != "" {
 				opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = match.SessionID
