@@ -215,6 +215,8 @@ func TestCodexDiagnosticEventTypeSanitizesUpstreamSuppliedTypes(t *testing.T) {
 		{"ttft shell call command done passes", "response.shell_call_command.done", "response.shell_call_command.done"},
 		{"terminal shell output content delta passes", "response.shell_call_output_content.delta", "response.shell_call_output_content.delta"},
 		{"terminal shell output content done passes", "response.shell_call_output_content.done", "response.shell_call_output_content.done"},
+		{"ttft code interpreter interpreting lifecycle passes", "response.code_interpreter_call.interpreting", "response.code_interpreter_call.interpreting"},
+		{"ttft mcp call in progress lifecycle passes", "response.mcp_call.in_progress", "response.mcp_call.in_progress"},
 		{"empty becomes a dash", "", "-"},
 		{"whitespace only becomes a dash", "  \n\t", "-"},
 		{"control characters around a real type are tolerated", "res\x00po\x1bnse.created", "response.created"},
