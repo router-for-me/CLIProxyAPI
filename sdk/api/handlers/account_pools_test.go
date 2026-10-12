@@ -49,6 +49,40 @@ func TestAccountPoolsModelListAndPolicyRefresh(t *testing.T) {
 	}
 }
 
+// A pool member that is disabled, by flag or by status, is never selected, so
+// the models only it serves are not listed for the pooled key either.
+func TestAccountPoolsModelListSkipsDisabledMembers(t *testing.T) {
+	h := keyScopeTestHandler(t)
+	h.AuthManager = coreauth.NewManager(nil, nil, nil)
+	modelRegistry := registry.GetGlobalRegistry()
+	for _, credential := range []struct {
+		auth  *coreauth.Auth
+		model string
+	}{
+		{&coreauth.Auth{ID: "pool-active", Provider: "claude", Status: coreauth.StatusActive}, "pool-active-model"},
+		{&coreauth.Auth{ID: "pool-status-disabled", Provider: "claude", Status: coreauth.StatusDisabled}, "pool-status-disabled-model"},
+		{&coreauth.Auth{ID: "pool-flag-disabled", Provider: "claude", Status: coreauth.StatusActive, Disabled: true}, "pool-flag-disabled-model"},
+	} {
+		if _, err := h.AuthManager.Register(context.Background(), credential.auth); err != nil {
+			t.Fatal(err)
+		}
+		modelRegistry.RegisterClient(credential.auth.ID, "claude", []*registry.ModelInfo{{ID: credential.model}})
+		id := credential.auth.ID
+		t.Cleanup(func() { modelRegistry.UnregisterClient(id) })
+	}
+	if a, _ := h.AuthManager.GetByID("pool-status-disabled"); a == nil || a.Disabled || a.Status != coreauth.StatusDisabled {
+		t.Fatalf("test credential does not use the status-only representation: %+v", a)
+	}
+	chain := []string{"members"}
+	h.Cfg.Client.AccountPools = &[]config.ClientAccountPool{{Name: "members", AuthIDs: []string{"pool-active", "pool-status-disabled", "pool-flag-disabled"}}}
+	h.Cfg.Client.KeyScopes = &[]config.ClientKeyScope{{KeyPrefix: "members-", Providers: []string{"claude"}, Pools: &chain}}
+	c, _ := keyScopeRequestContext("members-key")
+	filtered := h.scopeModelList(c, []byte(`{"data":[{"id":"pool-active-model"},{"id":"pool-status-disabled-model"},{"id":"pool-flag-disabled-model"}]}`))
+	if gjson.GetBytes(filtered, "data.#").Int() != 1 || gjson.GetBytes(filtered, "data.0.id").String() != "pool-active-model" {
+		t.Fatalf("pooled model list = %s, want only the active member's model", filtered)
+	}
+}
+
 // Executor plugins select credentials outside the scheduler, so a pooled key
 // is refused before one runs, even when its scope names the plugin. Unpooled
 // keys keep plugin routing.

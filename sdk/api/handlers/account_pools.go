@@ -61,9 +61,11 @@ func (h *BaseAPIHandler) accountPoolModelFilter(c *gin.Context) func(model strin
 	if h.AuthManager == nil || h.AuthManager.HomeEnabled() {
 		return func(string) bool { return false }
 	}
+	// Selection never picks a disabled credential, in either representation,
+	// so its models are not offered either.
 	var members []string
 	for _, a := range h.AuthManager.List() {
-		if !a.Disabled && policy.Allows(a) {
+		if !a.Disabled && a.Status != coreauth.StatusDisabled && policy.Allows(a) {
 			members = append(members, a.ID)
 		}
 	}
