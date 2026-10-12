@@ -95,7 +95,8 @@ type ClientKeyScope struct {
 	// with it. A full key is also a valid prefix. The longest matching prefix wins.
 	KeyPrefix string `yaml:"key-prefix" json:"key-prefix"`
 	// Providers lists the provider keys the matching keys may use, for example claude,
-	// codex, gemini or xai. anthropic, openai, chatgpt, muse and grok are accepted aliases.
+	// codex, gemini, xai or the name of an openai-compatibility entry. anthropic, openai,
+	// chatgpt, muse and grok are accepted aliases.
 	Providers []string `yaml:"providers" json:"providers"`
 }
 

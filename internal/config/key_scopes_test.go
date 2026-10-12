@@ -43,3 +43,22 @@ client:
 		t.Fatal("runtime snapshot shares key-scopes")
 	}
 }
+
+func TestKeyScopeProviderKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want []string
+	}{
+		{"claude", []string{"claude", "openai-compatible-claude"}},
+		{" Anthropic ", []string{"claude", "openai-compatible-anthropic"}},
+		{"openai", []string{"codex", "openai-compatible-openai"}},
+		{"OpenRouter", []string{"openrouter", "openai-compatible-openrouter"}},
+		{"openai-compatible-openrouter", []string{"openai-compatible-openrouter"}},
+		{"openai-compatibility", []string{"openai-compatibility"}},
+		{" ", nil},
+	} {
+		if got := KeyScopeProviderKeys(tc.name); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("KeyScopeProviderKeys(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

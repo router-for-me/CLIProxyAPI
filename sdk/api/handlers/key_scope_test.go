@@ -89,8 +89,9 @@ func TestKeyScopeMatchesLongestPrefix(t *testing.T) {
 			if scoped != testCase.scoped {
 				t.Fatalf("scoped = %t, want %t", scoped, testCase.scoped)
 			}
-			if len(allowed) != len(testCase.want) {
-				t.Fatalf("allowed = %v, want %v", allowed, testCase.want)
+			// Each name also allows the openai-compatibility entry of that name.
+			if len(allowed) != 2*len(testCase.want) {
+				t.Fatalf("allowed = %v, want %v and their openai-compatible- keys", allowed, testCase.want)
 			}
 			for _, provider := range testCase.want {
 				if _, ok := allowed[provider]; !ok {
@@ -340,6 +341,35 @@ func TestScopeModelListFiltersEveryListShape(t *testing.T) {
 	}
 	if got := handler.scopeModelList(claude, []byte("not json")); string(got) != "not json" {
 		t.Fatal("a body that is not JSON must pass through unchanged")
+	}
+}
+
+// An openai-compatibility entry registers its credentials and models under
+// openai-compatible-<name>, so a scope may name the entry as it is configured.
+func TestKeyScopeAcceptsOpenAICompatibilityNames(t *testing.T) {
+	handler := keyScopeTestHandler(t)
+	const routerModel = "key-scope-router-model"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient("key-scope-router-client", "openai-compatible-openrouter", []*registry.ModelInfo{{ID: routerModel}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient("key-scope-router-client") })
+	*handler.Cfg.Client.KeyScopes = append(*handler.Cfg.Client.KeyScopes,
+		config.ClientKeyScope{KeyPrefix: "sk-router-", Providers: []string{"OpenRouter"}},
+		config.ClientKeyScope{KeyPrefix: "sk-router-key-", Providers: []string{"openai-compatible-openrouter"}},
+	)
+
+	for _, apiKey := range []string{"sk-router-abc", "sk-router-key-abc"} {
+		providers, errMsg := handler.scopeProviders(keyScopeExecutionContext(apiKey), routerModel, []string{"openai-compatible-openrouter"})
+		if errMsg != nil || len(providers) != 1 {
+			t.Fatalf("%s: compatibility model = %v, %v; want it allowed", apiKey, providers, errMsg)
+		}
+		if _, errMsg = handler.scopeProviders(keyScopeExecutionContext(apiKey), keyScopeClaudeModel, []string{"claude"}); errMsg == nil {
+			t.Fatalf("%s: a Claude model was allowed", apiKey)
+		}
+		c, _ := keyScopeRequestContext(apiKey)
+		list := handler.scopeModelList(c, []byte(`{"data":[{"id":"`+routerModel+`"},{"id":"`+keyScopeClaudeModel+`"}]}`))
+		if data := gjson.GetBytes(list, "data").Array(); len(data) != 1 || data[0].Get("id").String() != routerModel {
+			t.Fatalf("%s: model list = %s, want only the compatibility model", apiKey, list)
+		}
 	}
 }
 

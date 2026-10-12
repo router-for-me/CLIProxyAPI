@@ -321,8 +321,8 @@ client:
   # Codex credential, so they answer 403 provider_not_allowed unless the scope includes codex.
   # The longest matching prefix wins and a full key is also a valid prefix. Keys that match no
   # entry are unrestricted. providers takes the names credentials register under (claude, codex,
-  # gemini, xai, or an openai-compatibility name); anthropic, openai, chatgpt, muse and grok are
-  # accepted aliases. Key scopes do not apply in Home mode.
+  # gemini, xai, or the name of an openai-compatibility entry); anthropic, openai, chatgpt, muse
+  # and grok are accepted aliases. Key scopes do not apply in Home mode.
   # key-scopes:
   #   - key-prefix: "sk-claude-"
   #     providers: ["claude"]

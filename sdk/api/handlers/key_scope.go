@@ -28,10 +28,10 @@ func (h *BaseAPIHandler) keyScope(c *gin.Context) (allowed map[string]struct{}, 
 	if !ok {
 		return nil, false
 	}
-	allowed = make(map[string]struct{}, len(scope.Providers))
+	allowed = make(map[string]struct{}, 2*len(scope.Providers))
 	for _, provider := range scope.Providers {
-		if normalized := internalconfig.NormalizeKeyScopeProvider(provider); normalized != "" {
-			allowed[normalized] = struct{}{}
+		for _, key := range internalconfig.KeyScopeProviderKeys(provider) {
+			allowed[key] = struct{}{}
 		}
 	}
 	return allowed, true

@@ -12,6 +12,10 @@ var keyScopeProviderAliases = map[string]string{
 	"grok":      "xai",
 }
 
+// keyScopeOpenAICompatiblePrefix starts the provider key an openai-compatibility
+// entry registers its credentials under, as util.OpenAICompatibleProviderKey builds it.
+const keyScopeOpenAICompatiblePrefix = "openai-compatible-"
+
 // NormalizeKeyScopeProvider returns the provider key a provider name in
 // client.key-scopes refers to: lower case, with aliases resolved.
 func NormalizeKeyScopeProvider(provider string) string {
@@ -20,6 +24,22 @@ func NormalizeKeyScopeProvider(provider string) string {
 		return canonical
 	}
 	return provider
+}
+
+// KeyScopeProviderKeys returns the provider keys a provider name in
+// client.key-scopes stands for: the provider it names, through an alias if it
+// is one, and the key an openai-compatibility entry of that name registers its
+// credentials under (openai-compatible-<name>).
+func KeyScopeProviderKeys(provider string) []string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
+	keys := []string{NormalizeKeyScopeProvider(provider)}
+	if provider != "openai-compatibility" && !strings.HasPrefix(provider, keyScopeOpenAICompatiblePrefix) {
+		keys = append(keys, keyScopeOpenAICompatiblePrefix+provider)
+	}
+	return keys
 }
 
 // KeyScope returns the client.key-scopes entry for a client API key: the one
