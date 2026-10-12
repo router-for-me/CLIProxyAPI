@@ -105,6 +105,10 @@ func (w *Watcher) dispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (b
 	}
 	clone := update.Auth.Clone()
 	w.clientsMutex.Lock()
+	if w.fileObservations == nil {
+		w.fileObservations = make(map[string]uint64)
+	}
+	w.fileObservations[normalized]++
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
 	}
