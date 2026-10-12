@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestWithFreshResponseHeadersHolderIsolatesAttempts(t *testing.T) {
@@ -30,5 +31,32 @@ func TestWithFreshResponseHeadersHolderIsolatesAttempts(t *testing.T) {
 	}
 	if got := GetResponseHeaders(secondAttemptCtx).Get("X-Upstream-Attempt"); got != "second" {
 		t.Fatalf("second attempt holder = %q, want second", got)
+	}
+}
+
+func TestResponseHeaderCaptureTimesSurvivePartialEvents(t *testing.T) {
+	ctx := WithResponseHeadersHolder(context.Background())
+	initial := time.Unix(1800000000, 0)
+	event := initial.Add(time.Hour)
+	setResponseHeadersAt(ctx, http.Header{"X-Codex-Primary-Used-Percent": []string{"80"}, "X-Codex-Primary-Reset-After-Seconds": []string{"60"}}, initial)
+	mergeResponseHeadersAt(ctx, http.Header{"X-Request-Id": []string{"later"}, "X-Codex-Secondary-Used-Percent": []string{"10"}}, event)
+	headers, times := GetResponseHeadersWithCaptureTimes(ctx)
+	if headers.Get("X-Codex-Primary-Used-Percent") != "80" || !times["X-Codex-Primary-Used-Percent"].Equal(initial) || !times["X-Codex-Primary-Reset-After-Seconds"].Equal(initial) || !times["X-Codex-Secondary-Used-Percent"].Equal(event) {
+		t.Fatalf("capture times lost: %v", times)
+	}
+	times["X-Codex-Primary-Used-Percent"] = event
+	headers.Set("X-Codex-Primary-Used-Percent", "0")
+	nextHeaders, nextTimes := GetResponseHeadersWithCaptureTimes(ctx)
+	if nextHeaders.Get("X-Codex-Primary-Used-Percent") != "80" || !nextTimes["X-Codex-Primary-Used-Percent"].Equal(initial) {
+		t.Fatal("snapshot shares mutable storage")
+	}
+	fresh := WithFreshResponseHeadersHolder(ctx)
+	if headers, times := GetResponseHeadersWithCaptureTimes(fresh); len(headers) != 0 || len(times) != 0 {
+		t.Fatal("capture times leaked into next attempt")
+	}
+	setResponseHeadersAt(ctx, http.Header{"X-Codex-Primary-Used-Percent": []string{"20"}}, event)
+	_, times = GetResponseHeadersWithCaptureTimes(ctx)
+	if len(times) != 1 || !times["X-Codex-Primary-Used-Percent"].Equal(event) {
+		t.Fatal("replacement kept old capture times")
 	}
 }

@@ -48,9 +48,34 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 	if observedAt.IsZero() {
 		observedAt = time.Now()
 	}
+	// A long stream may finish after a newer request on the same account.
+	// Do not let its earlier capture replace the newer observation.
+	if observedAt.Before(q.ObservedAt) {
+		return false
+	}
 	q.Signals = next
 	q.ObservedAt = observedAt
 	return true
+}
+
+// quotaObservationTime uses the oldest retained quota signal conservatively:
+// merging a later partial websocket event cannot rejuvenate earlier windows.
+// Non-quota response headers do not age a newly received quota event.
+func quotaObservationTime(provider string, headers http.Header, captureTimes map[string]time.Time, fallback time.Time) time.Time {
+	var observedAt time.Time
+	for name := range collectQuotaSignals(provider, headers) {
+		capturedAt := captureTimes[name]
+		if capturedAt.IsZero() {
+			capturedAt = fallback
+		}
+		if observedAt.IsZero() || capturedAt.Before(observedAt) {
+			observedAt = capturedAt
+		}
+	}
+	if observedAt.IsZero() {
+		return fallback
+	}
+	return observedAt
 }
 
 // ClearObservationSignals removes only passive observation data. It leaves

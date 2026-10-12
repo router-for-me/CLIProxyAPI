@@ -124,12 +124,16 @@ func observedCapacity(auth *Auth, model string, now time.Time) (float64, bool) {
 	var windows []capacityWindow
 	switch strings.ToLower(auth.Provider) {
 	case "claude":
-		for _, name := range []string{"5h", "7d", "7d-sonnet", "7d-opus"} {
-			if name == "7d-sonnet" && !strings.Contains(strings.ToLower(model), "sonnet") || name == "7d-opus" && !strings.Contains(strings.ToLower(model), "opus") {
+		for _, name := range []string{"5h", "7d", "7d-sonnet", "7d-opus", "7d_oi"} {
+			if name == "7d-sonnet" && !strings.Contains(strings.ToLower(model), "sonnet") || name == "7d-opus" && !strings.Contains(strings.ToLower(model), "opus") || name == "7d_oi" && !strings.Contains(strings.ToLower(model), "fable") {
 				continue
 			}
 			prefix := "anthropic-ratelimit-unified-" + name
-			if value, exists := signals[prefix+"-utilization"]; exists {
+			value, exists := signals[prefix+"-utilization"]
+			if strings.EqualFold(signals[prefix+"-status"], "rejected") {
+				value, exists = "1", true
+			}
+			if exists {
 				windows = append(windows, capacityWindow{value, 1, signals[prefix+"-reset"], ""})
 			}
 		}
