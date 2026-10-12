@@ -178,8 +178,62 @@ func publishCatalogBytes(data []byte) ([]string, error) {
 	return changed, nil
 }
 
+// generalCatalogFetcher bridges the Haiku 5.5 rollout while the official
+// catalog lags the executable. Remote metadata wins once the entry is published;
+// explicit URL/file catalogs remain authoritative, including model omissions.
+func generalCatalogFetcher(urls []string) func(context.Context, string) ([]byte, error) {
+	fetch := catalogFetcher(embeddedModelsJSON, urls, validateCatalogBytes)
+	return func(ctx context.Context, source string) ([]byte, error) {
+		data, errFetch := fetch(ctx, source)
+		if errFetch != nil || source != "" {
+			return data, errFetch
+		}
+		var parsed staticModelsJSON
+		if errDecode := json.Unmarshal(data, &parsed); errDecode != nil {
+			return nil, errDecode
+		}
+		for _, model := range parsed.Claude {
+			if model.ID == "claude-haiku-5-5" {
+				return data, nil
+			}
+		}
+		var embedded staticModelsJSON
+		if errDecode := json.Unmarshal(embeddedModelsJSON, &embedded); errDecode != nil {
+			return nil, errDecode
+		}
+		for _, model := range embedded.Claude {
+			if model.ID != "claude-haiku-5-5" {
+				continue
+			}
+			// Preserve remote entries and unrelated sections verbatim, including
+			// fields from newer catalog schema versions.
+			var sections map[string]json.RawMessage
+			if errDecode := json.Unmarshal(data, &sections); errDecode != nil {
+				return nil, errDecode
+			}
+			var entries []json.RawMessage
+			if raw := sections["claude"]; len(raw) > 0 {
+				if errDecode := json.Unmarshal(raw, &entries); errDecode != nil {
+					return nil, errDecode
+				}
+			}
+			entry, errEncode := json.Marshal(model)
+			if errEncode != nil {
+				return nil, errEncode
+			}
+			claude, errEncode := json.Marshal(append(entries, entry))
+			if errEncode != nil {
+				return nil, errEncode
+			}
+			sections["claude"] = claude
+			return json.Marshal(sections)
+		}
+		return data, nil
+	}
+}
+
 var generalCatalogUpdater = &catalogUpdater{
-	fetch:   catalogFetcher(embeddedModelsJSON, modelsURLs, validateCatalogBytes),
+	fetch:   generalCatalogFetcher(modelsURLs),
 	publish: publishCatalogBytes,
 }
 var codexCatalogUpdater = &catalogUpdater{
