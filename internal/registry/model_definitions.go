@@ -586,5 +586,45 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		}
 	}
 
+	// Dated and bracketed Claude variants (claude-sonnet-5-5-20261001,
+	// claude-opus-5-5[1m]) share the capabilities of their catalog entry.
+	for _, familyID := range claudeFamilyModelIDs(modelID) {
+		for _, m := range data.Claude {
+			if m != nil && m.ID == familyID {
+				return cloneModelInfo(m)
+			}
+		}
+	}
+
 	return nil
+}
+
+// claudeFamilyModelIDs returns the catalog IDs a Claude model variant may belong
+// to: without a "[...]" context suffix, then also without a "-YYYYMMDD" date.
+func claudeFamilyModelIDs(modelID string) []string {
+	if !strings.HasPrefix(modelID, "claude-") {
+		return nil
+	}
+	var ids []string
+	base := modelID
+	if i := strings.IndexByte(base, '['); i > 0 && strings.HasSuffix(base, "]") {
+		base = base[:i]
+		ids = append(ids, base)
+	}
+	if n := len(base); n > 9 && base[n-9] == '-' && isEightDigits(base[n-8:]) {
+		ids = append(ids, base[:n-9])
+	}
+	return ids
+}
+
+func isEightDigits(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
