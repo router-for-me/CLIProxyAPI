@@ -66,7 +66,7 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("vertex credential: merge metadata failed: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(authFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("vertex credential: create file failed: %w", err)
 	}
@@ -75,6 +75,9 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 			log.Errorf("vertex credential: failed to close file: %v", errClose)
 		}
 	}()
+	if errChmod := f.Chmod(0o600); errChmod != nil {
+		return fmt.Errorf("vertex credential: restrict file permissions: %w", errChmod)
+	}
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err = enc.Encode(data); err != nil {
