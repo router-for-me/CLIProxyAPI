@@ -314,6 +314,20 @@ client:
     # Default false. Applies to both OAuth and API-key credentials across providers.
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
+  # Optional: limit client API keys (access.api-keys) to the credentials of the listed providers.
+  # A key that starts with key-prefix only sees those providers' models in every model list,
+  # and a request for any other model is answered 400 model_not_found before a credential is
+  # chosen. Codex web search and voice (/v1/alpha/search, /v1/live, /v1/realtime) always use a
+  # Codex credential, so they answer 403 provider_not_allowed unless the scope includes codex.
+  # The longest matching prefix wins and a full key is also a valid prefix. Keys that match no
+  # entry are unrestricted. providers takes the names credentials register under (claude, codex,
+  # gemini, xai, or an openai-compatibility name); anthropic, openai, chatgpt, muse and grok are
+  # accepted aliases. Key scopes do not apply in Home mode.
+  # key-scopes:
+  #   - key-prefix: "sk-claude-"
+  #     providers: ["claude"]
+  #   - key-prefix: "sk-codex-"
+  #     providers: ["codex"]
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:

@@ -644,6 +644,7 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 			return
 		}
 	}
+	body = h.scopeModelList(c, body)
 
 	rawResponseHeaders := http.Header{
 		"Content-Type": []string{"application/json; charset=utf-8"},
