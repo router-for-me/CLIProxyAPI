@@ -64,6 +64,15 @@ func (h *BaseAPIHandler) scopedProvidersForExecution(ctx context.Context, modelN
 	return providers, normalizedModel, nil
 }
 
+// scopePluginExecutor applies the request's key scope to a request that a
+// model router hands to an executor plugin. The plugin picks its own
+// credentials, so a scoped key may use it only when the scope names the plugin
+// by its ID, as it names a provider.
+func (h *BaseAPIHandler) scopePluginExecutor(ctx context.Context, modelName, pluginID string) *interfaces.ErrorMessage {
+	_, errMsg := h.scopeProviders(ctx, modelName, []string{pluginID})
+	return errMsg
+}
+
 // scopeProviders keeps the providers the request's client API key may use. A
 // model that only other providers serve is reported as not found, the answer
 // an unknown model gets.

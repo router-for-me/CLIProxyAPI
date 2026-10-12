@@ -277,6 +277,75 @@ func TestKeyScopeAppliesToEveryExecutionPath(t *testing.T) {
 	}
 }
 
+// A model router can hand a request to an executor plugin, which picks its own
+// credentials. A scoped key may only use the plugin when its scope names the
+// plugin's ID; unscoped keys keep plugin routing.
+func TestKeyScopeAppliesToExecutorPlugins(t *testing.T) {
+	const targetPluginID = "plugin-executor"
+	host := &handlerDirectExecutorRouteHost{}
+	host.hasRouters = true
+	host.route = func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+	cfg := &sdkconfig.SDKConfig{}
+	cfg.Client.KeyScopes = &[]config.ClientKeyScope{
+		{KeyPrefix: "sk-claude-", Providers: []string{"claude"}},
+		{KeyPrefix: "sk-plugin-", Providers: []string{"claude", targetPluginID}},
+	}
+	handler := NewBaseAPIHandlers(cfg, nil)
+	handler.SetModelRouterHost(host)
+	body := []byte(`{"model":"plugin-routed"}`)
+	run := map[string]func(context.Context) *int{
+		"execute": func(ctx context.Context) *int {
+			_, _, errMsg := handler.ExecuteWithAuthManager(ctx, "openai", "plugin-routed", body, "")
+			if errMsg == nil {
+				return nil
+			}
+			return &errMsg.StatusCode
+		},
+		"count": func(ctx context.Context) *int {
+			_, _, errMsg := handler.ExecuteCountWithAuthManager(ctx, "openai", "plugin-routed", body, "")
+			if errMsg == nil {
+				return nil
+			}
+			return &errMsg.StatusCode
+		},
+		"stream": func(ctx context.Context) *int {
+			data, _, errs := handler.ExecuteStreamWithAuthManager(ctx, "openai", "plugin-routed", body, "")
+			if data != nil {
+				for range data {
+				}
+			}
+			for errMsg := range errs {
+				if errMsg != nil {
+					return &errMsg.StatusCode
+				}
+			}
+			return nil
+		},
+	}
+	for name, execute := range run {
+		t.Run(name, func(t *testing.T) {
+			host.lastPluginID = ""
+			if status := execute(keyScopeExecutionContext("sk-claude-abc")); status == nil || *status != http.StatusBadRequest {
+				t.Fatalf("plugin route for a Claude key: status=%v, want 400", status)
+			}
+			if host.lastPluginID != "" {
+				t.Fatalf("a key whose scope lacks the plugin reached %q", host.lastPluginID)
+			}
+			for _, apiKey := range []string{"sk-plugin-abc", "unscoped-key"} {
+				host.lastPluginID = ""
+				if status := execute(keyScopeExecutionContext(apiKey)); status != nil {
+					t.Fatalf("plugin route for %s failed with %d", apiKey, *status)
+				}
+				if host.lastPluginID != targetPluginID {
+					t.Fatalf("%s used plugin %q, want %q", apiKey, host.lastPluginID, targetPluginID)
+				}
+			}
+		})
+	}
+}
+
 func TestScopeModelListFiltersEveryListShape(t *testing.T) {
 	handler := keyScopeTestHandler(t)
 
