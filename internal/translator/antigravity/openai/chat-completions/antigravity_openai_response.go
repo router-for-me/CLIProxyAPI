@@ -95,7 +95,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	}
 
 	// Initialize the OpenAI SSE template.
-	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
+	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null},"finish_reason":null,"native_finish_reason":null}]}`)
 
 	// Extract and set the model version.
 	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {

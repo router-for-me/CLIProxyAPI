@@ -50,6 +50,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		reporter.SetUpstreamModel(upstreamModel)
 	}
 	from := opts.SourceFormat
+	ctx, req, opts = e.applyNativeToolSearchFallback(ctx, auth, from, upstreamModel, req, opts)
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
 	var replayScope claudeThinkingReplayScope

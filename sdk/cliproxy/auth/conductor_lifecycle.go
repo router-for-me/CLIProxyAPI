@@ -300,6 +300,14 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
+	if existing.Metadata != nil {
+		if persistedHints, hasHints := existing.Metadata["antigravity_capability_hints"]; hasHints {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["antigravity_capability_hints"] = persistedHints
+		}
+	}
 	auth.EnsureIndex()
 	// Save before publication, including the transactional Meta mint path.
 	// Runtime-only changes made during I/O are merged below, never overwritten.
@@ -555,6 +563,11 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		if shouldSkipPersist(ctx) {
 			return nil
 		}
+		releaseFg, errWait := m.beginForegroundStoreSave(ctx)
+		if errWait != nil {
+			return errWait
+		}
+		defer releaseFg()
 		_, err := store.Save(ctx, auth)
 		return err
 	}
@@ -562,6 +575,11 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if shouldSkipPersist(ctx) {
 		return nil
 	}
+	releaseFg, errWait := m.beginForegroundStoreSave(ctx)
+	if errWait != nil {
+		return errWait
+	}
+	defer releaseFg()
 	_, err := store.Save(ctx, auth)
 	return err
 }

@@ -523,7 +523,8 @@ func (e *DevinExecutor) streamDevinFrames(
 	var accumulatedSignature []byte
 	var signatureType string
 
-	claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, sdktranslator.FormatInteractions, responseFormat, opts.OriginalRequest)
+	// Devin reports authoritative cache-aware token usage in its response frames,
+	// so do not seed message_start with a full-input estimate.
 	var translateParam any
 	helps.InitializeApplyPatchStream(ctx, sdktranslator.FormatInteractions, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), req.Payload, &translateParam)
 	translationFailed := false
@@ -587,7 +588,7 @@ func (e *DevinExecutor) streamDevinFrames(
 			req.Payload,
 			trimmed,
 			&translateParam,
-			claudeInputTokens,
+			nil,
 		)
 		helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 		for _, line := range lines {
@@ -1135,7 +1136,7 @@ func (e *DevinExecutor) streamDevinFrames(
 			req.Payload,
 			[]byte("[DONE]"),
 			&translateParam,
-			claudeInputTokens,
+			nil,
 		)
 		helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 		for _, line := range lines {

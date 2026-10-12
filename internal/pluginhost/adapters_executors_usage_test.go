@@ -887,6 +887,54 @@ func TestUsageAdapterRecoversSessionHierarchyFromContext(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPropagatesNativeKeyAndAccessProvider(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 1)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-native-key",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-native-key",
+	}
+
+	// 1. Direct record propagation
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:       "test-provider",
+		Model:          "test-model",
+		APIKey:         "sk-native-key",
+		IsNativeKey:    true,
+		AccessProvider: "config-inline",
+	})
+	rec := <-plugin.captured
+	if !rec.IsNativeKey {
+		t.Fatalf("rec.IsNativeKey = false, want true")
+	}
+	if rec.AccessProvider != "config-inline" {
+		t.Fatalf("rec.AccessProvider = %q, want %q", rec.AccessProvider, "config-inline")
+	}
+
+	// 2. Fallback to context values when record fields are omitted
+	ctx := coreusage.WithAPIKey(context.Background(), "sk-ctx-native")
+	ctx = coreusage.WithAccessProvider(ctx, "config-inline")
+	adapter.HandleUsage(ctx, coreusage.Record{
+		Provider: "test-provider",
+		Model:    "test-model",
+	})
+	recCtx := <-plugin.captured
+	if recCtx.APIKey != "sk-ctx-native" {
+		t.Fatalf("recCtx.APIKey = %q, want sk-ctx-native", recCtx.APIKey)
+	}
+	if !recCtx.IsNativeKey {
+		t.Fatalf("recCtx.IsNativeKey = false, want true")
+	}
+	if recCtx.AccessProvider != "config-inline" {
+		t.Fatalf("recCtx.AccessProvider = %q, want config-inline", recCtx.AccessProvider)
+	}
+}
+
 func TestExecutorAdapterExecuteAttributesResponsesUsageToSelectedAuth(t *testing.T) {
 	plugin := newTestUsageCapturePlugin("plugin-provider-responses")
 	registerTestUsagePlugin(t, "test-executor-adapter-responses-auth-usage", plugin)

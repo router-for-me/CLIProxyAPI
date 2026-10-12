@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/gemini"
@@ -704,7 +705,14 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 	if s.cfg.Client.Codex.EnableApplyPatch {
 		applyPatchCapabilityForModel = homeApplyPatchCapabilityForModel(entries, manager)
 	}
-	payload := codexmodels.BuildResponseForClientWithToolCapabilities(models, nil, webSearchCapabilityForModel, applyPatchCapabilityForModel, s.cfg.Client.Codex.OptimizeMultiAgentV2, clientVersion)
+	var payload map[string]any
+	if responsesclaude.ClientToolSearchEnabled() {
+		payload = codexmodels.BuildResponseForClientWithSearchToolRoutes(models, nil, homeProvidersForModel(entries), webSearchCapabilityForModel, applyPatchCapabilityForModel, homeToolSearchCapabilityForModel(entries), s.cfg.Client.Codex.OptimizeMultiAgentV2, clientVersion)
+	} else {
+		// upstream.claude.tool-search off keeps the catalog that predates
+		// tool_search, which never consulted Home routes for search support.
+		payload = codexmodels.BuildResponseForClientWithToolCapabilities(models, nil, webSearchCapabilityForModel, applyPatchCapabilityForModel, nil, s.cfg.Client.Codex.OptimizeMultiAgentV2, clientVersion)
+	}
 	body, errMarshal := codexmodels.MarshalCompact(payload)
 	if errMarshal != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
@@ -716,6 +724,15 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 // homeApplyPatchCapabilityForModel uses only Home's exact public routing evidence,
 // never the local model registry or the template's metadata model ID.
 func homeApplyPatchCapabilityForModel(entries []homeModelEntry, manager *auth.Manager) codexmodels.ApplyPatchCapabilityForModelFunc {
+	providersForModel := homeProvidersForModel(entries)
+	return func(id string) bool {
+		return manager.SupportsApplyPatchForProviders(providersForModel(id))
+	}
+}
+
+// homeProvidersForModel returns Home's routing providers for an exact public
+// model ID. An empty entry stands for an unknown route so it can veto support.
+func homeProvidersForModel(entries []homeModelEntry) codexmodels.ProvidersForModelFunc {
 	providersByID := make(map[string][]string, len(entries))
 	for _, entry := range entries {
 		id := strings.TrimSpace(entry.id)
@@ -731,8 +748,31 @@ func homeApplyPatchCapabilityForModel(entries []homeModelEntry, manager *auth.Ma
 			}
 		}
 	}
+	return func(id string) []string {
+		return providersByID[strings.TrimSpace(id)]
+	}
+}
+
+// homeToolSearchCapabilityForModel trusts Home's per-route tool_search flag and
+// requires it on every route of the model. A Home that predates the flag never
+// enables native tool search.
+func homeToolSearchCapabilityForModel(entries []homeModelEntry) codexmodels.ToolSearchCapabilityForModelFunc {
+	routesByID := make(map[string][]registry.NativeCapabilityRoute, len(entries))
+	for _, entry := range entries {
+		id := strings.TrimSpace(entry.id)
+		routesByID[id] = append(routesByID[id], entry.nativeCapabilityRoutes...)
+	}
 	return func(id string) bool {
-		return manager.SupportsApplyPatchForProviders(providersByID[strings.TrimSpace(id)])
+		routes := routesByID[strings.TrimSpace(id)]
+		if len(routes) == 0 {
+			return false
+		}
+		for _, route := range routes {
+			if route.NativeCapabilities == nil || route.NativeCapabilities.ToolSearch == nil || !*route.NativeCapabilities.ToolSearch {
+				return false
+			}
+		}
+		return true
 	}
 }
 
@@ -1174,11 +1214,14 @@ func homeModelNativeCapabilities(model map[string]any) *registry.NativeCapabilit
 	if !ok {
 		return nil
 	}
-	webSearch, ok := raw["web_search"].(bool)
-	if !ok {
-		return &registry.NativeCapabilities{}
+	capabilities := &registry.NativeCapabilities{}
+	if webSearch, okWebSearch := raw["web_search"].(bool); okWebSearch {
+		capabilities.WebSearch = &webSearch
 	}
-	return &registry.NativeCapabilities{WebSearch: &webSearch}
+	if toolSearch, okToolSearch := raw["tool_search"].(bool); okToolSearch {
+		capabilities.ToolSearch = &toolSearch
+	}
+	return capabilities
 }
 
 func appendUniqueHomeProvider(providers []string, provider string) []string {

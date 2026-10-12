@@ -623,38 +623,47 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
+				// The disconnect notification makes the downstream handler close the client and
+				// cancel the request context, so it must follow delivery of the error to the
+				// conductor; otherwise the cancellation can drop the error and its cooldown.
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
 				}
 				if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
 					terminateErr = errClearReplay
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 					reporter.PublishFailure(ctx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
+					sess.notifyUpstreamDisconnect(wsErr)
 					return
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
+				sess.notifyUpstreamDisconnect(wsErr)
 				return
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
+				// Publish the downstream disconnect only after the error was delivered, see the
+				// upstream error branch above.
 				if sess != nil {
 					unlockStreamSession()
-					e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
+					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "terminal_failure", streamErr)
 				}
 				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 					terminateErr = errClearReplay
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 					reporter.PublishFailure(ctx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
+					sess.notifyUpstreamDisconnect(streamErr)
 					return
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
 				reporter.PublishFailure(ctx, streamErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: streamErr})
+				sess.notifyUpstreamDisconnect(streamErr)
 				return
 			}
 
