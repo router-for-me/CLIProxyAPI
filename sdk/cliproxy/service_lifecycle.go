@@ -213,6 +213,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.registerModelRefreshCallback()
 	if !homeEnabled {
+		s.startLiveModelSync(ctx)
 		go s.runAntigravityModelRefresh(ctx)
 	}
 

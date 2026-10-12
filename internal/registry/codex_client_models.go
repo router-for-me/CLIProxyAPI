@@ -58,6 +58,7 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 	if err := ValidateCodexClientModelsJSON(data); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
+	data = codexClientLiveOverlay.apply(data)
 
 	cloned := append([]byte(nil), data...)
 	codexClientCatalogStore.mu.Lock()

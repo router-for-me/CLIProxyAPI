@@ -411,6 +411,12 @@ upstream:
     # Default false keeps the translation and catalog behavior that predate tool_search support.
     tool-search: false
 
+    # When true, read the model list from Anthropic with each Claude OAuth credential (at startup,
+    # then hourly) and add the models the catalog does not list yet, using the closest known
+    # model for the capability metadata Anthropic does not report. Catalog models are never
+    # removed or changed. Default false uses the catalog alone.
+    live-models: false
+
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
     # system prompt replacement), so the original system prompt is passed through to Claude as-is.
     # Credential attributes and explicit per-key cloak modes override this shared default.
@@ -1028,6 +1034,12 @@ oauth:
 
     # Codex provider behavior.
     codex:
+      # When true, read the Codex model catalog from ChatGPT with each Codex OAuth credential (at
+      # startup, then hourly), add the models the catalog does not list yet for the credential's
+      # plan, and serve the provider's own entries in the Codex client catalog. Catalog models are
+      # never removed. Default false uses the catalog alone.
+      live-models: false
+
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
       live-media-relay:
@@ -1093,6 +1105,15 @@ oauth:
     #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts
     #     - "API"
     #     - "proxy"
+
+    # Meta provider behavior.
+    meta:
+      # When true, read the Muse Code model catalog (/muse-code/models at the root of the origin
+      # the login uses) with each Meta login (at startup, then hourly) and add the Muse models the
+      # catalog does not list yet. Models Meta hides from clients, and models that do not answer
+      # in text, are skipped. meta-api-key entries keep their configured models.
+      # Default false uses the catalog alone.
+      live-models: false
 
 # Image and video behavior.
 multimedia:

@@ -121,6 +121,9 @@ type ClaudeConfig struct {
 	// translation elsewhere, and per-credential search advertising in the Codex
 	// catalog. Default false keeps the translation that predates tool_search support.
 	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
+	// LiveModels discovers the models each Claude OAuth credential can use from the
+	// provider and adds the ones the model catalog does not list yet. Default is false.
+	LiveModels bool `yaml:"live-models" json:"live-models"`
 }
 
 // ClaudeHeaderDefaults configures the measured Claude Code software baseline.
@@ -157,6 +160,13 @@ type XAIConfig struct {
 type DevinConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+}
+
+// MetaConfig configures provider-wide Meta behavior.
+type MetaConfig struct {
+	// LiveModels discovers the models each Meta login can use from the provider and
+	// adds the ones the model catalog does not list yet. Default is false.
+	LiveModels bool `yaml:"live-models" json:"live-models"`
 }
 
 // AntigravityConfig configures provider-wide Antigravity request behavior.
@@ -222,6 +232,9 @@ type CodexConfig struct {
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
 	// upstream model/account/socket for their entire lifetime. Default is false.
 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
+	// LiveModels discovers the models each Codex OAuth credential can use from the
+	// provider and adds the ones the model catalog does not list yet. Default is false.
+	LiveModels bool `yaml:"live-models" json:"live-models"`
 	// SignInWithChatGPTIdentifier configures the identifier (agent_name_hint and User-Agent prefix)
 	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
 	// Defaults to "CLIProxyAPI".
