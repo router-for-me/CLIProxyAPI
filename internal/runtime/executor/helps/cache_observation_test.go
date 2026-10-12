@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
@@ -155,14 +156,27 @@ func TestCacheObservationPrivacyMarkersAndTTL(t *testing.T) {
 	var output bytes.Buffer
 	logger := log.StandardLogger()
 	previous := logger.Out
+	previousFormatter := logger.Formatter
 	logger.SetOutput(&output)
-	t.Cleanup(func() { logger.SetOutput(previous) })
+	logger.SetFormatter(&logging.LogFormatter{})
+	t.Cleanup(func() {
+		logger.SetOutput(previous)
+		logger.SetFormatter(previousFormatter)
+	})
 	record := usage.Record{
 		RequestID: r.RequestID(), APIKey: "secret-api-key", SessionID: "secret-session", AuthID: "secret-account",
 		ResponseModel: "secret-served-model", Fail: usage.Failure{StatusCode: 429, Body: "secret-failure"}, Failed: true,
 		ServiceTier: "secret-tier", ResponseServiceTier: "secret-response-tier", Detail: ParseClaudeUsage([]byte(`{"usage":{"input_tokens":0,"cache_read_input_tokens":20,"cache_creation_input_tokens":10,"output_tokens":2}}`)),
 	}
 	r.publishCacheObservation(record)
+	parts := strings.SplitN(output.String(), " cache_observation=", 2)
+	if len(parts) != 2 {
+		t.Fatal("native application formatter omitted the observation record")
+	}
+	var rendered cacheObservation
+	if err := json.Unmarshal([]byte(strings.TrimSpace(parts[1])), &rendered); err != nil || rendered.RequestID != r.RequestID() || rendered.Phase != "completion" || rendered.Tokens == nil || rendered.Tokens.TotalTokens != 32 {
+		t.Fatal("native application log did not preserve the per-execution usage record")
+	}
 	if strings.Contains(output.String(), "secret-") || strings.Contains(output.String(), cfg.CacheObservation.SessionID) {
 		t.Fatal("raw sensitive value escaped observation")
 	}
