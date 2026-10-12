@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -34,6 +35,9 @@ func TestAccountPoolsRouteGuard(t *testing.T) {
 		{"GET", "/v1/models/*model", "/v1/models/claude-test", "review-key", 204},
 		{"POST", "/v1/images/generations", "/v1/images/generations", "review-key", 403},
 		{"POST", "/v1/videos", "/v1/videos", "review-key", 403},
+		{"GET", "/v1beta/models", "/v1beta/models", "review-key", 204},
+		{"GET", "/v1beta/models/*action", "/v1beta/models/gemini-test", "review-key", 204},
+		{"POST", "/v1beta/models/*action", "/v1beta/models/gemini-test:generateContent", "review-key", 403},
 		{"POST", "/v1beta/interactions", "/v1beta/interactions", "review-key", 403},
 		{"POST", "/new-endpoint", "/new-endpoint", "review-key", 403},
 		{"POST", "/new-endpoint", "/new-endpoint", "legacy-key", 204},
@@ -79,6 +83,65 @@ func TestAccountPoolsDirectSearchUsesAuthenticatedPolicy(t *testing.T) {
 	(*server.handlers.Cfg.Client.AccountPools)[0].AuthIDs = nil
 	if w := request(); w.Code == 200 || len(executor.authIDs) != 1 {
 		t.Fatalf("empty reviewer pool used another account: status=%d ids=%v", w.Code, executor.authIDs)
+	}
+}
+
+// Gemini clients discover models through /v1beta/models; a pooled key sees, and
+// can look up, only the models a credential in its pools serves.
+func TestGeminiModelDiscoveryForPooledKeys(t *testing.T) {
+	server := newTestServerWithConfig(t, &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"sk-pool-test", "legacy-key"}}})
+	pools := []string{"gemini-pool"}
+	server.handlers.Cfg.Client = config.ClientConfig{
+		AccountPools: &[]config.ClientAccountPool{{Name: "gemini-pool", AuthIDs: []string{"gemini-pooled"}}},
+		KeyScopes:    &[]config.ClientKeyScope{{KeyPrefix: "sk-pool-", Providers: []string{"gemini"}, Pools: &pools}},
+	}
+	modelRegistry := registry.GetGlobalRegistry()
+	for _, credential := range []struct{ id, model string }{
+		{"gemini-pooled", "pool-gemini-inside"}, {"gemini-other", "pool-gemini-outside"},
+	} {
+		if _, errRegister := server.handlers.AuthManager.Register(context.Background(), &auth.Auth{ID: credential.id, Provider: "gemini", Status: auth.StatusActive}); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+		modelRegistry.RegisterClient(credential.id, "gemini", []*registry.ModelInfo{{ID: credential.model, Name: credential.model}})
+		id := credential.id
+		t.Cleanup(func() { modelRegistry.UnregisterClient(id) })
+	}
+	get := func(path, key string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer "+key)
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		return recorder
+	}
+	listed := func(key string) map[string]bool {
+		recorder := get("/v1beta/models", key)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("model list for %s: status=%d body=%s", key, recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+			t.Fatal(errUnmarshal)
+		}
+		names := make(map[string]bool, len(response.Models))
+		for _, model := range response.Models {
+			names[strings.TrimPrefix(model.Name, "models/")] = true
+		}
+		return names
+	}
+	if names := listed("sk-pool-test"); !names["pool-gemini-inside"] || names["pool-gemini-outside"] {
+		t.Fatalf("pooled Gemini model list = %v, want the pooled model only", names)
+	}
+	if names := listed("legacy-key"); !names["pool-gemini-inside"] || !names["pool-gemini-outside"] {
+		t.Fatalf("unscoped Gemini model list = %v, want both models", names)
+	}
+	for model, want := range map[string]int{"pool-gemini-inside": http.StatusOK, "pool-gemini-outside": http.StatusNotFound} {
+		if recorder := get("/v1beta/models/"+model, "sk-pool-test"); recorder.Code != want {
+			t.Errorf("pooled Gemini model detail for %s: status=%d want=%d body=%s", model, recorder.Code, want, recorder.Body.String())
+		}
 	}
 }
 

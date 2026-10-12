@@ -341,9 +341,10 @@ client:
   # still applies, and session affinity stays within a pool. A credential keeps one quota,
   # cooldown and session state however many pools list it. Omitting pools keeps provider-only
   # routing; pools: [] allows no credential, and a missing or repeated pool name fails closed.
-  # Pooled keys can use model lists, messages and count_tokens, chat/completions, completions,
-  # responses (HTTP and WebSocket), responses/compact, and Codex web search and voice; other
-  # endpoints, executor plugins and Home mode refuse them.
+  # Pooled keys can use model lists and model details (/v1/models, /v1beta/models), messages and
+  # count_tokens, chat/completions, completions, responses (HTTP and WebSocket),
+  # responses/compact, and Codex web search and voice; other endpoints, executor plugins and Home
+  # mode refuse them.
   # account-pools:
   #   - name: "reviewer"
   #     auth-files: ["claude-reviewer.json"]
