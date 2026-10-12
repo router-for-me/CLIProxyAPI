@@ -23,6 +23,8 @@ func TestApplyThinking_ClaudeSonnet55DisabledUsesBetweenTools(t *testing.T) {
 		{name: "disabled with stale fields", body: `{"model":"claude-sonnet-5-5",` + msgs + `,"thinking":{"type":"disabled","budget_tokens":8000,"display":"omitted"},"output_config":{"effort":"xhigh"}}`, model: "claude-sonnet-5-5"},
 		{name: "suffix none", body: `{"model":"claude-sonnet-5-5",` + msgs + `,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`, model: "claude-sonnet-5-5(none)"},
 		{name: "zero budget", body: `{"model":"claude-sonnet-5-5",` + msgs + `,"thinking":{"type":"enabled","budget_tokens":0}}`, model: "claude-sonnet-5-5"},
+		{name: "context variant", body: `{"model":"claude-sonnet-5-5[1m]",` + msgs + `,"thinking":{"type":"disabled"}}`, model: "claude-sonnet-5-5[1m]"},
+		{name: "dated variant", body: `{"model":"claude-sonnet-5-5-20261001",` + msgs + `,"thinking":{"type":"disabled"}}`, model: "claude-sonnet-5-5-20261001"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -35,6 +37,10 @@ func TestApplyThinking_ClaudeSonnet55DisabledUsesBetweenTools(t *testing.T) {
 			}
 			if gjson.GetBytes(out, "output_config.effort").Exists() {
 				t.Fatalf("between_tools keeps output_config.effort: %s", out)
+			}
+			// Usage records report the turned-off request as the none level.
+			if got := thinking.ExtractTranslatedReasoningEffort(out, "claude"); got != "none" {
+				t.Fatalf("usage reasoning effort = %q, want none", got)
 			}
 		})
 	}

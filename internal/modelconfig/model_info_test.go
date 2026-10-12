@@ -81,6 +81,9 @@ func TestResolveModelInfoConfiguredThinkingKeepsCatalogDisableType(t *testing.T)
 	if other := ResolveModelInfo("claude-opus-5", "claude", configured); other.Thinking.DisableType != "" {
 		t.Fatalf("claude-opus-5 DisableType = %q, want empty", other.Thinking.DisableType)
 	}
+	if variant := ResolveModelInfo("claude-sonnet-5-5[1m]", "claude", configured); variant.Thinking.DisableType != "between_tools" {
+		t.Fatalf("claude-sonnet-5-5[1m] DisableType = %q, want catalog between_tools", variant.Thinking.DisableType)
+	}
 }
 
 func TestResolveModelInfoUnknownModelKeepsMissingCapability(t *testing.T) {
