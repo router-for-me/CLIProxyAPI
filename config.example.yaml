@@ -389,6 +389,15 @@ upstream:
     # the entire credential across all sibling models. Default is false.
     model-level-cooling: false
 
+    # When true, enable Codex client tool_search on Claude Responses routes. Credentials on
+    # api.anthropic.com (or keys with native-tool-search: true) receive it as Anthropic native
+    # tool search (defer_loading + tool_reference), which keeps the prompt-cache prefix stable
+    # across tool discoveries; other credentials fall back to the plain translation. The Codex
+    # model catalog advertises supports_search_tool for a Claude model only when every
+    # credential serving it supports native tool search.
+    # Default false keeps the translation and catalog behavior that predate tool_search support.
+    tool-search: false
+
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
     # system prompt replacement), so the original system prompt is passed through to Claude as-is.
     # Credential attributes and explicit per-key cloak modes override this shared default.
@@ -667,6 +676,7 @@ upstream:
 #         - api-key: "sk-atSM..."
 #           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #           rebuild-mid-system-message: false # optional: default is false; when true, move messages with role "system" into the top-level Claude system field
+#           native-tool-search: false # optional: default is false; when true, trust this key's custom base-url with Anthropic native tool search (defer_loading + tool_reference) for Codex tool_search; requires upstream.claude.tool-search: true
 #           cloak:                         # optional: explicitly enable request cloaking for non-Claude-Code clients
 #             mode: "auto"                 # "auto" (default inside this block): cloak only when client is not Claude Code
 #                                          # "always": cloak every unconfirmed client; confirmed native Claude Code still passes through

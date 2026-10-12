@@ -11,8 +11,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -145,6 +148,66 @@ func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
 }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
+
+var _ cliproxyauth.NativeToolSearchSupport = (*ClaudeExecutor)(nil)
+
+// SupportsNativeToolSearch reports whether a credential can receive Codex
+// tool_search as Anthropic native tool search (defer_loading tools and
+// tool_reference results) for the given upstream model. Anthropic's own origin
+// qualifies; a custom base URL qualifies only when native-tool-search is
+// enabled for it. Models that predate tool search never qualify, and nothing
+// qualifies while upstream.claude.tool-search is off. That switch is read from
+// the translator so the executor and the translator always agree on it.
+func (e *ClaudeExecutor) SupportsNativeToolSearch(auth *cliproxyauth.Auth, upstreamModel string) bool {
+	return e.supportsNativeToolSearch(responsesclaude.ClientToolSearchEnabled(), auth, upstreamModel)
+}
+
+func (e *ClaudeExecutor) supportsNativeToolSearch(toolSearch bool, auth *cliproxyauth.Auth, upstreamModel string) bool {
+	if !toolSearch || helps.ClaudeModelLacksToolSearch(upstreamModel) {
+		return false
+	}
+	_, baseURL := claudeCreds(auth)
+	if baseURL = strings.TrimSpace(baseURL); baseURL == "" || isAnthropicUpstreamBase(baseURL) {
+		return true
+	}
+	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["native_tool_search"]), "true") {
+		return true
+	}
+	entry := resolveClaudeKeyConfig(e.cfg, auth)
+	return entry != nil && entry.NativeToolSearch
+}
+
+// applyNativeToolSearchFallback removes Codex tool_search from a Responses
+// request before translation when the credential cannot use native tool
+// search, so the translated body matches the pre-tool-search translation.
+// While upstream.claude.tool-search is off the translator already produces
+// that translation from the unmodified request, so nothing is removed.
+//
+// The returned context pins upstream.claude.tool-search for the rest of the
+// request, so this decision and the request and response translations agree
+// even if the configuration is reloaded mid-request.
+func (e *ClaudeExecutor) applyNativeToolSearchFallback(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, upstreamModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	if from != sdktranslator.FormatOpenAIResponse {
+		return ctx, req, opts
+	}
+	toolSearch := responsesclaude.ClientToolSearchEnabledFor(ctx)
+	ctx = responsesclaude.WithClientToolSearch(ctx, toolSearch)
+	if !toolSearch {
+		return ctx, req, opts
+	}
+	if !helps.ResponsesHasToolSearch(req.Payload) && !helps.ResponsesHasToolSearch(opts.OriginalRequest) {
+		return ctx, req, opts
+	}
+	if e.supportsNativeToolSearch(toolSearch, auth, upstreamModel) {
+		return ctx, req, opts
+	}
+	req.Payload = helps.StripResponsesToolSearch(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		opts.OriginalRequest = helps.StripResponsesToolSearch(opts.OriginalRequest)
+	}
+	log.Debugf("claude executor: native tool search unavailable, removed tool_search from request (model=%s)", upstreamModel)
+	return ctx, req, opts
+}
 
 func (e *ClaudeExecutor) modelLevelCooling() bool {
 	return e != nil && e.cfg != nil && e.cfg.Claude.ModelLevelCooling

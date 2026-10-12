@@ -575,9 +575,8 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
-		data.Devin,
-		staticDevinModels,
-		data.Meta,
+		GetDevinModels(),
+		GetMetaModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {

@@ -51,6 +51,11 @@ func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
 // Identifier returns the executor identifier.
 func (e *KimiExecutor) Identifier() string { return "kimi" }
 
+// SupportsNativeToolSearch keeps Kimi out of native tool search. Catalog checks
+// see Kimi credentials before their base_url is filled in, so the embedded
+// Claude rule would mistake them for Anthropic's origin.
+func (e *KimiExecutor) SupportsNativeToolSearch(*cliproxyauth.Auth, string) bool { return false }
+
 // RequestToFormat reports the upstream request format used after auth selection.
 func (e *KimiExecutor) RequestToFormat(_ cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
 	if opts.SourceFormat == sdktranslator.FormatClaude {

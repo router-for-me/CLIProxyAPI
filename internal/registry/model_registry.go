@@ -30,6 +30,10 @@ type NativeCapabilities struct {
 	// WebSearch reports explicit per-model support for native web search.
 	// nil means the catalog has not established support either way.
 	WebSearch *bool `json:"web_search,omitempty"`
+	// ToolSearch reports whether every credential behind a Home route can take
+	// Codex tool_search as Anthropic native tool search. Home computes it per
+	// route; nil means unknown and is treated as unsupported.
+	ToolSearch *bool `json:"tool_search,omitempty"`
 }
 
 // ModelInfo represents information about an available model

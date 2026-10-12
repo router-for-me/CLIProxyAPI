@@ -118,6 +118,11 @@ type ClaudeConfig struct {
 	// ModelLevelCooling scopes Claude quota cooldowns to the requested model
 	// rather than cooling down the entire credential across all sibling models.
 	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
+	// ToolSearch enables Codex client tool_search on Claude Responses routes:
+	// Anthropic native tool search where the credential supports it, a pre-tool_search
+	// translation elsewhere, and per-credential search advertising in the Codex
+	// catalog. Default false keeps the translation that predates tool_search support.
+	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
 }
 
 // ClaudeHeaderDefaults configures the measured Claude Code software baseline.
@@ -547,6 +552,11 @@ type ClaudeKey struct {
 
 	// RebuildMidSystemMessage moves Claude messages with role "system" into the top-level system field.
 	RebuildMidSystemMessage bool `yaml:"rebuild-mid-system-message,omitempty" json:"rebuild-mid-system-message,omitempty"`
+
+	// NativeToolSearch trusts a custom base URL with Anthropic native tool search
+	// (defer_loading tools and tool_reference results) for Codex tool_search.
+	// Official api.anthropic.com credentials use native tool search without it.
+	NativeToolSearch bool `yaml:"native-tool-search,omitempty" json:"native-tool-search,omitempty"`
 
 	// DisableCooling overrides the global cooling policy for this credential when set.
 	// True disables auth/model cooldowns; false explicitly enables them.

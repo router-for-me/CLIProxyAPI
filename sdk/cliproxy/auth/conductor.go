@@ -217,7 +217,9 @@ type Manager struct {
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
 	persistLocks sync.Map
 	// authMutationLocks coordinate credential mutations without blocking unrelated readers.
-	authMutationLocks sync.Map
+	authMutationLocks      sync.Map
+	metadataPersistCancels sync.Map
+	metadataSaveGate       sync.Map
 	// authLoadGate allows concurrent credential transactions, but excludes whole-store reloads.
 	// Mutations acquire one permit; Load acquires all permits before reading the store.
 	authLoadGate *semaphore.Weighted

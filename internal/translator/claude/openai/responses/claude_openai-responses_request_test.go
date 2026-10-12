@@ -1286,7 +1286,7 @@ func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesExpandedToolNames(t *
 	if _, ok := customNames["collaboration__send"]; ok {
 		t.Fatal("final-name collision should keep the top-level function type")
 	}
-	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, "collaboration__send")
+	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, "collaboration__send", true)
 	if name != "collaboration__send" || namespace != "" {
 		t.Fatalf("final-name collision namespace = (%q, %q), want (collaboration__send, empty)", name, namespace)
 	}
@@ -1536,7 +1536,7 @@ func TestSplitResponsesQualifiedFunctionCallFromAdditionalTools(t *testing.T) {
 		"input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"mcp__node_repl","tools":[{"type":"function","name":"js"}]}]}]
 	}`)
 
-	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, "mcp__node_repl__js")
+	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, "mcp__node_repl__js", true)
 	if name != "js" {
 		t.Fatalf("name = %q, want js", name)
 	}
@@ -2756,13 +2756,13 @@ func TestConvertOpenAIResponsesRequestToClaude_LongToolNamesUniqueAndReversible(
 		t.Fatalf("tool names must be unique, got duplicate name %q for both tools", name0)
 	}
 
-	child0, ns0 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name0)
+	child0, ns0 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name0, true)
 	if child0 != "acme_inventory_service_get_item_prices" || ns0 != "mcp__example_apps__acme_inventory_service" {
 		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (%q, %q)",
 			name0, child0, ns0, "acme_inventory_service_get_item_prices", "mcp__example_apps__acme_inventory_service")
 	}
 
-	child1, ns1 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name1)
+	child1, ns1 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name1, true)
 	if child1 != "acme_inventory_service_get_item_metrics" || ns1 != "mcp__example_apps__acme_inventory_service" {
 		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (%q, %q)",
 			name1, child1, ns1, "acme_inventory_service_get_item_metrics", "mcp__example_apps__acme_inventory_service")
@@ -2856,12 +2856,12 @@ func TestConvertOpenAIResponsesRequestToClaude_SanitizationCollisions(t *testing
 		t.Fatalf("tool 1 name = %q, want a_b_<hash>", name1)
 	}
 
-	child0, ns0 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name0)
+	child0, ns0 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name0, true)
 	if child0 != "a_b" || ns0 != "" {
 		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (a_b, \"\")", name0, child0, ns0)
 	}
 
-	child1, ns1 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name1)
+	child1, ns1 := splitResponsesQualifiedFunctionCallFromRequest(reqJSON, name1, true)
 	if child1 != "a.b" || ns1 != "" {
 		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(%q) = (%q, %q), want (a.b, \"\")", name1, child1, ns1)
 	}
