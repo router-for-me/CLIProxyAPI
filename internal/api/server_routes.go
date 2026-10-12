@@ -687,6 +687,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 	if !ok {
 		return
 	}
+	entries = homeNativeProviderEntries(s.cfg, entries, "codex")
 
 	models := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
@@ -894,6 +895,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 
 	if isClaude {
 		disableCloaking := s.cfg != nil && s.cfg.ClaudeCode.DisableCloakingModelList
+		entries = homeNativeProviderEntries(s.cfg, entries, "claude")
 		s.writeModelListResponse(c, "claude", claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
 		return
 	}
@@ -916,6 +918,25 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		"object": "list",
 		"data":   filtered,
 	})
+}
+
+// homeNativeProviderEntries keeps the Home entries served by the named provider
+// when client.native-model-lists is enabled, as handlers.NativeProviderModels does
+// for the local model registry. The entries are returned unchanged when it is off.
+func homeNativeProviderEntries(cfg *config.Config, entries []homeModelEntry, provider string) []homeModelEntry {
+	if cfg == nil || !cfg.Client.NativeModelLists {
+		return entries
+	}
+	native := make([]homeModelEntry, 0, len(entries))
+	for _, entry := range entries {
+		for _, candidate := range entry.providers {
+			if strings.EqualFold(candidate, provider) {
+				native = append(native, entry)
+				break
+			}
+		}
+	}
+	return native
 }
 
 func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {

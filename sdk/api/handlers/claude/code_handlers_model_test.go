@@ -81,6 +81,49 @@ func TestClaudeModelsResponseDisablesModelListCloaking(t *testing.T) {
 	t.Fatalf("uncloaked model %q not found in response", modelID)
 }
 
+func TestClaudeModelsResponseNativeModelLists(t *testing.T) {
+	const claudeClientID = "claude-native-model-lists-test"
+	const codexClientID = "codex-native-model-lists-test"
+	const claudeModelID = "claude-native-model-lists-test"
+	const codexModelID = "gpt-native-model-lists-test"
+	registryRef := registry.GetGlobalRegistry()
+	registryRef.RegisterClient(claudeClientID, "claude", []*registry.ModelInfo{{ID: claudeModelID, Object: "model", OwnedBy: "test"}})
+	registryRef.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{{ID: codexModelID, Object: "model", OwnedBy: "test"}})
+	t.Cleanup(func() {
+		registryRef.UnregisterClient(claudeClientID)
+		registryRef.UnregisterClient(codexClientID)
+	})
+
+	listed := func(nativeModelLists bool) map[string]bool {
+		cfg := &sdkconfig.SDKConfig{ClaudeCode: sdkconfig.ClaudeCodeConfig{DisableCloakingModelList: true}}
+		cfg.Client.NativeModelLists = nativeModelLists
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{Cfg: cfg}).ClaudeModels(ctx)
+
+		var response struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+			t.Fatalf("decode response: %v", errUnmarshal)
+		}
+		ids := make(map[string]bool, len(response.Data))
+		for _, model := range response.Data {
+			ids[model.ID] = true
+		}
+		return ids
+	}
+
+	if ids := listed(false); !ids[claudeModelID] || !ids[codexModelID] {
+		t.Fatalf("setting off: Claude model listed = %t, Codex model listed = %t, want both", ids[claudeModelID], ids[codexModelID])
+	}
+	if ids := listed(true); !ids[claudeModelID] || ids[codexModelID] {
+		t.Fatalf("setting on: Claude model listed = %t, Codex model listed = %t, want only the Claude model", ids[claudeModelID], ids[codexModelID])
+	}
+}
+
 func TestRewriteClaudeDDModelInBody(t *testing.T) {
 	tests := []struct {
 		name      string
