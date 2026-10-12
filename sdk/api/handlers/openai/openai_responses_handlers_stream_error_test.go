@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -29,6 +30,7 @@ const (
 	directInitialErrorResponsesModel    = "direct-initial-error-responses-model"
 	crossChunkMultilineResponsesModel   = "cross-chunk-multiline-responses-model"
 	validThenMalformedResponsesModel    = "valid-then-malformed-responses-model"
+	keepAliveBeforeFirstFrameModel      = "keepalive-before-first-frame-responses-model"
 )
 
 type prematureResponsesStreamExecutor struct{}
@@ -48,6 +50,14 @@ func (*prematureResponsesStreamExecutor) ExecuteStream(_ context.Context, _ *cor
 		}
 	}
 	chunks := make(chan coreexecutor.StreamChunk, 2)
+	if req.Model == keepAliveBeforeFirstFrameModel {
+		go func() {
+			time.Sleep(1100 * time.Millisecond)
+			chunks <- coreexecutor.StreamChunk{Err: errors.New("upstream failed after initial keepalive")}
+			close(chunks)
+		}()
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
 	if req.Model == validThenMalformedResponsesModel {
 		chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n" +
 			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"\n\n")}
@@ -92,6 +102,43 @@ func (*prematureResponsesStreamExecutor) ExecuteStream(_ context.Context, _ *cor
 	chunks <- coreexecutor.StreamChunk{Err: errors.New("unexpected EOF")}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func TestResponsesHandlerSendsKeepAliveBeforeFirstFrame(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &prematureResponsesStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "keepalive-before-first-frame-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: keepAliveBeforeFirstFrameModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 1}}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"keepalive-before-first-frame-responses-model","input":"hi","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ": keep-alive\n\n") {
+		t.Fatalf("initial keepalive missing: %q", body)
+	}
+	if !strings.Contains(body, "event: response.failed") {
+		t.Fatalf("terminal failure missing after keepalive: %q", body)
+	}
 }
 
 func (*prematureResponsesStreamExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
