@@ -167,10 +167,19 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	}
 
 	if config.Mode == ModeNone && toFormat == "claude" {
-		// Claude supports explicit disable via thinking.type="disabled".
-		// Keep Budget=0 so applier can omit budget_tokens.
-		config.Budget = 0
-		config.Level = ""
+		if !support.ZeroAllowed && len(support.Levels) > 0 {
+			// Adaptive-only Claude models (for example claude-opus-5-5) reject
+			// thinking.type="disabled". Like other models that cannot be
+			// disabled, fall back to the lowest supported level.
+			config.Mode = ModeLevel
+			config.Budget = 0
+			config.Level = ThinkingLevel(support.Levels[0])
+		} else {
+			// Claude supports explicit disable via thinking.type="disabled".
+			// Keep Budget=0 so applier can omit budget_tokens.
+			config.Budget = 0
+			config.Level = ""
+		}
 	} else {
 		switch config.Mode {
 		case ModeBudget, ModeAuto, ModeNone:
