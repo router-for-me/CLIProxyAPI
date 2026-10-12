@@ -97,10 +97,20 @@ func genOpenCodeID(prefix string, descending bool) string {
 }
 
 // applyOpenCodeHeaders injects required authentication & fingerprint headers to pass OpenCode cloud inspection.
+// It also strips any headers that would expose non-OpenCode client identity.
 func applyOpenCodeHeaders(req *http.Request) {
 	if req == nil {
 		return
 	}
+	// Strip foreign client headers that might trigger upstream inspection
+	req.Header.Del("x-client")
+	req.Header.Del("x-app-name")
+	req.Header.Del("x-app-version")
+	req.Header.Del("x-zcode-app-version")
+	req.Header.Del("x-zcode-agent")
+	req.Header.Del("x-zcode-session-type")
+	req.Header.Del("x-zcode-trace-id")
+
 	req.Header.Set("User-Agent", openCodeUserAgent)
 	req.Header.Set("x-opencode-client", openCodeClientHeader)
 	req.Header.Set("x-opencode-project", openCodeProjectHeader)
@@ -120,7 +130,7 @@ func applyOpenCodePayload(payload []byte, forceStream bool) ([]byte, error) {
 		return payload, nil
 	}
 
-	// 1. Ensure tools are present (dummy functions if missing)
+	// 1. Ensure OpenCode mandatory tools (read, bash, write) are present in the tools array
 	toolsVal := gjson.GetBytes(payload, "tools")
 	if !toolsVal.Exists() || !toolsVal.IsArray() || len(toolsVal.Array()) == 0 {
 		var err error
@@ -132,6 +142,32 @@ func applyOpenCodePayload(payload []byte, forceStream bool) ([]byte, error) {
 			payload, err = sjson.SetBytes(payload, "tool_choice", "auto")
 			if err != nil {
 				return nil, fmt.Errorf("opencode: inject tool_choice error: %w", err)
+			}
+		}
+	} else {
+		// Even if the caller passed tools (e.g. ZCode, Cursor), OpenCode FreeTier strictly
+		// checks for the presence of its standard tools ("read", "bash", "write").
+		existingTools := toolsVal.Array()
+		hasRead, hasBash, hasWrite := false, false, false
+		for _, t := range existingTools {
+			name := t.Get("function.name").String()
+			switch name {
+			case "read":
+				hasRead = true
+			case "bash":
+				hasBash = true
+			case "write":
+				hasWrite = true
+			}
+		}
+		for _, dummy := range openCodeDummyTools {
+			dName := dummy["function"].(map[string]any)["name"].(string)
+			if (dName == "read" && !hasRead) || (dName == "bash" && !hasBash) || (dName == "write" && !hasWrite) {
+				var err error
+				payload, err = sjson.SetBytes(payload, "tools.-1", dummy)
+				if err != nil {
+					return nil, fmt.Errorf("opencode: append required dummy tool %s error: %w", dName, err)
+				}
 			}
 		}
 	}
