@@ -93,16 +93,42 @@ func (h *BaseAPIHandler) scopeProviders(ctx context.Context, modelName string, p
 	return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(body)}
 }
 
+// keyModelFilter returns a predicate that reports whether the request's client
+// API key may use a model: whether a provider in its scope serves the model.
+// scoped is false, and the predicate nil, for an unrestricted key.
+func (h *BaseAPIHandler) keyModelFilter(c *gin.Context) (allows func(model string) bool, scoped bool) {
+	allowed, scoped := h.keyScope(c)
+	if !scoped {
+		return nil, false
+	}
+	modelRegistry := registry.GetGlobalRegistry()
+	return func(model string) bool {
+		for _, provider := range modelRegistry.GetModelProviders(model) {
+			if _, ok := allowed[strings.ToLower(provider)]; ok {
+				return true
+			}
+		}
+		return false
+	}, true
+}
+
+// KeyAllowsModel reports whether the request's client API key may use the
+// model. Handlers that answer with one model's details, outside the model
+// lists, call it.
+func (h *BaseAPIHandler) KeyAllowsModel(c *gin.Context, model string) bool {
+	allows, scoped := h.keyModelFilter(c)
+	return !scoped || allows(model)
+}
+
 // scopeModelList removes from a model-list response the models the request's
 // client API key may not use. It understands every list shape the proxy
 // serves: an array under "data" (OpenAI, Anthropic, Grok) or under "models"
 // (Codex, Gemini), with the model named by id, slug, model or name.
 func (h *BaseAPIHandler) scopeModelList(c *gin.Context, body []byte) []byte {
-	allowed, scoped := h.keyScope(c)
+	allows, scoped := h.keyModelFilter(c)
 	if !scoped || !gjson.ValidBytes(body) {
 		return body
 	}
-	modelRegistry := registry.GetGlobalRegistry()
 	for _, listKey := range []string{"data", "models"} {
 		list := gjson.GetBytes(body, listKey)
 		if !list.IsArray() {
@@ -111,19 +137,12 @@ func (h *BaseAPIHandler) scopeModelList(c *gin.Context, body []byte) []byte {
 		kept := make([]string, 0, len(list.Array()))
 		firstID, lastID := "", ""
 		list.ForEach(func(_, entry gjson.Result) bool {
-			id := modelListEntryID(entry)
-			if id == "" {
-				return true
-			}
-			for _, provider := range modelRegistry.GetModelProviders(id) {
-				if _, ok := allowed[strings.ToLower(provider)]; ok {
-					kept = append(kept, entry.Raw)
-					if firstID == "" {
-						firstID = entry.Get("id").String()
-					}
-					lastID = entry.Get("id").String()
-					break
+			if id := modelListEntryID(entry); id != "" && allows(id) {
+				kept = append(kept, entry.Raw)
+				if firstID == "" {
+					firstID = entry.Get("id").String()
 				}
+				lastID = entry.Get("id").String()
 			}
 			return true
 		})
