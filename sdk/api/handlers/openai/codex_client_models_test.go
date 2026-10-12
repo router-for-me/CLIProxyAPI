@@ -60,6 +60,36 @@ func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsResponseNativeModelLists(t *testing.T) {
+	codexModelID, claudeModelID := "native-list-codex-catalog-model", "native-list-claude-catalog-model"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient("native-list-codex-catalog-client", "codex", []*registry.ModelInfo{{ID: codexModelID}})
+	modelRegistry.RegisterClient("native-list-claude-catalog-client", "claude", []*registry.ModelInfo{{ID: claudeModelID}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("native-list-codex-catalog-client")
+		modelRegistry.UnregisterClient("native-list-claude-catalog-client")
+	})
+
+	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil)
+	handler := NewOpenAIAPIHandler(base)
+	listed := func() map[string]bool {
+		slugs := make(map[string]bool)
+		for _, model := range handler.codexClientModelsResponse("0.153.4")["models"].([]map[string]any) {
+			slug, _ := model["slug"].(string)
+			slugs[slug] = true
+		}
+		return slugs
+	}
+
+	if slugs := listed(); !slugs[codexModelID] || !slugs[claudeModelID] {
+		t.Fatalf("setting off: Codex model listed = %t, Claude model listed = %t, want both", slugs[codexModelID], slugs[claudeModelID])
+	}
+	base.Cfg.Client.NativeModelLists = true
+	if slugs := listed(); !slugs[codexModelID] || slugs[claudeModelID] {
+		t.Fatalf("setting on: Codex model listed = %t, Claude model listed = %t, want only the Codex model", slugs[codexModelID], slugs[claudeModelID])
+	}
+}
+
 func TestCodexClientModelsResponseClientVersionFiltering(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	modelRegistry.RegisterClient("codex-version-filter-sdk-test", "openai-compatibility", []*registry.ModelInfo{

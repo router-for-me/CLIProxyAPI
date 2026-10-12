@@ -4,6 +4,7 @@ import (
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
 func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) map[string]any {
@@ -21,7 +22,11 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 		toolSearchCapabilityForModel = h.SupportsNativeToolSearchModel
 	}
 	modelRegistry := registry.GetGlobalRegistry()
-	return codexmodels.BuildResponseForClientWithToolCapabilities(h.Models(), modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
+	models := h.Models()
+	if h != nil {
+		models = handlers.NativeProviderModels(h.Cfg, models, "codex")
+	}
+	return codexmodels.BuildResponseForClientWithToolCapabilities(models, modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
 }
 
 // CodexClientModelsResponse builds a Codex client model response.

@@ -314,6 +314,10 @@ client:
     # Default false. Applies to both OAuth and API-key credentials across providers.
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
+  # When true, each native client is only shown the models of its own provider: the Anthropic
+  # model list (Claude Code) contains Claude models only and the Codex client catalog contains
+  # Codex models only. Requests are unaffected. Default false lists every model.
+  native-model-lists: false
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
