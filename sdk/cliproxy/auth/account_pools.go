@@ -37,8 +37,8 @@ func ResolveAccountPools(cfg config.ClientConfig, clientKey string) (*AccountPoo
 	}
 	policy := &AccountPoolPolicy{providers: make(map[string]bool)}
 	for _, provider := range scope.Providers {
-		if provider = config.NormalizeKeyScopeProvider(provider); provider != "" {
-			policy.providers[provider] = true
+		for _, key := range config.KeyScopeProviderKeys(provider) {
+			policy.providers[key] = true
 		}
 	}
 	if len(policy.providers) == 0 {

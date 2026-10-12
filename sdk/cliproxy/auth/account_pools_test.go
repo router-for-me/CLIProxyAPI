@@ -325,6 +325,26 @@ func TestAccountPoolsHomeFailsClosed(t *testing.T) {
 	}
 }
 
+// An openai-compatibility entry's credentials are registered under
+// openai-compatible-<name>; a pooled scope may name the entry as configured.
+func TestAccountPoolsAcceptOpenAICompatibilityNames(t *testing.T) {
+	pools := []string{"router"}
+	cfg := config.ClientConfig{
+		AccountPools: &[]config.ClientAccountPool{{Name: "router", AuthIDs: []string{"router-credential"}}},
+		KeyScopes:    &[]config.ClientKeyScope{{KeyPrefix: "router-", Providers: []string{"OpenRouter"}, Pools: &pools}},
+	}
+	p, err := ResolveAccountPools(cfg, "router-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Allows(&Auth{ID: "router-credential", Provider: "openai-compatible-openrouter"}) {
+		t.Fatal("the openai-compatibility credential is outside its pool")
+	}
+	if p.Allows(&Auth{ID: "router-credential", Provider: "claude"}) {
+		t.Fatal("a provider outside the scope crossed into the pool")
+	}
+}
+
 func TestAccountPoolsFileMembershipAndAuthKind(t *testing.T) {
 	cfg := poolTestConfig()
 	(*cfg.AccountPools)[0] = config.ClientAccountPool{Name: "reviewer", AuthFiles: []string{"reviewer.json"}, AuthKind: AuthKindOAuth}
