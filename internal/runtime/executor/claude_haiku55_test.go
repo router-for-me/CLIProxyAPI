@@ -3,15 +3,17 @@ package executor
 import (
 	"context"
 	"fmt"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestClaudeHaiku55Capabilities(t *testing.T) {
@@ -68,7 +70,13 @@ func TestClaudeHaiku55SamplingPayloadBarrier(t *testing.T) {
 					if errRead != nil {
 						return nil, errRead
 					}
-					return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")), Request: req}, nil
+					contentType := "application/json"
+					response := `{"id":"msg_test","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[{"type":"text","text":"ready"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+					if stream {
+						contentType = "text/event-stream"
+						response = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(response)), Request: req}, nil
 				})
 				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 				cfg := &config.Config{}
@@ -105,6 +113,24 @@ func TestClaudeHaiku55SamplingPayloadBarrier(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+func TestClaudeHaiku55ThinkingNormalization(t *testing.T) {
+	for _, tc := range []struct{ input, wantType string }{
+		{`{"thinking":{"type":"enabled","budget_tokens":4096}}`, "adaptive"},
+		{`{"thinking":{"type":"disabled"},"output_config":{"effort":"max"}}`, "disabled"},
+	} {
+		out, errThinking := thinking.ApplyThinking([]byte(tc.input), "claude-haiku-5-5", "claude", "claude", "claude")
+		if errThinking != nil {
+			t.Fatal(errThinking)
+		}
+		if gjson.GetBytes(out, "thinking.type").String() != tc.wantType || gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
+			t.Fatalf("invalid normalized thinking: %s", out)
+		}
+		if tc.wantType == "disabled" && gjson.GetBytes(out, "output_config.effort").Exists() {
+			t.Fatalf("disabled thinking retained incompatible effort: %s", out)
 		}
 	}
 }
