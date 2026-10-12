@@ -30,8 +30,9 @@ type museRelayCaptureExecutor struct {
 	refreshes    int
 	status       int
 	responseBody string
-	// revokedKey, when set, is answered with 401 like a revoked Meta API key.
-	revokedKey string
+	// statusByKey answers requests carrying one of these Meta keys with the given
+	// status, such as 401 for a revoked key or 429 for an exhausted one.
+	statusByKey map[string]int
 }
 
 // ShouldPrepareRequestAuth mirrors the Meta executor: a login holding only a
@@ -89,16 +90,20 @@ func (e *museRelayCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, 
 	if status == 0 {
 		status = http.StatusOK
 	}
-	if e.revokedKey != "" && req.Header.Get("Authorization") == "Bearer "+e.revokedKey {
-		status = http.StatusUnauthorized
+	if keyStatus, ok := e.statusByKey[strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")]; ok {
+		status = keyStatus
 	}
 	responseBody := e.responseBody
 	if responseBody == "" {
 		responseBody = `{"rows":[{"model_id":"muse-test"}]}`
 	}
+	header := http.Header{"Content-Type": []string{"application/json"}, "Etag": []string{`"catalog-1"`}, "Set-Cookie": []string{"session=upstream"}}
+	if status == http.StatusTooManyRequests {
+		header.Set("Retry-After", "120")
+	}
 	return &http.Response{
 		StatusCode: status,
-		Header:     http.Header{"Content-Type": []string{"application/json"}, "Etag": []string{`"catalog-1"`}, "Set-Cookie": []string{"session=upstream"}},
+		Header:     header,
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}, nil
 }
@@ -354,7 +359,7 @@ func TestMuseCodeRelayMintsDCAKeyBeforeChoosingOrigin(t *testing.T) {
 
 func TestMuseCodeRelayRefreshesARevokedKeyOnce(t *testing.T) {
 	server, executor := museRelayTestServer(t, map[string]string{"api_key": "revoked-key", "dca_token": "dca:test"})
-	executor.revokedKey = "revoked-key"
+	executor.statusByKey = map[string]int{"revoked-key": http.StatusUnauthorized}
 
 	req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
 	req.Header.Set("Authorization", "Bearer plain-key")
@@ -374,7 +379,7 @@ func TestMuseCodeRelayRefreshesARevokedKeyOnce(t *testing.T) {
 
 func TestMuseCodeRelayRetiresARejectedCredential(t *testing.T) {
 	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
-	executor.revokedKey = "dead-key"
+	executor.statusByKey = map[string]int{"dead-key": http.StatusUnauthorized}
 	// A config key Meta rejects, with nothing to refresh it from, beside a good one.
 	dead := &auth.Auth{ID: "meta-dead", Provider: "meta", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "dead-key"}}
 	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), dead); errRegister != nil {
@@ -395,6 +400,67 @@ func TestMuseCodeRelayRetiresARejectedCredential(t *testing.T) {
 	}
 	if failures > 1 {
 		t.Fatalf("%d of 8 requests failed; want the rejected credential retired after its first 401", failures)
+	}
+}
+
+// museRelayAddCredential registers another Meta credential that serves the
+// test model, beside the one museRelayTestServer registers.
+func museRelayAddCredential(t *testing.T, server *Server, id string, attributes map[string]string) {
+	t.Helper()
+	credential := &auth.Auth{ID: id, Provider: "meta", Status: auth.StatusActive, Attributes: attributes}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register %s: %v", id, errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(id, "meta", []*registry.ModelInfo{{ID: "muse-relay-test", Object: "model", OwnedBy: "meta", Type: "meta"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+}
+
+func museRelayGetModels(server *Server) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+	req.Header.Set("Authorization", "Bearer plain-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	return recorder
+}
+
+func TestMuseCodeRelayRetiresALoginWhoseFreshKeyIsRejectedToo(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
+	// A DCA-backed login whose old and freshly minted keys are both refused.
+	museRelayAddCredential(t, server, "meta-dca-dead", map[string]string{"api_key": "revoked-key", "dca_token": "dca:test"})
+	executor.statusByKey = map[string]int{"revoked-key": http.StatusUnauthorized, "fresh-key": http.StatusUnauthorized}
+
+	failures := 0
+	for i := 0; i < 8; i++ {
+		if museRelayGetModels(server).Code != http.StatusOK {
+			failures++
+		}
+	}
+	// The refresh advances the credential version; a result recorded without it
+	// would be dropped as stale and the login minted again on every request.
+	if executor.refreshes != 1 || failures > 1 {
+		t.Fatalf("refreshes = %d, failures = %d of 8; want one refresh and at most one failure", executor.refreshes, failures)
+	}
+}
+
+func TestMuseCodeRelayPassesRetryAfterAndMovesPastAnExhaustedKey(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
+	museRelayAddCredential(t, server, "meta-busy", map[string]string{"api_key": "busy-key"})
+	executor.statusByKey = map[string]int{"busy-key": http.StatusTooManyRequests}
+
+	failures := 0
+	for i := 0; i < 8; i++ {
+		recorder := museRelayGetModels(server)
+		if recorder.Code == http.StatusTooManyRequests {
+			failures++
+			if got := recorder.Header().Get("Retry-After"); got != "120" {
+				t.Fatalf("Retry-After = %q on Meta's 429, want it passed through", got)
+			}
+		} else if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d", i, recorder.Code)
+		}
+	}
+	if failures > 1 {
+		t.Fatalf("%d of 8 requests hit the exhausted key; want it skipped after its first 429", failures)
 	}
 }
 

@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
@@ -93,7 +95,9 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 		if preparer, okPreparer := executor.(auth.RequestAuthPreparer); okPreparer {
 			prepared, errPrepare := s.handlers.AuthManager.PrepareRequestAuth(ctx, preparer, selected)
 			if errPrepare != nil {
-				c.JSON(clienterror.HTTPStatusFromErrorOr(errPrepare, http.StatusBadGateway), gin.H{"error": errPrepare.Error()})
+				status := clienterror.HTTPStatusFromErrorOr(errPrepare, http.StatusBadGateway)
+				s.recordMuseCodeFailure(ctx, selected, status, nil, errPrepare)
+				c.JSON(status, gin.H{"error": errPrepare.Error()})
 				return
 			}
 			if prepared != nil {
@@ -130,21 +134,17 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 			current = refreshed
 			resp, status, errSend = send(current)
 		}
-		// Still refused: the credential itself is rejected. Record it as the
-		// pipeline does, so selection moves past it and it is not refreshed again.
-		if errSend == nil && resp.StatusCode == http.StatusUnauthorized {
-			s.handlers.AuthManager.MarkResult(ctx, auth.Result{
-				AuthID:          current.ID,
-				Provider:        museCodeProvider,
-				Success:         false,
-				CredentialScope: true,
-				Error:           &auth.Error{Code: "unauthorized", Message: "Meta rejected the credential", HTTPStatus: http.StatusUnauthorized},
-			})
-		}
 	}
+	// Failures that belong to the credential are recorded as the pipeline records
+	// them, so selection moves past a rejected, exhausted or unreachable credential
+	// and a rejected login is not refreshed again on every request.
 	if errSend != nil {
+		s.recordMuseCodeFailure(ctx, current, status, nil, errSend)
 		c.JSON(status, gin.H{"error": errSend.Error()})
 		return
+	}
+	if museCodeCredentialFailure(resp.StatusCode) {
+		s.recordMuseCodeFailure(ctx, current, resp.StatusCode, museCodeRetryAfter(resp.Header), nil)
 	}
 	defer closeMuseCodeResponse(resp)
 	upstreamBody, errRead := io.ReadAll(io.LimitReader(resp.Body, museCodeRelayMaxBody+1))
@@ -156,7 +156,7 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Muse Code response is too large"})
 		return
 	}
-	for _, name := range []string{"Content-Type", "Cache-Control", "Etag", "Last-Modified"} {
+	for _, name := range []string{"Content-Type", "Cache-Control", "Etag", "Last-Modified", "Retry-After"} {
 		if value := resp.Header.Get(name); value != "" {
 			c.Header(name, value)
 		}
@@ -185,6 +185,60 @@ func (s *Server) museCodeSelectAuth(ctx context.Context, opts coreexecutor.Optio
 		}
 	}
 	return nil, lastErr
+}
+
+// recordMuseCodeFailure records a relayed request that failed on its credential.
+// These requests name no model, so the failure is the credential's. The result
+// carries the credential version and registration epoch it was sent under, which
+// MarkResult needs to accept it after a refresh.
+func (s *Server) recordMuseCodeFailure(ctx context.Context, current *auth.Auth, status int, retryAfter *time.Duration, errFailure error) {
+	if current == nil {
+		return
+	}
+	message := http.StatusText(status)
+	if errFailure != nil {
+		message = errFailure.Error()
+	}
+	s.handlers.AuthManager.MarkResult(ctx, auth.Result{
+		AuthID:            current.ID,
+		Provider:          museCodeProvider,
+		Success:           false,
+		RetryAfter:        retryAfter,
+		CredentialScope:   true,
+		Error:             &auth.Error{Message: message, HTTPStatus: status},
+		CredentialVersion: current.CredentialVersion,
+		RegistrationEpoch: current.RegistrationEpoch,
+	})
+}
+
+// museCodeCredentialFailure reports whether Meta's answer is about the
+// credential (rejected, unpaid, forbidden, exhausted or failing) rather than
+// about the request, such as a 400 or 404.
+func museCodeCredentialFailure(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return status >= http.StatusInternalServerError
+	}
+}
+
+// museCodeRetryAfter reads a Retry-After header given in seconds or as a date.
+func museCodeRetryAfter(header http.Header) *time.Duration {
+	value := strings.TrimSpace(header.Get("Retry-After"))
+	if value == "" {
+		return nil
+	}
+	if seconds, errAtoi := strconv.Atoi(value); errAtoi == nil && seconds >= 0 {
+		delay := time.Duration(seconds) * time.Second
+		return &delay
+	}
+	if at, errParse := http.ParseTime(value); errParse == nil {
+		if delay := time.Until(at); delay > 0 {
+			return &delay
+		}
+	}
+	return nil
 }
 
 func closeMuseCodeResponse(resp *http.Response) {
