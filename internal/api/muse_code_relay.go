@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -28,6 +29,10 @@ const (
 // catalog. Endpoints that mint or revoke credentials, and telemetry, are left
 // out on purpose.
 var museCodeRelayPaths = []string{"models", "config", "search", "browser_open"}
+
+// museCodeRelayQueryCredentials are the query parameters client access accepts
+// as a proxy API key. They are never passed on to Meta.
+var museCodeRelayQueryCredentials = []string{"key", "auth_token"}
 
 // registerMuseCodeRoutes serves the Muse Code client endpoints so the Muse CLI
 // can use the proxy as its endpoint.
@@ -70,7 +75,12 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 	}
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
-	selected, errSelect := s.handlers.AuthManager.SelectAuth(ctx, museCodeProvider, "", coreexecutor.Options{Headers: c.Request.Header.Clone()})
+	selectionModel := museCodeSelectionModel()
+	if selectionModel == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Meta auth unavailable"})
+		return
+	}
+	selected, errSelect := s.handlers.AuthManager.SelectAuth(ctx, museCodeProvider, selectionModel, coreexecutor.Options{Headers: c.Request.Header.Clone()})
 	if errSelect != nil {
 		for _, value := range auth.SafeResponseHeaders(errSelect).Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
@@ -82,8 +92,22 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Meta auth unavailable"})
 		return
 	}
+	// A Meta login that holds only a DCA token gets its API key minted and saved
+	// here, before the origin is derived, because the mint may name the origin.
+	if executor, okExecutor := s.handlers.AuthManager.Executor(museCodeProvider); okExecutor {
+		if preparer, okPreparer := executor.(auth.RequestAuthPreparer); okPreparer {
+			prepared, errPrepare := s.handlers.AuthManager.PrepareRequestAuth(ctx, preparer, selected)
+			if errPrepare != nil {
+				c.JSON(clienterror.HTTPStatusFromErrorOr(errPrepare, http.StatusBadGateway), gin.H{"error": errPrepare.Error()})
+				return
+			}
+			if prepared != nil {
+				selected = prepared
+			}
+		}
+	}
 
-	upstreamURL, errURL := museCodeUpstreamURL(selected, c.Request.URL.Path, c.Request.URL.RawQuery)
+	upstreamURL, errURL := museCodeUpstreamURL(selected, c.Request.URL.Path, museCodeRelayQuery(c.Request.URL.RawQuery))
 	if errURL != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errURL.Error()})
 		return
@@ -119,6 +143,31 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 	}
 	c.Status(resp.StatusCode)
 	_, _ = c.Writer.Write(upstreamBody)
+}
+
+// museCodeSelectionModel returns a model some Meta credential serves. Selecting
+// with it leaves out the credentials that serve none, such as a config key
+// turned off with a "*" model exclusion, which a selection without a model
+// would still pick.
+func museCodeSelectionModel() string {
+	for _, model := range registry.GetGlobalRegistry().GetAvailableModelsByProvider(museCodeProvider) {
+		if model != nil && strings.TrimSpace(model.ID) != "" {
+			return model.ID
+		}
+	}
+	return ""
+}
+
+// museCodeRelayQuery drops the proxy credentials from a relayed query string.
+func museCodeRelayQuery(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	values, _ := url.ParseQuery(rawQuery)
+	for _, name := range museCodeRelayQueryCredentials {
+		values.Del(name)
+	}
+	return values.Encode()
 }
 
 // museCodeUpstreamURL maps a relayed request onto the origin the credential

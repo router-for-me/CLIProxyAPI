@@ -12,6 +12,7 @@ import (
 
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -24,8 +25,22 @@ type museRelayCaptureExecutor struct {
 	request      *http.Request
 	body         []byte
 	calls        int
+	mints        int
 	status       int
 	responseBody string
+}
+
+// ShouldPrepareRequestAuth mirrors the Meta executor: a login holding only a
+// DCA token needs its API key minted first.
+func (e *museRelayCaptureExecutor) ShouldPrepareRequestAuth(a *auth.Auth) bool {
+	return a != nil && a.Attributes["api_key"] == "" && a.Attributes["dca_token"] != ""
+}
+
+func (e *museRelayCaptureExecutor) PrepareRequestAuth(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
+	e.mints++
+	a.Attributes["api_key"] = "minted-key"
+	a.Attributes["base_url"] = "https://minted.example.com/v1"
+	return a, nil
 }
 
 func (e *museRelayCaptureExecutor) Identifier() string { return "meta" }
@@ -101,6 +116,8 @@ func museRelayTestServer(t *testing.T, attributes map[string]string) (*Server, *
 	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
 		t.Fatalf("register Meta auth: %v", errRegister)
 	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, "meta", []*registry.ModelInfo{{ID: "muse-relay-test", Object: "model", OwnedBy: "meta", Type: "meta"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
 	return server, executor
 }
 
@@ -249,6 +266,92 @@ func TestMuseCodeRelayRefusesPlainlyWhileHomeIsEnabled(t *testing.T) {
 	}
 	if executor.calls != 0 {
 		t.Fatal("the Meta executor was called while Home is enabled")
+	}
+}
+
+func TestMuseCodeRelayDropsProxyKeyFromQuery(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key", "base_url": "https://meta.example.com/v1"})
+
+	for _, query := range []string{"profile=tbh&key=plain-key", "auth_token=plain-key&profile=tbh"} {
+		req := httptest.NewRequest(http.MethodGet, "/muse-code/models?"+query, nil)
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200 (the query key authenticates); body=%s", query, recorder.Code, recorder.Body.String())
+		}
+		if got, want := executor.request.URL.String(), "https://meta.example.com/muse-code/models?profile=tbh"; got != want {
+			t.Fatalf("%s: upstream URL = %q, want %q without the proxy key", query, got, want)
+		}
+	}
+}
+
+func TestMuseCodeRelaySkipsMetaCredentialsThatServeNoModel(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
+	// A config key turned off with a "*" exclusion is left with no models.
+	disabled := &auth.Auth{ID: "meta-disabled", Provider: "meta", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "disabled-key", "excluded_models": "*"}}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), disabled); errRegister != nil {
+		t.Fatalf("register disabled Meta auth: %v", errRegister)
+	}
+
+	for i := 0; i < 4; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+		req.Header.Set("Authorization", "Bearer plain-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, body=%s", i, recorder.Code, recorder.Body.String())
+		}
+		if got := executor.request.Header.Get("Authorization"); got != "Bearer meta-key" {
+			t.Fatalf("request %d went out with %q, want the credential that serves models", i, got)
+		}
+	}
+
+	registry.GetGlobalRegistry().UnregisterClient("meta-auth")
+	executor.calls = 0
+	req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+	req.Header.Set("Authorization", "Bearer plain-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusServiceUnavailable || executor.calls != 0 {
+		t.Fatalf("with no credential serving a model: status = %d, Meta calls = %d; want 503 and none", recorder.Code, executor.calls)
+	}
+}
+
+func TestMuseCodeRelayMintsDCAKeyBeforeChoosingOrigin(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"dca_token": "dca:test", "base_url": "https://stale.example.com/v1"})
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+		req.Header.Set("Authorization", "Bearer plain-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, body=%s", i, recorder.Code, recorder.Body.String())
+		}
+		if got, want := executor.request.URL.String(), "https://minted.example.com/muse-code/models"; got != want {
+			t.Fatalf("request %d: upstream URL = %q, want the origin the mint named", i, got)
+		}
+		if got := executor.request.Header.Get("Authorization"); got != "Bearer minted-key" {
+			t.Fatalf("request %d: Authorization = %q, want the minted key", i, got)
+		}
+	}
+	if executor.mints != 1 {
+		t.Fatalf("mints = %d over two requests, want 1: the minted key must be saved", executor.mints)
+	}
+}
+
+func TestMuseCodeRelayIsBlockedInExampleKeySafeMode(t *testing.T) {
+	server := newTestServerWithOptions(t, WithExampleAPIKeySafeMode())
+	cfg := *server.cfg
+	cfg.APIKeys = []string{"your-api-key-1"}
+	server.UpdateClients(&cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+	req.Header.Set("Authorization", "Bearer your-api-key-1")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden || recorder.Header().Get("X-CPA-SAFE-MODE") != "example-api-key" {
+		t.Fatalf("status = %d, safe-mode header = %q; want 403 from example-key safe mode", recorder.Code, recorder.Header().Get("X-CPA-SAFE-MODE"))
 	}
 }
 
