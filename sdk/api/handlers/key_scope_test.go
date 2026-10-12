@@ -16,6 +16,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 )
 
@@ -418,6 +419,40 @@ func TestWriteModelListResponseAppliesKeyScope(t *testing.T) {
 	handler.WriteModelListResponse(detail, "openai", gin.H{"object": "list", "data": []gin.H{{"id": keyScopeClaudeModel}, {"id": keyScopeCodexModel}}})
 	if detailRecorder.Code != http.StatusNotFound {
 		t.Fatalf("Claude model detail for a Codex key: status=%d body=%s, want 404", detailRecorder.Code, detailRecorder.Body.String())
+	}
+}
+
+// A response interceptor may replace the catalog; the scope applies to what it
+// returns, for the list and for the model detail picked from it.
+func TestWriteModelListResponseScopesInterceptedCatalog(t *testing.T) {
+	handler := keyScopeTestHandler(t)
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			headers := cloneHeader(req.ResponseHeaders)
+			headers.Set("Content-Length", "1024")
+			return pluginapi.ResponseInterceptResponse{
+				Headers: headers,
+				Body:    []byte(`{"object":"list","data":[{"id":"` + keyScopeClaudeModel + `"},{"id":"` + keyScopeCodexModel + `"}]}`),
+			}
+		},
+	})
+	original := gin.H{"object": "list", "data": []gin.H{{"id": keyScopeCodexModel}}}
+
+	c, recorder := keyScopeRequestContext("sk-codex-abc")
+	handler.WriteModelListResponse(c, "openai", original)
+	data := gjson.GetBytes(recorder.Body.Bytes(), "data").Array()
+	if len(data) != 1 || data[0].Get("id").String() != keyScopeCodexModel {
+		t.Fatalf("intercepted list for a Codex key = %s, want only the Codex model", recorder.Body.String())
+	}
+	if length := recorder.Header().Get("Content-Length"); length != "" {
+		t.Fatalf("Content-Length = %s survived a filtered body", length)
+	}
+
+	detail, detailRecorder := keyScopeRequestContext("sk-codex-abc")
+	detail.Set(ModelDetailIDContextKey, keyScopeClaudeModel)
+	handler.WriteModelListResponse(detail, "openai", original)
+	if detailRecorder.Code != http.StatusNotFound {
+		t.Fatalf("intercepted Claude model detail for a Codex key: status=%d body=%s, want 404", detailRecorder.Code, detailRecorder.Body.String())
 	}
 }
 
