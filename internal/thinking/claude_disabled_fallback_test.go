@@ -19,6 +19,8 @@ func TestApplyThinking_ClaudeDisabledFallsBackOnAdaptiveOnlyModels(t *testing.T)
 		wantEffort   string
 	}{
 		{model: "claude-opus-5-5", wantThinking: "adaptive", wantEffort: "low"},
+		{model: "claude-opus-5-5[1m]", wantThinking: "adaptive", wantEffort: "low"},
+		{model: "claude-opus-5-5-20261001", wantThinking: "adaptive", wantEffort: "low"},
 		{model: "claude-fable-5", wantThinking: "adaptive", wantEffort: "low"},
 		{model: "claude-fable-5-1", wantThinking: "adaptive", wantEffort: "low"},
 		{model: "claude-opus-5", wantThinking: "disabled"},
@@ -37,6 +39,12 @@ func TestApplyThinking_ClaudeDisabledFallsBackOnAdaptiveOnlyModels(t *testing.T)
 			}
 			if got := gjson.GetBytes(out, "output_config.effort").String(); got != tt.wantEffort {
 				t.Fatalf("output_config.effort = %q, want %q; body=%s", got, tt.wantEffort, out)
+			}
+			// The caller asked for no thinking: the fallback keeps it hidden.
+			if tt.wantThinking == "adaptive" {
+				if got := gjson.GetBytes(out, "thinking.display").String(); got != "omitted" {
+					t.Fatalf("thinking.display = %q, want omitted; body=%s", got, out)
+				}
 			}
 			if tt.wantThinking == "disabled" && gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
 				t.Fatalf("disabled thinking carries budget_tokens: %s", out)
@@ -74,6 +82,9 @@ func TestApplyThinking_ClaudeDisabledFallbackInputs(t *testing.T) {
 			}
 			if gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
 				t.Fatalf("fallback keeps budget_tokens: %s", out)
+			}
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != "omitted" {
+				t.Fatalf("thinking.display = %q, want omitted; body=%s", got, out)
 			}
 		})
 	}
