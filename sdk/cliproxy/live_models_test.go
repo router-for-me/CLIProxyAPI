@@ -1,7 +1,9 @@
 package cliproxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,10 +11,13 @@ import (
 	"testing"
 	"time"
 
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 func registeredModel(t *testing.T, authID, modelID string) *ModelInfo {
@@ -23,6 +28,39 @@ func registeredModel(t *testing.T, authID, modelID string) *ModelInfo {
 		}
 	}
 	return nil
+}
+
+func waitForRegisteredModel(t *testing.T, authID, modelID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if registeredModel(t, authID, modelID) != nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("model %s was not registered for %s", modelID, authID)
+}
+
+// syncLiveModelsAndWait runs one check and waits for the reads it started.
+func syncLiveModelsAndWait(ctx context.Context, service *Service, state *liveModelSyncState, now time.Time) {
+	service.syncLiveModels(ctx, state, now)
+	state.reads.Wait()
+}
+
+func registerLiveTestAuths(t *testing.T, ctx context.Context, manager *coreauth.Manager, auths ...*coreauth.Auth) {
+	t.Helper()
+	for _, auth := range auths {
+		auth.Status = coreauth.StatusActive
+		if _, errRegister := manager.Register(coreauth.WithSkipPersist(ctx), auth); errRegister != nil {
+			t.Fatalf("Register(%s): %v", auth.ID, errRegister)
+		}
+		authID := auth.ID
+		t.Cleanup(func() {
+			GlobalModelRegistry().UnregisterClient(authID)
+			liveModelAdditions.set(authID, nil)
+		})
+	}
 }
 
 func TestParseClaudeAndCodexLiveModels(t *testing.T) {
@@ -65,12 +103,15 @@ func TestParseMetaLiveModels(t *testing.T) {
 		{"id":"muse-plain-9","metadata":{"muse-code":{"reasoning":false,"modalities":{"output":["text"]},"variants":{"low":{"reasoningEffort":"low"}}}}},
 		{"id":"muse-hidden-9","metadata":{"muse-code":{"is_hidden":true,"modalities":{"output":["text"]}}}},
 		{"id":"muse-image-9","metadata":{"muse-code":{"modalities":{"input":["text"],"output":["image"]}}}},
+		{"id":"muse-no-output-9","metadata":{"muse-code":{"name":"No output list","modalities":{"input":["text"]}}}},
+		{"id":"muse-no-modalities-9","metadata":{"muse-code":{"name":"No modalities"}}}},
+		{"id":"muse-output-string-9","metadata":{"muse-code":{"modalities":{"output":"text"}}}},
 		{"id":"gpt-9-live","metadata":{"muse-code":{"modalities":{"output":["text"]}}}},
 		{"id":"muse-bare-9"},
 		{"id":""}
 	]}`))
 	if len(models) != 2 || models[0].id != "muse-live-9" || models[1].id != "muse-plain-9" {
-		t.Fatalf("meta models = %+v, want the two visible Muse text models", models)
+		t.Fatalf("meta models = %+v, want only the two visible Muse models whose output list has text", models)
 	}
 	got := models[0]
 	if got.displayName != "Muse Live 9" || got.description != "Live model" || got.created != 1791662408 || got.contextLength != 1007997 || got.maxCompletionTokens != 128000 {
@@ -85,8 +126,8 @@ func TestParseMetaLiveModels(t *testing.T) {
 	if !plain.noThinking || len(plain.thinkingLevels) != 0 {
 		t.Fatalf("model without reasoning = %+v, want no reasoning levels", plain)
 	}
-	if info := liveModelInfo("meta", plain, internalregistry.GetMetaModels()); info.Thinking != nil {
-		t.Fatalf("a model without reasoning inherited reasoning levels %+v", info.Thinking)
+	if info := liveModelInfo("meta", plain, internalregistry.GetMetaModels()); info.Thinking != nil || !info.ExplicitThinking {
+		t.Fatalf("model without reasoning: thinking %+v, explicit %v; want no thinking, marked explicit", info.Thinking, info.ExplicitThinking)
 	}
 }
 
@@ -246,10 +287,10 @@ func TestSyncLiveModelsRegistersDiscoveredModels(t *testing.T) {
 	cfg.Claude.LiveModels = true
 	cfg.Codex.LiveModels = true
 	service := &Service{cfg: cfg, coreManager: manager}
-	nextSync := make(map[string]time.Time)
+	state := newLiveModelSyncState()
 	now := time.Now()
 
-	service.syncLiveModels(ctx, nextSync, now)
+	syncLiveModelsAndWait(ctx, service, state, now)
 
 	claudeModel := registeredModel(t, claudeID, "claude-live-sync-test")
 	if claudeModel == nil {
@@ -276,7 +317,7 @@ func TestSyncLiveModelsRegistersDiscoveredModels(t *testing.T) {
 	}
 
 	// Within the sync interval nothing is read again.
-	service.syncLiveModels(ctx, nextSync, now.Add(liveModelSyncTick))
+	syncLiveModelsAndWait(ctx, service, state, now.Add(liveModelSyncTick))
 	mu.Lock()
 	claudeRequests, codexRequests := requests["claude"], requests["codex"]
 	mu.Unlock()
@@ -286,7 +327,7 @@ func TestSyncLiveModelsRegistersDiscoveredModels(t *testing.T) {
 
 	// Turning discovery off for a provider removes its additions.
 	cfg.Claude.LiveModels = false
-	service.syncLiveModels(ctx, nextSync, now.Add(2*liveModelSyncTick))
+	syncLiveModelsAndWait(ctx, service, state, now.Add(2*liveModelSyncTick))
 	if registeredModel(t, claudeID, "claude-live-sync-test") != nil {
 		t.Fatal("the discovered Claude model stayed registered after discovery was turned off")
 	}
@@ -341,7 +382,7 @@ func TestSyncLiveModelsRegistersMetaModels(t *testing.T) {
 	}
 	service := &Service{cfg: cfg, coreManager: manager}
 
-	service.syncLiveModels(ctx, make(map[string]time.Time), time.Now())
+	syncLiveModelsAndWait(ctx, service, newLiveModelSyncState(), time.Now())
 
 	model := registeredModel(t, metaID, "muse-live-sync-test")
 	if model == nil {
@@ -411,11 +452,11 @@ func TestSyncLiveModelsMintsMetaKeyOnce(t *testing.T) {
 		liveModelAdditions.set(authID, nil)
 	})
 	service := &Service{cfg: cfg, coreManager: manager}
-	nextSync := make(map[string]time.Time)
+	state := newLiveModelSyncState()
 	now := time.Now()
 
-	service.syncLiveModels(ctx, nextSync, now)
-	service.syncLiveModels(ctx, nextSync, now.Add(liveModelSyncInterval+time.Second))
+	syncLiveModelsAndWait(ctx, service, state, now)
+	syncLiveModelsAndWait(ctx, service, state, now.Add(liveModelSyncInterval+time.Second))
 
 	if registeredModel(t, authID, "muse-mint-sync-test") == nil {
 		t.Fatal("the discovered Meta model was not registered")
@@ -461,17 +502,17 @@ func TestSyncLiveModelsKeepsMetaModelsWhenTheListIsMissing(t *testing.T) {
 		liveModelAdditions.set(authID, nil)
 	})
 	service := &Service{cfg: cfg, coreManager: manager}
-	nextSync := make(map[string]time.Time)
+	state := newLiveModelSyncState()
 	now := time.Now()
 
-	service.syncLiveModels(ctx, nextSync, now)
+	syncLiveModelsAndWait(ctx, service, state, now)
 	if registeredModel(t, authID, "muse-kept-test") == nil {
 		t.Fatal("the discovered Meta model was not registered")
 	}
 	mu.Lock()
 	answer = `{"error":"maintenance"}`
 	mu.Unlock()
-	service.syncLiveModels(ctx, nextSync, now.Add(liveModelSyncInterval+time.Second))
+	syncLiveModelsAndWait(ctx, service, state, now.Add(liveModelSyncInterval+time.Second))
 	if registeredModel(t, authID, "muse-kept-test") == nil {
 		t.Fatal("an answer without the model list dropped the models found before")
 	}
@@ -503,16 +544,298 @@ func TestSyncLiveModelsBacksOffAfterFailure(t *testing.T) {
 	cfg := &internalconfig.Config{}
 	cfg.Claude.LiveModels = true
 	service := &Service{cfg: cfg, coreManager: manager}
-	nextSync := make(map[string]time.Time)
+	state := newLiveModelSyncState()
 	now := time.Now()
 
-	service.syncLiveModels(ctx, nextSync, now)
-	service.syncLiveModels(ctx, nextSync, now.Add(liveModelSyncTick))
-	service.syncLiveModels(ctx, nextSync, now.Add(liveModelSyncRetryBackoff+time.Second))
+	syncLiveModelsAndWait(ctx, service, state, now)
+	syncLiveModelsAndWait(ctx, service, state, now.Add(liveModelSyncTick))
+	syncLiveModelsAndWait(ctx, service, state, now.Add(liveModelSyncRetryBackoff+time.Second))
 
 	mu.Lock()
 	defer mu.Unlock()
 	if requests != 2 {
 		t.Fatalf("requests = %d, want one attempt and one retry after the backoff", requests)
+	}
+}
+
+func TestLiveModelSyncStateSkipsACredentialWhileItsReadRuns(t *testing.T) {
+	state := newLiveModelSyncState()
+	now := time.Now()
+
+	if !state.begin("a", now) {
+		t.Fatal("a credential that was never read is not due")
+	}
+	if state.begin("a", now.Add(2*liveModelSyncInterval)) {
+		t.Fatal("a second read started while the first is still running")
+	}
+	if !state.begin("b", now) {
+		t.Fatal("a running read held up another credential")
+	}
+	state.finish("a", now.Add(liveModelSyncInterval))
+	if state.begin("a", now.Add(liveModelSyncTick)) {
+		t.Fatal("a credential was read again before it was due")
+	}
+	if !state.begin("a", now.Add(liveModelSyncInterval)) {
+		t.Fatal("a credential is not read again once it is due")
+	}
+}
+
+func TestSyncLiveModelsDoesNotWaitForAStalledRead(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseStalled := func() { releaseOnce.Do(func() { close(release) }) }
+	var mu sync.Mutex
+	requests := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		mu.Lock()
+		requests[token]++
+		mu.Unlock()
+		if token == "stalled-token" {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-` + strings.TrimSuffix(token, "-token") + `-live-test"}]}`))
+	}))
+	defer server.Close()
+	defer releaseStalled()
+	originalClaudeURL := claudeModelsURL
+	claudeModelsURL = server.URL
+	t.Cleanup(func() { claudeModelsURL = originalClaudeURL })
+
+	ctx := context.Background()
+	manager := coreauth.NewManager(nil, nil, nil)
+	stalledID, fastID := "live-sync-stalled", "live-sync-fast"
+	registerLiveTestAuths(t, ctx, manager,
+		&coreauth.Auth{ID: stalledID, Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "stalled-token"}},
+		&coreauth.Auth{ID: fastID, Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "fast-token"}},
+	)
+	cfg := &internalconfig.Config{}
+	cfg.Claude.LiveModels = true
+	service := &Service{cfg: cfg, coreManager: manager}
+	state := newLiveModelSyncState()
+	now := time.Now()
+
+	returned := make(chan struct{})
+	go func() {
+		service.syncLiveModels(ctx, state, now)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the check waited for a read that does not answer")
+	}
+	waitForRegisteredModel(t, fastID, "claude-fast-live-test")
+
+	// The next check does not start a second read of the stalled credential.
+	service.syncLiveModels(ctx, state, now.Add(liveModelSyncInterval+time.Second))
+	releaseStalled()
+	state.reads.Wait()
+
+	mu.Lock()
+	stalledReads := requests["stalled-token"]
+	mu.Unlock()
+	if stalledReads != 1 {
+		t.Fatalf("the stalled credential was read %d times, want once", stalledReads)
+	}
+	if registeredModel(t, stalledID, "claude-stalled-live-test") == nil {
+		t.Fatal("the stalled read was not registered once it answered")
+	}
+}
+
+func TestSyncLiveModelsKeepsAdditionsWhenAnAnswerHasNoList(t *testing.T) {
+	var mu sync.Mutex
+	requests := map[string]int{}
+	answers := map[string]string{
+		"claude": `{"data":[{"id":"claude-kept-live-test"}]}`,
+		"codex":  `{"models":[{"slug":"gpt-kept-live-test"}]}`,
+	}
+	serve := func(provider string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			requests[provider]++
+			_, _ = w.Write([]byte(answers[provider]))
+		}))
+	}
+	claudeServer, codexServer := serve("claude"), serve("codex")
+	defer claudeServer.Close()
+	defer codexServer.Close()
+	originalClaudeURL, originalCodexURL := claudeModelsURL, codexModelsURL
+	claudeModelsURL, codexModelsURL = claudeServer.URL, codexServer.URL
+	t.Cleanup(func() { claudeModelsURL, codexModelsURL = originalClaudeURL, originalCodexURL })
+
+	ctx := context.Background()
+	manager := coreauth.NewManager(nil, nil, nil)
+	claudeID, codexID := "live-sync-claude-kept", "live-sync-codex-kept"
+	registerLiveTestAuths(t, ctx, manager,
+		&coreauth.Auth{ID: claudeID, Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "claude-token"}},
+		&coreauth.Auth{ID: codexID, Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "pro"}, Metadata: map[string]any{"access_token": "codex-token"}},
+	)
+	cfg := &internalconfig.Config{}
+	cfg.Claude.LiveModels = true
+	cfg.Codex.LiveModels = true
+	service := &Service{cfg: cfg, coreManager: manager}
+	state := newLiveModelSyncState()
+	now := time.Now()
+
+	syncLiveModelsAndWait(ctx, service, state, now)
+	if registeredModel(t, claudeID, "claude-kept-live-test") == nil || registeredModel(t, codexID, "gpt-kept-live-test") == nil {
+		t.Fatal("the discovered models were not registered")
+	}
+
+	// A successful answer without the list keeps the models found before ...
+	mu.Lock()
+	answers["claude"], answers["codex"] = `{"type":"error","error":{"type":"overloaded_error"}}`, `{"detail":"maintenance"}`
+	mu.Unlock()
+	failedAt := now.Add(liveModelSyncInterval + time.Second)
+	syncLiveModelsAndWait(ctx, service, state, failedAt)
+	if registeredModel(t, claudeID, "claude-kept-live-test") == nil {
+		t.Fatal("a Claude answer without its data list dropped the models found before")
+	}
+	if registeredModel(t, codexID, "gpt-kept-live-test") == nil {
+		t.Fatal("a Codex answer without its models list dropped the models found before")
+	}
+
+	// ... and is retried after the backoff rather than an hour later.
+	syncLiveModelsAndWait(ctx, service, state, failedAt.Add(liveModelSyncRetryBackoff))
+	mu.Lock()
+	defer mu.Unlock()
+	if requests["claude"] != 3 || requests["codex"] != 3 {
+		t.Fatalf("reads = claude %d, codex %d; want a retry of each after the backoff (3 and 3)", requests["claude"], requests["codex"])
+	}
+}
+
+// liveCodexClientCatalogAnswer is a Codex model catalog answer with one valid
+// client entry, built from the first entry of the served catalog.
+func liveCodexClientCatalogAnswer(t *testing.T, slug string) string {
+	t.Helper()
+	var catalog struct {
+		Models []map[string]any `json:"models"`
+	}
+	if errDecode := json.Unmarshal(internalregistry.GetCodexClientModelsJSON(), &catalog); errDecode != nil || len(catalog.Models) == 0 {
+		t.Fatalf("decode served Codex client catalog: %v", errDecode)
+	}
+	entry := make(map[string]any, len(catalog.Models[0]))
+	for key, value := range catalog.Models[0] {
+		entry[key] = value
+	}
+	entry["slug"], entry["display_name"] = slug, "Live "+slug
+	answer, errEncode := json.Marshal(map[string]any{"models": []any{entry}})
+	if errEncode != nil {
+		t.Fatalf("encode Codex catalog answer: %v", errEncode)
+	}
+	return string(answer)
+}
+
+func servesCodexClientSlug(slug string) bool {
+	return gjson.GetBytes(internalregistry.GetCodexClientModelsJSON(), `models.#(slug=="`+slug+`")`).Exists()
+}
+
+func TestSyncLiveModelsDropsCodexClientEntriesWithTheirCredentials(t *testing.T) {
+	t.Cleanup(func() { internalregistry.RetainLiveCodexClientModels(nil) })
+	base := internalregistry.GetCodexClientModelsJSON()
+	answer := liveCodexClientCatalogAnswer(t, "gpt-overlay-live-test")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer server.Close()
+	originalCodexURL := codexModelsURL
+	codexModelsURL = server.URL
+	t.Cleanup(func() { codexModelsURL = originalCodexURL })
+
+	ctx := context.Background()
+	manager := coreauth.NewManager(nil, nil, nil)
+	codexID := "live-sync-codex-overlay"
+	registerLiveTestAuths(t, ctx, manager,
+		&coreauth.Auth{ID: codexID, Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "pro"}, Metadata: map[string]any{"access_token": "codex-token"}},
+	)
+	cfg := &internalconfig.Config{}
+	cfg.Codex.LiveModels = true
+	service := &Service{cfg: cfg, coreManager: manager}
+	state := newLiveModelSyncState()
+	now := time.Now()
+
+	syncLiveModelsAndWait(ctx, service, state, now)
+	if !servesCodexClientSlug("gpt-overlay-live-test") {
+		t.Fatal("the Codex client catalog does not serve the live entry")
+	}
+
+	// Turning discovery off returns the Codex client catalog to the catalog alone.
+	cfg.Codex.LiveModels = false
+	syncLiveModelsAndWait(ctx, service, state, now.Add(liveModelSyncTick))
+	if !bytes.Equal(internalregistry.GetCodexClientModelsJSON(), base) {
+		t.Fatal("the Codex client catalog kept live entries after discovery was turned off")
+	}
+
+	// Turned on again, the credential is read at the next check.
+	cfg.Codex.LiveModels = true
+	syncLiveModelsAndWait(ctx, service, state, now.Add(2*liveModelSyncTick))
+	if !servesCodexClientSlug("gpt-overlay-live-test") {
+		t.Fatal("the live entry did not come back when discovery was turned on again")
+	}
+
+	// Removing the last Codex login does the same.
+	manager.Remove(ctx, codexID)
+	syncLiveModelsAndWait(ctx, service, state, now.Add(3*liveModelSyncTick))
+	if !bytes.Equal(internalregistry.GetCodexClientModelsJSON(), base) {
+		t.Fatal("the Codex client catalog kept live entries after the last Codex login was removed")
+	}
+}
+
+func TestSyncLiveModelsMetaModelWithoutReasoningShowsNoReasoningLevels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"muse-plain-live-test","metadata":{"muse-code":{"reasoning":false,"modalities":{"output":["text"]},"variants":{"high":{"reasoningEffort":"high"}}}}},
+			{"id":"muse-reasoning-live-test","metadata":{"muse-code":{"modalities":{"output":["text"]},"variants":{"high":{"reasoningEffort":"high"},"low":{"reasoningEffort":"low"}}}}}
+		]}`))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	cfg := &internalconfig.Config{}
+	cfg.Meta.LiveModels = true
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(runtimeexecutor.NewMetaExecutor(cfg))
+	metaID := "live-sync-meta-reasoning"
+	registerLiveTestAuths(t, ctx, manager,
+		&coreauth.Auth{ID: metaID, Provider: "meta", Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "meta-key", "source_backend": "file", "source": "/auths/meta-reasoning.json"}},
+	)
+	service := &Service{cfg: cfg, coreManager: manager}
+	syncLiveModelsAndWait(ctx, service, newLiveModelSyncState(), time.Now())
+	if registeredModel(t, metaID, "muse-plain-live-test") == nil || registeredModel(t, metaID, "muse-reasoning-live-test") == nil {
+		t.Fatal("the discovered Meta models were not registered")
+	}
+
+	// The Codex client catalog lists no reasoning levels for the model Meta
+	// reports as not reasoning, and the reported levels for the other one.
+	response := codexmodels.BuildResponseForClient(internalregistry.GetGlobalRegistry().GetAvailableModels("openai"), nil, false, codexLiveClientVersion)
+	catalog, errEncode := json.Marshal(response)
+	if errEncode != nil {
+		t.Fatalf("encode Codex client catalog: %v", errEncode)
+	}
+	plain := gjson.GetBytes(catalog, `models.#(slug=="muse-plain-live-test")`)
+	if !plain.Exists() || plain.Get("supported_reasoning_levels").Raw != "[]" || plain.Get("default_reasoning_level").Exists() {
+		t.Fatalf("Codex client entry of the model without reasoning = %s, want supported_reasoning_levels [] and no default", plain.Raw)
+	}
+	var efforts []string
+	gjson.GetBytes(catalog, `models.#(slug=="muse-reasoning-live-test").supported_reasoning_levels.#.effort`).ForEach(func(_, effort gjson.Result) bool {
+		efforts = append(efforts, effort.String())
+		return true
+	})
+	if strings.Join(efforts, ",") != "low,high" {
+		t.Fatalf("Codex client reasoning levels of the reasoning model = %v, want low,high", efforts)
+	}
+
+	// A request to it has its reasoning settings removed rather than sent to Meta.
+	info := internalregistry.LookupModelInfo("muse-plain-live-test", "meta")
+	request := []byte(`{"model":"muse-plain-live-test","input":"hi","reasoning":{"effort":"high"}}`)
+	prepared, errThinking := thinking.ApplyThinkingWithModelInfo(request, request, "muse-plain-live-test", "codex", "codex", "meta", info)
+	if errThinking != nil || gjson.GetBytes(prepared, "reasoning").Exists() {
+		t.Fatalf("request to the model without reasoning = %s, %v; want the reasoning settings removed", prepared, errThinking)
 	}
 }

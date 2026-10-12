@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -15,9 +14,6 @@ import (
 )
 
 const (
-	// oauthProbeTimeout bounds one control-plane probe. Probes run in the
-	// background and never carry a client request.
-	oauthProbeTimeout = 20 * time.Second
 	// oauthProbeMaxBody caps how much of a probe response is read.
 	oauthProbeMaxBody = 8 << 20
 
@@ -89,21 +85,18 @@ func oauthProbeHeaders(cfg *config.Config, provider string, auth *coreauth.Auth)
 
 // oauthProbeGET issues one authenticated GET against a provider control-plane
 // endpoint through the credential's proxy settings and returns the body of a
-// successful response.
+// successful response. It sets no deadline of its own; ctx ends the request.
 func (s *Service) oauthProbeGET(ctx context.Context, cfg *config.Config, provider string, auth *coreauth.Auth, endpoint string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, oauthProbeTimeout)
-	defer cancel()
-
-	req, errRequest := http.NewRequestWithContext(probeCtx, http.MethodGet, endpoint, nil)
+	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if errRequest != nil {
 		return nil, fmt.Errorf("create request: %w", errRequest)
 	}
 	req.Header = oauthProbeHeaders(cfg, provider, auth)
 
-	client := helps.NewProxyAwareHTTPClient(probeCtx, cfg, auth, 0)
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 	resp, errDo := client.Do(req)
 	if errDo != nil {
 		return nil, fmt.Errorf("request failed: %w", errDo)

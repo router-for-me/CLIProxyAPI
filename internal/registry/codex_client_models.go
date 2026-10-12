@@ -58,17 +58,22 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 	if err := ValidateCodexClientModelsJSON(data); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
-	data = codexClientLiveOverlay.apply(data)
+	// Entries discovered live from the provider are laid over every base catalog.
+	return codexClientLiveOverlay.install(data), nil
+}
 
+// storeCodexClientModels serves data as the Codex client catalog and reports
+// whether it changed.
+func storeCodexClientModels(data []byte) bool {
 	cloned := append([]byte(nil), data...)
 	codexClientCatalogStore.mu.Lock()
 	defer codexClientCatalogStore.mu.Unlock()
 	if bytes.Equal(codexClientCatalogStore.data, cloned) {
-		return false, nil
+		return false
 	}
 	codexClientCatalogStore.data = cloned
 	codexClientCatalogStore.revision++
-	return true, nil
+	return true
 }
 
 // ValidateCodexClientModelsJSON validates the fields required to serve a

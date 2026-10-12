@@ -162,10 +162,7 @@ func (s *Service) withLiveModels(a *coreauth.Auth, provider string, models []*Mo
 	if s == nil || a == nil {
 		return models
 	}
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
-	if !liveModelsEnabled(cfg, provider) {
+	if !liveModelsEnabled(s.liveModelConfig(), provider) {
 		return models
 	}
 	if _, ok := liveModelProvider(a); !ok {
@@ -190,6 +187,62 @@ func (s *Service) withLiveModels(a *coreauth.Auth, provider string, models []*Mo
 	return models
 }
 
+// liveModelSyncState carries the sync's schedule between checks: when each
+// credential may be read again, and which reads are still running.
+type liveModelSyncState struct {
+	mu       sync.Mutex
+	nextSync map[string]time.Time
+	running  map[string]struct{}
+	// reads counts the reads still running, so tests can wait for them.
+	reads sync.WaitGroup
+}
+
+func newLiveModelSyncState() *liveModelSyncState {
+	return &liveModelSyncState{nextSync: make(map[string]time.Time), running: make(map[string]struct{})}
+}
+
+// begin reports whether the credential is due and no earlier read of it is
+// still running. When it is, the read is recorded as running.
+func (st *liveModelSyncState) begin(authID string, now time.Time) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if _, running := st.running[authID]; running {
+		return false
+	}
+	if next, pending := st.nextSync[authID]; pending && now.Before(next) {
+		return false
+	}
+	st.running[authID] = struct{}{}
+	return true
+}
+
+// finish records that the credential's read ended and when it is due again.
+func (st *liveModelSyncState) finish(authID string, next time.Time) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	delete(st.running, authID)
+	st.nextSync[authID] = next
+}
+
+// unschedule forgets when the credential is due, so it is read at the next
+// check after discovery is turned on again.
+func (st *liveModelSyncState) unschedule(authID string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	delete(st.nextSync, authID)
+}
+
+// retain forgets the schedule of credentials that are no longer registered.
+func (st *liveModelSyncState) retain(known map[string]struct{}) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for authID := range st.nextSync {
+		if _, ok := known[authID]; !ok {
+			delete(st.nextSync, authID)
+		}
+	}
+}
+
 // startLiveModelSync keeps the model list of Claude, Codex and Meta credentials
 // in step with what the provider reports for each account.
 func (s *Service) startLiveModelSync(ctx context.Context) {
@@ -200,7 +253,7 @@ func (s *Service) startLiveModelSync(ctx context.Context) {
 		ctx = context.Background()
 	}
 	go func() {
-		nextSync := make(map[string]time.Time)
+		state := newLiveModelSyncState()
 		timer := time.NewTimer(liveModelSyncStartDelay)
 		defer timer.Stop()
 		for {
@@ -209,35 +262,32 @@ func (s *Service) startLiveModelSync(ctx context.Context) {
 				return
 			case <-timer.C:
 			}
-			s.syncLiveModels(ctx, nextSync, time.Now())
+			s.syncLiveModels(ctx, state, time.Now())
 			timer.Reset(liveModelSyncTick)
 		}
 	}()
 }
 
-// syncLiveModels reads the provider model list of every credential that is due
-// and re-registers the credentials whose list gained or lost a model. nextSync
-// carries the earliest time each credential may be read again.
-func (s *Service) syncLiveModels(ctx context.Context, nextSync map[string]time.Time, now time.Time) {
-	if s == nil || s.coreManager == nil {
+// syncLiveModels starts a read of the provider model list for every credential
+// that is due. Each read runs on its own goroutine, and a credential whose last
+// read is still running is skipped, so a provider that is slow to answer holds
+// up only its own credential. The reads carry no deadline of their own; ctx
+// ends them when the service stops.
+func (s *Service) syncLiveModels(ctx context.Context, state *liveModelSyncState, now time.Time) {
+	if s == nil || s.coreManager == nil || state == nil {
 		return
 	}
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
+	cfg := s.liveModelConfig()
 
 	auths := s.coreManager.List()
 	known := make(map[string]struct{}, len(auths))
 	for _, auth := range auths {
 		known[auth.ID] = struct{}{}
 	}
-	for id := range nextSync {
-		if _, ok := known[id]; !ok {
-			delete(nextSync, id)
-		}
-	}
+	state.retain(known)
 	liveModelAdditions.retain(known)
 
+	var codexIDs []string
 	for _, auth := range auths {
 		if ctx.Err() != nil {
 			return
@@ -250,41 +300,87 @@ func (s *Service) syncLiveModels(ctx context.Context, nextSync map[string]time.T
 			if liveModelAdditions.set(auth.ID, nil) {
 				s.refreshModelRegistrationForAuth(auth)
 			}
-			delete(nextSync, auth.ID)
+			state.unschedule(auth.ID)
 			continue
 		}
-		if next, pending := nextSync[auth.ID]; pending && now.Before(next) {
+		if provider == "codex" {
+			codexIDs = append(codexIDs, auth.ID)
+		}
+		if !state.begin(auth.ID, now) {
 			continue
 		}
-		discovered, errFetch := s.fetchLiveModels(ctx, cfg, provider, auth)
-		if errFetch != nil {
-			nextSync[auth.ID] = now.Add(liveModelSyncRetryBackoff)
-			log.Debugf("live models: %s credential %s: %v", provider, auth.ID, errFetch)
-			continue
-		}
-		nextSync[auth.ID] = now.Add(liveModelSyncInterval)
-		additions := liveModelAdditionsFor(provider, auth, discovered)
-		if !liveModelAdditions.set(auth.ID, additions) {
-			continue
-		}
-		ids := make([]string, 0, len(additions))
-		for _, addition := range additions {
-			ids = append(ids, addition.ID)
-		}
-		log.Infof("live models: %s credential %s now adds %d model(s) the catalog does not list: %s", provider, auth.ID, len(ids), strings.Join(ids, ", "))
-		s.refreshModelRegistrationForAuth(auth)
+		state.reads.Add(1)
+		go func(auth *coreauth.Auth, provider string) {
+			defer state.reads.Done()
+			s.readLiveModels(ctx, state, provider, auth, now)
+		}(auth, provider)
+	}
+	// The Codex client catalog keeps only the entries of the Codex credentials
+	// that are still read, so turning discovery off or removing the last Codex
+	// login returns it to the catalog alone.
+	if registry.RetainLiveCodexClientModels(codexIDs) {
+		log.Infof("live models: Codex client model catalog dropped the entries of credentials no longer read")
 	}
 }
 
-// fetchLiveModels reads the provider model list for one credential.
-func (s *Service) fetchLiveModels(ctx context.Context, cfg *config.Config, provider string, auth *coreauth.Auth) ([]liveModel, error) {
+// readLiveModels reads one credential's model list and re-registers the
+// credential when the models the catalog does not list changed.
+func (s *Service) readLiveModels(ctx context.Context, state *liveModelSyncState, provider string, auth *coreauth.Auth, now time.Time) {
+	discovered, codexCatalog, errFetch := s.fetchLiveModels(ctx, s.liveModelConfig(), provider, auth)
+	if errFetch != nil {
+		state.finish(auth.ID, now.Add(liveModelSyncRetryBackoff))
+		log.Debugf("live models: %s credential %s: %v", provider, auth.ID, errFetch)
+		return
+	}
+	state.finish(auth.ID, now.Add(liveModelSyncInterval))
+
+	// Discovery may have been turned off, or the credential removed, while the
+	// read was running.
+	if !liveModelsEnabled(s.liveModelConfig(), provider) {
+		return
+	}
+	if current, ok := s.coreManager.GetByID(auth.ID); !ok || current == nil || current.Disabled {
+		return
+	}
+	if codexCatalog != nil {
+		if changed, errMerge := registry.MergeLiveCodexClientModels(auth.ID, codexCatalog); errMerge != nil {
+			log.Debugf("live models: codex credential %s: client catalog not updated: %v", auth.ID, errMerge)
+		} else if changed {
+			log.Infof("live models: Codex client model catalog updated from credential %s", auth.ID)
+		}
+	}
+	additions := liveModelAdditionsFor(provider, auth, discovered)
+	if !liveModelAdditions.set(auth.ID, additions) {
+		return
+	}
+	ids := make([]string, 0, len(additions))
+	for _, addition := range additions {
+		ids = append(ids, addition.ID)
+	}
+	log.Infof("live models: %s credential %s now adds %d model(s) the catalog does not list: %s", provider, auth.ID, len(ids), strings.Join(ids, ", "))
+	s.refreshModelRegistrationForAuth(auth)
+}
+
+// liveModelConfig returns the current configuration, which a reload may replace.
+func (s *Service) liveModelConfig() *config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
+// fetchLiveModels reads the provider model list for one credential. For Codex it
+// also returns the answer itself, whose entries are served to Codex clients.
+func (s *Service) fetchLiveModels(ctx context.Context, cfg *config.Config, provider string, auth *coreauth.Auth) ([]liveModel, []byte, error) {
 	switch provider {
 	case "claude":
 		body, errGet := s.oauthProbeGET(ctx, cfg, provider, auth, claudeModelsURL)
 		if errGet != nil {
-			return nil, errGet
+			return nil, nil, errGet
 		}
-		return parseClaudeLiveModels(body), nil
+		if errList := requireModelList(body, "data"); errList != nil {
+			return nil, nil, errList
+		}
+		return parseClaudeLiveModels(body), nil, nil
 	case "codex":
 		endpoint := codexModelsURL
 		if parsed, errParse := url.Parse(endpoint); errParse == nil {
@@ -295,28 +391,34 @@ func (s *Service) fetchLiveModels(ctx context.Context, cfg *config.Config, provi
 		}
 		body, errGet := s.oauthProbeGET(ctx, cfg, provider, auth, endpoint)
 		if errGet != nil {
-			return nil, errGet
+			return nil, nil, errGet
 		}
-		if changed, errMerge := registry.MergeLiveCodexClientModels(body); errMerge != nil {
-			log.Debugf("live models: codex credential %s: client catalog not updated: %v", auth.ID, errMerge)
-		} else if changed {
-			log.Infof("live models: Codex client model catalog updated from credential %s", auth.ID)
+		if errList := requireModelList(body, "models"); errList != nil {
+			return nil, nil, errList
 		}
-		return parseCodexLiveModels(body), nil
+		return parseCodexLiveModels(body), body, nil
 	case "meta":
 		body, errGet := s.metaModelsGET(ctx, auth)
 		if errGet != nil {
-			return nil, errGet
+			return nil, nil, errGet
 		}
-		// An answer without the list is not an empty catalog; failing keeps the
-		// models found last time and retries after the backoff.
-		if !gjson.GetBytes(body, "data").IsArray() {
-			return nil, fmt.Errorf("model catalog response has no data list")
+		if errList := requireModelList(body, "data"); errList != nil {
+			return nil, nil, errList
 		}
-		return parseMetaLiveModels(body), nil
+		return parseMetaLiveModels(body), nil, nil
 	default:
-		return nil, nil
+		return nil, nil, nil
 	}
+}
+
+// requireModelList fails an answer that has no model list at path. Such an
+// answer is not an empty catalog: failing keeps the models found last time and
+// retries the read after the backoff.
+func requireModelList(body []byte, path string) error {
+	if !gjson.GetBytes(body, path).IsArray() {
+		return fmt.Errorf("model list response has no %s list", path)
+	}
+	return nil
 }
 
 // metaModelsGET reads the Muse Code model catalog with one Meta credential. The
@@ -328,12 +430,9 @@ func (s *Service) metaModelsGET(ctx context.Context, auth *coreauth.Auth) ([]byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, oauthProbeTimeout)
-	defer cancel()
-
 	if registered, ok := s.coreManager.Executor("meta"); ok {
 		if preparer, ok := registered.(coreauth.RequestAuthPreparer); ok {
-			prepared, errPrepare := s.coreManager.PrepareRequestAuth(probeCtx, preparer, auth)
+			prepared, errPrepare := s.coreManager.PrepareRequestAuth(ctx, preparer, auth)
 			if errPrepare != nil {
 				return nil, fmt.Errorf("prepare credential: %w", errPrepare)
 			}
@@ -348,11 +447,11 @@ func (s *Service) metaModelsGET(ctx context.Context, auth *coreauth.Auth) ([]byt
 	}
 	headers := make(http.Header)
 	headers.Set("Accept", "application/json")
-	req, errRequest := s.coreManager.NewHttpRequest(probeCtx, auth, http.MethodGet, endpoint, nil, headers)
+	req, errRequest := s.coreManager.NewHttpRequest(ctx, auth, http.MethodGet, endpoint, nil, headers)
 	if errRequest != nil {
 		return nil, fmt.Errorf("create request: %w", errRequest)
 	}
-	resp, errDo := s.coreManager.HttpRequest(probeCtx, auth, req)
+	resp, errDo := s.coreManager.HttpRequest(ctx, auth, req)
 	if errDo != nil {
 		return nil, fmt.Errorf("request failed: %w", errDo)
 	}
@@ -454,8 +553,9 @@ func parseCodexLiveModels(body []byte) []liveModel {
 
 // parseMetaLiveModels reads the Muse Code model catalog response. Only Muse
 // models with Muse Code metadata are taken, so a model ID another provider
-// serves is never routed to Meta. Models Meta hides from clients, and models
-// that do not answer in text, are skipped.
+// serves is never routed to Meta. Models Meta hides from clients are skipped,
+// and so are models whose output modalities do not list text, including models
+// that report none.
 func parseMetaLiveModels(body []byte) []liveModel {
 	var models []liveModel
 	gjson.GetBytes(body, "data").ForEach(func(_, entry gjson.Result) bool {
@@ -464,7 +564,7 @@ func parseMetaLiveModels(body []byte) []liveModel {
 		if !strings.HasPrefix(strings.ToLower(id), "muse-") || !museCode.Exists() || museCode.Get("is_hidden").Bool() {
 			return true
 		}
-		if outputs := museCode.Get("modalities.output"); outputs.IsArray() && !gjsonArrayContains(outputs, "text") {
+		if outputs := museCode.Get("modalities.output"); !outputs.IsArray() || !gjsonArrayContains(outputs, "text") {
 			return true
 		}
 		model := liveModel{
@@ -603,7 +703,11 @@ func liveModelInfo(provider string, model liveModel, catalog []*ModelInfo) *Mode
 		info.MaxCompletionTokens = model.maxCompletionTokens
 	}
 	if model.noThinking {
+		// No thinking support: requests have their reasoning settings removed.
+		// Marking it explicit keeps the Codex client catalog from showing the
+		// reasoning levels of the template it builds the entry from.
 		info.Thinking = nil
+		info.ExplicitThinking = true
 	} else if len(model.thinkingLevels) > 0 {
 		info.Thinking = &registry.ThinkingSupport{Levels: append([]string(nil), model.thinkingLevels...)}
 	}
