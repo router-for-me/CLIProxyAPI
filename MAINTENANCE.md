@@ -7,6 +7,7 @@ Both default branches are `main`. Canonical checkout: `~/Repos/CLIProxyAPI`.
 Initial local, `origin/main`, and `upstream/main` baseline on 2026-09-13:
 `44e62bc8acc2f224bff9c62d222717d3f6723dea` (upstream v7.3.1), with exact parity.
 Accepted upstream baseline before CPA-001: `d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5` (`v8.0.23`).
+Current accepted upstream release: `091ff27f31285ec4fd1dd5823b44f7f51fb8f48b` (`v8.0.24`). Its canceled-stream cooldown path (`recordCanceledUpstreamCooldown`) carries the CPA-001 explicit cooldown.
 `origin` publishes to the owned fork. `upstream` is fetch-only.
 This fork supplies the local gateway build from fork `main` and tracks upstream RELEASE TAGS, not upstream `main`.
 
