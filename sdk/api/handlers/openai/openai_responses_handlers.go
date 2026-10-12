@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
@@ -726,7 +727,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		finishDelivery(err)
 		cancelExecution(err)
 	}
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	var dataChan <-chan []byte
+	var upstreamHeaders http.Header
+	var errChan <-chan *interfaces.ErrorMessage
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -741,8 +744,68 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
 	var initialOutput bytes.Buffer
+	committed := false
+	commitSSE := func() {
+		if committed {
+			return
+		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		committed = true
+	}
+	writeKeepAlive := func() bool {
+		commitSSE()
+		if errWrite := writeResponsesSSEChunk(c.Writer, []byte(": keep-alive\n\n")); errWrite != nil {
+			cliCancel(errWrite)
+			return false
+		}
+		if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
+			cliCancel(errFlush)
+			return false
+		}
+		return true
+	}
+	keepAliveInterval := handlers.StreamingKeepAliveInterval(h.Cfg)
+	var keepAlive *time.Ticker
+	var keepAliveC <-chan time.Time
+	if keepAliveInterval > 0 {
+		keepAlive = time.NewTicker(keepAliveInterval)
+		defer keepAlive.Stop()
+		keepAliveC = keepAlive.C
+	}
 
-	// Peek at the first complete SSE data frame.
+	// ExecuteStreamWithAuthManager waits synchronously for the first deliverable
+	// upstream chunk so it can perform bootstrap retries. Run that bootstrap in a
+	// goroutine so configured SSE keepalives can reach the client during a long
+	// time to first token.
+	type streamBootstrapResult struct {
+		data    <-chan []byte
+		headers http.Header
+		errs    <-chan *interfaces.ErrorMessage
+	}
+	bootstrapResult := make(chan streamBootstrapResult, 1)
+	go func() {
+		data, headers, errs := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+		bootstrapResult <- streamBootstrapResult{data: data, headers: headers, errs: errs}
+	}()
+	for dataChan == nil && errChan == nil {
+		select {
+		case <-c.Request.Context().Done():
+			cliCancel(c.Request.Context().Err())
+			return
+		case result := <-bootstrapResult:
+			dataChan = result.data
+			upstreamHeaders = result.headers
+			errChan = result.errs
+		case <-keepAliveC:
+			if !writeKeepAlive() {
+				return
+			}
+		}
+	}
+
+	// Peek at the first complete SSE data frame. Keep sending heartbeats if an
+	// upstream adapter returns an incomplete frame and then becomes idle.
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -760,8 +823,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				safeErrMsg = sanitizeResponsesInitialErrorMessage(errMsg)
 			}
 			if safeErrMsg != nil && framer.dataFrames > 0 {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				commitSSE()
 				if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
 					cliCancel(errWrite)
 					return
@@ -770,6 +832,13 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 					cliCancel(errFlush)
 					return
 				}
+				pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+				pendingErrors <- safeErrMsg
+				close(pendingErrors)
+				h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, framer)
+				return
+			}
+			if committed {
 				pendingErrors := make(chan *interfaces.ErrorMessage, 1)
 				pendingErrors <- safeErrMsg
 				close(pendingErrors)
@@ -802,9 +871,8 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 					errMsg = sanitizeResponsesInitialErrorMessage(errMsg)
 				}
 
-				if framer.dataFrames > 0 {
-					setSSEHeaders()
-					handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				if committed || framer.dataFrames > 0 {
+					commitSSE()
 					if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
 						cliCancel(errWrite)
 						return
@@ -844,8 +912,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				continue
 			}
 
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			commitSSE()
 			if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
 				cliCancel(errWrite)
 				return
@@ -862,6 +929,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 
 			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
 			return
+		case <-keepAliveC:
+			if !writeKeepAlive() {
+				return
+			}
 		}
 	}
 }
