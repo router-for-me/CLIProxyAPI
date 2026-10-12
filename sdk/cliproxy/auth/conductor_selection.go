@@ -1022,6 +1022,12 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if !okStrategy {
 		return nil, false, nil
 	}
+	// The built-in scheduler picks from every eligible credential, not from the
+	// candidates of the first available account pool, so a pooled request falls
+	// back to the selector, which only sees those candidates.
+	if HasAccountPools(ctx) {
+		return nil, false, nil
+	}
 	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
 }
 

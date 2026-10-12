@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func poolTestConfig() config.ClientConfig {
@@ -136,6 +137,27 @@ func TestAccountPoolsDedicatedThenSharedAndNoPersonalFallback(t *testing.T) {
 	resp, err = m.Execute(personal, []string{"claude"}, req, cliproxyexecutor.Options{})
 	if err != nil || string(resp.Payload) != "personal" {
 		t.Fatalf("personal route: %s %v", resp.Payload, err)
+	}
+}
+
+// A plugin scheduler that delegates to a built-in strategy must not reach past
+// the first available pool to a higher-priority credential in a later one.
+func TestAccountPoolsDelegatedSchedulerStaysInFirstPool(t *testing.T) {
+	for _, delegate := range []string{pluginapi.SchedulerBuiltinFillFirst, pluginapi.SchedulerBuiltinRoundRobin} {
+		t.Run(delegate, func(t *testing.T) {
+			m, _, model := poolTestManager(t, &FillFirstSelector{})
+			m.SetPluginScheduler(&fakePluginScheduler{
+				resp:    pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: delegate},
+				handled: true,
+			})
+			ctx := poolTestContext(t, poolTestConfig(), "review-key")
+			for range 3 {
+				a, err := m.SelectAuth(ctx, "claude", model, cliproxyexecutor.Options{})
+				if err != nil || a.ID != "reviewer" {
+					t.Fatalf("delegated pick: %v %v, want reviewer", a, err)
+				}
+			}
+		})
 	}
 }
 
