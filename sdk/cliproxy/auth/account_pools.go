@@ -105,8 +105,10 @@ func HasAccountPools(ctx context.Context) bool { return accountPoolsFromContext(
 func (p *AccountPoolPolicy) Allows(a *Auth) bool { return p == nil || p.tier(a) >= 0 }
 
 // tier returns the index of the first pool the credential belongs to, or -1.
+// The provider check uses the key selection routes the credential under, so an
+// openai-compatibility credential matches its openai-compatible-<name> key.
 func (p *AccountPoolPolicy) tier(a *Auth) int {
-	if a == nil || !p.providers[strings.ToLower(a.Provider)] {
+	if a == nil || !p.providers[executorKeyFromAuth(a)] {
 		return -1
 	}
 	for i, group := range p.groups {

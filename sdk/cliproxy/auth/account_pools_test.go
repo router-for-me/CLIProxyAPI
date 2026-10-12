@@ -327,10 +327,13 @@ func TestAccountPoolsHomeFailsClosed(t *testing.T) {
 
 // An openai-compatibility entry's credentials are registered under
 // openai-compatible-<name>; a pooled scope may name the entry as configured.
+// Membership uses the provider key selection routes a credential under, so a
+// legacy credential (provider openai-compatibility, named by its label)
+// matches too.
 func TestAccountPoolsAcceptOpenAICompatibilityNames(t *testing.T) {
 	pools := []string{"router"}
 	cfg := config.ClientConfig{
-		AccountPools: &[]config.ClientAccountPool{{Name: "router", AuthIDs: []string{"router-credential"}}},
+		AccountPools: &[]config.ClientAccountPool{{Name: "router", AuthIDs: []string{"router-credential", "router-legacy"}}},
 		KeyScopes:    &[]config.ClientKeyScope{{KeyPrefix: "router-", Providers: []string{"OpenRouter"}, Pools: &pools}},
 	}
 	p, err := ResolveAccountPools(cfg, "router-key")
@@ -339,6 +342,10 @@ func TestAccountPoolsAcceptOpenAICompatibilityNames(t *testing.T) {
 	}
 	if !p.Allows(&Auth{ID: "router-credential", Provider: "openai-compatible-openrouter"}) {
 		t.Fatal("the openai-compatibility credential is outside its pool")
+	}
+	legacy := &Auth{ID: "router-legacy", Provider: "openai-compatibility", Label: "OpenRouter"}
+	if executorKeyFromAuth(legacy) != "openai-compatible-openrouter" || !p.Allows(legacy) {
+		t.Fatal("the legacy openai-compatibility credential is outside its pool")
 	}
 	if p.Allows(&Auth{ID: "router-credential", Provider: "claude"}) {
 		t.Fatal("a provider outside the scope crossed into the pool")
