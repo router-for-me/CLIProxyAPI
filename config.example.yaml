@@ -147,7 +147,21 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, most-remaining
+  # most-remaining ranks available accounts within the highest credential priority by
+  # the lowest remaining fraction across observed Claude/Codex allowance windows.
+  # Claude short/weekly and applicable Opus/Sonnet windows, and Codex primary/secondary
+  # and named model-specific windows are considered. It compares percentages, not
+  # absolute tokens across subscription tiers. Existing healthy session bindings win.
+  # Observations come from upstream responses; no quota polling is performed. Data
+  # older than 15 minutes, malformed data, or windows past reset are unknown.
+  # Unknown accounts are sampled once every eight new assignments while present,
+  # and preferred when known accounts have 20% or less remaining. This avoids
+  # starving new/stale accounts without assuming their allowance is full.
+  # Ties/no usable data use round-robin. Only windows in the last response count;
+  # missing model-specific windows cannot be inferred from older responses.
+  # Select this strategy in YAML or the v8 configuration API. Home mode continues
+  # to use its authoritative dispatch policy rather than local account selection.
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.

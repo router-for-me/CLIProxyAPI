@@ -665,7 +665,9 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
 	if !isBuiltInSelector(selector) {
-		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
+		_, sessionAffinity := selector.(*SessionAffinitySelector)
+		_, capacity := selector.(*CapacitySelector)
+		if !sessionAffinity && !capacity {
 			return ctx
 		}
 	}
@@ -673,6 +675,20 @@ func selectorContextForAvailableAuths(ctx context.Context, selector Selector, ro
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
+}
+
+func (m *Manager) capacitySelectionContext(ctx context.Context, selector Selector, routeModel string, auths []*Auth) context.Context {
+	if affinity, ok := selector.(*SessionAffinitySelector); ok {
+		selector = affinity.fallback
+	}
+	if _, ok := selector.(*CapacitySelector); !ok {
+		return ctx
+	}
+	models := make(map[string]string, len(auths))
+	for _, candidate := range auths {
+		models[candidate.ID] = m.resolveExecutionAliasResult(candidate, routeModel).UpstreamModel
+	}
+	return context.WithValue(ctx, capacityModelsContextKey{}, models)
 }
 
 func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(selector Selector, affinityCandidates []*Auth, routeModel string, now time.Time) map[string]struct{} {
@@ -1826,6 +1842,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx = m.capacitySelectionContext(selectorCtx, selector, model, selectorAuths)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
@@ -2172,6 +2189,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx = m.capacitySelectionContext(selectorCtx, selector, model, selectorAuths)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
