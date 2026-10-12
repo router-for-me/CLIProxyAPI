@@ -119,14 +119,27 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 		}
 		return resp, http.StatusOK, nil
 	}
-	resp, status, errSend := send(selected)
+	current := selected
+	resp, status, errSend := send(current)
 	// A revoked API key answers 401 while the login can still mint another. The
 	// relay sends outside the execution pipeline, so it refreshes once itself,
 	// under the same rules, before giving up.
 	if errSend == nil && resp.StatusCode == http.StatusUnauthorized {
-		if refreshed, okRefresh := s.handlers.AuthManager.RefreshAfterUnauthorized(ctx, selected); okRefresh {
+		if refreshed, okRefresh := s.handlers.AuthManager.RefreshAfterUnauthorized(ctx, current); okRefresh {
 			closeMuseCodeResponse(resp)
-			resp, status, errSend = send(refreshed)
+			current = refreshed
+			resp, status, errSend = send(current)
+		}
+		// Still refused: the credential itself is rejected. Record it as the
+		// pipeline does, so selection moves past it and it is not refreshed again.
+		if errSend == nil && resp.StatusCode == http.StatusUnauthorized {
+			s.handlers.AuthManager.MarkResult(ctx, auth.Result{
+				AuthID:          current.ID,
+				Provider:        museCodeProvider,
+				Success:         false,
+				CredentialScope: true,
+				Error:           &auth.Error{Code: "unauthorized", Message: "Meta rejected the credential", HTTPStatus: http.StatusUnauthorized},
+			})
 		}
 	}
 	if errSend != nil {

@@ -372,6 +372,32 @@ func TestMuseCodeRelayRefreshesARevokedKeyOnce(t *testing.T) {
 	}
 }
 
+func TestMuseCodeRelayRetiresARejectedCredential(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
+	executor.revokedKey = "dead-key"
+	// A config key Meta rejects, with nothing to refresh it from, beside a good one.
+	dead := &auth.Auth{ID: "meta-dead", Provider: "meta", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "dead-key"}}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), dead); errRegister != nil {
+		t.Fatalf("register rejected Meta auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(dead.ID, "meta", []*registry.ModelInfo{{ID: "muse-relay-test", Object: "model", OwnedBy: "meta", Type: "meta"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(dead.ID) })
+
+	failures := 0
+	for i := 0; i < 8; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+		req.Header.Set("Authorization", "Bearer plain-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			failures++
+		}
+	}
+	if failures > 1 {
+		t.Fatalf("%d of 8 requests failed; want the rejected credential retired after its first 401", failures)
+	}
+}
+
 func TestMuseCodeRelayIsNotHiddenByACoolingModel(t *testing.T) {
 	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
 	// A second credential serves only a model that is cooling down on it.
