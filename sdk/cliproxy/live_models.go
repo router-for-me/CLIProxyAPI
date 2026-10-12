@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -64,7 +65,7 @@ type liveModel struct {
 // stands in when a client turns reasoning off; other names are dropped.
 var metaEffortOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
-// liveModelCache holds, per credential, the models the provider reports that
+// liveModelCache holds, per live model key, the models the provider reports that
 // the model catalog does not list.
 type liveModelCache struct {
 	mu        sync.RWMutex
@@ -73,22 +74,23 @@ type liveModelCache struct {
 
 var liveModelAdditions = &liveModelCache{additions: make(map[string][]*ModelInfo)}
 
-func (c *liveModelCache) get(authID string) []*ModelInfo {
+func (c *liveModelCache) get(key string) []*ModelInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.additions[authID]
+	return c.additions[key]
 }
 
-// set stores the additions for a credential and reports whether the set of
-// model IDs changed.
-func (c *liveModelCache) set(authID string, additions []*ModelInfo) bool {
+// set stores the additions for a key and reports whether they changed, either
+// in which models they are or in any model's definition.
+func (c *liveModelCache) set(key string, additions []*ModelInfo) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	changed := !sameModelIDs(c.additions[authID], additions)
+	previous := c.additions[key]
+	changed := (len(previous) > 0 || len(additions) > 0) && !reflect.DeepEqual(previous, additions)
 	if len(additions) == 0 {
-		delete(c.additions, authID)
+		delete(c.additions, key)
 	} else {
-		c.additions[authID] = additions
+		c.additions[key] = additions
 	}
 	return changed
 }
@@ -96,27 +98,35 @@ func (c *liveModelCache) set(authID string, additions []*ModelInfo) bool {
 func (c *liveModelCache) retain(known map[string]struct{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for authID := range c.additions {
-		if _, ok := known[authID]; !ok {
-			delete(c.additions, authID)
+	for key := range c.additions {
+		if _, ok := known[key]; !ok {
+			delete(c.additions, key)
 		}
 	}
 }
 
-func sameModelIDs(a, b []*ModelInfo) bool {
-	if len(a) != len(b) {
-		return false
+// liveModelKey identifies what a credential's live models are read for: the
+// credential, its provider, and the account and plan it signs in with. A token
+// refresh keeps the key. A credential file replaced in place by another
+// provider's or another account's login gets a new key, so nothing read for
+// the previous one is applied to it, and it is read again at the next check.
+func liveModelKey(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
 	}
-	ids := make(map[string]struct{}, len(a))
-	for _, model := range a {
-		ids[model.ID] = struct{}{}
-	}
-	for _, model := range b {
-		if _, ok := ids[model.ID]; !ok {
-			return false
+	parts := []string{auth.ID, strings.ToLower(strings.TrimSpace(auth.Provider))}
+	for _, field := range []string{"email", "account_id"} {
+		value := ""
+		if auth.Metadata != nil {
+			value, _ = auth.Metadata[field].(string)
 		}
+		parts = append(parts, strings.ToLower(strings.TrimSpace(value)))
 	}
-	return true
+	plan := ""
+	if auth.Attributes != nil {
+		plan = strings.ToLower(strings.TrimSpace(auth.Attributes["plan_type"]))
+	}
+	return strings.Join(append(parts, plan), "\x00")
 }
 
 // liveModelsEnabled reports whether live model discovery is on for the provider.
@@ -168,7 +178,7 @@ func (s *Service) withLiveModels(a *coreauth.Auth, provider string, models []*Mo
 	if _, ok := liveModelProvider(a); !ok {
 		return models
 	}
-	additions := liveModelAdditions.get(a.ID)
+	additions := liveModelAdditions.get(liveModelKey(a))
 	if len(additions) == 0 {
 		return models
 	}
@@ -187,8 +197,8 @@ func (s *Service) withLiveModels(a *coreauth.Auth, provider string, models []*Mo
 	return models
 }
 
-// liveModelSyncState carries the sync's schedule between checks: when each
-// credential may be read again, and which reads are still running.
+// liveModelSyncState carries the sync's schedule between checks: when each live
+// model key may be read again, and which reads are still running.
 type liveModelSyncState struct {
 	mu       sync.Mutex
 	nextSync map[string]time.Time
@@ -201,44 +211,44 @@ func newLiveModelSyncState() *liveModelSyncState {
 	return &liveModelSyncState{nextSync: make(map[string]time.Time), running: make(map[string]struct{})}
 }
 
-// begin reports whether the credential is due and no earlier read of it is
-// still running. When it is, the read is recorded as running.
-func (st *liveModelSyncState) begin(authID string, now time.Time) bool {
+// begin reports whether the key is due and no earlier read of it is still
+// running. When it is, the read is recorded as running.
+func (st *liveModelSyncState) begin(key string, now time.Time) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if _, running := st.running[authID]; running {
+	if _, running := st.running[key]; running {
 		return false
 	}
-	if next, pending := st.nextSync[authID]; pending && now.Before(next) {
+	if next, pending := st.nextSync[key]; pending && now.Before(next) {
 		return false
 	}
-	st.running[authID] = struct{}{}
+	st.running[key] = struct{}{}
 	return true
 }
 
-// finish records that the credential's read ended and when it is due again.
-func (st *liveModelSyncState) finish(authID string, next time.Time) {
+// finish records that the key's read ended and when it is due again.
+func (st *liveModelSyncState) finish(key string, next time.Time) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	delete(st.running, authID)
-	st.nextSync[authID] = next
+	delete(st.running, key)
+	st.nextSync[key] = next
 }
 
-// unschedule forgets when the credential is due, so it is read at the next
-// check after discovery is turned on again.
-func (st *liveModelSyncState) unschedule(authID string) {
+// unschedule forgets when the key is due, so it is read at the next check
+// after discovery is turned on again.
+func (st *liveModelSyncState) unschedule(key string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	delete(st.nextSync, authID)
+	delete(st.nextSync, key)
 }
 
-// retain forgets the schedule of credentials that are no longer registered.
+// retain forgets the schedule of keys no registered credential has any more.
 func (st *liveModelSyncState) retain(known map[string]struct{}) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	for authID := range st.nextSync {
-		if _, ok := known[authID]; !ok {
-			delete(st.nextSync, authID)
+	for key := range st.nextSync {
+		if _, ok := known[key]; !ok {
+			delete(st.nextSync, key)
 		}
 	}
 }
@@ -282,12 +292,12 @@ func (s *Service) syncLiveModels(ctx context.Context, state *liveModelSyncState,
 	auths := s.coreManager.List()
 	known := make(map[string]struct{}, len(auths))
 	for _, auth := range auths {
-		known[auth.ID] = struct{}{}
+		known[liveModelKey(auth)] = struct{}{}
 	}
 	state.retain(known)
 	liveModelAdditions.retain(known)
 
-	var codexIDs []string
+	var codexKeys []string
 	for _, auth := range auths {
 		if ctx.Err() != nil {
 			return
@@ -296,61 +306,63 @@ func (s *Service) syncLiveModels(ctx context.Context, state *liveModelSyncState,
 		if !ok {
 			continue
 		}
+		key := liveModelKey(auth)
 		if !liveModelsEnabled(cfg, provider) {
-			if liveModelAdditions.set(auth.ID, nil) {
+			if liveModelAdditions.set(key, nil) {
 				s.refreshModelRegistrationForAuth(auth)
 			}
-			state.unschedule(auth.ID)
+			state.unschedule(key)
 			continue
 		}
 		if provider == "codex" {
-			codexIDs = append(codexIDs, auth.ID)
+			codexKeys = append(codexKeys, key)
 		}
-		if !state.begin(auth.ID, now) {
+		if !state.begin(key, now) {
 			continue
 		}
 		state.reads.Add(1)
-		go func(auth *coreauth.Auth, provider string) {
+		go func(auth *coreauth.Auth, provider, key string) {
 			defer state.reads.Done()
-			s.readLiveModels(ctx, state, provider, auth, now)
-		}(auth, provider)
+			s.readLiveModels(ctx, state, provider, auth, key, now)
+		}(auth, provider, key)
 	}
-	// The Codex client catalog keeps only the entries of the Codex credentials
-	// that are still read, so turning discovery off or removing the last Codex
-	// login returns it to the catalog alone.
-	if registry.RetainLiveCodexClientModels(codexIDs) {
+	// The Codex client catalog keeps only the entries read for the Codex
+	// credentials as they are now, so turning discovery off, removing the last
+	// Codex login, or replacing a login drops what was read before.
+	if registry.RetainLiveCodexClientModels(codexKeys) {
 		log.Infof("live models: Codex client model catalog dropped the entries of credentials no longer read")
 	}
 }
 
 // readLiveModels reads one credential's model list and re-registers the
-// credential when the models the catalog does not list changed.
-func (s *Service) readLiveModels(ctx context.Context, state *liveModelSyncState, provider string, auth *coreauth.Auth, now time.Time) {
+// credential when the models the catalog does not list changed. key is the
+// credential's live model key when the read started.
+func (s *Service) readLiveModels(ctx context.Context, state *liveModelSyncState, provider string, auth *coreauth.Auth, key string, now time.Time) {
 	discovered, codexCatalog, errFetch := s.fetchLiveModels(ctx, s.liveModelConfig(), provider, auth)
 	if errFetch != nil {
-		state.finish(auth.ID, now.Add(liveModelSyncRetryBackoff))
+		state.finish(key, now.Add(liveModelSyncRetryBackoff))
 		log.Debugf("live models: %s credential %s: %v", provider, auth.ID, errFetch)
 		return
 	}
-	state.finish(auth.ID, now.Add(liveModelSyncInterval))
+	state.finish(key, now.Add(liveModelSyncInterval))
 
-	// Discovery may have been turned off, or the credential removed, while the
-	// read was running.
+	// Discovery may have been turned off while the read was running, or the
+	// credential removed or replaced; what was read then belongs to no one.
 	if !liveModelsEnabled(s.liveModelConfig(), provider) {
 		return
 	}
-	if current, ok := s.coreManager.GetByID(auth.ID); !ok || current == nil || current.Disabled {
+	if current, ok := s.coreManager.GetByID(auth.ID); !ok || current == nil || current.Disabled || liveModelKey(current) != key {
 		return
 	}
 	if codexCatalog != nil {
-		if changed, errMerge := registry.MergeLiveCodexClientModels(auth.ID, codexCatalog); errMerge != nil {
+		if changed, errMerge := registry.MergeLiveCodexClientModels(key, codexCatalog); errMerge != nil {
 			log.Debugf("live models: codex credential %s: client catalog not updated: %v", auth.ID, errMerge)
 		} else if changed {
 			log.Infof("live models: Codex client model catalog updated from credential %s", auth.ID)
 		}
 	}
 	additions := liveModelAdditionsFor(provider, auth, discovered)
-	if !liveModelAdditions.set(auth.ID, additions) {
+	if !liveModelAdditions.set(key, additions) {
 		return
 	}
 	ids := make([]string, 0, len(additions))
@@ -437,6 +449,12 @@ func (s *Service) metaModelsGET(ctx context.Context, auth *coreauth.Auth) ([]byt
 				return nil, fmt.Errorf("prepare credential: %w", errPrepare)
 			}
 			if prepared != nil {
+				// The manager returns the credential as it is now, which may have
+				// been replaced by another provider's login under the same ID.
+				// Its token must never go to the Muse Code catalog.
+				if !strings.EqualFold(strings.TrimSpace(prepared.Provider), "meta") {
+					return nil, fmt.Errorf("credential is no longer a Meta login")
+				}
 				auth = prepared
 			}
 		}

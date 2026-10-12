@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,6 +43,18 @@ func waitForRegisteredModel(t *testing.T, authID, modelID string) {
 	t.Fatalf("model %s was not registered for %s", modelID, authID)
 }
 
+// forgetLiveModelAdditions drops whatever was read for the credential, under
+// any of its live model keys.
+func forgetLiveModelAdditions(authID string) {
+	liveModelAdditions.mu.Lock()
+	defer liveModelAdditions.mu.Unlock()
+	for key := range liveModelAdditions.additions {
+		if strings.HasPrefix(key, authID+"\x00") {
+			delete(liveModelAdditions.additions, key)
+		}
+	}
+}
+
 // syncLiveModelsAndWait runs one check and waits for the reads it started.
 func syncLiveModelsAndWait(ctx context.Context, service *Service, state *liveModelSyncState, now time.Time) {
 	service.syncLiveModels(ctx, state, now)
@@ -58,7 +71,7 @@ func registerLiveTestAuths(t *testing.T, ctx context.Context, manager *coreauth.
 		authID := auth.ID
 		t.Cleanup(func() {
 			GlobalModelRegistry().UnregisterClient(authID)
-			liveModelAdditions.set(authID, nil)
+			forgetLiveModelAdditions(authID)
 		})
 	}
 }
@@ -279,7 +292,7 @@ func TestSyncLiveModelsRegistersDiscoveredModels(t *testing.T) {
 		authID := auth.ID
 		t.Cleanup(func() {
 			GlobalModelRegistry().UnregisterClient(authID)
-			liveModelAdditions.set(authID, nil)
+			forgetLiveModelAdditions(authID)
 		})
 	}
 
@@ -377,7 +390,7 @@ func TestSyncLiveModelsRegistersMetaModels(t *testing.T) {
 		authID := auth.ID
 		t.Cleanup(func() {
 			GlobalModelRegistry().UnregisterClient(authID)
-			liveModelAdditions.set(authID, nil)
+			forgetLiveModelAdditions(authID)
 		})
 	}
 	service := &Service{cfg: cfg, coreManager: manager}
@@ -449,7 +462,7 @@ func TestSyncLiveModelsMintsMetaKeyOnce(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		GlobalModelRegistry().UnregisterClient(authID)
-		liveModelAdditions.set(authID, nil)
+		forgetLiveModelAdditions(authID)
 	})
 	service := &Service{cfg: cfg, coreManager: manager}
 	state := newLiveModelSyncState()
@@ -499,7 +512,7 @@ func TestSyncLiveModelsKeepsMetaModelsWhenTheListIsMissing(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		GlobalModelRegistry().UnregisterClient(authID)
-		liveModelAdditions.set(authID, nil)
+		forgetLiveModelAdditions(authID)
 	})
 	service := &Service{cfg: cfg, coreManager: manager}
 	state := newLiveModelSyncState()
@@ -837,5 +850,210 @@ func TestSyncLiveModelsMetaModelWithoutReasoningShowsNoReasoningLevels(t *testin
 	prepared, errThinking := thinking.ApplyThinkingWithModelInfo(request, request, "muse-plain-live-test", "codex", "codex", "meta", info)
 	if errThinking != nil || gjson.GetBytes(prepared, "reasoning").Exists() {
 		t.Fatalf("request to the model without reasoning = %s, %v; want the reasoning settings removed", prepared, errThinking)
+	}
+}
+
+func TestSyncLiveModelsReregistersChangedModelMetadata(t *testing.T) {
+	var mu sync.Mutex
+	contextLength := 100000
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"data":[{"id":"claude-metadata-live-test","display_name":"Metadata %d","max_input_tokens":%d}]}`, contextLength, contextLength)
+	}))
+	defer server.Close()
+	originalClaudeURL := claudeModelsURL
+	claudeModelsURL = server.URL
+	t.Cleanup(func() { claudeModelsURL = originalClaudeURL })
+
+	ctx := context.Background()
+	manager := coreauth.NewManager(nil, nil, nil)
+	authID := "live-sync-metadata"
+	registerLiveTestAuths(t, ctx, manager,
+		&coreauth.Auth{ID: authID, Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "token"}},
+	)
+	cfg := &internalconfig.Config{}
+	cfg.Claude.LiveModels = true
+	service := &Service{cfg: cfg, coreManager: manager}
+	state := newLiveModelSyncState()
+	now := time.Now()
+
+	syncLiveModelsAndWait(ctx, service, state, now)
+	if model := registeredModel(t, authID, "claude-metadata-live-test"); model == nil || model.ContextLength != 100000 {
+		t.Fatalf("discovered model = %+v, want a 100000 context window", model)
+	}
+
+	// The provider keeps the model but changes what it reports about it.
+	mu.Lock()
+	contextLength = 200000
+	mu.Unlock()
+	syncLiveModelsAndWait(ctx, service, state, now.Add(liveModelSyncInterval+time.Second))
+	model := registeredModel(t, authID, "claude-metadata-live-test")
+	if model == nil || model.ContextLength != 200000 || model.DisplayName != "Metadata 200000" {
+		t.Fatalf("model after the provider changed it = %+v, want the new context window and name", model)
+	}
+}
+
+func TestMetaModelsGETRefusesACredentialReplacedByAnotherProvider(t *testing.T) {
+	var mu sync.Mutex
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.URL.Path+" "+r.Header.Get("Authorization"))
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	cfg := &internalconfig.Config{}
+	cfg.Meta.LiveModels = true
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(runtimeexecutor.NewMetaExecutor(cfg))
+	manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
+	authID := "live-sync-meta-now-codex"
+	// The credential file now holds a Codex login under the same ID.
+	registerLiveTestAuths(t, ctx, manager, &coreauth.Auth{ID: authID, Provider: "codex",
+		Attributes: map[string]string{"auth_kind": "oauth", "base_url": server.URL + "/v1"},
+		Metadata:   map[string]any{"access_token": "codex-secret-token"},
+	})
+	// The read began while it was a Meta login that holds only a DCA token.
+	snapshot := &coreauth.Auth{ID: authID, Provider: "meta",
+		Attributes: map[string]string{"base_url": server.URL + "/v1", "auth_kind": "oauth", "source_backend": "file", "source": "/auths/meta.json"},
+		Metadata:   map[string]any{"type": "meta", "access_token": "dca:replaced", "dca_token": "dca:replaced"},
+	}
+	service := &Service{cfg: cfg, coreManager: manager}
+
+	if _, errGet := service.metaModelsGET(ctx, snapshot); errGet == nil {
+		t.Fatal("the Muse Code catalog was read with a credential that is no longer a Meta login")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 0 {
+		t.Fatalf("requests = %q, want none; the Codex token must not reach the Muse Code catalog", requests)
+	}
+}
+
+func TestLiveModelsStayWithTheCredentialTheyWereReadFor(t *testing.T) {
+	claudeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		account := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer token-")
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-account-` + account + `-live-test"}]}`))
+	}))
+	defer claudeServer.Close()
+	codexServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-switched-live-test"}]}`))
+	}))
+	defer codexServer.Close()
+	originalClaudeURL, originalCodexURL := claudeModelsURL, codexModelsURL
+	claudeModelsURL, codexModelsURL = claudeServer.URL, codexServer.URL
+	t.Cleanup(func() { claudeModelsURL, codexModelsURL = originalClaudeURL, originalCodexURL })
+
+	ctx := context.Background()
+	manager := coreauth.NewManager(nil, nil, nil)
+	authID := "live-sync-replaced"
+	registerLiveTestAuths(t, ctx, manager, &coreauth.Auth{ID: authID, Provider: "claude",
+		Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "token-a", "email": "a@example.com"}})
+	cfg := &internalconfig.Config{}
+	cfg.Claude.LiveModels = true
+	cfg.Codex.LiveModels = true
+	service := &Service{cfg: cfg, coreManager: manager}
+	state := newLiveModelSyncState()
+	now := time.Now()
+	replace := func(auth *coreauth.Auth) {
+		t.Helper()
+		auth.Status = coreauth.StatusActive
+		if _, errUpdate := manager.Update(coreauth.WithSkipPersist(ctx), auth); errUpdate != nil {
+			t.Fatalf("Update: %v", errUpdate)
+		}
+		current, _ := manager.GetByID(auth.ID)
+		service.refreshModelRegistrationForAuth(current)
+	}
+
+	syncLiveModelsAndWait(ctx, service, state, now)
+	if registeredModel(t, authID, "claude-account-a-live-test") == nil {
+		t.Fatal("the first account's model was not registered")
+	}
+
+	// Another account's login replaces the file under the same ID.
+	replace(&coreauth.Auth{ID: authID, Provider: "claude",
+		Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "token-b", "email": "b@example.com"}})
+	if registeredModel(t, authID, "claude-account-a-live-test") != nil {
+		t.Fatal("the previous account's model was registered for the account that replaced it")
+	}
+	// It is read at the next check, although the previous read is not an hour old.
+	syncLiveModelsAndWait(ctx, service, state, now.Add(liveModelSyncTick))
+	if registeredModel(t, authID, "claude-account-b-live-test") == nil {
+		t.Fatal("the new account was not read at the next check")
+	}
+
+	// A Codex login of the same person replaces it: no Claude model may be routed to it.
+	replace(&coreauth.Auth{ID: authID, Provider: "codex",
+		Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"access_token": "codex-token", "email": "b@example.com"}})
+	if registeredModel(t, authID, "claude-account-b-live-test") != nil {
+		t.Fatal("a Claude model was registered for the Codex login that replaced the Claude one")
+	}
+	syncLiveModelsAndWait(ctx, service, state, now.Add(2*liveModelSyncTick))
+	if registeredModel(t, authID, "gpt-switched-live-test") == nil {
+		t.Fatal("the Codex login was not read at the next check")
+	}
+}
+
+func TestSyncLiveModelsDropsAReadWhoseCredentialWasReplaced(t *testing.T) {
+	t.Cleanup(func() { internalregistry.RetainLiveCodexClientModels(nil) })
+	base := internalregistry.GetCodexClientModelsJSON()
+	answer := liveCodexClientCatalogAnswer(t, "gpt-replaced-live-test")
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRead := func() { releaseOnce.Do(func() { close(release) }) }
+	reading := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case reading <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer server.Close()
+	defer releaseRead()
+	originalCodexURL := codexModelsURL
+	codexModelsURL = server.URL
+	t.Cleanup(func() { codexModelsURL = originalCodexURL })
+
+	ctx := context.Background()
+	manager := coreauth.NewManager(nil, nil, nil)
+	authID := "live-sync-replaced-mid-read"
+	registerLiveTestAuths(t, ctx, manager, &coreauth.Auth{ID: authID, Provider: "codex",
+		Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "pro"},
+		Metadata:   map[string]any{"access_token": "codex-token-a", "account_id": "acct-a", "email": "a@example.com"}})
+	cfg := &internalconfig.Config{}
+	cfg.Codex.LiveModels = true
+	service := &Service{cfg: cfg, coreManager: manager}
+	state := newLiveModelSyncState()
+
+	service.syncLiveModels(ctx, state, time.Now())
+	select {
+	case <-reading:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the read did not start")
+	}
+	// Another account's login replaces the file while the read is running.
+	if _, errUpdate := manager.Update(coreauth.WithSkipPersist(ctx), &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "pro"},
+		Metadata:   map[string]any{"access_token": "codex-token-b", "account_id": "acct-b", "email": "b@example.com"}}); errUpdate != nil {
+		t.Fatalf("Update: %v", errUpdate)
+	}
+	releaseRead()
+	state.reads.Wait()
+
+	if !bytes.Equal(internalregistry.GetCodexClientModelsJSON(), base) {
+		t.Fatal("the Codex client catalog serves what was read for the login that was replaced")
+	}
+	if registeredModel(t, authID, "gpt-replaced-live-test") != nil {
+		t.Fatal("a model read for the replaced login was registered for its replacement")
 	}
 }

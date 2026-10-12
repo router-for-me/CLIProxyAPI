@@ -10,15 +10,16 @@ import (
 )
 
 // codexClientLiveOverlayStore holds the Codex client model entries discovered
-// live from the provider, per OAuth credential. They are laid over whichever
-// base catalog is installed (embedded or remote), so a model the base does not
-// carry yet is served to Codex clients with its real metadata.
+// live from the provider, per source: the OAuth credential, as identified by the
+// caller, that read them. They are laid over whichever base catalog is installed
+// (embedded or remote), so a model the base does not carry yet is served to
+// Codex clients with its real metadata.
 type codexClientLiveOverlayStore struct {
 	mu sync.Mutex
 	// base is the last validated base catalog installed.
 	base []byte
-	// sources maps a credential ID to the valid entries it reported, in the
-	// order the provider listed them.
+	// sources maps a source key to the valid entries it reported, in the order
+	// the provider listed them.
 	sources map[string][]codexClientLiveEntry
 }
 
@@ -52,19 +53,19 @@ func (o *codexClientLiveOverlayStore) reinstallLocked() bool {
 	return storeCodexClientModels(o.applyLocked(o.base))
 }
 
-// liveEntriesLocked returns the live entry served for each slug. Credentials
-// are read in ID order and the first to report a slug provides its entry, so
-// the served catalog does not depend on which credential was read last.
+// liveEntriesLocked returns the live entry served for each slug. Sources are
+// read in key order and the first to report a slug provides its entry, so the
+// served catalog does not depend on which source was read last.
 func (o *codexClientLiveOverlayStore) liveEntriesLocked() ([]string, map[string]json.RawMessage) {
-	ids := make([]string, 0, len(o.sources))
-	for id := range o.sources {
-		ids = append(ids, id)
+	keys := make([]string, 0, len(o.sources))
+	for source := range o.sources {
+		keys = append(keys, source)
 	}
-	sort.Strings(ids)
+	sort.Strings(keys)
 	var order []string
 	entries := make(map[string]json.RawMessage)
-	for _, id := range ids {
-		for _, entry := range o.sources[id] {
+	for _, source := range keys {
+		for _, entry := range o.sources[source] {
 			if _, ok := entries[entry.slug]; ok {
 				continue
 			}
@@ -120,9 +121,9 @@ func (o *codexClientLiveOverlayStore) applyLocked(base []byte) []byte {
 	return data
 }
 
-// update replaces the live entries of one credential with the valid entries of
-// a catalog payload it read, and reports whether the served catalog changed.
-func (o *codexClientLiveOverlayStore) update(authID string, payload []byte) (bool, error) {
+// update replaces the live entries of one source with the valid entries of a
+// catalog payload it read, and reports whether the served catalog changed.
+func (o *codexClientLiveOverlayStore) update(source string, payload []byte) (bool, error) {
 	var parsed codexClientRawModelsPayload
 	if err := json.Unmarshal(payload, &parsed); err != nil {
 		return false, fmt.Errorf("decode live Codex model catalog: %w", err)
@@ -157,29 +158,29 @@ func (o *codexClientLiveOverlayStore) update(authID string, payload []byte) (boo
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if sameCodexClientLiveEntries(o.sources[authID], entries) {
+	if sameCodexClientLiveEntries(o.sources[source], entries) {
 		return false, nil
 	}
 	if o.sources == nil {
 		o.sources = make(map[string][]codexClientLiveEntry)
 	}
-	o.sources[authID] = entries
+	o.sources[source] = entries
 	return o.reinstallLocked(), nil
 }
 
-// retain drops the live entries of every credential not listed and reports
-// whether the served catalog changed.
-func (o *codexClientLiveOverlayStore) retain(authIDs []string) bool {
-	keep := make(map[string]struct{}, len(authIDs))
-	for _, id := range authIDs {
-		keep[id] = struct{}{}
+// retain drops the live entries of every source not listed and reports whether
+// the served catalog changed.
+func (o *codexClientLiveOverlayStore) retain(sources []string) bool {
+	keep := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		keep[source] = struct{}{}
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	removed := false
-	for id := range o.sources {
-		if _, ok := keep[id]; !ok {
-			delete(o.sources, id)
+	for source := range o.sources {
+		if _, ok := keep[source]; !ok {
+			delete(o.sources, source)
 			removed = true
 		}
 	}
@@ -211,20 +212,21 @@ func codexClientModelSlug(entry json.RawMessage) string {
 	return strings.TrimSpace(model.Slug)
 }
 
-// MergeLiveCodexClientModels lays the entries of a Codex model catalog that one
-// OAuth credential read live from the provider over the installed catalog. A
-// live entry replaces the installed entry with the same slug, and slugs the
-// installed catalog lacks are added. Entries that fail catalog validation are
-// skipped. When credentials report different entries for a slug, the one with
-// the lowest credential ID is served. It reports whether the served catalog
-// changed.
-func MergeLiveCodexClientModels(authID string, payload []byte) (bool, error) {
-	return codexClientLiveOverlay.update(authID, payload)
+// MergeLiveCodexClientModels lays the entries of a Codex model catalog that an
+// OAuth credential read live from the provider over the installed catalog.
+// source identifies what read it, and the entries replace the ones that source
+// reported before. A live entry replaces the installed entry with the same
+// slug, and slugs the installed catalog lacks are added. Entries that fail
+// catalog validation are skipped. When sources report different entries for a
+// slug, the one with the lowest source key is served. It reports whether the
+// served catalog changed.
+func MergeLiveCodexClientModels(source string, payload []byte) (bool, error) {
+	return codexClientLiveOverlay.update(source, payload)
 }
 
-// RetainLiveCodexClientModels drops the live entries of every credential not
-// listed and reports whether the served catalog changed. With no credential
-// listed, the installed catalog is served alone again.
-func RetainLiveCodexClientModels(authIDs []string) bool {
-	return codexClientLiveOverlay.retain(authIDs)
+// RetainLiveCodexClientModels drops the live entries of every source not listed
+// and reports whether the served catalog changed. With no source listed, the
+// installed catalog is served alone again.
+func RetainLiveCodexClientModels(sources []string) bool {
+	return codexClientLiveOverlay.retain(sources)
 }
