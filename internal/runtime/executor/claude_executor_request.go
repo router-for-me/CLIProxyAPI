@@ -302,6 +302,11 @@ func isClaudeOpus55Model(model string) bool {
 	return model == "claude-opus-5-5" || strings.HasPrefix(model, "claude-opus-5-5[")
 }
 
+func isClaudeHaiku55Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	return model == "claude-haiku-5-5" || strings.HasPrefix(model, "claude-haiku-5-5-") || strings.HasPrefix(model, "claude-haiku-5-5[")
+}
+
 func isClaudeSonnet55Model(model string) bool {
 	model = claudeCanonicalModel(model)
 	return model == "claude-sonnet-5-5" || strings.HasPrefix(model, "claude-sonnet-5-5-") || strings.HasPrefix(model, "claude-sonnet-5-5[")
@@ -341,7 +346,7 @@ func applyClaudeCloakThinkingDisplay(body []byte, callerOwned bool) []byte {
 }
 
 func claudeModelHasPerTurnEffort(model string) bool {
-	return isClaudeOpus55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1")
+	return isClaudeOpus55Model(model) || isClaudeHaiku55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1")
 }
 
 // claudeModelHasPerTurnTiming reports models whose catalog lists per_turn_timing.
@@ -349,7 +354,7 @@ func claudeModelHasPerTurnEffort(model string) bool {
 // is set, so the beta follows the body or an explicit caller request.
 func claudeModelHasPerTurnTiming(model string) bool {
 	model = claudeCanonicalModel(model)
-	return claudeModelHasPerTurnEffort(model) || strings.HasPrefix(model, "claude-mythos-5-1")
+	return isClaudeOpus55Model(model) || strings.HasPrefix(model, "claude-fable-5-1") || strings.HasPrefix(model, "claude-mythos-5-1")
 }
 
 func claudeIncludePerTurnControl(body []byte, requested map[string]bool) bool {
@@ -419,7 +424,7 @@ func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
 			return false
 		}
 		model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
-		if isClaudeHaikuModel(model) {
+		if isClaudeHaikuModel(model) && !isClaudeHaiku55Model(model) {
 			return false
 		}
 		thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
@@ -819,6 +824,14 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 //   - thinking active: temperature must be 1, top_p must be >= 0.95, top_k unset
 //   - otherwise: temperature and top_p cannot both be specified
 func normalizeClaudeSamplingForUpstream(body []byte, nativeOwned bool) []byte {
+	// Haiku 5.5 rejects sampling controls, including on native CLI requests.
+	if isClaudeHaiku55Model(gjson.GetBytes(body, "model").String()) {
+		for _, field := range []string{"temperature", "top_p", "top_k"} {
+			body, _ = sjson.DeleteBytes(body, field)
+		}
+		return body
+	}
+
 	thinkingActive := false
 	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())) {
 	case "enabled", "adaptive", "auto":
