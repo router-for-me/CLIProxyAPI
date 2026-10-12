@@ -33,8 +33,18 @@ This fork supplies the local gateway build from fork `main` and tracks upstream 
 - Source rollback: revert the CPA-001 change through a new reviewed PR; runtime rollback remains a separate installation operation.
 - Retirement condition: remove the fork implementation only after a released upstream version satisfies the complete cooldown regression contract.
 
-No other behavioral patches are implemented or approved.
-Use stable IDs `CPA-002` and onward for future logical patches.
+### CPA-002 — finite provider cache observation
+
+- Required behavior: optional `cache-observation` observes only 1 exact session for an absolute expiry within 1h and 1-100 model executions per process. Capture stays disabled by default, preserves outgoing bytes and emits only scoped hashes, marker TTLs and allowlisted usage evidence in the existing application logger.
+- Source surfaces: `internal/config/config.go`, Claude/Codex HTTP execution seams, `internal/runtime/executor/helps/cache_observation.go`, usage reporter completion, focused helper and mocked transport tests, and `docs/cache-observation.md`.
+- Rationale: the cache audit observed reuse but could not correlate final signed/normalized prefixes with actual usage. The existing plugin interceptor runs before those transforms, and general request logging retains raw bodies and headers.
+- Upstream preflight: root guidance at `bf934162` requires helpers under `helps/`, payload rules as the final semantic barrier, and secret-free logging. Searches of open/closed/merged cache and usage work found no equivalent finite final-boundary observer. Upstream issue #6273 rejects custom TTL fields in translated OpenAI schemas, so private observation preserves raw counters without changing those schemas. Issue #6561 reports a separate tool-search cache boundary and is not repaired here.
+- Verification: `go test ./internal/runtime/executor/helps ./internal/runtime/executor ./internal/config ./sdk/cliproxy/usage`, race tests on observation paths, full `go test ./...`, and server build. No inference traffic is needed to prove the observer. Actual provider reuse/economics remain separate evidence.
+- Upstream association: none. This is an explicitly approved fork-local measurement capability. A public upstream contribution requires separate authority.
+- Verification prerequisite: adopted upstream test-only commit `77cf88b0883d48b45a677e26e26739448e09cb2e` by Gracjan Kubicki, pinning the tool-search golden clock and resetting diagnostics. The unmodified accepted release `091ff27f` reproduced the date-dependent failure. No production request behavior or golden assertion was changed.
+- Retirement condition: adopt a released upstream observer only when it preserves the finite scope, exact final request boundary, privacy and per-execution usage join.
+
+Use stable IDs `CPA-003` and onward for future logical patches.
 Upstream maintenance-contract issue/PR associations: none found when checked 2026-09-13.
 Retain this contract while maintaining the fork. Retire behavioral patches only after a released upstream implementation passes their complete regression contract.
 

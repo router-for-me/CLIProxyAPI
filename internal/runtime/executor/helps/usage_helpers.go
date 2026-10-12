@@ -26,6 +26,7 @@ import (
 )
 
 type UsageReporter struct {
+	cacheObservation    *cacheObservation
 	requestID           string
 	traceID             string
 	provider            string
@@ -211,6 +212,7 @@ func (r *UsageReporter) accessTokenFingerprint() string {
 // ObserveResponseModel stores the model reported by an upstream response or event and
 // ignores payloads without one; the substitution warning is emitted at publish time.
 func (r *UsageReporter) ObserveResponseModel(payload []byte) {
+	r.ObserveCacheUsage(payload)
 	if r == nil || r.responseModelFinal.Load() {
 		return
 	}
@@ -574,6 +576,7 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 // publishAttemptRecord emits the record for one upstream attempt and the
 // observability warnings that belong to the attempt rather than to a single event.
 func (r *UsageReporter) publishAttemptRecord(ctx context.Context, record usage.Record) {
+	r.publishCacheObservation(record)
 	r.publishRecord(ctx, record)
 	r.warnModelSubstitution(ctx)
 }

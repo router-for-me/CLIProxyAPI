@@ -284,6 +284,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
 	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
+	reporter.ObserveCacheRequest(ctx, e.cfg, bodyForUpstream, url)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,

@@ -99,6 +99,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+	reporter.ObserveCacheRequest(ctx, e.cfg, upstreamBody, url)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
@@ -248,6 +249,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				case "response.completed", "response.incomplete", "response.done":
 					terminalSuccess = true
 					data = normalizeCodexWebsocketCompletion(data)
+					reporter.ObserveCacheUsage(data)
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					} else {
@@ -425,6 +427,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				case "response.completed", "response.incomplete", "response.done":
 					terminalSuccess = true
 					data = normalizeCodexWebsocketCompletion(data)
+					reporter.ObserveCacheUsage(data)
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					} else {

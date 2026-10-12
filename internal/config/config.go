@@ -70,6 +70,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// CacheObservation enables one finite, hashes-only session observation.
+	CacheObservation *CacheObservationConfig `yaml:"cache-observation,omitempty" json:"cache-observation,omitempty"`
+
 	// RedisUsageQueueRetentionSeconds controls how long usage queue items are retained
 	// in memory for Management API consumers.
 	// Default: 60. Max: 3600.
@@ -196,4 +199,12 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// CacheObservationConfig requires an exact internal session ID, an absolute
+// RFC3339 expiry within 1h, and a per-process budget of 1-100 execution attempts.
+type CacheObservationConfig struct {
+	SessionID   string `yaml:"session-id" json:"session-id"`
+	ExpiresAt   string `yaml:"expires-at" json:"expires-at"`
+	MaxAttempts int    `yaml:"max-attempts" json:"max-attempts"`
 }
