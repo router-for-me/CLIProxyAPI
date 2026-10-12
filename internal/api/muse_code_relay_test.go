@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -26,8 +27,11 @@ type museRelayCaptureExecutor struct {
 	body         []byte
 	calls        int
 	mints        int
+	refreshes    int
 	status       int
 	responseBody string
+	// revokedKey, when set, is answered with 401 like a revoked Meta API key.
+	revokedKey string
 }
 
 // ShouldPrepareRequestAuth mirrors the Meta executor: a login holding only a
@@ -53,7 +57,12 @@ func (e *museRelayCaptureExecutor) ExecuteStream(context.Context, *auth.Auth, co
 	return nil, nil
 }
 
+// Refresh mirrors the Meta executor: a login with a DCA token mints a new key.
 func (e *museRelayCaptureExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
+	if a != nil && a.Attributes["dca_token"] != "" {
+		e.refreshes++
+		a.Attributes["api_key"] = "fresh-key"
+	}
 	return a, nil
 }
 
@@ -79,6 +88,9 @@ func (e *museRelayCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, 
 	status := e.status
 	if status == 0 {
 		status = http.StatusOK
+	}
+	if e.revokedKey != "" && req.Header.Get("Authorization") == "Bearer "+e.revokedKey {
+		status = http.StatusUnauthorized
 	}
 	responseBody := e.responseBody
 	if responseBody == "" {
@@ -337,6 +349,58 @@ func TestMuseCodeRelayMintsDCAKeyBeforeChoosingOrigin(t *testing.T) {
 	}
 	if executor.mints != 1 {
 		t.Fatalf("mints = %d over two requests, want 1: the minted key must be saved", executor.mints)
+	}
+}
+
+func TestMuseCodeRelayRefreshesARevokedKeyOnce(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "revoked-key", "dca_token": "dca:test"})
+	executor.revokedKey = "revoked-key"
+
+	req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+	req.Header.Set("Authorization", "Bearer plain-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after refreshing the revoked key; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if executor.calls != 2 || executor.refreshes != 1 {
+		t.Fatalf("Meta calls = %d, refreshes = %d; want 2 and 1", executor.calls, executor.refreshes)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer fresh-key" {
+		t.Fatalf("retry Authorization = %q, want the refreshed key", got)
+	}
+}
+
+func TestMuseCodeRelayIsNotHiddenByACoolingModel(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
+	// A second credential serves only a model that is cooling down on it.
+	cooling := &auth.Auth{
+		ID: "meta-cooling", Provider: "meta", Status: auth.StatusActive,
+		Attributes: map[string]string{"api_key": "cooling-key"},
+		ModelStates: map[string]*auth.ModelState{"muse-cooling": {
+			Status: auth.StatusError, Unavailable: true, NextRetryAfter: time.Now().Add(time.Hour),
+		}},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), cooling); errRegister != nil {
+		t.Fatalf("register cooling Meta auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(cooling.ID, "meta", []*registry.ModelInfo{{ID: "muse-cooling", Object: "model", OwnedBy: "meta", Type: "meta"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(cooling.ID) })
+
+	// The registry lists the two models in no fixed order, so send enough
+	// requests that the cooling model comes first in some of them.
+	for i := 0; i < 16; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+		req.Header.Set("Authorization", "Bearer plain-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200 through the healthy credential; body=%s", i, recorder.Code, recorder.Body.String())
+		}
+		if got := executor.request.Header.Get("Authorization"); got != "Bearer meta-key" {
+			t.Fatalf("request %d went out with %q, want the healthy credential", i, got)
+		}
 	}
 }
 

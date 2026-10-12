@@ -75,12 +75,7 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 	}
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
-	selectionModel := museCodeSelectionModel()
-	if selectionModel == "" {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Meta auth unavailable"})
-		return
-	}
-	selected, errSelect := s.handlers.AuthManager.SelectAuth(ctx, museCodeProvider, selectionModel, coreexecutor.Options{Headers: c.Request.Header.Clone()})
+	selected, errSelect := s.museCodeSelectAuth(ctx, coreexecutor.Options{Headers: c.Request.Header.Clone()})
 	if errSelect != nil {
 		for _, value := range auth.SafeResponseHeaders(errSelect).Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
@@ -107,26 +102,38 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 		}
 	}
 
-	upstreamURL, errURL := museCodeUpstreamURL(selected, c.Request.URL.Path, museCodeRelayQuery(c.Request.URL.RawQuery))
-	if errURL != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errURL.Error()})
-		return
-	}
-	req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, selected, c.Request.Method, upstreamURL, body, museCodeRelayHeaders(c.Request.Header))
-	if errRequest != nil {
-		c.JSON(clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), gin.H{"error": errRequest.Error()})
-		return
-	}
-	resp, errDo := s.handlers.AuthManager.HttpRequest(ctx, selected, req)
-	if errDo != nil {
-		c.JSON(clienterror.HTTPStatusFromErrorOr(errDo, http.StatusBadGateway), gin.H{"error": errDo.Error()})
-		return
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("muse code relay: close response body error: %v", errClose)
+	query := museCodeRelayQuery(c.Request.URL.RawQuery)
+	headers := museCodeRelayHeaders(c.Request.Header)
+	send := func(current *auth.Auth) (*http.Response, int, error) {
+		upstreamURL, errURL := museCodeUpstreamURL(current, c.Request.URL.Path, query)
+		if errURL != nil {
+			return nil, http.StatusServiceUnavailable, errURL
 		}
-	}()
+		req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, current, c.Request.Method, upstreamURL, body, headers)
+		if errRequest != nil {
+			return nil, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest
+		}
+		resp, errDo := s.handlers.AuthManager.HttpRequest(ctx, current, req)
+		if errDo != nil {
+			return nil, clienterror.HTTPStatusFromErrorOr(errDo, http.StatusBadGateway), errDo
+		}
+		return resp, http.StatusOK, nil
+	}
+	resp, status, errSend := send(selected)
+	// A revoked API key answers 401 while the login can still mint another. The
+	// relay sends outside the execution pipeline, so it refreshes once itself,
+	// under the same rules, before giving up.
+	if errSend == nil && resp.StatusCode == http.StatusUnauthorized {
+		if refreshed, okRefresh := s.handlers.AuthManager.RefreshAfterUnauthorized(ctx, selected); okRefresh {
+			closeMuseCodeResponse(resp)
+			resp, status, errSend = send(refreshed)
+		}
+	}
+	if errSend != nil {
+		c.JSON(status, gin.H{"error": errSend.Error()})
+		return
+	}
+	defer closeMuseCodeResponse(resp)
 	upstreamBody, errRead := io.ReadAll(io.LimitReader(resp.Body, museCodeRelayMaxBody+1))
 	if errRead != nil {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadGateway), gin.H{"error": "Failed to read Muse Code response"})
@@ -145,17 +152,32 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 	_, _ = c.Writer.Write(upstreamBody)
 }
 
-// museCodeSelectionModel returns a model some Meta credential serves. Selecting
-// with it leaves out the credentials that serve none, such as a config key
-// turned off with a "*" model exclusion, which a selection without a model
-// would still pick.
-func museCodeSelectionModel() string {
+// museCodeSelectAuth picks a Meta credential for a request that names no model.
+// It selects for each model the Meta credentials serve, in turn, and takes the
+// first credential found. A credential that serves no model, such as a config
+// key turned off with a "*" model exclusion, is never chosen, and a model that
+// is cooling down on one credential does not hide another credential.
+func (s *Server) museCodeSelectAuth(ctx context.Context, opts coreexecutor.Options) (*auth.Auth, error) {
+	var lastErr error
 	for _, model := range registry.GetGlobalRegistry().GetAvailableModelsByProvider(museCodeProvider) {
-		if model != nil && strings.TrimSpace(model.ID) != "" {
-			return model.ID
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		selected, errSelect := s.handlers.AuthManager.SelectAuth(ctx, museCodeProvider, model.ID, opts)
+		if errSelect == nil && selected != nil {
+			return selected, nil
+		}
+		if errSelect != nil {
+			lastErr = errSelect
 		}
 	}
-	return ""
+	return nil, lastErr
+}
+
+func closeMuseCodeResponse(resp *http.Response) {
+	if errClose := resp.Body.Close(); errClose != nil {
+		log.Errorf("muse code relay: close response body error: %v", errClose)
+	}
 }
 
 // museCodeRelayQuery drops the proxy credentials from a relayed query string.
