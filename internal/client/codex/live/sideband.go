@@ -331,8 +331,15 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		return
 	case sessionClaimAcquired:
 	default:
-		writeLiveError(c, http.StatusNotFound, "Codex live session not found")
-		return
+		// Client secrets are scoped to calls created through this proxy.
+		if _, hasClientSecret := c.Get(ClientSecretPrincipalContextKey); hasClientSecret {
+			writeLiveError(c, http.StatusNotFound, "Codex live session not found")
+			return
+		}
+		// Calls created outside this proxy (for example by Codex Desktop) or lost on
+		// restart are unknown here; relay them upstream, which owns call access.
+		session = liveSession{model: defaultLiveModel}
+		log.WithField("call_id", callID).Info("codex live sideband: relaying unknown call upstream")
 	}
 	if principal, hasClientSecret := c.Get(ClientSecretPrincipalContextKey); hasClientSecret {
 		principalValue, _ := principal.(string)
@@ -358,7 +365,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, c.Request.Header, nil, map[string]any{
-		coreexecutor.ExecutionSessionMetadataKey: session.callID,
+		coreexecutor.ExecutionSessionMetadataKey: callID,
 	})
 	if session.sessionID != "" {
 		meta := logging.GetClientRequestMetadata(ctx)
