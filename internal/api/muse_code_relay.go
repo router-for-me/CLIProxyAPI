@@ -48,12 +48,22 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Meta auth manager unavailable"})
 		return
 	}
+	// Home dispatches a credential for a model, and these requests carry none,
+	// so they are refused plainly rather than with the legacy selection error.
+	if s.handlers.AuthManager.HomeEnabled() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Muse Code endpoints are unavailable while Home is enabled"})
+		return
+	}
 
 	var body []byte
 	if c.Request.Method != http.MethodGet && c.Request.Body != nil {
-		requestBody, errRead := io.ReadAll(io.LimitReader(c.Request.Body, museCodeRelayMaxBody))
+		requestBody, errRead := io.ReadAll(io.LimitReader(c.Request.Body, museCodeRelayMaxBody+1))
 		if errRead != nil {
 			c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), gin.H{"error": "Failed to read Muse Code request"})
+			return
+		}
+		if len(requestBody) > museCodeRelayMaxBody {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Muse Code request is too large"})
 			return
 		}
 		body = requestBody
@@ -93,9 +103,13 @@ func (s *Server) museCodeRelay(c *gin.Context) {
 			log.Errorf("muse code relay: close response body error: %v", errClose)
 		}
 	}()
-	upstreamBody, errRead := io.ReadAll(io.LimitReader(resp.Body, museCodeRelayMaxBody))
+	upstreamBody, errRead := io.ReadAll(io.LimitReader(resp.Body, museCodeRelayMaxBody+1))
 	if errRead != nil {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadGateway), gin.H{"error": "Failed to read Muse Code response"})
+		return
+	}
+	if len(upstreamBody) > museCodeRelayMaxBody {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Muse Code response is too large"})
 		return
 	}
 	for _, name := range []string{"Content-Type", "Cache-Control", "Etag", "Last-Modified"} {

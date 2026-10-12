@@ -21,10 +21,11 @@ import (
 // museRelayCaptureExecutor stands in for the Meta executor and records the
 // request the relay sends upstream.
 type museRelayCaptureExecutor struct {
-	request *http.Request
-	body    []byte
-	calls   int
-	status  int
+	request      *http.Request
+	body         []byte
+	calls        int
+	status       int
+	responseBody string
 }
 
 func (e *museRelayCaptureExecutor) Identifier() string { return "meta" }
@@ -64,10 +65,14 @@ func (e *museRelayCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, 
 	if status == 0 {
 		status = http.StatusOK
 	}
+	responseBody := e.responseBody
+	if responseBody == "" {
+		responseBody = `{"rows":[{"model_id":"muse-test"}]}`
+	}
 	return &http.Response{
 		StatusCode: status,
 		Header:     http.Header{"Content-Type": []string{"application/json"}, "Etag": []string{`"catalog-1"`}, "Set-Cookie": []string{"session=upstream"}},
-		Body:       io.NopCloser(strings.NewReader(`{"rows":[{"model_id":"muse-test"}]}`)),
+		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}, nil
 }
 
@@ -197,6 +202,53 @@ func TestMuseCodeRelayRequiresKeyAndAllowlist(t *testing.T) {
 	}
 	if executor.calls != 0 {
 		t.Fatalf("the Meta executor received %d request(s), want none", executor.calls)
+	}
+}
+
+func TestMuseCodeRelayRejectsOversizedBodies(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
+	oversized := strings.Repeat("a", museCodeRelayMaxBody+1)
+
+	req := httptest.NewRequest(http.MethodPost, "/muse-code/search", strings.NewReader(oversized))
+	req.Header.Set("Authorization", "Bearer plain-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized request: status = %d, want 413", recorder.Code)
+	}
+	if executor.calls != 0 {
+		t.Fatal("an oversized request reached Meta")
+	}
+
+	executor.responseBody = oversized
+	req = httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+	req.Header.Set("Authorization", "Bearer plain-key")
+	recorder = httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("oversized response: status = %d, want 502", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "aaaa") {
+		t.Fatal("part of an oversized response was relayed")
+	}
+}
+
+func TestMuseCodeRelayRefusesPlainlyWhileHomeIsEnabled(t *testing.T) {
+	server, executor := museRelayTestServer(t, map[string]string{"api_key": "meta-key"})
+	homeConfig := &proxyconfig.Config{}
+	homeConfig.Home.Enabled = true
+	server.handlers.AuthManager.SetConfig(homeConfig)
+
+	req := httptest.NewRequest(http.MethodGet, "/muse-code/models", nil)
+	req.Header.Set("Authorization", "Bearer plain-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "Muse Code endpoints are unavailable while Home is enabled") {
+		t.Fatalf("status = %d, body = %s; want the Home refusal", recorder.Code, recorder.Body.String())
+	}
+	if executor.calls != 0 {
+		t.Fatal("the Meta executor was called while Home is enabled")
 	}
 }
 
