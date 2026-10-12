@@ -2348,6 +2348,10 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return original, true, nil
 	}
 
+	if !strings.HasPrefix(name, "mcp__") {
+		return resolver.resolveBareToolComponent(name)
+	}
+
 	server := claudeMCPAliasServer(name)
 	if _, known := resolver.servers[server]; !known {
 		return "", false, nil
@@ -2478,6 +2482,33 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 
 	log.Warnf("claude oauth mcp alias: cannot restore tool name %q: no unique request-local match; forwarding it unchanged", name)
 	return "", false, nil
+}
+
+// resolveBareToolComponent restores a name the model emitted without the
+// "mcp__<server>__" prefix, keeping only the alias tool component
+// ("<toolID>_<semantic>"). A name the caller declared itself is already the
+// name the client expects and is forwarded unchanged, as is anything that does
+// not match exactly one request-local alias.
+func (resolver claudeMCPAliasResolver) resolveBareToolComponent(name string) (string, bool, error) {
+	if name == "" {
+		return "", false, nil
+	}
+	matchedOriginal := ""
+	matchCount := 0
+	for _, entry := range resolver.aliases {
+		if entry.original == name {
+			return "", false, nil
+		}
+		if entry.parts.toolID+"_"+entry.parts.semantic == name {
+			matchedOriginal = entry.original
+			matchCount++
+		}
+	}
+	if matchCount != 1 {
+		return "", false, nil
+	}
+	log.Debugf("claude oauth mcp alias: recovered drifted tool name %q as %q via bare tool component", name, matchedOriginal)
+	return matchedOriginal, true, nil
 }
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses
