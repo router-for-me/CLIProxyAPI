@@ -100,3 +100,58 @@ func TestHaiku55DefaultCatalogRefresh(t *testing.T) {
 		t.Fatal("official Haiku metadata was overridden")
 	}
 }
+
+func TestGeneralCatalogRejectsInvalidRoots(t *testing.T) {
+	original := getModels()
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+	for _, raw := range []string{"null", " null \n", "[]", "true", "42", `"catalog"`} {
+		t.Run(raw, func(t *testing.T) {
+			modelsCatalogStore.mu.Lock()
+			modelsCatalogStore.data = original
+			modelsCatalogStore.mu.Unlock()
+			data := []byte(raw)
+			if errValidate := validateCatalogBytes(data); errValidate == nil {
+				t.Error("invalid root passed source validation")
+			}
+			if _, errPublish := publishCatalogBytes(data); errPublish == nil {
+				t.Error("invalid root published")
+			}
+			if errLoad := loadModelsFromBytes(data, "test"); errLoad == nil {
+				t.Error("invalid root loaded")
+			}
+			if getModels() != original {
+				t.Error("invalid root replaced last valid catalog")
+			}
+		})
+	}
+}
+
+func TestHaikuCatalogInvalidRootFallback(t *testing.T) {
+	original := getModels()
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+	invalid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("null")) }))
+	defer invalid.Close()
+	valid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(embeddedModelsJSON) }))
+	defer valid.Close()
+	fetch := generalCatalogFetcher([]string{invalid.URL, valid.URL})
+	data, errFetch := fetch(context.Background(), "")
+	if errFetch != nil || string(data) != string(embeddedModelsJSON) {
+		t.Fatalf("did not fall back to valid official source: %v", errFetch)
+	}
+	if _, errFetch := fetch(context.Background(), invalid.URL); errFetch == nil {
+		t.Fatal("explicit null catalog accepted")
+	}
+	updater := &catalogUpdater{generation: 1, fetch: generalCatalogFetcher([]string{invalid.URL}), publish: publishCatalogBytes}
+	updater.refresh(context.Background(), "", 1)
+	if getModels() != original {
+		t.Fatal("failed refresh replaced last valid catalog")
+	}
+}

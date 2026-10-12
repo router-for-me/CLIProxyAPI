@@ -193,16 +193,16 @@ func mergeProviderNames(existing, incoming []string) []string {
 }
 
 func loadModelsFromBytes(data []byte, source string) error {
-	var parsed staticModelsJSON
+	var parsed *staticModelsJSON
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return fmt.Errorf("%s: decode models catalog: %w", source, err)
 	}
-	if err := validateModelsCatalog(&parsed); err != nil {
+	if err := validateModelsCatalog(parsed); err != nil {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)
 	}
 
 	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = &parsed
+	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
 	return nil
 }

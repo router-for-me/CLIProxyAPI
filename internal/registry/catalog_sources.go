@@ -152,28 +152,28 @@ func catalogFetcher(embedded []byte, urls []string, validate func([]byte) error)
 }
 
 func validateCatalogBytes(data []byte) error {
-	var parsed staticModelsJSON
+	var parsed *staticModelsJSON
 	if errUnmarshal := json.Unmarshal(data, &parsed); errUnmarshal != nil {
 		return errUnmarshal
 	}
-	return validateModelsCatalog(&parsed)
+	return validateModelsCatalog(parsed)
 }
 
 func publishCatalogBytes(data []byte) ([]string, error) {
-	var parsed staticModelsJSON
+	var parsed *staticModelsJSON
 	if errUnmarshal := json.Unmarshal(data, &parsed); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
-	if errValidate := validateModelsCatalog(&parsed); errValidate != nil {
+	if errValidate := validateModelsCatalog(parsed); errValidate != nil {
 		return nil, errValidate
 	}
 	old := getModels()
 	if len(parsed.Meta) == 0 && old != nil {
 		parsed.Meta = old.Meta
 	}
-	changed := detectChangedProviders(old, &parsed)
+	changed := detectChangedProviders(old, parsed)
 	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = &parsed
+	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
 	return changed, nil
 }
