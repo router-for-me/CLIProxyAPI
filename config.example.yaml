@@ -1058,6 +1058,11 @@ oauth:
       # Identifier (agent_name_hint and User-Agent prefix) for Sign in with ChatGPT (SIWC) OAuth and API requests.
       signin-with-chatgpt-identifier: "CLIProxyAPI"
 
+      # When true, every Codex OAuth credential uses the upstream WebSocket transport for
+      # downstream WebSocket requests, unless its auth file sets "websockets" itself.
+      # Default false leaves the transport to each auth file.
+      websockets: false
+
       # Default headers for Codex OAuth model requests.
       # These are used only for file-backed/OAuth Codex requests when the client
       # does not send the header. `user-agent` applies to HTTP and websocket requests;

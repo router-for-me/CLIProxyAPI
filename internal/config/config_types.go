@@ -226,6 +226,10 @@ type CodexConfig struct {
 	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
 	// Defaults to "CLIProxyAPI".
 	SignInWithChatGPTIdentifier string `yaml:"signin-with-chatgpt-identifier,omitempty" json:"signin-with-chatgpt-identifier,omitempty"`
+	// Websockets makes every Codex OAuth credential use the upstream WebSocket transport
+	// for downstream WebSocket requests unless its auth file sets "websockets" itself.
+	// Default is false, which leaves the transport to each auth file.
+	Websockets bool `yaml:"websockets" json:"websockets"`
 }
 
 // DefaultSignInWithChatGPTIdentifier is the default identifier (agent_name_hint and User-Agent prefix)

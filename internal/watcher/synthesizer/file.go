@@ -258,6 +258,11 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				a.Attributes["plan_type"] = codex.DefaultPlanType
 			}
 		}
+		// oauth.providers.codex.websockets is the default for auth files that do not
+		// set "websockets" themselves; an explicit value in the file always wins.
+		if _, explicit := metadata["websockets"]; !explicit && cfg != nil && cfg.Codex.Websockets {
+			a.Attributes["websockets"] = "true"
+		}
 	}
 	return []*coreauth.Auth{a}, nil
 }
