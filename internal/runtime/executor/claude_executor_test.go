@@ -3158,6 +3158,17 @@ func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	}
 }
 
+func TestNormalizeCacheControlTTL_DowngradesTopLevelMarkerAfterFiveMinuteBlock(t *testing.T) {
+	input := []byte(`{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":[{"type":"text","text":"a"}]}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`)
+	output := normalizeCacheControlTTL(input)
+	if gjson.GetBytes(output, "cache_control.ttl").Exists() {
+		t.Fatalf("top-level 1h after a 5m block must be downgraded: %s", output)
+	}
+	if gjson.GetBytes(output, "system.0.cache_control.ttl").String() != "5m" {
+		t.Fatalf("earlier 5m block must be untouched: %s", output)
+	}
+}
+
 func TestNormalizeCacheControlTTL_PreservesOriginalBytesWhenNoChange(t *testing.T) {
 	// Payload where no TTL normalization is needed (all blocks use 1h with no
 	// preceding 5m block). The text intentionally contains HTML chars (<, >, &)

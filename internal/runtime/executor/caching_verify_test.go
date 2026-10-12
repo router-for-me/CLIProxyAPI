@@ -22,6 +22,30 @@ func TestEnsureCacheControl(t *testing.T) {
 		}
 	})
 
+	t.Run("Folds The Top-Level Marker Into The Last Message Breakpoint", func(t *testing.T) {
+		// The Anthropic SDKs' default caching form: no block markers, one
+		// request-level cache_control that targets the last block. Anthropic
+		// counts that form as its own block against the four-breakpoint limit
+		// ("A maximum of 4 blocks with cache_control may be provided. Found 5.")
+		// even when the last block already carries the marker CPA placed.
+		input := []byte(`{"model":"claude-opus-5-5",` +
+			`"system":[{"type":"text","text":"s"}],` +
+			`"messages":[{"role":"user","content":[{"type":"text","text":"a"}]},` +
+			`{"role":"assistant","content":[{"type":"text","text":"b"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"c"}]}],` +
+			`"cache_control":{"type":"ephemeral"}}`)
+		output := ensureCacheControl(input)
+		if gjson.GetBytes(output, "cache_control").Exists() {
+			t.Errorf("top-level cache_control must be folded away once CPA places breakpoints: %s", output)
+		}
+		if gjson.GetBytes(output, "messages.2.content.0.cache_control.type").String() != "ephemeral" {
+			t.Errorf("the last message block must carry the breakpoint the top-level form asked for: %s", output)
+		}
+		if got := countCacheControls(output); got != 2 {
+			t.Errorf("breakpoint count = %d, want system + last message", got)
+		}
+	})
+
 	// Test case 2: System prompt as array
 	t.Run("Array System Prompt", func(t *testing.T) {
 		input := []byte(`{"model": "claude-3-5-sonnet", "system": [{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}], "messages": []}`)
@@ -629,6 +653,40 @@ func TestUpgradeClaudeCacheControlTTL(t *testing.T) {
 		want := []byte(`"cache_control":{"type":"ephemeral","ttl":"1h","scope":"global"}`)
 		if !bytes.Contains(output, want) {
 			t.Errorf("scope-bearing marker lost native {type, ttl, scope} order: %s", output)
+		}
+	})
+
+	t.Run("Upgrades The Top-Level Marker With The Block It Lands On", func(t *testing.T) {
+		// A caller that sets the request-level cache_control (the Anthropic SDK's
+		// top-level form) targets the last block. That block gets the 1h pool, so
+		// the top-level marker must say 1h too or Anthropic answers 400:
+		// "Top-level cache_control has ttl='5m' but the target block already has
+		// cache_control with ttl='1h'".
+		input := []byte(`{` +
+			`"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],` +
+			`"messages":[{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]}],` +
+			`"cache_control":{"type":"ephemeral"}}`)
+		output := upgradeClaudeCacheControlTTL(input, claudeCacheControlTTL1h)
+		for _, path := range []string{"system.0.cache_control.ttl", "messages.0.content.0.cache_control.ttl", "cache_control.ttl"} {
+			if got := gjson.GetBytes(output, path).String(); got != "1h" {
+				t.Errorf("%s = %q, want 1h. Output: %s", path, got, output)
+			}
+		}
+		if gjson.GetBytes(output, "cache_control.type").String() != "ephemeral" {
+			t.Errorf("top-level marker lost its type: %s", output)
+		}
+
+		stripped := stripClaudeCacheControlTTL(output)
+		if gjson.GetBytes(stripped, "cache_control.ttl").Exists() {
+			t.Errorf("strip must also drop the top-level ttl: %s", stripped)
+		}
+		if !bytes.Equal(stripped, input) {
+			t.Errorf("strip after upgrade must restore the input: %s", stripped)
+		}
+
+		absent := []byte(`{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}]}`)
+		if output := upgradeClaudeCacheControlTTL(absent, claudeCacheControlTTL1h); gjson.GetBytes(output, "cache_control").Exists() {
+			t.Errorf("upgrade must not invent a top-level marker: %s", output)
 		}
 	})
 
