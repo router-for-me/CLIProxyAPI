@@ -324,11 +324,33 @@ client:
   # that match no entry are unrestricted. providers takes the names credentials register under
   # (claude, codex, gemini, xai, or the name of an openai-compatibility entry); anthropic, openai,
   # chatgpt, muse and grok are accepted aliases. Key scopes do not apply in Home mode.
+  # Add pools to an entry to route its keys through ordered account pools (see account-pools).
   # key-scopes:
   #   - key-prefix: "sk-claude-"
   #     providers: ["claude"]
   #   - key-prefix: "sk-codex-"
   #     providers: ["codex"]
+  #   - key-prefix: "sk-reviewer-"
+  #     providers: ["claude"]
+  #     pools: ["reviewer", "shared"]
+  # Optional: named sets of existing credentials for key-scopes pools. auth-files lists auth file
+  # basenames and auth-ids credential IDs, both exact matches; auth-kind (oauth or apikey)
+  # optionally limits a pool to one kind. A scope's pools are tried in order: each selection uses
+  # the first pool with an available credential for the model and moves to the next on cooldown,
+  # unavailable models or retryable errors. Pool order precedes credential priority, providers
+  # still applies, and session affinity stays within a pool. A credential keeps one quota,
+  # cooldown and session state however many pools list it. Omitting pools keeps provider-only
+  # routing; pools: [] allows no credential, and a missing or repeated pool name fails closed.
+  # Pooled keys can use model lists, messages and count_tokens, chat/completions, completions,
+  # responses (HTTP and WebSocket), responses/compact, and Codex web search and voice; other
+  # endpoints, executor plugins and Home mode refuse them.
+  # account-pools:
+  #   - name: "reviewer"
+  #     auth-files: ["claude-reviewer.json"]
+  #     auth-kind: "oauth"
+  #   - name: "shared"
+  #     auth-files: ["claude-shared.json", "codex-shared.json"]
+  #     auth-kind: "oauth"
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:

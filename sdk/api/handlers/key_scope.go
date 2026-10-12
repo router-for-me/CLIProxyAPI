@@ -103,15 +103,20 @@ func (h *BaseAPIHandler) scopeProviders(ctx context.Context, modelName string, p
 }
 
 // keyModelFilter returns a predicate that reports whether the request's client
-// API key may use a model: whether a provider in its scope serves the model.
+// API key may use a model: whether a provider in its scope serves the model
+// and, for a key with account pools, a credential in its pools serves it.
 // scoped is false, and the predicate nil, for an unrestricted key.
 func (h *BaseAPIHandler) keyModelFilter(c *gin.Context) (allows func(model string) bool, scoped bool) {
 	allowed, scoped := h.keyScope(c)
 	if !scoped {
 		return nil, false
 	}
+	poolServesModel := h.accountPoolModelFilter(c)
 	modelRegistry := registry.GetGlobalRegistry()
 	return func(model string) bool {
+		if !poolServesModel(model) {
+			return false
+		}
 		for _, provider := range modelRegistry.GetModelProviders(model) {
 			if _, ok := allowed[strings.ToLower(provider)]; ok {
 				return true
@@ -130,9 +135,11 @@ func (h *BaseAPIHandler) KeyAllowsModel(c *gin.Context, model string) bool {
 }
 
 // scopeModelList removes from a model-list response the models the request's
-// client API key may not use. It understands every list shape the proxy
-// serves: an array under "data" (OpenAI, Anthropic, Grok) or under "models"
-// (Codex, Gemini), with the model named by id, slug, model or name.
+// client API key may not use: models of providers outside its scope and, for a
+// key with account pools, models no credential in its pools serves. It
+// understands every list shape the proxy serves: an array under "data"
+// (OpenAI, Anthropic, Grok) or under "models" (Codex, Gemini), with the model
+// named by id, slug, model or name.
 func (h *BaseAPIHandler) scopeModelList(c *gin.Context, body []byte) []byte {
 	allows, scoped := h.keyModelFilter(c)
 	if !scoped || !gjson.ValidBytes(body) {

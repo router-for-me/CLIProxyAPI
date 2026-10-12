@@ -109,7 +109,7 @@ func (s *Server) setupRoutes() {
 	s.engine.POST("/v1/realtime/calls/:call_id/refer", standardAuth, keyScope, s.codexLiveHandler.HandleSIPControl)
 
 	openaiV1 := s.engine.Group("/openai/v1")
-	openaiV1.Use(AuthMiddleware(s.accessManager))
+	openaiV1.Use(AuthMiddleware(s.accessManager), s.keyScopeMiddleware())
 	{
 		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
 		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
@@ -128,7 +128,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(AuthMiddleware(s.accessManager), s.keyScopeMiddleware())
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/interactions", geminiHandlers.Interactions)
@@ -580,7 +580,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 		c.Abort()
 	}
 
-	s.engine.GET(trimmed, conditionalAuth, finalHandler)
+	s.engine.GET(trimmed, conditionalAuth, s.keyScopeMiddleware(), finalHandler)
 }
 
 // isAnthropicModelsRequest reports whether a /v1/models request should be served in

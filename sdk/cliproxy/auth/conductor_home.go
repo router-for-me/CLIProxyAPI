@@ -949,6 +949,11 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 }
 
 func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, opts cliproxyexecutor.Options) (*HomeDispatchSelection, error) {
+	// Home selects credentials by its own policy and knows nothing of account pools,
+	// so a pooled request fails closed before dispatch.
+	if HasAccountPools(ctx) {
+		return nil, &Error{Code: "account_pool_unavailable", Message: "client account pools are unavailable in Home mode", HTTPStatus: http.StatusServiceUnavailable}
+	}
 	if m == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
