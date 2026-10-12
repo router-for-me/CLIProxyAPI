@@ -177,6 +177,8 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAuthGet(ctx, request)
 	case pluginabi.MethodHostAuthGetRuntime:
 		return h.callHostAuthGetRuntime(ctx, request)
+	case pluginabi.MethodHostAuthGetCredential:
+		return h.callHostAuthGetCredential(ctx, request)
 	case pluginabi.MethodHostAuthSave:
 		return h.callHostAuthSave(ctx, request)
 	case pluginabi.MethodHostAffinityLookup:

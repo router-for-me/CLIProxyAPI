@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -559,6 +560,104 @@ func TestHostListAuthFilesFromDiskParsesDisabled(t *testing.T) {
 			if f.Status != string(coreauth.StatusActive) {
 				t.Fatalf("active.json entry.Status = %v, want %v", f.Status, coreauth.StatusActive)
 			}
+		}
+	}
+}
+
+func TestHostAuthGetCredentialCallbackReturnsConfigAPIKey(t *testing.T) {
+	cfg := &config.Config{GeminiKey: []config.GeminiKey{{
+		APIKey:   "test-gemini-key",
+		BaseURL:  "https://generativelanguage.example.com",
+		Prefix:   "team",
+		ProxyURL: "socks5://127.0.0.1:1080",
+	}}}
+	auths, errSynthesize := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	})
+	if errSynthesize != nil {
+		t.Fatalf("synthesize config auths: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("synthesized %d auths, want 1", len(auths))
+	}
+	auth := auths[0]
+	auth.EnsureIndex()
+
+	host := New()
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+	if _, errRegister := host.currentAuthManager().Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	req, errMarshal := json.Marshal(pluginapi.HostAuthGetRequest{AuthIndex: auth.Index})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	// Config API keys have no auth file, so host.auth.get cannot return them.
+	if _, errGet := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGet, req); errGet == nil {
+		t.Fatal("host.auth.get returned a config API key; this test no longer covers a gap")
+	}
+
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetCredential, req)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostAuthGetCredentialResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if resp.AuthIndex != auth.Index || resp.Provider != auth.Provider || resp.Prefix != "team" || resp.ProxyURL != "socks5://127.0.0.1:1080" || resp.Disabled {
+		t.Fatalf("response = %#v, want config credential %s", resp, auth.Index)
+	}
+	if got := resp.Attributes["api_key"]; got != "test-gemini-key" {
+		t.Fatalf("api_key = %q, want test-gemini-key", got)
+	}
+	if got := resp.Attributes["base_url"]; got != "https://generativelanguage.example.com" {
+		t.Fatalf("base_url = %q, want configured base URL", got)
+	}
+}
+
+func TestHostAuthGetCredentialCallbackReportsDisabledAndRejectsBadIndex(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:         "demo-disabled",
+		Provider:   "demo",
+		Status:     coreauth.StatusDisabled,
+		Disabled:   true,
+		Attributes: map[string]string{"api_key": "disabled-key"},
+	}
+	auth.EnsureIndex()
+
+	host := New()
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+	if _, errRegister := host.currentAuthManager().Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	req, errMarshal := json.Marshal(pluginapi.HostAuthGetRequest{AuthIndex: auth.Index})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetCredential, req)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostAuthGetCredentialResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if !resp.Disabled {
+		t.Fatalf("response = %#v, want Disabled", resp)
+	}
+
+	for _, authIndex := range []string{"", "  ", "missing-index"} {
+		badReq, errBad := json.Marshal(pluginapi.HostAuthGetRequest{AuthIndex: authIndex})
+		if errBad != nil {
+			t.Fatalf("marshal request: %v", errBad)
+		}
+		if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetCredential, badReq); errCall == nil {
+			t.Fatalf("host.auth.get_credential accepted auth_index %q", authIndex)
 		}
 	}
 }

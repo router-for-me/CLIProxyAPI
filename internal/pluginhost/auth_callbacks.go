@@ -113,6 +113,34 @@ func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]by
 	return marshalRPCResult(pluginapi.HostAuthGetRuntimeResponse{Auth: *entry})
 }
 
+// callHostAuthGetCredential returns the routing credential for any auth,
+// including API keys declared in the host configuration, which have no auth
+// file and are therefore unreachable through host.auth.get.
+func (h *Host) callHostAuthGetCredential(ctx context.Context, request []byte) ([]byte, error) {
+	_ = ctx
+	var req rpcHostAuthGetRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host auth get credential request: %w", errUnmarshal)
+	}
+	authIndex := strings.TrimSpace(req.AuthIndex)
+	if authIndex == "" {
+		return nil, fmt.Errorf("auth_index is required")
+	}
+	auth, errGet := h.authByIndex(authIndex)
+	if errGet != nil {
+		return nil, errGet
+	}
+	return marshalRPCResult(pluginapi.HostAuthGetCredentialResponse{
+		AuthIndex:  authIndex,
+		Provider:   strings.TrimSpace(auth.Provider),
+		Label:      auth.Label,
+		Prefix:     auth.Prefix,
+		ProxyURL:   auth.ProxyURL,
+		Disabled:   auth.Disabled || auth.Status == coreauth.StatusDisabled,
+		Attributes: authAttributes(auth),
+	})
+}
+
 func (h *Host) callHostAuthSave(ctx context.Context, request []byte) ([]byte, error) {
 	var req pluginapi.HostAuthSaveRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {

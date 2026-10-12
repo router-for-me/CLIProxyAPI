@@ -836,6 +836,29 @@ type HostAuthGetRuntimeResponse struct {
 	Auth HostAuthFileEntry `json:"auth"`
 }
 
+// HostAuthGetCredentialResponse returns the routing credential resolved by auth index.
+//
+// Unlike HostAuthGetResponse it is not limited to file-backed credentials:
+// API keys declared in the host configuration have no auth file, and their
+// secret lives only in Attributes (for example "api_key" and "base_url").
+type HostAuthGetCredentialResponse struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// Provider is the credential provider key.
+	Provider string `json:"provider,omitempty"`
+	// Label is the human-readable credential label.
+	Label string `json:"label,omitempty"`
+	// Prefix is the optional model prefix configured for the credential.
+	Prefix string `json:"prefix,omitempty"`
+	// ProxyURL is the optional outbound proxy configured for the credential.
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// Disabled reports whether the credential is disabled.
+	Disabled bool `json:"disabled,omitempty"`
+	// Attributes contains the same credential attributes the host passes to
+	// plugin executors, including secrets such as "api_key".
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
 // HostAuthSaveRequest asks the host to persist credential JSON to a physical auth file.
 type HostAuthSaveRequest struct {
 	// Name is the target auth file name. It must end with .json.
