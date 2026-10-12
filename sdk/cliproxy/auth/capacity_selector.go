@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,11 +36,11 @@ func (s *CapacitySelector) Pick(ctx context.Context, provider, model string, opt
 	if s.nowFunc != nil {
 		now = s.nowFunc()
 	}
-	available, errAvailable := getSelectorAvailableAuths(ctx, auths, provider, model, now)
+	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, auths, provider, model, now)
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = capacityEligibleAuths(ctx, provider, available)
 	var best, unknown []*Auth
 	bestRemaining := -1.0
 	var models map[string]string
@@ -77,6 +78,24 @@ func (s *CapacitySelector) Pick(ctx context.Context, provider, model string, opt
 	}
 	ctx = context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
 	return rotation.Pick(ctx, provider, model, opts, available)
+}
+
+// capacityEligibleAuths applies transport eligibility before priority. Mixed
+// requests still get the Codex websocket preference when every candidate is Codex.
+func capacityEligibleAuths(ctx context.Context, provider string, auths []*Auth) []*Auth {
+	if provider == "mixed" && len(auths) > 0 {
+		codexOnly := true
+		for _, candidate := range auths {
+			if canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != "codex" {
+				codexOnly = false
+				break
+			}
+		}
+		if codexOnly {
+			provider = "codex"
+		}
+	}
+	return highestPriorityAuths(preferCodexWebsocketAuths(ctx, provider, auths))
 }
 
 func (s *CapacitySelector) exploreUnknown(key string) bool {
@@ -145,8 +164,8 @@ func observedCapacity(auth *Auth, model string, now time.Time) (float64, bool) {
 			return 0, false
 		}
 		if window.resetAt != "" {
-			reset, errReset := strconv.ParseInt(window.resetAt, 10, 64)
-			if errReset != nil || reset <= now.Unix() {
+			reset, valid := capacityResetTime(window.resetAt)
+			if !valid || !reset.After(now) {
 				return 0, false
 			}
 		} else if window.resetAfter != "" {
@@ -158,6 +177,23 @@ func observedCapacity(auth *Auth, model string, now time.Time) (float64, bool) {
 		remaining = math.Min(remaining, 1-used/window.scale)
 	}
 	return remaining, true
+}
+
+// capacityResetTime accepts the Unix seconds, RFC3339, and HTTP-date formats
+// used by provider quota headers, preserving fractional Unix seconds.
+func capacityResetTime(raw string) (time.Time, bool) {
+	if seconds, errParse := strconv.ParseFloat(raw, 64); errParse == nil {
+		if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 || seconds >= math.Exp2(63) {
+			return time.Time{}, false
+		}
+		whole, fraction := math.Modf(seconds)
+		return time.Unix(int64(whole), int64(fraction*1e9)), true
+	}
+	if reset, errParse := time.Parse(time.RFC3339Nano, raw); errParse == nil {
+		return reset, true
+	}
+	reset, errParse := http.ParseTime(raw)
+	return reset, errParse == nil
 }
 
 type capacityWindow struct {

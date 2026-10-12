@@ -148,7 +148,7 @@ access:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, most-remaining
-  # most-remaining ranks available accounts within the highest credential priority by
+  # most-remaining ranks transport-eligible accounts within the highest credential priority by
   # the lowest remaining fraction across observed Claude/Codex allowance windows.
   # Claude short/weekly and applicable Opus/Sonnet windows, and Codex primary/secondary
   # and named model-specific windows are considered. It compares percentages, not
