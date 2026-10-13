@@ -11,10 +11,15 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 	if len(clientVersion) > 0 {
 		version = clientVersion[0]
 	}
-	optimizeMultiAgentV2 := h != nil && h.Cfg != nil && h.Cfg.Client.Codex.OptimizeMultiAgentV2
+	optimizeMultiAgentV2 := false
 	var applyPatchCapabilityForModel codexmodels.ApplyPatchCapabilityForModelFunc
-	if h != nil && h.Cfg != nil && h.Cfg.Client.Codex.EnableApplyPatch {
-		applyPatchCapabilityForModel = h.SupportsApplyPatchModel
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil {
+			optimizeMultiAgentV2 = cfg.Client.Codex.OptimizeMultiAgentV2
+			if cfg.Client.Codex.EnableApplyPatch {
+				applyPatchCapabilityForModel = h.SupportsApplyPatchModel
+			}
+		}
 	}
 	var toolSearchCapabilityForModel codexmodels.ToolSearchCapabilityForModelFunc
 	if h != nil && responsesclaude.ClientToolSearchEnabled() {
