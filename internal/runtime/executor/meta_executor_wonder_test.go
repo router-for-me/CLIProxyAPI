@@ -1,0 +1,142 @@
+package executor
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
+)
+
+func writeMetaWonderResponsesOK(w http.ResponseWriter, model string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	payload, _ := json.Marshal(map[string]any{
+		"type": "response.completed",
+		"response": map[string]any{
+			"id":     "resp_wonder",
+			"object": "response",
+			"status": "completed",
+			"model":  model,
+			"output": []map[string]any{
+				{
+					"type": "message",
+					"role": "assistant",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "ok"},
+					},
+				},
+			},
+			"usage": map[string]any{
+				"input_tokens":  1,
+				"output_tokens": 1,
+				"total_tokens":  2,
+			},
+		},
+	})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\n"))
+}
+
+func metaWonderTestAuth(serverURL string) *cliproxyauth.Auth {
+	return &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": serverURL,
+		},
+	}
+}
+
+func TestMetaExecutor_ExecuteMuseWonder(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		writeMetaWonderResponsesOK(w, gjson.GetBytes(gotBody, "model").String())
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	resp, err := exec.Execute(context.Background(), metaWonderTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: []byte(`{"model":"muse-wonder-1.0","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("path = %q, want /responses", gotPath)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "muse-wonder-1.0" {
+		t.Fatalf("upstream model = %q, want muse-wonder-1.0", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "model").String(); got != "muse-wonder-1.0" {
+		t.Fatalf("downstream model = %q, want muse-wonder-1.0", got)
+	}
+}
+
+func TestMetaExecutor_ExecuteStreamMuseWonderContributor(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeMetaWonderResponsesOK(w, gjson.GetBytes(gotBody, "model").String())
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	result, err := exec.ExecuteStream(context.Background(), metaWonderTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0-contributor",
+		Payload: []byte(`{"model":"muse-wonder-1.0-contributor","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "muse-wonder-1.0-contributor" {
+		t.Fatalf("upstream model = %q, want muse-wonder-1.0-contributor", got)
+	}
+	gotChunk := false
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		if len(chunk.Payload) > 0 {
+			gotChunk = true
+		}
+	}
+	if !gotChunk {
+		t.Fatal("expected at least one stream payload chunk")
+	}
+}
+
+func TestMetaExecutor_MuseWonderReasoningMax(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeMetaWonderResponsesOK(w, "muse-wonder-1.0")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	_, err := exec.Execute(context.Background(), metaWonderTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0(max)",
+		Payload: []byte(`{"model":"muse-wonder-1.0","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "muse-wonder-1.0" {
+		t.Fatalf("upstream model = %q, want muse-wonder-1.0", got)
+	}
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "max" {
+		t.Fatalf("reasoning.effort = %q, want max (body: %s)", got, gotBody)
+	}
+}
