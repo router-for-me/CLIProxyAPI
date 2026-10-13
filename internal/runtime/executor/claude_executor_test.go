@@ -9797,3 +9797,66 @@ func TestClaudeExecutor_CloakModePrefersStoredPrevReqOverCallerFake(t *testing.T
 		t.Fatalf("CPA must not use fake caller cc_prev_req, got: %s", turn2System)
 	}
 }
+
+func TestDisableThinkingForCustomClaudeCompat_RemovesThinkingOnCustomBaseURL(t *testing.T) {
+	payload := []byte(`{
+		"thinking": {"type":"adaptive"},
+		"output_config": {"effort":"medium"},
+		"messages": [
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}
+		]
+	}`)
+
+	out := disableThinkingForCustomClaudeCompat(payload, "https://api.kimi.com/coding/")
+
+	if gjson.GetBytes(out, "thinking").Exists() {
+		t.Fatalf("thinking should be removed for custom Claude-compatible fallback")
+	}
+	if gjson.GetBytes(out, "output_config.effort").Exists() {
+		t.Fatalf("output_config.effort should be removed for custom Claude-compatible fallback")
+	}
+	if gjson.GetBytes(out, "output_config").Exists() {
+		t.Fatalf("empty output_config should be removed after dropping effort")
+	}
+}
+
+func TestDisableThinkingForCustomClaudeCompat_KeepsThinkingForOfficialAnthropic(t *testing.T) {
+	payload := []byte(`{
+		"thinking": {"type":"adaptive"},
+		"output_config": {"effort":"medium"},
+		"messages": [
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{}}]}
+		]
+	}`)
+
+	out := disableThinkingForCustomClaudeCompat(payload, "https://api.anthropic.com")
+
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive", got)
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "medium" {
+		t.Fatalf("output_config.effort = %q, want medium", got)
+	}
+}
+
+func TestDisableThinkingForCustomClaudeCompat_KeepsThinkingWhenToolUseStartsWithThinking(t *testing.T) {
+	payload := []byte(`{
+		"thinking": {"type":"adaptive"},
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"reasoning","signature":""},
+				{"type":"tool_use","id":"call_1","name":"Read","input":{}}
+			]}
+		]
+	}`)
+
+	out := disableThinkingForCustomClaudeCompat(payload, "https://api.kimi.com/coding/")
+
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "thinking" {
+		t.Fatalf("messages.0.content.0.type = %q, want thinking", got)
+	}
+}
