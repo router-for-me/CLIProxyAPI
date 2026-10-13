@@ -90,9 +90,15 @@ func kimiResponsesModelFamily(model string) (string, bool) {
 		"kimi-for-coding-highspeed", "for-coding-highspeed":
 		return "coding", true
 	}
-	// K3 and its registered long-context variant are Moonshot platform models;
+	// K2 and K3 registered platform models (internal/registry/models/models.json);
 	// the host normalizer accepts them via generic prefix stripping.
-	if m == "k3" || m == "kimi-k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3-") {
+	switch {
+	case m == "k2" || m == "kimi-k2" ||
+		m == "k2-thinking" || m == "kimi-k2-thinking" ||
+		m == "k2.5" || m == "kimi-k2.5" ||
+		m == "k2.6" || m == "kimi-k2.6":
+		return "platform", true
+	case m == "k3" || m == "kimi-k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3-"):
 		return "platform", true
 	}
 	return "", false

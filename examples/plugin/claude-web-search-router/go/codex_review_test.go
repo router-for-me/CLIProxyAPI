@@ -589,3 +589,36 @@ func TestKimiResponsesModelFamilyK3Variants(t *testing.T) {
 		t.Fatalf("kimi-k3-256k target = %+v ok=%v, want cred-platform", target, ok)
 	}
 }
+
+// TestKimiResponsesModelFamilyK2PlatformVariants verifies the registered K2
+// platform models classify as platform so they pin a Moonshot credential
+// instead of falling back to an unpinned target the scheduler can pin onto a
+// coding endpoint.
+func TestKimiResponsesModelFamilyK2PlatformVariants(t *testing.T) {
+	for _, model := range []string{
+		"kimi-k2", "k2",
+		"kimi-k2-thinking", "k2-thinking",
+		"kimi-k2.5", "k2.5",
+		"kimi-k2.6", "k2.6",
+	} {
+		got, ok := kimiResponsesModelFamily(model)
+		if !ok || got != "platform" {
+			t.Fatalf("family(%q) = %q,%v want platform,true", model, got, ok)
+		}
+	}
+	entries := []pluginapi.HostAuthFileEntry{
+		{Provider: "kimi", BaseURL: "https://api.kimi.com/coding", ID: "cred-coding"},
+		{Provider: "kimi", BaseURL: "https://api.moonshot.ai", ID: "cred-platform"},
+	}
+	for _, model := range []string{"kimi-k2", "kimi-k2-thinking", "kimi-k2.5", "kimi-k2.6"} {
+		target, ok := resolveKimiResponsesTargetForModel(entries, model)
+		if !ok || target.authID != "cred-platform" {
+			t.Fatalf("%s target = %+v ok=%v, want cred-platform", model, target, ok)
+		}
+	}
+	// The K2 coding aliases still resolve to the coding credential.
+	target, ok := resolveKimiResponsesTargetForModel(entries, "kimi-k2.8-code")
+	if !ok || target.authID != "cred-coding" {
+		t.Fatalf("kimi-k2.8-code target = %+v ok=%v, want cred-coding", target, ok)
+	}
+}
