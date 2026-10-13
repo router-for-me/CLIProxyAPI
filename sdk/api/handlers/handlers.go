@@ -491,6 +491,16 @@ func (h *BaseAPIHandler) SetModelRouterHost(host PluginModelRouterHost) {
 	h.runtimeMu.Unlock()
 }
 
+// CurrentModelRouterHost returns a snapshot of the explicitly configured model router host.
+func (h *BaseAPIHandler) CurrentModelRouterHost() PluginModelRouterHost {
+	if h == nil {
+		return nil
+	}
+	h.runtimeMu.RLock()
+	defer h.runtimeMu.RUnlock()
+	return h.ModelRouterHost
+}
+
 func isNilPluginInterceptorHost(host PluginInterceptorHost) bool {
 	return isNilInterface(host)
 }
