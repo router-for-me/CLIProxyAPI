@@ -164,3 +164,99 @@ func TestMetaExecutor_ExecuteMuseWonderFull(t *testing.T) {
 		t.Fatalf("downstream model = %q, want muse-wonder-full-1.0", got)
 	}
 }
+
+func TestMetaExecutor_RefreshRevalidatesWonderFullAfterDCAExpiry(t *testing.T) {
+	mintCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/key":
+			mintCalls++
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"dca expired"}`))
+		case "/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"muse-wonder-1.0"},{"id":"muse-wonder-full-1.0"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+	t.Setenv("META_MODELS_URL", server.URL+"/models")
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":   "LLM|minted",
+			"dca_token": "dca:expired-revalidate",
+			"base_url":  "https://api.meta.ai/v1",
+		},
+		Metadata: map[string]any{
+			"type":           "meta",
+			"auth_kind":      "oauth",
+			"api_key":        "LLM|minted",
+			"access_token":   "LLM|minted",
+			"dca_token":      "dca:expired-revalidate",
+			"dca_expires_at": float64(1700000000),
+			"subs_tier_name": "High Usage",
+			"is_subs_active": true,
+		},
+	}
+
+	refreshed, err := exec.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if mintCalls != 0 {
+		t.Fatalf("mint calls = %d, want 0 for a known-expired DCA token", mintCalls)
+	}
+	if got, ok := refreshed.Metadata["wonder_full_entitled"].(bool); !ok || !got {
+		t.Fatalf("wonder_full_entitled = %v, want true", refreshed.Metadata["wonder_full_entitled"])
+	}
+}
+
+func TestMetaExecutor_RefreshFallsBackToWonderFullRevalidationOnMintFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/key":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"dca expired"}`))
+		case "/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"muse-wonder-1.0"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+	t.Setenv("META_MODELS_URL", server.URL+"/models")
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":   "LLM|minted",
+			"dca_token": "dca:mint-fails-revalidate",
+			"base_url":  "https://api.meta.ai/v1",
+		},
+		Metadata: map[string]any{
+			"type":           "meta",
+			"auth_kind":      "oauth",
+			"api_key":        "LLM|minted",
+			"access_token":   "LLM|minted",
+			"dca_token":      "dca:mint-fails-revalidate",
+			"subs_tier_name": "Muse Code Max Usage",
+			"is_subs_active": true,
+		},
+	}
+
+	refreshed, err := exec.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if got, ok := refreshed.Metadata["wonder_full_entitled"].(bool); !ok || got {
+		t.Fatalf("wonder_full_entitled = %v, want false", refreshed.Metadata["wonder_full_entitled"])
+	}
+}

@@ -358,3 +358,48 @@ func TestSaveTokenToFilePreservesFileOnEncodingFailure(t *testing.T) {
 		t.Fatalf("failed save corrupted existing credential: %q", raw)
 	}
 }
+
+func TestMetaAuth_WonderFullEntitled(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		status  int
+		want    bool
+		wantErr bool
+	}{
+		{name: "full listed", body: `{"data":[{"id":"muse-wonder-1.0"},{"id":"muse-wonder-full-1.0"}]}`, status: http.StatusOK, want: true},
+		{name: "full absent", body: `{"data":[{"id":"muse-wonder-1.0"},{"id":"muse-spark-1.3"}]}`, status: http.StatusOK, want: false},
+		{name: "upstream error", body: `{"error":"unauthorized"}`, status: http.StatusUnauthorized, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") || !strings.HasSuffix(got, "|minted") {
+					t.Errorf("Authorization = %q, want minted key bearer", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			auth := NewMetaAuth(&config.Config{})
+			auth.httpClient = server.Client()
+			auth.SetModelsURL(server.URL)
+
+			got, err := auth.WonderFullEntitled(context.Background(), DefaultAPIBaseURL, "LLM|minted")
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WonderFullEntitled() error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("WonderFullEntitled() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

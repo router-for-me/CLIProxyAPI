@@ -220,11 +220,17 @@ type MetaAuth struct {
 	httpClient *http.Client
 	proxyURL   string
 	mintURL    string
+	modelsURL  string
 }
 
 // SetMintURL overrides the API key minting endpoint (primarily for unit tests).
 func (a *MetaAuth) SetMintURL(u string) {
 	a.mintURL = strings.TrimSpace(u)
+}
+
+// SetModelsURL overrides the Muse Code model catalog endpoint (primarily for unit tests).
+func (a *MetaAuth) SetModelsURL(u string) {
+	a.modelsURL = strings.TrimSpace(u)
 }
 
 // NewMetaAuth creates a new MetaAuth service instance.
@@ -480,6 +486,90 @@ func (a *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedKeyR
 		return nil, fmt.Errorf("meta auth: mint response missing api_key")
 	}
 	return &minted, nil
+}
+
+// WonderFullEntitled reports whether Meta currently serves Muse Wonder Full
+// to the account behind a minted API key. The minted key outlives the DCA
+// token used for minting, so once that token expires the account-scoped
+// Muse Code model catalog is the remaining way to revalidate plan-gated
+// entitlement without a new login: Full models appear in the catalog only
+// for entitled accounts.
+func (a *MetaAuth) WonderFullEntitled(ctx context.Context, baseURL, apiKey string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return false, fmt.Errorf("meta auth: missing api key")
+	}
+
+	modelsURL := a.modelsURL
+	if modelsURL == "" {
+		if envModels := strings.TrimSpace(os.Getenv("META_MODELS_URL")); envModels != "" {
+			modelsURL = envModels
+		} else {
+			origin, errOrigin := museCodeOrigin(baseURL)
+			if errOrigin != nil {
+				return false, errOrigin
+			}
+			modelsURL = origin + "/muse-code/models"
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("meta auth: create models request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("User-Agent", "muse-code/1.0.2")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("meta auth: models request failed: %w", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("meta auth: close models response body error: %v", errClose)
+		}
+	}()
+
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if errRead != nil {
+		return false, fmt.Errorf("meta auth: read models response: %w", errRead)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("meta auth: models request failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var catalog struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &catalog); err != nil {
+		return false, fmt.Errorf("meta auth: parse models response: %w", err)
+	}
+	for _, model := range catalog.Data {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model.ID)), "muse-wonder-full-") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// museCodeOrigin returns the scheme and host of an API base URL. The Muse
+// Code catalog lives at the root of the credential origin, beside /v1.
+func museCodeOrigin(baseURL string) (string, error) {
+	trimmed := strings.TrimSpace(baseURL)
+	if trimmed == "" {
+		trimmed = DefaultAPIBaseURL
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("meta auth: invalid base url %q", baseURL)
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
 // CreateTokenStorage creates a serializable token storage record from the auth bundle.

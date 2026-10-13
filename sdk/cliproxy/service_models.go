@@ -195,7 +195,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
-		if !configured {
+		// Explicitly configured models are an operator opt-in only for API-key
+		// credentials. An OAuth credential can resolve a config entry by base
+		// URL alone before its first mint, so it must stay subject to the
+		// subscription entitlement filter.
+		if !configured || authKind != "apikey" {
 			models = applyMetaWonderFullEntitlement(models, a)
 		}
 	default:
@@ -942,6 +946,12 @@ func metaAuthWonderFullEntitled(auth *coreauth.Auth) bool {
 	if auth == nil {
 		return false
 	}
+	// A recorded catalog check is the freshest evidence: it is written only
+	// by entitlement revalidation with the minted key and cleared by the
+	// next successful mint, after which the tier fields below govern again.
+	if entitled, known := metaAuthWonderFullEvidence(auth); known {
+		return entitled
+	}
 	active, activeKnown := metaAuthSubscriptionActive(auth)
 	if activeKnown && !active {
 		return false
@@ -971,6 +981,32 @@ func applyMetaWonderFullEntitlement(models []*ModelInfo, auth *coreauth.Auth) []
 		filtered = append(filtered, model)
 	}
 	return filtered
+}
+
+func metaAuthWonderFullEvidence(auth *coreauth.Auth) (entitled bool, known bool) {
+	if auth == nil {
+		return false, false
+	}
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["wonder_full_entitled"]; ok {
+			switch value := raw.(type) {
+			case bool:
+				return value, true
+			case string:
+				if parsed, errParse := strconv.ParseBool(strings.TrimSpace(value)); errParse == nil {
+					return parsed, true
+				}
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes["wonder_full_entitled"]); value != "" {
+			if parsed, errParse := strconv.ParseBool(value); errParse == nil {
+				return parsed, true
+			}
+		}
+	}
+	return false, false
 }
 
 func metaAuthSubscriptionTier(auth *coreauth.Auth) string {

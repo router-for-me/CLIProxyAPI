@@ -2,8 +2,10 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,11 +106,25 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		}
 	}
 
+	_, mintedKey := metaCreds(auth)
+	if mintedKey != "" && metaDCAExpired(auth, time.Now()) {
+		if refreshed, errRevalidate := e.revalidateMetaWonderFull(ctx, auth); errRevalidate == nil {
+			return refreshed, nil
+		} else {
+			log.Debugf("meta executor: wonder full revalidation failed: %v", errRevalidate)
+		}
+	}
+
 	mintRes, err, _ := metaRefreshGroup.Do(dcaToken, func() (any, error) {
 		authSvc := metaauth.NewMetaAuthWithProxyURL(e.cfg, auth.ProxyURL)
 		return authSvc.MintAPIKey(ctx, dcaToken)
 	})
 	if err != nil {
+		if mintedKey != "" {
+			if refreshed, errRevalidate := e.revalidateMetaWonderFull(ctx, auth); errRevalidate == nil {
+				return refreshed, nil
+			}
+		}
 		return nil, fmt.Errorf("meta executor: mint API key failed: %w", err)
 	}
 
@@ -147,6 +163,7 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	}
 	auth.Metadata["is_subs_active"] = minted.IsSubsActive
 	auth.Metadata["has_payment_method"] = minted.HasPaymentMethod
+	delete(auth.Metadata, "wonder_full_entitled")
 	auth.Metadata["type"] = "meta"
 	nowStr := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = nowStr
@@ -181,6 +198,98 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	auth.LastRefreshedAt = time.Now()
 
 	return auth, nil
+}
+
+// revalidateMetaWonderFull refreshes Wonder Full entitlement with the minted
+// API key when minting is unavailable (most importantly after the DCA token
+// expires, since the minted key outlives it). The result is recorded as
+// wonder_full_entitled so model registration can use current upstream
+// evidence instead of the subscription tier saved at the last mint.
+func (e *MetaExecutor) revalidateMetaWonderFull(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	baseURL, token := metaCreds(auth)
+	if token == "" {
+		return nil, fmt.Errorf("meta executor: missing minted api key for entitlement revalidation")
+	}
+	authSvc := metaauth.NewMetaAuthWithProxyURL(e.cfg, auth.ProxyURL)
+	entitled, err := authSvc.WonderFullEntitled(ctx, baseURL, token)
+	if err != nil {
+		return nil, err
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["wonder_full_entitled"] = entitled
+	nowStr := time.Now().Format(time.RFC3339)
+	auth.Metadata["last_refresh"] = nowStr
+	if existing, ok := auth.Storage.(*metaauth.MetaTokenStorage); ok && existing != nil {
+		storage := *existing
+		storage.LastRefresh = nowStr
+		storage.Metadata = auth.Metadata
+		auth.Storage = &storage
+	}
+	auth.LastRefreshedAt = time.Now()
+	return auth, nil
+}
+
+// metaDCAExpired reports whether the saved DCA token expiry is known to be
+// in the past. Unknown expiry is treated as not expired so the normal mint
+// path stays in charge.
+func metaDCAExpired(auth *cliproxyauth.Auth, now time.Time) bool {
+	expiry, ok := metaDCAExpiry(auth)
+	return ok && !expiry.After(now)
+}
+
+func metaDCAExpiry(auth *cliproxyauth.Auth) (time.Time, bool) {
+	if auth == nil {
+		return time.Time{}, false
+	}
+	if auth.Storage != nil {
+		if ms, ok := auth.Storage.(*metaauth.MetaTokenStorage); ok && ms != nil {
+			if ms.DCAExpiresAt > 0 {
+				return time.Unix(ms.DCAExpiresAt, 0), true
+			}
+			if parsed, errParse := time.Parse(time.RFC3339, strings.TrimSpace(ms.DCAExpired)); errParse == nil {
+				return parsed, true
+			}
+		}
+	}
+	if auth.Metadata != nil {
+		if expiry, ok := metaUnixExpiry(auth.Metadata["dca_expires_at"]); ok {
+			return expiry, true
+		}
+		if raw, ok := auth.Metadata["dca_expired"].(string); ok {
+			if parsed, errParse := time.Parse(time.RFC3339, strings.TrimSpace(raw)); errParse == nil {
+				return parsed, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func metaUnixExpiry(raw any) (time.Time, bool) {
+	switch value := raw.(type) {
+	case int64:
+		if value > 0 {
+			return time.Unix(value, 0), true
+		}
+	case int:
+		if value > 0 {
+			return time.Unix(int64(value), 0), true
+		}
+	case float64:
+		if value > 0 {
+			return time.Unix(int64(value), 0), true
+		}
+	case json.Number:
+		if parsed, errParse := value.Int64(); errParse == nil && parsed > 0 {
+			return time.Unix(parsed, 0), true
+		}
+	case string:
+		if parsed, errParse := strconv.ParseInt(strings.TrimSpace(value), 10, 64); errParse == nil && parsed > 0 {
+			return time.Unix(parsed, 0), true
+		}
+	}
+	return time.Time{}, false
 }
 
 // ShouldPrepareRequestAuth reports true when a Meta auth has a DCA token but no usable API key.

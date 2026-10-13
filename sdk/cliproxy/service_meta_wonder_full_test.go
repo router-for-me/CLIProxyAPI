@@ -50,6 +50,16 @@ func TestRegisterModelsForAuth_MetaWonderFullEntitlement(t *testing.T) {
 			metadata: nil,
 			wantFull: false,
 		},
+		{
+			name:     "catalog evidence entitled overrides lower tier",
+			metadata: map[string]any{"subs_tier_name": "High Usage", "is_subs_active": true, "wonder_full_entitled": true},
+			wantFull: true,
+		},
+		{
+			name:     "catalog evidence not entitled overrides maximum tier",
+			metadata: map[string]any{"subs_tier_name": "Muse Code Max Usage", "is_subs_active": true, "wonder_full_entitled": false},
+			wantFull: false,
+		},
 	}
 
 	for _, test := range tests {
@@ -206,5 +216,56 @@ func TestMetaRegistrationHookReregistersAfterTierUpdate(t *testing.T) {
 	}
 	if seen := registeredIDs(); seen["muse-wonder-full-1.0"] || !seen["muse-wonder-1.0"] {
 		t.Fatalf("after downgrade: want Wonder without Full, got %v", seen)
+	}
+}
+
+func TestRegisterModelsForAuth_MetaOAuthConfigMatchStaysEntitlementFiltered(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			MetaKey: []config.CodexKey{
+				{
+					BaseURL: "https://api.meta.ai/v1",
+					Models: []config.MetaModel{
+						{Name: "muse-wonder-full-1.0"},
+						{Name: "muse-wonder-1.0"},
+					},
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-meta-wonder-full-oauth-config-match",
+		Provider: "meta",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"base_url":  "https://api.meta.ai/v1",
+		},
+		Metadata: map[string]any{
+			"type":      "meta",
+			"auth_kind": "oauth",
+			"dca_token": "dca:valid",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	seen := make(map[string]bool)
+	for _, model := range registry.GetModelsForClient(auth.ID) {
+		if model != nil {
+			seen[strings.TrimSpace(model.ID)] = true
+		}
+	}
+	if !seen["muse-wonder-1.0"] {
+		t.Fatalf("expected configured muse-wonder-1.0 to stay registered, got %v", seen)
+	}
+	if seen["muse-wonder-full-1.0"] {
+		t.Fatalf("expected Wonder Full to stay filtered for an OAuth credential matched only by base URL, got %v", seen)
 	}
 }
