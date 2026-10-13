@@ -335,7 +335,14 @@ func (c *kimiClient) executePlan(ctx context.Context, plan kimiSearchPlan, cfg p
 	if err != nil {
 		return nil, "", err
 	}
-	return filterBlockedDomains(hits, plan.blocked), answer, nil
+	filtered := filterBlockedDomains(hits, plan.blocked)
+	if plan.level == kimiLevelModel && answer != "" && len(filtered) != len(hits) {
+		// The model wrote its answer from an unfiltered server-side search;
+		// once a source is removed the answer may still derive from that
+		// page, so drop it and let the caller compose from allowed hits.
+		answer = ""
+	}
+	return filtered, answer, nil
 }
 
 func (c *kimiClient) runToolSearch(ctx context.Context, pro bool, plan kimiSearchPlan, cfg pluginConfig, query string) ([]claudeWebSearchHit, error) {

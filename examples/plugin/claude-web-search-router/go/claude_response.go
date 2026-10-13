@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -153,10 +154,16 @@ func composeAnswerText(answer string, hits []claudeWebSearchHit) string {
 	return buf.String()
 }
 
+// hostFromURL extracts the hostname from raw, normalized so ports and
+// userinfo cannot defeat domain matching (e.g. "blocked.example:443" must
+// match a "blocked.example" rule).
 func hostFromURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+		return u.Hostname()
 	}
 	withoutScheme := raw
 	if idx := strings.Index(raw, "://"); idx >= 0 {

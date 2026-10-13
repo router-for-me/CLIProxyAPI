@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -176,5 +179,131 @@ func TestResolveKimiResponsesTargetListFailureDegradesUnpinned(t *testing.T) {
 	}
 	if target.model != kimiResponsesCodingModel || target.authID != "" || target.provider != "kimi" {
 		t.Fatalf("degraded target = %+v, want unpinned coding default", target)
+	}
+}
+
+// TestResolveKimiSearchPlanBasicAllowedDomainsPromotedToPro verifies that an
+// explicit basic level cannot silently drop a request-level allowed_domains
+// restriction (Basic clears sites before the upstream call).
+func TestResolveKimiSearchPlanBasicAllowedDomainsPromotedToPro(t *testing.T) {
+	cfg := pluginConfig{KimiSearchLevel: "basic"}
+	toolCfg := claudeWebSearchToolConfig{AllowedDomains: []string{"example.com"}}
+	plan := resolveKimiSearchPlan(cfg, toolCfg, "any query here")
+	if plan.level != kimiLevelPro {
+		t.Fatalf("explicit basic with allowed_domains = %q, want pro", plan.level)
+	}
+}
+
+// TestResolveKimiSearchPlanFetchFallbackAllowedDomainsPromotedToPro verifies
+// the no-URL fallback of explicit fetch level also honors allowed_domains.
+func TestResolveKimiSearchPlanFetchFallbackAllowedDomainsPromotedToPro(t *testing.T) {
+	cfg := pluginConfig{KimiSearchLevel: "fetch"}
+	toolCfg := claudeWebSearchToolConfig{AllowedDomains: []string{"example.com"}}
+	plan := resolveKimiSearchPlan(cfg, toolCfg, "query without any url")
+	if plan.level != kimiLevelPro {
+		t.Fatalf("fetch fallback without URL and with allowed_domains = %q, want pro", plan.level)
+	}
+}
+
+// TestHostFromURLNormalizesHost verifies host extraction strips ports and
+// userinfo so blocked-domain matching cannot be evaded.
+func TestHostFromURLNormalizesHost(t *testing.T) {
+	cases := map[string]string{
+		"https://blocked.example:443/a":     "blocked.example",
+		"https://user@blocked.example/x":    "blocked.example",
+		"http://blocked.example":            "blocked.example",
+		"https://sub.blocked.example/y?z=1": "sub.blocked.example",
+	}
+	for raw, want := range cases {
+		if got := hostFromURL(raw); got != want {
+			t.Fatalf("hostFromURL(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// TestResolveKimiResponsesTargetConfiguredPlatformModelPrefersPlatformCred
+// verifies that a configured platform model pins a platform credential instead
+// of a coding one (a platform model on a coding endpoint fails upstream).
+func TestResolveKimiResponsesTargetConfiguredPlatformModelPrefersPlatformCred(t *testing.T) {
+	entry := func(provider, baseURL, id string) pluginapi.HostAuthFileEntry {
+		return pluginapi.HostAuthFileEntry{Provider: provider, BaseURL: baseURL, ID: id}
+	}
+	entries := []pluginapi.HostAuthFileEntry{
+		entry("kimi", "https://api.kimi.com/coding", "cred-coding"),
+		entry("kimi", "https://api.moonshot.ai", "cred-platform"),
+	}
+	target, ok := resolveKimiResponsesTargetForModel(entries, kimiResponsesPlatformModel)
+	if !ok {
+		t.Fatal("expected platform target for platform model override")
+	}
+	if target.authID != "cred-platform" {
+		t.Fatalf("target.authID = %q, want cred-platform", target.authID)
+	}
+	if target.model != kimiResponsesPlatformModel {
+		t.Fatalf("target.model = %q", target.model)
+	}
+}
+
+// TestResolveKimiResponsesTargetRotatesCredentials verifies that several
+// compatible credentials are pinned in turn rather than always the first.
+func TestResolveKimiResponsesTargetRotatesCredentials(t *testing.T) {
+	entry := func(id string) pluginapi.HostAuthFileEntry {
+		return pluginapi.HostAuthFileEntry{Provider: "kimi", BaseURL: "https://api.kimi.com/coding", ID: id}
+	}
+	entries := []pluginapi.HostAuthFileEntry{entry("cred-a"), entry("cred-b")}
+	seen := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		target, ok := resolveKimiResponsesTargetFromEntries(entries)
+		if !ok {
+			t.Fatal("expected target")
+		}
+		seen[target.authID] = true
+	}
+	if !seen["cred-a"] || !seen["cred-b"] {
+		t.Fatalf("rotation saw %v, want both cred-a and cred-b", seen)
+	}
+}
+
+// TestExecutePlanModelDropsAnswerFromBlockedSources verifies that when
+// blocked_domains remove a model-level source, the model-written answer is
+// discarded instead of being kept without its citation.
+func TestExecutePlanModelDropsAnswerFromBlockedSources(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != kimiResponsesPath {
+			t.Errorf("path = %s, want %s", r.URL.Path, kimiResponsesPath)
+		}
+		_, _ = w.Write([]byte(`{
+			"output": [
+				{"type": "web_search_call", "action": {"sources": [
+					{"type": "url", "url": "https://blocked.example/x", "title": "blocked"},
+					{"type": "url", "url": "https://allowed.example/y", "title": "allowed"}
+				]}},
+				{"type": "message", "content": [{"type": "output_text", "text": "answer text"}]}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := newKimiClientWithOptions([]string{"sk-test"}, server.URL, server.Client())
+	plan := kimiSearchPlan{level: kimiLevelModel, blocked: []string{"blocked.example"}}
+	hits, answer, err := client.executePlan(context.Background(), plan, pluginConfig{}, "query")
+	if err != nil {
+		t.Fatalf("executePlan error = %v", err)
+	}
+	if answer != "" {
+		t.Fatalf("answer = %q, want empty after blocked-source removal", answer)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].URL, "allowed.example") {
+		t.Fatalf("hits = %+v, want only the allowed source", hits)
+	}
+
+	// Without removals the answer is preserved.
+	plan = kimiSearchPlan{level: kimiLevelModel, blocked: []string{"other.example"}}
+	_, answer, err = client.executePlan(context.Background(), plan, pluginConfig{}, "query")
+	if err != nil {
+		t.Fatalf("executePlan error = %v", err)
+	}
+	if answer != "answer text" {
+		t.Fatalf("answer = %q, want preserved when no source is blocked", answer)
 	}
 }

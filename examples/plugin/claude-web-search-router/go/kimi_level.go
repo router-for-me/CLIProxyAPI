@@ -96,10 +96,18 @@ func resolveKimiSearchPlan(cfg pluginConfig, toolCfg claudeWebSearchToolConfig, 
 		blocked: toolCfg.BlockedDomains,
 	}
 
+	// A request-level allowed_domains restriction must survive plan
+	// resolution: Basic clears sites and the model tier never applies them,
+	// so both are promoted to the site-filtered Pro tier.
+	requestRestricted := len(toolCfg.AllowedDomains) > 0
+
 	level := kimiSearchLevel(strings.ToLower(strings.TrimSpace(cfg.KimiSearchLevel)))
 	switch level {
 	case kimiLevelBasic, kimiLevelPro, kimiLevelModel:
 		plan.level = level
+		if requestRestricted && level != kimiLevelPro {
+			plan.level = kimiLevelPro
+		}
 		return plan
 	case kimiLevelFetch:
 		if u := extractURLFromQuery(query); u != "" {
@@ -115,6 +123,9 @@ func resolveKimiSearchPlan(cfg pluginConfig, toolCfg claudeWebSearchToolConfig, 
 			return plan
 		}
 		plan.level = kimiLevelBasic
+		if requestRestricted {
+			plan.level = kimiLevelPro
+		}
 		return plan
 	}
 
