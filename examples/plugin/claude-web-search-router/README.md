@@ -40,17 +40,19 @@ Conversation history is forwarded as text-only input items; Claude tool options
 this one — use `route: kimi_responses` to force it or let `fallback` reach it.
 
 - **Retry**: when several compatible credentials exist, a retryable failure
-  (429/503/502/504) moves to the next credential in the pool before the
-  backend gives up; a non-retryable failure stops immediately. Rotation is
-  uniform round-robin within the highest configured priority tier:
+  (429/503/502/504) moves to the next credential before the backend gives
+  up; a non-retryable failure stops immediately. The highest priority tier
+  is rotated first and lower tiers are tried after retryable top-tier
+  failures, mirroring the host selector's highest-*currently-available*-tier
+  semantics. Rotation within a tier is uniform round-robin because
   `host.auth.list` does not expose per-credential weights, so the host's
   weighted-round-robin (honored only when no `auth_id` is pinned) cannot be
   mirrored while pinning keeps model and endpoint matched.
 - **Degraded fallback**: when `host.auth.list` is unavailable (older host),
-  execution degrades to an unpinned coding-plan model under the provider
-  family the route decision relied on (`kimi-ai` when the host listed a
-  kimi.ai credential), so a kimi-ai-only deployment is not forced into the
-  `kimi` bucket (which would fail with `auth_not_found`).
+  execution degrades to an unpinned coding-plan model tried across both kimi
+  provider buckets (`kimi`, then `kimi-ai`, or hint-ordered when the route
+  metadata named a family) — a `kimi` bucket miss (`auth_not_found`) falls
+  through to `kimi-ai`, so a kimi-ai-only deployment still executes.
 
 ### xAI web search notes (aligned with upstream docs)
 

@@ -15,7 +15,7 @@ import (
 type executionPlan struct {
 	backend  routeBackend
 	model    string
-	provider string // kimi_responses: provider family the route decision relied on
+	provider string // kimi_responses: route-time provider family; orders unpinned bucket fallback
 }
 
 func buildExecutionPlans(cfg pluginConfig, req pluginapi.ModelRouteRequest) []executionPlan {

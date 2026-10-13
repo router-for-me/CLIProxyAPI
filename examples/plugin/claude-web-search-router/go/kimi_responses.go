@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -127,10 +128,9 @@ func highestPriorityEntries(entries []*pluginapi.HostAuthFileEntry) []*pluginapi
 	return out
 }
 
-// kimiCredentialPools splits kimi-family entries into coding-plan and
-// Moonshot platform credentials, skipping disabled and unavailable ones and
-// narrowing each pool to its highest priority tier.
-func kimiCredentialPools(entries []pluginapi.HostAuthFileEntry) (coding, platform []*pluginapi.HostAuthFileEntry) {
+// kimiCredentialPoolEntries splits kimi-family entries into coding-plan and
+// Moonshot platform credentials, skipping disabled and unavailable ones.
+func kimiCredentialPoolEntries(entries []pluginapi.HostAuthFileEntry) (coding, platform []*pluginapi.HostAuthFileEntry) {
 	for i := range entries {
 		entry := &entries[i]
 		if !isKimiProviderEntry(entry.Provider) || entry.Disabled || entry.Unavailable {
@@ -142,6 +142,34 @@ func kimiCredentialPools(entries []pluginapi.HostAuthFileEntry) (coding, platfor
 			platform = append(platform, entry)
 		}
 	}
+	return coding, platform
+}
+
+// groupPriorityTiers buckets entries into descending priority tiers (highest
+// first), preserving input order within a tier.
+func groupPriorityTiers(entries []*pluginapi.HostAuthFileEntry) [][]*pluginapi.HostAuthFileEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(entries)
+	slices.SortStableFunc(sorted, func(a, b *pluginapi.HostAuthFileEntry) int {
+		return b.Priority - a.Priority
+	})
+	var tiers [][]*pluginapi.HostAuthFileEntry
+	for _, entry := range sorted {
+		if n := len(tiers); n > 0 && tiers[n-1][0].Priority == entry.Priority {
+			tiers[n-1] = append(tiers[n-1], entry)
+		} else {
+			tiers = append(tiers, []*pluginapi.HostAuthFileEntry{entry})
+		}
+	}
+	return tiers
+}
+
+// kimiCredentialPools narrows each family pool to its highest priority tier,
+// mirroring the host auth selector's per-request narrowing.
+func kimiCredentialPools(entries []pluginapi.HostAuthFileEntry) (coding, platform []*pluginapi.HostAuthFileEntry) {
+	coding, platform = kimiCredentialPoolEntries(entries)
 	return highestPriorityEntries(coding), highestPriorityEntries(platform)
 }
 
@@ -167,48 +195,59 @@ func peekKimiResponsesTargetForModel(entries []pluginapi.HostAuthFileEntry, mode
 	})
 }
 
-// resolveKimiResponsesSelectPool picks the credential pool compatible with the
+// resolveKimiResponsesFamily picks the credential family compatible with the
 // model override: coding-plan credentials by default (platform keys when no
-// coding credential exists), the platform pool for a platform model override.
-// It returns nil when the override names a model no credential family can
-// serve, or when no compatible credential exists.
-func resolveKimiResponsesSelectPool(entries []pluginapi.HostAuthFileEntry, modelOverride string) []*pluginapi.HostAuthFileEntry {
-	coding, platform := kimiCredentialPools(entries)
-	pool := coding
+// coding credential exists), the platform family for a platform model
+// override. It returns nil when the override names a model no credential
+// family can serve, or when no compatible credential exists.
+func resolveKimiResponsesFamily(entries []pluginapi.HostAuthFileEntry, modelOverride string) []*pluginapi.HostAuthFileEntry {
+	coding, platform := kimiCredentialPoolEntries(entries)
+	family := coding
 	if modelOverride != "" {
-		family, known := kimiResponsesModelFamily(modelOverride)
+		fam, known := kimiResponsesModelFamily(modelOverride)
 		if !known {
 			return nil
 		}
-		if family == "platform" {
-			pool = platform
+		if fam == "platform" {
+			family = platform
 		}
-	} else if len(pool) == 0 {
-		pool = platform
+	} else if len(family) == 0 {
+		family = platform
 	}
-	if len(pool) == 0 {
+	if len(family) == 0 {
 		return nil
 	}
-	return pool
+	return family
 }
 
-// resolveKimiResponsesTargetsAt builds every compatible target in rotation
-// order so execution can retry the remaining credentials before leaving the
-// backend. One rotation tick is consumed and the first element is the target
-// a single-target resolve would have picked.
+// resolveKimiResponsesTargetsAt builds every compatible target in execution
+// order: the highest priority tier first, rotated within the tier (one
+// rotation tick consumed, so the first element is the target a single-target
+// resolve would have picked), then lower priority tiers descending — so a
+// retryable top-tier failure descends to the configured backup credentials,
+// mirroring the host selector's highest-*currently-available*-tier semantics
+// (sdk/cliproxy/auth/selector.go).
 func resolveKimiResponsesTargetsAt(entries []pluginapi.HostAuthFileEntry, modelOverride string, nextCounter func() uint64) []kimiResponsesTarget {
-	pool := resolveKimiResponsesSelectPool(entries, modelOverride)
-	if len(pool) == 0 {
+	family := resolveKimiResponsesFamily(entries, modelOverride)
+	if len(family) == 0 {
 		return nil
 	}
+	tiers := groupPriorityTiers(family)
 	n := nextCounter()
 	if n == 0 {
 		n = 1
 	}
-	start := int(n-1) % len(pool)
-	targets := make([]kimiResponsesTarget, 0, len(pool))
-	for i := range pool {
-		entry := pool[(start+i)%len(pool)]
+	primary := tiers[0]
+	start := int(n-1) % len(primary)
+	ordered := make([]*pluginapi.HostAuthFileEntry, 0, len(family))
+	for i := range primary {
+		ordered = append(ordered, primary[(start+i)%len(primary)])
+	}
+	for _, tier := range tiers[1:] {
+		ordered = append(ordered, tier...)
+	}
+	targets := make([]kimiResponsesTarget, 0, len(ordered))
+	for _, entry := range ordered {
 		model := kimiResponsesModelForBaseURL(entry.BaseURL)
 		if modelOverride != "" {
 			model = modelOverride
@@ -362,17 +401,48 @@ func kimiResponsesBody(claudeBody []byte, model string, stream bool) ([]byte, er
 	return json.Marshal(out)
 }
 
-// withRouteProvider applies the provider family the route decision relied on
-// to an unpinned target. Degraded fallbacks default to "kimi", which breaks
-// kimi-ai-only deployments when the host forces that bucket (auth_not_found
-// with only kimi-ai credentials available). Pinned targets keep their
-// credential-derived provider: the host rejects a pinned ID whose provider
-// does not match, so overriding it would break scheduling.
-func (t kimiResponsesTarget) withRouteProvider(routeProvider string) kimiResponsesTarget {
-	if t.authID == "" && strings.TrimSpace(routeProvider) != "" {
-		t.provider = canonicalKimiSchedulingProvider(routeProvider)
+// kimiBucketCandidates returns the forced-provider buckets an unpinned target
+// should try, in order. At execute time the plugin cannot see which kimi
+// provider families the host has — ExecutorRequest.Metadata never carries
+// ModelRouteRequest.AvailableProviders
+// (internal/pluginhost/adapters_executors.go buildExecutorRequest) — so both
+// buckets are attempted and the route-time hint only orders them.
+func kimiBucketCandidates(routeProvider string) []string {
+	if canonicalKimiSchedulingProvider(routeProvider) == "kimi-ai" {
+		return []string{"kimi-ai", "kimi"}
 	}
-	return t
+	return []string{"kimi", "kimi-ai"}
+}
+
+// expandKimiUnpinnedTargets orders unpinned targets across both kimi provider
+// buckets so degraded execution falls through to the other family when the
+// first bucket has no usable credential (host auth_not_found) — e.g. a
+// kimi-ai-only deployment no longer dies on the default "kimi" bucket. Pinned
+// targets pass through unchanged: the host rejects a pinned ID whose provider
+// does not match, so the credential-derived provider must stay.
+func expandKimiUnpinnedTargets(targets []kimiResponsesTarget, routeProvider string) []kimiResponsesTarget {
+	out := make([]kimiResponsesTarget, 0, len(targets)+1)
+	for _, target := range targets {
+		if target.authID != "" {
+			out = append(out, target)
+			continue
+		}
+		for _, bucket := range kimiBucketCandidates(routeProvider) {
+			expanded := target
+			expanded.provider = bucket
+			out = append(out, expanded)
+		}
+	}
+	return out
+}
+
+// isKimiAuthMiss reports whether the host failed to find a usable auth for
+// the target (auth_not_found). Unlike other non-retryable failures this one
+// is bucket- or credential-specific, so the retry loop moves on: another
+// credential, or the other provider bucket for an unpinned target, may still
+// serve the request.
+func isKimiAuthMiss(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "auth_not_found")
 }
 
 // kimiRouteProviderHint returns the canonical kimi scheduling provider the
@@ -419,12 +489,12 @@ type kimiAttemptOutcome struct {
 
 // runKimiCredentialAttempts executes attempt for each target in order. A
 // retryable outcome moves to the next credential; a non-retryable one stops
-// immediately because it applies to every credential in the pool. It returns
+// immediately because it applies to every credential in the pool — except an
+// auth_not_found miss, which is bucket- or credential-specific. It returns
 // the last outcome once the pool is exhausted.
-func runKimiCredentialAttempts(targets []kimiResponsesTarget, routeProvider string, attempt func(kimiResponsesTarget) kimiAttemptOutcome) kimiAttemptOutcome {
+func runKimiCredentialAttempts(targets []kimiResponsesTarget, attempt func(kimiResponsesTarget) kimiAttemptOutcome) kimiAttemptOutcome {
 	var last kimiAttemptOutcome
 	for _, target := range targets {
-		target = target.withRouteProvider(routeProvider)
 		last = attempt(target)
 		if last.err == nil {
 			if !isRetryableHTTPStatus(last.status) {
@@ -432,7 +502,7 @@ func runKimiCredentialAttempts(targets []kimiResponsesTarget, routeProvider stri
 			}
 			continue
 		}
-		if !isRetryableHTTPStatus(hostHTTPStatusFromError(last.err)) {
+		if !isRetryableHTTPStatus(hostHTTPStatusFromError(last.err)) && !isKimiAuthMiss(last.err) {
 			return last
 		}
 	}
@@ -444,11 +514,11 @@ func runKimiCredentialAttempts(targets []kimiResponsesTarget, routeProvider stri
 // giving up, so one throttled or unavailable credential does not push the
 // request to the next backend while others in the pool could still serve it.
 func hostModelExecuteKimiResponses(ctx context.Context, hostCallbackID string, cfg pluginConfig, body []byte, stream bool, routeProvider string) ([]byte, int, error) {
-	targets := resolveKimiResponsesTargets(cfg)
+	targets := expandKimiUnpinnedTargets(resolveKimiResponsesTargets(cfg), routeProvider)
 	if len(targets) == 0 {
 		return nil, 0, fmt.Errorf("kimi responses: no usable kimi credential")
 	}
-	last := runKimiCredentialAttempts(targets, routeProvider, func(target kimiResponsesTarget) kimiAttemptOutcome {
+	last := runKimiCredentialAttempts(targets, func(target kimiResponsesTarget) kimiAttemptOutcome {
 		payload, status, errRun := hostModelExecuteKimiTarget(ctx, hostCallbackID, target, body, stream)
 		return kimiAttemptOutcome{payload: payload, status: status, err: errRun}
 	})
@@ -469,20 +539,19 @@ type kimiStreamAttemptOutcome struct {
 }
 
 // runKimiStreamCredentialAttempts executes attempt for each target in order,
-// moving to the next credential only when the failure was retryable and no
-// chunk was emitted yet. Once part of a message is on the plugin stream,
-// another credential cannot be tried without emitting a second message_start
-// and corrupting the stream.
-func runKimiStreamCredentialAttempts(targets []kimiResponsesTarget, routeProvider string, attempt func(kimiResponsesTarget) kimiStreamAttemptOutcome) kimiStreamAttemptOutcome {
+// moving to the next credential only when the failure was retryable (or an
+// auth_not_found miss) and no chunk was emitted yet. Once part of a message
+// is on the plugin stream, another credential cannot be tried without
+// emitting a second message_start and corrupting the stream.
+func runKimiStreamCredentialAttempts(targets []kimiResponsesTarget, attempt func(kimiResponsesTarget) kimiStreamAttemptOutcome) kimiStreamAttemptOutcome {
 	var last kimiStreamAttemptOutcome
 	for _, target := range targets {
-		target = target.withRouteProvider(routeProvider)
 		last = attempt(target)
 		if last.err == nil {
 			if !isRetryableHTTPStatus(last.status) {
 				return last
 			}
-		} else if !isRetryableHTTPStatus(hostHTTPStatusFromError(last.err)) {
+		} else if !isRetryableHTTPStatus(hostHTTPStatusFromError(last.err)) && !isKimiAuthMiss(last.err) {
 			return last
 		}
 		if last.partial {
@@ -496,11 +565,11 @@ func runKimiStreamCredentialAttempts(targets []kimiResponsesTarget, routeProvide
 // retrying the remaining compatible credentials on retryable failures that
 // happened before any chunk was emitted.
 func hostModelStreamForwardKimiResponses(ctx context.Context, hostCallbackID string, cfg pluginConfig, body []byte, pluginStreamID string, routeProvider string) (int, bool, error) {
-	targets := resolveKimiResponsesTargets(cfg)
+	targets := expandKimiUnpinnedTargets(resolveKimiResponsesTargets(cfg), routeProvider)
 	if len(targets) == 0 {
 		return 0, false, fmt.Errorf("kimi responses: no usable kimi credential")
 	}
-	last := runKimiStreamCredentialAttempts(targets, routeProvider, func(target kimiResponsesTarget) kimiStreamAttemptOutcome {
+	last := runKimiStreamCredentialAttempts(targets, func(target kimiResponsesTarget) kimiStreamAttemptOutcome {
 		status, partial, errRun := hostModelStreamForwardKimiTarget(ctx, hostCallbackID, target, body, pluginStreamID)
 		return kimiStreamAttemptOutcome{status: status, partial: partial, err: errRun}
 	})

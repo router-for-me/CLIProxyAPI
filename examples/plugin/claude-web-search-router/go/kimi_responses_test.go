@@ -276,6 +276,14 @@ func TestRunKimiCredentialAttemptsRetrySemantics(t *testing.T) {
 			wantErr:   "400",
 		},
 		{
+			name: "auth_not_found miss moves to next credential",
+			outcomes: []kimiAttemptOutcome{
+				{err: fmt.Errorf("auth_not_found: no usable auths in bucket")},
+				{payload: []byte("ok"), status: 200},
+			},
+			wantCalls: 2,
+		},
+		{
 			name: "exhausted pool returns the last error",
 			outcomes: []kimiAttemptOutcome{
 				{err: fmt.Errorf("kimi http 429: throttled")},
@@ -288,7 +296,7 @@ func TestRunKimiCredentialAttemptsRetrySemantics(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			last := runKimiCredentialAttempts(targets, "", func(kimiResponsesTarget) kimiAttemptOutcome {
+			last := runKimiCredentialAttempts(targets, func(kimiResponsesTarget) kimiAttemptOutcome {
 				outcome := tc.outcomes[min(calls, len(tc.outcomes)-1)]
 				calls++
 				return outcome
@@ -309,16 +317,22 @@ func TestRunKimiCredentialAttemptsRetrySemantics(t *testing.T) {
 	}
 }
 
-func TestRunKimiCredentialAttemptsAppliesRouteProviderToUnpinned(t *testing.T) {
+func TestExpandKimiUnpinnedTargetsOrdersBuckets(t *testing.T) {
 	t.Parallel()
-	targets := []kimiResponsesTarget{{model: "m", provider: "kimi"}}
-	var seen []kimiResponsesTarget
-	runKimiCredentialAttempts(targets, "kimi.ai", func(target kimiResponsesTarget) kimiAttemptOutcome {
-		seen = append(seen, target)
-		return kimiAttemptOutcome{err: fmt.Errorf("kimi http 429: throttled")}
-	})
-	if len(seen) != 1 || seen[0].provider != "kimi-ai" {
-		t.Fatalf("attempt target = %+v, want unpinned provider replaced by route hint kimi-ai", seen)
+	pinned := []kimiResponsesTarget{{model: "m", authID: "a", provider: "kimi-ai"}}
+	expanded := expandKimiUnpinnedTargets(pinned, "")
+	if len(expanded) != 1 || expanded[0] != pinned[0] {
+		t.Fatalf("pinned expansion = %+v, want pass-through unchanged", expanded)
+	}
+
+	unpinned := []kimiResponsesTarget{{model: "m", provider: "kimi"}}
+	expanded = expandKimiUnpinnedTargets(unpinned, "")
+	if len(expanded) != 2 || expanded[0].provider != "kimi" || expanded[1].provider != "kimi-ai" {
+		t.Fatalf("default expansion = %+v, want kimi bucket first then kimi-ai", expanded)
+	}
+	expanded = expandKimiUnpinnedTargets(unpinned, "kimi.ai")
+	if len(expanded) != 2 || expanded[0].provider != "kimi-ai" || expanded[1].provider != "kimi" {
+		t.Fatalf("hinted expansion = %+v, want kimi-ai bucket first", expanded)
 	}
 }
 
@@ -329,7 +343,7 @@ func TestRunKimiStreamCredentialAttemptsPartialStopsRetry(t *testing.T) {
 		{model: "m2", authID: "b", provider: "kimi"},
 	}
 	calls := 0
-	last := runKimiStreamCredentialAttempts(targets, "", func(kimiResponsesTarget) kimiStreamAttemptOutcome {
+	last := runKimiStreamCredentialAttempts(targets, func(kimiResponsesTarget) kimiStreamAttemptOutcome {
 		calls++
 		return kimiStreamAttemptOutcome{partial: true, err: fmt.Errorf("kimi http 429: throttled")}
 	})
@@ -348,7 +362,7 @@ func TestRunKimiStreamCredentialAttemptsRetriesBeforeFirstChunk(t *testing.T) {
 		{model: "m2", authID: "b", provider: "kimi"},
 	}
 	calls := 0
-	last := runKimiStreamCredentialAttempts(targets, "", func(kimiResponsesTarget) kimiStreamAttemptOutcome {
+	last := runKimiStreamCredentialAttempts(targets, func(kimiResponsesTarget) kimiStreamAttemptOutcome {
 		calls++
 		if calls == 1 {
 			return kimiStreamAttemptOutcome{err: fmt.Errorf("kimi http 503: unavailable")}
@@ -360,18 +374,22 @@ func TestRunKimiStreamCredentialAttemptsRetriesBeforeFirstChunk(t *testing.T) {
 	}
 }
 
-func TestKimiResponsesTargetWithRouteProvider(t *testing.T) {
+func TestRunKimiStreamCredentialAttemptsAuthMissRetries(t *testing.T) {
 	t.Parallel()
-	pinned := kimiResponsesTarget{model: "m", authID: "a", provider: "kimi"}
-	if got := pinned.withRouteProvider("kimi-ai"); got.provider != "kimi" {
-		t.Fatalf("pinned target provider = %q, want credential-derived kimi preserved", got.provider)
+	targets := []kimiResponsesTarget{
+		{model: "m1", provider: "kimi"},
+		{model: "m1", provider: "kimi-ai"},
 	}
-	unpinned := kimiResponsesTarget{model: "m", provider: "kimi"}
-	if got := unpinned.withRouteProvider("kimi.ai"); got.provider != "kimi-ai" {
-		t.Fatalf("unpinned target provider = %q, want kimi-ai from route hint", got.provider)
+	calls := 0
+	last := runKimiStreamCredentialAttempts(targets, func(kimiResponsesTarget) kimiStreamAttemptOutcome {
+		calls++
+		return kimiStreamAttemptOutcome{err: fmt.Errorf("auth_not_found: no usable auths in bucket")}
+	})
+	if calls != 2 {
+		t.Fatalf("attempts = %d, want both buckets tried on auth miss", calls)
 	}
-	if got := unpinned.withRouteProvider("   "); got.provider != "kimi" {
-		t.Fatalf("empty hint changed provider to %q", got.provider)
+	if last.err == nil || !strings.Contains(last.err.Error(), "auth_not_found") {
+		t.Fatalf("last.err = %v, want the auth miss returned", last.err)
 	}
 }
 
@@ -388,5 +406,40 @@ func TestKimiRouteProviderHint(t *testing.T) {
 	}
 	if got := kimiRouteProviderHint(nil); got != "" {
 		t.Fatalf("nil hint = %q, want empty", got)
+	}
+}
+
+func TestResolveKimiResponsesTargetsDescendsPriorityTiers(t *testing.T) {
+	t.Parallel()
+	entry := func(id string, priority int) pluginapi.HostAuthFileEntry {
+		return pluginapi.HostAuthFileEntry{Provider: "kimi", BaseURL: "https://api.kimi.com/coding", ID: id, Priority: priority}
+	}
+	entries := []pluginapi.HostAuthFileEntry{
+		entry("cred-top-a", 10),
+		entry("cred-top-b", 10),
+		entry("cred-backup", 1),
+	}
+	tick := uint64(0)
+	next := func() uint64 { tick++; return tick }
+
+	targets := resolveKimiResponsesTargetsAt(entries, "", next)
+	if len(targets) != 3 {
+		t.Fatalf("targets = %+v, want top tier plus backup", targets)
+	}
+	primary := map[string]bool{targets[0].authID: true, targets[1].authID: true}
+	if !primary["cred-top-a"] || !primary["cred-top-b"] {
+		t.Fatalf("primary tier = %q, %q; want both top-tier credentials", targets[0].authID, targets[1].authID)
+	}
+	if targets[2].authID != "cred-backup" {
+		t.Fatalf("backup slot = %q, want cred-backup", targets[2].authID)
+	}
+
+	// Rotation stays within the top tier; the backup never captures the
+	// first attempt while a top-tier credential exists.
+	tick = 0
+	for i := 0; i < 4; i++ {
+		if target, ok := resolveKimiResponsesTargetAt(entries, "", next); !ok || target.authID == "cred-backup" {
+			t.Fatalf("single resolve = %+v (%v), want top-tier only", target, ok)
+		}
 	}
 }
