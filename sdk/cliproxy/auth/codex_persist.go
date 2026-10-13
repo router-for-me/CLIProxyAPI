@@ -93,6 +93,15 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 			auth.Metadata = make(map[string]any)
 		}
 		auth.Metadata["disabled"] = auth.Disabled
+		if mode, ok := ctx.Value(authUpdateModeContextKey{}).(updateAuthMode); ok && mode == updateModeReplace && !HasAuthCreationIntent(ctx) {
+			// Storage snapshots carry login-time tokens and configuration. An
+			// explicit Update owns configuration edits and deletions, while the
+			// locked disk record remains authoritative for credential partitions.
+			replaced, errReplace := persistCodexConfigurationReplace(path, auth)
+			if errReplace != nil || replaced {
+				return true, errReplace
+			}
+		}
 		if storage, ok := auth.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
 			clonedStorage := *storage
 			clonedStorage.ReplaceCredentials = HasAuthCreationIntent(ctx)
@@ -142,4 +151,38 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 	default:
 		return false, nil
 	}
+}
+
+// persistCodexConfigurationReplace applies an explicit configuration update to
+// an existing record. It returns replaced=false when no record exists, leaving
+// first writes to the storage save path.
+func persistCodexConfigurationReplace(path string, auth *Auth) (bool, error) {
+	replaced := false
+	errLock := codex.WithFileLock(path, func() error {
+		existing, errRead := os.ReadFile(path)
+		if errRead != nil {
+			if os.IsNotExist(errRead) {
+				return nil
+			}
+			return fmt.Errorf("auth filestore: read existing failed: %w", errRead)
+		}
+		var diskMap map[string]any
+		if errUnmarshal := json.Unmarshal(existing, &diskMap); errUnmarshal != nil || diskMap == nil {
+			return fmt.Errorf("auth filestore: invalid existing credential JSON")
+		}
+		merged := codex.MergeCodexCredentialsFromDisk(diskMap, auth.Metadata)
+		if _, hasType := merged["type"]; !hasType {
+			// Storage-backed metadata omits the record type that storage saves add.
+			merged["type"] = "codex"
+		}
+		merged["disabled"] = auth.Disabled
+		NormalizeCredentialMetadata(merged)
+		if errWrite := codex.WriteJSONFileAtomic(path, merged); errWrite != nil {
+			return errWrite
+		}
+		auth.Metadata = merged
+		replaced = true
+		return nil
+	})
+	return replaced, errLock
 }
