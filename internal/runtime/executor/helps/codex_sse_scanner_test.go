@@ -106,6 +106,12 @@ func TestCodexSSEScannerAssemblesEventData(t *testing.T) {
 			warnings: 1,
 		},
 		{
+			name:     "only the first invalid event in a stream is described",
+			stream:   "data: {\"a\":\n\ndata: {\"b\":\n\ndata: {\"c\":3}\n\n",
+			want:     []string{"data: {\"a\":", "", "data: {\"b\":", "", `data: {"c":3}`, ""},
+			warnings: 1,
+		},
+		{
 			name:   "a complete object on its own line inside an open array stays in the event",
 			stream: "data: {\"type\":\"response.completed\",\"response\":{\"output\":[\ndata: {\"id\":\"m\",\"type\":\"message\"}\ndata: ]}}\n\n",
 			want:   []string{`data: {"type":"response.completed","response":{"output":[{"id":"m","type":"message"}]}}`, ""},
@@ -222,6 +228,26 @@ func TestCodexSSEScannerAssemblesAnEventOfThousandsOfLinesQuickly(t *testing.T) 
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("assembling 2,001 data lines took %v; validation must not grow with every line", elapsed)
+	}
+}
+
+func TestCodexSSEScannerHoldsAnEventInMemoryThatFollowsItsBytes(t *testing.T) {
+	// One valid event of 100,000 empty data lines: about 600 KB, well within the line limit.
+	stream := "data: [\n" + strings.Repeat("data:\n", 100_000) + "data: ]\n\n"
+	var got []string
+	allocs := testing.AllocsPerRun(1, func() {
+		got = got[:0]
+		scanner := NewCodexSSEScanner(context.Background(), strings.NewReader(stream), 1<<20)
+		for scanner.Scan() {
+			got = append(got, string(scanner.Bytes()))
+		}
+	})
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", []string{"data: []", ""}) {
+		t.Fatalf("lines = %q", got)
+	}
+	// Holding each line separately costs at least one allocation per line.
+	if allocs > 1000 {
+		t.Fatalf("assembling 100,002 data lines took %.0f allocations; holding an event must not allocate per line", allocs)
 	}
 }
 

@@ -35,8 +35,8 @@ var codexSSEDataPrefix = []byte("data:")
 //   - the collected bytes would exceed the line limit.
 //
 // A completed event is delivered compacted onto one line. One that never becomes valid JSON is
-// delivered as the same multi-line data field, so it still fails downstream, and one warning
-// describes its framing without any of its bytes.
+// delivered as the same multi-line data field, so it still fails downstream. The first such event
+// in a stream gets one warning that describes its framing without any of its bytes.
 //
 // The scanner merges data lines and nothing else. It holds only the data lines of an event being
 // collected and delivers every other line the moment it reads it, in the order read. A comment,
@@ -52,14 +52,18 @@ type CodexSSEScanner struct {
 	maxBytes int
 	// stock is set while assembly is off.
 	stock bool
-	// held are the data lines of the event being collected, as read. joined is their joined value,
-	// nesting follows it, and size counts the held bytes.
-	held    [][]byte
+	// held is the event being collected: its data lines as read, joined with "\n" in one buffer, so
+	// its memory follows its bytes, not its line count. count is how many lines it holds and size
+	// their bytes. joined is their joined value, and nesting follows it.
+	held    []byte
+	count   int
+	size    int
 	joined  []byte
 	nesting codexJSONNesting
-	size    int
 	queue   [][]byte
 	current []byte
+	// warned is set once the stream has had its invalid-event warning.
+	warned bool
 }
 
 // NewCodexSSEScanner returns a CodexSSEScanner over r, with assembly on. maxBytes bounds one line,
@@ -84,14 +88,14 @@ func (s *CodexSSEScanner) Scan() bool {
 	for s.lines.Scan() {
 		line := s.lines.Bytes()
 		if !bytes.HasPrefix(line, codexSSEDataPrefix) {
-			if len(line) == 0 && s.held != nil {
+			if len(line) == 0 && s.count > 0 {
 				s.release([]byte{})
 				return s.Scan()
 			}
 			s.current = line
 			return true
 		}
-		if s.held == nil {
+		if s.count == 0 {
 			if s.stock || !codexSSEIncompleteJSON(bytes.TrimSpace(line[len(codexSSEDataPrefix):])) {
 				s.current = line
 				return true
@@ -101,13 +105,12 @@ func (s *CodexSSEScanner) Scan() bool {
 			s.release(bytes.Clone(line))
 			return s.Scan()
 		}
-		// The underlying scanner reuses its buffer, so keep a copy.
-		if s.hold(bytes.Clone(line)) {
+		if s.hold(line) {
 			s.release()
 			return s.Scan()
 		}
 	}
-	if s.held != nil {
+	if s.count > 0 {
 		s.release()
 		return s.Scan()
 	}
@@ -117,12 +120,14 @@ func (s *CodexSSEScanner) Scan() bool {
 // hold adds a data line to the event being collected and reports whether its data has closed.
 func (s *CodexSSEScanner) hold(line []byte) bool {
 	value := codexSSEValue(line)
-	if s.held != nil {
+	if s.count > 0 {
+		s.held = append(s.held, '\n')
 		s.joined = append(s.joined, '\n')
 		s.nesting.feed([]byte{'\n'})
 	}
-	s.held = append(s.held, line)
+	s.held = append(s.held, line...)
 	s.joined = append(s.joined, value...)
+	s.count++
 	s.size += len(line)
 	return s.nesting.feed(value)
 }
@@ -130,8 +135,8 @@ func (s *CodexSSEScanner) hold(line []byte) bool {
 // release ends the collection and queues the event as one line, followed by the line that ended
 // it, if any.
 func (s *CodexSSEScanner) release(end ...[]byte) {
-	s.queue = append(append(s.queue, s.assemble(s.held, s.joined)), end...)
-	s.held, s.joined, s.nesting, s.size = nil, nil, codexJSONNesting{}, 0
+	s.queue = append(append(s.queue, s.assemble(s.held, s.count, s.joined)), end...)
+	s.held, s.count, s.size, s.joined, s.nesting = nil, 0, 0, nil, codexJSONNesting{}
 }
 
 // codexSSEValue is one data line's value: the text after "data:" without the one leading space.
@@ -199,10 +204,12 @@ func (s *CodexSSEScanner) Bytes() []byte { return s.current }
 // Err returns the error that stopped the scan, as bufio.Scanner does.
 func (s *CodexSSEScanner) Err() error { return s.lines.Err() }
 
-func (s *CodexSSEScanner) assemble(lines [][]byte, joined []byte) []byte {
-	if len(lines) == 1 {
-		s.diagnose(lines, bytes.TrimSpace(joined))
-		return lines[0]
+// assemble returns the event held as lines data lines: compacted onto one line when its data is
+// valid JSON, otherwise as held.
+func (s *CodexSSEScanner) assemble(held []byte, lines int, joined []byte) []byte {
+	if lines == 1 {
+		s.diagnose(held, lines, bytes.TrimSpace(joined))
+		return held
 	}
 	if json.Valid(joined) {
 		var compacted bytes.Buffer
@@ -213,36 +220,40 @@ func (s *CodexSSEScanner) assemble(lines [][]byte, joined []byte) []byte {
 			return compacted.Bytes()
 		}
 	}
-	s.diagnose(lines, joined)
-	return bytes.Join(lines, []byte("\n"))
+	s.diagnose(held, lines, joined)
+	return held
 }
 
-// diagnose logs one bounded warning when an event's data is not valid JSON: how many data lines
-// carried it, each line's length and whether it is valid on its own, and where the joined data
-// fails to parse. It never logs data bytes.
-func (s *CodexSSEScanner) diagnose(lines [][]byte, data []byte) {
-	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) || json.Valid(data) {
+// diagnose logs one bounded warning for the first event in the stream whose data is not valid
+// JSON, so a broken upstream cannot turn every event into a log line. It describes how many data
+// lines carried it, each line's length and whether it is valid on its own, and where the joined
+// data fails to parse. It never logs data bytes.
+func (s *CodexSSEScanner) diagnose(held []byte, lines int, data []byte) {
+	if s.warned || len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) || json.Valid(data) {
 		return
 	}
+	s.warned = true
 	offset := int64(-1)
 	var syntaxErr *json.SyntaxError
 	if errors.As(json.Unmarshal(data, new(json.RawMessage)), &syntaxErr) {
 		offset = syntaxErr.Offset
 	}
-	shown := min(len(lines), codexSSEDiagnosticLines)
+	shown := min(lines, codexSSEDiagnosticLines)
 	lengths := make([]string, shown)
 	valid := make([]string, shown)
 	for i := range shown {
-		value := bytes.TrimSpace(lines[i][len(codexSSEDataPrefix):])
+		var line []byte
+		line, held, _ = bytes.Cut(held, []byte("\n"))
+		value := bytes.TrimSpace(line[len(codexSSEDataPrefix):])
 		lengths[i] = strconv.Itoa(len(value))
 		valid[i] = strconv.FormatBool(json.Valid(value))
 	}
 	more := ""
-	if len(lines) > shown {
-		more = ",+" + strconv.Itoa(len(lines)-shown)
+	if lines > shown {
+		more = ",+" + strconv.Itoa(lines-shown)
 	}
 	LogWithRequestID(s.ctx).WithFields(log.Fields{
-		"data_lines":        len(lines),
+		"data_lines":        lines,
 		"line_bytes":        strings.Join(lengths, ",") + more,
 		"lines_valid":       strings.Join(valid, ",") + more,
 		"data_bytes":        len(data),
