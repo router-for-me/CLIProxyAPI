@@ -515,10 +515,26 @@ func (h metaModelRegistrationHook) OnAuthUpdated(ctx context.Context, auth *core
 	h.reregister(ctx, auth)
 }
 
+type metaRegistrationContextKey struct{}
+
 func (h metaModelRegistrationHook) reregister(ctx context.Context, auth *coreauth.Auth) {
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Plugin model discovery can save an auth update mid-registration,
+	// which fires this hook again on the same call chain. The outer
+	// registration already completes with the updated auth, so nested
+	// invocations must not recurse.
+	if ctx.Value(metaRegistrationContextKey{}) != nil {
+		return
+	}
+	// The credential update already committed and persisted before this
+	// hook fired. Reconciliation must finish even when the caller's
+	// request context was canceled in between.
+	ctx = context.WithValue(context.WithoutCancel(ctx), metaRegistrationContextKey{}, true)
 	h.service.completeModelRegistrationForAuth(ctx, auth)
 }
 

@@ -72,6 +72,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 	var models []*ModelInfo
+	filterMetaWonderFull := false
 	switch provider {
 	case constant.Gemini:
 		models = registry.GetGeminiModels()
@@ -197,9 +198,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 		// OAuth credentials can resolve an entry by base URL alone, so only
 		// API-key credentials treat configured models as an opt-in.
-		if !configured || authKind != "apikey" {
-			models = applyMetaWonderFullEntitlement(models, a)
-		}
+		filterMetaWonderFull = !configured || authKind != "apikey"
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if cfg := s.currentConfig(); cfg != nil {
@@ -317,6 +316,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		key = strings.ToLower(strings.TrimSpace(a.Provider))
 	}
 	models = s.appendPluginModels(key, models)
+	// Static plugin models merge after the catalog, so the entitlement gate
+	// must run on the merged list.
+	if filterMetaWonderFull {
+		models = applyMetaWonderFullEntitlement(models, a)
+	}
 	if len(models) > 0 {
 		models = applyOAuthSettingsForAuth(cfg, provider, authKind, models)
 		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix))

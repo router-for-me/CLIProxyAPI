@@ -255,3 +255,52 @@ func TestRegisterModelsForAuth_MetaOAuthConfigMatchStaysEntitlementFiltered(t *t
 		t.Fatalf("expected Wonder Full (including its muse-full alias) to stay filtered for an OAuth credential matched only by base URL, got %v", seen)
 	}
 }
+
+func TestMetaRegistrationHookGuardsReentrancyAndCancellation(t *testing.T) {
+	coreManager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: coreManager}
+	hook := metaModelRegistrationHook{service: service}
+	coreManager.AddHook(hook)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-meta-hook-guards",
+		Provider: "meta",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"type":      "meta",
+			"auth_kind": "oauth",
+			"dca_token": "dca:valid",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	registered, errRegister := coreManager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	if seen := metaRegisteredModelIDs(auth.ID); !seen["muse-wonder-1.0"] {
+		t.Fatalf("want Wonder registered after Register, got %v", seen)
+	}
+
+	registry.UnregisterClient(auth.ID)
+	nestedCtx := context.WithValue(context.Background(), metaRegistrationContextKey{}, true)
+	hook.reregister(nestedCtx, registered)
+	if seen := metaRegisteredModelIDs(auth.ID); len(seen) != 0 {
+		t.Fatalf("want nested reregister to no-op, got %v", seen)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	hook.reregister(canceledCtx, registered)
+	if seen := metaRegisteredModelIDs(auth.ID); !seen["muse-wonder-1.0"] {
+		t.Fatalf("want Wonder registered despite canceled context, got %v", seen)
+	}
+}

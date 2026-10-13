@@ -577,6 +577,9 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	cfg := s.currentConfig()
 	models := applyExcludedModels(result.Models, activeExcluded)
 	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
+	if strings.EqualFold(providerKey, "meta") && !strings.EqualFold(activeAuthKind, "apikey") {
+		models = applyMetaWonderFullEntitlement(models, activeAuth)
+	}
 	if len(models) > 0 {
 		models = applyOAuthSettingsForAuth(cfg, providerKey, activeAuthKind, models)
 		s.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))
