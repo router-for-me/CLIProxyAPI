@@ -340,6 +340,8 @@ func (h *BaseAPIHandler) interceptorHost() PluginInterceptorHost {
 	if h == nil {
 		return nil
 	}
+	h.runtimeMu.RLock()
+	defer h.runtimeMu.RUnlock()
 	return h.PluginHost
 }
 

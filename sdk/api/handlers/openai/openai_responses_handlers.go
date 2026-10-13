@@ -551,7 +551,11 @@ func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 }
 
 func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {
-	if h == nil || h.Cfg == nil {
+	if h == nil {
+		return payload
+	}
+	cfg := h.CurrentConfig()
+	if cfg == nil {
 		return payload
 	}
 
@@ -570,7 +574,7 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context
 		requestCtx,
 		requestHeaders,
 		payload,
-		h.Cfg.Client.Codex.OptimizeMultiAgentV2,
+		cfg.Client.Codex.OptimizeMultiAgentV2,
 		homeEnabled,
 	)
 	if prepared && c != nil {
@@ -580,7 +584,11 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context
 }
 
 func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context, payload []byte) []byte {
-	if h == nil || h.Cfg == nil || !h.Cfg.CodexOrphanDelegationCompatibility {
+	if h == nil {
+		return payload
+	}
+	cfg := h.CurrentConfig()
+	if cfg == nil || !cfg.CodexOrphanDelegationCompatibility {
 		return payload
 	}
 	requestCtx := context.Background()
@@ -754,7 +762,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		}
 		return true
 	}
-	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.Cfg)
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
 	defer stopKeepAlive()
 
 	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
