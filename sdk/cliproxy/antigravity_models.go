@@ -234,6 +234,8 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hin
 	}
 	value := map[string]any{
 		"model_ids": modelItems,
+		// updated_at tells operators how fresh a persisted entitlement list is; parsers ignore it.
+		"updated_at": antigravityNowFunc().UTC().Format(time.RFC3339),
 	}
 	if project = strings.TrimSpace(project); project != "" {
 		value["project_id"] = project
@@ -415,10 +417,14 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 			}
 		}
 		if status == antigravityProbeStatusSuccess && hints.ModelIDs != nil {
+			previousModelIDs := current.hints.ModelIDs
 			hints.revision = revision
 			current.hints, current.expiresAt, current.lastUsed = hints.clone(), now.Add(antigravityCapabilityCacheTTL), now
 			antigravityCapabilityCache[cacheKey] = current
 			delete(antigravityAuthFailureCache, failureKey)
+			if added, removed := diffEntitlementModelIDs(previousModelIDs, hints.ModelIDs); len(added) > 0 || len(removed) > 0 {
+				log.Infof("antigravity: account model list changed for %s: added %v, removed %v", auth.ID, added, removed)
+			}
 			return hints, nil
 		}
 		// Missing models (including legacy capability-only responses) are not a
@@ -599,6 +605,27 @@ func normalizeAntigravityFetchedModelID(modelID string) string {
 	return strings.ToLower(strings.TrimSpace(modelID))
 }
 
+// diffEntitlementModelIDs reports sorted upstream model IDs present only in next (added)
+// and only in previous (removed). A nil previous map suppresses the initial observation.
+func diffEntitlementModelIDs(previous, next map[string]struct{}) (added, removed []string) {
+	if previous == nil {
+		return nil, nil
+	}
+	for id := range next {
+		if _, ok := previous[id]; !ok {
+			added = append(added, id)
+		}
+	}
+	for id := range previous {
+		if _, ok := next[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	slices.Sort(added)
+	slices.Sort(removed)
+	return added, removed
+}
+
 // WaitAntigravityProbes waits for any in-flight asynchronous Antigravity capability probes to complete.
 func (s *Service) WaitAntigravityProbes() {
 	if s == nil {
@@ -712,9 +739,8 @@ func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth
 			s.cfgMu.RUnlock()
 			return
 		}
-		reg := registry.GetGlobalRegistry()
 		var appliedEpoch uint64
-		appliedEpoch, updated = reg.ReplaceClientModels(auth.ID, providerKey, expectedRegEpoch, models)
+		appliedEpoch, updated = registry.GetGlobalRegistry().ReplaceClientModels(auth.ID, providerKey, expectedRegEpoch, models)
 		if updated {
 			entry.appliedRevision = hints.revision
 			entry.appliedEpoch = appliedEpoch
