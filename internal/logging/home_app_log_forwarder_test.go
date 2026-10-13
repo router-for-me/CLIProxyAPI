@@ -66,7 +66,7 @@ func TestHomeAppLogForwarder_ForwardsFormattedLogWhenBoundOwnerIsHealthy(t *test
 	entry.Time = time.Date(2026, 5, 29, 8, 0, 0, 0, time.Local)
 	entry.Level = log.DebugLevel
 	entry.Message = "debug details"
-	entry.Data["request_id"] = "req-app-1"
+	entry.Data["request_id"] = "req-app1"
 
 	if errFire := forwarder.Fire(entry); errFire != nil {
 		t.Fatalf("Fire error: %v", errFire)
@@ -87,13 +87,13 @@ func TestHomeAppLogForwarder_ForwardsFormattedLogWhenBoundOwnerIsHealthy(t *test
 	if got.Level != "debug" {
 		t.Fatalf("level = %q, want debug", got.Level)
 	}
-	if got.RequestID != "req-app-1" {
-		t.Fatalf("request_id = %q, want req-app-1", got.RequestID)
+	if got.RequestID != "req-app1" {
+		t.Fatalf("request_id = %q, want req-app1", got.RequestID)
 	}
 	if !strings.Contains(got.Line, "debug details") {
 		t.Fatalf("line %q missing log message", got.Line)
 	}
-	if !strings.Contains(got.Line, "[req-app-1]") {
+	if !strings.Contains(got.Line, "[req-app1]") {
 		t.Fatalf("line %q missing matching request id", got.Line)
 	}
 	if strings.TrimSpace(got.Timestamp) == "" {

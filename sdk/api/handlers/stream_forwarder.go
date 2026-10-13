@@ -35,6 +35,12 @@ type StreamForwardOptions struct {
 	// The failure is passed to cancel without writing another terminal payload.
 	ChunkError func() *interfaces.ErrorMessage
 
+	// ChunkDone reports successful terminal delivery after WriteChunk and Flush.
+	ChunkDone func() bool
+
+	// Flush optionally exposes transport flush errors hidden by http.Flusher.
+	Flush func() error
+
 	// NormalizeTerminalError optionally replaces an upstream error before it is
 	// written or passed to cancel.
 	NormalizeTerminalError func(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage
@@ -62,6 +68,18 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 	}
 	if cancel == nil {
 		return
+	}
+
+	flush := func() bool {
+		if opts.Flush != nil {
+			if errFlush := opts.Flush(); errFlush != nil {
+				cancel(errFlush)
+				return false
+			}
+		} else {
+			flusher.Flush()
+		}
+		return true
 	}
 
 	writeChunk := opts.WriteChunk
@@ -112,19 +130,25 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					if opts.WriteTerminalError != nil {
 						opts.WriteTerminalError(terminalErr)
 					}
-					flusher.Flush()
+					if !flush() {
+						return
+					}
 					cancel(terminalErr.Error)
 					return
 				}
 				if opts.WriteDone != nil {
 					opts.WriteDone()
 				}
-				flusher.Flush()
+				if !flush() {
+					return
+				}
 				cancel(nil)
 				return
 			}
 			writeChunk(chunk)
-			flusher.Flush()
+			if !flush() {
+				return
+			}
 			if opts.ChunkError != nil {
 				chunkErr := opts.ChunkError()
 				if chunkErr != nil {
@@ -139,6 +163,10 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					return
 				}
 			}
+			if opts.ChunkDone != nil && opts.ChunkDone() {
+				cancel(nil)
+				return
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -151,7 +179,9 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				}
 				if opts.WriteTerminalError != nil {
 					opts.WriteTerminalError(terminalErr)
-					flusher.Flush()
+					if !flush() {
+						return
+					}
 				}
 			}
 			var execErr error
@@ -162,7 +192,9 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			return
 		case <-keepAliveC:
 			writeKeepAlive()
-			flusher.Flush()
+			if !flush() {
+				return
+			}
 		}
 	}
 }

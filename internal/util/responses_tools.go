@@ -7,15 +7,17 @@ import (
 	"sort"
 	"strings"
 
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 // ResponsesToolIdentity represents the resolved identity of a tool in OpenAI Responses format.
 type ResponsesToolIdentity struct {
-	Name      string
-	Namespace string
-	Custom    bool
+	Name       string
+	Namespace  string
+	Custom     bool
+	ApplyPatch bool // Resolved from the winning original declaration, never from the upstream name.
 }
 
 // ResponsesToolDescriptor is an internal representation of a tool declaration in a Responses request.
@@ -298,9 +300,10 @@ func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]st
 		}
 
 		identity := ResponsesToolIdentity{
-			Name:      desc.LocalName,
-			Namespace: desc.Namespace,
-			Custom:    desc.ToolType == "custom",
+			Name:       desc.LocalName,
+			Namespace:  desc.Namespace,
+			Custom:     desc.ToolType == "custom",
+			ApplyPatch: applypatch.IsCustomTool(desc.Tool),
 		}
 		reverseMap[geminiName] = identity
 		if desc.Name != geminiName {
@@ -313,7 +316,10 @@ func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]st
 			funcDecl, _ = sjson.SetBytes(funcDecl, "description", descStr)
 		}
 
-		if desc.ToolType == "custom" {
+		if applypatch.IsCustomTool(desc.Tool) {
+			funcDecl, _ = sjson.SetBytes(funcDecl, "description", applypatch.Description(desc.Tool))
+			funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", applypatch.Parameters())
+		} else if desc.ToolType == "custom" {
 			funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`))
 		} else {
 			params := responsesToolParameters(desc.Tool)

@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -1607,5 +1608,820 @@ func TestConvertClaudeResponseToOpenAIResponses_EmptyFunctionArgsConsistentOnTru
 	}
 	if got := incomplete.Get("response.output.0.arguments").String(); got != "" {
 		t.Fatalf("response.output.0.arguments = %q, want empty string", got)
+	}
+}
+
+func applyPatchClaudeStart(index int, id, name string) []byte {
+	return []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%q,"name":%q,"input":{}}}`, index, id, name))
+}
+func applyPatchClaudeFragment(index int, fragment string) []byte {
+	return []byte(fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%q}}`, index, fragment))
+}
+func applyPatchClaudeEnd() [][]byte {
+	return [][]byte{[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`), []byte(`data: {"type":"message_stop"}`)}
+}
+func applyPatchClaudeEvents(t *testing.T, chunks [][]byte) []gjson.Result {
+	t.Helper()
+	var events []gjson.Result
+	for _, chunk := range chunks {
+		_, data := parseClaudeResponsesSSEEvent(t, chunk)
+		events = append(events, data)
+	}
+	return events
+}
+
+const applyPatchClaudeRequest = `{"tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}`
+
+func TestApplyPatchClaudePreviewBeforeDone(t *testing.T) {
+	request := []byte(applyPatchClaudeRequest)
+	var param any
+	feed := func(chunk []byte) []gjson.Result {
+		return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", request, nil, chunk, &param))
+	}
+	feed(applyPatchClaudeStart(0, "c1", "apply_patch"))
+	preview := feed(applyPatchClaudeFragment(0, `{"input":"*** Begin Patch\n*** Add File: a.txt\n+hello\n`))
+	if len(preview) != 1 || preview[0].Get("type").String() != "response.custom_tool_call_input.delta" || preview[0].Get("delta").String() != "*** Begin Patch\n*** Add File: a.txt\n+hello\n" {
+		t.Fatalf("missing real decoded preview: %v", preview)
+	}
+	if preview[0].Get("call_id").String() != "c1" || preview[0].Get("item_id").String() != "ctc_c1" {
+		t.Fatalf("preview identity: %s", preview[0].Raw)
+	}
+	var events []gjson.Result
+	events = append(events, preview...)
+	events = append(events, feed(applyPatchClaudeFragment(0, `*** End Patch"}`))...)
+	for _, chunk := range applyPatchClaudeEnd() {
+		events = append(events, feed(chunk)...)
+	}
+	want := "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch"
+	var deltas strings.Builder
+	seenDone, seenItem, seenCompleted := false, false, false
+	lastSequence := 0
+	for _, event := range events {
+		if sequence := int(event.Get("sequence_number").Int()); sequence <= lastSequence {
+			t.Fatalf("non-monotonic sequence: %s", event.Raw)
+		} else {
+			lastSequence = sequence
+		}
+		switch event.Get("type").String() {
+		case "response.custom_tool_call_input.delta":
+			deltas.WriteString(event.Get("delta").String())
+		case "response.custom_tool_call_input.done":
+			seenDone = true
+			if deltas.String() != want || event.Get("input").String() != want || event.Get("call_id").String() != "c1" {
+				t.Fatalf("input.done mismatch: %s", event.Raw)
+			}
+		case "response.output_item.done":
+			seenItem = true
+			if !seenDone || event.Get("item.input").String() != want {
+				t.Fatalf("item.done mismatch: %s", event.Raw)
+			}
+		case "response.completed":
+			seenCompleted = true
+			if !seenItem || event.Get("response.output.0.input").String() != want {
+				t.Fatalf("completed mismatch: %s", event.Raw)
+			}
+		}
+	}
+	if !seenDone || !seenItem || !seenCompleted {
+		t.Fatalf("missing terminal events: %v", events)
+	}
+}
+
+func TestApplyPatchClaudeLateIdentityAndInterleavedCalls(t *testing.T) {
+	var param any
+	feed := func(chunk []byte) []gjson.Result {
+		return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))
+	}
+	feed(applyPatchClaudeStart(0, "", ""))
+	for _, event := range feed(applyPatchClaudeFragment(0, `{"input":"first\n`)) {
+		if strings.Contains(event.Get("type").String(), "arguments.delta") || event.Get("type").String() == "response.custom_tool_call_input.delta" {
+			t.Fatalf("emitted before identity: %s", event.Raw)
+		}
+	}
+	var events []gjson.Result
+	events = append(events, feed(applyPatchClaudeStart(0, "c1", "apply_patch"))...)
+	events = append(events, feed(applyPatchClaudeStart(1, "c2", "apply_patch"))...)
+	events = append(events, feed(applyPatchClaudeFragment(1, `{"input":"second`))...)
+	events = append(events, feed(applyPatchClaudeFragment(0, `tail"}`))...)
+	events = append(events, feed(applyPatchClaudeFragment(1, ` tail"}`))...)
+	for _, chunk := range applyPatchClaudeEnd() {
+		events = append(events, feed(chunk)...)
+	}
+	inputs := map[string]string{}
+	indices := map[string]int64{}
+	done := map[string]string{}
+	for _, event := range events {
+		switch event.Get("type").String() {
+		case "response.custom_tool_call_input.delta":
+			id := event.Get("call_id").String()
+			inputs[id] += event.Get("delta").String()
+			indices[id] = event.Get("output_index").Int()
+		case "response.custom_tool_call_input.done":
+			done[event.Get("call_id").String()] = event.Get("input").String()
+		case "response.failed":
+			t.Fatalf("interleaved calls failed: %s", event.Raw)
+		}
+	}
+	if inputs["c1"] != "first\ntail" || inputs["c2"] != "second tail" || done["c1"] != inputs["c1"] || done["c2"] != inputs["c2"] || indices["c1"] == indices["c2"] {
+		t.Fatalf("mixed calls: inputs=%v done=%v indices=%v", inputs, done, indices)
+	}
+}
+
+func TestApplyPatchClaudeInvalidArgumentsFailOnce(t *testing.T) {
+	for _, arguments := range []string{`plain patch`, `{}`, `{"input":42}`, `{"input":"x","extra":1}`, `{"input":"x","input":"y"}`, `{"input":"x"} {}`, `{"input":"unfinished`, `{"input":"bad\q"}`, `{"input":"\ud800"}`} {
+		t.Run(arguments, func(t *testing.T) {
+			var param any
+			var events []gjson.Result
+			feed := func(chunk []byte) {
+				events = append(events, applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))...)
+			}
+			feed(applyPatchClaudeStart(0, "c1", "apply_patch"))
+			feed(applyPatchClaudeFragment(0, arguments))
+			for _, chunk := range applyPatchClaudeEnd() {
+				feed(chunk)
+			}
+			for _, chunk := range applyPatchClaudeEnd() {
+				feed(chunk)
+			}
+			failureCount := 0
+			for _, event := range events {
+				switch event.Get("type").String() {
+				case "response.failed":
+					failureCount++
+					if event.Get("response.error.code").String() != "invalid_tool_arguments" {
+						t.Fatalf("wrong failure: %s", event.Raw)
+					}
+				case "response.completed", "response.incomplete", "response.custom_tool_call_input.done", "response.output_item.done":
+					t.Fatalf("invalid arguments succeeded: %s", event.Raw)
+				}
+			}
+			state, ok := param.(interface{ ToolInputError() error })
+			if failureCount != 1 || !ok || state.ToolInputError() == nil {
+				t.Fatalf("missing retained failure: count=%d state=%T", failureCount, param)
+			}
+		})
+	}
+}
+
+func TestApplyPatchClaudeWinnerAndNamespace(t *testing.T) {
+	for _, tc := range []struct{ name, request, upstream, wantType, wantName, namespace string }{
+		{"function", `{"tools":[{"type":"function","name":"apply_patch"}]}`, "apply_patch", "function_call", "apply_patch", ""},
+		{"function wins", `{"tools":[{"type":"function","name":"apply_patch"}],"input":[{"type":"additional_tools","tools":[{"type":"custom","name":"apply_patch"}]}]}`, "apply_patch", "function_call", "apply_patch", ""},
+		{"custom wins", `{"tools":[{"type":"custom","name":"apply_patch"}],"input":[{"type":"additional_tools","tools":[{"type":"function","name":"apply_patch"}]}]}`, "apply_patch", "custom_tool_call", "apply_patch", ""},
+		{"namespace", `{"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]}]}`, "editor__apply_patch", "custom_tool_call", "apply_patch", "editor"},
+		{"flat collision", `{"tools":[{"type":"function","name":"editor__apply_patch"},{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]}]}`, "editor__apply_patch", "function_call", "editor__apply_patch", ""},
+		{"same source custom first", `{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"apply_patch"}]}`, "apply_patch", "custom_tool_call", "apply_patch", ""},
+		{"same source function first", `{"tools":[{"type":"function","name":"apply_patch"},{"type":"custom","name":"apply_patch"}]}`, "apply_patch", "function_call", "apply_patch", ""},
+		{"namespace before flat", `{"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]},{"type":"function","name":"editor__apply_patch"}]}`, "editor__apply_patch", "function_call", "editor__apply_patch", ""},
+		{"sanitized namespace", `{"tools":[{"type":"namespace","name":"mcp.editor","tools":[{"type":"custom","name":"apply_patch"}]}]}`, "mcp_editor__apply_patch", "custom_tool_call", "apply_patch", "mcp.editor"},
+		{"other custom", `{"tools":[{"type":"custom","name":"edit"}]}`, "edit", "custom_tool_call", "edit", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			request := []byte(tc.request)
+			feed := func(chunk []byte) []gjson.Result {
+				return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", request, nil, chunk, &param))
+			}
+			feed(applyPatchClaudeStart(0, "c1", tc.upstream))
+			args := `{"input":"x"}`
+			if tc.wantType == "function_call" || tc.name == "other custom" {
+				args = `{"not_input":42}`
+			}
+			events := feed(applyPatchClaudeFragment(0, args))
+			for _, chunk := range applyPatchClaudeEnd() {
+				events = append(events, feed(chunk)...)
+			}
+			var item gjson.Result
+			for _, event := range events {
+				if event.Get("type").String() == "response.completed" {
+					item = event.Get("response.output.0")
+				}
+			}
+			if item.Get("type").String() != tc.wantType || item.Get("name").String() != tc.wantName || item.Get("namespace").String() != tc.namespace {
+				t.Fatalf("wrong winning identity: %s", item.Raw)
+			}
+			if tc.wantType == "function_call" && item.Get("arguments").String() != args {
+				t.Fatalf("ordinary function was unwrapped: %s", item.Raw)
+			}
+			if tc.name == "other custom" && item.Get("input").String() != args {
+				t.Fatalf("other custom changed: %s", item.Raw)
+			}
+		})
+	}
+}
+
+func TestApplyPatchClaudeNonStreamStrictInput(t *testing.T) {
+	for _, tc := range []struct {
+		arguments, want string
+		invalid         bool
+	}{
+		{`{"input":"*** Begin Patch\n*** End Patch"}`, "*** Begin Patch\n*** End Patch", false},
+		{`{"input":12}`, "", true}, {`{"input":"truncated`, "", true}, {`{"input":"x","extra":true}`, "", true}, {`{"input":"\ud800"}`, "", true},
+	} {
+		t.Run(tc.arguments, func(t *testing.T) {
+			var param any
+			raw := []byte(string(applyPatchClaudeStart(0, "c1", "apply_patch")) + "\n" + string(applyPatchClaudeFragment(0, tc.arguments)) + "\n" + `data: {"type":"message_stop"}`)
+			result := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, raw, &param))
+			if tc.invalid {
+				state, ok := param.(interface{ ToolInputError() error })
+				if result.Get("status").String() != "failed" || result.Get("error.code").String() != "invalid_tool_arguments" || !ok || state.ToolInputError() == nil {
+					t.Fatalf("invalid non-stream input succeeded: %s state=%T", result.Raw, param)
+				}
+			} else if result.Get("output.0.input").String() != tc.want {
+				t.Fatalf("non-stream input mismatch: %s", result.Raw)
+			}
+		})
+	}
+}
+
+func TestApplyPatchClaudeTerminalValidatesTruncatedCall(t *testing.T) {
+	var param any
+	feed := func(chunk []byte) []gjson.Result {
+		return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))
+	}
+	feed(applyPatchClaudeStart(0, "c1", "apply_patch"))
+	feed(applyPatchClaudeFragment(0, `{"input":"unfinished`))
+	chunks := applyPatchClaudeEnd()
+	events := feed(chunks[len(chunks)-1])
+	if len(events) != 1 || events[0].Get("type").String() != "response.failed" {
+		t.Fatalf("truncated terminal did not fail: %v", events)
+	}
+}
+
+func TestApplyPatchClaudeUnicodeFragments(t *testing.T) {
+	arguments := `{"input":"line\n\u4f60\u597d \ud83d\ude00 \" \\ \u96ea"}`
+	for split := 1; split < len(arguments); split++ {
+		var param any
+		feed := func(chunk []byte) []gjson.Result {
+			return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))
+		}
+		feed(applyPatchClaudeStart(0, "c1", "apply_patch"))
+		events := feed(applyPatchClaudeFragment(0, arguments[:split]))
+		events = append(events, feed(applyPatchClaudeFragment(0, arguments[split:]))...)
+		for _, chunk := range applyPatchClaudeEnd() {
+			events = append(events, feed(chunk)...)
+		}
+		var input strings.Builder
+		for _, event := range events {
+			if event.Get("type").String() == "response.custom_tool_call_input.delta" {
+				input.WriteString(event.Get("delta").String())
+			}
+		}
+		if input.String() != "line\n你好 😀 \" \\ 雪" {
+			t.Fatalf("split %d: input = %q", split, input.String())
+		}
+	}
+}
+
+func TestApplyPatchClaudeIdentityFieldsArriveSeparately(t *testing.T) {
+	for _, tc := range []struct{ id, name string }{{"c1", ""}, {"", "apply_patch"}} {
+		var param any
+		feed := func(chunk []byte) []gjson.Result {
+			return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))
+		}
+		feed(applyPatchClaudeStart(0, tc.id, tc.name))
+		events := feed(applyPatchClaudeFragment(0, `{"input":"preview`))
+		if len(events) != 0 {
+			t.Fatalf("preview without complete identity: %v", events)
+		}
+		events = feed(applyPatchClaudeStart(0, "c1", "apply_patch"))
+		found := false
+		for _, event := range events {
+			if event.Get("type").String() == "response.custom_tool_call_input.delta" {
+				found = event.Get("delta").String() == "preview" && event.Get("call_id").String() == "c1"
+			}
+		}
+		if !found {
+			t.Fatalf("buffer not released after identity: %v", events)
+		}
+	}
+}
+
+func TestApplyPatchClaudeConflictingIdentityFails(t *testing.T) {
+	for _, tc := range []struct{ id, name string }{{"other", "apply_patch"}, {"c1", "other"}} {
+		var param any
+		feed := func(chunk []byte) []gjson.Result {
+			return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))
+		}
+		feed(applyPatchClaudeStart(0, "c1", "apply_patch"))
+		feed(applyPatchClaudeFragment(0, `{"input":"preview`))
+		events := feed(applyPatchClaudeStart(0, tc.id, tc.name))
+		for _, chunk := range applyPatchClaudeEnd() {
+			events = append(events, feed(chunk)...)
+		}
+		if len(events) != 1 || events[0].Get("type").String() != "response.failed" {
+			t.Fatalf("conflicting identity did not fail once: %v", events)
+		}
+	}
+}
+
+func TestApplyPatchClaudeNonStreamOriginalDeclarationWins(t *testing.T) {
+	original := []byte(`{"tools":[{"type":"function","name":"apply_patch"}]}`)
+	var param any
+	raw := []byte(string(applyPatchClaudeStart(0, "c1", "apply_patch")) + "\n" + string(applyPatchClaudeFragment(0, `{"not_input":42}`)) + "\n" + `data: {"type":"message_stop"}`)
+	result := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", original, []byte(applyPatchClaudeRequest), raw, &param))
+	if result.Get("output.0.type").String() != "function_call" || result.Get("output.0.arguments").String() != `{"not_input":42}` {
+		t.Fatalf("converted declaration overrode original: %s", result.Raw)
+	}
+}
+
+func TestApplyPatchClaudeSnapshotsValidateAndDoNotPreview(t *testing.T) {
+	for _, tc := range []struct {
+		name, fragment, snapshot, want string
+		invalid                        bool
+	}{
+		{"snapshot only", "", `{"input":"whole"}`, "whole", false},
+		{"matching suffix", `{"input":"pre`, `{"input":"prefix"}`, "prefix", false},
+		{"conflict", `{"input":"wrong`, `{"input":"prefix"}`, "", true},
+		{"completed conflict", `{"input":"pre"}`, `{"input":"prefix"}`, "", true},
+		{"invalid snapshot", `{"input":"pre`, `{"input":7}`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			request := []byte(applyPatchClaudeRequest)
+			feed := func(chunk []byte) []gjson.Result {
+				return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", request, nil, chunk, &param))
+			}
+			start := applyPatchClaudeStart(0, "c1", "apply_patch")
+			events := feed(start)
+			var raw []byte
+			raw = append(raw, start...)
+			raw = append(raw, '\n')
+			if tc.fragment != "" {
+				chunk := applyPatchClaudeFragment(0, tc.fragment)
+				events = append(events, feed(chunk)...)
+				raw = append(raw, chunk...)
+				raw = append(raw, '\n')
+			}
+			snapshot := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c1","name":"apply_patch","input":%s}}`, tc.snapshot))
+			snapshotEvents := feed(snapshot)
+			for _, event := range snapshotEvents {
+				if event.Get("type").String() == "response.custom_tool_call_input.delta" {
+					t.Fatalf("snapshot fabricated a preview: %s", event.Raw)
+				}
+			}
+			events = append(events, snapshotEvents...)
+			raw = append(raw, snapshot...)
+			raw = append(raw, '\n')
+			for _, chunk := range applyPatchClaudeEnd() {
+				events = append(events, feed(chunk)...)
+				raw = append(raw, chunk...)
+				raw = append(raw, '\n')
+			}
+			var terminal gjson.Result
+			var input strings.Builder
+			for _, event := range events {
+				if event.Get("type").String() == "response.custom_tool_call_input.delta" {
+					input.WriteString(event.Get("delta").String())
+				}
+				if event.Get("type").String() == "response.failed" || event.Get("type").String() == "response.completed" {
+					terminal = event
+				}
+			}
+			var nonStreamParam any
+			nonStream := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", request, nil, raw, &nonStreamParam))
+			if tc.invalid {
+				if terminal.Get("type").String() != "response.failed" || nonStream.Get("status").String() != "failed" {
+					t.Fatalf("conflicting/invalid snapshot succeeded: stream=%s nonstream=%s", terminal.Raw, nonStream.Raw)
+				}
+			} else if input.String() != tc.want || terminal.Get("response.output.0.input").String() != tc.want || nonStream.Get("output.0.input").String() != tc.want {
+				t.Fatalf("snapshot mismatch: deltas=%q stream=%s nonstream=%s", input.String(), terminal.Raw, nonStream.Raw)
+			}
+		})
+	}
+}
+
+func TestApplyPatchClaudeNonStreamConflictingIdentityFails(t *testing.T) {
+	var param any
+	raw := []byte(string(applyPatchClaudeStart(0, "c1", "apply_patch")) + "\n" + string(applyPatchClaudeFragment(0, `{"input":"x"}`)) + "\n" + string(applyPatchClaudeStart(0, "c2", "apply_patch")) + "\n" + `data: {"type":"message_stop"}`)
+	result := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, raw, &param))
+	state, ok := param.(interface{ ToolInputError() error })
+	if result.Get("status").String() != "failed" || !ok || state.ToolInputError() == nil {
+		t.Fatalf("conflicting non-stream identity succeeded: %s", result.Raw)
+	}
+}
+
+func TestApplyPatchClaudeConflictingSnapshotsFail(t *testing.T) {
+	var param any
+	request := []byte(applyPatchClaudeRequest)
+	var raw []byte
+	var events []gjson.Result
+	for _, input := range []string{`{"input":"first"}`, `{"input":"replacement"}`} {
+		chunk := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c1","name":"apply_patch","input":%s}}`, input))
+		raw = append(raw, chunk...)
+		raw = append(raw, '\n')
+		events = append(events, applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", request, nil, chunk, &param))...)
+	}
+	for _, chunk := range applyPatchClaudeEnd() {
+		raw = append(raw, chunk...)
+		raw = append(raw, '\n')
+		events = append(events, applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", request, nil, chunk, &param))...)
+	}
+	failures := 0
+	for _, event := range events {
+		if event.Get("type").String() == "response.failed" {
+			failures++
+		}
+		if event.Get("type").String() == "response.completed" || event.Get("type").String() == "response.custom_tool_call_input.done" {
+			t.Fatalf("silently replaced snapshot: %s", event.Raw)
+		}
+	}
+	var nonStreamParam any
+	result := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", request, nil, raw, &nonStreamParam))
+	if failures != 1 || result.Get("status").String() != "failed" {
+		t.Fatalf("snapshot replacement did not fail: stream failures=%d nonstream=%s", failures, result.Raw)
+	}
+}
+
+func TestApplyPatchClaudePendingIdentityConflictFails(t *testing.T) {
+	var param any
+	feed := func(chunk []byte) []gjson.Result {
+		return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))
+	}
+	feed(applyPatchClaudeStart(0, "c1", ""))
+	feed(applyPatchClaudeFragment(0, `{"input":"x"}`))
+	events := feed(applyPatchClaudeStart(0, "c2", "apply_patch"))
+	if len(events) != 1 || events[0].Get("type").String() != "response.failed" {
+		t.Fatalf("pending ID silently replaced: %v", events)
+	}
+}
+
+func TestApplyPatchClaudeMissingIDSynthesizedAtTerminal(t *testing.T) {
+	var param any
+	feed := func(chunk []byte) []gjson.Result {
+		return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))
+	}
+	feed(applyPatchClaudeStart(0, "", "apply_patch"))
+	feed(applyPatchClaudeFragment(0, `{"input":"x"}`))
+	var events []gjson.Result
+	for _, chunk := range applyPatchClaudeEnd() {
+		events = append(events, feed(chunk)...)
+	}
+	var completed gjson.Result
+	for _, event := range events {
+		if event.Get("type").String() == "response.completed" {
+			completed = event
+		}
+	}
+	item := completed.Get("response.output.0")
+	if item.Get("type").String() != "custom_tool_call" || item.Get("input").String() != "x" || item.Get("call_id").String() == "" {
+		t.Fatalf("missing ID lost patch: %s", completed.Raw)
+	}
+}
+
+func TestApplyPatchClaudeNonStreamLateIdentity(t *testing.T) {
+	var param any
+	raw := []byte(string(applyPatchClaudeStart(0, "", "apply_patch")) + "\n" + string(applyPatchClaudeFragment(0, `{"input":"x"}`)) + "\n" + string(applyPatchClaudeStart(0, "c1", "")) + "\n" + `data: {"type":"message_stop"}`)
+	result := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, raw, &param))
+	item := result.Get("output.0")
+	if item.Get("type").String() != "custom_tool_call" || item.Get("input").String() != "x" || item.Get("id").String() != "ctc_c1" {
+		t.Fatalf("late ID/name lost: %s", result.Raw)
+	}
+}
+
+func assertApplyPatchClaudeDeferredFailure(t *testing.T, events []gjson.Result, param any) {
+	t.Helper()
+	failures := 0
+	for _, event := range events {
+		switch event.Get("type").String() {
+		case "response.failed":
+			failures++
+			if event.Get("response.error.code").String() != "invalid_tool_arguments" {
+				t.Fatalf("wrong failure: %s", event.Raw)
+			}
+		case "response.completed", "response.incomplete", "response.custom_tool_call_input.done", "response.output_item.done":
+			t.Fatalf("invalid pending evidence succeeded: %s", event.Raw)
+		}
+	}
+	state := param.(interface{ ToolInputError() error })
+	if failures != 1 || state.ToolInputError() == nil {
+		t.Fatalf("missing retained failure: count=%d error=%v", failures, state.ToolInputError())
+	}
+}
+
+func TestApplyPatchClaudeDeferredIdentityConflict(t *testing.T) {
+	for _, tc := range []struct {
+		name, request, resolvedID, resolvedName, wantType string
+		invalid                                           bool
+	}{
+		{"keep second ID", applyPatchClaudeRequest, "c2", "apply_patch", "", true},
+		{"return to first ID", applyPatchClaudeRequest, "c1", "apply_patch", "", true},
+		{"omit final ID", applyPatchClaudeRequest, "", "apply_patch", "", true},
+		{"ordinary function", `{"tools":[{"type":"function","name":"apply_patch"}]}`, "c2", "apply_patch", "function_call", false},
+		{"function winner", `{"tools":[{"type":"function","name":"apply_patch"},{"type":"custom","name":"apply_patch"}]}`, "c2", "apply_patch", "function_call", false},
+		{"other custom", `{"tools":[{"type":"custom","name":"edit"}]}`, "c2", "edit", "custom_tool_call", false},
+	} {
+		chunks := [][]byte{applyPatchClaudeStart(0, "c1", ""), applyPatchClaudeStart(0, "c2", ""), applyPatchClaudeStart(0, tc.resolvedID, tc.resolvedName), applyPatchClaudeFragment(0, `{"input":"x"}`)}
+		chunks = append(chunks, applyPatchClaudeEnd()...)
+		for _, stream := range []bool{true, false} {
+			mode := "nonstream"
+			if stream {
+				mode = "stream"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				var param any
+				var result gjson.Result
+				if stream {
+					var events []gjson.Result
+					for i, chunk := range chunks {
+						current := applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(tc.request), nil, chunk, &param))
+						if i < 2 && len(current) != 0 {
+							t.Fatalf("unclassified identity emitted events: %v", current)
+						}
+						events = append(events, current...)
+					}
+					if tc.invalid {
+						assertApplyPatchClaudeDeferredFailure(t, events, param)
+						return
+					}
+					for _, event := range events {
+						if event.Get("type").String() == "response.completed" {
+							result = event.Get("response")
+						}
+					}
+				} else {
+					result = gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", []byte(tc.request), nil, bytes.Join(chunks, []byte("\n")), &param))
+					if tc.invalid {
+						if result.Get("status").String() != "failed" || result.Get("error.code").String() != "invalid_tool_arguments" || param.(interface{ ToolInputError() error }).ToolInputError() == nil {
+							t.Fatalf("lost pending conflict: %s", result.Raw)
+						}
+						return
+					}
+				}
+				item := result.Get("output.0")
+				if result.Get("status").String() != "completed" || item.Get("type").String() != tc.wantType || item.Get("call_id").String() != "c2" || param.(interface{ ToolInputError() error }).ToolInputError() != nil {
+					t.Fatalf("unrelated tool changed: %s", result.Raw)
+				}
+				if tc.wantType == "function_call" && item.Get("arguments").String() != `{"input":"x"}` {
+					t.Fatalf("ordinary arguments changed: %s", item.Raw)
+				}
+				if tc.wantType == "custom_tool_call" && item.Get("input").String() != "x" {
+					t.Fatalf("other custom input changed: %s", item.Raw)
+				}
+			})
+		}
+	}
+}
+
+func TestApplyPatchClaudeDeferredSnapshots(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second, fragment, toolName, request, want string
+		invalid                                                bool
+	}{
+		{name: "different complete snapshots", first: `{"input":"first"}`, second: `{"input":"replacement"}`, invalid: true},
+		{name: "complete snapshot cannot extend", first: `{"input":"pre"}`, second: `{"input":"prefix"}`, invalid: true},
+		{name: "early wrong type", first: `{"input":42}`, second: `{"input":"replacement"}`, invalid: true},
+		{name: "early extra field", first: `{"input":"first","extra":1}`, second: `{"input":"replacement"}`, invalid: true},
+		{name: "early duplicate key", first: `{"input":"first","input":"replacement"}`, second: `{"input":"replacement"}`, invalid: true},
+		{name: "early invalid surrogate", first: `{"input":"\ud800"}`, second: `{"input":"replacement"}`, invalid: true},
+		{name: "early invalid then placeholder", first: `{"input":null}`, second: `{}`, fragment: `{"input":"replacement"}`, invalid: true},
+		{name: "early invalid then equal decoded input", first: `{"input":"first","extra":1}`, second: `{"input":"first"}`, invalid: true},
+		{name: "equivalent complete snapshots", first: `{"input":"\u0078\n"}`, second: ` { "input" : "x\n" } `, want: "x\n"},
+		{name: "single snapshot and placeholders", first: `{"input":"whole"}`, second: `{}`, want: "whole"},
+		{name: "partial source extension", first: `{}`, second: `{"input":"prefix"}`, fragment: `{"input":"pre`, want: "prefix"},
+		{name: "complete source conflict", first: `{}`, second: `{"input":"prefix"}`, fragment: `{"input":"pre"}`, invalid: true},
+		{name: "ordinary placeholders", first: `{}`, second: `{}`, fragment: `{"input":"x"}`, want: "x"},
+		{name: "ordinary function ignores patch evidence", first: `{"input":42}`, second: `{"input":"replacement"}`, fragment: `{"other":42}`, request: `{"tools":[{"type":"function","name":"apply_patch"}]}`, want: `{"other":42}`},
+		{name: "other custom ignores patch evidence", first: `{"input":42}`, second: `{"input":"replacement"}`, fragment: `{"other":42}`, toolName: "edit", request: `{"tools":[{"type":"custom","name":"edit"}]}`, want: `{"other":42}`},
+	} {
+		request, toolName := tc.request, tc.toolName
+		if request == "" {
+			request = applyPatchClaudeRequest
+		}
+		if toolName == "" {
+			toolName = "apply_patch"
+		}
+		snapshot := func(input string) []byte {
+			return []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c1","name":"","input":%s}}`, input))
+		}
+		chunks := [][]byte{snapshot(tc.first)}
+		if tc.fragment != "" {
+			chunks = append(chunks, applyPatchClaudeFragment(0, tc.fragment))
+		}
+		chunks = append(chunks, snapshot(tc.second), applyPatchClaudeStart(0, "c1", toolName))
+		chunks = append(chunks, applyPatchClaudeEnd()...)
+		for _, stream := range []bool{true, false} {
+			mode := "nonstream"
+			if stream {
+				mode = "stream"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				var param any
+				var result gjson.Result
+				if stream {
+					var events []gjson.Result
+					var deltas strings.Builder
+					for i, chunk := range chunks {
+						current := applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(request), nil, chunk, &param))
+						if i < len(chunks)-3 && len(current) != 0 {
+							t.Fatalf("unclassified snapshots fabricated output: %v", current)
+						}
+						events = append(events, current...)
+					}
+					if tc.invalid {
+						assertApplyPatchClaudeDeferredFailure(t, events, param)
+						return
+					}
+					for _, event := range events {
+						if event.Get("type").String() == "response.custom_tool_call_input.delta" {
+							deltas.WriteString(event.Get("delta").String())
+						}
+						if event.Get("type").String() == "response.completed" {
+							result = event.Get("response")
+						}
+					}
+					if tc.request == "" && deltas.String() != tc.want {
+						t.Fatalf("snapshot/partial input mismatch: delta=%q want=%q", deltas.String(), tc.want)
+					}
+				} else {
+					result = gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", []byte(request), nil, bytes.Join(chunks, []byte("\n")), &param))
+					if tc.invalid {
+						if result.Get("status").String() != "failed" || result.Get("error.code").String() != "invalid_tool_arguments" || param.(interface{ ToolInputError() error }).ToolInputError() == nil {
+							t.Fatalf("lost pending snapshot evidence: %s", result.Raw)
+						}
+						return
+					}
+				}
+				field := "output.0.input"
+				if tc.request != "" && toolName == "apply_patch" {
+					field = "output.0.arguments"
+				}
+				if result.Get("status").String() != "completed" || result.Get(field).String() != tc.want || param.(interface{ ToolInputError() error }).ToolInputError() != nil {
+					t.Fatalf("pending snapshots changed valid/unrelated input: %s", result.Raw)
+				}
+			})
+		}
+	}
+}
+
+func TestApplyPatchClaudeSnapshotAfterItemCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name, snapshot string
+		invalid        bool
+	}{
+		{"conflicting complete snapshot", `{"input":"y"}`, true},
+		{"complete snapshot cannot extend finished input", `{"input":"xy"}`, true},
+		{"equivalent reencoded snapshot", ` { "input" : "\u0078" } `, false},
+		{"placeholder after item completion", `{}`, false},
+	} {
+		// Reproduce the six-step sequence with a second, still-open patch call.
+		chunks := [][]byte{
+			applyPatchClaudeStart(0, "c1", "apply_patch"),
+			applyPatchClaudeFragment(0, `{"input":"x"}`),
+			[]byte(`data: {"type":"content_block_stop","index":0}`),
+			applyPatchClaudeStart(1, "c2", "apply_patch"),
+			applyPatchClaudeFragment(1, `{"input":"ok"}`),
+			[]byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c1","name":"apply_patch","input":%s}}`, tc.snapshot)),
+		}
+		chunks = append(chunks, applyPatchClaudeEnd()...)
+		for _, stream := range []bool{true, false} {
+			mode := "nonstream"
+			if stream {
+				mode = "stream"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				request := []byte(applyPatchClaudeRequest)
+				var param any
+				var result gjson.Result
+				if stream {
+					feed := func(chunk []byte) []gjson.Result {
+						return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", request, nil, chunk, &param))
+					}
+					var events []gjson.Result
+					for _, chunk := range chunks[:5] {
+						events = append(events, feed(chunk)...)
+					}
+					inputDone, itemDone := 0, 0
+					var preview strings.Builder
+					for _, event := range events {
+						switch event.Get("type").String() {
+						case "response.custom_tool_call_input.delta":
+							if event.Get("call_id").String() == "c1" {
+								preview.WriteString(event.Get("delta").String())
+							}
+						case "response.custom_tool_call_input.done":
+							inputDone++
+							if event.Get("call_id").String() != "c1" || event.Get("input").String() != "x" {
+								t.Fatalf("wrong early input completion: %s", event.Raw)
+							}
+						case "response.output_item.done":
+							itemDone++
+							if event.Get("item.call_id").String() != "c1" || event.Get("item.input").String() != "x" {
+								t.Fatalf("wrong early item completion: %s", event.Raw)
+							}
+						case "response.completed", "response.incomplete", "response.failed":
+							t.Fatalf("response ended before the late snapshot: %s", event.Raw)
+						}
+					}
+					st := param.(*claudeToResponsesState)
+					if inputDone != 1 || itemDone != 1 || preview.String() != "x" || !st.FuncItemDone[0] || st.FuncInputSnapshot[0] != "" {
+						t.Fatalf("first call was not finalized from real arguments without a snapshot: inputDone=%d itemDone=%d preview=%q", inputDone, itemDone, preview.String())
+					}
+					snapshotEvents := feed(chunks[5])
+					if !tc.invalid && len(snapshotEvents) != 0 {
+						t.Fatalf("late snapshot fabricated events: %v", snapshotEvents)
+					}
+					after := append([]gjson.Result(nil), snapshotEvents...)
+					for _, chunk := range chunks[6:] {
+						after = append(after, feed(chunk)...)
+					}
+					if tc.invalid {
+						assertApplyPatchClaudeDeferredFailure(t, after, param)
+						if len(snapshotEvents) != 1 || snapshotEvents[0].Get("type").String() != "response.failed" {
+							t.Fatalf("late conflicting snapshot was not rejected immediately: %v", snapshotEvents)
+						}
+						return
+					}
+					completions := 0
+					for _, event := range after {
+						switch event.Get("type").String() {
+						case "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done":
+							if event.Get("call_id").String() != "c2" {
+								t.Fatalf("finalized first call emitted duplicate input events: %s", event.Raw)
+							}
+						case "response.output_item.done":
+							if event.Get("item.call_id").String() != "c2" {
+								t.Fatalf("finalized first call emitted duplicate item completion: %s", event.Raw)
+							}
+						case "response.completed":
+							completions++
+							result = event.Get("response")
+						}
+					}
+					if completions != 1 {
+						t.Fatalf("expected one successful response completion, got %d", completions)
+					}
+				} else {
+					result = gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", request, nil, bytes.Join(chunks, []byte("\n")), &param))
+					if tc.invalid {
+						if result.Get("status").String() != "failed" || result.Get("error.code").String() != "invalid_tool_arguments" || param.(interface{ ToolInputError() error }).ToolInputError() == nil {
+							t.Fatalf("late conflicting snapshot succeeded: %s", result.Raw)
+						}
+						return
+					}
+				}
+				if result.Get("status").String() != "completed" || result.Get("output.0.call_id").String() != "c1" || result.Get("output.0.input").String() != "x" || result.Get("output.1.call_id").String() != "c2" || result.Get("output.1.input").String() != "ok" || param.(interface{ ToolInputError() error }).ToolInputError() != nil {
+					t.Fatalf("late matching snapshot changed successful input: %s", result.Raw)
+				}
+			})
+		}
+	}
+}
+
+func TestApplyPatchClaudeSuccessfulTerminalSealsState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		late []byte
+	}{
+		{"duplicate message_stop", []byte(`data: {"type":"message_stop"}`)},
+		{"post-terminal fragment", applyPatchClaudeFragment(0, `{"input":"late"}`)},
+		{"post-terminal conflicting snapshot", []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c1","name":"apply_patch","input":{"input":"y"}}}`)},
+	} {
+		chunks := [][]byte{applyPatchClaudeStart(0, "c1", "apply_patch"), applyPatchClaudeFragment(0, `{"input":"x"}`)}
+		chunks = append(chunks, applyPatchClaudeEnd()...)
+		for _, stream := range []bool{true, false} {
+			mode := "nonstream"
+			if stream {
+				mode = "stream"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				var param any
+				if stream {
+					feed := func(chunk []byte) []gjson.Result {
+						return applyPatchClaudeEvents(t, ConvertClaudeResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, chunk, &param))
+					}
+					completions := 0
+					for _, chunk := range chunks {
+						for _, event := range feed(chunk) {
+							if event.Get("type").String() == "response.completed" {
+								completions++
+								if event.Get("response.output.0.input").String() != "x" {
+									t.Fatalf("incorrect completion: %s", event.Raw)
+								}
+							}
+						}
+					}
+					if completions != 1 {
+						t.Fatalf("expected one successful terminal: count=%d", completions)
+					}
+					for _, chunk := range [][]byte{tc.late, []byte(`data: {"type":"message_stop"}`)} {
+						if late := feed(chunk); len(late) != 0 {
+							t.Fatalf("sealed response emitted more events: %v", late)
+						}
+					}
+				} else {
+					raw := bytes.Join(chunks, []byte("\n"))
+					raw = append(raw, '\n')
+					raw = append(raw, tc.late...)
+					result := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "test", []byte(applyPatchClaudeRequest), nil, raw, &param))
+					if result.Get("status").String() != "completed" || result.Get("output.0.input").String() != "x" {
+						t.Fatalf("successful terminal became a failure: %s", result.Raw)
+					}
+				}
+				if errToolInputError := param.(interface{ ToolInputError() error }).ToolInputError(); errToolInputError != nil {
+					t.Fatalf("successful terminal retained a failure: %v", errToolInputError)
+				}
+			})
+		}
 	}
 }

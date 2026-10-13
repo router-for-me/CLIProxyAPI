@@ -71,6 +71,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	}
 
 	// 1. Refresh Lifecycle Timestamps
+	merged.RejectedAccessToken = updated.RejectedAccessToken
 	if !updated.LastRefreshedAt.IsZero() {
 		merged.LastRefreshedAt = updated.LastRefreshedAt
 	}

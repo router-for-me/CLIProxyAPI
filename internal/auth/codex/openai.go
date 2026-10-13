@@ -25,6 +25,8 @@ type CodexTokenData struct {
 	Email string `json:"email"`
 	// Expire is the timestamp of the token expire
 	Expire string `json:"expired"`
+	// PlanType is the subscription plan type (e.g. "free", "plus", "pro", "team")
+	PlanType string `json:"plan_type,omitempty"`
 }
 
 // CodexAuthBundle aggregates all authentication-related data after the OAuth flow is complete.

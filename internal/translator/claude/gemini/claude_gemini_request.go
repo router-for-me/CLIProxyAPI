@@ -189,7 +189,11 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// System instruction conversion to Claude Code format
-	if sysInstr := root.Get("system_instruction"); sysInstr.Exists() {
+	sysInstr := root.Get("systemInstruction")
+	if !sysInstr.Exists() {
+		sysInstr = root.Get("system_instruction")
+	}
+	if sysInstr.Exists() {
 		if parts := sysInstr.Get("parts"); parts.Exists() && parts.IsArray() {
 			var systemText strings.Builder
 			parts.ForEach(func(_, part gjson.Result) bool {

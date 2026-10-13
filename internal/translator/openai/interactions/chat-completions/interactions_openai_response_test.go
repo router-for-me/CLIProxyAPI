@@ -3,6 +3,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -408,5 +409,52 @@ func TestConvertInteractionsResponseToOpenAI_ContentFilterFinishReason(t *testin
 	outNonStream := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "devin/swe-2", nil, nil, raw, nil)
 	if got := gjson.GetBytes(outNonStream, "choices.0.finish_reason").String(); got != "content_filter" {
 		t.Fatalf("finish_reason = %q, want content_filter. Output: %s", got, string(outNonStream))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAI_ResponseFailed(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		wantMsg  string
+		wantCode string
+	}{
+		{
+			name:     "response_failed_top_level",
+			payload:  `data: {"event_type":"response.failed","error":{"message":"devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.","code":"403"}}`,
+			wantMsg:  "permission_denied",
+			wantCode: "403",
+		},
+		{
+			name:     "interaction_failed_nested",
+			payload:  `data: {"event_type":"interaction.failed","interaction":{"error":{"message":"rate limit exceeded","code":"429"}}}`,
+			wantMsg:  "rate limit exceeded",
+			wantCode: "429",
+		},
+		{
+			name:     "fallback_defaults",
+			payload:  `data: {"event_type":"response.failed"}`,
+			wantMsg:  "upstream error occurred",
+			wantCode: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			events := ConvertInteractionsResponseToOpenAI(context.Background(), "devin/kimi-k3", nil, nil, []byte(tt.payload), &param)
+			if len(events) == 0 {
+				t.Fatalf("expected non-empty events for %s, got 0", tt.name)
+			}
+			errorMsg := gjson.GetBytes(events[0], "error.message").String()
+			if !strings.Contains(errorMsg, tt.wantMsg) {
+				t.Fatalf("expected error.message containing %q, got: %s", tt.wantMsg, string(events[0]))
+			}
+			if tt.wantCode != "" {
+				if gotCode := gjson.GetBytes(events[0], "error.code").String(); gotCode != tt.wantCode {
+					t.Fatalf("expected error.code %q, got: %s", tt.wantCode, string(events[0]))
+				}
+			}
+		})
 	}
 }

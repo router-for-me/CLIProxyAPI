@@ -1,6 +1,7 @@
 package util
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -224,5 +225,45 @@ func TestBuildGeminiFunctionDeclarations_DisambiguationAndLongNames(t *testing.T
 	identityLong := reverseMap[longName]
 	if !identityLong.Custom || identityLong.Name != "mcp__very_very_very_very_very_very_long_namespace_name__very_very_very_long_custom_tool_name_that_exceeds_sixty_four_chars" {
 		t.Fatalf("unexpected reverse identity for long name: %+v", identityLong)
+	}
+}
+
+func TestBuildGeminiApplyPatchDeclaration(t *testing.T) {
+	root := gjson.Parse(`{"tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}`)
+	declarations, _, reverse := BuildGeminiFunctionDeclarations(root)
+	if len(declarations) != 1 {
+		t.Fatalf("declarations: %d", len(declarations))
+	}
+	declaration := gjson.ParseBytes(declarations[0])
+	if !strings.Contains(declaration.Get("description").String(), "*** Begin Patch") || !strings.Contains(declaration.Get("description").String(), "start: patch") {
+		t.Fatal("patch format is missing")
+	}
+	if declaration.Get("parametersJsonSchema.properties.input.type").String() != "string" || !declaration.Get("parametersJsonSchema.additionalProperties").Exists() || declaration.Get("parametersJsonSchema.additionalProperties").Bool() {
+		t.Fatal("input schema is missing")
+	}
+	if !reverse[declaration.Get("name").String()].Custom {
+		t.Fatal("custom client identity was lost")
+	}
+}
+
+func TestBuildGeminiApplyPatchIdentityUsesWinningOriginalDeclaration(t *testing.T) {
+	root := gjson.Parse(`{"tools":[{"type":"namespace","name":"a.b","tools":[{"type":"custom","name":"apply_patch"}]},{"type":"function","name":"a_b__apply_patch","parameters":{"type":"object","properties":{"n":{"type":"number"}}}},{"type":"function","name":"apply_patch"}],"input":[{"type":"additional_tools","tools":[{"type":"custom","name":"apply_patch"}]}]}`)
+	declarations, forward, reverse := BuildGeminiFunctionDeclarations(root)
+	if len(declarations) != 3 {
+		t.Fatalf("declarations=%d", len(declarations))
+	}
+	if forward["a.b__apply_patch"] == forward["a_b__apply_patch"] {
+		t.Fatal("sanitized collision was not separated")
+	}
+	for _, raw := range declarations {
+		decl := gjson.ParseBytes(raw)
+		identity := reverse[decl.Get("name").String()]
+		patch := identity.Custom && identity.Namespace == "a.b"
+		if identity.ApplyPatch != patch || strings.Contains(decl.Get("description").String(), "*** Begin Patch") != patch {
+			t.Fatalf("wrong winning identity=%+v declaration=%s", identity, raw)
+		}
+	}
+	if reverse[forward["apply_patch"]].Custom || reverse[forward["apply_patch"]].ApplyPatch {
+		t.Fatal("ordinary function became custom patch")
 	}
 }

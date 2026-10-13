@@ -2972,3 +2972,70 @@ func TestSanitizeArrayItems_PreservesItemsForUppercaseArrayType(t *testing.T) {
 		})
 	}
 }
+
+// TestCleanJSONSchema_EnforcesObjectTypeForProperties_Issue6394 tests issue 6394:
+// When a property defines nested properties/required (e.g. through a union type like ["string", "object"],
+// merged anyOf branches, or missing type), Gemini requires type to be OBJECT.
+// Properties or required must never be emitted on a non-OBJECT type node.
+func TestCleanJSONSchema_EnforcesObjectTypeForProperties_Issue6394(t *testing.T) {
+	cleaners := map[string]func(string) string{
+		"Gemini":              CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":    CleanJSONSchemaForGeminiJSONSchema,
+		"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	}
+
+	t.Run("TypeArrayWithPropertiesPrefersObject", func(t *testing.T) {
+		input := `{"type":"object","properties":{"requestBody":{"type":"object","properties":{"delivery":{"type":"object","properties":{"endpoint":{"type":["string","object"],"properties":{"traces":{"type":"string"}},"required":["traces"]}},"required":["endpoint"]}},"required":["delivery"]}},"required":["requestBody"]}`
+
+		for name, clean := range cleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				parsed := gjson.Parse(got)
+
+				endpointType := parsed.Get("properties.requestBody.properties.delivery.properties.endpoint.type").String()
+				if !strings.EqualFold(endpointType, "object") {
+					t.Fatalf("[%s] endpoint type = %q, want object; cleaned: %s", name, endpointType, got)
+				}
+				if !parsed.Get("properties.requestBody.properties.delivery.properties.endpoint.properties.traces").Exists() {
+					t.Fatalf("[%s] endpoint.properties.traces missing; cleaned: %s", name, got)
+				}
+			})
+		}
+	})
+
+	t.Run("AnyOfUnionMergedIntoNodeWithoutTypeEnsuresObject", func(t *testing.T) {
+		input := `{"type":"object","properties":{"endpoint":{"properties":{"traces":{"type":"string"}},"required":["traces"],"anyOf":[{"type":"string"},{"type":"object","properties":{"other":{"type":"string"}}}]}}}`
+
+		for name, clean := range cleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				parsed := gjson.Parse(got)
+
+				endpointType := parsed.Get("properties.endpoint.type").String()
+				if !strings.EqualFold(endpointType, "object") {
+					t.Fatalf("[%s] endpoint type = %q, want object; cleaned: %s", name, endpointType, got)
+				}
+				if !parsed.Get("properties.endpoint.properties.traces").Exists() {
+					t.Fatalf("[%s] endpoint.properties.traces missing; cleaned: %s", name, got)
+				}
+			})
+		}
+	})
+
+	t.Run("PrimitiveTypeWithPropertiesPromotedToObject", func(t *testing.T) {
+		input := `{"type":"object","properties":{"endpoint":{"type":"string","properties":{"traces":{"type":"string"}},"required":["traces"]}}}`
+
+		for name, clean := range cleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				parsed := gjson.Parse(got)
+
+				endpointType := parsed.Get("properties.endpoint.type").String()
+				if !strings.EqualFold(endpointType, "object") {
+					t.Fatalf("[%s] endpoint type = %q, want object; cleaned: %s", name, endpointType, got)
+				}
+			})
+		}
+	})
+}

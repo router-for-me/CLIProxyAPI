@@ -149,3 +149,8 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 	}
 	return false
 }
+
+// SupportsApplyPatch requires both selectable transports to support the tool.
+func (e *CodexAutoExecutor) SupportsApplyPatch() bool {
+	return e != nil && e.httpExec != nil && e.wsExec != nil && e.httpExec.SupportsApplyPatch() && e.wsExec.SupportsApplyPatch()
+}

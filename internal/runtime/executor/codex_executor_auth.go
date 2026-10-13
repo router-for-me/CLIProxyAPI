@@ -53,6 +53,29 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	auth.Metadata["type"] = "codex"
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
+
+	planType := strings.TrimSpace(td.PlanType)
+	if planType == "" && td.IDToken != "" {
+		if claims, errParse := codexauth.ParseJWTToken(td.IDToken); errParse == nil && claims != nil {
+			planType = claims.GetPlanType()
+		}
+	}
+	if planType == "" {
+		planType = codexauth.DefaultPlanType
+	}
+	auth.Metadata["plan_type"] = planType
+	clonedAttributes := make(map[string]string, len(auth.Attributes)+1)
+	for k, v := range auth.Attributes {
+		clonedAttributes[k] = v
+	}
+	clonedAttributes["plan_type"] = planType
+	auth.Attributes = clonedAttributes
+	if storage, ok := auth.Storage.(*codexauth.CodexTokenStorage); ok && storage != nil {
+		clonedStorage := *storage
+		svc.UpdateTokenStorage(&clonedStorage, td)
+		clonedStorage.PlanType = planType
+		auth.Storage = &clonedStorage
+	}
 	return auth, nil
 }
 

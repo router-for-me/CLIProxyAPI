@@ -293,6 +293,89 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_PreservesWebSearchSourcesInclude(t *testing.T) {
+	reasoningOnly := []string{"reasoning.encrypted_content"}
+	reasoningAndSources := []string{"reasoning.encrypted_content", "web_search_call.action.sources"}
+	tests := []struct {
+		name        string
+		includeJSON string
+		want        []string
+	}{
+		{name: "missing include", includeJSON: "", want: reasoningOnly},
+		{name: "null include", includeJSON: "null", want: reasoningOnly},
+		{name: "string include", includeJSON: `"web_search_call.action.sources"`, want: reasoningOnly},
+		{name: "object include", includeJSON: `{"web_search_call.action.sources":true}`, want: reasoningOnly},
+		{name: "non-string entries", includeJSON: `[42,true]`, want: reasoningOnly},
+		{name: "empty array", includeJSON: `[]`, want: reasoningOnly},
+		{name: "sources alone", includeJSON: `["web_search_call.action.sources"]`, want: reasoningAndSources},
+		{name: "reasoning then sources", includeJSON: `["reasoning.encrypted_content","web_search_call.action.sources"]`, want: reasoningAndSources},
+		{name: "sources before reasoning", includeJSON: `["web_search_call.action.sources","reasoning.encrypted_content"]`, want: reasoningAndSources},
+		{name: "duplicate sources", includeJSON: `["web_search_call.action.sources","web_search_call.action.sources"]`, want: reasoningAndSources},
+		{name: "unsupported entries filtered", includeJSON: `["file_search_call.results","web_search_call.action.sources","code_interpreter_call.outputs"]`, want: reasoningAndSources},
+		{name: "non-string entries alongside sources", includeJSON: `[42,"web_search_call.action.sources",null]`, want: reasoningAndSources},
+	}
+
+	for _, stream := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("stream_%v/%s", stream, tt.name), func(t *testing.T) {
+				inputJSON := []byte(`{"model":"gpt-5.6","input":[{"type":"message","role":"user","content":"hi"}]}`)
+				if tt.includeJSON != "" {
+					var errSet error
+					inputJSON, errSet = sjson.SetRawBytes(inputJSON, "include", []byte(tt.includeJSON))
+					if errSet != nil {
+						t.Fatalf("setting include: %v", errSet)
+					}
+				}
+
+				before := string(inputJSON)
+				output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, stream)
+				if string(inputJSON) != before {
+					t.Fatalf("caller input changed:\n got: %s\nwant: %s", inputJSON, before)
+				}
+				got := gjson.GetBytes(output, "include").Array()
+				if len(got) != len(tt.want) {
+					t.Fatalf("include = %s, want %v", gjson.GetBytes(output, "include").Raw, tt.want)
+				}
+				for i, want := range tt.want {
+					if got[i].Type != gjson.String || got[i].String() != want {
+						t.Fatalf("include[%d] = %s, want %q; include = %s", i, got[i].Raw, want, gjson.GetBytes(output, "include").Raw)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_WebSearchToolDoesNotOptIntoSources(t *testing.T) {
+	inputJSON := []byte(`{"model":"gpt-5.6","input":"find python asyncio docs","tools":[{"type":"web_search"}],"tool_choice":"required"}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+
+	include := gjson.GetBytes(output, "include").Array()
+	if len(include) != 1 || include[0].Type != gjson.String || include[0].String() != "reasoning.encrypted_content" {
+		t.Fatalf("include = %s, want reasoning.encrypted_content only", gjson.GetBytes(output, "include").Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodexReusesNormalizedPayloadWithSources(t *testing.T) {
+	for _, includeJSON := range []string{
+		`["reasoning.encrypted_content","web_search_call.action.sources"]`,
+		`[ "reasoning.encrypted_content" , "web_search_call.action.sources" ]`,
+		`[ "reasoning.encrypted_content" ]`,
+	} {
+		inputJSON := []byte(`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":` + includeJSON + `,"service_tier":"priority","input":[{"type":"message","role":"user","content":"hello"}]}`)
+
+		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+
+		if &output[0] != &inputJSON[0] {
+			t.Fatalf("normalized request payload with include %s was copied", includeJSON)
+		}
+		if string(output) != string(inputJSON) {
+			t.Fatalf("normalized request changed:\n got: %s\nwant: %s", output, inputJSON)
+		}
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToCodex_FiltersPromptCacheRetention(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.6-terra",
@@ -881,5 +964,55 @@ func TestConvertOpenAIResponsesRequestToCodex_ServiceTier(t *testing.T) {
 				t.Fatalf("service_tier = %q, want %q; output: %s", res.String(), tt.wantTier, string(output))
 			}
 		})
+	}
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_NormalizesEmptyFunctionCallArguments
+// covers the parameter-less tool call shape that strict Codex Responses
+// upstreams reject with "`arguments` must be valid JSON": only blank string
+// arguments on function_call history items become "{}", everything else is
+// preserved byte-for-byte in intent.
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesEmptyFunctionCallArguments(t *testing.T) {
+	inputJSON := []byte(`{"model":"gpt-5.6","input":[
+		{"type":"function_call","id":"fc_empty","call_id":"call_empty","name":"create_worktree","arguments":""},
+		{"type":"function_call","id":"fc_blank","call_id":"call_blank","name":"list_artifacts","arguments":"   \t\n"},
+		{"type":"function_call","id":"fc_kept","call_id":"call_kept","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+		{"type":"function_call","id":"fc_broken","call_id":"call_broken","name":"exec_command","arguments":"not-json"},
+		{"type":"function_call","id":"fc_missing","call_id":"call_missing","name":"no_args"},
+		{"type":"function_call","id":"fc_null","call_id":"call_null","name":"null_args","arguments":null},
+		{"type":"function_call","id":"fc_num","call_id":"call_num","name":"num_args","arguments":123},
+		{"type":"function_call_output","call_id":"call_empty","output":"worktree created"},
+		{"type":"custom_tool_call","id":"ctc_1","call_id":"call_custom","name":"apply_patch","input":"exact patch"},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+	]}`)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+	for index, want := range []string{"{}", "{}", `{"cmd":"pwd"}`, "not-json"} {
+		if got := gjson.GetBytes(output, "input."+strconv.Itoa(index)+".arguments").String(); got != want {
+			t.Fatalf("input.%d.arguments = %q, want %q; output: %s", index, got, want, string(output))
+		}
+	}
+	if gjson.GetBytes(output, "input.4.arguments").Exists() {
+		t.Fatalf("input.4 (missing arguments) should not gain arguments field; output: %s", string(output))
+	}
+	if got := gjson.GetBytes(output, "input.5.arguments").Type; got != gjson.Null {
+		t.Fatalf("input.5.arguments type = %v, want null; output: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.6.arguments").Int(); got != 123 {
+		t.Fatalf("input.6.arguments = %d, want 123; output: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.7.type").String(); got != "function_call_output" || gjson.GetBytes(output, "input.7.output").String() != "worktree created" {
+		t.Fatalf("input.7 should be function_call_output with unchanged output; output: %s", string(output))
+	}
+	if got := gjson.GetBytes(output, "input.8.type").String(); got != "custom_tool_call" {
+		t.Fatalf("input.8.type = %q, want custom_tool_call; output: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.8.input").String(); got != "exact patch" {
+		t.Fatalf("input.8.input = %q, want exact patch; output: %s", got, string(output))
+	}
+	if gjson.GetBytes(output, "input.8.arguments").Exists() {
+		t.Fatalf("custom_tool_call must not gain arguments; output: %s", string(output))
+	}
+	if got := gjson.GetBytes(output, "input.9.type").String(); got != "message" {
+		t.Fatalf("input.9.type = %q, want message; output: %s", got, string(output))
 	}
 }

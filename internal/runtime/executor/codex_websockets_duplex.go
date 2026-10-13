@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -200,7 +201,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 				return false
 			}
-			payload = buildCodexWebsocketRequestBody(prepared.clientBody)
+			payload = frameCodexWebsocketRequestBody(prepared.clientBody)
 			metadataMu.Lock()
 			if len(pending) >= 16 {
 				metadataMu.Unlock()
@@ -277,6 +278,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.steer":
+					// Steering carries business input but must not inherit response.create defaults.
+					steerReq := req
+					steerReq.Payload = payload
+					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, opts)(payload)
+					payload, _ = sjson.SetBytes(payload, "type", "response.steer")
 					parent := gjson.GetBytes(payload, "previous_response_id").String()
 					metadataMu.Lock()
 					settings := responseSettings[parent]
@@ -295,7 +301,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 						steeringSettings[parent] = settings
 					}
 					metadataMu.Unlock()
-					// Control frames bypass ALL response.create translations and defaults.
+					// Control frames bypass response.create translations and built-in defaults.
 					// Unknown fields and unsupported input are left to upstream validation.
 					if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
 						fail(fmt.Errorf("websocket credential is no longer enabled"))

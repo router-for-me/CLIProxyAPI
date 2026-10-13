@@ -644,3 +644,44 @@ func TestConvertClaudeRequestToInteractionsPreservesBusinessObjectsInToolResultA
 		t.Errorf("expected exit_code 2 to be preserved in result: %s", resStr)
 	}
 }
+
+func TestConvertInteractionsResponseToClaude_ResponseFailed(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wantMsg string
+	}{
+		{
+			name:    "response_failed_top_level",
+			payload: `data: {"event_type":"response.failed","error":{"message":"devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.","code":"403"}}`,
+			wantMsg: "permission_denied",
+		},
+		{
+			name:    "interaction_failed_nested",
+			payload: `data: {"event_type":"interaction.failed","interaction":{"error":{"message":"service unavailable","type":"server_error"}}}`,
+			wantMsg: "service unavailable",
+		},
+		{
+			name:    "fallback_defaults",
+			payload: `data: {"event_type":"response.failed"}`,
+			wantMsg: "upstream error occurred",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			events := ConvertInteractionsResponseToClaude(context.Background(), "devin/kimi-k3", nil, nil, []byte(tt.payload), &param)
+			if len(events) == 0 {
+				t.Fatalf("expected non-empty events for %s, got 0", tt.name)
+			}
+			payload := findClaudeEventPayload(events, "error")
+			if len(payload) == 0 {
+				t.Fatalf("expected error event payload, got: %s", string(bytes.Join(events, []byte("\n"))))
+			}
+			if got := gjson.GetBytes(payload, "error.message").String(); !strings.Contains(got, tt.wantMsg) {
+				t.Fatalf("error.message = %q, want containing %q", got, tt.wantMsg)
+			}
+		})
+	}
+}

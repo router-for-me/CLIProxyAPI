@@ -705,12 +705,14 @@ func reasoningEffortFromConfig(config ThinkingConfig) string {
 // extractClaudeConfig extracts thinking configuration from Claude format request body.
 //
 // Claude API format:
-//   - thinking.type: "enabled" or "disabled"
+//   - thinking.type: "enabled", "adaptive", "auto", or "disabled"
 //   - thinking.budget_tokens: integer (-1=auto, 0=disabled, >0=budget)
+//   - output_config.effort: string ("none", "auto", "low", "medium", "high", "max")
 //
 // Priority: thinking.type="disabled" takes precedence over budget_tokens.
-// When type="enabled" without budget_tokens, returns ModeAuto to indicate
-// the user wants thinking enabled but didn't specify a budget.
+// When type="enabled", budget_tokens takes precedence over output_config.effort.
+// When type="enabled" without budget_tokens, output_config.effort is preserved if present;
+// otherwise returns ModeAuto to indicate the user wants thinking enabled with default budget.
 func extractClaudeConfig(body []byte) ThinkingConfig {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
@@ -750,8 +752,21 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 		}
 	}
 
-	// If type="enabled" but no budget_tokens, treat as auto (user wants thinking but no budget specified)
+	// If type="enabled", check output_config.effort before falling back to auto
 	if thinkingType == "enabled" {
+		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {
+			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			if value != "" {
+				switch value {
+				case "none":
+					return ThinkingConfig{Mode: ModeNone, Budget: 0}
+				case "auto":
+					return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+				default:
+					return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+				}
+			}
+		}
 		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
 	}
 

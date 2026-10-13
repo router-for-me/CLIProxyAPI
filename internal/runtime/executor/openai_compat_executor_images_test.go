@@ -119,3 +119,68 @@ func TestOpenAICompatExecutor_ImageStreamChunkBoundaryObservability(t *testing.T
 		})
 	}
 }
+
+func TestOpenAICompatExecutor_ImageEndpointPath_HonorsOverriddenRequestPath_Issue6196(t *testing.T) {
+	var requestedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"b64_json":"img"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name: "compat",
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL,
+			"api_key":      "test-key",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+
+	payload := []byte(`{"model":"gpt-image-2.5","prompt":"a red apple"}`)
+	// Case 1: default inbound path is edits
+	optsEdits := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/edits",
+		},
+	}
+	if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2.5",
+		Payload: payload,
+	}, optsEdits); err != nil {
+		t.Fatalf("Execute edits error: %v", err)
+	}
+	if requestedPath != "/images/edits" {
+		t.Fatalf("upstream path = %q, want /images/edits", requestedPath)
+	}
+
+	// Case 2: interceptor rewrites to generations
+	optsGenerations := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2.5",
+		Payload: payload,
+	}, optsGenerations)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatalf("Execute returned empty payload")
+	}
+	if requestedPath != "/images/generations" {
+		t.Fatalf("upstream path = %q, want /images/generations", requestedPath)
+	}
+}

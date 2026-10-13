@@ -113,59 +113,6 @@ func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	}
 }
 
-func TestModelCatalogUpdaterPlan(t *testing.T) {
-	tests := []struct {
-		name            string
-		localModel      bool
-		homeEnabled     bool
-		wantModels      bool
-		wantCodexClient bool
-		wantDevin       bool
-	}{
-		{
-			name:            "normal CPA refreshes all catalogs",
-			localModel:      false,
-			homeEnabled:     false,
-			wantModels:      true,
-			wantCodexClient: true,
-			wantDevin:       true,
-		},
-		{
-			name:            "home mode keeps models.json local and refreshes codex templates and devin",
-			localModel:      false,
-			homeEnabled:     true,
-			wantModels:      false,
-			wantCodexClient: true,
-			wantDevin:       true,
-		},
-		{
-			name:            "local-model disables all remote catalogs",
-			localModel:      true,
-			homeEnabled:     false,
-			wantModels:      false,
-			wantCodexClient: false,
-			wantDevin:       false,
-		},
-		{
-			name:            "local-model disables all remote catalogs even under home",
-			localModel:      true,
-			homeEnabled:     true,
-			wantModels:      false,
-			wantCodexClient: false,
-			wantDevin:       false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotModels, gotCodex, gotDevin := modelCatalogUpdaterPlan(tt.localModel, tt.homeEnabled)
-			if gotModels != tt.wantModels || gotCodex != tt.wantCodexClient || gotDevin != tt.wantDevin {
-				t.Fatalf("modelCatalogUpdaterPlan(%v, %v) = (%v, %v, %v), want (%v, %v, %v)",
-					tt.localModel, tt.homeEnabled, gotModels, gotCodex, gotDevin, tt.wantModels, tt.wantCodexClient, tt.wantDevin)
-			}
-		})
-	}
-}
-
 func TestHomeConfigPayloadPortApplication(t *testing.T) {
 	tests := []struct {
 		name     string

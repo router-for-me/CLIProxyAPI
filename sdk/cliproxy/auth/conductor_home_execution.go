@@ -200,7 +200,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
 			if !restoreExecutionModel {
-				execReq = attachResolvedHomeModelInfo(execReq, selection.modelInfo, selection.configurationUpdateSupport)
+				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
 			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()

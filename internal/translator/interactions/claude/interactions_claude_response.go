@@ -136,6 +136,8 @@ func convertInteractionsEventToClaude(modelName string, rawJSON []byte, st *inte
 		return appendClaudeContentBlockStop(nil, st)
 	case "interaction.completed", "finish":
 		return appendClaudeMessageDelta(nil, root, st)
+	case "response.failed", "interaction.failed":
+		return appendClaudeError(nil, root, st)
 	case "done":
 		return appendClaudeMessageStop(nil, st)
 	}
@@ -308,6 +310,26 @@ func appendClaudeMessageStop(out [][]byte, st *interactionsToClaudeStreamState) 
 	}
 	st.Done = true
 	return out
+}
+
+func appendClaudeError(out [][]byte, root gjson.Result, st *interactionsToClaudeStreamState) [][]byte {
+	out = appendClaudeContentBlockStop(out, st)
+	errNode := root.Get("error")
+	if !errNode.Exists() {
+		errNode = root.Get("interaction.error")
+	}
+	msg := errNode.Get("message").String()
+	if msg == "" {
+		msg = "upstream error occurred"
+	}
+	errType := errNode.Get("type").String()
+	if errType == "" {
+		errType = "api_error"
+	}
+	payload := []byte(`{"type":"error","error":{"type":"","message":""}}`)
+	payload, _ = sjson.SetBytes(payload, "error.type", errType)
+	payload, _ = sjson.SetBytes(payload, "error.message", msg)
+	return append(out, translatorcommon.AppendSSEEventBytes(nil, "error", payload, 3))
 }
 
 func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result) []byte {

@@ -245,7 +245,7 @@ func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
 	}
 }
 
-func TestGeminiExecutorAppliesPayloadRulesBeforeLeadingUserNormalization(t *testing.T) {
+func TestGeminiExecutorAppliesPayloadRulesAfterLeadingUserNormalization(t *testing.T) {
 	var upstreamBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)
@@ -281,11 +281,11 @@ func TestGeminiExecutorAppliesPayloadRulesBeforeLeadingUserNormalization(t *test
 	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
 		t.Fatalf("upstream roles malformed: %s", upstreamBody)
 	}
-	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != "" {
-		t.Fatalf("synthetic leading user changed: %s", upstreamBody)
+	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != "payload override" {
+		t.Fatalf("payload override did not target final leading user: %s", upstreamBody)
 	}
-	if got := contents[1].Get("parts.0.text").String(); got != "payload override" {
-		t.Fatalf("payload rule applied to %q, want original first model turn; body=%s", got, upstreamBody)
+	if got := contents[1].Get("parts.0.text").String(); got != "prior output" {
+		t.Fatalf("payload rule applied to %q, want unmodified original first model turn; body=%s", got, upstreamBody)
 	}
 }
 
@@ -1325,6 +1325,8 @@ func TestGeminiExecutorNativeInteractionsResponsesStreamEmitsDone(t *testing.T) 
 		_, _ = w.Write([]byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"i1\",\"model\":\"gemini-3.1-flash-lite\"}}\n\n"))
 		_, _ = w.Write([]byte("event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"i1\",\"status\":\"completed\",\"usage\":{\"total_input_tokens\":1,\"total_output_tokens\":2}}}\n\n"))
 		_, _ = w.Write([]byte("event: done\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("event: done\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"late\"}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -1349,17 +1351,24 @@ func TestGeminiExecutorNativeInteractionsResponsesStreamEmitsDone(t *testing.T) 
 		t.Fatalf("ExecuteStream() error = %v", errExecute)
 	}
 
-	done := false
+	done := 0
+	completed := 0
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
+		if bytes.Contains(chunk.Payload, []byte(`"type":"response.completed"`)) {
+			completed++
+		}
+		if bytes.Contains(chunk.Payload, []byte(`"late"`)) {
+			t.Fatal("post-terminal content was forwarded")
+		}
 		if bytes.Equal(bytes.TrimSpace(chunk.Payload), []byte("data: [DONE]")) {
-			done = true
+			done++
 		}
 	}
-	if !done {
-		t.Fatal("Responses [DONE] chunk not found")
+	if done != 1 || completed != 1 {
+		t.Fatalf("Responses terminal counts: DONE=%d completed=%d, want one each", done, completed)
 	}
 }
 

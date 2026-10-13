@@ -297,7 +297,7 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		return
 	}
 
-	suffix := "-" + requestID + ".log"
+	suffix := "-" + logging.ShortRequestID(requestID) + ".log"
 	var matchedFile string
 	var latestModTime time.Time
 	for _, entry := range entries {

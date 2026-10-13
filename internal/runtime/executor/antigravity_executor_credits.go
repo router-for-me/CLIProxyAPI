@@ -82,8 +82,18 @@ type antigravityCreditsBalance struct {
 }
 
 type antigravityCreditsHintRefreshState struct {
-	mu          sync.Mutex
-	lastAttempt time.Time
+	mu                sync.Mutex
+	registrationEpoch uint64
+	lastAttempt       time.Time
+	task              *antigravityCreditsRefreshTask
+}
+
+type antigravityCreditsRefreshTask struct {
+	state     *antigravityCreditsHintRefreshState
+	ctx       context.Context
+	lifecycle context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
 }
 
 type antigravityTokenRefreshData struct {
@@ -391,6 +401,17 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 		return
 	}
 
+	e.queueAntigravityCreditsRefresh(ctx, auth, accessToken, antigravityCreditsHintRefreshTimeout)
+}
+
+func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context, auth *cliproxyauth.Auth, accessToken string, timeout time.Duration) {
+	if e == nil || auth == nil || (ctx != nil && ctx.Err() != nil) {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" || strings.TrimSpace(accessToken) == "" {
+		return
+	}
 	state := &antigravityCreditsHintRefreshState{}
 	if existing, loaded := antigravityCreditsHintRefreshByID.LoadOrStore(authID, state); loaded {
 		if cast, ok := existing.(*antigravityCreditsHintRefreshState); ok && cast != nil {
@@ -401,33 +422,89 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 		}
 	}
 
-	now := time.Now()
-	if !state.mu.TryLock() {
-		return
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if !state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < antigravityCreditsHintRefreshInterval {
+	now := time.Now()
+	state.mu.Lock()
+	if ctx.Err() != nil || auth.RegistrationEpoch < state.registrationEpoch {
 		state.mu.Unlock()
 		return
 	}
-	state.lastAttempt = now
-
-	refreshCtx := context.Background()
-	if ctx != nil {
-		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-			refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
+	oldTask := state.task
+	if auth.RegistrationEpoch != state.registrationEpoch {
+		state.registrationEpoch = auth.RegistrationEpoch
+		state.lastAttempt = time.Time{}
+		state.task = nil
+	} else if oldTask != nil {
+		if oldTask.ctx.Err() == nil {
+			state.mu.Unlock()
+			return
 		}
+		if oldTask.lifecycle.Err() != nil {
+			state.lastAttempt = time.Time{}
+		}
+		state.task = nil
 	}
-	refreshCtx, cancel := context.WithTimeout(refreshCtx, antigravityCreditsHintRefreshTimeout)
+	if !state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < antigravityCreditsHintRefreshInterval {
+		state.mu.Unlock()
+		if oldTask != nil {
+			oldTask.cancel()
+		}
+		return
+	}
+
+	lifecycle := ctx
+	var refreshCtx context.Context
+	var cancelRefresh context.CancelFunc
+	if timeout > 0 {
+		// Keep the existing independent warm-hint budget and transport selection.
+		lifecycle = context.Background()
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			lifecycle = context.WithValue(lifecycle, "cliproxy.roundtripper", rt)
+		}
+		refreshCtx, cancelRefresh = context.WithTimeout(lifecycle, timeout)
+	} else {
+		// Optional post-refresh work follows its lifecycle without adding a timer.
+		refreshCtx, cancelRefresh = context.WithCancel(lifecycle)
+	}
+	task := &antigravityCreditsRefreshTask{
+		state:     state,
+		ctx:       refreshCtx,
+		lifecycle: lifecycle,
+		cancel:    cancelRefresh,
+		done:      make(chan struct{}),
+	}
+	state.task = task
+	state.lastAttempt = now
+	state.mu.Unlock()
+	if oldTask != nil {
+		oldTask.cancel()
+	}
 	authCopy := auth.Clone()
 
-	go func(state *antigravityCreditsHintRefreshState, auth *cliproxyauth.Auth, token string) {
-		defer cancel()
-		defer state.mu.Unlock()
-		e.updateAntigravityCreditsBalance(refreshCtx, auth, token)
-	}(state, authCopy, accessToken)
+	go func() {
+		defer close(task.done)
+		defer task.cancel()
+		defer func() {
+			state.mu.Lock()
+			if state.task == task {
+				state.task = nil
+				if task.lifecycle.Err() != nil {
+					state.lastAttempt = time.Time{}
+				}
+			}
+			state.mu.Unlock()
+		}()
+		e.updateAntigravityCreditsBalanceForTask(task.ctx, authCopy, accessToken, task)
+	}()
 }
 
 func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
+	e.updateAntigravityCreditsBalanceForTask(ctx, auth, accessToken, nil)
+}
+
+func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context.Context, auth *cliproxyauth.Auth, accessToken string, task *antigravityCreditsRefreshTask) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
@@ -462,7 +539,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	httpReq.Header.Set("User-Agent", userAgent)
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "credits_query").Do(httpReq)
 	if errDo != nil {
 		log.Debugf("antigravity executor: loadCodeAssist request error: %v", errDo)
 		return
@@ -480,11 +557,32 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	}
 
 	authID := strings.TrimSpace(auth.ID)
+	publish := func(balance *antigravityCreditsBalance, hint cliproxyauth.AntigravityCreditsHint) {
+		if task != nil {
+			state := task.state
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			current, _ := antigravityCreditsHintRefreshByID.Load(authID)
+			if current != state || state.task != task || state.registrationEpoch != auth.RegistrationEpoch {
+				return
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if balance != nil {
+			storeAntigravityCreditsBalanceBestEffort(authID, *balance)
+		}
+		cliproxyauth.SetAntigravityCreditsHint(authID, hint)
+		if balance != nil && hint.Available {
+			clearAntigravityCreditsPermanentlyDisabled(auth)
+		}
+	}
 	paidTierID := strings.TrimSpace(gjson.GetBytes(bodyBytes, "paidTier.id").String())
 
 	credits := gjson.GetBytes(bodyBytes, "paidTier.availableCredits")
 	if !credits.IsArray() {
-		cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+		publish(nil, cliproxyauth.AntigravityCreditsHint{
 			Known:      true,
 			Available:  false,
 			PaidTierID: paidTierID,
@@ -510,8 +608,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 			PaidTierID:      paidTierID,
 			Known:           true,
 		}
-		storeAntigravityCreditsBalanceBestEffort(authID, bal)
-		cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+		publish(&bal, cliproxyauth.AntigravityCreditsHint{
 			Known:           true,
 			Available:       creditAmount >= minAmount,
 			CreditAmount:    creditAmount,
@@ -519,9 +616,6 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 			PaidTierID:      paidTierID,
 			UpdatedAt:       time.Now(),
 		})
-		if creditAmount >= minAmount {
-			clearAntigravityCreditsPermanentlyDisabled(auth)
-		}
 		return
 	}
 }

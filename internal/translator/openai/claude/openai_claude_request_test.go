@@ -1626,3 +1626,144 @@ func TestConvertClaudeRequestToOpenAI_ToolChoice(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertClaudeRequestToOpenAI_EnabledThinkingEffort(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputJSON  string
+		wantEffort string
+	}{
+		{
+			name:       "explicit output_config effort is preserved without budget",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":"high"}}`,
+			wantEffort: "high",
+		},
+		{
+			name:       "legacy budget remains authoritative when both are present",
+			inputJSON:  `{"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}`,
+			wantEffort: "medium",
+		},
+		{
+			name:       "enabled without budget or effort keeps auto default",
+			inputJSON:  `{"thinking":{"type":"enabled"}}`,
+			wantEffort: "auto",
+		},
+		{
+			name:       "enabled with empty effort string falls back to auto",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":""}}`,
+			wantEffort: "auto",
+		},
+		{
+			name:       "enabled with whitespace-only effort falls back to auto",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":"   "}}`,
+			wantEffort: "auto",
+		},
+		{
+			name:       "enabled with non-string effort falls back to auto",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":123}}`,
+			wantEffort: "auto",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+			if got := gjson.GetBytes(out, "reasoning_effort").String(); got != tt.wantEffort {
+				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tt.wantEffort, out)
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_NormalizesBooleanSubschemas(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-3-opus",
+		"tools": [
+			{
+				"name": "patch_tool",
+				"description": "Applies a JSON patch",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"patch": {"type": "array", "items": true},
+						"anything": true,
+						"disabled": false,
+						"enabled_flag": {"type": "boolean", "default": true, "enum": [true, false]},
+						"either": {"anyOf": [true, {"type": "string"}]},
+						"nested_obj": {
+							"type": "object",
+							"properties": {"foo": {"type": "string"}},
+							"additionalProperties": true
+						}
+					},
+					"additionalProperties": false,
+					"$defs": {
+						"wildcard": true
+					}
+				}
+			}
+		],
+		"messages": [{"role": "user", "content": "hello"}]
+	}`)
+
+	output := ConvertClaudeRequestToOpenAI("test-model", inputJSON, false)
+	outputJSON := gjson.ParseBytes(output)
+
+	params := outputJSON.Get("tools.0.function.parameters")
+	if !params.Exists() {
+		t.Fatalf("parameters missing: %s", outputJSON.Raw)
+	}
+
+	// items: true -> items: {}
+	patchItems := params.Get("properties.patch.items")
+	if !patchItems.Exists() || patchItems.Type == gjson.True || patchItems.Raw == "true" {
+		t.Fatalf("array items boolean subschema not normalized: %s", params.Get("properties.patch").Raw)
+	}
+	if !patchItems.IsObject() || patchItems.Raw != "{}" {
+		t.Fatalf("array items boolean subschema should be empty object {}: %s", patchItems.Raw)
+	}
+
+	// anything: true -> anything: {}
+	anything := params.Get("properties.anything")
+	if !anything.Exists() || !anything.IsObject() || anything.Raw != "{}" {
+		t.Fatalf("boolean property subschema not normalized to empty object {}: %s", anything.Raw)
+	}
+
+	// either.anyOf.0: true -> {}
+	eitherBranch := params.Get("properties.either.anyOf.0")
+	if !eitherBranch.Exists() || !eitherBranch.IsObject() || eitherBranch.Raw != "{}" {
+		t.Fatalf("boolean anyOf branch not normalized to empty object {}: %s", eitherBranch.Raw)
+	}
+
+	// $defs.wildcard: true -> {}
+	wildcard := params.Get("$defs.wildcard")
+	if !wildcard.Exists() || !wildcard.IsObject() || wildcard.Raw != "{}" {
+		t.Fatalf("boolean $defs subschema not normalized to empty object {}: %s", wildcard.Raw)
+	}
+
+	// additionalProperties: false must remain boolean false
+	if addProps := params.Get("additionalProperties"); !addProps.Exists() || addProps.Type != gjson.False {
+		t.Fatalf("additionalProperties: false must be preserved as boolean false, got: %s", addProps.Raw)
+	}
+
+	// nested_obj.additionalProperties: true must remain boolean true
+	if nestedAddProps := params.Get("properties.nested_obj.additionalProperties"); !nestedAddProps.Exists() || nestedAddProps.Type != gjson.True {
+		t.Fatalf("nested additionalProperties: true must be preserved as boolean true, got: %s", nestedAddProps.Raw)
+	}
+
+	// disabled: false must remain boolean false
+	if disabled := params.Get("properties.disabled"); !disabled.Exists() || disabled.Type != gjson.False {
+		t.Fatalf("disabled: false must be preserved as boolean false, got: %s", disabled.Raw)
+	}
+
+	// enabled_flag data values default: true and enum: [true, false] must remain boolean data values
+	if defVal := params.Get("properties.enabled_flag.default"); !defVal.Exists() || defVal.Type != gjson.True {
+		t.Fatalf("enabled_flag.default should remain boolean true, got: %s", defVal.Raw)
+	}
+	if enum0 := params.Get("properties.enabled_flag.enum.0"); !enum0.Exists() || enum0.Type != gjson.True {
+		t.Fatalf("enabled_flag.enum.0 should remain boolean true, got: %s", enum0.Raw)
+	}
+	if enum1 := params.Get("properties.enabled_flag.enum.1"); !enum1.Exists() || enum1.Type != gjson.False {
+		t.Fatalf("enabled_flag.enum.1 should remain boolean false, got: %s", enum1.Raw)
+	}
+}

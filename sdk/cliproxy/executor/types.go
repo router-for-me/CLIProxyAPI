@@ -123,6 +123,8 @@ type RequestAfterAuthInterceptRequest struct {
 
 // RequestAfterAuthInterceptResponse returns selected-auth request modifications.
 type RequestAfterAuthInterceptResponse struct {
+	// Path optionally overrides the inbound request path in Options.Metadata[RequestPathMetadataKey].
+	Path string
 	// Headers replaces matching current request headers and preserves headers not mentioned here.
 	Headers http.Header
 	// Body replaces the current request body only when non-empty.

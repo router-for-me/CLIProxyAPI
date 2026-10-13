@@ -460,3 +460,95 @@ func TestHomeStreamingLogWriter_CloseTerminatesWhenClientUnhealthy(t *testing.T)
 		t.Fatalf("homeStreamingLogWriter leaked writer goroutine after Close with unhealthy client")
 	}
 }
+
+func TestFileRequestLogger_UsesShortRequestIDForLocalAndFullForHome(t *testing.T) {
+	fullUUID := "018f3a5b-1234-7abc-def0-12345678abcd"
+	expectedShortID := "5678abcd"
+
+	// 1. Local file log filename ends with short request ID
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0)
+
+	errLog := logger.LogRequest(
+		"/v1/chat/completions",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		http.StatusOK,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"ok":true}`),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		fullUUID,
+		time.Now(),
+		time.Now(),
+	)
+	if errLog != nil {
+		t.Fatalf("LogRequest failed: %v", errLog)
+	}
+
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		t.Fatalf("ReadDir failed: %v", errRead)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 log file, got %d", len(entries))
+	}
+	filename := entries[0].Name()
+	expectedSuffix := "-" + expectedShortID + ".log"
+	if !strings.HasSuffix(filename, expectedSuffix) {
+		t.Fatalf("filename %q does not have expected suffix %q", filename, expectedSuffix)
+	}
+	if strings.Contains(filename, fullUUID) {
+		t.Fatalf("filename %q should not contain full UUID", filename)
+	}
+
+	// 2. Home forwarded payload preserves full UUID across internal communication
+	original := currentHomeRequestLogClient
+	defer func() {
+		currentHomeRequestLogClient = original
+	}()
+	stub := &stubHomeRequestLogClient{heartbeatOK: true}
+	currentHomeRequestLogClient = func() homeRequestLogClient {
+		return stub
+	}
+
+	homeLogger := NewFileRequestLogger(true, logsDir, "", 0)
+	homeLogger.SetHomeEnabled(true)
+
+	errHomeLog := homeLogger.LogRequest(
+		"/v1/chat/completions",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		http.StatusOK,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"ok":true}`),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		fullUUID,
+		time.Now(),
+		time.Now(),
+	)
+	if errHomeLog != nil {
+		t.Fatalf("home LogRequest failed: %v", errHomeLog)
+	}
+
+	if len(stub.pushed) != 1 {
+		t.Fatalf("home pushed records = %d, want 1", len(stub.pushed))
+	}
+
+	var got homeRequestLogPayload
+	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload failed: %v", errUnmarshal)
+	}
+	if got.RequestID != fullUUID {
+		t.Fatalf("home payload request_id = %q, want full UUID %q", got.RequestID, fullUUID)
+	}
+}

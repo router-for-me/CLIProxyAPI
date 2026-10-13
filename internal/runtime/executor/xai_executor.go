@@ -20,6 +20,7 @@ var (
 const (
 	xaiImageHandlerType        = "openai-image"
 	xaiVideoHandlerType        = "openai-video"
+	xaiSpeechHandlerType       = "openai-speech"
 	xaiCustomToolType          = "custom"
 	xaiFunctionToolType        = "function"
 	xaiImageGenerationToolType = "image_generation"
@@ -43,13 +44,16 @@ const (
 	xaiVideosEditsPath          = "/videos/edits"
 	xaiVideosExtensionsPath     = "/videos/extensions"
 	xaiVideosPath               = "/videos"
+	xaiTTSPath                  = "/tts"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 	xaiComposerModelPrefix      = "grok-composer-"
 	xaiTokenAuthHeader          = "X-XAI-Token-Auth"
 	xaiTokenAuthValue           = "xai-grok-cli"
 	xaiClientVersionHeader      = "x-grok-client-version"
-	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
-	xaiClientVersionValue         = "0.2.120"
+	// Keep in sync with the current Grok CLI client version that chat-proxy
+	// expects. The server rejects older versions with HTTP 426; it required
+	// 1.0.13+ as of 2026-10-01 (#6249).
+	xaiClientVersionValue         = "1.0.44"
 	xaiClientIdentifierHeader     = "x-grok-client-identifier"
 	xaiClientIdentifierValue      = "grok-shell"
 	xaiAuthenticateResponseHeader = "x-authenticateresponse"
@@ -111,3 +115,6 @@ func (e *XAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *XAIExecutor) SupportsApplyPatch() bool { return e != nil }

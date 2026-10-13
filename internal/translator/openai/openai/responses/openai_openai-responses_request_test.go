@@ -2618,3 +2618,26 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NamespaceToolPrefi
 		t.Fatalf("splitResponsesQualifiedFunctionCallFromRequest(raw, \"fs_read\") = (%q, %q), want (\"fs_read\", \"\")", name, namespace)
 	}
 }
+
+func TestApplyPatchChatRequestContractAndHistory(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch","description":"Edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.","format":{"type":"grammar","syntax":"lark","definition":"start: patch"},"cache_control":{"type":"ephemeral"}}]}],"input":[{"type":"custom_tool_call","namespace":"editor","name":"apply_patch","call_id":"c1","input":"*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"done"}]}`)
+	result := gjson.ParseBytes(ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false))
+	tool := result.Get("tools.0.function")
+	description := tool.Get("description").String()
+	schema := tool.Get("parameters")
+	for _, instruction := range []string{"*** Begin Patch", "*** End Patch", "*** Add File:", "*** Delete File:", "*** Update File:", "*** Move to:", "*** End of File", "@@", "start: patch", "JSON object"} {
+		if !strings.Contains(description, instruction) {
+			t.Errorf("missing instruction %q", instruction)
+		}
+	}
+	if strings.Contains(description, "do not wrap the patch in JSON") {
+		t.Fatal("contradictory freeform instructions")
+	}
+	if schema.Get("additionalProperties").Bool() || !schema.Get("additionalProperties").Exists() || schema.Get("required.0").String() != "input" {
+		t.Fatalf("not strict schema: %s", schema.Raw)
+	}
+	call := result.Get("messages.0.tool_calls.0")
+	if call.Get("function.name").String() != "editor__apply_patch" || gjson.Get(call.Get("function.arguments").String(), "input").String() != "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch" || call.Get("id").String() != "c1" || result.Get("messages.1.tool_call_id").String() != "c1" || result.Get("messages.1.content").String() != "done" {
+		t.Fatalf("history mismatch: %s", result.Raw)
+	}
+}

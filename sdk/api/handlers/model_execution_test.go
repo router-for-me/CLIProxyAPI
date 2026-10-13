@@ -1193,3 +1193,61 @@ func TestExecuteModelStreamReturnsFilteredHeadersWhenPassthroughDisabled(t *test
 		t.Fatalf("Set-Cookie = %q, want filtered", stream.Headers.Get("Set-Cookie"))
 	}
 }
+
+func TestExecuteModelAllowsImageModel_Issue6196(t *testing.T) {
+	model := "gpt-image-2.5"
+	requestBody := []byte(`{"prompt":"a red apple"}`)
+	executor := &modelExecutionCaptureExecutor{
+		provider: "openai",
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{
+				Payload: []byte(`{"data":[{"b64_json":"test"}]}`),
+			}, nil
+		},
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"data":[{"b64_json":"test"}]}`)}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Chunks: chunks,
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai-image",
+		ExitProtocol:  "openai-image",
+		Model:         model,
+		Body:          requestBody,
+		Path:          "/v1/images/generations",
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v, want nil", errMsg)
+	}
+	if string(resp.Body) != `{"data":[{"b64_json":"test"}]}` {
+		t.Fatalf("ExecuteModel() body = %s, want expected body", string(resp.Body))
+	}
+	_, capturedOpts := executor.captured()
+	if gotPath := capturedOpts.Metadata[coreexecutor.RequestPathMetadataKey]; gotPath != "/v1/images/generations" {
+		t.Fatalf("captured request path = %v, want /v1/images/generations", gotPath)
+	}
+
+	stream, errStream := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai-image",
+		ExitProtocol:  "openai-image",
+		Model:         model,
+		Stream:        true,
+		Body:          requestBody,
+		Path:          "/v1/images/edits",
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteModelStream() error = %+v, want nil", errStream)
+	}
+	for range stream.Chunks {
+	}
+	_, streamOpts := executor.captured()
+	if gotPath := streamOpts.Metadata[coreexecutor.RequestPathMetadataKey]; gotPath != "/v1/images/edits" {
+		t.Fatalf("captured stream request path = %v, want /v1/images/edits", gotPath)
+	}
+}

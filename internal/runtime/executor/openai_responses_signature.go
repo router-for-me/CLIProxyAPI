@@ -168,7 +168,11 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx context.Cont
 			if rawSignature != strings.TrimSpace(rawSignature) {
 				reason = "encrypted_content has leading or trailing whitespace"
 			} else if _, err := signature.InspectGPTReasoningSignature(rawSignature); err != nil {
-				reason = err.Error()
+				// When isCompat is true, third-party Responses models (such as Muse)
+				// expect their own unknown-format encrypted_content to be replayed.
+				if !isCompat || rawSignature == "" || signature.DetectSignatureProvider(rawSignature) != signature.SignatureProviderUnknown {
+					reason = err.Error()
+				}
 			}
 		case gjson.Null:
 			reason = "encrypted_content is null"

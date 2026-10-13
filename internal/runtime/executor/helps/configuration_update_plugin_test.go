@@ -1,9 +1,11 @@
 package helps_test
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	helps "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/claude"
@@ -18,9 +20,11 @@ import (
 type editUpdatePluginHooks struct {
 	summaryRemovingPluginHooks
 	effort string
+	calls  int
 }
 
 func (h *editUpdatePluginHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
+	h.calls++
 	if h.effort == "" {
 		out, _ := sjson.DeleteBytes(body, "input.0")
 		return out
@@ -54,6 +58,41 @@ func TestPluginConfigurationUpdateNormalizationIsAuthoritative(t *testing.T) {
 				t.Fatalf("unexpected input: %s", body)
 			}
 		})
+	}
+}
+
+func TestRequestPairPreservesPluginConfigurationUpdateIntent(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, compat := range []bool{false, true} {
+			for _, distinct := range []bool{false, true} {
+				hooks := &editUpdatePluginHooks{}
+				sdktranslator.SetPluginHooks(hooks)
+				t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
+				original := []byte(`{"reasoning":{"effort":"medium"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"hi"}]}`)
+				request := original
+				wantCalls := 1
+				if distinct {
+					request = []byte(`{"input":[{"role":"user","content":"different"}]}`)
+					wantCalls = 2
+				}
+				inputBefore := bytes.Clone(request)
+				base, work, updatesChanged := helps.TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(t.Context(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatCodex, "opaque-route", original, request, stream, compat)
+				if hooks.calls != wantCalls {
+					t.Fatalf("stream=%v compat=%v distinct=%v: plugin calls = %d, want %d", stream, compat, distinct, hooks.calls, wantCalls)
+				}
+				if updatesChanged != !distinct {
+					t.Fatalf("stream=%v compat=%v distinct=%v: working update intent = %v, want %v", stream, compat, distinct, updatesChanged, !distinct)
+				}
+				if !distinct && !bytes.Equal(base, work) {
+					t.Fatal("same input produced different plugin results")
+				}
+				baselineBefore := bytes.Clone(base)
+				work[0] = 'X'
+				if !bytes.Equal(base, baselineBefore) || !bytes.Equal(request, inputBefore) {
+					t.Fatal("working buffer aliases the baseline or input")
+				}
+			}
+		}
 	}
 }
 

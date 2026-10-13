@@ -272,6 +272,10 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 			outputs = [][]byte{translated}
 		}
 	}
+	// Retained tool failures are never recovered by raw fallback or plugin normalization.
+	if translationToolInputFailed(param) {
+		return outputs
+	}
 	if outputs == nil && !usedNativeTransform {
 		outputs = [][]byte{body}
 	}
@@ -304,10 +308,22 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 			body = translated
 		}
 	}
+	if translationToolInputFailed(param) || (fn.NonStream != nil && body == nil) {
+		return nil
+	}
 	if hooks != nil {
 		body = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false)
 	}
 	return body
+}
+
+// translationToolInputFailed consumes only the optional, request-local error contract.
+func translationToolInputFailed(param *any) bool {
+	if param == nil {
+		return false
+	}
+	state, okState := (*param).(interface{ ToolInputError() error })
+	return okState && state.ToolInputError() != nil
 }
 
 // TranslateTokenCount applies the registered token count response translator.

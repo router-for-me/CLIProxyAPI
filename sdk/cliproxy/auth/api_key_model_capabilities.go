@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"maps"
 	"strings"
 
@@ -15,6 +16,7 @@ const (
 	resolvedAPIKeyModelInfoMetadataKey     = "cliproxy.resolved_api_key_model_info"
 	resolvedCodexOAuthModelInfoMetadataKey = "cliproxy.resolved_codex_oauth_model_info"
 	resolvedHomeModelInfoMetadataKey       = "cliproxy.resolved_home_model_info"
+	resolvedHomeModelOptionsMetadataKey    = "cliproxy.resolved_home_model_options"
 )
 
 type apiKeyModelCapabilityRoute struct {
@@ -72,15 +74,26 @@ func ResolvedModelInfo(req cliproxyexecutor.Request) (*registry.ModelInfo, bool)
 	return ResolvedAPIKeyModelInfo(req)
 }
 
+// ResolvedHomeModelOptions returns the credential model options selected for this attempt.
+// A present but unmatched or empty models list yields zero-value options.
+func ResolvedHomeModelOptions(req cliproxyexecutor.Request) (internalconfig.OpenAICompatibilityModel, bool) {
+	options, ok := req.Metadata[resolvedHomeModelOptionsMetadataKey].(internalconfig.OpenAICompatibilityModel)
+	return options, ok
+}
+
 // CodexAPIKeyModelIsCompat reports whether the selected codex-api-key model has
-// is-compat enabled. When true and codex.optimize-multi-agent-v2 is also true,
-// Codex MultiAgentV2 agent_message items are converted into portable Responses
-// message/user input for third-party Responses-compatible endpoints.
+// is-compat enabled. When true, Codex MultiAgentV2 agent_message items are converted
+// into portable Responses message/user input for third-party Responses-compatible endpoints.
 func CodexAPIKeyModelIsCompat(cfg *internalconfig.Config, auth *Auth, model string) bool {
 	if cfg == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return false
 	}
 	entry := resolveCodexAPIKeyConfig(cfg, auth)
+	if cfg.Home.Enabled {
+		if options, configured := homeAPIKeyModelOptions(auth, model, model); configured {
+			return options.IsCompat
+		}
+	}
 	if entry == nil || len(entry.Models) == 0 {
 		return false
 	}
@@ -110,6 +123,71 @@ func CodexAPIKeyModelIsCompat(cfg *internalconfig.Config, auth *Auth, model stri
 		}
 	}
 	return false
+}
+
+// homeAPIKeyModelOptions reads the selected credential's model configuration.
+// A present models list is authoritative, including empty lists and false defaults.
+func homeAPIKeyModelOptions(auth *Auth, model, routeModel string) (internalconfig.OpenAICompatibilityModel, bool) {
+	var empty internalconfig.OpenAICompatibilityModel
+	if auth == nil {
+		return empty, false
+	}
+	raw, exists := auth.Metadata["credential_options"]
+	if !exists {
+		return empty, false
+	}
+	data, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		return empty, false
+	}
+	var options struct {
+		Models json.RawMessage `json:"models"`
+	}
+	if errDecode := json.Unmarshal(data, &options); errDecode != nil || len(options.Models) == 0 {
+		return empty, false
+	}
+	var models []internalconfig.OpenAICompatibilityModel
+	if errDecode := json.Unmarshal(options.Models, &models); errDecode != nil {
+		return empty, false
+	}
+	requested := strings.TrimSpace(model)
+	if requested == "" {
+		return empty, true
+	}
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(requested).ModelName)
+	_, routeCandidates := modelAliasLookupCandidates(rewriteModelForAuth(strings.TrimSpace(routeModel), auth))
+	for _, route := range routeCandidates {
+		for _, candidate := range []string{requested, baseModel} {
+			for _, configured := range models {
+				name := strings.TrimSpace(configured.Name)
+				alias := strings.TrimSpace(configured.Alias)
+				if name == "" {
+					name = alias
+				}
+				if strings.EqualFold(name, candidate) && (strings.EqualFold(alias, route) || strings.EqualFold(name, route)) {
+					return configured, true
+				}
+			}
+		}
+	}
+	// Prefer upstream names over aliases and exact suffixes over base fallbacks.
+	for _, useAlias := range []bool{false, true} {
+		for _, candidate := range []string{requested, baseModel} {
+			if candidate == "" {
+				continue
+			}
+			for _, configured := range models {
+				name := strings.TrimSpace(configured.Name)
+				if useAlias || name == "" {
+					name = strings.TrimSpace(configured.Alias)
+				}
+				if strings.EqualFold(name, candidate) {
+					return configured, true
+				}
+			}
+		}
+	}
+	return empty, true
 }
 
 func (m *Manager) attachResolvedAPIKeyModelInfo(req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string) cliproxyexecutor.Request {
@@ -205,27 +283,47 @@ func lookupCodexOAuthModelCapability(auth *Auth, upstreamModel string) (*registr
 	return nil, false
 }
 
-func attachResolvedHomeModelInfo(req cliproxyexecutor.Request, modelInfo *registry.ModelInfo, support ...*bool) cliproxyexecutor.Request {
+func attachResolvedHomeModelInfo(req cliproxyexecutor.Request, auth *Auth, routeModel string, modelInfo *registry.ModelInfo, support *bool) cliproxyexecutor.Request {
+	upstreamModel := req.Model
+	if modelInfo != nil {
+		upstreamModel = modelInfo.ID
+	}
+	if auth != nil {
+		if dispatched := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); dispatched != "" {
+			upstreamModel = dispatched
+		}
+	}
+	options, configured := homeAPIKeyModelOptions(auth, upstreamModel, routeModel)
+	if modelInfo == nil && !configured {
+		return req
+	}
+	metadata := make(map[string]any, len(req.Metadata)+2)
+	maps.Copy(metadata, req.Metadata)
+	delete(metadata, resolvedHomeModelOptionsMetadataKey)
+	if configured {
+		metadata[resolvedHomeModelOptionsMetadataKey] = options
+	}
+	req.Metadata = metadata
 	if modelInfo == nil {
 		return req
 	}
 	selected := *modelInfo
-	if len(support) > 0 && support[0] != nil {
-		selected.SupportConfigurationUpdate = *support[0]
-	} else {
-		selected.SupportConfigurationUpdate = false
-		local, ok := ResolvedAPIKeyModelInfo(req)
-		if !ok {
-			local, ok = req.Metadata[resolvedCodexOAuthModelInfoMetadataKey].(*registry.ModelInfo)
-		}
-		if ok && local != nil && strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(local.ID).ModelName), strings.TrimSpace(thinking.ParseSuffix(selected.ID).ModelName)) {
-			selected.SupportConfigurationUpdate = local.SupportConfigurationUpdate
-		}
+
+	local, ok := ResolvedAPIKeyModelInfo(req)
+	if !ok {
+		local, ok = req.Metadata[resolvedCodexOAuthModelInfoMetadataKey].(*registry.ModelInfo)
 	}
-	metadata := make(map[string]any, len(req.Metadata)+1)
-	maps.Copy(metadata, req.Metadata)
+	sameModel := ok && local != nil && strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(local.ID).ModelName), strings.TrimSpace(thinking.ParseSuffix(selected.ID).ModelName))
+	if support != nil {
+		selected.SupportConfigurationUpdate = *support
+	} else {
+		selected.SupportConfigurationUpdate = sameModel && local.SupportConfigurationUpdate
+	}
+	if configured {
+		selected.IsCompat = options.IsCompat
+	}
+
 	metadata[resolvedHomeModelInfoMetadataKey] = &selected
-	req.Metadata = metadata
 	return req
 }
 

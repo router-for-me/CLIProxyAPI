@@ -194,6 +194,27 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompat_PreservesRea
 	}
 }
 
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompat_PreservesUnknownFormatEncryptedContent(t *testing.T) {
+	const unknownSig = "opaque-encrypted-reasoning-token-xyz"
+	body := []byte(`{"store":false,"input":[{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + unknownSig + `"},{"type":"reasoning","summary":[],"content":null,"encrypted_content":""},{"type":"reasoning","summary":[],"content":null,"encrypted_content":"` + testClaudeCAISSample + `"}]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(context.Background(), "test", body, true)
+	if gotSig := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotSig != unknownSig {
+		t.Fatalf("compat encrypted_content = %q, want %q; body=%s", gotSig, unknownSig, got)
+	}
+	if gjson.GetBytes(got, "input.1.encrypted_content").Exists() {
+		t.Fatalf("empty encrypted_content should still be stripped: %s", got)
+	}
+	if gjson.GetBytes(got, "input.2.encrypted_content").Exists() {
+		t.Fatalf("Claude signature should still be stripped: %s", got)
+	}
+
+	got = sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "test", body)
+	if gjson.GetBytes(got, "input.0.encrypted_content").Exists() {
+		t.Fatalf("non-compat sanitization unexpectedly preserved unknown-format encrypted_content: %s", got)
+	}
+}
+
 func BenchmarkSanitizeOpenAIResponsesReasoningEncryptedContentLargeNoopPayload(b *testing.B) {
 	body := []byte(`{"store":false,"input":[{"type":"message","role":"user","content":"` + strings.Repeat("x", 8<<20) + `"}]}`)
 	b.ReportAllocs()

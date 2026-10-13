@@ -213,6 +213,8 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		cooldownStateChanged bool
 	)
 
+	releaseMutation := m.lockAuthMutation(authID)
+	defer releaseMutation()
 	m.mu.Lock()
 	auth, ok := m.auths[authID]
 	if ok && auth != nil {
@@ -347,7 +349,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 					}
 					auth.Generation++
 					auth.UpdatedAt = now
-					if errPersist := m.persist(context.Background(), auth); errPersist != nil {
+					if errPersist := m.persistLocked(context.Background(), auth); errPersist != nil {
 						logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
 					}
 				}
@@ -361,6 +363,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		}
 	}
 	m.mu.Unlock()
+	releaseMutation()
 
 	if snapshot == nil {
 		return

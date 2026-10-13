@@ -100,3 +100,18 @@ func (c *JWTClaims) GetUserEmail() string {
 func (c *JWTClaims) GetAccountID() string {
 	return c.CodexAuthInfo.ChatgptAccountID
 }
+
+// DefaultPlanType defines the default subscription plan type when not present in claims.
+const DefaultPlanType = "free"
+
+// GetPlanType extracts the ChatGPT plan type from the JWT claims.
+// If the claim is missing or empty, it defaults to "free".
+func (c *JWTClaims) GetPlanType() string {
+	if c == nil {
+		return DefaultPlanType
+	}
+	if pt := strings.TrimSpace(c.CodexAuthInfo.ChatgptPlanType); pt != "" {
+		return pt
+	}
+	return DefaultPlanType
+}

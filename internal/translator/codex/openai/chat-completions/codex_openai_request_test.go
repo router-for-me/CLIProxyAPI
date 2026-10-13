@@ -1141,7 +1141,7 @@ func TestCustomToolCallResponseFollowUpRoundTrip(t *testing.T) {
 	if got := assistantMessage.Get("tool_calls.0.type").String(); got != "function" {
 		t.Fatalf("expected response to normalize custom call as function, got %s", assistantMessage.Raw)
 	}
-	if got := assistantMessage.Get("tool_calls.0.function.arguments").String(); got != "patch" {
+	if got := assistantMessage.Get("tool_calls.0.function.arguments").String(); got != `{"input":"patch"}` {
 		t.Fatalf("expected normalized custom input, got %s", assistantMessage.Raw)
 	}
 
@@ -1163,6 +1163,9 @@ func TestCustomToolCallResponseFollowUpRoundTrip(t *testing.T) {
 	}
 	if got := items[2].Get("type").String(); got != "custom_tool_call_output" {
 		t.Fatalf("expected custom_tool_call_output after response round trip, got %s", items[2].Raw)
+	}
+	if got := items[1].Get("input").String(); got != "patch" {
+		t.Fatalf("raw follow-up input = %q", got)
 	}
 }
 
@@ -1712,6 +1715,30 @@ func TestConvertOpenAIRequestToCodexServiceTier(t *testing.T) {
 			}
 			if gotEffort := gjson.GetBytes(out, "reasoning.effort").String(); gotEffort != tt.wantEffort {
 				t.Fatalf("reasoning.effort = %q, want %q; payload=%s", gotEffort, tt.wantEffort, out)
+			}
+		})
+	}
+}
+
+func TestApplyPatchChatHistoryBoundary(t *testing.T) {
+	for _, tc := range []struct{ name, tools, call, wantType, want string }{
+		{"normalized", `[{"type":"custom","name":"apply_patch"}]`, `{"type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"p\"}"}}`, "custom_tool_call", "p"},
+		{"legacy", `[{"type":"custom","name":"apply_patch"}]`, `{"type":"function","function":{"name":"apply_patch","arguments":"raw patch"}}`, "custom_tool_call", "raw patch"},
+		{"explicit", `[{"type":"custom","name":"apply_patch"}]`, `{"type":"custom","custom":{"name":"apply_patch","input":"{\"input\":\"p\"}"}}`, "custom_tool_call", `{"input":"p"}`},
+		{"invalid-wrapper", `[{"type":"custom","name":"apply_patch"}]`, `{"type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"p\",\"extra\":1}"}}`, "custom_tool_call", `{"input":"p","extra":1}`},
+		{"function-preference", `[{"type":"custom","name":"apply_patch"},{"type":"function","function":{"name":"apply_patch","parameters":{}}}]`, `{"type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"p\"}"}}`, "function_call", `{"input":"p"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"tools":` + tc.tools + `,"messages":[{"role":"assistant","tool_calls":[` + tc.call + `]}]}`)
+			out := ConvertOpenAIRequestToCodex("m", raw, true)
+			items := gjson.GetBytes(out, "input").Array()
+			item := items[len(items)-1]
+			field := "arguments"
+			if tc.wantType == "custom_tool_call" {
+				field = "input"
+			}
+			if item.Get("type").String() != tc.wantType || item.Get(field).String() != tc.want {
+				t.Fatalf("history boundary: %s", out)
 			}
 		})
 	}

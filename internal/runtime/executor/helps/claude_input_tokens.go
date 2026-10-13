@@ -63,6 +63,9 @@ func TranslateStreamWithClaudeInputTokens(
 		rawJSON,
 		param,
 	)
+	if param != nil && ApplyPatchTranslationError(*param) != nil {
+		return chunks
+	}
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		for i, chunk := range chunks {
 			chunks[i] = EnsureResponsesUsageDetails(chunk)

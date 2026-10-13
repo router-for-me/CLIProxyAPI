@@ -135,3 +135,130 @@ func responsesFunctionCallItem(callID, name string) string {
 func responsesFunctionCallOutputItem(callID, output string) string {
 	return fmt.Sprintf(`{"type":"function_call_output","call_id":%q,"output":%q}`, callID, output)
 }
+
+func responsesWebSearchCallItem(id, query string) string {
+	return fmt.Sprintf(`{"type":"web_search_call","id":%q,"status":"completed","action":{"type":"search","query":%q}}`, id, query)
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_WebSearchSeparatesToolUseWithThinking(t *testing.T) {
+	rawSig, signature := testClaudeResponsesThinkingSignatureForModel(t, "claude-opus-5-test")
+
+	t.Run("function_call then web_search_call", func(t *testing.T) {
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`,
+			responsesReasoningItem(rawSig, "I should search and then run a command."),
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Searching, then running."}]}`,
+			responsesFunctionCallItem("call_00_abc", "exec_command"),
+			responsesWebSearchCallItem("ws_srvtoolu_12_x", "hello world"),
+			responsesFunctionCallOutputItem("call_00_abc", "hi"),
+		)
+
+		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		content := gjson.GetBytes(out, "messages.1.content").Array()
+		wantTypes := []string{"thinking", "text", "server_tool_use", "web_search_tool_result", "thinking", "tool_use"}
+		if len(content) != len(wantTypes) {
+			t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
+		}
+		for index, wantType := range wantTypes {
+			if got := content[index].Get("type").String(); got != wantType {
+				t.Fatalf("assistant content[%d].type = %q, want %q. Output: %s", index, got, wantType, out)
+			}
+		}
+		if got := content[0].Get("signature").String(); got != signature {
+			t.Fatalf("first thinking signature = %q, want %q", got, signature)
+		}
+		if got := content[4].Get("signature").String(); got != signature {
+			t.Fatalf("second thinking signature = %q, want %q", got, signature)
+		}
+		if got := content[4].Get("thinking").String(); got != "I should search and then run a command." {
+			t.Fatalf("second thinking text = %q, want original thinking text", got)
+		}
+		if got := content[5].Get("id").String(); got != "call_00_abc" {
+			t.Fatalf("tool_use id = %q, want call_00_abc", got)
+		}
+	})
+
+	t.Run("web_search_call then function_call", func(t *testing.T) {
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`,
+			responsesReasoningItem(rawSig, "I should search and then run a command."),
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Searching, then running."}]}`,
+			responsesWebSearchCallItem("ws_srvtoolu_12_x", "hello world"),
+			responsesFunctionCallItem("call_00_abc", "exec_command"),
+			responsesFunctionCallOutputItem("call_00_abc", "hi"),
+		)
+
+		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		content := gjson.GetBytes(out, "messages.1.content").Array()
+		wantTypes := []string{"thinking", "text", "server_tool_use", "web_search_tool_result", "thinking", "tool_use"}
+		if len(content) != len(wantTypes) {
+			t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
+		}
+		for index, wantType := range wantTypes {
+			if got := content[index].Get("type").String(); got != wantType {
+				t.Fatalf("assistant content[%d].type = %q, want %q. Output: %s", index, got, wantType, out)
+			}
+		}
+		if got := content[4].Get("signature").String(); got != signature {
+			t.Fatalf("second thinking signature = %q, want %q", got, signature)
+		}
+		if got := content[5].Get("id").String(); got != "call_00_abc" {
+			t.Fatalf("tool_use id = %q, want call_00_abc", got)
+		}
+	})
+
+	t.Run("no thinking item present", func(t *testing.T) {
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Searching, then running."}]}`,
+			responsesWebSearchCallItem("ws_srvtoolu_12_x", "hello world"),
+			responsesFunctionCallItem("call_00_abc", "exec_command"),
+			responsesFunctionCallOutputItem("call_00_abc", "hi"),
+		)
+
+		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		content := gjson.GetBytes(out, "messages.1.content").Array()
+		wantTypes := []string{"text", "server_tool_use", "web_search_tool_result", "tool_use"}
+		if len(content) != len(wantTypes) {
+			t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
+		}
+		for index, wantType := range wantTypes {
+			if got := content[index].Get("type").String(); got != wantType {
+				t.Fatalf("assistant content[%d].type = %q, want %q. Output: %s", index, got, wantType, out)
+			}
+		}
+	})
+
+	t.Run("selects latest thinking block when multiple exist", func(t *testing.T) {
+		firstRaw, _ := testClaudeResponsesThinkingSignatureForModel(t, "claude-opus-5-first")
+		secondRaw, secondSignature := testClaudeResponsesThinkingSignatureForModel(t, "claude-opus-5-second")
+
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`,
+			responsesReasoningItem(firstRaw, "first reasoning"),
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"thought once"}]}`,
+			responsesReasoningItem(secondRaw, "second reasoning"),
+			responsesWebSearchCallItem("ws_srvtoolu_12_x", "hello world"),
+			responsesFunctionCallItem("call_00_abc", "exec_command"),
+			responsesFunctionCallOutputItem("call_00_abc", "hi"),
+		)
+
+		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		content := gjson.GetBytes(out, "messages.1.content").Array()
+		wantTypes := []string{"thinking", "text", "thinking", "server_tool_use", "web_search_tool_result", "thinking", "tool_use"}
+		if len(content) != len(wantTypes) {
+			t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
+		}
+		for index, wantType := range wantTypes {
+			if got := content[index].Get("type").String(); got != wantType {
+				t.Fatalf("assistant content[%d].type = %q, want %q. Output: %s", index, got, wantType, out)
+			}
+		}
+		if got := content[5].Get("signature").String(); got != secondSignature {
+			t.Fatalf("separated thinking signature = %q, want latest %q", got, secondSignature)
+		}
+		if got := content[5].Get("thinking").String(); got != "second reasoning" {
+			t.Fatalf("separated thinking text = %q, want latest 'second reasoning'", got)
+		}
+	})
+}

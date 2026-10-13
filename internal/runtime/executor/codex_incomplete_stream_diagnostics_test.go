@@ -425,20 +425,30 @@ func TestCodexExecutorExecuteStreamIncompleteStreamDiagnosticsIgnoreDownstreamUs
 	}
 }
 
-// An upstream that commits headers and then sends nothing at all reports no event and no frame,
-// while still reporting how long it stayed silent.
-func TestCodexExecutorExecuteStreamIncompleteStreamWithoutAnyFrame(t *testing.T) {
-	released, streamErr := codexIncompleteStreamAttempt(t, false, nil)
-	if !released {
-		t.Fatal("the unbuffered path must release the stream")
-	}
-	if streamErr == nil {
-		t.Fatal("expected an incomplete-stream error, got nil")
-	}
+// An upstream that closes before sending any payload must keep the empty-stream contract:
+// the conductor can retry another credential instead of committing an in-stream error.
+func TestCodexExecutorExecuteStreamIncompleteStreamWithoutAnyFrameAllowsFailover(t *testing.T) {
+	for _, buffering := range []bool{false, true} {
+		t.Run(fmt.Sprintf("buffering=%v", buffering), func(t *testing.T) {
+			clock := newCodexScriptedStreamClock(t)
+			server := codexScriptedSSEServer(t, clock)
+			defer server.Close()
 
-	want := codexIncompleteStreamWant("none", 0)
-	if got := streamErr.Error(); got != want {
-		t.Fatalf("stream error = %q, want %q", got, want)
+			req, opts := codexTestRequest()
+			result, err := NewCodexExecutor(codexBufferingConfig(buffering)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+			if err != nil {
+				t.Fatalf("expected an empty stream eligible for failover, got error: %v", err)
+			}
+			if result == nil {
+				t.Fatal("expected an empty stream result")
+			}
+			if got := result.Headers.Get("Content-Type"); got != "text/event-stream" {
+				t.Fatalf("content type = %q, want text/event-stream", got)
+			}
+			if chunk, ok := <-result.Chunks; ok {
+				t.Fatalf("expected a closed stream without payload or error chunks, got %+v", chunk)
+			}
+		})
 	}
 }
 

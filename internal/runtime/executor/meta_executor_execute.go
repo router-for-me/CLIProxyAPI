@@ -22,6 +22,7 @@ import (
 )
 
 type metaPreparedRequest struct {
+	applyPatch      *helps.ApplyPatchResponsesState
 	baseModel       string
 	from            sdktranslator.Format
 	responseFormat  sdktranslator.Format
@@ -53,7 +54,6 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, e.Identifier(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = helps.SetBoolIfDifferent(body, "stream", stream)
 	body, _ = sjson.DeleteBytes(body, "generate")
@@ -61,11 +61,20 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.DeleteBytes(body, "client_metadata")
+	applyPatch := helps.NewApplyPatchResponsesState(from, originalPayload, originalTranslated)
+	var errNormalizePatch error
+	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body, originalPayload)
+	if errNormalizePatch != nil {
+		return nil, errNormalizePatch
+	}
 	body = normalizeCodexInstructions(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "meta executor", body)
 	body = helps.SanitizeMetaWebSearchTools(body)
+	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 
+	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, e.Identifier(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	return &metaPreparedRequest{
+		applyPatch:      applyPatch,
 		baseModel:       baseModel,
 		from:            from,
 		responseFormat:  responseFormat,
@@ -134,8 +143,10 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, wrapMetaUpstreamError(httpResp.StatusCode, data)
 	}
 
-	out, errCompleted := e.translateMetaCompleted(ctx, req, prepared, data)
+	var upstreamUsage helps.StreamUsageBuffer
+	out, errCompleted := e.translateMetaCompleted(ctx, req, prepared, data, &upstreamUsage)
 	if errCompleted != nil {
+		upstreamUsage.PublishFailure(ctx, reporter, errCompleted)
 		return resp, errCompleted
 	}
 	if len(out.sourceEvent) > 0 {
@@ -158,7 +169,7 @@ type metaCompletedTranslation struct {
 	sourceEvent []byte
 }
 
-func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxyexecutor.Request, prepared *metaPreparedRequest, data []byte) (metaCompletedTranslation, error) {
+func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxyexecutor.Request, prepared *metaPreparedRequest, data []byte, upstreamUsage *helps.StreamUsageBuffer) (metaCompletedTranslation, error) {
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	for _, line := range bytes.Split(data, []byte("\n")) {
@@ -166,28 +177,56 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			continue
 		}
 		eventData := bytes.TrimSpace(line[len(dataTag):])
+		if detail, ok := helps.ParseCodexUsage(eventData); ok {
+			upstreamUsage.Observe(detail, true)
+		}
 		if errEvent := metaStreamEventError(eventData); errEvent != nil {
 			return metaCompletedTranslation{}, errEvent
 		}
-		eventType := gjson.GetBytes(eventData, "type").String()
-		switch eventType {
-		case "response.output_item.done":
-			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed", "response.incomplete":
-			completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			var param any
-			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
+		events, errBridge := prepared.applyPatch.Transform(eventData)
+		if errBridge != nil {
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			return metaCompletedTranslation{}, errBridge
+		}
+		for _, eventData := range events {
+			eventType := gjson.GetBytes(eventData, "type").String()
+			switch eventType {
+			case "response.output_item.done":
+				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.incomplete":
+				completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+				var param any
+				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+					return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+				}
+				return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
+			}
 		}
 	}
 
 	if completedData, ok := metaAsCompletedEvent(data); ok {
+		if detail, okUsage := helps.ParseCodexUsage(completedData); okUsage {
+			upstreamUsage.Observe(detail, true)
+		}
 		completedData = patchCodexCompletedOutput(completedData, outputItemsByIndex, outputItemsFallback)
+		var errBridge error
+		completedData, errBridge = prepared.applyPatch.Bridge.TransformNonStream(completedData)
+		if errBridge != nil {
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			return metaCompletedTranslation{}, errBridge
+		}
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+		if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+			return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		}
 		return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
 	}
 
+	if errFinish := prepared.applyPatch.Finish(); errFinish != nil {
+		return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
 	return metaCompletedTranslation{}, statusErr{code: http.StatusRequestTimeout, msg: "meta stream error: stream disconnected before response.completed or response.incomplete"}
 }
 

@@ -30,13 +30,36 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 	return out
 }
 
-// ApplyPayloadConfigWithRequestTracked applies payload config and reports whether
-// an applied rule targeted trackedPath or one of its descendants.
+// ApplyPayloadConfigWithRequestForExecutor applies payload config with explicit target executor context.
+func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
+	out, _ := ApplyPayloadConfigWithTrackedPathsForExecutor(cfg, targetExecutor, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers)
+	return out
+}
+
+func isCodexTargetExecutor(targetExecutor string) bool {
+	te := strings.ToLower(strings.TrimSpace(targetExecutor))
+	return te == "codex" || te == "codex-websockets" || te == "codex_websockets"
+}
+
 // ApplyPayloadConfigWithTrackedPaths applies payload config and reports which
 // tracked paths (or their descendants) were targeted by an applied rule.
 func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPaths ...string) ([]byte, map[string]bool) {
+	return ApplyPayloadConfigWithTrackedPathsForExecutor(cfg, "", model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers, trackedPaths...)
+}
+
+// ApplyPayloadConfigWithTrackedPathsForExecutor applies payload config with target executor awareness.
+// When headers indicate a Codex client and the target executor is not Codex or Codex WebSocket,
+// it normalizes tool parameter integer types to satisfy client-side integer deserialization (#6237).
+// For Codex and Codex WebSocket targets, integer normalization is skipped (#6244).
+func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPaths ...string) ([]byte, map[string]bool) {
 	touched := make(map[string]bool)
-	if cfg == nil || len(payload) == 0 {
+	if len(payload) == 0 {
+		return payload, touched
+	}
+	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
+		payload = NormalizeCodexToolIntegerTypes(payload, headers)
+	}
+	if cfg == nil {
 		return payload, touched
 	}
 	out := payload

@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -19,7 +21,10 @@ type unauthorizedRefreshExecutor struct {
 	refreshCalls  int
 	tokenInvalid  map[string]struct{}
 	refreshFail   bool
+	refreshErr    error
 	refreshTokens map[string]string
+	onExecute     func(authID string)
+	onRefresh     func()
 }
 
 func (e *unauthorizedRefreshExecutor) Identifier() string { return e.id }
@@ -29,7 +34,11 @@ func (e *unauthorizedRefreshExecutor) Execute(_ context.Context, auth *Auth, _ c
 	e.executeCalls = append(e.executeCalls, auth.ID)
 	token := authAccessToken(auth)
 	_, invalid := e.tokenInvalid[token]
+	onExec := e.onExecute
 	e.mu.Unlock()
+	if onExec != nil {
+		onExec(auth.ID)
+	}
 	if invalid {
 		return cliproxyexecutor.Response{}, &Error{
 			HTTPStatus: http.StatusUnauthorized,
@@ -44,7 +53,11 @@ func (e *unauthorizedRefreshExecutor) ExecuteStream(_ context.Context, auth *Aut
 	e.streamCalls = append(e.streamCalls, auth.ID)
 	token := authAccessToken(auth)
 	_, invalid := e.tokenInvalid[token]
+	onExec := e.onExecute
 	e.mu.Unlock()
+	if onExec != nil {
+		onExec(auth.ID)
+	}
 	if invalid {
 		return nil, &Error{
 			HTTPStatus: http.StatusUnauthorized,
@@ -59,15 +72,24 @@ func (e *unauthorizedRefreshExecutor) ExecuteStream(_ context.Context, auth *Aut
 
 func (e *unauthorizedRefreshExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.refreshCalls++
-	if e.refreshFail {
+	onRef := e.onRefresh
+	err := e.refreshErr
+	fail := e.refreshFail
+	next := e.refreshTokens[auth.ID]
+	e.mu.Unlock()
+	if onRef != nil {
+		onRef()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if fail {
 		return nil, &Error{HTTPStatus: http.StatusUnauthorized, Message: "refresh token invalid"}
 	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	next := e.refreshTokens[auth.ID]
 	if next == "" {
 		next = "refreshed-access-token"
 	}
@@ -224,6 +246,364 @@ func TestManager_ExecuteStream_UnauthorizedRefreshesCurrentAuthBeforeFallback(t 
 		if id == backup.ID {
 			t.Fatalf("backup auth should not be used when refresh recovers primary")
 		}
+	}
+}
+
+func TestManager_Execute_RejectedTokenWithInvalidGrantStopsSelectingAuth(t *testing.T) {
+	m, executor, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
+	executor.mu.Lock()
+	executor.refreshErr = errors.New(`token refresh failed with status 400: {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}`)
+	executor.mu.Unlock()
+	// The revoked access token still has a future expiry, as in production.
+	updated, ok := m.GetByID(primary.ID)
+	if !ok || updated == nil {
+		t.Fatal("primary auth missing")
+	}
+	updated.Metadata["expired"] = time.Now().Add(6 * time.Hour).Format(time.RFC3339)
+	if _, errUpdate := m.Update(context.Background(), updated); errUpdate != nil {
+		t.Fatalf("update primary: %v", errUpdate)
+	}
+
+	for i := 0; i < 2; i++ {
+		resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("Execute %d error = %v, want success via backup", i, errExecute)
+		}
+		if got := string(resp.Payload); got != backup.ID+":backup-access-token" {
+			t.Fatalf("Execute %d payload = %q, want backup response", i, got)
+		}
+	}
+
+	primaryCalls := 0
+	for _, id := range executor.ExecuteCalls() {
+		if id == primary.ID {
+			primaryCalls++
+		}
+	}
+	if primaryCalls != 1 {
+		t.Fatalf("primary executions = %d, want 1; calls = %v", primaryCalls, executor.ExecuteCalls())
+	}
+	if got := executor.RefreshCalls(); got != 1 {
+		t.Fatalf("Refresh calls = %d, want 1", got)
+	}
+	final, ok := m.GetByID(primary.ID)
+	if !ok || final == nil {
+		t.Fatal("primary auth missing after refresh failure")
+	}
+	if !hasUnauthorizedAuthFailure(final) {
+		t.Fatalf("expected terminal unauthorized state, got unavailable=%v status=%s next_refresh=%v last_error=%+v", final.Unavailable, final.Status, final.NextRefreshAfter, final.LastError)
+	}
+}
+
+func TestManager_MarkResult_InFlightResultDoesNotReviveTerminalUnauthorizedAuth(t *testing.T) {
+	m, executor, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
+	executor.mu.Lock()
+	executor.refreshErr = errors.New(`token refresh failed with status 400: {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}`)
+	executor.mu.Unlock()
+
+	// Initial request triggers 401 + invalid_grant -> terminal unauthorized.
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v, want success via backup", errExecute)
+	}
+
+	authAfterRefresh, ok := m.GetByID(primary.ID)
+	if !ok || authAfterRefresh == nil {
+		t.Fatal("primary auth missing")
+	}
+	if !hasUnauthorizedAuthFailure(authAfterRefresh) {
+		t.Fatalf("expected terminal unauthorized state initially")
+	}
+
+	// Simulate an in-flight request on primary finishing with 500 Internal Server Error.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   primary.ID,
+		Provider: "codex",
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusInternalServerError,
+			Code:       "internal_error",
+			Message:    "internal server error",
+		},
+	})
+
+	authAfter500, ok := m.GetByID(primary.ID)
+	if !ok || authAfter500 == nil {
+		t.Fatal("primary auth missing")
+	}
+	if !hasUnauthorizedAuthFailure(authAfter500) {
+		t.Fatalf("expected terminal unauthorized state preserved after in-flight 500, got status=%s unavailable=%v last_error=%+v", authAfter500.Status, authAfter500.Unavailable, authAfter500.LastError)
+	}
+
+	// Simulate another in-flight request finishing with Success.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   primary.ID,
+		Provider: "codex",
+		Model:    model,
+		Success:  true,
+	})
+
+	authAfterSuccess, ok := m.GetByID(primary.ID)
+	if !ok || authAfterSuccess == nil {
+		t.Fatal("primary auth missing")
+	}
+	if !hasUnauthorizedAuthFailure(authAfterSuccess) {
+		t.Fatalf("expected terminal unauthorized state preserved after in-flight success, got status=%s unavailable=%v last_error=%+v", authAfterSuccess.Status, authAfterSuccess.Unavailable, authAfterSuccess.LastError)
+	}
+
+	// Reset any model cooldowns / advance time.
+	_, _, _ = m.ResetQuota(context.Background(), primary.ID)
+
+	// Execute again: primary MUST NOT be selected.
+	callsBefore := len(executor.ExecuteCalls())
+	resp, errSecond := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errSecond != nil {
+		t.Fatalf("second execute error: %v", errSecond)
+	}
+	if got := string(resp.Payload); got != backup.ID+":backup-access-token" {
+		t.Fatalf("got payload %q, want backup", got)
+	}
+	for _, id := range executor.ExecuteCalls()[callsBefore:] {
+		if id == primary.ID {
+			t.Fatalf("primary was selected again after in-flight result!")
+		}
+	}
+}
+
+func TestManager_ConcurrentUnauthorized_BarrierExecutionPreservesTerminalState(t *testing.T) {
+	model := "gpt-5.5"
+	primary := &Auth{
+		ID:       "aa-primary",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":  "stale-access-token",
+			"refresh_token": "primary-refresh-token",
+			"expired":       time.Now().Add(6 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	backup := &Auth{
+		ID:       "bb-backup",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":  "backup-access-token",
+			"refresh_token": "backup-refresh-token",
+		},
+	}
+
+	executor := &unauthorizedRefreshExecutor{
+		id: "codex",
+		tokenInvalid: map[string]struct{}{
+			"stale-access-token": {},
+		},
+		refreshErr: errors.New(`token refresh failed with status 400: {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}`),
+	}
+
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(primary.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(backup.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(primary.ID)
+		reg.UnregisterClient(backup.ID)
+	})
+
+	if _, err := m.Register(context.Background(), primary); err != nil {
+		t.Fatalf("register primary: %v", err)
+	}
+	if _, err := m.Register(context.Background(), backup); err != nil {
+		t.Fatalf("register backup: %v", err)
+	}
+
+	// Channel-based synchronization barrier:
+	// Hold both requests when executing primary until both have entered.
+	primaryEntered := make(chan struct{}, 2)
+	releasePrimary := make(chan struct{})
+	executor.mu.Lock()
+	executor.onExecute = func(authID string) {
+		if authID == primary.ID {
+			primaryEntered <- struct{}{}
+			<-releasePrimary
+		}
+	}
+	executor.mu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	results := make([]string, 2)
+	errs := make([]error, 2)
+
+	for i := 0; i < 2; i++ {
+		idx := i
+		go func() {
+			defer wg.Done()
+			resp, err := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			errs[idx] = err
+			if err == nil {
+				results[idx] = string(resp.Payload)
+			}
+		}()
+	}
+
+	// Wait until both concurrent goroutines have arrived at executing primary with timeout protection.
+	timeout := time.After(5 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-primaryEntered:
+		case <-timeout:
+			t.Fatal("timed out waiting for concurrent executions to enter primary")
+		}
+	}
+	// Release both goroutines to receive 401 concurrently.
+	close(releasePrimary)
+
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for concurrent executions to complete")
+	}
+
+	for i := 0; i < 2; i++ {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d error = %v, want success via backup", i, errs[i])
+		}
+		if results[i] != backup.ID+":backup-access-token" {
+			t.Fatalf("goroutine %d payload = %q, want backup response", i, results[i])
+		}
+	}
+
+	// Only 1 refresh attempt should have occurred for the invalidated primary token.
+	if got := executor.RefreshCalls(); got != 1 {
+		t.Fatalf("expected 1 refresh call during concurrent execution, got %d", got)
+	}
+
+	final, ok := m.GetByID(primary.ID)
+	if !ok || final == nil {
+		t.Fatal("primary auth missing")
+	}
+	if !hasUnauthorizedAuthFailure(final) {
+		t.Fatalf("expected terminal unauthorized state after concurrent execution, got unavailable=%v status=%s next_refresh=%v last_error=%+v",
+			final.Unavailable, final.Status, final.NextRefreshAfter, final.LastError)
+	}
+
+	// Explicitly verify background and request-triggered refresh do NOT call executor.Refresh on terminal unauthorized auth.
+	callsBefore := executor.RefreshCalls()
+	m.refreshAuth(context.Background(), primary.ID)
+	if got := executor.RefreshCalls(); got != callsBefore {
+		t.Fatalf("background refreshAuth called executor.Refresh on terminal unauthorized auth (%d -> %d)", callsBefore, got)
+	}
+
+	_, refreshed := m.tryRefreshAfterUnauthorized(context.Background(), final, &Error{HTTPStatus: http.StatusUnauthorized, Message: "401"}, false)
+	if refreshed {
+		t.Fatal("tryRefreshAfterUnauthorized should not report refreshed for terminal unauthorized auth")
+	}
+	if got := executor.RefreshCalls(); got != callsBefore {
+		t.Fatalf("tryRefreshAfterUnauthorized called executor.Refresh on terminal unauthorized auth (%d -> %d)", callsBefore, got)
+	}
+
+	// Verify that manual ForceRefreshAuth DOES call executor.Refresh.
+	_, _ = m.ForceRefreshAuth(context.Background(), primary.ID)
+	if got := executor.RefreshCalls(); got != callsBefore+1 {
+		t.Fatalf("ForceRefreshAuth should call executor.Refresh, got %d calls, want %d", got, callsBefore+1)
+	}
+
+	// Verify that a subsequent request still does not touch primary.
+	execCallsBefore := len(executor.ExecuteCalls())
+	resp3, err3 := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err3 != nil {
+		t.Fatalf("Execute 3 error: %v", err3)
+	}
+	if string(resp3.Payload) != backup.ID+":backup-access-token" {
+		t.Fatalf("Execute 3 want backup, got %s", resp3.Payload)
+	}
+	for _, id := range executor.ExecuteCalls()[execCallsBefore:] {
+		if id == primary.ID {
+			t.Fatalf("primary was selected again after concurrent execution!")
+		}
+	}
+}
+
+func TestManager_ForceRefreshAuth_FailurePreservesTerminalUnauthorizedState(t *testing.T) {
+	m, executor, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
+
+	// Primary has future nominal expiry.
+	updated, ok := m.GetByID(primary.ID)
+	if !ok || updated == nil {
+		t.Fatal("primary auth missing")
+	}
+	updated.Metadata["expired"] = time.Now().Add(6 * time.Hour).Format(time.RFC3339)
+	if _, errUpdate := m.Update(context.Background(), updated); errUpdate != nil {
+		t.Fatalf("update primary: %v", errUpdate)
+	}
+
+	executor.mu.Lock()
+	executor.refreshErr = errors.New(`token refresh failed with status 400: {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}`)
+	executor.mu.Unlock()
+
+	// Initial request triggers 401 + invalid_grant -> terminal unauthorized.
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error: %v", errExecute)
+	}
+
+	authAfterInit, _ := m.GetByID(primary.ID)
+	if !hasUnauthorizedAuthFailure(authAfterInit) {
+		t.Fatalf("expected terminal unauthorized state initially")
+	}
+
+	// 1. Manually force refresh, but the refresh fails with 503 Service Unavailable.
+	executor.mu.Lock()
+	executor.refreshErr = errors.New("upstream 503 service unavailable")
+	executor.mu.Unlock()
+
+	_, errForce := m.ForceRefreshAuth(context.Background(), primary.ID)
+	if errForce == nil {
+		t.Fatal("expected ForceRefreshAuth to fail")
+	}
+
+	authAfterFailedForce, _ := m.GetByID(primary.ID)
+	if !hasUnauthorizedAuthFailure(authAfterFailedForce) {
+		t.Fatalf("expected terminal unauthorized state to be preserved after failed force refresh, got unavailable=%v status=%s next_refresh=%v last_error=%+v",
+			authAfterFailedForce.Unavailable, authAfterFailedForce.Status, authAfterFailedForce.NextRefreshAfter, authAfterFailedForce.LastError)
+	}
+	if !authAfterFailedForce.NextRefreshAfter.IsZero() {
+		t.Fatalf("expected NextRefreshAfter to remain zero after failed force refresh, got %v", authAfterFailedForce.NextRefreshAfter)
+	}
+
+	// Selection still skips primary.
+	resp, errAfterFailedForce := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errAfterFailedForce != nil {
+		t.Fatalf("Execute error: %v", errAfterFailedForce)
+	}
+	if string(resp.Payload) != backup.ID+":backup-access-token" {
+		t.Fatalf("expected backup selection, got %s", resp.Payload)
+	}
+
+	// 2. Now force refresh succeeds with a valid token.
+	executor.mu.Lock()
+	executor.refreshErr = nil
+	executor.refreshTokens[primary.ID] = "newly-minted-token"
+	executor.mu.Unlock()
+
+	refreshed, errSuccess := m.ForceRefreshAuth(context.Background(), primary.ID)
+	if errSuccess != nil {
+		t.Fatalf("ForceRefreshAuth should succeed, got: %v", errSuccess)
+	}
+	if refreshed.Status != StatusActive {
+		t.Fatalf("expected StatusActive after successful force refresh, got %s", refreshed.Status)
+	}
+	if refreshed.Unavailable {
+		t.Fatal("expected Unavailable=false after successful force refresh")
+	}
+	if hasUnauthorizedAuthFailure(refreshed) {
+		t.Fatal("hasUnauthorizedAuthFailure should be false after successful force refresh")
 	}
 }
 

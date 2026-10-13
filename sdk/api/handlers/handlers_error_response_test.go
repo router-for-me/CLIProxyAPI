@@ -399,6 +399,41 @@ func TestBuildErrorResponseBodyWithError_TerminalAuthEnforcesContractOnJSONInput
 	}
 }
 
+func TestBuildErrorResponseBodyWithError_RequestTimeoutIsServerError(t *testing.T) {
+	body := BuildErrorResponseBodyWithError(http.StatusRequestTimeout, "upstream request timeout", nil)
+	var payload struct {
+		Error struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal error body: %v", errUnmarshal)
+	}
+	if payload.Error.Type != "server_error" {
+		t.Fatalf("type = %q, want server_error", payload.Error.Type)
+	}
+	if payload.Error.Code != "request_timeout" {
+		t.Fatalf("code = %q, want request_timeout", payload.Error.Code)
+	}
+	if payload.Error.Message != "upstream request timeout" {
+		t.Fatalf("message = %q, want upstream request timeout", payload.Error.Message)
+	}
+}
+
+func TestBuildErrorResponseBody_CompactsPrettyPrintedJSON(t *testing.T) {
+	prettyJSON := "{\n  \"error\": {\n    \"code\": 500,\n    \"message\": \"Internal error encountered.\",\n    \"status\": \"INTERNAL\"\n  }\n}"
+	body := BuildErrorResponseBody(http.StatusInternalServerError, prettyJSON)
+	if strings.Contains(string(body), "\n") {
+		t.Fatalf("expected compacted JSON without newlines for SSE compatibility, got:\n%s", string(body))
+	}
+	expected := `{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}`
+	if string(body) != expected {
+		t.Fatalf("body = %s, want %s", string(body), expected)
+	}
+}
+
 func TestEnrichAuthSelectionError_PropagatesTerminalAuth(t *testing.T) {
 	terminalErr := coreauth.NewTerminalAuthError(&coreauth.Error{
 		Code:       "auth_unavailable",

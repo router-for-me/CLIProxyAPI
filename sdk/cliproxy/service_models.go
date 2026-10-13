@@ -28,6 +28,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if ctx.Err() != nil {
 		return
 	}
+	s.cancelStaleAntigravityProbes(a.ID)
 	if a.Disabled {
 		if s != nil && s.coreManager != nil {
 			if current, ok := s.coreManager.GetByID(a.ID); ok && current != nil && !current.Disabled {
@@ -110,7 +111,21 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = registry.GetAIStudioModels()
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
-		models = registry.GetAntigravityModels()
+		if !s.antigravityHomeEnabled() {
+			expectedRegEpoch := GlobalModelRegistry().ClientRegistrationEpoch(a.ID)
+			expectedKey := s.antigravityCapabilityKey(a)
+			hints := s.cachedAntigravityHints(a)
+			if hints.ModelIDs != nil {
+				// Publish known catalogs through the same fenced, state-preserving
+				// path as refreshes. An expired catalog remains usable while HTTP
+				// is pending, including its quota and suspension projections.
+				s.applyAntigravityModelHints(ctx, a, provider, hints, expectedKey, a.RegistrationEpoch, expectedRegEpoch)
+				s.asyncProbeAntigravityCapabilities(ctx, a, provider)
+				return
+			}
+		} else {
+			models = registry.GetAntigravityModels()
+		}
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
@@ -295,6 +310,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
+		models = applyOAuthSettingsForAuth(s.cfg, provider, authKind, models)
 		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
 		if strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") {
 			s.asyncProbeAntigravityCapabilities(ctx, a, key)
@@ -303,15 +319,18 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 
 	GlobalModelRegistry().UnregisterClient(a.ID)
+	if provider == "antigravity" {
+		s.asyncProbeAntigravityCapabilities(ctx, a, key)
+	}
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for
 // one auth and reconciles any concurrent auth changes that race with the
 // refresh. Callers are expected to pre-filter provider membership.
 //
-// Re-registration is deliberate: registry cooldown/suspension state is treated
-// as part of the previous registration snapshot and is cleared when the auth is
-// rebound to the refreshed model catalog.
+// Re-registration is deliberate: most providers start a fresh registry snapshot.
+// Native Antigravity catalogs instead use fenced replacement to preserve quota
+// and suspension state while account entitlement refreshes are pending.
 func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 	return s.refreshModelRegistrationForAuthWithContext(context.Background(), current, nil)
 }
@@ -334,7 +353,7 @@ func (s *Service) refreshModelRegistrationForAuthWithContext(ctx context.Context
 		s.ensureExecutorsForAuthWithContext(ctx, current, false)
 	}
 	s.registerModelsForAuthWithCache(ctx, current, compatCache)
-	s.coreManager.ReconcileRegistryModelStates(ctx, current.ID)
+	s.reconcileRegisteredModelStates(ctx, current)
 	if ctx.Err() != nil {
 		return false
 	}
@@ -354,7 +373,7 @@ func (s *Service) refreshModelRegistrationForAuthWithContext(ctx context.Context
 	if ctx.Err() != nil {
 		return false
 	}
-	s.coreManager.ReconcileRegistryModelStates(ctx, latest.ID)
+	s.reconcileRegisteredModelStates(ctx, latest)
 	s.coreManager.RefreshSchedulerEntry(current.ID)
 	return true
 }
@@ -1124,6 +1143,54 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 				continue
 			}
 			seen[key] = struct{}{}
+			out = append(out, model)
+		}
+	}
+	return out
+}
+
+func applyOAuthSettings(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+	return applyOAuthSettingsForAuth(cfg, provider, authKind, models)
+}
+
+func applyOAuthSettingsForAuth(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
+	if channel == "" {
+		return models
+	}
+	settings := oauthSettingsForAuth(cfg, channel)
+	if len(settings) == 0 {
+		return models
+	}
+	return applyOAuthSettingEntries(settings, models)
+}
+
+func oauthSettingsForAuth(cfg *config.Config, channel string) []config.OAuthModelSetting {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return nil
+	}
+	return cfg.OAuthSettings[channel]
+}
+
+func applyOAuthSettingEntries(settings []config.OAuthModelSetting, models []*ModelInfo) []*ModelInfo {
+	if len(settings) == 0 || len(models) == 0 {
+		return models
+	}
+	out := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.MetadataModelID, model.Name)
+		if setting != nil && setting.MaxContextLength > 0 {
+			clone := *model
+			clone.ContextLength = setting.MaxContextLength
+			clone.MaxContextLength = setting.MaxContextLength
+			out = append(out, &clone)
+		} else {
 			out = append(out, model)
 		}
 	}

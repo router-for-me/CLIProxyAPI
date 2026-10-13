@@ -50,6 +50,8 @@ type Auth struct {
 	ID string `json:"id"`
 	// RegistrationEpoch tracks monotonic registration cycles across unregister/re-register.
 	RegistrationEpoch uint64 `json:"registration_epoch,omitempty"`
+	// CredentialVersion tracks monotonic credential replacements for secret material.
+	CredentialVersion uint64 `json:"credential_version,omitempty"`
 	// Generation tracks monotonic mutations to resolve scheduler/reconcile snapshot races.
 	Generation uint64 `json:"generation,omitempty"`
 	// Index is a stable runtime identifier derived from auth metadata (not persisted).
@@ -99,6 +101,9 @@ type Auth struct {
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+
+	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
+	RejectedAccessToken string `json:"-"`
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -293,19 +298,19 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
-	if len(a.Attributes) > 0 {
+	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {
 			copyAuth.Attributes[key] = value
 		}
 	}
-	if len(a.Metadata) > 0 {
+	if a.Metadata != nil {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
 		for key, value := range a.Metadata {
 			copyAuth.Metadata[key] = value
 		}
 	}
-	if len(a.ModelStates) > 0 {
+	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()
@@ -617,7 +622,11 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
 	}
-	if tokenStr := authAccessToken(a); tokenStr != "" {
+	tokenStr := authAccessToken(a)
+	if tokenStr != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
+	}
+	if tokenStr != "" {
 		if jwtExp, ok := parseJWTExp(tokenStr); ok {
 			return jwtExp, true
 		}
@@ -637,6 +646,9 @@ func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
 	tokenStr := authAccessToken(a)
 	if tokenStr == "" {
 		return time.Time{}, false
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
 	}
 	if jwtExp, ok := parseJWTExp(tokenStr); ok {
 		return jwtExp, true

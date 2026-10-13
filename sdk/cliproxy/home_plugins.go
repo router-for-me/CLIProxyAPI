@@ -22,8 +22,9 @@ import (
 const homePluginStatusReportTimeout = 10 * time.Second
 
 type homePluginStatusWork struct {
-	cfg    *config.Config
-	report homeplugins.SyncReport
+	cfg              *config.Config
+	report           homeplugins.SyncReport
+	needsLoadMarking bool
 }
 
 type homePluginTaskWork struct {
@@ -212,7 +213,13 @@ func (s *Service) finalizeHomePluginWork(ctx context.Context, client *home.Clien
 		}
 	}
 	for work.nextStatus < len(work.statusWork) {
-		status := work.statusWork[work.nextStatus]
+		status := &work.statusWork[work.nextStatus]
+		if status.needsLoadMarking {
+			if errLoad := homeplugins.MarkLoadResults(&status.report, s.pluginHost); errLoad != nil {
+				log.Warnf("failed to load home plugins: %v", errLoad)
+			}
+			status.needsLoadMarking = false
+		}
 		if errReport := s.pushHomePluginStatusWithClient(ctx, status.cfg, status.report, client); errReport != nil {
 			return errReport
 		}

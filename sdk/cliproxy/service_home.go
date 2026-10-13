@@ -11,7 +11,6 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -101,6 +100,23 @@ func (q *homeConfigWorkQueue) dequeue(ctx context.Context) ([]byte, bool) {
 	}
 }
 
+func (q *homeConfigWorkQueue) tryDequeueLatest() ([]byte, bool) {
+	if q == nil {
+		return nil, false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nil, false
+	}
+	item := q.items[len(q.items)-1]
+	for index := range q.items {
+		q.items[index] = nil
+	}
+	q.items = nil
+	return item, true
+}
+
 type homeLogForwarder interface {
 	Bind(*home.Client)
 	Deactivate(*home.Client)
@@ -180,16 +196,15 @@ func (s *Service) stageHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, errContext
 	}
-	if didSync {
-		if errLoad := homeplugins.MarkLoadResults(&report, s.pluginHost); errLoad != nil {
-			return nil, fmt.Errorf("load home plugins: %w", errLoad)
-		}
-	}
 	if strings.TrimSpace(report.Task) != "" {
 		work.syncKey = syncKey
 		work.markSynced = true
 		if strings.TrimSpace(merged.Home.NodeID) != "" {
-			work.statusWork = append(work.statusWork, homePluginStatusWork{cfg: &merged, report: report})
+			work.statusWork = append(work.statusWork, homePluginStatusWork{
+				cfg:              &merged,
+				report:           report,
+				needsLoadMarking: didSync,
+			})
 		}
 	}
 	taskWork, errTasks := s.stageHomePluginTasksWithClient(ctx, &merged, client)
@@ -680,6 +695,9 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 			log.WithError(errParse).Warn("failed to stage home config; retrying")
 			if !waitForHomeSubscriberRetry(lifetimeCtx, homeSubscriberPreAckRetryBackoff) {
 				return
+			}
+			if latest, okLatest := queue.tryDequeueLatest(); okLatest {
+				raw = latest
 			}
 		}
 
