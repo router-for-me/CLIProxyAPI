@@ -140,3 +140,27 @@ func TestMetaExecutor_MuseWonderReasoningMax(t *testing.T) {
 		t.Fatalf("reasoning.effort = %q, want max (body: %s)", got, gotBody)
 	}
 }
+
+func TestMetaExecutor_ExecuteMuseWonderFull(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeMetaWonderResponsesOK(w, gjson.GetBytes(gotBody, "model").String())
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	resp, err := exec.Execute(context.Background(), metaWonderTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "muse-wonder-full-1.0",
+		Payload: []byte(`{"model":"muse-wonder-full-1.0","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "muse-wonder-full-1.0" {
+		t.Fatalf("upstream model = %q, want muse-wonder-full-1.0", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "model").String(); got != "muse-wonder-full-1.0" {
+		t.Fatalf("downstream model = %q, want muse-wonder-full-1.0", got)
+	}
+}

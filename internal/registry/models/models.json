@@ -4490,6 +4490,64 @@
   ],
   "meta": [
     {
+      "id": "muse-wonder-full-1.0",
+      "object": "model",
+      "created": 1791662412,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Wonder Full 1.0",
+      "name": "muse-wonder-full-1.0",
+      "description": "Meta's highest-capability Muse Wonder variant, available in Muse Code on Power and Maximum subscription plans.",
+      "context_length": 1007997,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-wonder-full-1.0-contributor",
+      "object": "model",
+      "created": 1791662414,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Wonder Full 1.0 Contributor",
+      "name": "muse-wonder-full-1.0-contributor",
+      "description": "Meta's highest-capability Muse Wonder variant, available in Muse Code on Power and Maximum subscription plans.",
+      "context_length": 1007997,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "muse-wonder-1.0",
       "object": "model",
       "created": 1791763200,
