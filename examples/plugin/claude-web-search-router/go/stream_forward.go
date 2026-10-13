@@ -115,7 +115,7 @@ func runOrderedExecutionPlansStream(ctx context.Context, exec pluginapi.Executor
 			recordBackendSuccess(backend)
 			return nil
 		case backendKimiResponses:
-			status, partial, errRun := hostModelStreamForwardKimiResponses(ctx, hostCallbackID, cfg, body, pluginStreamID)
+			status, partial, errRun := hostModelStreamForwardKimiResponses(ctx, hostCallbackID, cfg, body, pluginStreamID, plan.provider)
 			if errRun != nil {
 				lastErr = errRun
 				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {

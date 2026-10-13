@@ -39,6 +39,19 @@ Conversation history is forwarded as text-only input items; Claude tool options
 (`allowed_domains`, `max_uses`, …) apply to the `kimi_web_search` backend, not
 this one — use `route: kimi_responses` to force it or let `fallback` reach it.
 
+- **Retry**: when several compatible credentials exist, a retryable failure
+  (429/503/502/504) moves to the next credential in the pool before the
+  backend gives up; a non-retryable failure stops immediately. Rotation is
+  uniform round-robin within the highest configured priority tier:
+  `host.auth.list` does not expose per-credential weights, so the host's
+  weighted-round-robin (honored only when no `auth_id` is pinned) cannot be
+  mirrored while pinning keeps model and endpoint matched.
+- **Degraded fallback**: when `host.auth.list` is unavailable (older host),
+  execution degrades to an unpinned coding-plan model under the provider
+  family the route decision relied on (`kimi-ai` when the host listed a
+  kimi.ai credential), so a kimi-ai-only deployment is not forced into the
+  `kimi` bucket (which would fail with `auth_not_found`).
+
 ### xAI web search notes (aligned with upstream docs)
 
 - **Model**: xAI documents `grok-4.3` for server-side `web_search`. This example sets `TargetModel` to **`grok-4.3`** when `xai_model` is empty (do not forward `claude-sonnet-4-6` to xAI).
@@ -73,6 +86,14 @@ use the host `kimi` provider, whose OAuth credential targets `api.kimi.com/codin
 - **Claude mapping**: `max_uses` → `limit` (clamped 1–20),
   `allowed_domains` → `sites` (≤5, Pro only), `blocked_domains` → client-side
   hit filtering. `user_location` is not mapped (no Kimi equivalent).
+- **Host transport, host payload rules**: upstream calls go through the
+  transport-only `host.http.do` bridge (so `requests.proxy-url` and
+  request-log capture apply), but the plugin SDK exposes no payload-rule
+  callback, so host `payloads` config filters are **not** applied to this
+  backend's direct calls (including the `model` level) or to `kimi_coding`.
+  Deployments that rely on payload rules should use `kimi_responses`, which
+  executes through the host executor where payload rules are the final
+  barrier before sending.
 - **Deprecated upstream**: the `$web_search` `builtin_function` chat-completions
   tool retires 2026-10-20 and is intentionally not used.
 

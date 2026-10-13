@@ -13,8 +13,9 @@ import (
 )
 
 type executionPlan struct {
-	backend routeBackend
-	model   string
+	backend  routeBackend
+	model    string
+	provider string // kimi_responses: provider family the route decision relied on
 }
 
 func buildExecutionPlans(cfg pluginConfig, req pluginapi.ModelRouteRequest) []executionPlan {
@@ -49,7 +50,7 @@ func executionPlansForExecuteRoute(cfg pluginConfig, req pluginapi.ModelRouteReq
 	case backendXAIWebSearch:
 		plans = append(plans, executionPlan{backend: backend, model: resolveXAIWebSearchTargetModel(cfg.XAIModel)})
 	case backendKimiResponses:
-		plans = append(plans, executionPlan{backend: backend})
+		plans = append(plans, executionPlan{backend: backend, provider: kimiRouteProviderHint(req.AvailableProviders)})
 	case backendKimiWebSearch:
 		if !newKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL).available() {
 			return nil
@@ -98,7 +99,7 @@ func buildExecutionPlansInternal(cfg pluginConfig, req pluginapi.ModelRouteReque
 				model:   resolveXAIWebSearchTargetModel(cfg.XAIModel),
 			})
 		case backendKimiResponses:
-			plans = append(plans, executionPlan{backend: backend})
+			plans = append(plans, executionPlan{backend: backend, provider: kimiRouteProviderHint(req.AvailableProviders)})
 		case backendKimiCoding:
 			plans = append(plans, executionPlan{backend: backend})
 		case backendKimiWebSearch:
@@ -153,7 +154,7 @@ func executionPlansForRoute(cfg pluginConfig, req pluginapi.ModelRouteRequest, r
 		case backendXAIWebSearch:
 			plans = append(plans, executionPlan{backend: b, model: resolveXAIWebSearchTargetModel(cfg.XAIModel)})
 		case backendKimiResponses:
-			plans = append(plans, executionPlan{backend: b})
+			plans = append(plans, executionPlan{backend: b, provider: kimiRouteProviderHint(req.AvailableProviders)})
 		case backendKimiCoding:
 			plans = append(plans, executionPlan{backend: b})
 		case backendKimiWebSearch:
@@ -268,7 +269,7 @@ func runOrderedExecutionPlans(ctx context.Context, exec pluginapi.ExecutorReques
 			recordBackendSuccess(backend)
 			return payload, headers, nil
 		case backendKimiResponses:
-			payload, status, errRun := hostModelExecuteKimiResponses(ctx, hostCallbackID, cfg, body, stream)
+			payload, status, errRun := hostModelExecuteKimiResponses(ctx, hostCallbackID, cfg, body, stream, plan.provider)
 			if errRun != nil {
 				lastErr = errRun
 				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -160,5 +162,231 @@ func TestKimiResponsesBodyNoText(t *testing.T) {
 	body := []byte(`{"messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "only"}]}]}`)
 	if _, err := kimiResponsesBody(body, "m", false); err == nil {
 		t.Fatal("expected error for textless body")
+	}
+}
+
+func TestResolveKimiResponsesTargetsEnumeratesCodingPoolInRotationOrder(t *testing.T) {
+	t.Parallel()
+	entry := func(provider, baseURL, id string) pluginapi.HostAuthFileEntry {
+		return pluginapi.HostAuthFileEntry{Provider: provider, BaseURL: baseURL, ID: id}
+	}
+	entries := []pluginapi.HostAuthFileEntry{
+		entry("kimi", "https://api.kimi.com/coding", "cred-a"),
+		entry("kimi", "https://api.kimi.com/coding", "cred-b"),
+		entry("kimi", "https://api.moonshot.ai", "cred-platform"),
+	}
+	tick := uint64(0)
+	next := func() uint64 { tick++; return tick }
+
+	first := resolveKimiResponsesTargetsAt(entries, "", next)
+	if len(first) != 2 {
+		t.Fatalf("targets = %+v, want both coding credentials", first)
+	}
+	if first[0].authID != "cred-a" || first[1].authID != "cred-b" {
+		t.Fatalf("rotation order = %q, %q; want cred-a then cred-b", first[0].authID, first[1].authID)
+	}
+	for _, target := range first {
+		if target.model != kimiResponsesCodingModel || target.provider != "kimi" {
+			t.Fatalf("target = %+v, want coding model under kimi provider", target)
+		}
+	}
+
+	second := resolveKimiResponsesTargetsAt(entries, "", next)
+	if len(second) != 2 || second[0].authID != "cred-b" || second[1].authID != "cred-a" {
+		t.Fatalf("second rotation = %+v; want start advanced to cred-b", second)
+	}
+
+	// A single-target resolve stays consistent with the first list element.
+	tick = 0
+	single, ok := resolveKimiResponsesTargetAt(entries, "", next)
+	if !ok || single != first[0] {
+		t.Fatalf("single resolve = %+v (%v), want first list element %+v", single, ok, first[0])
+	}
+}
+
+func TestResolveKimiResponsesTargetsPlatformOverrideEnumeratesPlatformPool(t *testing.T) {
+	t.Parallel()
+	entry := func(id string) pluginapi.HostAuthFileEntry {
+		return pluginapi.HostAuthFileEntry{Provider: "kimi", BaseURL: "https://api.moonshot.ai", ID: id}
+	}
+	entries := []pluginapi.HostAuthFileEntry{
+		{Provider: "kimi", BaseURL: "https://api.kimi.com/coding", ID: "cred-coding"},
+		entry("cred-p1"),
+		entry("cred-p2"),
+	}
+	tick := uint64(0)
+	targets := resolveKimiResponsesTargetsAt(entries, "kimi-k3", func() uint64 { tick++; return tick })
+	if len(targets) != 2 {
+		t.Fatalf("targets = %+v, want both platform credentials", targets)
+	}
+	for _, target := range targets {
+		if target.model != "kimi-k3" {
+			t.Fatalf("target model = %q, want configured override kimi-k3", target.model)
+		}
+		if target.authID != "cred-p1" && target.authID != "cred-p2" {
+			t.Fatalf("target auth = %q, want a platform credential", target.authID)
+		}
+	}
+}
+
+func TestResolveKimiResponsesTargetsUnknownOverrideDeclined(t *testing.T) {
+	t.Parallel()
+	entries := []pluginapi.HostAuthFileEntry{
+		{Provider: "kimi", BaseURL: "https://api.kimi.com/coding", ID: "cred-a"},
+	}
+	if targets := resolveKimiResponsesTargetsAt(entries, "mystery-model", func() uint64 { return 1 }); len(targets) != 0 {
+		t.Fatalf("targets = %+v, want none for an unknown model family", targets)
+	}
+}
+
+func TestRunKimiCredentialAttemptsRetrySemantics(t *testing.T) {
+	t.Parallel()
+	targets := []kimiResponsesTarget{
+		{model: "m1", authID: "a", provider: "kimi"},
+		{model: "m2", authID: "b", provider: "kimi"},
+	}
+	cases := []struct {
+		name      string
+		outcomes  []kimiAttemptOutcome
+		wantCalls int
+		wantErr   string // substring of the returned error; empty expects success
+	}{
+		{
+			name: "retryable error moves to next credential",
+			outcomes: []kimiAttemptOutcome{
+				{err: fmt.Errorf("kimi http 429: throttled")},
+				{payload: []byte("ok"), status: 200},
+			},
+			wantCalls: 2,
+		},
+		{
+			name: "retryable http status moves to next credential",
+			outcomes: []kimiAttemptOutcome{
+				{status: 429},
+				{payload: []byte("ok"), status: 200},
+			},
+			wantCalls: 2,
+		},
+		{
+			name: "non-retryable failure stops immediately",
+			outcomes: []kimiAttemptOutcome{
+				{err: fmt.Errorf("kimi http 400: bad request")},
+			},
+			wantCalls: 1,
+			wantErr:   "400",
+		},
+		{
+			name: "exhausted pool returns the last error",
+			outcomes: []kimiAttemptOutcome{
+				{err: fmt.Errorf("kimi http 429: throttled")},
+				{err: fmt.Errorf("kimi http 503: unavailable")},
+			},
+			wantCalls: 2,
+			wantErr:   "503",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			last := runKimiCredentialAttempts(targets, "", func(kimiResponsesTarget) kimiAttemptOutcome {
+				outcome := tc.outcomes[min(calls, len(tc.outcomes)-1)]
+				calls++
+				return outcome
+			})
+			if calls != tc.wantCalls {
+				t.Fatalf("attempts = %d, want %d", calls, tc.wantCalls)
+			}
+			if tc.wantErr == "" {
+				if last.err != nil || string(last.payload) != "ok" {
+					t.Fatalf("last = %+v, want success payload", last)
+				}
+				return
+			}
+			if last.err == nil || !strings.Contains(last.err.Error(), tc.wantErr) {
+				t.Fatalf("last.err = %v, want substring %q", last.err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunKimiCredentialAttemptsAppliesRouteProviderToUnpinned(t *testing.T) {
+	t.Parallel()
+	targets := []kimiResponsesTarget{{model: "m", provider: "kimi"}}
+	var seen []kimiResponsesTarget
+	runKimiCredentialAttempts(targets, "kimi.ai", func(target kimiResponsesTarget) kimiAttemptOutcome {
+		seen = append(seen, target)
+		return kimiAttemptOutcome{err: fmt.Errorf("kimi http 429: throttled")}
+	})
+	if len(seen) != 1 || seen[0].provider != "kimi-ai" {
+		t.Fatalf("attempt target = %+v, want unpinned provider replaced by route hint kimi-ai", seen)
+	}
+}
+
+func TestRunKimiStreamCredentialAttemptsPartialStopsRetry(t *testing.T) {
+	t.Parallel()
+	targets := []kimiResponsesTarget{
+		{model: "m1", authID: "a", provider: "kimi"},
+		{model: "m2", authID: "b", provider: "kimi"},
+	}
+	calls := 0
+	last := runKimiStreamCredentialAttempts(targets, "", func(kimiResponsesTarget) kimiStreamAttemptOutcome {
+		calls++
+		return kimiStreamAttemptOutcome{partial: true, err: fmt.Errorf("kimi http 429: throttled")}
+	})
+	if calls != 1 {
+		t.Fatalf("attempts = %d, want 1: a partial stream must not be retried", calls)
+	}
+	if !last.partial || last.err == nil {
+		t.Fatalf("last = %+v, want the partial error returned", last)
+	}
+}
+
+func TestRunKimiStreamCredentialAttemptsRetriesBeforeFirstChunk(t *testing.T) {
+	t.Parallel()
+	targets := []kimiResponsesTarget{
+		{model: "m1", authID: "a", provider: "kimi"},
+		{model: "m2", authID: "b", provider: "kimi"},
+	}
+	calls := 0
+	last := runKimiStreamCredentialAttempts(targets, "", func(kimiResponsesTarget) kimiStreamAttemptOutcome {
+		calls++
+		if calls == 1 {
+			return kimiStreamAttemptOutcome{err: fmt.Errorf("kimi http 503: unavailable")}
+		}
+		return kimiStreamAttemptOutcome{status: 200}
+	})
+	if calls != 2 || last.err != nil || last.status != 200 {
+		t.Fatalf("calls = %d last = %+v, want retry then success", calls, last)
+	}
+}
+
+func TestKimiResponsesTargetWithRouteProvider(t *testing.T) {
+	t.Parallel()
+	pinned := kimiResponsesTarget{model: "m", authID: "a", provider: "kimi"}
+	if got := pinned.withRouteProvider("kimi-ai"); got.provider != "kimi" {
+		t.Fatalf("pinned target provider = %q, want credential-derived kimi preserved", got.provider)
+	}
+	unpinned := kimiResponsesTarget{model: "m", provider: "kimi"}
+	if got := unpinned.withRouteProvider("kimi.ai"); got.provider != "kimi-ai" {
+		t.Fatalf("unpinned target provider = %q, want kimi-ai from route hint", got.provider)
+	}
+	if got := unpinned.withRouteProvider("   "); got.provider != "kimi" {
+		t.Fatalf("empty hint changed provider to %q", got.provider)
+	}
+}
+
+func TestKimiRouteProviderHint(t *testing.T) {
+	t.Parallel()
+	if got := kimiRouteProviderHint([]string{"claude", "kimi"}); got != "" {
+		t.Fatalf("plain-kimi hint = %q, want empty (default bucket)", got)
+	}
+	if got := kimiRouteProviderHint([]string{"kimi-ai"}); got != "kimi-ai" {
+		t.Fatalf("kimi-ai hint = %q", got)
+	}
+	if got := kimiRouteProviderHint([]string{"kimi.ai", "kimi"}); got != "kimi-ai" {
+		t.Fatalf("mixed hint = %q, want kimi-ai", got)
+	}
+	if got := kimiRouteProviderHint(nil); got != "" {
+		t.Fatalf("nil hint = %q, want empty", got)
 	}
 }
