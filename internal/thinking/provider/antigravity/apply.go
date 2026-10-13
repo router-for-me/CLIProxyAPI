@@ -56,7 +56,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	// For Gemini models on Antigravity with discrete levels (not Claude):
 	if len(support.Levels) > 0 && !isClaude {
 		if config.Mode == thinking.ModeBudget {
-			levelStr, ok := thinking.ConvertBudgetToLevel(config.Budget)
+			levelStr, ok := thinking.ConvertBudgetToSupportedLevel(config.Budget, modelInfo, "antigravity")
 			if ok && levelStr != "" && levelStr != "none" {
 				config.Level = thinking.ThinkingLevel(levelStr)
 				config.Mode = thinking.ModeLevel

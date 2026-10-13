@@ -22,17 +22,17 @@ LDFLAGS_RELEASE := -s -w $(LDFLAGS_COMMON)
 
 all: build
 
-# 默认调试构建：加入 -trimpath 去除本地文件系统路径，注入版本信息，保留符号表
+# Debug build: remove local paths, inject version metadata, and retain symbols.
 build:
 	go build -trimpath -ldflags="$(LDFLAGS_COMMON)" -o $(OUTPUT) ./cmd/server
 
-# 生产发布构建：CGO=0 + 纯静态标签 + 去符号表 + 去路径
+# Portable release build: disable CGO, use static tags, and strip symbols and paths.
 release:
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -tags "$(TAGS)" -ldflags="$(LDFLAGS_RELEASE)" -o $(OUTPUT) ./cmd/server
 
 clean:
 	rm -rf bin/ dist/
 
-# 单测命令：附带 -checklinkname=0 确保含 live 依赖的测试包在 Go 1.23+ 正常链接
+# Include -checklinkname=0 so tests with live dependencies link on Go 1.23+.
 test:
 	go test -ldflags="$(CHECKLINKNAME_FLAG)" ./...

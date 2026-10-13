@@ -15,35 +15,31 @@ ARG COMMIT=none
 ARG BUILD_DATE=unknown
 
 # Technical Debt Note: -checklinkname=0 inherited from Commit 2 (pion/ice -> wlynxg/anet)
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false \
+RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false \
     -tags "netgo osusergo" \
     -ldflags="-s -w -checklinkname=0 -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" \
     -o ./CLIProxyAPI ./cmd/server/
 
-# Prepare directories with permissive access for nonroot compatibility
-RUN mkdir -p /root/.cli-proxy-api /CLIProxyAPI/logs /CLIProxyAPI/plugins /home/nonroot \
-    && ln -s /root/.cli-proxy-api /home/nonroot/.cli-proxy-api \
-    && chmod -R 777 /root /CLIProxyAPI /home/nonroot
-
-FROM gcr.io/distroless/static-debian12:nonroot
-
-# Copy timezone data from builder
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
-
-# Copy directories and compatibility symlinks
-COPY --from=builder --chown=nonroot:nonroot /root /root
-COPY --from=builder --chown=nonroot:nonroot /home/nonroot /home/nonroot
-COPY --from=builder --chown=nonroot:nonroot /CLIProxyAPI /CLIProxyAPI
-
-WORKDIR /CLIProxyAPI
-
-COPY --from=builder --chown=nonroot:nonroot /app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
-COPY --chown=nonroot:nonroot config.example.yaml /CLIProxyAPI/config.example.yaml
-
-EXPOSE 8317
+# Keep glibc for dynamic plugins and /bin/sh for the cluster Compose command.
+FROM debian:bookworm-slim
 
 ENV TZ=Asia/Shanghai
 
-USER nonroot:nonroot
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /root/.cli-proxy-api /CLIProxyAPI/logs /CLIProxyAPI/plugins \
+    && ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime \
+    && echo "${TZ}" > /etc/timezone
+
+WORKDIR /CLIProxyAPI
+
+COPY --from=builder /app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+COPY config.example.yaml /CLIProxyAPI/config.example.yaml
+
+EXPOSE 8317
+
+# Preserve access to root-owned 0600 credentials in existing bind mounts.
+USER 0:0
 
 CMD ["/CLIProxyAPI/CLIProxyAPI"]

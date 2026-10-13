@@ -57,7 +57,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errProject != nil {
 		return nil, errProject
 	}
-	upstreamModelName := mapAntigravityUpstreamModel(modelName)
+	upstreamModelName := helps.AntigravityUpstreamModel(auth, modelName)
 	payload = geminiToAntigravity(upstreamModelName, payload, projectID, derivedSessionIDs...)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
@@ -88,7 +88,9 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		hasThinkingSupport := modelInfo != nil && modelInfo.Thinking != nil
 		hasThinkingConfig := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig").Exists()
 		if hasThinkingSupport || hasThinkingConfig {
-			payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.includeThoughts", true)
+			includeThoughts := !isAntigravityIncludeThoughtsExplicitlyFalse(payload)
+			payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
+			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig.include_thoughts")
 
 			currLevel := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel")
 			currBudget := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
@@ -96,7 +98,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 			// If budget is provided for level-only model, convert to thinkingLevel
 			if currBudget.Exists() && (!currLevel.Exists() || currLevel.String() == "") && modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0 && !strings.Contains(strings.ToLower(modelName), "claude") {
 				budgetVal := int(currBudget.Int())
-				if levelStr, ok := thinking.ConvertBudgetToLevel(budgetVal); ok && levelStr != "" {
+				if levelStr, ok := thinking.ConvertBudgetToSupportedLevel(budgetVal, modelInfo, "antigravity"); ok && levelStr != "" {
 					payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingLevel", levelStr)
 					payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
 				}
@@ -608,25 +610,7 @@ func isAntigravityIncludeThoughtsExplicitlyFalse(payload []byte) bool {
 	}
 	return false
 }
-func mapAntigravityUpstreamModel(modelName string) string {
-	switch strings.ToLower(strings.TrimSpace(modelName)) {
-	case "gemini-3.8-flash":
-		return "gemini-3.8-flash-high"
-	case "gemini-3.7-flash":
-		return "gemini-3.7-flash-high"
-	case "gemini-3.6-flash":
-		return "gemini-3.6-flash-high"
-	case "gemini-3.1-pro", "gemini-3-pro":
-		return "gemini-pro-agent"
-	default:
-		return modelName
-	}
-}
-
 func isThinkingExplicitlyDisabled(payload []byte) bool {
-	if isAntigravityIncludeThoughtsExplicitlyFalse(payload) {
-		return true
-	}
 	for _, path := range []string{
 		"request.generationConfig.thinkingConfig.thinkingLevel",
 		"request.generationConfig.thinkingConfig.thinking_level",

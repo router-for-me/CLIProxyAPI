@@ -93,6 +93,7 @@ type antigravityFetchAvailableModelsResponse struct {
 
 type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
+	// Retain raw wire IDs; public-ID normalization must not invent entitlements.
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
 	ModelIDs map[string]struct{}
 	revision uint64
@@ -315,9 +316,6 @@ func parsePersistedAntigravityModelSet(raw any) (map[string]struct{}, bool) {
 			if rawID != "" {
 				set[rawID] = struct{}{}
 			}
-			if norm := registry.NormalizeAntigravityModelID(rawID); norm != "" {
-				set[norm] = struct{}{}
-			}
 		}
 		return set, true
 	case []string:
@@ -326,9 +324,6 @@ func parsePersistedAntigravityModelSet(raw any) (map[string]struct{}, bool) {
 			rawID := normalizeAntigravityFetchedModelID(s)
 			if rawID != "" {
 				set[rawID] = struct{}{}
-			}
-			if norm := registry.NormalizeAntigravityModelID(rawID); norm != "" {
-				set[norm] = struct{}{}
 			}
 		}
 		return set, true
@@ -585,9 +580,6 @@ func parseAntigravityModelCapabilityHints(body []byte) (antigravityModelCapabili
 			if rawID != "" {
 				modelIDs[rawID] = struct{}{}
 			}
-			if norm := registry.NormalizeAntigravityModelID(rawID); norm != "" {
-				modelIDs[norm] = struct{}{}
-			}
 		}
 	}
 	return antigravityModelCapabilityHints{WebSearchModelIDs: webSearchModels, ModelIDs: modelIDs}, true
@@ -717,6 +709,9 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
 		cfg = &config.Config{}
 	}
 	models := filterAntigravityModels(registry.GetAntigravityModels(), hints)
+	for _, model := range models {
+		model.UpstreamModelID = registry.ResolveAntigravityUpstreamModel(model.ID, hints.ModelIDs)
+	}
 	models = applyAntigravityFetchedModelCapabilities(models, hints)
 	excluded := cfg.OAuthExcludedModels[coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())]
 	if value := strings.TrimSpace(auth.Attributes["excluded_models"]); value != "" {
@@ -790,11 +785,11 @@ func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth
 	} else {
 		// Older capability-only responses cannot revoke model entitlements.
 		aliasMap := s.buildAntigravityReverseAliasMap(auth)
-			updated = GlobalModelRegistry().ApplyClientModelCapabilities(auth.ID, expectedRegEpoch, func(id string, info *ModelInfo) {
-				if hasAntigravityWebSearchCapability(hints, resolveAntigravityUpstreamModelID(id, auth.Prefix, aliasMap)) {
-					info.SupportsWebSearch = true
-				}
-			})
+		updated = GlobalModelRegistry().ApplyClientModelCapabilities(auth.ID, expectedRegEpoch, func(id string, info *ModelInfo) {
+			if hasAntigravityWebSearchCapability(hints, resolveAntigravityUpstreamModelID(id, auth.Prefix, aliasMap)) {
+				info.SupportsWebSearch = true
+			}
+		})
 	}
 	if updated && s.coreManager != nil {
 		s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)

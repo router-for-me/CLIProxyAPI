@@ -16,6 +16,7 @@ env:
 
 jobs:
   prepare-release:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -89,7 +90,7 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
           fi
 
   build-hosted:
@@ -696,7 +697,7 @@ jobs:
 
   publish-checksums:
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && github.ref_type == 'tag'
     needs:
       - build-hosted
       - build-linux-glibc
