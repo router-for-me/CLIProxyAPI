@@ -164,7 +164,8 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		cfg = e.cfg
 	}
 	beforeRefresh := auth.Clone()
-	auth.CodexRefreshPatch = nil
+	pendingPatch := auth.CodexRefreshPatch
+	pendingOuter, pendingSIWC := pendingPatch.Partitions()
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -189,6 +190,12 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		diskBaseline = cloneSIWCMap(diskMap)
 		if siwcSub, okSub := diskMap["siwc"].(map[string]any); okSub {
 			diskBaseline["siwc"] = cloneSIWCMap(siwcSub)
+		}
+		// Overlay a successful but unpersisted rotation before coalescing disk
+		// credentials. Apply retains independently rotated disk partitions; keep
+		// the raw disk baseline for the next compare-and-merge write.
+		if pendingPatch != nil {
+			diskMap = pendingPatch.Apply(diskMap)
 		}
 		inOuterRef, _ := auth.Metadata["refresh_token"].(string)
 		inOuterAcc, _ := auth.Metadata["access_token"].(string)
@@ -276,8 +283,8 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	if !needOuter && !needSIWC {
-		if diskRotatedOuter || diskRotatedSIWC {
-			patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, diskRotatedOuter, diskRotatedSIWC)
+		if diskRotatedOuter || diskRotatedSIWC || pendingPatch != nil {
+			patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, diskRotatedOuter || pendingOuter, diskRotatedSIWC || pendingSIWC)
 			auth.CodexRefreshPatch = patch
 			if storage, ok := auth.Storage.(*codexauth.CodexTokenStorage); ok && storage != nil {
 				clonedStorage := *storage
@@ -435,7 +442,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		log.Warnf("codex executor: outer token refreshed but SIWC token refresh failed for %s: %v", auth.ID, siwcErr)
 	}
 
-	patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, outerRefreshed || diskRotatedOuter, siwcRefreshed || diskRotatedSIWC)
+	patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, outerRefreshed || diskRotatedOuter || pendingOuter, siwcRefreshed || diskRotatedSIWC || pendingSIWC)
 	auth.CodexRefreshPatch = patch
 	if storage, ok := auth.Storage.(*codexauth.CodexTokenStorage); ok && storage != nil {
 		clonedStorage := *storage
@@ -445,15 +452,18 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	if diskPath != "" {
 		latestBytes, errReadLatest := os.ReadFile(diskPath)
 		if errReadLatest != nil {
-			return auth, fmt.Errorf("codex executor: re-read credential file %s before write: %w", diskPath, errReadLatest)
+			log.Warnf("codex executor: retaining refreshed credentials for %s after credential file re-read failed: %v", auth.ID, errReadLatest)
+			return auth, nil
 		}
 		var latestDisk map[string]any
 		if errUnmarshal := json.Unmarshal(latestBytes, &latestDisk); errUnmarshal != nil || len(latestDisk) == 0 {
-			return auth, fmt.Errorf("codex executor: invalid credential JSON in %s before write: %w", diskPath, errUnmarshal)
+			log.Warnf("codex executor: retaining refreshed credentials for %s after invalid credential JSON before write", auth.ID)
+			return auth, nil
 		}
 		mergedDisk := patch.Apply(latestDisk)
 		if errWrite := codexauth.WriteJSONFileAtomic(diskPath, mergedDisk); errWrite != nil {
-			return auth, fmt.Errorf("codex executor: persist refreshed credentials to %s: %w", diskPath, errWrite)
+			log.Warnf("codex executor: retaining refreshed credentials for %s after credential file write failed: %v", auth.ID, errWrite)
+			return auth, nil
 		}
 		auth.Metadata = mergedDisk
 	}

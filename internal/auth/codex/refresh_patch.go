@@ -48,6 +48,14 @@ func NewCredentialRefreshPatchWithDiskBaseline(before, diskBefore, after map[str
 	return patch
 }
 
+// Partitions reports which credential partitions this pending patch carries.
+func (p *CredentialRefreshPatch) Partitions() (outer, siwc bool) {
+	if p == nil {
+		return false, false
+	}
+	return p.outerAfter != nil, p.siwcAfter != nil
+}
+
 func credentialFields(metadata map[string]any, keys []string) map[string]any {
 	fields := make(map[string]any)
 	for _, key := range keys {

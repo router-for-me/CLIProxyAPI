@@ -649,7 +649,9 @@ func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
 	defer releaseMutation()
 	m.mu.Lock()
 	if current := m.auths[id]; current != nil && authAccessToken(current) == failedAccessToken {
-		if _, hasExp := current.AccessTokenExpirationTime(); !hasExp {
+		// Codex refresh scheduling is partition-aware: rejection makes the
+		// active partition due even when its advertised expiry is still valid.
+		if _, hasExp := current.AccessTokenExpirationTime(); !hasExp || strings.EqualFold(strings.TrimSpace(current.Provider), "codex") {
 			current.Generation++
 			current.UpdatedAt = time.Now()
 			current.RejectedAccessToken = failedAccessToken
