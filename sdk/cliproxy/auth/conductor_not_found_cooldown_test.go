@@ -287,3 +287,133 @@ func TestManager_Execute_SelectionOverrideRecordsSentModelOn404(t *testing.T) {
 		t.Fatalf("selection-override 404 fell into the transient branch: %v", state.NextRetryAfter.Sub(before))
 	}
 }
+
+// Payload-override rules rewrite the request body's model inside the executor,
+// after the conductor snapshots execReq.Model: a rule retargeting
+// "gpt-6-astra" to "configured-wire" makes the provider's structured 404 name
+// the final wire model. Executors report that name through Options.Metadata and
+// the recorded result must classify against it across the execute, count and
+// stream paths instead of falling into the short transient window (#5514
+// review).
+type wireModelOverrideExecutor struct {
+	sawNilMetadata int
+}
+
+func (e *wireModelOverrideExecutor) Identifier() string { return "wire-override-provider" }
+
+func (e *wireModelOverrideExecutor) recordWireModel(opts cliproxyexecutor.Options) {
+	if opts.Metadata == nil {
+		e.sawNilMetadata++
+		return
+	}
+	opts.Metadata[cliproxyexecutor.WireModelMetadataKey] = "configured-wire"
+}
+
+func wireOverrideNotFound() *Error {
+	return &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"type":"not_found_error","message":"model configured-wire was not found"}`,
+	}
+}
+
+func (e *wireModelOverrideExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.recordWireModel(opts)
+	return cliproxyexecutor.Response{}, wireOverrideNotFound()
+}
+
+func (e *wireModelOverrideExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.recordWireModel(opts)
+	remaining := make(chan cliproxyexecutor.StreamChunk, 1)
+	remaining <- cliproxyexecutor.StreamChunk{Err: wireOverrideNotFound()}
+	close(remaining)
+	return &cliproxyexecutor.StreamResult{Chunks: remaining}, nil
+}
+
+func (e *wireModelOverrideExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *wireModelOverrideExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.recordWireModel(opts)
+	return cliproxyexecutor.Response{}, wireOverrideNotFound()
+}
+
+func (e *wireModelOverrideExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not supported")
+}
+
+func newWireOverrideManager(t *testing.T, executor *wireModelOverrideExecutor) (*Manager, *Auth) {
+	t.Helper()
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+	auth := &Auth{ID: "auth-wire-override-404", Provider: executor.Identifier(), Status: StatusActive}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "tenant/public"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	return m, auth
+}
+
+func assertWireOverrideLongCooldown(t *testing.T, m *Manager, executor *wireModelOverrideExecutor) {
+	t.Helper()
+	if executor.sawNilMetadata != 0 {
+		t.Fatalf("executor received %d attempts with nil metadata; the conductor must pre-allocate the per-attempt map", executor.sawNilMetadata)
+	}
+	before := time.Now()
+	updated, _ := m.GetByID("auth-wire-override-404")
+	state := existingModelState(updated, canonicalModelKey("tenant/public"))
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("wire-model-named 404 fell into the transient branch: %v", state.NextRetryAfter.Sub(before))
+	}
+}
+
+func wireOverrideRequestOptions() (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	req := cliproxyexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"input":"hi"}`)}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.AuthSelectionModelMetadataKey: "tenant/public"}}
+	return req, opts
+}
+
+func TestManager_Execute_WireModelOverrideRecordsFinalModelOn404(t *testing.T) {
+	executor := &wireModelOverrideExecutor{}
+	m, _ := newWireOverrideManager(t, executor)
+	req, opts := wireOverrideRequestOptions()
+
+	if _, errExec := m.Execute(context.Background(), []string{executor.Identifier()}, req, opts); errExec == nil {
+		t.Fatal("Execute expected the structured 404, got nil")
+	}
+	assertWireOverrideLongCooldown(t, m, executor)
+}
+
+func TestManager_ExecuteCount_WireModelOverrideRecordsFinalModelOn404(t *testing.T) {
+	executor := &wireModelOverrideExecutor{}
+	m, _ := newWireOverrideManager(t, executor)
+	req, opts := wireOverrideRequestOptions()
+
+	if _, errExec := m.ExecuteCount(context.Background(), []string{executor.Identifier()}, req, opts); errExec == nil {
+		t.Fatal("ExecuteCount expected the structured 404, got nil")
+	}
+	assertWireOverrideLongCooldown(t, m, executor)
+}
+
+func TestManager_ExecuteStream_WireModelOverrideRecordsFinalModelOn404(t *testing.T) {
+	executor := &wireModelOverrideExecutor{}
+	m, _ := newWireOverrideManager(t, executor)
+	req, opts := wireOverrideRequestOptions()
+	opts.Stream = true
+
+	streamResult, errStream := m.ExecuteStream(context.Background(), []string{executor.Identifier()}, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream: %v", errStream)
+	}
+	for range streamResult.Chunks {
+	}
+	assertWireOverrideLongCooldown(t, m, executor)
+}
