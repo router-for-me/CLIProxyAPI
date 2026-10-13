@@ -67,8 +67,8 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 			if mode, ok := ctx.Value(authUpdateModeContextKey{}).(updateAuthMode); ok && mode == updateModeReplace {
 				// Update owns intentional configuration edits, even when a previous
 				// rotation is pending. Keep the patch's partition/version arbitration
-				// while using the existing configuration-save merge for other fields.
-				merged = codex.MergeCodexCredentialsFromDisk(merged, auth.Metadata)
+				// and take every credential partition from the patched disk record.
+				merged = mergeCodexConfigurationWithDiskCredentials(merged, auth.Metadata)
 				merged["disabled"] = auth.Disabled
 			}
 			NormalizeCredentialMetadata(merged)
@@ -170,7 +170,7 @@ func persistCodexConfigurationReplace(path string, auth *Auth) (bool, error) {
 		if errUnmarshal := json.Unmarshal(existing, &diskMap); errUnmarshal != nil || diskMap == nil {
 			return fmt.Errorf("auth filestore: invalid existing credential JSON")
 		}
-		merged := codex.MergeCodexCredentialsFromDisk(diskMap, auth.Metadata)
+		merged := mergeCodexConfigurationWithDiskCredentials(diskMap, auth.Metadata)
 		if _, hasType := merged["type"]; !hasType {
 			// Storage-backed metadata omits the record type that storage saves add.
 			merged["type"] = "codex"
@@ -185,4 +185,23 @@ func persistCodexConfigurationReplace(path string, auth *Auth) (bool, error) {
 		return nil
 	})
 	return replaced, errLock
+}
+
+// mergeCodexConfigurationWithDiskCredentials keeps the explicit update's
+// configuration, including use_siwc, while copying every credential partition
+// exactly from the locked disk record. A partition absent on disk stays absent,
+// so a stale runtime or storage snapshot cannot resurrect removed credentials.
+func mergeCodexConfigurationWithDiskCredentials(diskMap, incomingMetadata map[string]any) map[string]any {
+	merged := codex.MergeCodexCredentialsFromDisk(diskMap, incomingMetadata)
+	for key := range incomingMetadata {
+		if key == "use_siwc" || !codex.IsCodexCredentialKey(key) {
+			continue
+		}
+		if value, exists := diskMap[key]; exists {
+			merged[key] = value
+		} else {
+			delete(merged, key)
+		}
+	}
+	return merged
 }

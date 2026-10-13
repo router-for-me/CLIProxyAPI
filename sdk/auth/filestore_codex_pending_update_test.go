@@ -124,3 +124,55 @@ func TestManagerCodexPendingPatchPreservesOperatorUpdate(t *testing.T) {
 		}
 	}
 }
+
+// A pending rotation must not let an operator update recreate a SIWC partition
+// that was removed on disk after the runtime snapshot.
+func TestManagerCodexPendingPatchUpdateKeepsRemovedDiskSIWCAbsent(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex.json")
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	manager := coreauth.NewManager(store, nil, nil)
+	initial := codexRefreshFixture()
+	if _, err := manager.Register(ctx, initial); err != nil {
+		t.Fatal(err)
+	}
+	base, _ := manager.GetByID(initial.ID)
+	rotated := base.Clone()
+	rotated.Metadata["access_token"] = "outer-new"
+	rotated.Metadata["refresh_token"] = "outer-ref-new"
+	rotated.CodexRefreshPatch = codex.NewCredentialRefreshPatch(base.Metadata, rotated.Metadata, true, false)
+	if _, err := manager.Update(coreauth.WithSkipPersist(ctx), rotated); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := manager.GetByID(initial.ID)
+	disk := readCodexRefreshFixture(t, path)
+	delete(disk, "siwc")
+	disk["use_siwc"] = false
+	writeCodexRefreshFixture(t, path, disk)
+	request := pending.Clone()
+	request.Metadata["use_siwc"] = false
+	request.Metadata["note"] = "operator-new"
+	delete(request.Metadata, "proxy_url")
+	updated, err := manager.Update(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := readCodexRefreshFixture(t, path)
+	reloaded, err := store.List(ctx)
+	if err != nil || len(reloaded) != 1 {
+		t.Fatalf("reload failed: count=%d err=%v", len(reloaded), err)
+	}
+	for _, metadata := range []map[string]any{saved, updated.Metadata, reloaded[0].Metadata} {
+		if _, exists := metadata["siwc"]; exists {
+			t.Fatal("pending-patch configuration update resurrected SIWC removed on disk")
+		}
+		if metadata["refresh_token"] != "outer-ref-new" || metadata["note"] != "operator-new" || metadata["use_siwc"] != false {
+			t.Fatal("pending rotation or operator configuration lost")
+		}
+		if _, exists := metadata["proxy_url"]; exists {
+			t.Fatal("deleted operator field restored")
+		}
+	}
+}

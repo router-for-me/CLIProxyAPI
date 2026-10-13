@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
@@ -76,6 +77,89 @@ func TestManagerCodexStorageBackedUpdatePersistsConfiguration(t *testing.T) {
 			}
 			if reloaded[0].Metadata["refresh_token"] != wantOuter {
 				t.Fatal("reloaded credential version regressed")
+			}
+		})
+	}
+}
+
+// Removing a disk partition after a login snapshot must not let a later
+// configuration update recreate it from stale runtime or storage credentials.
+func TestManagerCodexStorageBackedUpdateKeepsRemovedDiskCredentialsAbsent(t *testing.T) {
+	for _, removed := range []string{"siwc", "outer", "both"} {
+		t.Run(removed, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "codex.json")
+			store := NewFileTokenStore()
+			store.SetBaseDir(dir)
+			manager := coreauth.NewManager(store, nil, nil)
+			initial := codexRefreshFixture()
+			initial.Storage = &codex.CodexTokenStorage{AccessToken: "outer-old", RefreshToken: "outer-ref-old"}
+			if _, err := manager.Register(ctx, initial); err != nil {
+				t.Fatal(err)
+			}
+			runtime, ok := manager.GetByID(initial.ID)
+			if !ok || runtime.Storage == nil {
+				t.Fatal("login storage unexpectedly absent")
+			}
+			disk := readCodexRefreshFixture(t, path)
+			if removed == "siwc" || removed == "both" {
+				delete(disk, "siwc")
+			}
+			if removed == "outer" || removed == "both" {
+				for key := range disk {
+					if codex.IsCodexCredentialKey(key) && key != "siwc" && key != "use_siwc" {
+						delete(disk, key)
+					}
+				}
+			} else {
+				// The surviving partition was independently rotated on disk.
+				disk["access_token"] = "outer-disk-new"
+				disk["refresh_token"] = "outer-ref-disk-new"
+				disk["last_refresh"] = "2026-10-12T13:00:00Z"
+			}
+			if removed == "outer" {
+				section := disk["siwc"].(map[string]any)
+				section["access_token"] = "siwc-disk-new"
+				section["refresh_token"] = "siwc-ref-disk-new"
+			}
+			disk["use_siwc"] = false
+			writeCodexRefreshFixture(t, path, disk)
+
+			update := runtime.Clone()
+			update.Metadata["use_siwc"] = false
+			update.Metadata["note"] = "operator-new"
+			delete(update.Metadata, "proxy_url")
+			updated, err := manager.Update(ctx, update)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved := readCodexRefreshFixture(t, path)
+			reloaded, err := store.List(ctx)
+			if err != nil || len(reloaded) != 1 {
+				t.Fatalf("reload failed: count=%d err=%v", len(reloaded), err)
+			}
+			current, _ := manager.GetByID(initial.ID)
+			for _, metadata := range []map[string]any{saved, updated.Metadata, current.Metadata, reloaded[0].Metadata} {
+				if metadata["use_siwc"] != false || metadata["note"] != "operator-new" {
+					t.Fatal("operator configuration lost from runtime, disk or reload")
+				}
+				if _, exists := metadata["proxy_url"]; exists {
+					t.Fatal("deleted operator field restored")
+				}
+				for key := range runtime.Metadata {
+					if !codex.IsCodexCredentialKey(key) || key == "use_siwc" {
+						continue
+					}
+					want, hadDisk := disk[key]
+					got, hasSaved := metadata[key]
+					if hadDisk != hasSaved || !reflect.DeepEqual(got, want) {
+						t.Fatalf("configuration update resurrected or regressed disk credential partition field %q", key)
+					}
+				}
+			}
+			if saved["type"] != "codex" || reloaded[0].Provider != "codex" {
+				t.Fatal("record type lost")
 			}
 		})
 	}
