@@ -556,6 +556,65 @@ claw-master connect --open 127.0.0.1:8444 --ca ca.pem -- --remote-control
   instead of as a hang inside Claude.
 - Defaults come from `CLAW_MASTER_OPEN` and `CLAW_MASTER_CA`.
 
+### Programs that launch `claude` themselves (OpenClaw and other agent hosts)
+
+`connect` and `run` are launchers, not a proxy a client is pointed at: each launch starts its own forwarder
+with a fresh token and execs `claude` from `PATH` with `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` set. A host
+that spawns `claude` itself (OpenClaw's Claude CLI backend runs the bare command `claude`, with no setting to
+change it) has to find a `claude` on its own `PATH` that is a wrapper around `connect`. Found putting
+OpenClaw on the pool from a Mac through the tunnel above:
+
+- **Recursion.** `connect` resolves `claude` on the `PATH` it is given. A wrapper named `claude` must hand
+  `connect` a `PATH` whose first `claude` is the real one, or `connect` launches the wrapper again. Install
+  the wrapper in a directory that comes earlier only on the host's `PATH` (OpenClaw's gateway service puts
+  `/opt/homebrew/bin` before `~/.local/bin`; interactive shells do the reverse), so ordinary shells keep
+  plain `claude`.
+- **The host passes a refused flag.** OpenClaw adds `--setting-sources user` to every launch. `connect`
+  refuses it (`Claude launcher flags cannot override master identity or provider routing`), so every turn
+  exits 1 in about half a second, and the host's model fallback chain fails the same way on each model. The
+  wrapper drops `--setting-sources` and its value; Claude's default sources include `user`. The stderr line
+  is in the host's own log, not in claw-master's.
+- **Plain-HTTP loopback services break.** `connect` removes `NO_PROXY` from Claude's environment, and the
+  forwarder only tunnels `CONNECT`. A host that serves its tools as an MCP server on a plain-HTTP loopback
+  URL (OpenClaw does) gets `405 this proxy only tunnels CONNECT`; the turn still runs, but without the
+  host's tools, which is easy to miss. Restore a loopback-only exemption after `connect`, not before: put a
+  second small `claude` first on the `PATH` the wrapper gives `connect`, which exports
+  `NO_PROXY=localhost,127.0.0.1,::1` and execs the real `claude`. Anthropic traffic is unaffected; it never
+  goes to loopback.
+- **Fail open to the native login, not closed.** The wrapper checks that the tunnel's local port is
+  listening and otherwise execs the real `claude`, and it passes `--version`, `auth`, `update`, `mcp` and the
+  other management subcommands straight through, so a dead tunnel or a host's version probe never takes
+  the host down.
+- **Prove it with the native login out of quota.** A host turn that succeeds while the machine's own
+  subscription is exhausted can only have come through the pool; the server logs the first tunnel client
+  as `client connected for the first time client=tunnel listener=open`.
+
+A sketch of the two files (`/opt/homebrew/bin/claude` -> wrapper; `inner/claude` is the second one):
+
+```sh
+# wrapper
+REAL=$HOME/.local/bin/claude
+if nc -z -G 2 127.0.0.1 8444 2>/dev/null; then
+  case "${1:-}" in --version|-v|auth|login|logout|setup-token|update|doctor|mcp|plugin|install|config) exec "$REAL" "$@";; esac
+  n=$#; i=0; skip=0                                   # drop --setting-sources VALUE
+  for a in "$@"; do i=$((i+1))
+    if [ $skip = 1 ]; then skip=0; elif [ "$a" = --setting-sources ]; then skip=1
+    else case "$a" in --setting-sources=*) ;; *) set -- "$@" "$a";; esac; fi
+    [ $i = $n ] && break; done; shift $n
+  PATH=$HOME/.config/claw-master/inner:$HOME/.local/bin:$PATH exec claw-master connect \
+    --open 127.0.0.1:8444 --ca "$HOME/.config/claw-master/ca.pem" -- "$@"
+fi
+exec "$REAL" "$@"
+
+# inner/claude
+NO_PROXY=localhost,127.0.0.1,::1; no_proxy=$NO_PROXY; export NO_PROXY no_proxy
+exec "$HOME/.local/bin/claude" "$@"
+```
+
+Release assets: `checksums.txt` lists only the archives. The bare `claw-master-<os>-<arch>` binaries are
+not in it; check one against the digest GitHub records for the asset
+(`gh api repos/OWNER/CLIProxyAPI/releases/tags/TAG --jq '.assets[] | [.name, .digest]'`).
+
 ### Stopping and rolling restarts
 
 A stopping server drains: requests already running get up to `--drain-timeout` (default 60s) to
