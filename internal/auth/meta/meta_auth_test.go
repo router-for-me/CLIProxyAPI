@@ -358,3 +358,98 @@ func TestSaveTokenToFilePreservesFileOnEncodingFailure(t *testing.T) {
 		t.Fatalf("failed save corrupted existing credential: %q", raw)
 	}
 }
+
+func TestMetaAuth_WonderFullEntitled(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		status  int
+		want    bool
+		wantErr bool
+	}{
+		{name: "full listed", body: `{"data":[{"id":"muse-wonder-1.0"},{"id":"muse-wonder-full-1.0"}]}`, status: http.StatusOK, want: true},
+		{name: "full absent", body: `{"data":[{"id":"muse-wonder-1.0"},{"id":"muse-spark-1.3"}]}`, status: http.StatusOK, want: false},
+		{name: "upstream error", body: `{"error":"unauthorized"}`, status: http.StatusUnauthorized, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") || !strings.HasSuffix(got, "|minted") {
+					t.Errorf("Authorization = %q, want minted key bearer", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			auth := NewMetaAuth(&config.Config{})
+			auth.httpClient = server.Client()
+			auth.SetModelsURL(server.URL)
+
+			got, err := auth.WonderFullEntitled(context.Background(), DefaultAPIBaseURL, "LLM|minted")
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WonderFullEntitled() error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("WonderFullEntitled() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMuseCodeModelsURLs(t *testing.T) {
+	tests := []struct {
+		baseURL string
+		want    []string
+	}{
+		{baseURL: "https://api.meta.ai/v1", want: []string{"https://api.meta.ai/muse-code/models"}},
+		{baseURL: "https://api.meta.ai/v1/", want: []string{"https://api.meta.ai/muse-code/models"}},
+		{baseURL: "https://gateway.example/meta/v1", want: []string{"https://gateway.example/meta/muse-code/models", "https://gateway.example/muse-code/models"}},
+		{baseURL: "https://gateway.example/meta/v1/", want: []string{"https://gateway.example/meta/muse-code/models", "https://gateway.example/muse-code/models"}},
+		{baseURL: "https://gateway.example/meta", want: []string{"https://gateway.example/muse-code/models"}},
+	}
+	for _, test := range tests {
+		got, err := museCodeModelsURLs(test.baseURL)
+		if err != nil {
+			t.Fatalf("museCodeModelsURLs(%q) error = %v", test.baseURL, err)
+		}
+		if strings.Join(got, ",") != strings.Join(test.want, ",") {
+			t.Fatalf("museCodeModelsURLs(%q) = %v, want %v", test.baseURL, got, test.want)
+		}
+	}
+}
+
+func TestMetaAuth_WonderFullEntitledPrefixedGateway(t *testing.T) {
+	t.Setenv("META_MODELS_URL", "")
+	var hits []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.URL.Path)
+		if r.URL.Path != "/meta/muse-code/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"muse-wonder-full-1.0"}]}`))
+	}))
+	defer server.Close()
+
+	auth := NewMetaAuth(&config.Config{})
+	auth.httpClient = server.Client()
+	got, err := auth.WonderFullEntitled(context.Background(), server.URL+"/meta/v1", "LLM|minted")
+	if err != nil {
+		t.Fatalf("WonderFullEntitled() error = %v", err)
+	}
+	if !got {
+		t.Fatal("WonderFullEntitled() = false, want true")
+	}
+	if len(hits) != 1 || hits[0] != "/meta/muse-code/models" {
+		t.Fatalf("catalog hits = %v, want [/meta/muse-code/models]", hits)
+	}
+}

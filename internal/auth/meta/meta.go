@@ -220,11 +220,17 @@ type MetaAuth struct {
 	httpClient *http.Client
 	proxyURL   string
 	mintURL    string
+	modelsURL  string
 }
 
 // SetMintURL overrides the API key minting endpoint (primarily for unit tests).
 func (a *MetaAuth) SetMintURL(u string) {
 	a.mintURL = strings.TrimSpace(u)
+}
+
+// SetModelsURL overrides the Muse Code model catalog endpoint (primarily for unit tests).
+func (a *MetaAuth) SetModelsURL(u string) {
+	a.modelsURL = strings.TrimSpace(u)
 }
 
 // NewMetaAuth creates a new MetaAuth service instance.
@@ -480,6 +486,108 @@ func (a *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedKeyR
 		return nil, fmt.Errorf("meta auth: mint response missing api_key")
 	}
 	return &minted, nil
+}
+
+// WonderFullEntitled reports whether the account-scoped Muse Code catalog
+// currently serves Wonder Full to the minted key, which outlives the DCA
+// token used for minting.
+func (a *MetaAuth) WonderFullEntitled(ctx context.Context, baseURL, apiKey string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return false, fmt.Errorf("meta auth: missing api key")
+	}
+
+	candidates := []string{a.modelsURL}
+	if a.modelsURL == "" {
+		if envModels := strings.TrimSpace(os.Getenv("META_MODELS_URL")); envModels != "" {
+			candidates = []string{envModels}
+		} else {
+			derived, errDerive := museCodeModelsURLs(baseURL)
+			if errDerive != nil {
+				return false, errDerive
+			}
+			candidates = derived
+		}
+	}
+	var lastErr error
+	for _, modelsURL := range candidates {
+		entitled, errFetch := a.wonderFullEntitledAt(ctx, modelsURL, apiKey)
+		if errFetch == nil {
+			return entitled, nil
+		}
+		lastErr = errFetch
+	}
+	return false, lastErr
+}
+
+func (a *MetaAuth) wonderFullEntitledAt(ctx context.Context, modelsURL, apiKey string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("meta auth: create models request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("User-Agent", "muse-code/1.0.2")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("meta auth: models request failed: %w", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("meta auth: close models response body error: %v", errClose)
+		}
+	}()
+
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if errRead != nil {
+		return false, fmt.Errorf("meta auth: read models response: %w", errRead)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("meta auth: models request failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var catalog struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &catalog); err != nil {
+		return false, fmt.Errorf("meta auth: parse models response: %w", err)
+	}
+	for _, model := range catalog.Data {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model.ID)), "muse-wonder-full-") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// museCodeModelsURLs derives catalog candidates from an API base URL. The
+// catalog is the sibling of the terminal /v1 segment, so a gateway routing
+// prefix is preserved. The origin-root form follows as a fallback because
+// both placements exist behind custom gateways.
+func museCodeModelsURLs(baseURL string) ([]string, error) {
+	trimmed := strings.TrimSpace(baseURL)
+	if trimmed == "" {
+		trimmed = DefaultAPIBaseURL
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("meta auth: invalid base url %q", baseURL)
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	path := strings.TrimSuffix(parsed.Path, "/")
+	if strings.HasSuffix(path, "/v1") {
+		sibling := origin + strings.TrimSuffix(path, "/v1") + "/muse-code/models"
+		if root := origin + "/muse-code/models"; sibling != root {
+			return []string{sibling, root}, nil
+		}
+	}
+	return []string{origin + "/muse-code/models"}, nil
 }
 
 // CreateTokenStorage creates a serializable token storage record from the auth bundle.

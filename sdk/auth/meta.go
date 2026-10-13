@@ -26,11 +26,13 @@ func (MetaAuthenticator) Provider() string {
 	return "meta"
 }
 
+// Minted keys carry no expiry, so the lead doubles as the interval after
+// which saved subscription tier state gets revalidated by a refresh.
+var metaRefreshLead = 24 * time.Hour
+
 // RefreshLead instructs the manager on token refresh lead time.
-// Meta credentials do not advertise an API key expiration, so scheduled refresh
-// is disabled and recovery is triggered on demand (e.g. on 401 or request preparation).
 func (MetaAuthenticator) RefreshLead() *time.Duration {
-	return nil
+	return &metaRefreshLead
 }
 
 // Login launches the OAuth device-code flow to obtain Meta tokens and persists them.

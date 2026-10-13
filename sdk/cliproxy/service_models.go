@@ -72,6 +72,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 	var models []*ModelInfo
+	filterMetaWonderFull := false
 	switch provider {
 	case constant.Gemini:
 		models = registry.GetGeminiModels()
@@ -184,15 +185,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "meta":
 		models = registry.GetMetaModels()
+		configured := false
 		if entry := s.resolveConfigMetaKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildMetaConfigModels(entry)
+				configured = true
 			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+		// OAuth credentials can resolve an entry by base URL alone, so only
+		// API-key credentials treat configured models as an opt-in.
+		filterMetaWonderFull = !configured || authKind != "apikey"
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if cfg := s.currentConfig(); cfg != nil {
@@ -310,6 +316,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		key = strings.ToLower(strings.TrimSpace(a.Provider))
 	}
 	models = s.appendPluginModels(key, models)
+	// Static plugin models merge after the catalog, so the entitlement gate
+	// must run on the merged list.
+	if filterMetaWonderFull {
+		models = applyMetaWonderFullEntitlement(models, a)
+	}
 	if len(models) > 0 {
 		models = applyOAuthSettingsForAuth(cfg, provider, authKind, models)
 		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix))
@@ -918,6 +929,124 @@ func buildMetaConfigModels(entry *config.MetaKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "meta", "meta", "meta")
+}
+
+// Wonder Full is served only on Muse Code Power and Maximum plans.
+func isMetaWonderFullModel(modelID string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelID)), "muse-wonder-full-")
+}
+
+// Configured models carry their alias as ID and the upstream name in
+// MetadataModelID, so entitlement must match every identity.
+func isMetaWonderFullModelInfo(model *ModelInfo) bool {
+	if model == nil {
+		return false
+	}
+	return isMetaWonderFullModel(model.ID) ||
+		isMetaWonderFullModel(model.MetadataModelID) ||
+		isMetaWonderFullModel(model.Name)
+}
+
+// Entitlement must be proven, never assumed. A recorded catalog check
+// outranks the saved tier, and the next successful mint clears it.
+func metaAuthWonderFullEntitled(auth *coreauth.Auth) bool {
+	if entitled, known := metaAuthBoolValue(auth, "wonder_full_entitled"); known {
+		return entitled
+	}
+	if active, known := metaAuthBoolValue(auth, "is_subs_active"); known && !active {
+		return false
+	}
+	tier := metaAuthSubscriptionTier(auth)
+	return strings.Contains(tier, "power") || strings.Contains(tier, "max")
+}
+
+// Discovery errors keep the previous registration, so a downgrade committed
+// in the same pass must still remove plan-gated models from it.
+func (s *Service) stripUnentitledMetaWonderFullModels(auth *coreauth.Auth) {
+	if auth == nil || auth.ID == "" || s == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") || strings.EqualFold(auth.AuthKind(), "apikey") {
+		return
+	}
+	if metaAuthWonderFullEntitled(auth) {
+		return
+	}
+	reg := registry.GetGlobalRegistry()
+	existing := reg.GetModelsForClient(auth.ID)
+	if len(existing) == 0 {
+		return
+	}
+	filtered := applyMetaWonderFullEntitlement(existing, auth)
+	if len(filtered) == len(existing) {
+		return
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	reg.ReplaceClientModels(auth.ID, providerKey, reg.ClientRegistrationEpoch(auth.ID), filtered)
+}
+
+func applyMetaWonderFullEntitlement(models []*ModelInfo, auth *coreauth.Auth) []*ModelInfo {
+	if metaAuthWonderFullEntitled(auth) {
+		return models
+	}
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if isMetaWonderFullModelInfo(model) {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return filtered
+}
+
+func metaAuthBoolValue(auth *coreauth.Auth, key string) (value bool, known bool) {
+	if auth == nil {
+		return false, false
+	}
+	if auth.Metadata != nil {
+		switch raw := auth.Metadata[key].(type) {
+		case bool:
+			return raw, true
+		case string:
+			if parsed, errParse := strconv.ParseBool(strings.TrimSpace(raw)); errParse == nil {
+				return parsed, true
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
+			if parsed, errParse := strconv.ParseBool(raw); errParse == nil {
+				return parsed, true
+			}
+		}
+	}
+	return false, false
+}
+
+func metaAuthSubscriptionTier(auth *coreauth.Auth) string {
+	for _, key := range []string{"subs_tier_name", "subs_tier_id"} {
+		if value := metaAuthStringValue(auth, key); value != "" {
+			return strings.NewReplacer(" ", "", "-", "", "_", "").Replace(strings.ToLower(value))
+		}
+	}
+	return ""
+}
+
+func metaAuthStringValue(auth *coreauth.Auth, key string) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	if auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {

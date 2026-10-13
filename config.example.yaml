@@ -814,6 +814,8 @@ upstream:
 #       base-url: "https://api.meta.ai/v1" # optional: defaults to https://api.meta.ai/v1
 #       proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #       models:
+#         - name: "muse-wonder-1.0" # upstream model name
+#           alias: "muse-wonder"     # client alias mapped to the upstream model
 #         - name: "muse-spark-1.3" # upstream model name
 #           alias: "muse-latest"   # client alias mapped to the upstream model
 #       excluded-models:
@@ -937,6 +939,8 @@ oauth:
   #     - name: "grok-4.3"
   #       alias: "grok-latest"
   #   meta:
+  #     - name: "muse-wonder-1.0"
+  #       alias: "muse-wonder"
   #     - name: "muse-spark-1.3"
   #       alias: "muse-latest"
   #   sample-provider:                  # plugin provider keys are supported for OAuth plugins

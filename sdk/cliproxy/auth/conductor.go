@@ -140,6 +140,50 @@ func (NoopHook) OnAuthUpdated(context.Context, *Auth) {}
 // OnResult implements Hook.
 func (NoopHook) OnResult(context.Context, Result) {}
 
+// AddHook registers an additional lifecycle hook. Additional hooks run after
+// the primary hook supplied to NewManager, so a caller-provided manager keeps
+// its own hook when a host attaches model-registration wiring.
+func (m *Manager) AddHook(hook Hook) {
+	if m == nil || hook == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.extraHooks = append(m.extraHooks, hook)
+}
+
+func (m *Manager) lifecycleHooks() []Hook {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	hooks := make([]Hook, 0, len(m.extraHooks)+1)
+	if m.hook != nil {
+		hooks = append(hooks, m.hook)
+	}
+	hooks = append(hooks, m.extraHooks...)
+	return hooks
+}
+
+func (m *Manager) fireOnAuthRegistered(ctx context.Context, auth *Auth) {
+	for _, hook := range m.lifecycleHooks() {
+		hook.OnAuthRegistered(ctx, auth)
+	}
+}
+
+func (m *Manager) fireOnAuthUpdated(ctx context.Context, auth *Auth) {
+	for _, hook := range m.lifecycleHooks() {
+		hook.OnAuthUpdated(ctx, auth)
+	}
+}
+
+func (m *Manager) fireOnResult(ctx context.Context, result Result) {
+	for _, hook := range m.lifecycleHooks() {
+		hook.OnResult(ctx, result)
+	}
+}
+
 // ResultPolicy allows inspecting and mutating an execution result before in-memory quota mutations,
 // cooldown persistence, and scheduler/registry publishing.
 // Implementations of ResultPolicy must be safe for concurrent use by multiple goroutines.
@@ -167,6 +211,7 @@ type Manager struct {
 	executors                 map[string]ProviderExecutor
 	selector                  Selector
 	hook                      Hook
+	extraHooks                []Hook
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex

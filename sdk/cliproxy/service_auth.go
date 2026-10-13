@@ -500,6 +500,52 @@ func isStaleCoreAuth(existing, incoming *coreauth.Auth) bool {
 	return false
 }
 
+// Credential updates emit no auth-directory event in in-memory or custom
+// stores, so Meta model registration must follow the manager lifecycle.
+type metaModelRegistrationHook struct {
+	coreauth.NoopHook
+	service *Service
+}
+
+func (h metaModelRegistrationHook) OnAuthRegistered(ctx context.Context, auth *coreauth.Auth) {
+	h.reregister(ctx, auth)
+}
+
+func (h metaModelRegistrationHook) OnAuthUpdated(ctx context.Context, auth *coreauth.Auth) {
+	h.reregister(ctx, auth)
+}
+
+type metaRegistrationContextKey struct{}
+
+// metaRegistrationTimeout bounds detached post-commit reconciliation,
+// including any synchronous plugin model discovery it triggers.
+const metaRegistrationTimeout = 30 * time.Second
+
+func (h metaModelRegistrationHook) reregister(ctx context.Context, auth *coreauth.Auth) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Plugin model discovery can save an auth update mid-registration,
+	// which fires this hook again on the same call chain. The outer
+	// registration already completes with the updated auth, so nested
+	// invocations must not recurse.
+	if ctx.Value(metaRegistrationContextKey{}) != nil {
+		return
+	}
+	// The credential update already committed and persisted before this
+	// hook fired, so reconciliation detaches from caller cancellation.
+	// The detached context stays bounded: plugin model discovery runs
+	// synchronously inside reconciliation and must not stall a request
+	// goroutine forever after the client disconnects.
+	ctx = context.WithValue(context.WithoutCancel(ctx), metaRegistrationContextKey{}, true)
+	ctx, cancel := context.WithTimeout(ctx, metaRegistrationTimeout)
+	defer cancel()
+	h.service.completeModelRegistrationForAuth(ctx, auth)
+}
+
 func (s *Service) completeModelRegistrationForAuth(ctx context.Context, auth *coreauth.Auth) {
 	s.completeModelRegistrationForAuthWithCache(ctx, auth, nil)
 }

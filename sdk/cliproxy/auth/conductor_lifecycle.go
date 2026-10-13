@@ -156,11 +156,34 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
-	m.hook.OnAuthRegistered(ctx, auth.Clone())
+	m.fireOnAuthRegistered(ctx, auth.Clone())
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
 	}
+	if latest := m.latestCommittedMetaAuth(auth); latest != nil {
+		return latest, nil
+	}
 	return auth.Clone(), nil
+}
+
+// latestCommittedMetaAuth returns the newest committed record for a Meta
+// auth after lifecycle hooks ran. Hooks can commit a newer credential
+// through plugin model discovery, while Register and Update would
+// otherwise return their pre-hook candidate and callers execute with it.
+// The registration-epoch fence keeps a removed credential from being
+// revived and a re-registered record under the same ID from being
+// substituted.
+func (m *Manager) latestCommittedMetaAuth(auth *Auth) *Auth {
+	if m == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	latest := m.auths[auth.ID]
+	if latest == nil || latest.RegistrationEpoch != auth.RegistrationEpoch {
+		return nil
+	}
+	return latest.Clone()
 }
 
 type updateAuthMode int
@@ -353,9 +376,12 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	m.fireOnAuthUpdated(ctx, auth.Clone())
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
+	}
+	if latest := m.latestCommittedMetaAuth(auth); latest != nil {
+		return latest, nil
 	}
 	return auth.Clone(), nil
 }
