@@ -405,3 +405,42 @@ access:
 		}
 	})
 }
+
+func TestServerMaxRequestBodyBytesCrossOriginRejectionAndPreflight(t *testing.T) {
+	cfg := parseTestServerConfigYAML(t, "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\nobservability:\n  logs:\n    request-log: true\n")
+	server := newTestServerWithConfig(t, cfg)
+	for _, method := range []string{http.MethodPost, http.MethodOptions} {
+		t.Run(method, func(t *testing.T) {
+			counter := &countingBodyReader{reader: strings.NewReader(strings.Repeat("a", 128))}
+			req := httptest.NewRequest(method, "/v1/chat/completions", counter)
+			req.ContentLength = 128
+			req.Header.Set("Origin", "https://client.example")
+			req.Header.Set("Content-Type", "application/json")
+			if method == http.MethodOptions {
+				req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+				req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+			}
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			wantStatus := http.StatusRequestEntityTooLarge
+			if method == http.MethodOptions {
+				wantStatus = http.StatusNoContent
+			}
+			if rr.Code != wantStatus {
+				t.Fatalf("status=%d want=%d", rr.Code, wantStatus)
+			}
+			if rr.Header().Get("Access-Control-Allow-Origin") != "*" {
+				t.Fatal("response hidden by missing CORS origin")
+			}
+			if !strings.Contains(rr.Header().Get("Access-Control-Allow-Methods"), http.MethodPost) || rr.Header().Get("Access-Control-Allow-Headers") != "*" {
+				t.Fatal("preflight allowances missing")
+			}
+			if !strings.Contains(rr.Header().Get("Access-Control-Expose-Headers"), "X-CPA-TRACE-ID") {
+				t.Fatal("trace header not exposed")
+			}
+			if counter.read.Load() != 0 {
+				t.Fatal("oversized request or preflight read body before rejection")
+			}
+		})
+	}
+}

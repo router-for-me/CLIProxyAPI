@@ -40,6 +40,40 @@ func setRefreshLeadFactory(t *testing.T, provider string, factory func() *time.D
 	})
 }
 
+func TestAutoRefreshLoop_SIWCEvaluatorReschedulesInFuture(t *testing.T) {
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	for _, interval := range []time.Duration{time.Minute, 0} {
+		t.Run(interval.String(), func(t *testing.T) {
+			a := &Auth{ID: "evaluator-siwc", Provider: "codex", Runtime: testRefreshEvaluator{}, Metadata: map[string]any{"type": "codex", "use_siwc": true, "siwc": map[string]any{"access_token": "fixture-access", "refresh_token": "fixture-refresh", "client_id": "fixture-client", "expired": now.Add(time.Minute).Format(time.RFC3339)}}}
+			m := NewManager(nil, nil, nil)
+			if _, err := m.Register(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			a, _ = m.GetByID(a.ID)
+			if m.shouldRefresh(a, now) {
+				t.Fatal("runtime evaluator must override due SIWC")
+			}
+			next, scheduled := nextRefreshCheckAt(now, a, interval)
+			wantInterval := interval
+			if wantInterval <= 0 {
+				wantInterval = refreshCheckInterval
+			}
+			if !scheduled || !next.Equal(now.Add(wantInterval)) {
+				t.Fatalf("next=%s scheduled=%v, want future evaluator interval", next, scheduled)
+			}
+			loop := newAuthAutoRefreshLoop(m, interval, 1)
+			loop.upsert(a.ID, now)
+			loop.handleDue(context.Background(), now)
+			if next, ok := loop.peek(); !ok || !next.After(now) {
+				t.Fatal("declined evaluator left a busy-loop heap entry")
+			}
+			if len(loop.jobs) != 0 {
+				t.Fatal("declined evaluator enqueued refresh")
+			}
+		})
+	}
+}
+
 func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	expiry := now.Add(time.Hour)

@@ -169,6 +169,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
 	engine.Use(logging.CPATraceIDMiddleware())
+	// CORS must decorate early body-limit rejections and answer preflight before
+	// body-reading middleware or authentication, without weakening their limits.
+	engine.Use(corsMiddleware())
 	engine.Use(s.maxRequestBodyBytesMiddleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
@@ -192,7 +195,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.requestLogger = requestLogger
 	s.loggerToggle = toggle
 
-	engine.Use(corsMiddleware())
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)

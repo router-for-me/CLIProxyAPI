@@ -36,6 +36,9 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 	if !IsCodexAuthRecord(auth) {
 		return false, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	type metadataSetter interface {
 		SetMetadata(map[string]any)
@@ -61,6 +64,13 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 				return fmt.Errorf("auth filestore: invalid refresh source JSON")
 			}
 			merged := auth.CodexRefreshPatch.Apply(diskMap)
+			if mode, ok := ctx.Value(authUpdateModeContextKey{}).(updateAuthMode); ok && mode == updateModeReplace {
+				// Update owns intentional configuration edits, even when a previous
+				// rotation is pending. Keep the patch's partition/version arbitration
+				// while using the existing configuration-save merge for other fields.
+				merged = codex.MergeCodexCredentialsFromDisk(merged, auth.Metadata)
+				merged["disabled"] = auth.Disabled
+			}
 			NormalizeCredentialMetadata(merged)
 			if errWrite := codex.WriteJSONFileAtomic(path, merged); errWrite != nil {
 				return errWrite
