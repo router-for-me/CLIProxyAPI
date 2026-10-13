@@ -189,13 +189,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	sawOutputDelta := false
 	if buffering {
-		// An event split across data lines is collected inside one Scan; keep it within the same
-		// frame, byte and time budgets that bound the frames held here line by line.
+		// An event split across data lines is collected inside one Scan. Admit the collection by
+		// the same per-line budgets the loop charges below through scanner.Consumed.
 		scanner.SetCollectGuard(func(lines, size int) bool {
 			if bootstrapTimeout > 0 && nowCodexBootstrap().Sub(bootstrapStart) >= bootstrapTimeout {
 				return false
 			}
-			return bufferedFrames+lines < codexBootstrapMaxBufferedFrames && bufferedBytes+size <= codexBootstrapMaxBufferedBytes
+			return bufferedFrames+lines <= codexBootstrapMaxBufferedFrames && bufferedBytes+size <= codexBootstrapMaxBufferedBytes
 		})
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -288,14 +288,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
 			if isHandshake && !terminalSuccess {
-				frameBytes := len(line)
+				// Charge every upstream line this item consumed: an event assembled from several
+				// data lines holds all of them.
+				frameLines, frameBytes := scanner.Consumed()
 				for i := range chunks {
 					frameBytes += len(chunks[i])
 				}
 				timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 				timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
-				if !timeoutReached && bufferedFrames < codexBootstrapMaxBufferedFrames && bufferedBytes+frameBytes <= codexBootstrapMaxBufferedBytes {
-					bufferedFrames++
+				if !timeoutReached && bufferedFrames+frameLines <= codexBootstrapMaxBufferedFrames && bufferedBytes+frameBytes <= codexBootstrapMaxBufferedBytes {
+					bufferedFrames += frameLines
 					bufferedBytes += frameBytes
 					bufferedChunks = append(bufferedChunks, chunks...)
 					continue
@@ -303,7 +305,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				exhausted := "frame budget"
 				if timeoutReached {
 					exhausted = "time budget"
-				} else if bufferedFrames < codexBootstrapMaxBufferedFrames {
+				} else if bufferedFrames+frameLines <= codexBootstrapMaxBufferedFrames {
 					exhausted = "byte budget"
 				}
 				helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap %s exhausted after %d lines / %d bytes / %v, releasing stream without overload probing", exhausted, bufferedFrames, bufferedBytes, timeSinceStart)

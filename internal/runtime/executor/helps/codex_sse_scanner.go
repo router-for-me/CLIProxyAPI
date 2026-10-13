@@ -44,6 +44,9 @@ type CodexSSEScanner struct {
 	guard    func(lines, bytes int) bool
 	queue    [][]byte
 	current  []byte
+	// consumedLines and consumedBytes are the upstream lines and bytes behind current.
+	consumedLines int
+	consumedBytes int
 }
 
 // NewCodexSSEScanner returns a CodexSSEScanner over r. maxBytes bounds one line, as
@@ -58,6 +61,7 @@ func NewCodexSSEScanner(ctx context.Context, r io.Reader, maxBytes int) *CodexSS
 func (s *CodexSSEScanner) Scan() bool {
 	if len(s.queue) > 0 {
 		s.current, s.queue = s.queue[0], s.queue[1:]
+		s.consumedLines, s.consumedBytes = 1, len(s.current)
 		return true
 	}
 	if !s.lines.Scan() {
@@ -66,6 +70,7 @@ func (s *CodexSSEScanner) Scan() bool {
 	line := s.lines.Bytes()
 	if !bytes.HasPrefix(line, codexSSEDataPrefix) || !codexSSEIncompleteJSON(bytes.TrimSpace(line[len(codexSSEDataPrefix):])) {
 		s.current = line
+		s.consumedLines, s.consumedBytes = 1, len(line)
 		return true
 	}
 	// An incomplete event: collect its continuation. The underlying scanner reuses its buffer, so keep copies.
@@ -88,9 +93,10 @@ func (s *CodexSSEScanner) Scan() bool {
 			rest = append(rest, bytes.Clone(next))
 			break
 		}
-		if s.guard != nil && !s.guard(len(read), size+len(next)) {
+		if s.guard != nil && !s.guard(len(read)+1, size+len(next)) {
 			// The caller's budget does not cover this event: deliver its lines one by one, as read.
 			s.current = first
+			s.consumedLines, s.consumedBytes = 1, len(first)
 			s.queue = append(read[1:], bytes.Clone(next))
 			return true
 		}
@@ -107,15 +113,24 @@ func (s *CodexSSEScanner) Scan() bool {
 		closed = nesting.feed([]byte{'\n'}) || nesting.feed(value)
 	}
 	s.current = s.assemble(data, joined)
+	s.consumedLines, s.consumedBytes = len(data), 0
+	for _, line := range data {
+		s.consumedBytes += len(line)
+	}
 	s.queue = rest
 	return true
 }
 
+// Consumed reports how many upstream lines and bytes the current line stands for: one line and its
+// own length, or, for an event assembled from several data lines, all of those lines. Lines that
+// arrived inside such an event but are not data are delivered, and counted, on their own.
+func (s *CodexSSEScanner) Consumed() (lines, bytes int) { return s.consumedLines, s.consumedBytes }
+
 // SetCollectGuard installs a check made before an incomplete event collects each further line.
-// It receives how many lines the event would then span after its first and how many bytes. When it
-// returns false, the scanner stops collecting and delivers the lines read so far one by one, as
-// bufio.Scanner would, so a caller can keep its own per-line budgets while it holds a stream. A
-// nil guard removes the check.
+// It receives how many upstream lines and bytes this Scan would then have read in total, the same
+// quantities Consumed and the queued lines will report. When it returns false, the scanner stops
+// collecting and delivers the lines read so far one by one, as bufio.Scanner would, so a caller
+// can keep its own per-line budgets while it holds a stream. A nil guard removes the check.
 func (s *CodexSSEScanner) SetCollectGuard(guard func(lines, bytes int) bool) { s.guard = guard }
 
 // codexSSEValue is one data line's value: the text after "data:" without the one leading space.

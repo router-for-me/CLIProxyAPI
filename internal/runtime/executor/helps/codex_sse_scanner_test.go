@@ -232,7 +232,7 @@ func TestCodexSSEScannerGuardFallsBackToLineByLine(t *testing.T) {
 	var calls []call
 	scanner.SetCollectGuard(func(lines, size int) bool {
 		calls = append(calls, call{lines, size})
-		return lines < 2
+		return lines < 3
 	})
 	var got []string
 	for scanner.Scan() {
@@ -243,11 +243,26 @@ func TestCodexSSEScannerGuardFallsBackToLineByLine(t *testing.T) {
 	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
 		t.Fatalf("lines = %q\nwant    %q", got, want)
 	}
-	if fmt.Sprint(calls) != fmt.Sprint([]call{{1, 20}, {2, 26}}) {
+	if fmt.Sprint(calls) != fmt.Sprint([]call{{2, 20}, {3, 26}}) {
 		t.Fatalf("guard calls = %v", calls)
 	}
 	if len(hook.AllEntries()) != 0 {
 		t.Fatalf("unexpected warnings: %d", len(hook.AllEntries()))
+	}
+}
+
+func TestCodexSSEScannerReportsTheLinesEachItemConsumed(t *testing.T) {
+	stream := "event: e\ndata: {\"a\":\n: note\ndata: 1}\n\ndata: {\"b\":2}\n"
+	scanner := NewCodexSSEScanner(context.Background(), strings.NewReader(stream), 1<<20)
+	var got []string
+	for scanner.Scan() {
+		lines, size := scanner.Consumed()
+		got = append(got, fmt.Sprintf("%q:%d/%d", scanner.Bytes(), lines, size))
+	}
+	// The assembled event stands for its two data lines; the comment inside it is its own line.
+	want := []string{`"event: e":1/8`, `"data: {\"a\":1}":2/19`, `": note":1/6`, `"":1/0`, `"data: {\"b\":2}":1/13`}
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+		t.Fatalf("consumed = %q\nwant       %q", got, want)
 	}
 }
 

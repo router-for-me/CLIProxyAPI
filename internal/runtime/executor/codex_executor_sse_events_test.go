@@ -145,3 +145,33 @@ func TestCodexExecuteStreamKeepsBootstrapBudgetsForASplitEvent(t *testing.T) {
 		t.Fatal("buffered: the event was assembled past the bootstrap frame budget")
 	}
 }
+
+func TestCodexExecuteStreamChargesEverySplitLineToTheBootstrapBudget(t *testing.T) {
+	// Several valid handshake events in a row, each split across 20 data lines: together they
+	// span more upstream lines than the 48-line bootstrap budget, though each fits on its own.
+	var stream strings.Builder
+	stream.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_many\",\"model\":\"gpt-5.4\"}}\n\n")
+	for range 4 {
+		stream.WriteString("data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_many\",\"output\":[\n")
+		for range 18 {
+			stream.WriteString("data: {\"x\":1},\n")
+		}
+		stream.WriteString("data: {\"x\":1}]}}\n\n")
+	}
+	stream.WriteString("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_many\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	// The created event and two 20-line events fit the 48-line budget; the third would not, so
+	// its lines are released one by one and the stream starts there instead of being held.
+	assembledBeforeRelease, released := 0, false
+	for _, chunk := range codexStreamChunks(t, stream.String(), true) {
+		if chunk == `data: {"x":1},` {
+			released = true
+			break
+		}
+		if strings.HasPrefix(chunk, `data: {"type":"response.in_progress"`) && json.Valid([]byte(strings.TrimPrefix(chunk, "data: "))) {
+			assembledBeforeRelease++
+		}
+	}
+	if !released || assembledBeforeRelease != 2 {
+		t.Fatalf("assembled before release = %d (released %t), want 2 within the 48-line budget", assembledBeforeRelease, released)
+	}
+}
