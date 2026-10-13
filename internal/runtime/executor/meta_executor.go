@@ -98,6 +98,14 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	dcaToken := extractDCAToken(auth)
 	if dcaToken == "" {
 		if _, token := metaCreds(auth); token != "" {
+			// Best effort only. Failures keep the prior return-unchanged behavior.
+			if strings.EqualFold(auth.AuthKind(), cliproxyauth.AuthKindOAuth) {
+				if refreshed, errRevalidate := e.revalidateMetaWonderFull(ctx, auth); errRevalidate == nil {
+					return refreshed, nil
+				} else {
+					log.Debugf("meta executor: wonder full revalidation failed: %v", errRevalidate)
+				}
+			}
 			return auth, nil
 		}
 		return nil, statusErr{
@@ -174,6 +182,7 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	auth.Attributes["base_url"] = baseURL
 	auth.Attributes["api_key"] = minted.APIKey
 	auth.Attributes["access_token"] = minted.APIKey
+	delete(auth.Attributes, "wonder_full_entitled")
 
 	// Auth.Clone does not clone Storage. Keep the candidate isolated from live
 	// login storage; file-loaded records already persist through Metadata.
@@ -200,11 +209,8 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	return auth, nil
 }
 
-// revalidateMetaWonderFull refreshes Wonder Full entitlement with the minted
-// API key when minting is unavailable (most importantly after the DCA token
-// expires, since the minted key outlives it). The result is recorded as
-// wonder_full_entitled so model registration can use current upstream
-// evidence instead of the subscription tier saved at the last mint.
+// The result lands in wonder_full_entitled so registration uses current
+// upstream evidence instead of the tier saved at the last mint.
 func (e *MetaExecutor) revalidateMetaWonderFull(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	baseURL, token := metaCreds(auth)
 	if token == "" {
@@ -231,9 +237,7 @@ func (e *MetaExecutor) revalidateMetaWonderFull(ctx context.Context, auth *clipr
 	return auth, nil
 }
 
-// metaDCAExpired reports whether the saved DCA token expiry is known to be
-// in the past. Unknown expiry is treated as not expired so the normal mint
-// path stays in charge.
+// Unknown expiry counts as not expired so the mint path stays in charge.
 func metaDCAExpired(auth *cliproxyauth.Auth, now time.Time) bool {
 	expiry, ok := metaDCAExpiry(auth)
 	return ok && !expiry.After(now)

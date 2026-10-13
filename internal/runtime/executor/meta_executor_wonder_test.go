@@ -260,3 +260,104 @@ func TestMetaExecutor_RefreshFallsBackToWonderFullRevalidationOnMintFailure(t *t
 		t.Fatalf("wonder_full_entitled = %v, want false", refreshed.Metadata["wonder_full_entitled"])
 	}
 }
+
+func TestMetaExecutor_MintClearsWonderFullAttributeEvidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"api_key":"LLM|fresh-minted","subs_tier_name":"High Usage","is_subs_active":true}`))
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL)
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"auth_kind":            "oauth",
+			"dca_token":            "dca:clear-attr-evidence",
+			"wonder_full_entitled": "true",
+		},
+		Metadata: map[string]any{
+			"type":                 "meta",
+			"auth_kind":            "oauth",
+			"dca_token":            "dca:clear-attr-evidence",
+			"wonder_full_entitled": true,
+		},
+	}
+
+	refreshed, err := exec.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if _, ok := refreshed.Metadata["wonder_full_entitled"]; ok {
+		t.Fatalf("expected metadata wonder_full_entitled cleared after mint, got %v", refreshed.Metadata["wonder_full_entitled"])
+	}
+	if _, ok := refreshed.Attributes["wonder_full_entitled"]; ok {
+		t.Fatalf("expected attribute wonder_full_entitled cleared after mint, got %q", refreshed.Attributes["wonder_full_entitled"])
+	}
+	if refreshed.Metadata["subs_tier_name"] != "High Usage" {
+		t.Fatalf("subs_tier_name = %v, want High Usage", refreshed.Metadata["subs_tier_name"])
+	}
+}
+
+func TestMetaExecutor_RefreshRevalidatesWithoutDCAToken(t *testing.T) {
+	modelsHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelsHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"muse-wonder-1.0"}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("META_MODELS_URL", server.URL)
+
+	exec := NewMetaExecutor(&config.Config{})
+	oauth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"api_key":   "LLM|minted",
+			"base_url":  "https://api.meta.ai/v1",
+		},
+		Metadata: map[string]any{
+			"type":           "meta",
+			"auth_kind":      "oauth",
+			"api_key":        "LLM|minted",
+			"access_token":   "LLM|minted",
+			"subs_tier_name": "Muse Code Max Usage",
+			"is_subs_active": true,
+		},
+	}
+	refreshed, err := exec.Refresh(context.Background(), oauth)
+	if err != nil {
+		t.Fatalf("Refresh() oauth error = %v", err)
+	}
+	if modelsHits != 1 {
+		t.Fatalf("models hits = %d, want 1", modelsHits)
+	}
+	if got, ok := refreshed.Metadata["wonder_full_entitled"].(bool); !ok || got {
+		t.Fatalf("wonder_full_entitled = %v, want false", refreshed.Metadata["wonder_full_entitled"])
+	}
+
+	apiKeyAuth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"api_key":   "meta-model-api-key",
+			"base_url":  "https://api.meta.ai/v1",
+		},
+		Metadata: map[string]any{
+			"type":      "meta",
+			"auth_kind": "apikey",
+			"api_key":   "meta-model-api-key",
+		},
+	}
+	if _, errRefresh := exec.Refresh(context.Background(), apiKeyAuth); errRefresh != nil {
+		t.Fatalf("Refresh() apikey error = %v", errRefresh)
+	}
+	if modelsHits != 1 {
+		t.Fatalf("models hits after apikey refresh = %d, want still 1", modelsHits)
+	}
+	if _, ok := apiKeyAuth.Metadata["wonder_full_entitled"]; ok {
+		t.Fatal("expected no wonder_full_entitled recorded for apikey credential")
+	}
+}

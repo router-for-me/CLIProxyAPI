@@ -9,6 +9,16 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+func metaRegisteredModelIDs(authID string) map[string]bool {
+	seen := make(map[string]bool)
+	for _, model := range GlobalModelRegistry().GetModelsForClient(authID) {
+		if model != nil {
+			seen[strings.TrimSpace(model.ID)] = true
+		}
+	}
+	return seen
+}
+
 func TestRegisterModelsForAuth_MetaWonderFullEntitlement(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -84,13 +94,7 @@ func TestRegisterModelsForAuth_MetaWonderFullEntitlement(t *testing.T) {
 
 			service.registerModelsForAuth(context.Background(), auth)
 
-			models := registry.GetModelsForClient(auth.ID)
-			seen := make(map[string]bool)
-			for _, model := range models {
-				if model != nil {
-					seen[strings.TrimSpace(model.ID)] = true
-				}
-			}
+			seen := metaRegisteredModelIDs(auth.ID)
 			if !seen["muse-wonder-1.0"] || !seen["muse-spark-1.3"] {
 				t.Fatalf("expected standard Meta models to stay registered, got %v", seen)
 			}
@@ -134,12 +138,7 @@ func TestRegisterModelsForAuth_MetaWonderFullExplicitConfigModelsKept(t *testing
 
 	service.registerModelsForAuth(context.Background(), auth)
 
-	seen := make(map[string]bool)
-	for _, model := range registry.GetModelsForClient(auth.ID) {
-		if model != nil {
-			seen[strings.TrimSpace(model.ID)] = true
-		}
-	}
+	seen := metaRegisteredModelIDs(auth.ID)
 	if !seen["muse-wonder-full-1.0"] {
 		t.Fatalf("expected explicitly configured muse-wonder-full-1.0 to stay registered, got %v", seen)
 	}
@@ -177,15 +176,7 @@ func TestMetaRegistrationHookReregistersAfterTierUpdate(t *testing.T) {
 		t.Fatalf("Register() error = %v", errRegister)
 	}
 
-	registeredIDs := func() map[string]bool {
-		seen := make(map[string]bool)
-		for _, model := range registry.GetModelsForClient(auth.ID) {
-			if model != nil {
-				seen[strings.TrimSpace(model.ID)] = true
-			}
-		}
-		return seen
-	}
+	registeredIDs := func() map[string]bool { return metaRegisteredModelIDs(auth.ID) }
 
 	if seen := registeredIDs(); !seen["muse-wonder-1.0"] || seen["muse-wonder-full-1.0"] {
 		t.Fatalf("before mint: want Wonder without Full, got %v", seen)
@@ -226,7 +217,7 @@ func TestRegisterModelsForAuth_MetaOAuthConfigMatchStaysEntitlementFiltered(t *t
 				{
 					BaseURL: "https://api.meta.ai/v1",
 					Models: []config.MetaModel{
-						{Name: "muse-wonder-full-1.0"},
+						{Name: "muse-wonder-full-1.0", Alias: "muse-full"},
 						{Name: "muse-wonder-1.0"},
 					},
 				},
@@ -256,16 +247,11 @@ func TestRegisterModelsForAuth_MetaOAuthConfigMatchStaysEntitlementFiltered(t *t
 
 	service.registerModelsForAuth(context.Background(), auth)
 
-	seen := make(map[string]bool)
-	for _, model := range registry.GetModelsForClient(auth.ID) {
-		if model != nil {
-			seen[strings.TrimSpace(model.ID)] = true
-		}
-	}
+	seen := metaRegisteredModelIDs(auth.ID)
 	if !seen["muse-wonder-1.0"] {
 		t.Fatalf("expected configured muse-wonder-1.0 to stay registered, got %v", seen)
 	}
-	if seen["muse-wonder-full-1.0"] {
-		t.Fatalf("expected Wonder Full to stay filtered for an OAuth credential matched only by base URL, got %v", seen)
+	if seen["muse-wonder-full-1.0"] || seen["muse-full"] {
+		t.Fatalf("expected Wonder Full (including its muse-full alias) to stay filtered for an OAuth credential matched only by base URL, got %v", seen)
 	}
 }

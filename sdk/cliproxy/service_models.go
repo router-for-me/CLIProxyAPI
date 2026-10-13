@@ -195,10 +195,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
-		// Explicitly configured models are an operator opt-in only for API-key
-		// credentials. An OAuth credential can resolve a config entry by base
-		// URL alone before its first mint, so it must stay subject to the
-		// subscription entitlement filter.
+		// OAuth credentials can resolve an entry by base URL alone, so only
+		// API-key credentials treat configured models as an opt-in.
 		if !configured || authKind != "apikey" {
 			models = applyMetaWonderFullEntitlement(models, a)
 		}
@@ -929,53 +927,42 @@ func buildMetaConfigModels(entry *config.MetaKey) []*ModelInfo {
 	return buildConfigModels(entry.Models, "meta", "meta", "meta")
 }
 
-// isMetaWonderFullModel reports whether a catalog model ID belongs to the
-// Muse Wonder Full line, which Meta serves only to Muse Code Power and
-// Maximum subscription plans.
+// Wonder Full is served only on Muse Code Power and Maximum plans.
 func isMetaWonderFullModel(modelID string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelID)), "muse-wonder-full-")
 }
 
-// metaAuthWonderFullEntitled reports whether a Meta credential is known to
-// hold an active subscription tier that includes Muse Wonder Full. Tier
-// state is read from the subscription fields persisted by Meta login and
-// key refresh (subs_tier_name, subs_tier_id, is_subs_active). Credentials
-// without that state are not entitled until a login or refresh records it,
-// so Wonder Full is never advertised for an unproven entitlement.
-func metaAuthWonderFullEntitled(auth *coreauth.Auth) bool {
-	if auth == nil {
+// Configured models carry their alias as ID and the upstream name in
+// MetadataModelID, so entitlement must match every identity.
+func isMetaWonderFullModelInfo(model *ModelInfo) bool {
+	if model == nil {
 		return false
 	}
-	// A recorded catalog check is the freshest evidence: it is written only
-	// by entitlement revalidation with the minted key and cleared by the
-	// next successful mint, after which the tier fields below govern again.
-	if entitled, known := metaAuthWonderFullEvidence(auth); known {
+	return isMetaWonderFullModel(model.ID) ||
+		isMetaWonderFullModel(model.MetadataModelID) ||
+		isMetaWonderFullModel(model.Name)
+}
+
+// Entitlement must be proven, never assumed. A recorded catalog check
+// outranks the saved tier, and the next successful mint clears it.
+func metaAuthWonderFullEntitled(auth *coreauth.Auth) bool {
+	if entitled, known := metaAuthBoolValue(auth, "wonder_full_entitled"); known {
 		return entitled
 	}
-	active, activeKnown := metaAuthSubscriptionActive(auth)
-	if activeKnown && !active {
-		return false
-	}
-	if !activeKnown && !metaAuthHasSubscriptionState(auth) {
+	if active, known := metaAuthBoolValue(auth, "is_subs_active"); known && !active {
 		return false
 	}
 	tier := metaAuthSubscriptionTier(auth)
-	if tier == "" {
-		return false
-	}
 	return strings.Contains(tier, "power") || strings.Contains(tier, "max")
 }
 
-// applyMetaWonderFullEntitlement drops Wonder Full models for Meta
-// credentials that are not entitled to them, so plan-gated models are
-// neither listed for nor scheduled to lower-tier accounts.
 func applyMetaWonderFullEntitlement(models []*ModelInfo, auth *coreauth.Auth) []*ModelInfo {
 	if metaAuthWonderFullEntitled(auth) {
 		return models
 	}
 	filtered := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
-		if model != nil && isMetaWonderFullModel(model.ID) {
+		if isMetaWonderFullModelInfo(model) {
 			continue
 		}
 		filtered = append(filtered, model)
@@ -983,25 +970,23 @@ func applyMetaWonderFullEntitlement(models []*ModelInfo, auth *coreauth.Auth) []
 	return filtered
 }
 
-func metaAuthWonderFullEvidence(auth *coreauth.Auth) (entitled bool, known bool) {
+func metaAuthBoolValue(auth *coreauth.Auth, key string) (value bool, known bool) {
 	if auth == nil {
 		return false, false
 	}
 	if auth.Metadata != nil {
-		if raw, ok := auth.Metadata["wonder_full_entitled"]; ok {
-			switch value := raw.(type) {
-			case bool:
-				return value, true
-			case string:
-				if parsed, errParse := strconv.ParseBool(strings.TrimSpace(value)); errParse == nil {
-					return parsed, true
-				}
+		switch raw := auth.Metadata[key].(type) {
+		case bool:
+			return raw, true
+		case string:
+			if parsed, errParse := strconv.ParseBool(strings.TrimSpace(raw)); errParse == nil {
+				return parsed, true
 			}
 		}
 	}
 	if auth.Attributes != nil {
-		if value := strings.TrimSpace(auth.Attributes["wonder_full_entitled"]); value != "" {
-			if parsed, errParse := strconv.ParseBool(value); errParse == nil {
+		if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
+			if parsed, errParse := strconv.ParseBool(raw); errParse == nil {
 				return parsed, true
 			}
 		}
@@ -1012,60 +997,10 @@ func metaAuthWonderFullEvidence(auth *coreauth.Auth) (entitled bool, known bool)
 func metaAuthSubscriptionTier(auth *coreauth.Auth) string {
 	for _, key := range []string{"subs_tier_name", "subs_tier_id"} {
 		if value := metaAuthStringValue(auth, key); value != "" {
-			normalized := strings.NewReplacer(" ", "", "-", "", "_", "").Replace(strings.ToLower(value))
-			if normalized != "" {
-				return normalized
-			}
+			return strings.NewReplacer(" ", "", "-", "", "_", "").Replace(strings.ToLower(value))
 		}
 	}
 	return ""
-}
-
-func metaAuthSubscriptionActive(auth *coreauth.Auth) (active bool, known bool) {
-	if auth == nil {
-		return false, false
-	}
-	if auth.Metadata != nil {
-		if raw, ok := auth.Metadata["is_subs_active"]; ok {
-			switch value := raw.(type) {
-			case bool:
-				return value, true
-			case string:
-				if parsed, errParse := strconv.ParseBool(strings.TrimSpace(value)); errParse == nil {
-					return parsed, true
-				}
-			}
-		}
-	}
-	if auth.Attributes != nil {
-		if value := strings.TrimSpace(auth.Attributes["is_subs_active"]); value != "" {
-			if parsed, errParse := strconv.ParseBool(value); errParse == nil {
-				return parsed, true
-			}
-		}
-	}
-	return false, false
-}
-
-func metaAuthHasSubscriptionState(auth *coreauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if auth.Metadata != nil {
-		for _, key := range []string{"subs_tier_name", "subs_tier_id", "is_subs_active"} {
-			if _, ok := auth.Metadata[key]; ok {
-				return true
-			}
-		}
-	}
-	if auth.Attributes != nil {
-		for _, key := range []string{"subs_tier_name", "subs_tier_id", "is_subs_active"} {
-			if strings.TrimSpace(auth.Attributes[key]) != "" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func metaAuthStringValue(auth *coreauth.Auth, key string) string {
