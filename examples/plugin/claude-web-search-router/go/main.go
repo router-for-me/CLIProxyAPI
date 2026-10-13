@@ -78,6 +78,9 @@ const (
 	backendAntigravityGoogle routeBackend = "antigravity_google"
 	backendCodexWebSearch    routeBackend = "codex_web_search"
 	backendXAIWebSearch      routeBackend = "xai_web_search"
+	backendKimiResponses     routeBackend = "kimi_responses"
+	backendKimiWebSearch     routeBackend = "kimi_web_search"
+	backendKimiCoding        routeBackend = "kimi_coding"
 	backendTavily            routeBackend = "tavily"
 	backendDefaultProvider   routeBackend = "default_provider"
 )
@@ -100,15 +103,28 @@ type lifecycleRequest struct {
 }
 
 type pluginConfig struct {
-	Enabled              bool     `yaml:"enabled"`
-	Route                string   `yaml:"route"`
-	AntigravityModel     string   `yaml:"antigravity_model"`
-	CodexModel           string   `yaml:"codex_model"`
-	XAIModel             string   `yaml:"xai_model"`
-	DefaultProvider      string   `yaml:"default_provider"`
-	DefaultProviderModel string   `yaml:"default_provider_model"`
-	TavilyAPIKeys        []string `yaml:"tavily_api_keys"`
-	RequireWebSearchOnly bool     `yaml:"require_web_search_only"`
+	Enabled              bool            `yaml:"enabled"`
+	Route                string          `yaml:"route"`
+	AntigravityModel     string          `yaml:"antigravity_model"`
+	CodexModel           string          `yaml:"codex_model"`
+	XAIModel             string          `yaml:"xai_model"`
+	DefaultProvider      string          `yaml:"default_provider"`
+	DefaultProviderModel string          `yaml:"default_provider_model"`
+	TavilyAPIKeys        []string        `yaml:"tavily_api_keys"`
+	KimiResponsesModel   string          `yaml:"kimi_responses_model"`
+	KimiAPIKeys          []string        `yaml:"kimi_api_keys"`
+	KimiBaseURL          string          `yaml:"kimi_base_url"`
+	KimiSearchLevel      string          `yaml:"kimi_search_level"`
+	KimiModel            string          `yaml:"kimi_model"`
+	KimiMaxResults       int             `yaml:"kimi_max_results"`
+	KimiTimeoutSeconds   int             `yaml:"kimi_timeout_seconds"`
+	KimiSites            []string        `yaml:"kimi_sites"`
+	KimiTimeWindow       *kimiTimeWindow `yaml:"kimi_time_window"`
+	KimiProEscalation    bool            `yaml:"kimi_pro_escalation"`
+	KimiCodingAPIKeys    []string        `yaml:"kimi_coding_api_keys"`
+	KimiCodingBaseURL    string          `yaml:"kimi_coding_base_url"`
+	KimiCodingModel      string          `yaml:"kimi_coding_model"`
+	RequireWebSearchOnly bool            `yaml:"require_web_search_only"`
 }
 
 type registration struct {
@@ -229,6 +245,8 @@ func defaultPluginConfig() pluginConfig {
 	return pluginConfig{
 		Enabled:              true,
 		Route:                string(backendFallback),
+		KimiSearchLevel:      string(kimiLevelAuto),
+		KimiProEscalation:    true,
 		RequireWebSearchOnly: true,
 	}
 }
@@ -244,6 +262,14 @@ func decodeConfig(raw []byte) (pluginConfig, error) {
 	cfg.XAIModel = strings.TrimSpace(cfg.XAIModel)
 	cfg.DefaultProvider = strings.ToLower(strings.TrimSpace(cfg.DefaultProvider))
 	cfg.DefaultProviderModel = strings.TrimSpace(cfg.DefaultProviderModel)
+	cfg.KimiResponsesModel = strings.TrimSpace(cfg.KimiResponsesModel)
+	cfg.KimiBaseURL = strings.TrimSpace(cfg.KimiBaseURL)
+	cfg.KimiSearchLevel = strings.ToLower(strings.TrimSpace(cfg.KimiSearchLevel))
+	if cfg.KimiSearchLevel == "" {
+		cfg.KimiSearchLevel = string(kimiLevelAuto)
+	}
+	cfg.KimiModel = strings.TrimSpace(cfg.KimiModel)
+	cfg.KimiSites = normalizeKimiSites(cfg.KimiSites)
 	return cfg, nil
 }
 
@@ -267,14 +293,31 @@ func pluginRegistration() registration {
 				{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "When false, the router declines all Claude web_search requests."},
 				{Name: "route", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{
 					string(backendFallback), string(backendAntigravityGoogle), string(backendCodexWebSearch),
-					string(backendXAIWebSearch), string(backendTavily), string(backendDefaultProvider),
-				}, Description: "Backend for Claude Code web_search. fallback (default): antigravity → codex → xai → tavily."},
+					string(backendXAIWebSearch), string(backendKimiResponses), string(backendKimiCoding),
+					string(backendKimiWebSearch), string(backendTavily), string(backendDefaultProvider),
+				}, Description: "Backend for Claude Code web_search. fallback (default): antigravity → codex → xai → kimi_responses → kimi_coding → kimi_web_search → tavily."},
 				{Name: "antigravity_model", Type: pluginapi.ConfigFieldTypeString, Description: "Antigravity googleSearch model (empty: registry lookup, then first supports_web_search)."},
 				{Name: "codex_model", Type: pluginapi.ConfigFieldTypeString, Description: "Codex Responses model for web_search (empty defaults to gpt-5.4, never client Claude model)."},
 				{Name: "xai_model", Type: pluginapi.ConfigFieldTypeString, Description: "xAI Responses model with web_search (empty uses grok-4.3, not the client Claude model)."},
 				{Name: "default_provider", Type: pluginapi.ConfigFieldTypeString, Description: "Built-in provider key when route=default_provider."},
 				{Name: "default_provider_model", Type: pluginapi.ConfigFieldTypeString, Description: "Optional execution model on default_provider route."},
 				{Name: "tavily_api_keys", Type: pluginapi.ConfigFieldTypeArray, Description: "Tavily API keys (round-robin) when route=tavily."},
+				{Name: "kimi_responses_model", Type: pluginapi.ConfigFieldTypeString, Description: "Model for route=kimi_responses / the fallback kimi host-auth step (empty: auto — kimi-k2.8-code for kimi.com coding credentials, kimi-k3 for Moonshot platform keys)."},
+				{Name: "kimi_api_keys", Type: pluginapi.ConfigFieldTypeArray, Description: "Moonshot Open Platform API keys (round-robin) for route=kimi_web_search or the fallback kimi step. Not the kimi.com OAuth credential."},
+				{Name: "kimi_base_url", Type: pluginapi.ConfigFieldTypeString, Description: "Kimi Open Platform base URL (empty: https://api.moonshot.ai)."},
+				{Name: "kimi_search_level", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{
+					string(kimiLevelAuto), string(kimiLevelBasic), string(kimiLevelPro),
+					string(kimiLevelFetch), string(kimiLevelModel),
+				}, Description: "Kimi search API tier: basic ($/search), pro (sites/time_window + chunks), fetch (URL fetch), model (Responses web_search, kimi writes the answer). auto picks per request."},
+				{Name: "kimi_model", Type: pluginapi.ConfigFieldTypeString, Description: "Kimi model for kimi_search_level=model (empty: kimi-k3)."},
+				{Name: "kimi_max_results", Type: pluginapi.ConfigFieldTypeInteger, Description: "Kimi search result limit, 1-20 (empty: Claude max_uses, else 5)."},
+				{Name: "kimi_timeout_seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "Kimi search timeout in seconds, 1-60 (empty: no per-request timeout)."},
+				{Name: "kimi_sites", Type: pluginapi.ConfigFieldTypeArray, Description: "Restrict Pro search to these sites (max 5); Claude allowed_domains takes precedence."},
+				{Name: "kimi_time_window", Type: pluginapi.ConfigFieldTypeObject, Description: "Pro-only publication date filter {start, end} in YYYY / YYYY-MM / YYYY-MM-DD."},
+				{Name: "kimi_pro_escalation", Type: pluginapi.ConfigFieldTypeBoolean, Description: "auto: retry an empty Basic result set through Pro (empty calls are unbilled)."},
+				{Name: "kimi_coding_api_keys", Type: pluginapi.ConfigFieldTypeArray, Description: "Kimi for Coding API keys (round-robin) for route=kimi_coding: calls {base}/v1/responses with web_search so the coding model answers using live search."},
+				{Name: "kimi_coding_base_url", Type: pluginapi.ConfigFieldTypeString, Description: "Kimi for Coding base URL (empty: https://api.kimi.ai/coding)."},
+				{Name: "kimi_coding_model", Type: pluginapi.ConfigFieldTypeString, Description: "Coding model for route=kimi_coding (empty: kimi-for-coding)."},
 				{Name: "require_web_search_only", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Require tools to be exclusively typed web_search (matches antigravity-only path)."},
 			},
 		},
@@ -445,7 +488,7 @@ func hostHTTPStatusFromError(err error) int {
 		return 0
 	}
 	msg := err.Error()
-	for _, code := range []int{429, 503, 502} {
+	for _, code := range []int{429, 503, 502, 504} {
 		if strings.Contains(msg, fmt.Sprintf("%d", code)) {
 			return code
 		}
@@ -454,7 +497,7 @@ func hostHTTPStatusFromError(err error) int {
 }
 
 func isRetryableHTTPStatus(code int) bool {
-	return code == 429 || code == 503 || code == 502
+	return code == 429 || code == 503 || code == 502 || code == 504
 }
 func okEnvelope(v any) ([]byte, error) {
 	raw, errMarshal := json.Marshal(v)

@@ -98,6 +98,51 @@ func runOrderedExecutionPlansStream(ctx context.Context, exec pluginapi.Executor
 			}
 			recordBackendSuccess(backend)
 			return nil
+		case backendKimiWebSearch:
+			client := newKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL)
+			payload, _, errRun := runKimiClaudeStreamWithClient(ctx, exec, client)
+			if errRun != nil {
+				lastErr = errRun
+				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {
+					recordBackendFailure(backend)
+				}
+				continue
+			}
+			if errEmit := emitPluginStreamChunk(pluginStreamID, payload); errEmit != nil {
+				return errEmit
+			}
+			recordBackendSuccess(backend)
+			return nil
+		case backendKimiResponses:
+			status, errRun := hostModelStreamForwardKimiResponses(ctx, hostCallbackID, cfg, body, pluginStreamID)
+			if errRun != nil {
+				lastErr = errRun
+				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {
+					recordBackendFailure(backend)
+				}
+				continue
+			}
+			if isRetryableHTTPStatus(status) {
+				recordBackendFailure(backend)
+				lastErr = fmt.Errorf("host model status %d", status)
+				continue
+			}
+			recordBackendSuccess(backend)
+			return nil
+		case backendKimiCoding:
+			payload, _, errRun := runKimiCodingClaudeStream(ctx, exec, cfg)
+			if errRun != nil {
+				lastErr = errRun
+				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {
+					recordBackendFailure(backend)
+				}
+				continue
+			}
+			if errEmit := emitPluginStreamChunk(pluginStreamID, payload); errEmit != nil {
+				return errEmit
+			}
+			recordBackendSuccess(backend)
+			return nil
 		default:
 			status, errRun := hostModelStreamForwardClaude(ctx, hostCallbackID, plan.model, body, pluginStreamID)
 			if errRun != nil {
@@ -123,15 +168,20 @@ func runOrderedExecutionPlansStream(ctx context.Context, exec pluginapi.Executor
 }
 
 func hostModelStreamForwardClaude(ctx context.Context, hostCallbackID, execModel string, body []byte, pluginStreamID string) (int, error) {
+	return hostModelStreamForwardRequest(ctx, hostCallbackID, pluginapi.HostModelExecutionRequest{
+		EntryProtocol: "claude",
+		ExitProtocol:  "claude",
+		Model:         execModel,
+		Stream:        true,
+		Body:          body,
+	}, pluginStreamID)
+}
+
+func hostModelStreamForwardRequest(ctx context.Context, hostCallbackID string, hreq pluginapi.HostModelExecutionRequest, pluginStreamID string) (int, error) {
+	hreq.Stream = true
 	raw, errCall := callHost(pluginabi.MethodHostModelExecuteStream, hostModelExecutionRequest{
-		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-			EntryProtocol: "claude",
-			ExitProtocol:  "claude",
-			Model:         execModel,
-			Stream:        true,
-			Body:          body,
-		},
-		HostCallbackID: hostCallbackID,
+		HostModelExecutionRequest: hreq,
+		HostCallbackID:            hostCallbackID,
 	})
 	if errCall != nil {
 		return hostHTTPStatusFromError(errCall), errCall

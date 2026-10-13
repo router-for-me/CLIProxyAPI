@@ -48,6 +48,18 @@ func executionPlansForExecuteRoute(cfg pluginConfig, req pluginapi.ModelRouteReq
 		plans = append(plans, executionPlan{backend: backend, model: resolveCodexWebSearchTargetModel(cfg.CodexModel)})
 	case backendXAIWebSearch:
 		plans = append(plans, executionPlan{backend: backend, model: resolveXAIWebSearchTargetModel(cfg.XAIModel)})
+	case backendKimiResponses:
+		plans = append(plans, executionPlan{backend: backend})
+	case backendKimiWebSearch:
+		if !newKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL).available() {
+			return nil
+		}
+		plans = append(plans, executionPlan{backend: backend})
+	case backendKimiCoding:
+		if !newKimiCodingClient(cfg).available() {
+			return nil
+		}
+		plans = append(plans, executionPlan{backend: backend})
 	case backendTavily:
 		if !newTavilyClient(cfg.TavilyAPIKeys).available() {
 			return nil
@@ -85,6 +97,12 @@ func buildExecutionPlansInternal(cfg pluginConfig, req pluginapi.ModelRouteReque
 				backend: backend,
 				model:   resolveXAIWebSearchTargetModel(cfg.XAIModel),
 			})
+		case backendKimiResponses:
+			plans = append(plans, executionPlan{backend: backend})
+		case backendKimiCoding:
+			plans = append(plans, executionPlan{backend: backend})
+		case backendKimiWebSearch:
+			plans = append(plans, executionPlan{backend: backend})
 		case backendTavily:
 			plans = append(plans, executionPlan{backend: backend})
 		default:
@@ -98,10 +116,17 @@ func backendRunnableLenient(backend routeBackend, cfg pluginConfig, req pluginap
 	switch backend {
 	case backendTavily:
 		return newTavilyClient(cfg.TavilyAPIKeys).available()
+	case backendKimiWebSearch:
+		return newKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL).available()
 	case backendAntigravityGoogle:
 		return resolveAntigravityWebSearchTargetModel(cfg.AntigravityModel, req.RequestedModel) != ""
 	case backendCodexWebSearch, backendXAIWebSearch:
 		return true
+	case backendKimiResponses:
+		_, ok := resolveKimiResponsesTarget(cfg)
+		return ok
+	case backendKimiCoding:
+		return newKimiCodingClient(cfg).available()
 	default:
 		return false
 	}
@@ -127,6 +152,12 @@ func executionPlansForRoute(cfg pluginConfig, req pluginapi.ModelRouteRequest, r
 			plans = append(plans, executionPlan{backend: b, model: resolveCodexWebSearchTargetModel(cfg.CodexModel)})
 		case backendXAIWebSearch:
 			plans = append(plans, executionPlan{backend: b, model: resolveXAIWebSearchTargetModel(cfg.XAIModel)})
+		case backendKimiResponses:
+			plans = append(plans, executionPlan{backend: b})
+		case backendKimiCoding:
+			plans = append(plans, executionPlan{backend: b})
+		case backendKimiWebSearch:
+			plans = append(plans, executionPlan{backend: b})
 		case backendTavily:
 			plans = append(plans, executionPlan{backend: b})
 		}
@@ -198,6 +229,63 @@ func runOrderedExecutionPlans(ctx context.Context, exec pluginapi.ExecutorReques
 			}
 			recordBackendSuccess(backend)
 			return payload, headers, nil
+		case backendKimiWebSearch:
+			client := newKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL)
+			var payload []byte
+			var headers http.Header
+			var errRun error
+			if stream {
+				payload, headers, errRun = runKimiClaudeStreamWithClient(ctx, exec, client)
+			} else {
+				payload, headers, errRun = runKimiClaudeWithClient(ctx, exec, client)
+			}
+			if errRun != nil {
+				lastErr = errRun
+				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {
+					recordBackendFailure(backend)
+				}
+				continue
+			}
+			recordBackendSuccess(backend)
+			return payload, headers, nil
+		case backendKimiCoding:
+			var payload []byte
+			var headers http.Header
+			var errRun error
+			if stream {
+				payload, headers, errRun = runKimiCodingClaudeStream(ctx, exec, cfg)
+			} else {
+				payload, headers, errRun = runKimiCodingClaude(ctx, exec, cfg)
+			}
+			if errRun != nil {
+				lastErr = errRun
+				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {
+					recordBackendFailure(backend)
+				}
+				continue
+			}
+			recordBackendSuccess(backend)
+			return payload, headers, nil
+		case backendKimiResponses:
+			payload, status, errRun := hostModelExecuteKimiResponses(ctx, hostCallbackID, cfg, body, stream)
+			if errRun != nil {
+				lastErr = errRun
+				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {
+					recordBackendFailure(backend)
+				}
+				continue
+			}
+			if isRetryableHTTPStatus(status) {
+				recordBackendFailure(backend)
+				lastErr = fmt.Errorf("host model status %d", status)
+				continue
+			}
+			recordBackendSuccess(backend)
+			headers := http.Header{"Content-Type": []string{"application/json"}}
+			if stream {
+				headers = http.Header{"Content-Type": []string{"text/event-stream"}}
+			}
+			return payload, headers, nil
 		default:
 			payload, status, errRun := hostModelExecuteClaude(ctx, hostCallbackID, plan.model, body, stream)
 			if errRun != nil {
@@ -251,18 +339,23 @@ func availableProvidersFromMetadata(meta map[string]any) []string {
 }
 
 func hostModelExecuteClaude(ctx context.Context, hostCallbackID, execModel string, body []byte, stream bool) ([]byte, int, error) {
-	if stream {
-		return hostModelStreamClaude(ctx, hostCallbackID, execModel, body)
+	return hostModelExecuteRequest(ctx, hostCallbackID, pluginapi.HostModelExecutionRequest{
+		EntryProtocol: "claude",
+		ExitProtocol:  "claude",
+		Model:         execModel,
+		Stream:        stream,
+		Body:          body,
+	})
+}
+
+// hostModelExecuteRequest runs a host model execution; streaming requests are buffered.
+func hostModelExecuteRequest(ctx context.Context, hostCallbackID string, hreq pluginapi.HostModelExecutionRequest) ([]byte, int, error) {
+	if hreq.Stream {
+		return hostModelStreamBuffered(ctx, hostCallbackID, hreq)
 	}
 	raw, errCall := callHost(pluginabi.MethodHostModelExecute, hostModelExecutionRequest{
-		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-			EntryProtocol: "claude",
-			ExitProtocol:  "claude",
-			Model:         execModel,
-			Stream:        false,
-			Body:          body,
-		},
-		HostCallbackID: hostCallbackID,
+		HostModelExecutionRequest: hreq,
+		HostCallbackID:            hostCallbackID,
 	})
 	if errCall != nil {
 		return nil, hostHTTPStatusFromError(errCall), errCall
@@ -277,16 +370,11 @@ func hostModelExecuteClaude(ctx context.Context, hostCallbackID, execModel strin
 	return resp.Body, resp.StatusCode, nil
 }
 
-func hostModelStreamClaude(ctx context.Context, hostCallbackID, execModel string, body []byte) ([]byte, int, error) {
+func hostModelStreamBuffered(ctx context.Context, hostCallbackID string, hreq pluginapi.HostModelExecutionRequest) ([]byte, int, error) {
+	hreq.Stream = true
 	raw, errCall := callHost(pluginabi.MethodHostModelExecuteStream, hostModelExecutionRequest{
-		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-			EntryProtocol: "claude",
-			ExitProtocol:  "claude",
-			Model:         execModel,
-			Stream:        true,
-			Body:          body,
-		},
-		HostCallbackID: hostCallbackID,
+		HostModelExecutionRequest: hreq,
+		HostCallbackID:            hostCallbackID,
 	})
 	if errCall != nil {
 		return nil, hostHTTPStatusFromError(errCall), errCall

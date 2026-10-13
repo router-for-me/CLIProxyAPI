@@ -104,8 +104,12 @@ func webSearchResultBlocks(hits []claudeWebSearchHit) []map[string]any {
 		if title == "" {
 			title = hostFromURL(hit.URL)
 		}
+		var pageAge any
+		if hit.PageAge != "" {
+			pageAge = hit.PageAge
+		}
 		resultContent = append(resultContent, map[string]any{
-			"type": "web_search_result", "title": title, "url": hit.URL, "page_age": nil,
+			"type": "web_search_result", "title": title, "url": hit.URL, "page_age": pageAge,
 		})
 	}
 	return resultContent
