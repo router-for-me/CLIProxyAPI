@@ -103,6 +103,23 @@ func (c *kimiClient) nextKey() string {
 	return c.keys[int(n-1)%len(c.keys)]
 }
 
+// hostHTTPContextKey carries the host-injected HTTPClient through the call
+// chain so Kimi upstream requests follow host transport policy (proxy-url)
+// and request-log capture instead of opening direct connections.
+type hostHTTPContextKey struct{}
+
+func withHostHTTP(ctx context.Context, hc pluginapi.HostHTTPClient) context.Context {
+	if hc == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, hostHTTPContextKey{}, hc)
+}
+
+func hostHTTPFromContext(ctx context.Context) pluginapi.HostHTTPClient {
+	hc, _ := ctx.Value(hostHTTPContextKey{}).(pluginapi.HostHTTPClient)
+	return hc
+}
+
 // post sends a JSON body to a Kimi tools endpoint with Bearer auth. Errors embed
 // the HTTP status ("kimi http 429: ...") so hostHTTPStatusFromError picks them up.
 func (c *kimiClient) post(ctx context.Context, path string, payload any) ([]byte, error) {
@@ -112,6 +129,9 @@ func (c *kimiClient) post(ctx context.Context, path string, payload any) ([]byte
 	raw, errMarshal := json.Marshal(payload)
 	if errMarshal != nil {
 		return nil, errMarshal
+	}
+	if hc := hostHTTPFromContext(ctx); hc != nil {
+		return c.postViaHost(ctx, hc, path, raw)
 	}
 	req, errNew := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(path), bytes.NewReader(raw))
 	if errNew != nil {
@@ -136,6 +156,27 @@ func (c *kimiClient) post(ctx context.Context, path string, payload any) ([]byte
 		return nil, fmt.Errorf("kimi http %d: %s", resp.StatusCode, truncate(string(body), 512))
 	}
 	return body, nil
+}
+
+// postViaHost sends the payload through the host-injected HTTPClient so the
+// call honors host transport policy (proxy-url) and appears in request logs.
+func (c *kimiClient) postViaHost(ctx context.Context, hc pluginapi.HostHTTPClient, path string, raw []byte) ([]byte, error) {
+	resp, errDo := hc.Do(ctx, pluginapi.HTTPRequest{
+		Method: http.MethodPost,
+		URL:    c.endpoint(path),
+		Headers: http.Header{
+			"Content-Type":  []string{"application/json"},
+			"Authorization": []string{"Bearer " + c.nextKey()},
+		},
+		Body: raw,
+	})
+	if errDo != nil {
+		return nil, errDo
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("kimi http %d: %s", resp.StatusCode, truncate(string(resp.Body), 512))
+	}
+	return resp.Body, nil
 }
 
 type kimiTimeWindow struct {
@@ -403,12 +444,12 @@ func filterBlockedDomains(hits []claudeWebSearchHit, blocked []string) []claudeW
 }
 
 func domainMatches(host string, domains []string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 	if host == "" {
 		return false
 	}
 	for _, d := range domains {
-		d = strings.ToLower(strings.TrimSpace(d))
+		d = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), ".")
 		if d == "" {
 			continue
 		}
@@ -453,6 +494,7 @@ func runKimiSearch(ctx context.Context, req pluginapi.ExecutorRequest, client *k
 	}
 	toolCfg := extractClaudeWebSearchToolConfig(claudeRequestBody(req))
 	plan := resolveKimiSearchPlan(cfg, toolCfg, query)
+	ctx = withHostHTTP(ctx, req.HTTPClient)
 	hits, answer, errSearch := client.executePlan(ctx, plan, cfg, query)
 	if errSearch != nil {
 		return nil, "", "", errSearch

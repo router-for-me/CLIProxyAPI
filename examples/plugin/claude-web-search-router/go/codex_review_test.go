@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -305,5 +306,183 @@ func TestExecutePlanModelDropsAnswerFromBlockedSources(t *testing.T) {
 	}
 	if answer != "answer text" {
 		t.Fatalf("answer = %q, want preserved when no source is blocked", answer)
+	}
+}
+
+// fakeHostHTTPClient records requests and returns a canned response, standing
+// in for the host-injected HostHTTPClient.
+type fakeHostHTTPClient struct {
+	called bool
+	got    pluginapi.HTTPRequest
+	resp   pluginapi.HTTPResponse
+	err    error
+}
+
+func (f *fakeHostHTTPClient) Do(_ context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	f.called = true
+	f.got = req
+	return f.resp, f.err
+}
+
+func (f *fakeHostHTTPClient) DoStream(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	return pluginapi.HTTPStreamResponse{}, fmt.Errorf("not implemented")
+}
+
+// TestKimiClientRoutesThroughHostHTTPClient verifies the kimi_web_search client
+// uses the host-injected HTTPClient (host transport policy, request-log) when
+// one is present instead of its raw http.Client.
+func TestKimiClientRoutesThroughHostHTTPClient(t *testing.T) {
+	fake := &fakeHostHTTPClient{resp: pluginapi.HTTPResponse{
+		StatusCode: 200,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       []byte(`{"search_results": [{"title": "t", "url": "https://example.com"}]}`),
+	}}
+	client := newKimiClient([]string{"sk-test"}, "")
+	// Poison the raw client so any bypass fails loudly.
+	client.http = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("raw http client must not be used when host HTTP client is present")
+	})}
+
+	ctx := withHostHTTP(context.Background(), fake)
+	_, err := client.search(ctx, false, kimiSearchRequest{TextQuery: "q"})
+	if err != nil {
+		t.Fatalf("search error = %v", err)
+	}
+	if !fake.called {
+		t.Fatal("host HTTP client was not used")
+	}
+	if fake.got.Method != http.MethodPost {
+		t.Fatalf("method = %q, want POST", fake.got.Method)
+	}
+	if !strings.HasSuffix(fake.got.URL, kimiSearchBasicPath) {
+		t.Fatalf("url = %q, want suffix %s", fake.got.URL, kimiSearchBasicPath)
+	}
+	if got := fake.got.Headers.Get("Authorization"); got != "Bearer sk-test" {
+		t.Fatalf("authorization = %q, want Bearer sk-test", got)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestKimiCodingClientRoutesThroughHostHTTPClient verifies the kimi_coding
+// client also routes through the host-injected HTTPClient.
+func TestKimiCodingClientRoutesThroughHostHTTPClient(t *testing.T) {
+	fake := &fakeHostHTTPClient{resp: pluginapi.HTTPResponse{
+		StatusCode: 200,
+		Body: []byte(`{"output": [
+			{"type": "message", "content": [{"type": "output_text", "text": "answer"}]}
+		]}`),
+	}}
+	client := newKimiCodingClientWithOptions([]string{"sk-test"}, "", "", &http.Client{
+		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("raw http client must not be used when host HTTP client is present")
+		}),
+	})
+
+	ctx := withHostHTTP(context.Background(), fake)
+	_, _, err := client.search(ctx, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("coding search error = %v", err)
+	}
+	if !fake.called {
+		t.Fatal("host HTTP client was not used for kimi_coding")
+	}
+}
+
+// TestLenientProbeDoesNotAdvanceCredentialRotation verifies the availability
+// probe resolves the kimi_responses target without consuming a rotation tick,
+// so the execution that follows still rotates across the pool.
+func TestLenientProbeDoesNotAdvanceCredentialRotation(t *testing.T) {
+	entry := func(id string) pluginapi.HostAuthFileEntry {
+		return pluginapi.HostAuthFileEntry{Provider: "kimi", BaseURL: "https://api.kimi.com/coding", ID: id}
+	}
+	entries := []pluginapi.HostAuthFileEntry{entry("cred-a"), entry("cred-b")}
+
+	kimiResponsesCredentialCounter.Store(0)
+	if _, ok := peekKimiResponsesTargetForModel(entries, ""); !ok {
+		t.Fatal("peek expected target")
+	}
+	if got := kimiResponsesCredentialCounter.Load(); got != 0 {
+		t.Fatalf("peek advanced rotation counter to %d, want 0", got)
+	}
+	if _, ok := resolveKimiResponsesTargetForModel(entries, ""); !ok {
+		t.Fatal("resolve expected target")
+	}
+	if got := kimiResponsesCredentialCounter.Load(); got != 1 {
+		t.Fatalf("resolve advanced rotation counter to %d, want 1", got)
+	}
+}
+
+// TestResolveKimiResponsesTargetCodingAliases verifies every coding alias the
+// host normalizer accepts classifies as the coding family, so a host whose
+// only kimi credential is a kimi-ai coding credential still gets pinned
+// instead of falling back to the ineligible unpinned "kimi" provider.
+func TestResolveKimiResponsesTargetCodingAliases(t *testing.T) {
+	entry := func(provider, baseURL, id string) pluginapi.HostAuthFileEntry {
+		return pluginapi.HostAuthFileEntry{Provider: provider, BaseURL: baseURL, ID: id}
+	}
+	entries := []pluginapi.HostAuthFileEntry{
+		entry("kimi.ai", "https://api.kimi.ai/coding", "cred-coding"),
+	}
+	aliases := []string{
+		"kimi-k2.8", "k2.8", "kimi-k2.8-code", "k2.8-code",
+		"kimi-k2.8-preview", "k2.8-preview", "kimi-k2.7-code", "k2.7-code",
+		"kimi-for-coding", "for-coding",
+		"kimi-k2.7-code-highspeed", "k2.7-code-highspeed",
+		"kimi-for-coding-highspeed", "for-coding-highspeed",
+	}
+	for _, alias := range aliases {
+		target, ok := resolveKimiResponsesTargetForModel(entries, alias)
+		if !ok {
+			t.Fatalf("alias %q: expected coding credential pin", alias)
+		}
+		if target.authID != "cred-coding" {
+			t.Fatalf("alias %q: authID = %q, want cred-coding", alias, target.authID)
+		}
+		if target.provider != "kimi-ai" {
+			t.Fatalf("alias %q: provider = %q, want kimi-ai", alias, target.provider)
+		}
+		if target.model != alias {
+			t.Fatalf("alias %q: model = %q, want the override passed through", alias, target.model)
+		}
+	}
+
+	// Platform aliases keep pinning platform credentials.
+	platformEntries := []pluginapi.HostAuthFileEntry{
+		entry("kimi", "https://api.moonshot.ai", "cred-platform"),
+	}
+	target, ok := resolveKimiResponsesTargetForModel(platformEntries, "kimi-k3")
+	if !ok || target.authID != "cred-platform" {
+		t.Fatalf("kimi-k3 target = %+v ok=%v, want cred-platform", target, ok)
+	}
+	target, ok = resolveKimiResponsesTargetForModel(platformEntries, "k3(1024)")
+	if !ok || target.authID != "cred-platform" {
+		t.Fatalf("k3(1024) target = %+v ok=%v, want cred-platform", target, ok)
+	}
+}
+
+// TestHostFromURLNormalizesTerminalDot and TestDomainMatchesIgnoresTerminalDots
+// verify that absolute DNS names with a terminal dot cannot evade
+// blocked-domain matching.
+func TestHostFromURLNormalizesTerminalDot(t *testing.T) {
+	if got := hostFromURL("https://blocked.example./a"); got != "blocked.example" {
+		t.Fatalf("hostFromURL terminal dot = %q, want blocked.example", got)
+	}
+	if got := hostFromURL("http://blocked.example.:8080/x"); got != "blocked.example" {
+		t.Fatalf("hostFromURL terminal dot with port = %q, want blocked.example", got)
+	}
+}
+
+func TestDomainMatchesIgnoresTerminalDots(t *testing.T) {
+	if !domainMatches("blocked.example.", []string{"blocked.example"}) {
+		t.Fatal("host terminal dot did not match plain rule")
+	}
+	if !domainMatches("blocked.example", []string{"blocked.example."}) {
+		t.Fatal("plain host did not match terminal-dot rule")
+	}
+	if domainMatches("blocked.example.", nil) {
+		t.Fatal("empty rules must not match")
 	}
 }

@@ -123,7 +123,7 @@ func backendRunnableLenient(backend routeBackend, cfg pluginConfig, req pluginap
 	case backendCodexWebSearch, backendXAIWebSearch:
 		return true
 	case backendKimiResponses:
-		_, ok := resolveKimiResponsesTarget(cfg)
+		_, ok := peekKimiResponsesTarget(cfg)
 		return ok
 	case backendKimiCoding:
 		return newKimiCodingClient(cfg).available()

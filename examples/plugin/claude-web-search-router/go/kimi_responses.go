@@ -67,14 +67,27 @@ func kimiResponsesModelForBaseURL(baseURL string) string {
 var kimiResponsesCredentialCounter atomic.Uint64
 
 // kimiResponsesModelFamily buckets a configured kimi_responses_model into the
-// credential family that can serve it. The second return value is false for
-// models whose family is unknown; those must not pin a possibly-incompatible
-// credential.
+// credential family that can serve it. It accepts the same alias set the host
+// upstream normalizer recognizes (internal/runtime/executor/kimi_executor.go),
+// including CLIProxyAPI "kimi-" prefixes, "[1m]" context suffixes, and thinking
+// suffixes such as "(1024)". The second return value is false for models whose
+// family is unknown; those must not pin a possibly-incompatible credential.
 func kimiResponsesModelFamily(model string) (string, bool) {
-	switch strings.TrimSpace(model) {
-	case kimiResponsesCodingModel:
+	m := strings.ToLower(strings.TrimSpace(model))
+	m = strings.TrimSuffix(m, "[1m]")
+	if i := strings.Index(m, "("); i >= 0 {
+		m = strings.TrimSpace(m[:i])
+	}
+	switch m {
+	case "kimi-k2.8", "k2.8",
+		"kimi-k2.8-code", "k2.8-code",
+		"kimi-k2.8-preview", "k2.8-preview",
+		"kimi-k2.7-code", "k2.7-code",
+		"kimi-for-coding", "for-coding",
+		"kimi-k2.7-code-highspeed", "k2.7-code-highspeed",
+		"kimi-for-coding-highspeed", "for-coding-highspeed":
 		return "coding", true
-	case kimiResponsesPlatformModel:
+	case "kimi-k3", "k3":
 		return "platform", true
 	default:
 		return "", false
@@ -99,13 +112,28 @@ func kimiCredentialPools(entries []pluginapi.HostAuthFileEntry) (coding, platfor
 }
 
 // resolveKimiResponsesTargetForModel picks the credential and model for the
-// host-routed kimi Responses backend. Coding-plan credentials are preferred
-// over Moonshot platform keys unless a model override names a platform model;
-// among several compatible credentials the pinned ID rotates. When the
-// override names a model no credential family can serve (or no compatible
-// credential exists), the second return value is false so the caller can fall
-// back to an unpinned override.
+// host-routed kimi Responses backend, consuming one rotation tick. Coding-plan
+// credentials are preferred over Moonshot platform keys unless a model
+// override names a platform model. When the override names a model no
+// credential family can serve (or no compatible credential exists), the
+// second return value is false so the caller can fall back to an unpinned
+// override.
 func resolveKimiResponsesTargetForModel(entries []pluginapi.HostAuthFileEntry, modelOverride string) (kimiResponsesTarget, bool) {
+	return resolveKimiResponsesTargetAt(entries, modelOverride, func() uint64 {
+		return kimiResponsesCredentialCounter.Add(1)
+	})
+}
+
+// peekKimiResponsesTargetForModel resolves the target without consuming a
+// rotation tick; availability probes use it so probing does not skew which
+// credential the actual execution pins.
+func peekKimiResponsesTargetForModel(entries []pluginapi.HostAuthFileEntry, modelOverride string) (kimiResponsesTarget, bool) {
+	return resolveKimiResponsesTargetAt(entries, modelOverride, func() uint64 {
+		return kimiResponsesCredentialCounter.Load() + 1
+	})
+}
+
+func resolveKimiResponsesTargetAt(entries []pluginapi.HostAuthFileEntry, modelOverride string, nextCounter func() uint64) (kimiResponsesTarget, bool) {
 	coding, platform := kimiCredentialPools(entries)
 	pool := coding
 	if modelOverride != "" {
@@ -122,7 +150,10 @@ func resolveKimiResponsesTargetForModel(entries []pluginapi.HostAuthFileEntry, m
 	if len(pool) == 0 {
 		return kimiResponsesTarget{}, false
 	}
-	n := kimiResponsesCredentialCounter.Add(1)
+	n := nextCounter()
+	if n == 0 {
+		n = 1
+	}
 	entry := pool[int(n-1)%len(pool)]
 	model := kimiResponsesModelForBaseURL(entry.BaseURL)
 	if modelOverride != "" {
@@ -141,21 +172,37 @@ func resolveKimiResponsesTargetFromEntries(entries []pluginapi.HostAuthFileEntry
 	return resolveKimiResponsesTargetForModel(entries, "")
 }
 
-// resolveKimiResponsesTarget resolves the backend target. kimi_responses_model wins
-// for the model; when it names a known family a matching credential is pinned,
-// and an unknown model degrades to an unpinned override. Otherwise
-// host.auth.list supplies metadata only (never secrets). When the list call
-// fails (older host), the coding default is tried unpinned so the request
-// still degrades gracefully through the fallback chain.
+// resolveKimiResponsesTarget resolves the backend target, consuming one
+// rotation tick. kimi_responses_model wins for the model; when it names a
+// known family a matching credential is pinned, and an unknown model degrades
+// to an unpinned override. Otherwise host.auth.list supplies metadata only
+// (never secrets). When the list call fails (older host), the coding default
+// is tried unpinned so the request still degrades gracefully through the
+// fallback chain.
 func resolveKimiResponsesTarget(cfg pluginConfig) (kimiResponsesTarget, bool) {
+	return resolveKimiResponsesTargetWith(cfg, false)
+}
+
+// peekKimiResponsesTarget resolves the backend target without consuming a
+// rotation tick; availability probes use it so probing does not skew which
+// credential the actual execution pins.
+func peekKimiResponsesTarget(cfg pluginConfig) (kimiResponsesTarget, bool) {
+	return resolveKimiResponsesTargetWith(cfg, true)
+}
+
+func resolveKimiResponsesTargetWith(cfg pluginConfig, peek bool) (kimiResponsesTarget, bool) {
+	resolve := resolveKimiResponsesTargetForModel
+	if peek {
+		resolve = peekKimiResponsesTargetForModel
+	}
 	entries, listed := listKimiAuthEntries()
 	if m := strings.TrimSpace(cfg.KimiResponsesModel); m != "" {
-		if target, ok := resolveKimiResponsesTargetForModel(entries, m); ok {
+		if target, ok := resolve(entries, m); ok {
 			return target, true
 		}
 		return kimiResponsesTarget{model: m, provider: "kimi"}, true
 	}
-	if target, ok := resolveKimiResponsesTargetFromEntries(entries); ok {
+	if target, ok := resolve(entries, ""); ok {
 		return target, true
 	}
 	if !listed {

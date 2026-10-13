@@ -115,6 +115,9 @@ func (c *kimiCodingClient) search(ctx context.Context, claudeBody []byte) (strin
 	if errBody != nil {
 		return "", nil, errBody
 	}
+	if hc := hostHTTPFromContext(ctx); hc != nil {
+		return c.searchViaHost(ctx, hc, reqBody)
+	}
 	req, errNew := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(), strings.NewReader(string(reqBody)))
 	if errNew != nil {
 		return "", nil, errNew
@@ -138,6 +141,28 @@ func (c *kimiCodingClient) search(ctx context.Context, claudeBody []byte) (strin
 		return "", nil, fmt.Errorf("kimi coding http %d: %s", resp.StatusCode, truncate(string(body), 512))
 	}
 	return parseCodingResponses(body)
+}
+
+// searchViaHost sends the Responses payload through the host-injected
+// HTTPClient so the call honors host transport policy (proxy-url) and appears
+// in request logs.
+func (c *kimiCodingClient) searchViaHost(ctx context.Context, hc pluginapi.HostHTTPClient, reqBody []byte) (string, []claudeWebSearchHit, error) {
+	resp, errDo := hc.Do(ctx, pluginapi.HTTPRequest{
+		Method: http.MethodPost,
+		URL:    c.endpoint(),
+		Headers: http.Header{
+			"Content-Type":  []string{"application/json"},
+			"Authorization": []string{"Bearer " + c.nextKey()},
+		},
+		Body: reqBody,
+	})
+	if errDo != nil {
+		return "", nil, errDo
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("kimi coding http %d: %s", resp.StatusCode, truncate(string(resp.Body), 512))
+	}
+	return parseCodingResponses(resp.Body)
 }
 
 func parseCodingResponses(body []byte) (string, []claudeWebSearchHit, error) {
@@ -172,7 +197,7 @@ func parseCodingResponses(body []byte) (string, []claudeWebSearchHit, error) {
 }
 
 func runKimiCodingClaude(ctx context.Context, req pluginapi.ExecutorRequest, cfg pluginConfig) ([]byte, http.Header, error) {
-	answer, hits, errSearch := sharedKimiCodingClient(cfg).search(ctx, claudeRequestBody(req))
+	answer, hits, errSearch := sharedKimiCodingClient(cfg).search(withHostHTTP(ctx, req.HTTPClient), claudeRequestBody(req))
 	if errSearch != nil {
 		return nil, nil, errSearch
 	}
@@ -187,7 +212,7 @@ func runKimiCodingClaude(ctx context.Context, req pluginapi.ExecutorRequest, cfg
 // runKimiCodingClaudeStream buffers a complete Claude SSE stream. The upstream
 // call is non-streaming, so the stream is emitted once the search completes.
 func runKimiCodingClaudeStream(ctx context.Context, req pluginapi.ExecutorRequest, cfg pluginConfig) ([]byte, http.Header, error) {
-	answer, hits, errSearch := sharedKimiCodingClient(cfg).search(ctx, claudeRequestBody(req))
+	answer, hits, errSearch := sharedKimiCodingClient(cfg).search(withHostHTTP(ctx, req.HTTPClient), claudeRequestBody(req))
 	if errSearch != nil {
 		return nil, nil, errSearch
 	}
