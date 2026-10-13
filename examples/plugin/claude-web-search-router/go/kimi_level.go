@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/url"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -111,7 +112,7 @@ func resolveKimiSearchPlan(cfg pluginConfig, toolCfg claudeWebSearchToolConfig, 
 	}
 
 	// kimi_search_level=auto
-	if u := fetchIntentURL(query); u != "" {
+	if u := fetchIntentURL(query); u != "" && fetchURLPermittedBySites(u, sites) {
 		plan.level = kimiLevelFetch
 		plan.fetchURL = u
 		return plan
@@ -123,6 +124,21 @@ func resolveKimiSearchPlan(cfg pluginConfig, toolCfg claudeWebSearchToolConfig, 
 	plan.level = kimiLevelBasic
 	plan.escalate = cfg.KimiProEscalation
 	return plan
+}
+
+// fetchURLPermittedBySites reports whether fetching rawURL honors the site
+// restriction. With no sites configured any URL is permitted; otherwise the
+// URL's host must match one of the configured sites, because the fetch path
+// returns the page body without applying a site filter.
+func fetchURLPermittedBySites(rawURL string, sites []string) bool {
+	if len(sites) == 0 {
+		return true
+	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	return domainMatches(u.Hostname(), sites)
 }
 
 func normalizeKimiSites(sites []string) []string {

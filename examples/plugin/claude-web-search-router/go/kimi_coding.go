@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
 
@@ -50,6 +52,28 @@ func newKimiCodingClientWithOptions(keys []string, baseURL, model string, httpCl
 		model:   strings.TrimSpace(model),
 		http:    httpClient,
 	}
+}
+
+// sharedKimiCodingClient returns the process-wide coding client for the given
+// config, creating it on first use and refreshing it when the config changes,
+// so the round-robin key counter advances across requests (see sharedKimiClient).
+var (
+	sharedKimiCodingMu  sync.Mutex
+	sharedKimiCodingPtr *kimiCodingClient
+	sharedKimiCodingSig string
+)
+
+func sharedKimiCodingClient(cfg pluginConfig) *kimiCodingClient {
+	sig := strings.Join(cfg.KimiCodingAPIKeys, "\x00") + "\x01" + cfg.KimiCodingBaseURL + "\x01" + cfg.KimiCodingModel
+	sharedKimiCodingMu.Lock()
+	defer sharedKimiCodingMu.Unlock()
+	if sharedKimiCodingPtr != nil && sharedKimiCodingSig == sig {
+		return sharedKimiCodingPtr
+	}
+	client := newKimiCodingClient(cfg)
+	sharedKimiCodingPtr = client
+	sharedKimiCodingSig = sig
+	return client
 }
 
 func (c *kimiCodingClient) available() bool {
@@ -101,7 +125,11 @@ func (c *kimiCodingClient) search(ctx context.Context, claudeBody []byte) (strin
 	if errDo != nil {
 		return "", nil, errDo
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			logrus.Errorf("kimi coding: close response body: %v", errClose)
+		}
+	}()
 	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
 		return "", nil, errRead
@@ -144,7 +172,7 @@ func parseCodingResponses(body []byte) (string, []claudeWebSearchHit, error) {
 }
 
 func runKimiCodingClaude(ctx context.Context, req pluginapi.ExecutorRequest, cfg pluginConfig) ([]byte, http.Header, error) {
-	answer, hits, errSearch := newKimiCodingClient(cfg).search(ctx, claudeRequestBody(req))
+	answer, hits, errSearch := sharedKimiCodingClient(cfg).search(ctx, claudeRequestBody(req))
 	if errSearch != nil {
 		return nil, nil, errSearch
 	}
@@ -159,7 +187,7 @@ func runKimiCodingClaude(ctx context.Context, req pluginapi.ExecutorRequest, cfg
 // runKimiCodingClaudeStream buffers a complete Claude SSE stream. The upstream
 // call is non-streaming, so the stream is emitted once the search completes.
 func runKimiCodingClaudeStream(ctx context.Context, req pluginapi.ExecutorRequest, cfg pluginConfig) ([]byte, http.Header, error) {
-	answer, hits, errSearch := newKimiCodingClient(cfg).search(ctx, claudeRequestBody(req))
+	answer, hits, errSearch := sharedKimiCodingClient(cfg).search(ctx, claudeRequestBody(req))
 	if errSearch != nil {
 		return nil, nil, errSearch
 	}

@@ -230,7 +230,7 @@ func runOrderedExecutionPlans(ctx context.Context, exec pluginapi.ExecutorReques
 			recordBackendSuccess(backend)
 			return payload, headers, nil
 		case backendKimiWebSearch:
-			client := newKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL)
+			client := sharedKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL)
 			var payload []byte
 			var headers http.Header
 			var errRun error

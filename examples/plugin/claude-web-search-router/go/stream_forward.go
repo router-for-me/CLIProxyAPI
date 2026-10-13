@@ -99,7 +99,7 @@ func runOrderedExecutionPlansStream(ctx context.Context, exec pluginapi.Executor
 			recordBackendSuccess(backend)
 			return nil
 		case backendKimiWebSearch:
-			client := newKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL)
+			client := sharedKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL)
 			payload, _, errRun := runKimiClaudeStreamWithClient(ctx, exec, client)
 			if errRun != nil {
 				lastErr = errRun

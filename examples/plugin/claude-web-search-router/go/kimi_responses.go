@@ -20,10 +20,26 @@ const (
 )
 
 // kimiResponsesTarget is the resolved host execution target for the kimi_responses
-// backend: a registry model plus the credential ID to pin when known.
+// backend: a registry model plus the credential ID and provider to pin when known.
+// provider carries the host-canonical scheduling key ("kimi" or "kimi-ai") of the
+// pinned credential, because the host selects auths within the forced provider
+// bucket and rejects a pinned ID whose provider does not match.
 type kimiResponsesTarget struct {
-	model  string
-	authID string
+	model    string
+	authID   string
+	provider string
+}
+
+// canonicalKimiSchedulingProvider maps a kimi-family provider key to the
+// canonical scheduling name the host uses in auth selection: kimi.com
+// credentials schedule under "kimi", kimi.ai credentials under "kimi-ai".
+func canonicalKimiSchedulingProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "kimi.ai", "kimi-ai":
+		return "kimi-ai"
+	default:
+		return "kimi"
+	}
 }
 
 // isKimiProviderEntry reports whether an auth entry belongs to the kimi provider family.
@@ -55,37 +71,56 @@ func resolveKimiResponsesTargetFromEntries(entries []pluginapi.HostAuthFileEntry
 			continue
 		}
 		if kimiResponsesModelForBaseURL(entry.BaseURL) == kimiResponsesCodingModel {
-			return kimiResponsesTarget{model: kimiResponsesCodingModel, authID: strings.TrimSpace(entry.ID)}, true
+			return kimiResponsesTarget{
+				model:    kimiResponsesCodingModel,
+				authID:   strings.TrimSpace(entry.ID),
+				provider: canonicalKimiSchedulingProvider(entry.Provider),
+			}, true
 		}
 		if platform == nil {
 			platform = entry
 		}
 	}
 	if platform != nil {
-		return kimiResponsesTarget{model: kimiResponsesPlatformModel, authID: strings.TrimSpace(platform.ID)}, true
+		return kimiResponsesTarget{
+			model:    kimiResponsesPlatformModel,
+			authID:   strings.TrimSpace(platform.ID),
+			provider: canonicalKimiSchedulingProvider(platform.Provider),
+		}, true
 	}
 	return kimiResponsesTarget{}, false
 }
 
 // resolveKimiResponsesTarget resolves the backend target. kimi_responses_model wins
-// without credential pinning; otherwise host.auth.list supplies metadata only (never
-// secrets). When the list call fails (older host), the coding default is tried unpinned
-// so the request still degrades gracefully through the fallback chain.
+// for the model without credential pinning; otherwise host.auth.list supplies
+// metadata only (never secrets). When the list call fails (older host), the coding
+// default is tried unpinned so the request still degrades gracefully through the
+// fallback chain.
 func resolveKimiResponsesTarget(cfg pluginConfig) (kimiResponsesTarget, bool) {
 	if m := strings.TrimSpace(cfg.KimiResponsesModel); m != "" {
-		return kimiResponsesTarget{model: m}, true
+		if target, ok := resolveKimiResponsesTargetFromEntries(listKimiAuthEntries()); ok {
+			target.model = m
+			return target, true
+		}
+		return kimiResponsesTarget{model: m, provider: "kimi"}, true
 	}
+	return resolveKimiResponsesTargetFromEntries(listKimiAuthEntries())
+}
+
+// listKimiAuthEntries returns the host kimi auth metadata, or nil when the
+// host.auth.list call is unavailable or fails.
+func listKimiAuthEntries() []pluginapi.HostAuthFileEntry {
 	raw, errCall := callHost(pluginabi.MethodHostAuthList, map[string]any{})
 	if errCall != nil {
-		return kimiResponsesTarget{model: kimiResponsesCodingModel}, true
+		return nil
 	}
 	var resp struct {
 		Files []pluginapi.HostAuthFileEntry `json:"files"`
 	}
 	if errDecode := json.Unmarshal(raw, &resp); errDecode != nil {
-		return kimiResponsesTarget{model: kimiResponsesCodingModel}, true
+		return nil
 	}
-	return resolveKimiResponsesTargetFromEntries(resp.Files)
+	return resp.Files
 }
 
 // kimiResponsesBody converts the Claude Messages request into a Kimi Responses
@@ -144,7 +179,7 @@ func hostModelExecuteKimiResponses(ctx context.Context, hostCallbackID string, c
 		Model:          target.model,
 		Stream:         stream,
 		Body:           reqBody,
-		ForcedProvider: "kimi",
+		ForcedProvider: target.provider,
 		AuthID:         target.authID,
 	})
 }
@@ -164,7 +199,7 @@ func hostModelStreamForwardKimiResponses(ctx context.Context, hostCallbackID str
 		Model:          target.model,
 		Stream:         true,
 		Body:           reqBody,
-		ForcedProvider: "kimi",
+		ForcedProvider: target.provider,
 		AuthID:         target.authID,
 	}, pluginStreamID)
 }

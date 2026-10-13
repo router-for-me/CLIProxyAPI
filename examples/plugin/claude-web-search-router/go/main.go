@@ -378,6 +378,20 @@ func hasProvider(providers []string, key string) bool {
 	return false
 }
 
+// hasKimiProvider reports whether any entry of the kimi provider family
+// ("kimi", "kimi-ai", "kimi.ai", "kimi.com") is present. The host
+// canonicalizes kimi.com credentials to "kimi" and kimi.ai credentials to
+// "kimi-ai" in AvailableProviders, so an exact "kimi" match alone misses
+// kimi.ai credentials.
+func hasKimiProvider(providers []string) bool {
+	for _, p := range providers {
+		if isKimiProviderEntry(p) {
+			return true
+		}
+	}
+	return false
+}
+
 func execute(raw []byte) ([]byte, error) {
 	var req rpcExecutorRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {

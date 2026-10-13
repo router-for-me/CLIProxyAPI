@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -54,6 +57,32 @@ func newKimiClientWithOptions(keys []string, baseURL string, httpClient *http.Cl
 	}
 }
 
+// sharedKimiClient returns the process-wide client for the given config,
+// creating it on first use and refreshing it when the config changes. Reusing
+// the client keeps the round-robin key counter advancing across requests; a
+// fresh client per request restarts the counter at zero and pins every
+// one-call request onto the first configured key.
+var (
+	sharedKimiClientMu   sync.Mutex
+	sharedKimiClientPtr  *kimiClient
+	sharedKimiClientKeys []string
+	sharedKimiClientBase string
+)
+
+func sharedKimiClient(keys []string, baseURL string) *kimiClient {
+	normalizedBase := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	sharedKimiClientMu.Lock()
+	defer sharedKimiClientMu.Unlock()
+	if sharedKimiClientPtr != nil && sharedKimiClientBase == normalizedBase && slices.Equal(sharedKimiClientKeys, keys) {
+		return sharedKimiClientPtr
+	}
+	client := newKimiClient(keys, baseURL)
+	sharedKimiClientPtr = client
+	sharedKimiClientKeys = append([]string(nil), keys...)
+	sharedKimiClientBase = client.baseURL
+	return client
+}
+
 func (c *kimiClient) endpoint(path string) string {
 	base := c.baseURL
 	if base == "" {
@@ -94,7 +123,11 @@ func (c *kimiClient) post(ctx context.Context, path string, payload any) ([]byte
 	if errDo != nil {
 		return nil, errDo
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			logrus.Errorf("kimi: close response body: %v", errClose)
+		}
+	}()
 	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
 		return nil, errRead

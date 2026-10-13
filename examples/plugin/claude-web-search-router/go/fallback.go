@@ -77,7 +77,9 @@ func tryRouteBackend(backend routeBackend, cfg pluginConfig, req pluginapi.Model
 			Reason:      "claude_code_web_search_xai",
 		}, true
 	case backendKimiResponses:
-		if !hasProvider(req.AvailableProviders, "kimi") {
+		// The host canonicalizes kimi.ai credentials to "kimi-ai" (and kimi.com
+		// to "kimi"), so the whole provider family makes this backend runnable.
+		if !hasKimiProvider(req.AvailableProviders) {
 			return pluginapi.ModelRouteResponse{Handled: false, Reason: "kimi_responses_unavailable"}, false
 		}
 		return pluginapi.ModelRouteResponse{
