@@ -29,6 +29,11 @@ server:
   # Server port
   port: 8317
 
+  # Maximum allowed size (in bytes) for incoming HTTP request bodies.
+  # Requests exceeding this limit are rejected with HTTP 413 Payload Too Large.
+  # Default is 0 (disabled / no limit).
+  max-request-body-bytes: 0
+
   # Global token for GitHub requests (for example, release and asset downloads).
   # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
   # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.
@@ -164,6 +169,13 @@ routing:
   # for maximum parallel concurrency.
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
+  # Controls which credential failures rebind an established session to the failover credential:
+  #   - "any" (default): any credential-attributed failure unbinds and rebinds on failover.
+  #   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
+  #     request only while keeping the session bound to its original credential; quota and auth
+  #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+  # Ignored when routing.session-affinity is false.
+  session-affinity-rebind-on: "any"
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
@@ -220,8 +232,9 @@ requests:
 
   # Streaming behavior (SSE keep-alives + safe bootstrap retries).
   # streaming:
-  #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
-  #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+  #   keepalive-seconds: 15         # Default: 0 (disabled). <= 0 disables keep-alives.
+  #   bootstrap-retries: 1          # Default: 0 (disabled). Retries before first byte is sent.
+  #   send-keepalive-before-ft: false # Default: false. When true and keepalive-seconds > 0, send SSE heartbeats before the first token.
 
   # Optional payload configuration
   # payload:
@@ -1042,6 +1055,9 @@ oauth:
         #       - "turn:turn.example.com:3478?transport=udp"
         #     username: "user"
         #     credential: "secret"
+
+      # Identifier (agent_name_hint and User-Agent prefix) for Sign in with ChatGPT (SIWC) OAuth and API requests.
+      signin-with-chatgpt-identifier: "CLIProxyAPI"
 
       # Default headers for Codex OAuth model requests.
       # These are used only for file-backed/OAuth Codex requests when the client

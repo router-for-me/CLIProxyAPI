@@ -3007,6 +3007,37 @@ func TestAccessAdapterAuthenticateFailures(t *testing.T) {
 	}
 }
 
+func TestAccessAdapterAuthenticateMaxBytesErrorReturns413(t *testing.T) {
+	host := New()
+	called := false
+	adapter := newAccessAdapterForTest(host, "auth-plugin", frontendAuthProviderFunc{
+		identifier: "custom-auth",
+		authenticate: func(ctx context.Context, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {
+			called = true
+			return pluginapi.FrontendAuthResponse{Authenticated: true}, nil
+		},
+	})
+	limitedBody := http.MaxBytesReader(nil, io.NopCloser(strings.NewReader("0123456789")), 4)
+	req, errNewRequest := http.NewRequest(http.MethodPost, "http://example.test/v1/chat", limitedBody)
+	if errNewRequest != nil {
+		t.Fatalf("NewRequest() error = %v", errNewRequest)
+	}
+
+	result, authErr := adapter.Authenticate(context.Background(), req)
+	if result != nil {
+		t.Fatalf("Authenticate() result = %#v, want nil", result)
+	}
+	if authErr == nil {
+		t.Fatal("Authenticate() error = nil, want 413 auth error")
+	}
+	if got := authErr.HTTPStatusCode(); got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("Authenticate() status = %d, want %d (err=%v)", got, http.StatusRequestEntityTooLarge, authErr)
+	}
+	if called {
+		t.Fatal("provider Authenticate() was called despite oversized request body")
+	}
+}
+
 func TestExecutorAdapterMethods(t *testing.T) {
 	streamChunks := make(chan pluginapi.ExecutorStreamChunk, 2)
 	streamErr := errors.New("stream failed")

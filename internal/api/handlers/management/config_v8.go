@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"gopkg.in/yaml.v3"
 )
@@ -86,7 +87,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	} else {
 		body, errRead := io.ReadAll(c.Request.Body)
 		if errRead != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body"})
+			c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), gin.H{"error": "invalid_body"})
 			return
 		}
 		if !yamlRequest && !json.Valid(body) {
