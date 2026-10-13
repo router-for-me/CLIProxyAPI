@@ -119,7 +119,7 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy strin
 		token, _ := auth.Metadata["access_token"].(string)
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
-	userAgent := misc.AntigravityConfiguredUserAgent(auth.Attributes, auth.Metadata)
+	userAgent := antigravityModelFetchUserAgentOverride(auth)
 	return fmt.Sprintf("%q/%d/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, userAgent)
 }
 
@@ -172,11 +172,12 @@ func (s *Service) persistedAntigravityHintsForAuth(auth *coreauth.Auth, endpoint
 		}
 	}
 	project, _ := auth.Metadata["project_id"].(string)
-	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint); ok {
+	userAgent := antigravityModelFetchUserAgentOverride(auth)
+	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint, userAgent); ok {
 		return hints, true
 	}
 	if current != nil {
-		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint)
+		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint, userAgent)
 	}
 	return antigravityModelCapabilityHints{}, false
 }
@@ -199,7 +200,7 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 		return false
 	}
 	project, _ := auth.Metadata["project_id"].(string)
-	value := buildPersistedAntigravityCapabilityHintsValue(project, endpoint, hints)
+	value := buildPersistedAntigravityCapabilityHintsValue(project, endpoint, antigravityModelFetchUserAgentOverride(auth), hints)
 	persisted, preempted := s.coreManager.PersistMetadataEntry(ctx, auth.ID, auth.RegistrationEpoch, antigravityPersistedHintsMetaKey, value, func(existing *coreauth.Auth) bool {
 		if existing == nil || existing.Disabled || existing.Provider != auth.Provider || existing.RegistrationEpoch != auth.RegistrationEpoch || s.antigravityCapabilityKey(existing) != expectedKey {
 			return false
@@ -223,7 +224,7 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 	return false
 }
 
-func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hints antigravityModelCapabilityHints) map[string]any {
+func buildPersistedAntigravityCapabilityHintsValue(project, endpoint, userAgent string, hints antigravityModelCapabilityHints) map[string]any {
 	modelIDs := make([]string, 0, len(hints.ModelIDs))
 	for id := range hints.ModelIDs {
 		if normalized := normalizeAntigravityFetchedModelID(id); normalized != "" {
@@ -244,6 +245,11 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hin
 	if endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/"); endpoint != "" {
 		value["endpoint"] = endpoint
 	}
+	// Omitted for the default identity so catalogs persisted before User-Agent
+	// scoping stay valid for auths without an override.
+	if userAgent = strings.TrimSpace(userAgent); userAgent != "" {
+		value["user_agent"] = userAgent
+	}
 	if len(hints.WebSearchModelIDs) > 0 {
 		webSearchIDs := make([]string, 0, len(hints.WebSearchModelIDs))
 		for id := range hints.WebSearchModelIDs {
@@ -263,7 +269,7 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hin
 	return value
 }
 
-func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedProject, expectedEndpoint string) (antigravityModelCapabilityHints, bool) {
+func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedProject, expectedEndpoint, expectedUserAgent string) (antigravityModelCapabilityHints, bool) {
 	if metadata == nil {
 		return antigravityModelCapabilityHints{}, false
 	}
@@ -281,6 +287,10 @@ func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 		return antigravityModelCapabilityHints{}, false
 	}
 	if strings.TrimRight(strings.TrimSpace(persistedEndpoint), "/") != strings.TrimRight(strings.TrimSpace(expectedEndpoint), "/") {
+		return antigravityModelCapabilityHints{}, false
+	}
+	persistedUserAgent, _ := rawMap["user_agent"].(string)
+	if strings.TrimSpace(persistedUserAgent) != strings.TrimSpace(expectedUserAgent) {
 		return antigravityModelCapabilityHints{}, false
 	}
 	rawModels, hasModels := rawMap["model_ids"]
@@ -509,6 +519,23 @@ func antigravityModelFetchUserAgent(auth *coreauth.Auth) string {
 		return misc.AntigravityRequestUserAgent("")
 	}
 	return misc.AntigravityRequestUserAgent(misc.AntigravityConfiguredUserAgent(auth.Attributes, auth.Metadata))
+}
+
+// antigravityModelFetchUserAgentOverride returns the User-Agent the model probe
+// sends when the auth overrides the default identity, or "" when it does not.
+// It mirrors the probe's header order: the configured user_agent first, then
+// header: attributes, which may replace it. The default UA is excluded on
+// purpose so routine version refreshes do not invalidate cached catalogs.
+func antigravityModelFetchUserAgentOverride(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	req := &http.Request{Header: make(http.Header)}
+	if configured := misc.AntigravityConfiguredUserAgent(auth.Attributes, auth.Metadata); configured != "" {
+		req.Header.Set("User-Agent", misc.AntigravityRequestUserAgent(configured))
+	}
+	util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
+	return strings.TrimSpace(req.Header.Get("User-Agent"))
 }
 
 func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
