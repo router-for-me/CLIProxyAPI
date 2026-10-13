@@ -184,15 +184,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "meta":
 		models = registry.GetMetaModels()
+		configured := false
 		if entry := s.resolveConfigMetaKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildMetaConfigModels(entry)
+				configured = true
 			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+		if !configured {
+			models = applyMetaWonderFullEntitlement(models, a)
+		}
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if cfg := s.currentConfig(); cfg != nil {
@@ -918,6 +923,130 @@ func buildMetaConfigModels(entry *config.MetaKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "meta", "meta", "meta")
+}
+
+// isMetaWonderFullModel reports whether a catalog model ID belongs to the
+// Muse Wonder Full line, which Meta serves only to Muse Code Power and
+// Maximum subscription plans.
+func isMetaWonderFullModel(modelID string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelID)), "muse-wonder-full-")
+}
+
+// metaAuthWonderFullEntitled reports whether a Meta credential is known to
+// hold an active subscription tier that includes Muse Wonder Full. Tier
+// state is read from the subscription fields persisted by Meta login and
+// key refresh (subs_tier_name, subs_tier_id, is_subs_active). Credentials
+// without that state are not entitled until a login or refresh records it,
+// so Wonder Full is never advertised for an unproven entitlement.
+func metaAuthWonderFullEntitled(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	active, activeKnown := metaAuthSubscriptionActive(auth)
+	if activeKnown && !active {
+		return false
+	}
+	if !activeKnown && !metaAuthHasSubscriptionState(auth) {
+		return false
+	}
+	tier := metaAuthSubscriptionTier(auth)
+	if tier == "" {
+		return false
+	}
+	return strings.Contains(tier, "power") || strings.Contains(tier, "max")
+}
+
+// applyMetaWonderFullEntitlement drops Wonder Full models for Meta
+// credentials that are not entitled to them, so plan-gated models are
+// neither listed for nor scheduled to lower-tier accounts.
+func applyMetaWonderFullEntitlement(models []*ModelInfo, auth *coreauth.Auth) []*ModelInfo {
+	if metaAuthWonderFullEntitled(auth) {
+		return models
+	}
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model != nil && isMetaWonderFullModel(model.ID) {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return filtered
+}
+
+func metaAuthSubscriptionTier(auth *coreauth.Auth) string {
+	for _, key := range []string{"subs_tier_name", "subs_tier_id"} {
+		if value := metaAuthStringValue(auth, key); value != "" {
+			normalized := strings.NewReplacer(" ", "", "-", "", "_", "").Replace(strings.ToLower(value))
+			if normalized != "" {
+				return normalized
+			}
+		}
+	}
+	return ""
+}
+
+func metaAuthSubscriptionActive(auth *coreauth.Auth) (active bool, known bool) {
+	if auth == nil {
+		return false, false
+	}
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["is_subs_active"]; ok {
+			switch value := raw.(type) {
+			case bool:
+				return value, true
+			case string:
+				if parsed, errParse := strconv.ParseBool(strings.TrimSpace(value)); errParse == nil {
+					return parsed, true
+				}
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes["is_subs_active"]); value != "" {
+			if parsed, errParse := strconv.ParseBool(value); errParse == nil {
+				return parsed, true
+			}
+		}
+	}
+	return false, false
+}
+
+func metaAuthHasSubscriptionState(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Metadata != nil {
+		for _, key := range []string{"subs_tier_name", "subs_tier_id", "is_subs_active"} {
+			if _, ok := auth.Metadata[key]; ok {
+				return true
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		for _, key := range []string{"subs_tier_name", "subs_tier_id", "is_subs_active"} {
+			if strings.TrimSpace(auth.Attributes[key]) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func metaAuthStringValue(auth *coreauth.Auth, key string) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	if auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
