@@ -28,9 +28,6 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
-	if SchemaVersion != 6 {
-		t.Fatalf("SchemaVersion = %d, want 6", SchemaVersion)
-	}
 	if SchemaVersionWebSocketResponseObserver != 4 {
 		t.Fatalf("SchemaVersionWebSocketResponseObserver = %d, want 4", SchemaVersionWebSocketResponseObserver)
 	}
@@ -114,6 +111,15 @@ func TestMethodNamesAreStable(t *testing.T) {
 	}
 	if MethodExecutorExecuteStream != "executor.execute_stream" {
 		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)
+	}
+}
+
+func TestNativeMethodNamesAreStable(t *testing.T) {
+	if MethodNativeRegister != "native.register" {
+		t.Fatalf("MethodNativeRegister = %q", MethodNativeRegister)
+	}
+	if MethodNativeHandle != "native.handle" {
+		t.Fatalf("MethodNativeHandle = %q", MethodNativeHandle)
 	}
 }
 

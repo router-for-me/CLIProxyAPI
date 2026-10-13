@@ -71,13 +71,20 @@ func (s *Server) maxRequestBodyBytesMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (s *Server) homeHeartbeatUnavailable() bool {
+	if s == nil {
+		return false
+	}
+	cfg := s.getConfig()
+	if cfg == nil || !cfg.Home.Enabled {
+		return false
+	}
+	client := home.Current()
+	return client == nil || !client.HeartbeatOK()
+}
+
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cfg := s.getConfig()
-		if s == nil || cfg == nil || !cfg.Home.Enabled {
-			c.Next()
-			return
-		}
 		if c != nil && c.Request != nil {
 			path := c.Request.URL.Path
 			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v8/management/") || path == "/v8/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
@@ -85,8 +92,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 				return
 			}
 		}
-		client := home.Current()
-		if client == nil || !client.HeartbeatOK() {
+		if s.homeHeartbeatUnavailable() {
 			c.AbortWithStatus(http.StatusServiceUnavailable)
 			return
 		}
@@ -159,17 +165,19 @@ func isExampleAPIKeySafeModeProxyPath(path string) bool {
 	}
 }
 
-// corsMiddleware returns a Gin middleware handler that adds CORS headers
-// to every response, allowing cross-origin requests.
-//
-// Returns:
-//   - gin.HandlerFunc: The CORS middleware handler
+// setCORSHeaders adds the permissive CORS headers used by every API response.
+func setCORSHeaders(c *gin.Context) {
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+	// The "*" wildcard never covers Authorization, so the supported credential headers are listed by name.
+	c.Header("Access-Control-Allow-Headers", "*, Authorization, X-Api-Key, X-Goog-Api-Key, Api-Key")
+	c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
+}
+
+// corsMiddleware adds CORS headers to every response and answers preflights.
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "*")
-		c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
+		setCORSHeaders(c)
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)

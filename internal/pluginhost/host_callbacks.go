@@ -19,25 +19,31 @@ import (
 )
 
 type rpcHostHTTPRequest struct {
-	HTTPClientID   string                     `json:"http_client_id,omitempty"`
-	HostCallbackID string                     `json:"host_callback_id,omitempty"`
-	OperationID    string                     `json:"operation_id,omitempty"`
-	Method         string                     `json:"method,omitempty"`
-	URL            string                     `json:"url,omitempty"`
-	Headers        httpHeader                 `json:"headers,omitempty"`
-	Body           []byte                     `json:"body,omitempty"`
-	WireProfile    *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
-	Request        *httpRequest               `json:"request,omitempty"`
+	HTTPClientID     string                     `json:"http_client_id,omitempty"`
+	HostCallbackID   string                     `json:"host_callback_id,omitempty"`
+	OperationID      string                     `json:"operation_id,omitempty"`
+	Method           string                     `json:"method,omitempty"`
+	URL              string                     `json:"url,omitempty"`
+	Headers          httpHeader                 `json:"headers,omitempty"`
+	Body             []byte                     `json:"body,omitempty"`
+	WireProfile      *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
+	DisableRedirects bool                       `json:"disable_redirects,omitempty"`
+	MaxResponseBytes int64                      `json:"max_response_bytes,omitempty"`
+	SuppressLogging  bool                       `json:"suppress_logging,omitempty"`
+	Request          *httpRequest               `json:"request,omitempty"`
 }
 
 type httpHeader map[string][]string
 
 type httpRequest struct {
-	Method      string                     `json:"method,omitempty"`
-	URL         string                     `json:"url,omitempty"`
-	Headers     httpHeader                 `json:"headers,omitempty"`
-	Body        []byte                     `json:"body,omitempty"`
-	WireProfile *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
+	Method           string                     `json:"method,omitempty"`
+	URL              string                     `json:"url,omitempty"`
+	Headers          httpHeader                 `json:"headers,omitempty"`
+	Body             []byte                     `json:"body,omitempty"`
+	WireProfile      *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
+	DisableRedirects bool                       `json:"disable_redirects,omitempty"`
+	MaxResponseBytes int64                      `json:"max_response_bytes,omitempty"`
+	SuppressLogging  bool                       `json:"suppress_logging,omitempty"`
 }
 
 type rpcHostHTTPStreamResponse struct {
@@ -349,26 +355,26 @@ func decodeHostHTTPRequestWithOperationID(raw []byte) (pluginapi.HTTPRequest, st
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 		return pluginapi.HTTPRequest{}, "", "", fmt.Errorf("decode host http request: %w", errUnmarshal)
 	}
+	if invalidMaxResponseBytes(req.MaxResponseBytes) || (req.Request != nil && invalidMaxResponseBytes(req.Request.MaxResponseBytes)) {
+		return pluginapi.HTTPRequest{}, "", "", fmt.Errorf("host http request has invalid bounds")
+	}
 	if req.Request != nil {
 		wireProfile := req.Request.WireProfile
 		if wireProfile == nil {
 			wireProfile = req.WireProfile
 		}
-		return pluginapi.HTTPRequest{
-			Method:      req.Request.Method,
-			URL:         req.Request.URL,
-			Headers:     map[string][]string(req.Request.Headers),
-			Body:        append([]byte(nil), req.Request.Body...),
-			WireProfile: cloneWireProfile(wireProfile),
-		}, req.HostCallbackID, strings.TrimSpace(req.OperationID), nil
+		// Both envelopes may carry a bound; the stricter positive one wins.
+		maxResponseBytes := req.Request.MaxResponseBytes
+		if maxResponseBytes <= 0 || (req.MaxResponseBytes > 0 && req.MaxResponseBytes < maxResponseBytes) {
+			maxResponseBytes = req.MaxResponseBytes
+		}
+		return pluginapi.HTTPRequest{Method: req.Request.Method, URL: req.Request.URL, Headers: map[string][]string(req.Request.Headers), Body: append([]byte(nil), req.Request.Body...), WireProfile: cloneWireProfile(wireProfile), DisableRedirects: req.Request.DisableRedirects || req.DisableRedirects, MaxResponseBytes: maxResponseBytes, SuppressLogging: req.Request.SuppressLogging || req.SuppressLogging}, req.HostCallbackID, strings.TrimSpace(req.OperationID), nil
 	}
-	return pluginapi.HTTPRequest{
-		Method:      req.Method,
-		URL:         req.URL,
-		Headers:     map[string][]string(req.Headers),
-		Body:        append([]byte(nil), req.Body...),
-		WireProfile: cloneWireProfile(req.WireProfile),
-	}, req.HostCallbackID, strings.TrimSpace(req.OperationID), nil
+	return pluginapi.HTTPRequest{Method: req.Method, URL: req.URL, Headers: map[string][]string(req.Headers), Body: append([]byte(nil), req.Body...), WireProfile: cloneWireProfile(req.WireProfile), DisableRedirects: req.DisableRedirects, MaxResponseBytes: req.MaxResponseBytes, SuppressLogging: req.SuppressLogging}, req.HostCallbackID, strings.TrimSpace(req.OperationID), nil
+}
+
+func invalidMaxResponseBytes(limit int64) bool {
+	return limit < 0 || limit == int64(^uint64(0)>>1)
 }
 
 func cloneWireProfile(src *pluginapi.HTTPWireProfile) *pluginapi.HTTPWireProfile {

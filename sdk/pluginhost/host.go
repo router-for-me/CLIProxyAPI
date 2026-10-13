@@ -11,6 +11,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type NativeAPI = pluginapi.NativeAPI
+type NativeRequest = pluginapi.NativeRequest
+type NativeResponse = pluginapi.NativeResponse
+type NativeRoute = pluginapi.NativeRoute
+type NativeRegistrationRequest = pluginapi.NativeRegistrationRequest
+type NativeRegistrationResponse = pluginapi.NativeRegistrationResponse
+
 // ModelInfo describes a plugin-provided model using public plugin SDK types.
 type ModelInfo = pluginapi.ModelInfo
 
