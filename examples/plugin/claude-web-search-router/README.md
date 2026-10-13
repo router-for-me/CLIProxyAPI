@@ -211,7 +211,6 @@ plugins:
       # kimi_base_url: ""           # empty: https://api.moonshot.ai
       # kimi_model: "kimi-k3"       # for kimi_search_level=model
       # kimi_max_results: 10        # 1-20; empty: Claude max_uses, else 5
-      # kimi_timeout_seconds: 30    # 1-60
       # kimi_sites: ["docs.example"]# Pro only, max 5
       # kimi_time_window: {start: "2026-01", end: "2026-09"} # Pro only
       # kimi_pro_escalation: true   # auto: empty Basic results retried via Pro
@@ -298,7 +297,6 @@ plugins:
 | `kimi_search_level` | `auto` (default), `basic`, `pro`, `fetch`, `model` — see Kimi notes above |
 | `kimi_model` | Responses model for `kimi_search_level=model`; empty → `kimi-k3` |
 | `kimi_max_results` | Search result limit 1–20; empty → Claude `max_uses`, else 5 |
-| `kimi_timeout_seconds` | Search timeout 1–60 s; empty → no per-request timeout |
 | `kimi_sites` | Pro-only site restriction (max 5); Claude `allowed_domains` wins when set |
 | `kimi_time_window` | Pro-only `{start, end}` date filter (`YYYY` / `YYYY-MM` / `YYYY-MM-DD`) |
 | `kimi_pro_escalation` | `auto` only: retry an empty Basic result set via Pro (default `true`) |

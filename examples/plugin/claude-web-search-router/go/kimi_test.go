@@ -48,9 +48,8 @@ func TestKimiClientSearchBasicMockAPI(t *testing.T) {
 
 	client := newKimiClientWithOptions([]string{"sk-test"}, server.URL, server.Client())
 	resp, errSearch := client.search(context.Background(), false, kimiSearchRequest{
-		TextQuery:      "q",
-		Limit:          7,
-		TimeoutSeconds: 15,
+		TextQuery: "q",
+		Limit:     7,
 	})
 	if errSearch != nil {
 		t.Fatalf("search() error = %v", errSearch)
@@ -58,7 +57,7 @@ func TestKimiClientSearchBasicMockAPI(t *testing.T) {
 	if gotAuth != "Bearer sk-test" {
 		t.Fatalf("Authorization = %q", gotAuth)
 	}
-	if gotBody.TextQuery != "q" || gotBody.Limit != 7 || gotBody.TimeoutSeconds != 15 {
+	if gotBody.TextQuery != "q" || gotBody.Limit != 7 {
 		t.Fatalf("request = %+v", gotBody)
 	}
 	hits := kimiResultsToHits(resp.SearchResults)

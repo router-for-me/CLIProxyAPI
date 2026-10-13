@@ -117,7 +117,6 @@ type pluginConfig struct {
 	KimiSearchLevel      string          `yaml:"kimi_search_level"`
 	KimiModel            string          `yaml:"kimi_model"`
 	KimiMaxResults       int             `yaml:"kimi_max_results"`
-	KimiTimeoutSeconds   int             `yaml:"kimi_timeout_seconds"`
 	KimiSites            []string        `yaml:"kimi_sites"`
 	KimiTimeWindow       *kimiTimeWindow `yaml:"kimi_time_window"`
 	KimiProEscalation    bool            `yaml:"kimi_pro_escalation"`
@@ -311,7 +310,6 @@ func pluginRegistration() registration {
 				}, Description: "Kimi search API tier: basic ($/search), pro (sites/time_window + chunks), fetch (URL fetch), model (Responses web_search, kimi writes the answer). auto picks per request."},
 				{Name: "kimi_model", Type: pluginapi.ConfigFieldTypeString, Description: "Kimi model for kimi_search_level=model (empty: kimi-k3)."},
 				{Name: "kimi_max_results", Type: pluginapi.ConfigFieldTypeInteger, Description: "Kimi search result limit, 1-20 (empty: Claude max_uses, else 5)."},
-				{Name: "kimi_timeout_seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "Kimi search timeout in seconds, 1-60 (empty: no per-request timeout)."},
 				{Name: "kimi_sites", Type: pluginapi.ConfigFieldTypeArray, Description: "Restrict Pro search to these sites (max 5); Claude allowed_domains takes precedence."},
 				{Name: "kimi_time_window", Type: pluginapi.ConfigFieldTypeObject, Description: "Pro-only publication date filter {start, end} in YYYY / YYYY-MM / YYYY-MM-DD."},
 				{Name: "kimi_pro_escalation", Type: pluginapi.ConfigFieldTypeBoolean, Description: "auto: retry an empty Basic result set through Pro (empty calls are unbilled)."},

@@ -146,7 +146,6 @@ type kimiTimeWindow struct {
 type kimiSearchRequest struct {
 	TextQuery      string          `json:"text_query"`
 	Limit          int             `json:"limit,omitempty"`
-	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
 	IncludeContent bool            `json:"include_content,omitempty"`
 	Sites          []string        `json:"sites,omitempty"`
 	TimeWindow     *kimiTimeWindow `json:"time_window,omitempty"`
@@ -341,9 +340,8 @@ func (c *kimiClient) executePlan(ctx context.Context, plan kimiSearchPlan, cfg p
 
 func (c *kimiClient) runToolSearch(ctx context.Context, pro bool, plan kimiSearchPlan, cfg pluginConfig, query string) ([]claudeWebSearchHit, error) {
 	req := kimiSearchRequest{
-		TextQuery:      query,
-		Limit:          plan.limit,
-		TimeoutSeconds: normalizedKimiTimeout(cfg.KimiTimeoutSeconds),
+		TextQuery: query,
+		Limit:     plan.limit,
 	}
 	if pro {
 		req.Sites = plan.sites
@@ -354,16 +352,6 @@ func (c *kimiClient) runToolSearch(ctx context.Context, pro bool, plan kimiSearc
 		return nil, errSearch
 	}
 	return kimiResultsToHits(resp.SearchResults), nil
-}
-
-func normalizedKimiTimeout(seconds int) int {
-	if seconds < 0 {
-		return 0
-	}
-	if seconds > 60 {
-		return 60
-	}
-	return seconds
 }
 
 // kimiResultsToHits prefers ranked Pro chunks, then snippet, then full text.

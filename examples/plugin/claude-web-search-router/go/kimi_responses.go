@@ -97,30 +97,40 @@ func resolveKimiResponsesTargetFromEntries(entries []pluginapi.HostAuthFileEntry
 // default is tried unpinned so the request still degrades gracefully through the
 // fallback chain.
 func resolveKimiResponsesTarget(cfg pluginConfig) (kimiResponsesTarget, bool) {
+	entries, listed := listKimiAuthEntries()
 	if m := strings.TrimSpace(cfg.KimiResponsesModel); m != "" {
-		if target, ok := resolveKimiResponsesTargetFromEntries(listKimiAuthEntries()); ok {
+		if target, ok := resolveKimiResponsesTargetFromEntries(entries); ok {
 			target.model = m
 			return target, true
 		}
 		return kimiResponsesTarget{model: m, provider: "kimi"}, true
 	}
-	return resolveKimiResponsesTargetFromEntries(listKimiAuthEntries())
+	if target, ok := resolveKimiResponsesTargetFromEntries(entries); ok {
+		return target, true
+	}
+	if !listed {
+		// host.auth.list unavailable: keep the unpinned coding default so an
+		// explicit route accepted from AvailableProviders still executes.
+		return kimiResponsesTarget{model: kimiResponsesCodingModel, provider: "kimi"}, true
+	}
+	return kimiResponsesTarget{}, false
 }
 
-// listKimiAuthEntries returns the host kimi auth metadata, or nil when the
-// host.auth.list call is unavailable or fails.
-func listKimiAuthEntries() []pluginapi.HostAuthFileEntry {
+// listKimiAuthEntries returns the host kimi auth metadata. The second return
+// value is false when the host.auth.list call is unavailable or fails, which
+// callers distinguish from a successful listing with no usable credential.
+func listKimiAuthEntries() ([]pluginapi.HostAuthFileEntry, bool) {
 	raw, errCall := callHost(pluginabi.MethodHostAuthList, map[string]any{})
 	if errCall != nil {
-		return nil
+		return nil, false
 	}
 	var resp struct {
 		Files []pluginapi.HostAuthFileEntry `json:"files"`
 	}
 	if errDecode := json.Unmarshal(raw, &resp); errDecode != nil {
-		return nil
+		return nil, false
 	}
-	return resp.Files
+	return resp.Files, true
 }
 
 // kimiResponsesBody converts the Claude Messages request into a Kimi Responses
@@ -184,14 +194,14 @@ func hostModelExecuteKimiResponses(ctx context.Context, hostCallbackID string, c
 	})
 }
 
-func hostModelStreamForwardKimiResponses(ctx context.Context, hostCallbackID string, cfg pluginConfig, body []byte, pluginStreamID string) (int, error) {
+func hostModelStreamForwardKimiResponses(ctx context.Context, hostCallbackID string, cfg pluginConfig, body []byte, pluginStreamID string) (int, bool, error) {
 	target, ok := resolveKimiResponsesTarget(cfg)
 	if !ok {
-		return 0, fmt.Errorf("kimi responses: no usable kimi credential")
+		return 0, false, fmt.Errorf("kimi responses: no usable kimi credential")
 	}
 	reqBody, errBody := kimiResponsesBody(body, target.model, true)
 	if errBody != nil {
-		return 0, errBody
+		return 0, false, errBody
 	}
 	return hostModelStreamForwardRequest(ctx, hostCallbackID, pluginapi.HostModelExecutionRequest{
 		EntryProtocol:  "openai-response",

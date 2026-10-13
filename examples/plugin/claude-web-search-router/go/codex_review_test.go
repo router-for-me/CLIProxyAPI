@@ -130,3 +130,51 @@ func TestSharedKimiClientPersistsAcrossCalls(t *testing.T) {
 		t.Fatal("sharedKimiClient kept the old client after key config changed")
 	}
 }
+
+// TestResolveKimiSearchPlanExplicitFetchRespectsAllowedDomains verifies the
+// explicit fetch level honors allowed_domains too: an outside URL must not be
+// fetched unfiltered, while a matching URL keeps the fetch path.
+func TestResolveKimiSearchPlanExplicitFetchRespectsAllowedDomains(t *testing.T) {
+	cfg := pluginConfig{KimiSearchLevel: "fetch"}
+	toolCfg := claudeWebSearchToolConfig{AllowedDomains: []string{"example.com"}}
+
+	plan := resolveKimiSearchPlan(cfg, toolCfg, "https://other.com/page")
+	if plan.level != kimiLevelPro {
+		t.Fatalf("explicit fetch with allowed_domains and outside URL = %q, want pro", plan.level)
+	}
+	if len(plan.sites) != 1 || plan.sites[0] != "example.com" {
+		t.Fatalf("explicit fetch fallback sites = %v, want [example.com]", plan.sites)
+	}
+
+	plan = resolveKimiSearchPlan(cfg, toolCfg, "https://docs.example.com/spec")
+	if plan.level != kimiLevelFetch {
+		t.Fatalf("explicit fetch with URL inside allowed_domains = %q, want fetch", plan.level)
+	}
+}
+
+// TestResolveKimiSearchPlanAutoTimeWindowPromotesToPro verifies that auto
+// level routes time-windowed searches through Pro, because Basic drops the
+// time window and escalation only applies to empty Basic results.
+func TestResolveKimiSearchPlanAutoTimeWindowPromotesToPro(t *testing.T) {
+	cfg := pluginConfig{
+		KimiSearchLevel: "auto",
+		KimiTimeWindow:  &kimiTimeWindow{Start: "2026-01", End: "2026-06"},
+	}
+	plan := resolveKimiSearchPlan(cfg, claudeWebSearchToolConfig{}, "average rainfall Norway")
+	if plan.level != kimiLevelPro {
+		t.Fatalf("auto level with kimi_time_window = %q, want pro", plan.level)
+	}
+}
+
+// TestResolveKimiResponsesTargetListFailureDegradesUnpinned verifies that when
+// host.auth.list is unavailable (no host in tests), resolution degrades to the
+// unpinned coding default instead of declining the backend entirely.
+func TestResolveKimiResponsesTargetListFailureDegradesUnpinned(t *testing.T) {
+	target, ok := resolveKimiResponsesTarget(pluginConfig{})
+	if !ok {
+		t.Fatal("expected degraded unpinned target when host.auth.list fails")
+	}
+	if target.model != kimiResponsesCodingModel || target.authID != "" || target.provider != "kimi" {
+		t.Fatalf("degraded target = %+v, want unpinned coding default", target)
+	}
+}

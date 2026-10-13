@@ -103,8 +103,15 @@ func resolveKimiSearchPlan(cfg pluginConfig, toolCfg claudeWebSearchToolConfig, 
 		return plan
 	case kimiLevelFetch:
 		if u := extractURLFromQuery(query); u != "" {
-			plan.level = kimiLevelFetch
-			plan.fetchURL = u
+			if fetchURLPermittedBySites(u, sites) {
+				plan.level = kimiLevelFetch
+				plan.fetchURL = u
+				return plan
+			}
+			// The URL is outside the allowed domains; fetching it would
+			// bypass the restriction, so serve the request through the
+			// site-filtered Pro search instead.
+			plan.level = kimiLevelPro
 			return plan
 		}
 		plan.level = kimiLevelBasic
@@ -117,13 +124,22 @@ func resolveKimiSearchPlan(cfg pluginConfig, toolCfg claudeWebSearchToolConfig, 
 		plan.fetchURL = u
 		return plan
 	}
-	if len(sites) > 0 || isDeepQuery(query) {
+	if len(sites) > 0 || isDeepQuery(query) || kimiTimeWindowSet(cfg.KimiTimeWindow) {
+		// Pro carries sites and the time window; Basic drops the time window
+		// and escalation only retries empty Basic results, so a configured
+		// time window must start at Pro.
 		plan.level = kimiLevelPro
 		return plan
 	}
 	plan.level = kimiLevelBasic
 	plan.escalate = cfg.KimiProEscalation
 	return plan
+}
+
+// kimiTimeWindowSet reports whether a kimi_time_window with at least one bound
+// is configured.
+func kimiTimeWindowSet(w *kimiTimeWindow) bool {
+	return w != nil && (strings.TrimSpace(w.Start) != "" || strings.TrimSpace(w.End) != "")
 }
 
 // fetchURLPermittedBySites reports whether fetching rawURL honors the site

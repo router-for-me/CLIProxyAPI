@@ -114,17 +114,26 @@ func runOrderedExecutionPlansStream(ctx context.Context, exec pluginapi.Executor
 			recordBackendSuccess(backend)
 			return nil
 		case backendKimiResponses:
-			status, errRun := hostModelStreamForwardKimiResponses(ctx, hostCallbackID, cfg, body, pluginStreamID)
+			status, partial, errRun := hostModelStreamForwardKimiResponses(ctx, hostCallbackID, cfg, body, pluginStreamID)
 			if errRun != nil {
 				lastErr = errRun
 				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {
 					recordBackendFailure(backend)
+				}
+				if partial {
+					// Chunks of this message were already emitted on the
+					// plugin stream; starting another backend here would
+					// emit a second message_start and corrupt the stream.
+					return errRun
 				}
 				continue
 			}
 			if isRetryableHTTPStatus(status) {
 				recordBackendFailure(backend)
 				lastErr = fmt.Errorf("host model status %d", status)
+				if partial {
+					return lastErr
+				}
 				continue
 			}
 			recordBackendSuccess(backend)
@@ -144,17 +153,23 @@ func runOrderedExecutionPlansStream(ctx context.Context, exec pluginapi.Executor
 			recordBackendSuccess(backend)
 			return nil
 		default:
-			status, errRun := hostModelStreamForwardClaude(ctx, hostCallbackID, plan.model, body, pluginStreamID)
+			status, partial, errRun := hostModelStreamForwardClaude(ctx, hostCallbackID, plan.model, body, pluginStreamID)
 			if errRun != nil {
 				lastErr = errRun
 				if isRetryableHTTPStatus(hostHTTPStatusFromError(errRun)) {
 					recordBackendFailure(backend)
+				}
+				if partial {
+					return errRun
 				}
 				continue
 			}
 			if isRetryableHTTPStatus(status) {
 				recordBackendFailure(backend)
 				lastErr = fmt.Errorf("host model status %d", status)
+				if partial {
+					return lastErr
+				}
 				continue
 			}
 			recordBackendSuccess(backend)
@@ -167,7 +182,7 @@ func runOrderedExecutionPlansStream(ctx context.Context, exec pluginapi.Executor
 	return fmt.Errorf("web search execution: all backends failed")
 }
 
-func hostModelStreamForwardClaude(ctx context.Context, hostCallbackID, execModel string, body []byte, pluginStreamID string) (int, error) {
+func hostModelStreamForwardClaude(ctx context.Context, hostCallbackID, execModel string, body []byte, pluginStreamID string) (int, bool, error) {
 	return hostModelStreamForwardRequest(ctx, hostCallbackID, pluginapi.HostModelExecutionRequest{
 		EntryProtocol: "claude",
 		ExitProtocol:  "claude",
@@ -177,54 +192,60 @@ func hostModelStreamForwardClaude(ctx context.Context, hostCallbackID, execModel
 	}, pluginStreamID)
 }
 
-func hostModelStreamForwardRequest(ctx context.Context, hostCallbackID string, hreq pluginapi.HostModelExecutionRequest, pluginStreamID string) (int, error) {
+// hostModelStreamForwardRequest forwards the host model stream chunk by chunk
+// to the plugin stream. The returned partial flag is true once any chunk has
+// been emitted, so callers know a retry on the same stream ID would corrupt
+// the client stream.
+func hostModelStreamForwardRequest(ctx context.Context, hostCallbackID string, hreq pluginapi.HostModelExecutionRequest, pluginStreamID string) (int, bool, error) {
 	hreq.Stream = true
 	raw, errCall := callHost(pluginabi.MethodHostModelExecuteStream, hostModelExecutionRequest{
 		HostModelExecutionRequest: hreq,
 		HostCallbackID:            hostCallbackID,
 	})
 	if errCall != nil {
-		return hostHTTPStatusFromError(errCall), errCall
+		return hostHTTPStatusFromError(errCall), false, errCall
 	}
 	var resp pluginapi.HostModelStreamResponse
 	if errDecode := json.Unmarshal(raw, &resp); errDecode != nil {
-		return 0, errDecode
+		return 0, false, errDecode
 	}
 	if resp.StatusCode >= 400 {
 		_ = closeHostModelStream(resp.StreamID)
-		return resp.StatusCode, fmt.Errorf("host model status %d", resp.StatusCode)
+		return resp.StatusCode, false, fmt.Errorf("host model status %d", resp.StatusCode)
 	}
 	if strings.TrimSpace(resp.StreamID) == "" {
-		return 0, fmt.Errorf("host model stream: empty stream_id")
+		return 0, false, fmt.Errorf("host model stream: empty stream_id")
 	}
 	defer func() { _ = closeHostModelStream(resp.StreamID) }()
 
 	firstPayload := true
+	partial := false
 	for {
 		chunkRaw, errRead := callHost(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: resp.StreamID})
 		if errRead != nil {
-			return hostHTTPStatusFromError(errRead), errRead
+			return hostHTTPStatusFromError(errRead), partial, errRead
 		}
 		var chunk pluginapi.HostModelStreamReadResponse
 		if errDecode := json.Unmarshal(chunkRaw, &chunk); errDecode != nil {
-			return 0, errDecode
+			return 0, partial, errDecode
 		}
 		if chunk.Error != "" {
 			code := hostHTTPStatusFromError(fmt.Errorf("%s", chunk.Error))
-			return code, fmt.Errorf("%s", chunk.Error)
+			return code, partial, fmt.Errorf("%s", chunk.Error)
 		}
 		if len(chunk.Payload) > 0 {
 			if firstPayload && looksLikeOpenAIResponsesSSE(chunk.Payload) {
-				return 0, fmt.Errorf("host model stream returned OpenAI Responses SSE instead of Claude Messages SSE")
+				return 0, partial, fmt.Errorf("host model stream returned OpenAI Responses SSE instead of Claude Messages SSE")
 			}
 			firstPayload = false
+			partial = true
 			if errEmit := emitPluginStreamChunk(pluginStreamID, bytes.Clone(chunk.Payload)); errEmit != nil {
-				return 0, errEmit
+				return 0, partial, errEmit
 			}
 		}
 		if chunk.Done {
 			break
 		}
 	}
-	return http.StatusOK, nil
+	return http.StatusOK, partial, nil
 }
