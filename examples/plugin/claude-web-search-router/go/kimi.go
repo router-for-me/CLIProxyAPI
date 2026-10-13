@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/sirupsen/logrus"
 )
@@ -118,6 +119,55 @@ func withHostHTTP(ctx context.Context, hc pluginapi.HostHTTPClient) context.Cont
 func hostHTTPFromContext(ctx context.Context) pluginapi.HostHTTPClient {
 	hc, _ := ctx.Value(hostHTTPContextKey{}).(pluginapi.HostHTTPClient)
 	return hc
+}
+
+// hostHTTPBridge implements pluginapi.HostHTTPClient on top of the
+// host.http.do callback, so upstream requests follow host transport policy
+// (proxy-url) and request-log capture. ExecutorRequest.HTTPClient cannot be
+// used for this: it is tagged json:"-" and never crosses the RPC boundary to
+// the plugin, so the bridge keys off the executor's host callback ID instead.
+type hostHTTPBridge struct {
+	hostCallbackID string
+}
+
+// newHostHTTPBridge returns a bridge for the given host callback ID, or nil
+// when no callback context is available (e.g. unit tests).
+func newHostHTTPBridge(hostCallbackID string) pluginapi.HostHTTPClient {
+	if strings.TrimSpace(hostCallbackID) == "" {
+		return nil
+	}
+	return &hostHTTPBridge{hostCallbackID: hostCallbackID}
+}
+
+// hostHTTPDoWireRequest mirrors the host's rpcHostHTTPRequest JSON schema.
+type hostHTTPDoWireRequest struct {
+	HostCallbackID string      `json:"host_callback_id,omitempty"`
+	Method         string      `json:"method,omitempty"`
+	URL            string      `json:"url,omitempty"`
+	Headers        http.Header `json:"headers,omitempty"`
+	Body           []byte      `json:"body,omitempty"`
+}
+
+func (b *hostHTTPBridge) Do(_ context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	raw, errCall := callHost(pluginabi.MethodHostHTTPDo, hostHTTPDoWireRequest{
+		HostCallbackID: b.hostCallbackID,
+		Method:         req.Method,
+		URL:            req.URL,
+		Headers:        req.Headers,
+		Body:           req.Body,
+	})
+	if errCall != nil {
+		return pluginapi.HTTPResponse{}, errCall
+	}
+	var resp pluginapi.HTTPResponse
+	if errDecode := json.Unmarshal(raw, &resp); errDecode != nil {
+		return pluginapi.HTTPResponse{}, errDecode
+	}
+	return resp, nil
+}
+
+func (b *hostHTTPBridge) DoStream(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	return pluginapi.HTTPStreamResponse{}, fmt.Errorf("host http bridge: streaming not supported")
 }
 
 // post sends a JSON body to a Kimi tools endpoint with Bearer auth. Errors embed
@@ -355,10 +405,20 @@ func (c *kimiClient) executePlan(ctx context.Context, plan kimiSearchPlan, cfg p
 		var fr *kimiFetchResponse
 		fr, err = c.fetch(ctx, plan.fetchURL)
 		if err == nil {
+			finalURL := strings.TrimSpace(fr.URL)
+			if finalURL == "" {
+				finalURL = plan.fetchURL
+			}
+			if !fetchURLPermittedBySites(finalURL, plan.sites) {
+				// The upstream fetch landed on a host outside the allowed
+				// domains (redirect or canonical URL); returning its body
+				// would bypass the request's site restriction.
+				return nil, "", fmt.Errorf("kimi fetch landed outside allowed domains: %s", finalURL)
+			}
 			snippet := truncate(fr.Markdown, kimiFetchSnippetCap)
 			hits = []claudeWebSearchHit{{
 				Title:   strings.TrimSpace(fr.Title),
-				URL:     strings.TrimSpace(fr.URL),
+				URL:     finalURL,
 				Snippet: snippet,
 			}}
 		}

@@ -70,14 +70,16 @@ var kimiResponsesCredentialCounter atomic.Uint64
 // credential family that can serve it. It accepts the same alias set the host
 // upstream normalizer recognizes (internal/runtime/executor/kimi_executor.go),
 // including CLIProxyAPI "kimi-" prefixes, "[1m]" context suffixes, and thinking
-// suffixes such as "(1024)". The second return value is false for models whose
-// family is unknown; those must not pin a possibly-incompatible credential.
+// suffixes such as "(1024)" — stripped in the host's order (thinking suffix
+// first, then "[1m]") so combined forms classify too. The second return value
+// is false for models whose family is unknown; those must not pin a
+// possibly-incompatible credential.
 func kimiResponsesModelFamily(model string) (string, bool) {
 	m := strings.ToLower(strings.TrimSpace(model))
-	m = strings.TrimSuffix(m, "[1m]")
 	if i := strings.Index(m, "("); i >= 0 {
 		m = strings.TrimSpace(m[:i])
 	}
+	m = strings.TrimSuffix(m, "[1m]")
 	switch m {
 	case "kimi-k2.8", "k2.8",
 		"kimi-k2.8-code", "k2.8-code",
@@ -87,11 +89,13 @@ func kimiResponsesModelFamily(model string) (string, bool) {
 		"kimi-k2.7-code-highspeed", "k2.7-code-highspeed",
 		"kimi-for-coding-highspeed", "for-coding-highspeed":
 		return "coding", true
-	case "kimi-k3", "k3":
-		return "platform", true
-	default:
-		return "", false
 	}
+	// K3 and its registered long-context variant are Moonshot platform models;
+	// the host normalizer accepts them via generic prefix stripping.
+	if m == "k3" || m == "kimi-k3" || strings.HasPrefix(m, "k3-") || strings.HasPrefix(m, "kimi-k3-") {
+		return "platform", true
+	}
+	return "", false
 }
 
 // kimiCredentialPools splits kimi-family entries into coding-plan and

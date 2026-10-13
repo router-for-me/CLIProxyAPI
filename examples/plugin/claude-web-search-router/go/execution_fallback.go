@@ -196,6 +196,7 @@ func runWebSearchStreamWithExecutionFallback(ctx context.Context, exec pluginapi
 }
 
 func runOrderedExecutionPlans(ctx context.Context, exec pluginapi.ExecutorRequest, hostCallbackID string, cfg pluginConfig, plans []executionPlan, stream bool) ([]byte, http.Header, error) {
+	ctx = withHostHTTP(ctx, newHostHTTPBridge(hostCallbackID))
 	if len(plans) == 0 {
 		return nil, nil, fmt.Errorf("web search execution: no backend available")
 	}
@@ -253,9 +254,9 @@ func runOrderedExecutionPlans(ctx context.Context, exec pluginapi.ExecutorReques
 			var headers http.Header
 			var errRun error
 			if stream {
-				payload, headers, errRun = runKimiCodingClaudeStream(ctx, exec, cfg)
+				payload, headers, errRun = runKimiCodingClaudeStream(ctx, exec, cfg, hostCallbackID)
 			} else {
-				payload, headers, errRun = runKimiCodingClaude(ctx, exec, cfg)
+				payload, headers, errRun = runKimiCodingClaude(ctx, exec, cfg, hostCallbackID)
 			}
 			if errRun != nil {
 				lastErr = errRun

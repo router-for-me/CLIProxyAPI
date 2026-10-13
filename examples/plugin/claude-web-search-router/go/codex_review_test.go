@@ -486,3 +486,106 @@ func TestDomainMatchesIgnoresTerminalDots(t *testing.T) {
 		t.Fatal("empty rules must not match")
 	}
 }
+
+// TestHostHTTPBridgeRequiresCallbackID verifies the host HTTP bridge is only
+// constructed with a live callback ID, since ExecutorRequest.HTTPClient is
+// tagged json:"-" and never reaches the plugin in production.
+func TestHostHTTPBridgeRequiresCallbackID(t *testing.T) {
+	if got := newHostHTTPBridge(""); got != nil {
+		t.Fatalf("newHostHTTPBridge(\"\") = %v, want nil", got)
+	}
+	hc := newHostHTTPBridge("cb-1")
+	if hc == nil {
+		t.Fatal("newHostHTTPBridge(\"cb-1\") = nil, want bridge")
+	}
+	var _ pluginapi.HostHTTPClient = hc
+}
+
+// TestHostHTTPBridgeDoWithoutHostFails verifies the bridge surfaces the host
+// callback failure instead of falling back to a direct connection.
+func TestHostHTTPBridgeDoWithoutHostFails(t *testing.T) {
+	hc := newHostHTTPBridge("cb-missing")
+	if _, err := hc.Do(context.Background(), pluginapi.HTTPRequest{
+		Method: http.MethodPost,
+		URL:    "https://api.moonshot.ai/v1/tools/search",
+		Body:   []byte(`{}`),
+	}); err == nil {
+		t.Fatal("bridge Do without a host succeeded; want host callback error")
+	}
+}
+
+// TestExecutePlanFetchRechecksAllowedDomainsPostFetch verifies the fetch path
+// re-validates the URL the upstream actually returned (redirect or canonical
+// host), not just the pre-fetch URL.
+func TestExecutePlanFetchRechecksAllowedDomainsPostFetch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != kimiFetchPath {
+			t.Errorf("path = %s, want %s", r.URL.Path, kimiFetchPath)
+		}
+		// Upstream reports a canonical URL outside the allowed domains.
+		_, _ = w.Write([]byte(`{"url": "https://other.example/page", "title": "t", "markdown": "m"}`))
+	}))
+	defer server.Close()
+
+	client := newKimiClientWithOptions([]string{"sk-test"}, server.URL, server.Client())
+	plan := kimiSearchPlan{
+		level:    kimiLevelFetch,
+		fetchURL: "https://docs.example.com/spec",
+		sites:    []string{"example.com"},
+	}
+	_, _, err := client.executePlan(context.Background(), plan, pluginConfig{}, "query")
+	if err == nil {
+		t.Fatal("executePlan fetch accepted an upstream URL outside allowed_domains")
+	}
+	if !strings.Contains(err.Error(), "allowed domains") {
+		t.Fatalf("error = %v, want mention of allowed domains", err)
+	}
+
+	// A canonical URL inside the allowed domains still succeeds.
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"url": "https://docs.example.com/canon", "title": "t", "markdown": "m"}`))
+	}))
+	defer server2.Close()
+	client2 := newKimiClientWithOptions([]string{"sk-test"}, server2.URL, server2.Client())
+	hits, _, err := client2.executePlan(context.Background(), plan, pluginConfig{}, "query")
+	if err != nil {
+		t.Fatalf("executePlan fetch with in-scope canonical URL errored: %v", err)
+	}
+	if len(hits) != 1 || hits[0].URL != "https://docs.example.com/canon" {
+		t.Fatalf("hits = %+v, want the canonical in-scope URL", hits)
+	}
+}
+
+// TestKimiResponsesModelFamilyCombinedSuffix verifies suffix stripping matches
+// the host normalizer's order (thinking suffix first, then [1m]).
+func TestKimiResponsesModelFamilyCombinedSuffix(t *testing.T) {
+	cases := map[string]string{
+		"kimi-k2.8-code[1m](high)": "coding",
+		"kimi-k2.8-code(high)":     "coding",
+		"kimi-k2.8-code[1m]":       "coding",
+		"kimi-k3[1m](1024)":        "platform",
+	}
+	for model, want := range cases {
+		got, ok := kimiResponsesModelFamily(model)
+		if !ok || got != want {
+			t.Fatalf("family(%q) = %q,%v want %q,true", model, got, ok, want)
+		}
+	}
+}
+
+// TestKimiResponsesModelFamilyK3Variants verifies the registered K3 long-context
+// variant classifies as platform so it pins a platform credential.
+func TestKimiResponsesModelFamilyK3Variants(t *testing.T) {
+	for _, model := range []string{"kimi-k3-256k", "k3-256k"} {
+		got, ok := kimiResponsesModelFamily(model)
+		if !ok || got != "platform" {
+			t.Fatalf("family(%q) = %q,%v want platform,true", model, got, ok)
+		}
+	}
+	target, ok := resolveKimiResponsesTargetForModel([]pluginapi.HostAuthFileEntry{
+		{Provider: "kimi", BaseURL: "https://api.moonshot.ai", ID: "cred-platform"},
+	}, "kimi-k3-256k")
+	if !ok || target.authID != "cred-platform" {
+		t.Fatalf("kimi-k3-256k target = %+v ok=%v, want cred-platform", target, ok)
+	}
+}
