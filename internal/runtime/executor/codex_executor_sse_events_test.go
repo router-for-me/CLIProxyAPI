@@ -116,3 +116,32 @@ func TestCodexExecuteStreamKeepsAnInvalidSplitEventInvalid(t *testing.T) {
 		t.Fatalf("last chunk = %q, want the invalid event's two data lines unchanged", last)
 	}
 }
+
+func TestCodexExecuteStreamKeepsBootstrapBudgetsForASplitEvent(t *testing.T) {
+	// One handshake event split across more data lines than the bootstrap frame budget holds.
+	var split strings.Builder
+	split.WriteString("data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_split\",\"output\":[\n")
+	for range codexBootstrapMaxBufferedFrames + 10 {
+		split.WriteString("data: {\"x\":1},\n")
+	}
+	split.WriteString("data: {\"x\":1}]}}\n\n")
+	stream := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\",\"model\":\"gpt-5.4\"}}\n\n" + split.String() +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_split\",\"status\":\"completed\",\"output\":[]}}\n\n"
+	countFragments := func(chunks []string) int {
+		fragments := 0
+		for _, chunk := range chunks {
+			if chunk == `data: {"x":1},` {
+				fragments++
+			}
+		}
+		return fragments
+	}
+	// Unbuffered, the event is assembled; while bootstrap buffering holds the stream, its lines
+	// stay within the frame budget and are released one by one, as they were before.
+	if fragments := countFragments(codexStreamChunks(t, stream, false)); fragments != 0 {
+		t.Fatalf("unbuffered: %d fragments emitted, want the event assembled", fragments)
+	}
+	if fragments := countFragments(codexStreamChunks(t, stream, true)); fragments == 0 {
+		t.Fatal("buffered: the event was assembled past the bootstrap frame budget")
+	}
+}

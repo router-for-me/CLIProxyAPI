@@ -189,6 +189,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	sawOutputDelta := false
 	if buffering {
+		// An event split across data lines is collected inside one Scan; keep it within the same
+		// frame, byte and time budgets that bound the frames held here line by line.
+		scanner.SetCollectGuard(func(lines, size int) bool {
+			if bootstrapTimeout > 0 && nowCodexBootstrap().Sub(bootstrapStart) >= bootstrapTimeout {
+				return false
+			}
+			return bufferedFrames+lines < codexBootstrapMaxBufferedFrames && bufferedBytes+size <= codexBootstrapMaxBufferedBytes
+		})
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -308,6 +316,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			break
 		}
+		scanner.SetCollectGuard(nil)
 
 		if !streamStarted && bootstrapTerminalErr == nil {
 			closeBootstrapBody()

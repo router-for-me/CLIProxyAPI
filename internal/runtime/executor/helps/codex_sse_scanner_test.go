@@ -99,10 +99,15 @@ func TestCodexSSEScannerAssemblesEventData(t *testing.T) {
 			want:   []string{`data: {"a":1}`, `data: {"b":2}`},
 		},
 		{
-			name:     "invalid fragment followed by a complete event without a blank separator",
+			name:     "an invalid fragment absorbs the following data lines up to the blank line",
 			stream:   "data: {\"a\":\"" + marker + "\ndata: {\"b\":2}\n\n",
-			want:     []string{`data: {"a":"` + marker, `data: {"b":2}`, ""},
+			want:     []string{"data: {\"a\":\"" + marker + "\ndata: {\"b\":2}", ""},
 			warnings: 1,
+		},
+		{
+			name:   "a complete object on its own line inside an open array stays in the event",
+			stream: "data: {\"type\":\"response.completed\",\"response\":{\"output\":[\ndata: {\"id\":\"m\",\"type\":\"message\"}\ndata: ]}}\n\n",
+			want:   []string{`data: {"type":"response.completed","response":{"output":[{"id":"m","type":"message"}]}}`, ""},
 		},
 		{
 			name:     "unterminated incomplete event at end of stream is still delivered",
@@ -216,6 +221,33 @@ func TestCodexSSEScannerAssemblesAnEventOfThousandsOfLinesQuickly(t *testing.T) 
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("assembling 2,001 data lines took %v; validation must not grow with every line", elapsed)
+	}
+}
+
+func TestCodexSSEScannerGuardFallsBackToLineByLine(t *testing.T) {
+	hook := captureCodexSSEWarnings(t)
+	stream := "data: {\"a\":\ndata: [1,\n: note\ndata: 2]}\n\ndata: {\"b\":2}\n\n"
+	scanner := NewCodexSSEScanner(context.Background(), strings.NewReader(stream), 1<<20)
+	type call struct{ lines, size int }
+	var calls []call
+	scanner.SetCollectGuard(func(lines, size int) bool {
+		calls = append(calls, call{lines, size})
+		return lines < 2
+	})
+	var got []string
+	for scanner.Scan() {
+		got = append(got, string(scanner.Bytes()))
+	}
+	// The second further line is refused: the lines read so far come out one by one, as read.
+	want := []string{"data: {\"a\":", "data: [1,", ": note", "data: 2]}", "", `data: {"b":2}`, ""}
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+		t.Fatalf("lines = %q\nwant    %q", got, want)
+	}
+	if fmt.Sprint(calls) != fmt.Sprint([]call{{1, 20}, {2, 26}}) {
+		t.Fatalf("guard calls = %v", calls)
+	}
+	if len(hook.AllEntries()) != 0 {
+		t.Fatalf("unexpected warnings: %d", len(hook.AllEntries()))
 	}
 }
 

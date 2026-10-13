@@ -32,7 +32,6 @@ var codexSSEDataPrefix = []byte("data:")
 //   - their joined value closes its outermost object or array;
 //   - a blank line ends the event;
 //   - the stream ends;
-//   - a data line that is a complete JSON object on its own starts the next event;
 //   - the collected bytes would exceed the line limit.
 //
 // A completed event is delivered compacted onto one line. One that never becomes valid JSON is
@@ -42,6 +41,7 @@ type CodexSSEScanner struct {
 	ctx      context.Context
 	lines    *bufio.Scanner
 	maxBytes int
+	guard    func(lines, bytes int) bool
 	queue    [][]byte
 	current  []byte
 }
@@ -69,7 +69,9 @@ func (s *CodexSSEScanner) Scan() bool {
 		return true
 	}
 	// An incomplete event: collect its continuation. The underlying scanner reuses its buffer, so keep copies.
-	data := [][]byte{bytes.Clone(line)}
+	first := bytes.Clone(line)
+	data := [][]byte{first}
+	read := [][]byte{first}
 	joined := bytes.Clone(codexSSEValue(line))
 	var nesting codexJSONNesting
 	closed := nesting.feed(joined)
@@ -86,17 +88,20 @@ func (s *CodexSSEScanner) Scan() bool {
 			rest = append(rest, bytes.Clone(next))
 			break
 		}
+		if s.guard != nil && !s.guard(len(read), size+len(next)) {
+			// The caller's budget does not cover this event: deliver its lines one by one, as read.
+			s.current = first
+			s.queue = append(read[1:], bytes.Clone(next))
+			return true
+		}
 		size += len(next)
+		kept := bytes.Clone(next)
+		read = append(read, kept)
 		if !bytes.HasPrefix(next, codexSSEDataPrefix) {
-			rest = append(rest, bytes.Clone(next))
+			rest = append(rest, kept)
 			continue
 		}
-		if value := bytes.TrimSpace(next[len(codexSSEDataPrefix):]); bytes.HasPrefix(value, []byte("{")) && json.Valid(value) {
-			// A complete object of its own is the next event of an upstream that sends no blank lines.
-			rest = append(rest, bytes.Clone(next))
-			break
-		}
-		data = append(data, bytes.Clone(next))
+		data = append(data, kept)
 		value := codexSSEValue(next)
 		joined = append(append(joined, '\n'), value...)
 		closed = nesting.feed([]byte{'\n'}) || nesting.feed(value)
@@ -105,6 +110,13 @@ func (s *CodexSSEScanner) Scan() bool {
 	s.queue = rest
 	return true
 }
+
+// SetCollectGuard installs a check made before an incomplete event collects each further line.
+// It receives how many lines the event would then span after its first and how many bytes. When it
+// returns false, the scanner stops collecting and delivers the lines read so far one by one, as
+// bufio.Scanner would, so a caller can keep its own per-line budgets while it holds a stream. A
+// nil guard removes the check.
+func (s *CodexSSEScanner) SetCollectGuard(guard func(lines, bytes int) bool) { s.guard = guard }
 
 // codexSSEValue is one data line's value: the text after "data:" without the one leading space.
 func codexSSEValue(line []byte) []byte {
