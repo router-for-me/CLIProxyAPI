@@ -1592,7 +1592,7 @@ func shouldSkipCredentialCooldown(err *Error) bool {
 }
 
 // isConnectionLifecycleError reports transport/session lifecycle failures that must
-// not cool credentials: client cancellation and WebSocket close/EOF disconnects.
+// not cool credentials: client cancellation and WebSocket/HTTP/2 close/EOF disconnects.
 func isConnectionLifecycleError(err error) bool {
 	if err == nil {
 		return false
@@ -1646,11 +1646,17 @@ func isConnectionLifecycleMessage(message string) bool {
 		strings.Contains(lower, "websocket: close 1006") {
 		return true
 	}
-	// Wrapped transport EOF phrasing (e.g. "read tcp ...: unexpected EOF").
-	if strings.Contains(lower, "unexpected eof") {
+	// Wrapped transport disconnects (e.g. "read tcp ...: unexpected EOF").
+	if strings.Contains(lower, "unexpected eof") || isHTTP2ClosedConnectionMessage(lower) {
 		return true
 	}
 	return false
+}
+
+func isHTTP2ClosedConnectionMessage(lower string) bool {
+	// x/net/http2 keeps these errors unexported; allow common wrappers such as url.Error.
+	return strings.Contains(lower, "http2: client connection force closed via clientconn.close") ||
+		strings.Contains(lower, "http2: client conn is closed")
 }
 
 // isTransientTransportError reports pre-HTTP dial/TLS/DNS/reset failures that
@@ -1735,7 +1741,8 @@ func isTransientTransportMessage(message string) bool {
 		strings.Contains(lower, "broken pipe"),
 		strings.Contains(lower, "connection aborted"),
 		strings.Contains(lower, "use of closed network connection"),
-		strings.Contains(lower, "unexpected eof"):
+		strings.Contains(lower, "unexpected eof"),
+		isHTTP2ClosedConnectionMessage(lower):
 		return true
 	default:
 		return false
