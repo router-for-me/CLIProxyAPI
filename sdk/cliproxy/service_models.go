@@ -960,6 +960,31 @@ func metaAuthWonderFullEntitled(auth *coreauth.Auth) bool {
 	return strings.Contains(tier, "power") || strings.Contains(tier, "max")
 }
 
+// Discovery errors keep the previous registration, so a downgrade committed
+// in the same pass must still remove plan-gated models from it.
+func (s *Service) stripUnentitledMetaWonderFullModels(auth *coreauth.Auth) {
+	if auth == nil || auth.ID == "" || s == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") || strings.EqualFold(auth.AuthKind(), "apikey") {
+		return
+	}
+	if metaAuthWonderFullEntitled(auth) {
+		return
+	}
+	reg := registry.GetGlobalRegistry()
+	existing := reg.GetModelsForClient(auth.ID)
+	if len(existing) == 0 {
+		return
+	}
+	filtered := applyMetaWonderFullEntitlement(existing, auth)
+	if len(filtered) == len(existing) {
+		return
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	reg.ReplaceClientModels(auth.ID, providerKey, reg.ClientRegistrationEpoch(auth.ID), filtered)
+}
+
 func applyMetaWonderFullEntitlement(models []*ModelInfo, auth *coreauth.Auth) []*ModelInfo {
 	if metaAuthWonderFullEntitled(auth) {
 		return models

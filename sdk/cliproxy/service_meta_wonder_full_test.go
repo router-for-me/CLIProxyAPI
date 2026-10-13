@@ -304,3 +304,49 @@ func TestMetaRegistrationHookGuardsReentrancyAndCancellation(t *testing.T) {
 		t.Fatalf("want Wonder registered despite canceled context, got %v", seen)
 	}
 }
+
+func TestStripUnentitledMetaWonderFullModels(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-meta-strip-stale-full",
+		Provider: "meta",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"type":                 "meta",
+			"auth_kind":            "oauth",
+			"subs_tier_name":       "Muse Code Max Usage",
+			"is_subs_active":       true,
+			"wonder_full_entitled": false,
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+	registry.RegisterClient(auth.ID, "meta", []*ModelInfo{
+		{ID: "muse-wonder-1.0"},
+		{ID: "muse-wonder-full-1.0"},
+		{ID: "muse-full", MetadataModelID: "muse-wonder-full-1.0-contributor"},
+	})
+
+	service.stripUnentitledMetaWonderFullModels(auth)
+	seen := metaRegisteredModelIDs(auth.ID)
+	if !seen["muse-wonder-1.0"] || seen["muse-wonder-full-1.0"] || seen["muse-full"] {
+		t.Fatalf("want only muse-wonder-1.0 after strip, got %v", seen)
+	}
+
+	registry.RegisterClient(auth.ID, "meta", []*ModelInfo{
+		{ID: "muse-wonder-1.0"},
+		{ID: "muse-wonder-full-1.0"},
+	})
+	auth.Metadata["wonder_full_entitled"] = true
+	service.stripUnentitledMetaWonderFullModels(auth)
+	if seen := metaRegisteredModelIDs(auth.ID); !seen["muse-wonder-full-1.0"] {
+		t.Fatalf("want entitled registration untouched, got %v", seen)
+	}
+}

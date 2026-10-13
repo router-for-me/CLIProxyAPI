@@ -357,6 +357,22 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
 	}
+	// A Meta lifecycle hook can commit a newer credential through plugin
+	// model discovery. Callers such as request preparation execute with
+	// the returned snapshot, so hand back the latest committed record for
+	// the same registration instead of the pre-hook candidate.
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
+		m.mu.RLock()
+		latest := m.auths[auth.ID]
+		var latestClone *Auth
+		if latest != nil && latest.RegistrationEpoch == auth.RegistrationEpoch {
+			latestClone = latest.Clone()
+		}
+		m.mu.RUnlock()
+		if latestClone != nil {
+			return latestClone, nil
+		}
+	}
 	return auth.Clone(), nil
 }
 
