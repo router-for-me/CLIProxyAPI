@@ -1250,3 +1250,56 @@ func TestNormalizeCodexToolSchemas_DoesNotNormalizeIntegerTypes(t *testing.T) {
 		t.Fatalf("expected number, got: %s", got)
 	}
 }
+
+// Codex answers a tool schema whose numeric bound cannot be represented as int64
+// with an opaque HTTP 500 that cools the whole credential (#6579): bounds outside
+// the int64 range are dropped, in-range bounds and non-integer values stay as
+// written, and the same keys inside user data are untouched.
+func TestNormalizeCodexToolSchemas_DropsOutOfBoundsNumericBounds(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-6-luna",
+		"tools": [{
+			"type": "function",
+			"name": "emulate_process",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"options": {
+						"type": "object",
+						"properties": {
+							"seed": {"type": "integer", "minimum": 0, "maximum": 18446744073709552000},
+							"tag": {"type": "string", "default": {"maximum": 123}},
+							"ratio": {"type": "number", "exclusiveMinimum": 0.5, "maximum": 1e100},
+							"negative": {"type": "integer", "minimum": -9223372036854775809},
+							"bounded": {"type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807}
+						}
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+	props := gjson.GetBytes(out, "tools.0.parameters.properties.options.properties")
+	if props.Get("seed.maximum").Exists() {
+		t.Fatalf("u64 maximum must be dropped, got %s", props.Get("seed.maximum").Raw)
+	}
+	if props.Get("seed.minimum").Int() != 0 {
+		t.Fatalf("in-range minimum must stay, got %s", props.Get("seed.minimum").Raw)
+	}
+	if props.Get("negative.minimum").Exists() {
+		t.Fatalf("below-int64 minimum must be dropped, got %s", props.Get("negative.minimum").Raw)
+	}
+	if props.Get("ratio.maximum").Exists() {
+		t.Fatalf("out-of-int64 maximum must be dropped in float notation too, got %s", props.Get("ratio.maximum").Raw)
+	}
+	if got := props.Get("ratio.exclusiveMinimum").Raw; got != "0.5" {
+		t.Fatalf("non-integer exclusiveMinimum must stay, got %s", got)
+	}
+	if got := props.Get("bounded.minimum").Raw; got != "-9223372036854775808" || props.Get("bounded.maximum").Raw != "9223372036854775807" {
+		t.Fatalf("int64 edge bounds must stay verbatim, got %s / %s", props.Get("bounded.minimum").Raw, props.Get("bounded.maximum").Raw)
+	}
+	if got := props.Get("tag.default.maximum").Int(); got != 123 {
+		t.Fatalf("bounds inside user data must stay, got %s", props.Get("tag.default").Raw)
+	}
+}

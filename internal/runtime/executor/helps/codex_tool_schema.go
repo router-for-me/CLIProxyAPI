@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"strings"
@@ -127,6 +128,12 @@ func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 
 	if sanitizedParams, patternChanged := stripIncompatiblePatternsFromJSON(rawParams); patternChanged {
 		rawParams = sanitizedParams
+		changed = true
+		params = gjson.ParseBytes(rawParams)
+	}
+
+	if boundedParams, boundsChanged := stripOutOfBoundsNumericBoundsFromJSON(rawParams); boundsChanged {
+		rawParams = boundedParams
 		changed = true
 		params = gjson.ParseBytes(rawParams)
 	}
@@ -395,4 +402,108 @@ func escapeCodexSjsonKey(key string) string {
 	key = strings.ReplaceAll(key, `.`, `\.`)
 	key = strings.ReplaceAll(key, `:`, `\:`)
 	return key
+}
+
+// codexNumericBoundKeywords lists the JSON Schema numeric bound keywords the Codex
+// backend rejects with an opaque HTTP 500 when their value leaves the int64 range.
+var codexNumericBoundKeywords = [...]string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}
+
+var (
+	codexBoundMinInt64 = new(big.Rat).SetInt64(math.MinInt64)
+	codexBoundMaxInt64 = new(big.Rat).SetInt64(math.MaxInt64)
+)
+
+// numericBoundOutOfInt64 reports whether the numeric literal is an integer that
+// cannot be represented as int64. Non-integer values are left alone because they
+// carry no integer constraint the backend could choke on.
+func numericBoundOutOfInt64(number json.Number) bool {
+	value, ok := new(big.Rat).SetString(number.String())
+	if !ok {
+		return false
+	}
+	if !value.IsInt() {
+		return false
+	}
+	return value.Cmp(codexBoundMinInt64) < 0 || value.Cmp(codexBoundMaxInt64) > 0
+}
+
+// stripOutOfBoundsNumericBoundsFromJSON recursively removes numeric bound keywords
+// whose integer value leaves the int64 range: no int64 argument can ever violate
+// them, while the Codex backend answers such schemas with an opaque HTTP 500 that
+// cools the whole credential (#6579). The walk is schema-aware like
+// stripIncompatiblePatternsFromJSON so the same keys inside user data survive.
+func stripOutOfBoundsNumericBoundsFromJSON(raw []byte) ([]byte, bool) {
+	rawStr := string(raw)
+	// "inimum"/"aximum" match minimum/maximum and their exclusive variants.
+	if !strings.Contains(rawStr, "inimum") && !strings.Contains(rawStr, "aximum") {
+		return raw, false
+	}
+	var root any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&root); err != nil || root == nil {
+		return raw, false
+	}
+	// Verify no trailing garbage
+	var dummy any
+	if err := dec.Decode(&dummy); err != io.EOF {
+		return raw, false
+	}
+	if !stripOutOfBoundsNumericBounds(root) {
+		return raw, false
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(root); err != nil {
+		return raw, false
+	}
+	return bytes.TrimSpace(buf.Bytes()), true
+}
+
+func stripOutOfBoundsNumericBounds(v any) bool {
+	changed := false
+	switch schema := v.(type) {
+	case map[string]any:
+		for _, boundKey := range codexNumericBoundKeywords {
+			if boundVal, ok := schema[boundKey].(json.Number); ok && numericBoundOutOfInt64(boundVal) {
+				delete(schema, boundKey)
+				changed = true
+			}
+		}
+
+		for _, mapKey := range util.SchemaMapKeywords {
+			if subMap, ok := schema[mapKey].(map[string]any); ok {
+				for _, subSchema := range subMap {
+					if stripOutOfBoundsNumericBounds(subSchema) {
+						changed = true
+					}
+				}
+			}
+		}
+
+		for _, valKey := range util.SchemaValueKeywords {
+			if val, exists := schema[valKey]; exists {
+				switch sub := val.(type) {
+				case map[string]any:
+					if stripOutOfBoundsNumericBounds(sub) {
+						changed = true
+					}
+				case []any:
+					for _, item := range sub {
+						if stripOutOfBoundsNumericBounds(item) {
+							changed = true
+						}
+					}
+				}
+			}
+		}
+	case []any:
+		for _, item := range schema {
+			if stripOutOfBoundsNumericBounds(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
 }
