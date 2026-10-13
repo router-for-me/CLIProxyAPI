@@ -6,6 +6,10 @@ type skipPersistContextKey struct{}
 type deferAPIKeyModelAliasRebuildContextKey struct{}
 type authCreationIntentContextKey struct{}
 
+// authUpdateModeContextKey carries the existing manager mutation mode into storage.
+// It does not grant credential-creation or login-replacement intent.
+type authUpdateModeContextKey struct{}
+
 // WithAuthCreationIntent returns a derived context that allows a token store to
 // create a missing disabled credential. It is intended only for the immediate
 // persistence performed by login and credential migration flows.

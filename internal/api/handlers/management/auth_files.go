@@ -119,9 +119,9 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	h.mu.Lock()
 	host := h.pluginHost
 	h.mu.Unlock()
-	var quotaSupportedProviders map[string]struct{}
+	quota := authFileQuotaContext{v8: c.GetBool(ConfigV8ContextKey)}
 	if host != nil {
-		quotaSupportedProviders = host.QuotaSupportedProvidersSet(c.Request.Context())
+		quota.pluginIDs = host.QuotaProviderPluginIDs(c.Request.Context())
 	}
 	auths := h.authManager.List()
 	observedAt := time.Now().UTC()
@@ -141,7 +141,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		start, end := pagination.bounds(total)
 		files := make([]gin.H, 0, end-start)
 		for _, auth := range matching[start:end] {
-			if entry := h.buildAuthFileEntry(auth, quotaSupportedProviders); entry != nil {
+			if entry := h.buildAuthFileEntry(auth, quota); entry != nil {
 				entry["cooldowns"] = nil
 				if cooldownsKnown {
 					entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
@@ -157,7 +157,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) {
 			continue
 		}
-		if entry := h.buildAuthFileEntry(auth, quotaSupportedProviders); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, quota); entry != nil {
 			entry["cooldowns"] = nil
 			if cooldownsKnown {
 				entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
@@ -478,10 +478,19 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 	c.JSON(200, authFilesListResponse(observedAt, files, pagination, total, end))
 }
 
-func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, quotaSupported ...map[string]struct{}) gin.H {
+// authFileQuotaContext carries request-scoped quota capability data for auth file entries.
+type authFileQuotaContext struct {
+	// pluginIDs maps normalized provider keys to the quota plugin selected for them.
+	// A nil map means no quota plugins are available.
+	pluginIDs map[string]string
+	// v8 hides declarative quota_probe support because v8 only serves plugin quota routes.
+	v8 bool
+}
+
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, quota authFileQuotaContext) gin.H {
 	authFileEntryMu.Lock()
 	defer authFileEntryMu.Unlock()
-	return h.buildAuthFileEntryLocked(auth, quotaSupported...)
+	return h.buildAuthFileEntryLocked(auth, quota)
 }
 
 func isPersistentAuthFailure(auth *coreauth.Auth, now time.Time) bool {
@@ -634,7 +643,7 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 	return unavailable, status, statusMessage, nextRetry
 }
 
-func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported ...map[string]struct{}) gin.H {
+func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQuotaContext) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -674,25 +683,15 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
 	}
-	var quotaSupportedMap map[string]struct{}
-	if len(quotaSupported) > 0 {
-		quotaSupportedMap = quotaSupported[0]
-	}
-	if quotaSupportedMap != nil {
-		if _, ok := quotaSupportedMap[strings.ToLower(strings.TrimSpace(auth.Provider))]; ok {
-			entry["supports_quota"] = true
-			entry["quota_provider"] = auth.Provider
-		}
-	} else {
-		h.mu.Lock()
-		host := h.pluginHost
-		h.mu.Unlock()
-		if host != nil && host.HasQuotaProvider(auth.Provider) {
-			entry["supports_quota"] = true
-			entry["quota_provider"] = auth.Provider
+	if pluginID := quota.pluginIDs[strings.ToLower(strings.TrimSpace(auth.Provider))]; pluginID != "" {
+		entry["supports_quota"] = true
+		entry["quota_provider"] = auth.Provider
+		if quota.v8 {
+			entry["quota_plugin_id"] = pluginID
 		}
 	}
-	if auth.Metadata != nil {
+	// Declarative quota_probe is only executed by the v0 quota/fetch route.
+	if !quota.v8 && auth.Metadata != nil {
 		if probe, okProbe := auth.Metadata["quota_probe"]; okProbe && probe != nil {
 			entry["supports_quota"] = true
 			entry["quota_probe"] = probe

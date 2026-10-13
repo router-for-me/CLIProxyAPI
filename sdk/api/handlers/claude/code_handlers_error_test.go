@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,8 +12,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/tidwall/gjson"
 )
 
@@ -297,5 +301,88 @@ func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	}
 	if gotErr != wantErr {
 		t.Fatalf("pending error = %p, want %p", gotErr, wantErr)
+	}
+}
+
+type preFTKeepAliveClaudeExecutor struct {
+	chunks chan coreexecutor.StreamChunk
+}
+
+func (*preFTKeepAliveClaudeExecutor) Identifier() string { return "pre-ft-keepalive-claude-executor" }
+
+func (*preFTKeepAliveClaudeExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *preFTKeepAliveClaudeExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return &coreexecutor.StreamResult{Chunks: e.chunks}, nil
+}
+
+func (*preFTKeepAliveClaudeExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (*preFTKeepAliveClaudeExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (*preFTKeepAliveClaudeExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestClaudeMessagesHandlerSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tickChan := make(chan time.Time)
+	restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		return tickChan, func() {}
+	})
+	defer restore()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	executor := &preFTKeepAliveClaudeExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "pre-ft-keepalive-claude-model"
+	auth := &coreauth.Auth{ID: "pre-ft-keepalive-claude-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	go func() {
+		tickChan <- time.Unix(1, 0)
+		tickChan <- time.Unix(2, 0)
+		chunks <- coreexecutor.StreamChunk{Err: errors.New("claude upstream failed after keepalive")}
+		close(chunks)
+	}()
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			KeepAliveSeconds:      10,
+			SendKeepAliveBeforeFT: true,
+		},
+	}, manager)
+	h := NewClaudeCodeAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/messages", h.ClaudeMessages)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{\"model\":\""+model+"\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ": keep-alive\n\n") {
+		t.Fatalf("missing keep-alive comment: %q", body)
+	}
+	if !strings.Contains(body, "event: error\ndata: ") || !strings.Contains(body, "claude upstream failed after keepalive") {
+		t.Fatalf("missing Claude SSE JSON error event after keepalive: %q", body)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
 
 // IsAuthTokenPayloadKey returns true if key is a credential or token lifecycle field
@@ -69,6 +71,8 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
 		return merged
 	}
+
+	merged.CodexRefreshPatch = updated.CodexRefreshPatch
 
 	// 1. Refresh Lifecycle Timestamps
 	merged.RejectedAccessToken = updated.RejectedAccessToken
@@ -209,6 +213,34 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 			if strings.EqualFold(strings.TrimSpace(k), "proxy_url") {
 				continue
 			}
+			if updated.CodexRefreshPatch != nil && codex.IsCodexCredentialKey(strings.ToLower(strings.TrimSpace(k))) {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(k), "siwc") {
+				siwcUpd, okUpd := v.(map[string]any)
+				if !okUpd || len(siwcUpd) == 0 {
+					continue
+				}
+				baseVal, hadInBase := baseMeta[k]
+				changedByExecutor := !hadInBase || !reflect.DeepEqual(baseVal, v)
+				if changedByExecutor {
+					mergedSIWC := make(map[string]any)
+					if curSIWC, okCur := current.Metadata[k].(map[string]any); okCur {
+						for sk, sv := range curSIWC {
+							mergedSIWC[sk] = sv
+						}
+					} else if bSIWC, okBase := baseVal.(map[string]any); okBase {
+						for sk, sv := range bSIWC {
+							mergedSIWC[sk] = sv
+						}
+					}
+					for sk, sv := range siwcUpd {
+						mergedSIWC[sk] = sv
+					}
+					merged.Metadata[k] = mergedSIWC
+				}
+				continue
+			}
 			baseVal, hadInBase := baseMeta[k]
 			currentVal, hadInCurrent := current.Metadata[k]
 
@@ -225,7 +257,8 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 		// Deletions by executor: only delete if user didn't modify the field concurrently
 		if baseMeta != nil {
 			for k, baseVal := range baseMeta {
-				if strings.EqualFold(strings.TrimSpace(k), "proxy_url") {
+				trimmedKey := strings.ToLower(strings.TrimSpace(k))
+				if trimmedKey == "proxy_url" || trimmedKey == "siwc" || trimmedKey == "use_siwc" {
 					continue
 				}
 				if _, inUpdated := updated.Metadata[k]; !inUpdated {
@@ -237,6 +270,10 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 				}
 			}
 		}
+	}
+
+	if updated.CodexRefreshPatch != nil {
+		merged.Metadata = updated.CodexRefreshPatch.Apply(merged.Metadata)
 	}
 
 	// 2. Storage and Runtime

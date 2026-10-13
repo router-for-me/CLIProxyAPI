@@ -249,7 +249,7 @@ func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[str
 				continue
 			}
 			templates[slug] = cloneCodexClientModelMap(model)
-			if slug == "gpt-5.5" {
+			if defaultTemplate == nil || slug == "gpt-5.5" {
 				defaultTemplate = cloneCodexClientModelMap(model)
 			}
 		}

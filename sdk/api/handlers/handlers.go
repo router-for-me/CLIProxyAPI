@@ -157,6 +157,11 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	return payload
 }
 
+var streamingKeepAliveTickerFactory = func(interval time.Duration) (<-chan time.Time, func()) {
+	ticker := time.NewTicker(interval)
+	return ticker.C, ticker.Stop
+}
+
 // StreamingKeepAliveInterval returns the streaming keep-alive interval for this server (SSE heartbeats and WebSocket Ping frames).
 // Returning 0 disables keep-alives (default when unset).
 func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
@@ -168,6 +173,42 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 		return 0
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+// StreamingSendKeepAliveBeforeFT returns whether SSE keep-alives should be sent before the first token arrives.
+// It is active only when streaming.send-keepalive-before-ft is true and streaming.keepalive-seconds > 0.
+func StreamingSendKeepAliveBeforeFT(cfg *config.SDKConfig) bool {
+	return cfg != nil && cfg.Streaming.SendKeepAliveBeforeFT && StreamingKeepAliveInterval(cfg) > 0
+}
+
+// NewStreamingKeepAliveTicker returns a ticker channel and a stop function for streaming keep-alives.
+// When interval <= 0, it returns a nil channel and a no-op stop function.
+func NewStreamingKeepAliveTicker(interval time.Duration) (<-chan time.Time, func()) {
+	if interval <= 0 {
+		return nil, func() {}
+	}
+	return streamingKeepAliveTickerFactory(interval)
+}
+
+// NewPreFirstTokenKeepAliveTicker returns a ticker channel and a stop function for pre-first-token SSE keep-alives.
+// It is active only when streaming.send-keepalive-before-ft is true and streaming.keepalive-seconds > 0.
+func NewPreFirstTokenKeepAliveTicker(cfg *config.SDKConfig) (<-chan time.Time, func()) {
+	if !StreamingSendKeepAliveBeforeFT(cfg) {
+		return nil, func() {}
+	}
+	return NewStreamingKeepAliveTicker(StreamingKeepAliveInterval(cfg))
+}
+
+// SetStreamingKeepAliveTickerFactoryForTest overrides the keep-alive ticker factory for deterministic tests
+// and returns a restore function.
+func SetStreamingKeepAliveTickerFactoryForTest(factory func(interval time.Duration) (<-chan time.Time, func())) func() {
+	prev := streamingKeepAliveTickerFactory
+	if factory != nil {
+		streamingKeepAliveTickerFactory = factory
+	}
+	return func() {
+		streamingKeepAliveTickerFactory = prev
+	}
 }
 
 // NonStreamingKeepAliveInterval returns the keep-alive interval for non-streaming responses.

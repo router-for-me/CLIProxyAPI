@@ -1305,6 +1305,16 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	return models
 }
 
+// isQuotaSuspension reports whether a suspension is a quota cooldown. A model in a
+// quota cooldown stays listed: the limit is temporary, and a request meanwhile gets a
+// 429 with its retry time instead of an unknown model. A credential-wide quota
+// ("credential_quota") suspends every model of that credential, so it is a quota
+// cooldown too; counting it as another failure hides all of them when no other
+// credential serves them.
+func isQuotaSuspension(reason string) bool {
+	return strings.EqualFold(reason, "quota") || strings.EqualFold(reason, "credential_quota")
+}
+
 func modelRegistrationAvailability(registration *ModelRegistration, now time.Time) (bool, time.Time) {
 	if registration == nil {
 		return false, time.Time{}
@@ -1328,23 +1338,23 @@ func modelRegistrationAvailability(registration *ModelRegistration, now time.Tim
 
 	cooldownSuspended := 0
 	otherSuspended := 0
-	quotaAndOtherSuspended := 0
+	quotaAndSuspended := 0
 	if registration.SuspendedClients != nil {
 		for clientID, reason := range registration.SuspendedClients {
-			if strings.EqualFold(reason, "quota") {
+			if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+				quotaAndSuspended++
+			}
+			if isQuotaSuspension(reason) {
 				cooldownSuspended++
 				continue
 			}
 			otherSuspended++
-			if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
-				quotaAndOtherSuspended++
-			}
 		}
 	}
 
-	// A credential-wide quota can mark the same client both quota-exceeded and
+	// A quota cooldown can mark the same client both quota-exceeded and
 	// suspended. Count that unavailable client only once.
-	effectiveClients := availableClients - expiredClients - otherSuspended + quotaAndOtherSuspended
+	effectiveClients := availableClients - expiredClients - cooldownSuspended - otherSuspended + quotaAndSuspended
 	if effectiveClients < 0 {
 		effectiveClients = 0
 	}
@@ -1505,7 +1515,7 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		expiredClients := 0
 		cooldownSuspended := 0
 		otherSuspended := 0
-		quotaAndOtherSuspended := 0
+		quotaAndSuspended := 0
 		if ok && registration != nil {
 			if registration.QuotaExceededClients != nil {
 				for clientID, quotaTime := range registration.QuotaExceededClients {
@@ -1528,20 +1538,20 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 					if p, okProvider := r.clientProviders[clientID]; !okProvider || p != provider {
 						continue
 					}
-					if strings.EqualFold(reason, "quota") {
+					if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+						quotaAndSuspended++
+					}
+					if isQuotaSuspension(reason) {
 						cooldownSuspended++
 						continue
 					}
 					otherSuspended++
-					if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
-						quotaAndOtherSuspended++
-					}
 				}
 			}
 		}
 
 		availableClients := entry.count
-		effectiveClients := availableClients - expiredClients - otherSuspended + quotaAndOtherSuspended
+		effectiveClients := availableClients - expiredClients - cooldownSuspended - otherSuspended + quotaAndSuspended
 		if effectiveClients < 0 {
 			effectiveClients = 0
 		}

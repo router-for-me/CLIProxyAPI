@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -37,6 +38,38 @@ const (
 	exampleAPIKeyManagementPath = "/management.html"
 	exampleAPIKeyManagementURL  = "/management.html?safe-mode=configure"
 )
+
+func (s *Server) maxRequestBodyBytes() int64 {
+	if s == nil {
+		return 0
+	}
+	cfg := s.getConfig()
+	if cfg == nil || cfg.MaxRequestBodyBytes <= 0 {
+		return 0
+	}
+	return cfg.MaxRequestBodyBytes
+}
+
+func (s *Server) maxRequestBodyBytesMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		maxBytes := s.maxRequestBodyBytes()
+		if maxBytes <= 0 || c == nil || c.Request == nil {
+			c.Next()
+			return
+		}
+		c.Set(handlers.MaxRequestBodyBytesContextKey, maxBytes)
+		if c.Request.ContentLength > maxBytes {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error": "http: request body too large",
+			})
+			return
+		}
+		if c.Request.Body != nil && c.Request.Body != http.NoBody {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		}
+		c.Next()
+	}
+}
 
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -188,7 +221,10 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 		if realtimeError {
 			errorType := "authentication_error"
 			code := "invalid_api_key"
-			if statusCode >= http.StatusInternalServerError {
+			if statusCode == http.StatusRequestEntityTooLarge {
+				errorType = "invalid_request_error"
+				code = "request_body_too_large"
+			} else if statusCode >= http.StatusInternalServerError {
 				errorType = "server_error"
 				code = "authentication_service_error"
 			}

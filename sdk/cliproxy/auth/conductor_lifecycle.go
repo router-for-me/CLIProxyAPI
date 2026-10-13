@@ -61,6 +61,9 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if replaced == nil || replaced == executor {
 		return
 	}
+	if sharer, ok := replaced.(ExecutionSessionSharer); ok && sharer != nil && sharer.SharesExecutionSessionsWith(executor) {
+		return
+	}
 	if closer, ok := replaced.(ExecutionSessionCloser); ok && closer != nil {
 		closer.CloseExecutionSession(CloseAllExecutionSessionsID)
 	}
@@ -189,6 +192,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	NormalizeCredentialMetadata(auth.Metadata)
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("update auth: %w", errWeight)
@@ -216,9 +222,11 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	// Do not let an in-flight refresh overwrite credentials committed after its snapshot.
 	if mode == updateModeRefresh && base != nil && (existing.CredentialVersion != base.CredentialVersion || CredentialsChanged(base, existing)) {
-		current := existing.Clone()
-		m.mu.Unlock()
-		return current, nil
+		if auth.CodexRefreshPatch == nil || !auth.CodexRefreshPatch.CanApplyTo(existing.Metadata) {
+			current := existing.Clone()
+			m.mu.Unlock()
+			return current, nil
+		}
 	}
 	if mode == updateModeRefresh {
 		merged := MergeRefreshedAuth(base, existing, auth)
@@ -313,7 +321,8 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	// Runtime-only changes made during I/O are merged below, never overwritten.
 	existingBeforeSave := existing.Clone()
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
-	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
+	persistCtx := context.WithValue(ctx, authUpdateModeContextKey{}, mode)
+	if errPersist := m.persistLocked(persistCtx, auth); errPersist != nil {
 		// A minted Meta key must reach the store before requests can use it.
 		if persistMetaMint {
 			m.mu.Unlock()
@@ -413,7 +422,9 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 
 	if provider != "" {
 		if exec, ok := m.Executor(provider); ok && exec != nil {
-			if closer, okCloser := exec.(ExecutionSessionCloser); okCloser {
+			if authCloser, okAuthCloser := exec.(AuthExecutionSessionCloser); okAuthCloser && authCloser != nil {
+				authCloser.CloseAuthExecutionSessions(id)
+			} else if closer, okCloser := exec.(ExecutionSessionCloser); okCloser {
 				closer.CloseExecutionSession(CloseAllExecutionSessionsID)
 			}
 		}

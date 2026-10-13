@@ -52,6 +52,11 @@ func NewCodexAutoExecutor(cfg *config.Config) *CodexAutoExecutor {
 
 func (e *CodexAutoExecutor) Identifier() string { return "codex" }
 
+// UsesConfig reports whether the executor was created for cfg.
+func (e *CodexAutoExecutor) UsesConfig(cfg *config.Config) bool {
+	return e != nil && e.httpExec != nil && e.httpExec.cfg == cfg
+}
+
 func (e *CodexAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if e == nil || e.httpExec == nil {
 		return nil
@@ -111,6 +116,20 @@ func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 		return
 	}
 	e.wsExec.CloseExecutionSession(sessionID)
+}
+
+func (e *CodexAutoExecutor) SharesExecutionSessionsWith(other cliproxyauth.ProviderExecutor) bool {
+	if e == nil || e.wsExec == nil {
+		return false
+	}
+	return e.wsExec.SharesExecutionSessionsWith(other)
+}
+
+func (e *CodexAutoExecutor) CloseAuthExecutionSessions(authID string) {
+	if e == nil || e.wsExec == nil {
+		return
+	}
+	e.wsExec.CloseAuthExecutionSessions(authID)
 }
 
 func (e *CodexAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {

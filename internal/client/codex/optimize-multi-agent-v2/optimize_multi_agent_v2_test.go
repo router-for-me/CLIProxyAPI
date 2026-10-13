@@ -117,6 +117,18 @@ func TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata(t *testing.T) {
 	if len(custom.serviceTiers) != 0 {
 		t.Fatalf("custom service tiers = %v, want none", custom.serviceTiers)
 	}
+
+	catalogWithoutGPT55 := []byte(`{"models":[
+		{"slug":"gpt-6.1-sol","display_name":"First Fallback","description":"First fallback model.","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"service_tiers":[{"id":"priority"}],"priority":1},
+		{"slug":"gpt-5.6-sol","display_name":"Second","description":"Second model.","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"medium"}],"priority":2}
+	]}`)
+	fallbackModels := codexSpawnAgentModelsFromSources([]map[string]any{{"id": "third-party-model"}}, catalogWithoutGPT55, nil)
+	if len(fallbackModels) != 1 {
+		t.Fatalf("fallback model count = %d, want 1", len(fallbackModels))
+	}
+	if fallbackModels[0].id != "third-party-model" || fallbackModels[0].defaultReasoningEffort != "high" {
+		t.Fatalf("fallback model = %+v, want defaultReasoningEffort=high from first template", fallbackModels[0])
+	}
 }
 
 func TestDecodeCodexHomeAvailableModels(t *testing.T) {
