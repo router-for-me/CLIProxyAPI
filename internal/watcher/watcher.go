@@ -37,6 +37,7 @@ type Watcher struct {
 	clientsMutex      sync.RWMutex
 	authRescanMu      sync.Mutex
 	configReloadMu    sync.Mutex
+	configApplyMu     sync.Mutex // Serializes config loads with the hash they record.
 	configReloadTimer *time.Timer
 	serverUpdateMu    sync.Mutex
 	serverUpdateTimer *time.Timer
