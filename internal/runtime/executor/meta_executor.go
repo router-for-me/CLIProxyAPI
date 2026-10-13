@@ -98,13 +98,16 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	dcaToken := extractDCAToken(auth)
 	if dcaToken == "" {
 		if _, token := metaCreds(auth); token != "" {
-			// Best effort only. Failures keep the prior return-unchanged behavior.
+			// Surface revalidation failures so the refresh manager retries
+			// with its failure backoff instead of stamping this refresh as
+			// successful and waiting out the full lead. The manager keeps
+			// the still-valid minted key active on refresh failure.
 			if strings.EqualFold(auth.AuthKind(), cliproxyauth.AuthKindOAuth) {
-				if refreshed, errRevalidate := e.revalidateMetaWonderFull(ctx, auth); errRevalidate == nil {
-					return refreshed, nil
-				} else {
-					log.Debugf("meta executor: wonder full revalidation failed: %v", errRevalidate)
+				refreshed, errRevalidate := e.revalidateMetaWonderFull(ctx, auth)
+				if errRevalidate != nil {
+					return nil, fmt.Errorf("meta executor: wonder full revalidation failed: %w", errRevalidate)
 				}
+				return refreshed, nil
 			}
 			return auth, nil
 		}

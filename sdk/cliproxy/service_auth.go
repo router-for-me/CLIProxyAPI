@@ -517,6 +517,10 @@ func (h metaModelRegistrationHook) OnAuthUpdated(ctx context.Context, auth *core
 
 type metaRegistrationContextKey struct{}
 
+// metaRegistrationTimeout bounds detached post-commit reconciliation,
+// including any synchronous plugin model discovery it triggers.
+const metaRegistrationTimeout = 30 * time.Second
+
 func (h metaModelRegistrationHook) reregister(ctx context.Context, auth *coreauth.Auth) {
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
 		return
@@ -532,9 +536,13 @@ func (h metaModelRegistrationHook) reregister(ctx context.Context, auth *coreaut
 		return
 	}
 	// The credential update already committed and persisted before this
-	// hook fired. Reconciliation must finish even when the caller's
-	// request context was canceled in between.
+	// hook fired, so reconciliation detaches from caller cancellation.
+	// The detached context stays bounded: plugin model discovery runs
+	// synchronously inside reconciliation and must not stall a request
+	// goroutine forever after the client disconnects.
 	ctx = context.WithValue(context.WithoutCancel(ctx), metaRegistrationContextKey{}, true)
+	ctx, cancel := context.WithTimeout(ctx, metaRegistrationTimeout)
+	defer cancel()
 	h.service.completeModelRegistrationForAuth(ctx, auth)
 }
 

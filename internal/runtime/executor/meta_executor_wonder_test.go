@@ -361,3 +361,36 @@ func TestMetaExecutor_RefreshRevalidatesWithoutDCAToken(t *testing.T) {
 		t.Fatal("expected no wonder_full_entitled recorded for apikey credential")
 	}
 }
+
+func TestMetaExecutor_RefreshWithoutDCATokenReturnsRevalidationError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"catalog unavailable"}`))
+	}))
+	defer server.Close()
+	t.Setenv("META_MODELS_URL", server.URL)
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"api_key":   "LLM|minted",
+			"base_url":  "https://api.meta.ai/v1",
+		},
+		Metadata: map[string]any{
+			"type":           "meta",
+			"auth_kind":      "oauth",
+			"api_key":        "LLM|minted",
+			"access_token":   "LLM|minted",
+			"subs_tier_name": "High Usage",
+			"is_subs_active": true,
+		},
+	}
+	if _, err := exec.Refresh(context.Background(), auth); err == nil {
+		t.Fatal("Refresh() error = nil, want revalidation failure surfaced for refresh backoff")
+	}
+	if _, ok := auth.Metadata["wonder_full_entitled"]; ok {
+		t.Fatal("expected no wonder_full_entitled recorded after failed revalidation")
+	}
+}
