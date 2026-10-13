@@ -134,3 +134,77 @@ func TestRegisterModelsForAuth_MetaWonderFullExplicitConfigModelsKept(t *testing
 		t.Fatalf("expected explicitly configured muse-wonder-full-1.0 to stay registered, got %v", seen)
 	}
 }
+
+func TestMetaRegistrationHookReregistersAfterTierUpdate(t *testing.T) {
+	coreManager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: coreManager}
+	coreManager.AddHook(metaModelRegistrationHook{service: service})
+
+	auth := &coreauth.Auth{
+		ID:       "auth-meta-wonder-full-hook",
+		Provider: "meta",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"type":         "meta",
+			"auth_kind":    "oauth",
+			"access_token": "dca:valid",
+			"dca_token":    "dca:valid",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	ctx := context.Background()
+	registered, errRegister := coreManager.Register(ctx, auth)
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	registeredIDs := func() map[string]bool {
+		seen := make(map[string]bool)
+		for _, model := range registry.GetModelsForClient(auth.ID) {
+			if model != nil {
+				seen[strings.TrimSpace(model.ID)] = true
+			}
+		}
+		return seen
+	}
+
+	if seen := registeredIDs(); !seen["muse-wonder-1.0"] || seen["muse-wonder-full-1.0"] {
+		t.Fatalf("before mint: want Wonder without Full, got %v", seen)
+	}
+
+	minted := registered.Clone()
+	minted.Metadata["api_key"] = "LLM|minted"
+	minted.Metadata["access_token"] = "LLM|minted"
+	minted.Metadata["subs_tier_name"] = "Muse Code Max Usage"
+	minted.Metadata["subs_tier_id"] = "28367280949604159"
+	minted.Metadata["is_subs_active"] = true
+	saved, errUpdate := coreManager.UpdatePreparedAuth(ctx, registered, minted)
+	if errUpdate != nil {
+		t.Fatalf("UpdatePreparedAuth() error = %v", errUpdate)
+	}
+	if saved == nil {
+		t.Fatal("UpdatePreparedAuth() returned nil auth")
+	}
+	if seen := registeredIDs(); !seen["muse-wonder-full-1.0"] || !seen["muse-wonder-full-1.0-contributor"] {
+		t.Fatalf("after mint: want Wonder Full registered, got %v", seen)
+	}
+
+	downgraded := saved.Clone()
+	downgraded.Metadata["subs_tier_name"] = "High Usage"
+	downgraded.Metadata["subs_tier_id"] = "high_usage"
+	if _, errDowngrade := coreManager.Update(ctx, downgraded); errDowngrade != nil {
+		t.Fatalf("Update() downgrade error = %v", errDowngrade)
+	}
+	if seen := registeredIDs(); seen["muse-wonder-full-1.0"] || !seen["muse-wonder-1.0"] {
+		t.Fatalf("after downgrade: want Wonder without Full, got %v", seen)
+	}
+}

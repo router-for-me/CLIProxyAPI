@@ -26,11 +26,18 @@ func (MetaAuthenticator) Provider() string {
 	return "meta"
 }
 
+// metaRefreshLead bounds how long saved subscription state is treated as
+// current. Minted Meta keys do not advertise an expiration, so the manager
+// applies this value as a revalidation interval after the last refresh: a
+// due refresh re-mints the key and records the current subscription tier,
+// which keeps plan-gated model registration (for example Wonder Full) in
+// step with upgrades, downgrades, and cancellations. Recovery on 401 and
+// request preparation still happen on demand.
+var metaRefreshLead = 24 * time.Hour
+
 // RefreshLead instructs the manager on token refresh lead time.
-// Meta credentials do not advertise an API key expiration, so scheduled refresh
-// is disabled and recovery is triggered on demand (e.g. on 401 or request preparation).
 func (MetaAuthenticator) RefreshLead() *time.Duration {
-	return nil
+	return &metaRefreshLead
 }
 
 // Login launches the OAuth device-code flow to obtain Meta tokens and persists them.
