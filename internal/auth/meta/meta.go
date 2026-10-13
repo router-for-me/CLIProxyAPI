@@ -488,12 +488,9 @@ func (a *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedKeyR
 	return &minted, nil
 }
 
-// WonderFullEntitled reports whether Meta currently serves Muse Wonder Full
-// to the account behind a minted API key. The minted key outlives the DCA
-// token used for minting, so once that token expires the account-scoped
-// Muse Code model catalog is the remaining way to revalidate plan-gated
-// entitlement without a new login: Full models appear in the catalog only
-// for entitled accounts.
+// WonderFullEntitled reports whether the account-scoped Muse Code catalog
+// currently serves Wonder Full to the minted key, which outlives the DCA
+// token used for minting.
 func (a *MetaAuth) WonderFullEntitled(ctx context.Context, baseURL, apiKey string) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()

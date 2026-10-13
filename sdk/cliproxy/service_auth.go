@@ -500,12 +500,8 @@ func isStaleCoreAuth(existing, incoming *coreauth.Auth) bool {
 	return false
 }
 
-// metaModelRegistrationHook re-registers models after Meta credential
-// updates. Request preparation mints a key and records subscription tier
-// state through Manager.UpdatePreparedAuth, which emits no auth-directory
-// event for in-memory or custom stores; without this hook the model set
-// registered before the tier existed (for example without Wonder Full for
-// a DCA-only credential) would stay in effect for the life of the process.
+// Credential updates emit no auth-directory event in in-memory or custom
+// stores, so Meta model registration must follow the manager lifecycle.
 type metaModelRegistrationHook struct {
 	coreauth.NoopHook
 	service *Service
@@ -520,14 +516,8 @@ func (h metaModelRegistrationHook) OnAuthUpdated(ctx context.Context, auth *core
 }
 
 func (h metaModelRegistrationHook) reregister(ctx context.Context, auth *coreauth.Auth) {
-	if h.service == nil || auth == nil || auth.ID == "" {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
 		return
-	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
-		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	h.service.completeModelRegistrationForAuth(ctx, auth)
 }

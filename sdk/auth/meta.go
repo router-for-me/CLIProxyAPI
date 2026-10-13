@@ -26,13 +26,8 @@ func (MetaAuthenticator) Provider() string {
 	return "meta"
 }
 
-// metaRefreshLead bounds how long saved subscription state is treated as
-// current. Minted Meta keys do not advertise an expiration, so the manager
-// applies this value as a revalidation interval after the last refresh: a
-// due refresh re-mints the key and records the current subscription tier,
-// which keeps plan-gated model registration (for example Wonder Full) in
-// step with upgrades, downgrades, and cancellations. Recovery on 401 and
-// request preparation still happen on demand.
+// Minted keys carry no expiry, so the lead doubles as the interval after
+// which saved subscription tier state gets revalidated by a refresh.
 var metaRefreshLead = 24 * time.Hour
 
 // RefreshLead instructs the manager on token refresh lead time.
