@@ -417,3 +417,88 @@ func TestManager_ExecuteStream_WireModelOverrideRecordsFinalModelOn404(t *testin
 	}
 	assertWireOverrideLongCooldown(t, m, executor)
 }
+
+// Credential rotation must start each attempt with the wire-model key cleared:
+// when the first credential's payload rule rewrites the body model (recording
+// the wire model) and the rotation lands on a pass-through credential, the
+// stale key keeps classifying the second credential's structured 404 against
+// the first credential's rewritten name, cooling for minutes instead of the
+// model-support window (#5514 review).
+type wireModelRotationExecutor struct {
+	attempts       []string
+	sawNilMetadata int
+}
+
+func (e *wireModelRotationExecutor) Identifier() string { return "wire-override-provider" }
+
+func (e *wireModelRotationExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.attempts = append(e.attempts, auth.ID)
+	if opts.Metadata == nil {
+		e.sawNilMetadata++
+	}
+	if len(e.attempts) == 1 {
+		opts.Metadata[cliproxyexecutor.WireModelMetadataKey] = "configured-wire"
+		return cliproxyexecutor.Response{}, overloadStatusError()
+	}
+	return cliproxyexecutor.Response{}, &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"type":"not_found_error","message":"model gpt-6-astra was not found"}`,
+	}
+}
+
+func (e *wireModelRotationExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, errors.New("stream not supported")
+}
+
+func (e *wireModelRotationExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *wireModelRotationExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, errors.New("not supported")
+}
+
+func (e *wireModelRotationExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not supported")
+}
+
+func TestManager_Execute_WireModelMetadataResetBetweenAttempts(t *testing.T) {
+	executor := &wireModelRotationExecutor{}
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(5, 0, 6)
+	m.RegisterExecutor(executor)
+	reg := registry.GetGlobalRegistry()
+	priorities := map[string]string{"auth-wire-rotation-1": "100", "auth-wire-rotation-2": "99"}
+	for id, priority := range priorities {
+		auth := &Auth{ID: id, Provider: executor.Identifier(), Status: StatusActive, Attributes: map[string]string{"priority": priority}}
+		reg.RegisterClient(id, executor.Identifier(), []*registry.ModelInfo{{ID: "tenant/public"}})
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+	}
+	req, opts := wireOverrideRequestOptions()
+
+	if _, errExec := m.Execute(context.Background(), []string{executor.Identifier()}, req, opts); errExec == nil {
+		t.Fatal("Execute expected the structured 404, got nil")
+	}
+	if len(executor.attempts) != 2 {
+		t.Fatalf("expected a rotation across two credentials, attempts = %v", executor.attempts)
+	}
+	if executor.sawNilMetadata != 0 {
+		t.Fatalf("executor received %d attempts with nil metadata; the conductor must pre-allocate the per-attempt map", executor.sawNilMetadata)
+	}
+	before := time.Now()
+	updated, _ := m.GetByID("auth-wire-rotation-2")
+	state := existingModelState(updated, canonicalModelKey("tenant/public"))
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("second credential's 404 fell into the transient branch: %v", state.NextRetryAfter.Sub(before))
+	}
+}
