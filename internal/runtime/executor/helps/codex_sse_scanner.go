@@ -43,76 +43,62 @@ var codexSSEDataPrefix = []byte("data:")
 // id: or retry: line inside such an event therefore comes before the event's data instead of
 // between its pieces, which SSE treats alike: an event's fields take effect when it is dispatched.
 // The blank line or over-limit line that ends a collection follows the event's data.
+//
+// SetAssembly(false) makes the scanner read exactly as bufio.Scanner does, for a caller that
+// budgets every upstream line while it holds a stream.
 type CodexSSEScanner struct {
 	ctx      context.Context
 	lines    *bufio.Scanner
 	maxBytes int
-	guard    func(lines, bytes int) bool
+	// stock is set while assembly is off.
+	stock bool
 	// held are the data lines of the event being collected, as read. joined is their joined value,
 	// nesting follows it, and size counts the held bytes.
 	held    [][]byte
 	joined  []byte
 	nesting codexJSONNesting
 	size    int
-	queue   []codexSSEItem
+	queue   [][]byte
 	current []byte
-	// consumedLines and consumedBytes are the upstream lines and bytes behind current.
-	consumedLines int
-	consumedBytes int
 }
 
-// codexSSEItem is a line to deliver, with the upstream lines and bytes behind it.
-type codexSSEItem struct {
-	line  []byte
-	lines int
-	size  int
-}
-
-func codexSSELine(line []byte) codexSSEItem {
-	return codexSSEItem{line: line, lines: 1, size: len(line)}
-}
-
-// NewCodexSSEScanner returns a CodexSSEScanner over r. maxBytes bounds one line, as
-// bufio.Scanner.Buffer does, and also the data lines collected for one event.
+// NewCodexSSEScanner returns a CodexSSEScanner over r, with assembly on. maxBytes bounds one line,
+// as bufio.Scanner.Buffer does, and also the data lines collected for one event.
 func NewCodexSSEScanner(ctx context.Context, r io.Reader, maxBytes int) *CodexSSEScanner {
 	lines := bufio.NewScanner(r)
 	lines.Buffer(nil, maxBytes)
 	return &CodexSSEScanner{ctx: ctx, lines: lines, maxBytes: maxBytes}
 }
 
+// SetAssembly turns event assembly on or off. While it is off, no data line starts a collection and
+// every line is delivered as read, exactly as bufio.Scanner delivers it. An event already being
+// collected is still completed.
+func (s *CodexSSEScanner) SetAssembly(on bool) { s.stock = !on }
+
 // Scan advances to the next line, or to the next assembled event data line.
 func (s *CodexSSEScanner) Scan() bool {
 	if len(s.queue) > 0 {
-		s.deliver(s.queue[0])
-		s.queue = s.queue[1:]
+		s.current, s.queue = s.queue[0], s.queue[1:]
 		return true
 	}
 	for s.lines.Scan() {
 		line := s.lines.Bytes()
 		if !bytes.HasPrefix(line, codexSSEDataPrefix) {
 			if len(line) == 0 && s.held != nil {
-				s.release(codexSSELine([]byte{}))
+				s.release([]byte{})
 				return s.Scan()
 			}
-			s.deliver(codexSSELine(line))
+			s.current = line
 			return true
 		}
-		switch {
-		case s.held == nil:
-			if !codexSSEIncompleteJSON(bytes.TrimSpace(line[len(codexSSEDataPrefix):])) {
-				s.deliver(codexSSELine(line))
+		if s.held == nil {
+			if s.stock || !codexSSEIncompleteJSON(bytes.TrimSpace(line[len(codexSSEDataPrefix):])) {
+				s.current = line
 				return true
 			}
-		case s.size+len(line) > s.maxBytes:
+		} else if s.size+len(line) > s.maxBytes {
 			// Bounded like a single line: stop collecting and let this line be read on its own.
-			s.release(codexSSELine(bytes.Clone(line)))
-			return s.Scan()
-		case s.guard != nil && !s.guard(len(s.held)+1, s.size+len(line)):
-			// The caller's budget does not cover this event: deliver its data lines one by one, as read.
-			held, _, _ := s.take()
-			for _, kept := range append(held, bytes.Clone(line)) {
-				s.queue = append(s.queue, codexSSELine(kept))
-			}
+			s.release(bytes.Clone(line))
 			return s.Scan()
 		}
 		// The underlying scanner reuses its buffer, so keep a copy.
@@ -141,34 +127,12 @@ func (s *CodexSSEScanner) hold(line []byte) bool {
 	return s.nesting.feed(value)
 }
 
-// release queues the collected event as one line, followed by the line that ended it, if any.
-func (s *CodexSSEScanner) release(end ...codexSSEItem) {
-	held, joined, size := s.take()
-	s.queue = append(s.queue, codexSSEItem{line: s.assemble(held, joined), lines: len(held), size: size})
-	s.queue = append(s.queue, end...)
-}
-
-// take ends the collection and returns what it held.
-func (s *CodexSSEScanner) take() (held [][]byte, joined []byte, size int) {
-	held, joined, size = s.held, s.joined, s.size
+// release ends the collection and queues the event as one line, followed by the line that ended
+// it, if any.
+func (s *CodexSSEScanner) release(end ...[]byte) {
+	s.queue = append(append(s.queue, s.assemble(s.held, s.joined)), end...)
 	s.held, s.joined, s.nesting, s.size = nil, nil, codexJSONNesting{}, 0
-	return held, joined, size
 }
-
-func (s *CodexSSEScanner) deliver(item codexSSEItem) {
-	s.current, s.consumedLines, s.consumedBytes = item.line, item.lines, item.size
-}
-
-// Consumed reports how many upstream lines and bytes the current line stands for: one line and its
-// own length, or, for an event assembled from several data lines, all of those lines.
-func (s *CodexSSEScanner) Consumed() (lines, bytes int) { return s.consumedLines, s.consumedBytes }
-
-// SetCollectGuard installs a check made before an event being collected holds each further data
-// line. It receives how many upstream lines and bytes the event would then hold, which Consumed
-// will report for it. When it returns false, the scanner stops collecting and delivers the held
-// lines one by one, as bufio.Scanner would, so a caller can keep its own per-line budgets while it
-// holds a stream. Lines that are not held need no check. A nil guard removes the check.
-func (s *CodexSSEScanner) SetCollectGuard(guard func(lines, bytes int) bool) { s.guard = guard }
 
 // codexSSEValue is one data line's value: the text after "data:" without the one leading space.
 func codexSSEValue(line []byte) []byte {

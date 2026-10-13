@@ -225,45 +225,21 @@ func TestCodexSSEScannerAssemblesAnEventOfThousandsOfLinesQuickly(t *testing.T) 
 	}
 }
 
-func TestCodexSSEScannerGuardFallsBackToLineByLine(t *testing.T) {
-	hook := captureCodexSSEWarnings(t)
-	stream := "data: {\"a\":\ndata: [1,\n: note\ndata: 2]}\n\ndata: {\"b\":2}\n\n"
+func TestCodexSSEScannerReadsLineByLineWhileAssemblyIsOff(t *testing.T) {
+	stream := "data: {\"a\":\ndata: 1}\n\ndata: {\"b\":\ndata: 2}\n\n"
 	scanner := NewCodexSSEScanner(context.Background(), strings.NewReader(stream), 1<<20)
-	type call struct{ lines, size int }
-	var calls []call
-	scanner.SetCollectGuard(func(lines, size int) bool {
-		calls = append(calls, call{lines, size})
-		return lines < 3
-	})
+	scanner.SetAssembly(false)
 	var got []string
 	for scanner.Scan() {
 		got = append(got, string(scanner.Bytes()))
+		if len(got) == 3 {
+			// The first event has been read as bufio.Scanner reads it; assemble from here on.
+			scanner.SetAssembly(true)
+		}
 	}
-	// The comment is never held. The third data line is refused: the held lines come out one by one.
-	want := []string{": note", "data: {\"a\":", "data: [1,", "data: 2]}", "", `data: {"b":2}`, ""}
+	want := []string{"data: {\"a\":", "data: 1}", "", `data: {"b":2}`, ""}
 	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
 		t.Fatalf("lines = %q\nwant    %q", got, want)
-	}
-	if fmt.Sprint(calls) != fmt.Sprint([]call{{2, 20}, {3, 29}}) {
-		t.Fatalf("guard calls = %v", calls)
-	}
-	if len(hook.AllEntries()) != 0 {
-		t.Fatalf("unexpected warnings: %d", len(hook.AllEntries()))
-	}
-}
-
-func TestCodexSSEScannerReportsTheLinesEachItemConsumed(t *testing.T) {
-	stream := "event: e\ndata: {\"a\":\n: note\ndata: 1}\n\ndata: {\"b\":2}\n"
-	scanner := NewCodexSSEScanner(context.Background(), strings.NewReader(stream), 1<<20)
-	var got []string
-	for scanner.Scan() {
-		lines, size := scanner.Consumed()
-		got = append(got, fmt.Sprintf("%q:%d/%d", scanner.Bytes(), lines, size))
-	}
-	// The assembled event stands for its two data lines; the comment inside it is its own line.
-	want := []string{`"event: e":1/8`, `": note":1/6`, `"data: {\"a\":1}":2/19`, `"":1/0`, `"data: {\"b\":2}":1/13`}
-	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
-		t.Fatalf("consumed = %q\nwant       %q", got, want)
 	}
 }
 

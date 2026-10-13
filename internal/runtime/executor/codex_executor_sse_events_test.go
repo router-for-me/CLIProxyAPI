@@ -42,7 +42,9 @@ func codexStreamChunks(t *testing.T, stream string, buffered bool) []string {
 func TestCodexExecuteStreamTreatsAnEventSplitAcrossDataLinesAsOneEvent(t *testing.T) {
 	completed := `{"type":"response.completed","response":{"id":"resp_split","model":"gpt-5.4","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}`
 	cut := strings.Index(completed, `"output":`)
-	created := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\",\"model\":\"gpt-5.4\"}}\n\n"
+	// With bootstrap buffering, the first output releases the stream before the completed event.
+	created := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\",\"model\":\"gpt-5.4\"}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\"}\n\n"
 	oneLine := created + "event: response.completed\ndata: " + completed + "\n\n"
 	split := created + "event: response.completed\ndata: " + completed[:cut] + "\ndata: " + completed[cut:] + "\n\n"
 	for _, buffered := range []bool{false, true} {
@@ -117,61 +119,26 @@ func TestCodexExecuteStreamKeepsAnInvalidSplitEventInvalid(t *testing.T) {
 	}
 }
 
-func TestCodexExecuteStreamKeepsBootstrapBudgetsForASplitEvent(t *testing.T) {
-	// One handshake event split across more data lines than the bootstrap frame budget holds.
-	var split strings.Builder
-	split.WriteString("data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_split\",\"output\":[\n")
-	for range codexBootstrapMaxBufferedFrames + 10 {
-		split.WriteString("data: {\"x\":1},\n")
-	}
-	split.WriteString("data: {\"x\":1}]}}\n\n")
-	stream := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\",\"model\":\"gpt-5.4\"}}\n\n" + split.String() +
+func TestCodexExecuteStreamReadsLineByLineWhileBootstrapBufferingHoldsTheStream(t *testing.T) {
+	// A handshake event split across three data lines, well within the bootstrap budgets.
+	stream := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\",\"model\":\"gpt-5.4\"}}\n\n" +
+		"data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_split\",\"output\":[\ndata: {\"x\":1},\ndata: {\"x\":1}]}}\n\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_split\",\"status\":\"completed\",\"output\":[]}}\n\n"
-	countFragments := func(chunks []string) int {
-		fragments := 0
+	fragments := func(chunks []string) int {
+		count := 0
 		for _, chunk := range chunks {
 			if chunk == `data: {"x":1},` {
-				fragments++
+				count++
 			}
 		}
-		return fragments
+		return count
 	}
-	// Unbuffered, the event is assembled; while bootstrap buffering holds the stream, its lines
-	// stay within the frame budget and are released one by one, as they were before.
-	if fragments := countFragments(codexStreamChunks(t, stream, false)); fragments != 0 {
-		t.Fatalf("unbuffered: %d fragments emitted, want the event assembled", fragments)
+	// Unbuffered, the event is assembled. While bootstrap buffering holds the stream, every line is
+	// read and budgeted on its own, as it was before.
+	if count := fragments(codexStreamChunks(t, stream, false)); count != 0 {
+		t.Fatalf("unbuffered: %d fragments emitted, want the event assembled", count)
 	}
-	if fragments := countFragments(codexStreamChunks(t, stream, true)); fragments == 0 {
-		t.Fatal("buffered: the event was assembled past the bootstrap frame budget")
-	}
-}
-
-func TestCodexExecuteStreamChargesEverySplitLineToTheBootstrapBudget(t *testing.T) {
-	// Several valid handshake events in a row, each split across 20 data lines: together they
-	// span more upstream lines than the 48-line bootstrap budget, though each fits on its own.
-	var stream strings.Builder
-	stream.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_many\",\"model\":\"gpt-5.4\"}}\n\n")
-	for range 4 {
-		stream.WriteString("data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_many\",\"output\":[\n")
-		for range 18 {
-			stream.WriteString("data: {\"x\":1},\n")
-		}
-		stream.WriteString("data: {\"x\":1}]}}\n\n")
-	}
-	stream.WriteString("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_many\",\"status\":\"completed\",\"output\":[]}}\n\n")
-	// The created event and two 20-line events fit the 48-line budget; the third would not, so
-	// its lines are released one by one and the stream starts there instead of being held.
-	assembledBeforeRelease, released := 0, false
-	for _, chunk := range codexStreamChunks(t, stream.String(), true) {
-		if chunk == `data: {"x":1},` {
-			released = true
-			break
-		}
-		if strings.HasPrefix(chunk, `data: {"type":"response.in_progress"`) && json.Valid([]byte(strings.TrimPrefix(chunk, "data: "))) {
-			assembledBeforeRelease++
-		}
-	}
-	if !released || assembledBeforeRelease != 2 {
-		t.Fatalf("assembled before release = %d (released %t), want 2 within the 48-line budget", assembledBeforeRelease, released)
+	if count := fragments(codexStreamChunks(t, stream, true)); count != 1 {
+		t.Fatalf("buffered: %d fragments emitted, want the event read line by line", count)
 	}
 }
