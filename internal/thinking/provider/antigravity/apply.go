@@ -52,7 +52,28 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	isClaude := strings.Contains(strings.ToLower(modelInfo.ID), "claude")
 
-	// ModeAuto: Always use Budget format with thinkingBudget=-1
+	support := modelInfo.Thinking
+	// For Gemini models on Antigravity with discrete levels (not Claude):
+	if len(support.Levels) > 0 && !isClaude {
+		if config.Mode == thinking.ModeBudget {
+			levelStr, ok := thinking.ConvertBudgetToLevel(config.Budget)
+			if ok && levelStr != "" && levelStr != "none" {
+				config.Level = thinking.ThinkingLevel(levelStr)
+				config.Mode = thinking.ModeLevel
+			} else if levelStr == "none" {
+				config.Mode = thinking.ModeNone
+				config.Budget = 0
+			}
+		} else if config.Mode == thinking.ModeNone {
+			config.Budget = 0
+		} else if config.Mode == thinking.ModeAuto {
+			config.Level = thinking.LevelHigh
+			config.Mode = thinking.ModeLevel
+		}
+		return a.applyLevelFormat(body, config)
+	}
+
+	// ModeAuto: Always use Budget format with thinkingBudget=-1 (for Claude or Gemini 2.5)
 	if config.Mode == thinking.ModeAuto {
 		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 	}
@@ -60,11 +81,6 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 	}
 
-	// For non-auto modes, choose format based on model capabilities
-	support := modelInfo.Thinking
-	if len(support.Levels) > 0 {
-		return a.applyLevelFormat(body, config)
-	}
 	return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 }
 
@@ -103,17 +119,11 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
-		if config.Budget == 0 && config.Level == "" {
-			// With the amount fully disabled, visibility is irrelevant. Restoring
-			// includeThoughts alone would recreate thinkingConfig and let a
-			// default-on model think again.
-			result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig")
-			return result, nil
-		}
-		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
-		}
-		return applyAntigravityIncludeThoughts(result, body), nil
+		result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel")
+		result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
+		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", 0)
+		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
+		return result, nil
 	}
 
 	// Only handle ModeLevel - budget conversion should be done by upper layer

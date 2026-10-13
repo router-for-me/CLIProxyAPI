@@ -2,6 +2,7 @@
 package thinking
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 
@@ -886,13 +887,139 @@ func extractInteractionsConfig(body []byte) ThinkingConfig {
 // OpenAI uses level-based thinking configuration only, no numeric budget support.
 // The "none" value is treated specially to return ModeNone.
 func extractOpenAIConfig(body []byte) ThinkingConfig {
-	// Check reasoning_effort (OpenAI Chat Completions format)
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return ThinkingConfig{}
+	}
+
+	// 1. Check reasoning_effort (OpenAI Chat standard)
 	if effort := gjson.GetBytes(body, "reasoning_effort"); effort.Exists() {
-		value := effort.String()
-		if value == "none" {
+		if effort.Type == gjson.Number {
+			val := int(effort.Int())
+			if val == 0 {
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			} else if val == -1 {
+				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			} else if val > 0 {
+				return ThinkingConfig{Mode: ModeBudget, Budget: val}
+			}
+		} else if effort.Type == gjson.String {
+			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			if value == "none" || value == "off" {
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			}
+			if value == "auto" || value == "-1" {
+				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			}
+			if budget, err := strconv.Atoi(value); err == nil {
+				if budget == 0 {
+					return ThinkingConfig{Mode: ModeNone, Budget: 0}
+				} else if budget == -1 {
+					return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+				} else if budget > 0 {
+					return ThinkingConfig{Mode: ModeBudget, Budget: budget}
+				}
+			}
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	// 2. Check reasoning object (Kelivo OpenRouter & Responses dialect)
+	if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.IsObject() {
+		if enabled := reasoning.Get("enabled"); enabled.Exists() && enabled.Type == gjson.False {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
-		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		if maxTok := reasoning.Get("max_tokens"); maxTok.Exists() && maxTok.Type == gjson.Number {
+			val := int(maxTok.Int())
+			if val == 0 {
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			} else if val > 0 {
+				return ThinkingConfig{Mode: ModeBudget, Budget: val}
+			}
+		}
+		if effort := reasoning.Get("effort"); effort.Exists() && effort.Type == gjson.String {
+			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			if value == "none" || value == "off" {
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			}
+			if value == "auto" || value == "-1" {
+				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			}
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	// 3. Check thinking object (Kelivo Anthropic dialect in OpenAI format)
+	if thinkingObj := gjson.GetBytes(body, "thinking"); thinkingObj.IsObject() {
+		if tType := thinkingObj.Get("type"); tType.Exists() && strings.EqualFold(tType.String(), "disabled") {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		}
+		if budgetTok := thinkingObj.Get("budget_tokens"); budgetTok.Exists() && budgetTok.Type == gjson.Number {
+			val := int(budgetTok.Int())
+			if val == 0 {
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			} else if val > 0 {
+				return ThinkingConfig{Mode: ModeBudget, Budget: val}
+			}
+		}
+	}
+	if outEffort := gjson.GetBytes(body, "output_config.effort"); outEffort.Exists() && outEffort.Type == gjson.String {
+		value := strings.ToLower(strings.TrimSpace(outEffort.String()))
+		if value == "none" || value == "off" {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		}
+		if value != "" {
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	// 4. Check thinking_budget (Kelivo Qwen / SiliconFlow custom budget)
+	if tb := gjson.GetBytes(body, "thinking_budget"); tb.Exists() && tb.Type == gjson.Number {
+		val := int(tb.Int())
+		if val == 0 {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		} else if val > 0 {
+			return ThinkingConfig{Mode: ModeBudget, Budget: val}
+		}
+	}
+	if et := gjson.GetBytes(body, "enable_thinking"); et.Exists() && et.Type == gjson.False {
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
+
+	// 5. Check generationConfig.thinkingConfig (Kelivo Gemini dialect)
+	for _, prefix := range []string{
+		"generationConfig.thinkingConfig",
+		"generation_config.thinking_config",
+		"generationConfig.thinking_config",
+		"generation_config.thinkingConfig",
+	} {
+		if tc := gjson.GetBytes(body, prefix); tc.IsObject() {
+			for _, k := range []string{"thinkingBudget", "thinking_budget"} {
+				if b := tc.Get(k); b.Exists() && b.Type == gjson.Number {
+					val := int(b.Int())
+					if val == 0 {
+						return ThinkingConfig{Mode: ModeNone, Budget: 0}
+					} else if val == -1 {
+						return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+					} else if val > 0 {
+						return ThinkingConfig{Mode: ModeBudget, Budget: val}
+					}
+				}
+			}
+			for _, k := range []string{"thinkingLevel", "thinking_level"} {
+				if l := tc.Get(k); l.Exists() && l.Type == gjson.String {
+					value := strings.ToLower(strings.TrimSpace(l.String()))
+					if value == "none" || value == "off" {
+						return ThinkingConfig{Mode: ModeNone, Budget: 0}
+					}
+					if value == "auto" || value == "-1" {
+						return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+					}
+					if value != "" {
+						return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+					}
+				}
+			}
+		}
 	}
 
 	return ThinkingConfig{}

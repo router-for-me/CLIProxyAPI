@@ -48,9 +48,34 @@ func ExtractSummaryConfig(body []byte, format string) SummaryConfig {
 			if value == "" {
 				return SummaryConfig{}
 			}
-			if value == "none" {
+			if value == "none" || value == "off" {
 				return SummaryConfig{Mode: SummaryDisabled}
 			}
+			return SummaryConfig{Mode: SummaryEnabled, Detail: "auto"}
+		}
+		if enabled := gjson.GetBytes(body, "reasoning.enabled"); enabled.Exists() && enabled.Type == gjson.False {
+			return SummaryConfig{Mode: SummaryDisabled}
+		}
+		if tType := gjson.GetBytes(body, "thinking.type"); tType.Exists() && strings.EqualFold(tType.String(), "disabled") {
+			return SummaryConfig{Mode: SummaryDisabled}
+		}
+		if et := gjson.GetBytes(body, "enable_thinking"); et.Exists() && et.Type == gjson.False {
+			return SummaryConfig{Mode: SummaryDisabled}
+		}
+		if rEffort := gjson.GetBytes(body, "reasoning.effort"); rEffort.Exists() {
+			value := strings.ToLower(strings.TrimSpace(rEffort.String()))
+			if value == "none" || value == "off" {
+				return SummaryConfig{Mode: SummaryDisabled}
+			}
+			return SummaryConfig{Mode: SummaryEnabled, Detail: "auto"}
+		}
+		if maxTok := gjson.GetBytes(body, "reasoning.max_tokens"); maxTok.Exists() && maxTok.Int() > 0 {
+			return SummaryConfig{Mode: SummaryEnabled, Detail: "auto"}
+		}
+		if tb := gjson.GetBytes(body, "thinking_budget"); tb.Exists() && tb.Int() > 0 {
+			return SummaryConfig{Mode: SummaryEnabled, Detail: "auto"}
+		}
+		if tb := gjson.GetBytes(body, "thinking.budget_tokens"); tb.Exists() && tb.Int() > 0 {
 			return SummaryConfig{Mode: SummaryEnabled, Detail: "auto"}
 		}
 	case "openai-response", "codex":
