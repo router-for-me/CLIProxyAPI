@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/tidwall/gjson"
 )
 
 // TestTryRouteBackendKimiResponsesKimiAIProvider verifies that the kimi_responses
@@ -620,5 +622,65 @@ func TestKimiResponsesModelFamilyK2PlatformVariants(t *testing.T) {
 	target, ok := resolveKimiResponsesTargetForModel(entries, "kimi-k2.8-code")
 	if !ok || target.authID != "cred-coding" {
 		t.Fatalf("kimi-k2.8-code target = %+v ok=%v, want cred-coding", target, ok)
+	}
+}
+
+// TestKimiCredentialPoolsRotateWithinHighestPriority verifies rotation never
+// pins a lower-priority backup credential while a higher-priority credential
+// is available, mirroring the host auth selector's highest-tier narrowing.
+func TestKimiCredentialPoolsRotateWithinHighestPriority(t *testing.T) {
+	entry := func(id string, priority int) pluginapi.HostAuthFileEntry {
+		return pluginapi.HostAuthFileEntry{Provider: "kimi", BaseURL: "https://api.kimi.com/coding", ID: id, Priority: priority}
+	}
+	entries := []pluginapi.HostAuthFileEntry{
+		entry("cred-primary", 10),
+		entry("cred-backup", 1),
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		target, ok := resolveKimiResponsesTargetFromEntries(entries)
+		if !ok {
+			t.Fatal("expected target")
+		}
+		seen[target.authID] = true
+	}
+	if seen["cred-backup"] {
+		t.Fatalf("rotation pinned lower-priority backup; saw %v", seen)
+	}
+	if !seen["cred-primary"] {
+		t.Fatalf("rotation never pinned the primary; saw %v", seen)
+	}
+}
+
+// TestSearchModelNormalizesUpstreamModelID verifies the model tier posts the
+// upstream model identifier (host-style normalization), not the registry
+// alias, to the Moonshot Responses endpoint.
+func TestSearchModelNormalizesUpstreamModelID(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"output": []}`))
+	}))
+	defer server.Close()
+
+	cases := map[string]string{
+		"kimi-k3":          "k3",
+		"k3":               "k3",
+		"kimi-k3(1024)":    "k3(1024)",
+		"kimi-k2.8-code":   "kimi-for-coding",
+		"kimi-k2.8[1m]":    "kimi-for-coding",
+		"kimi-k3-256k":     "k3-256k",
+		"kimi-k2-thinking": "k2-thinking",
+	}
+	client := newKimiClientWithOptions([]string{"sk-test"}, server.URL, server.Client())
+	for in, want := range cases {
+		gotBody = nil
+		if _, _, err := client.searchModel(context.Background(), in, "query"); err != nil {
+			t.Fatalf("searchModel(%q) error = %v", in, err)
+		}
+		model := gjson.GetBytes(gotBody, "model").String()
+		if model != want {
+			t.Fatalf("searchModel(%q) posted model %q, want %q", in, model, want)
+		}
 	}
 }

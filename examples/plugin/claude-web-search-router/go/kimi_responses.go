@@ -104,8 +104,32 @@ func kimiResponsesModelFamily(model string) (string, bool) {
 	return "", false
 }
 
+// highestPriorityEntries narrows a credential pool to its highest configured
+// priority tier, mirroring the host auth selector (sdk/cliproxy/auth/selector.go)
+// so rotation never pins a lower-priority backup while a higher-priority
+// credential is available.
+func highestPriorityEntries(entries []*pluginapi.HostAuthFileEntry) []*pluginapi.HostAuthFileEntry {
+	if len(entries) <= 1 {
+		return entries
+	}
+	best := entries[0].Priority
+	for _, entry := range entries[1:] {
+		if entry.Priority > best {
+			best = entry.Priority
+		}
+	}
+	out := make([]*pluginapi.HostAuthFileEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Priority == best {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 // kimiCredentialPools splits kimi-family entries into coding-plan and
-// Moonshot platform credentials, skipping disabled and unavailable ones.
+// Moonshot platform credentials, skipping disabled and unavailable ones and
+// narrowing each pool to its highest priority tier.
 func kimiCredentialPools(entries []pluginapi.HostAuthFileEntry) (coding, platform []*pluginapi.HostAuthFileEntry) {
 	for i := range entries {
 		entry := &entries[i]
@@ -118,7 +142,7 @@ func kimiCredentialPools(entries []pluginapi.HostAuthFileEntry) (coding, platfor
 			platform = append(platform, entry)
 		}
 	}
-	return coding, platform
+	return highestPriorityEntries(coding), highestPriorityEntries(platform)
 }
 
 // resolveKimiResponsesTargetForModel picks the credential and model for the

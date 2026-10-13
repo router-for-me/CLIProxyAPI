@@ -347,6 +347,38 @@ type kimiResponsesResult struct {
 	Output []kimiResponsesOutputItem `json:"output"`
 }
 
+// normalizeKimiUpstreamModel converts a configured or registry model name to
+// the upstream model ID the Kimi Responses endpoint expects, mirroring the
+// host executor (internal/runtime/executor/kimi_executor.go): CLIProxyAPI
+// "kimi-" prefixes, "[1m]" context suffixes, and thinking suffixes such as
+// "(1024)" are handled, and coding aliases remap to their official upstream
+// IDs. Without this, a registry alias such as kimi-k3 reaches the upstream
+// unchanged and can be rejected as an invalid model.
+func normalizeKimiUpstreamModel(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	suffix := ""
+	if i := strings.Index(m, "("); i >= 0 && strings.HasSuffix(m, ")") {
+		suffix = m[i:]
+		m = strings.TrimSpace(m[:i])
+	}
+	m = strings.TrimSuffix(m, "[1m]")
+	var normalized string
+	switch m {
+	case "kimi-k2.8", "k2.8",
+		"kimi-k2.8-code", "k2.8-code",
+		"kimi-k2.8-preview", "k2.8-preview",
+		"kimi-k2.7-code", "k2.7-code",
+		"kimi-for-coding", "for-coding":
+		normalized = "kimi-for-coding"
+	case "kimi-k2.7-code-highspeed", "k2.7-code-highspeed",
+		"kimi-for-coding-highspeed", "for-coding-highspeed":
+		normalized = "kimi-for-coding-highspeed"
+	default:
+		normalized = strings.TrimPrefix(m, "kimi-")
+	}
+	return normalized + suffix
+}
+
 // searchModel runs kimi_search_level=model: a Responses API call where Kimi's
 // server-side web_search tool searches and the model writes the answer.
 func (c *kimiClient) searchModel(ctx context.Context, model, query string) ([]claudeWebSearchHit, string, error) {
@@ -354,6 +386,7 @@ func (c *kimiClient) searchModel(ctx context.Context, model, query string) ([]cl
 	if model == "" {
 		model = kimiDefaultModel
 	}
+	model = normalizeKimiUpstreamModel(model)
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, "", fmt.Errorf("web search query is empty")

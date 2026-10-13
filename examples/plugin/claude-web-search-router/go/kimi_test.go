@@ -179,8 +179,8 @@ func TestKimiClientSearchModelMockAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotBody.Model != kimiDefaultModel {
-		t.Fatalf("model = %q, want %s", gotBody.Model, kimiDefaultModel)
+	if gotBody.Model != normalizeKimiUpstreamModel(kimiDefaultModel) {
+		t.Fatalf("model = %q, want upstream form %q", gotBody.Model, normalizeKimiUpstreamModel(kimiDefaultModel))
 	}
 	if len(gotBody.Tools) != 1 || gotBody.Tools[0].Type != "web_search" {
 		t.Fatalf("tools = %+v", gotBody.Tools)
