@@ -90,9 +90,16 @@ func (c *kimiCodingClient) endpoint() string {
 	return strings.TrimSuffix(base, "/v1") + "/v1/responses"
 }
 
+// resolveModel returns the upstream model ID for the Responses call.
+// Registry aliases (kimi-k2.8-code, k2.8-code, kimi-k2.7-code-highspeed, …)
+// normalize to the official kimi-for-coding / kimi-for-coding-highspeed IDs —
+// the same mapping KimiExecutor applies
+// (internal/runtime/executor/kimi_executor.go) — because this direct path
+// bypasses the host executor and would otherwise post an alias the coding
+// endpoint rejects with an invalid-model 4xx.
 func (c *kimiCodingClient) resolveModel() string {
 	if c.model != "" {
-		return c.model
+		return normalizeKimiUpstreamModel(c.model)
 	}
 	return kimiCodingDefaultModel
 }

@@ -22,7 +22,15 @@ func TestKimiCodingClientDefaults(t *testing.T) {
 		{name: "base with /v1 suffix", baseURL: "https://api.kimi.ai/coding/v1", model: "",
 			wantEndpoint: "https://api.kimi.ai/coding/v1/responses", wantModel: "kimi-for-coding"},
 		{name: "custom model", baseURL: "", model: "k2.8-code",
-			wantEndpoint: "https://api.kimi.ai/coding/v1/responses", wantModel: "k2.8-code"},
+			wantEndpoint: "https://api.kimi.ai/coding/v1/responses", wantModel: "kimi-for-coding"},
+		{name: "prefixed coding alias", baseURL: "", model: "kimi-k2.8-code",
+			wantEndpoint: "https://api.kimi.ai/coding/v1/responses", wantModel: "kimi-for-coding"},
+		{name: "highspeed alias", baseURL: "", model: "kimi-k2.7-code-highspeed",
+			wantEndpoint: "https://api.kimi.ai/coding/v1/responses", wantModel: "kimi-for-coding-highspeed"},
+		{name: "official id passes through", baseURL: "", model: "kimi-for-coding",
+			wantEndpoint: "https://api.kimi.ai/coding/v1/responses", wantModel: "kimi-for-coding"},
+		{name: "unknown model passes through", baseURL: "", model: "some-future-model",
+			wantEndpoint: "https://api.kimi.ai/coding/v1/responses", wantModel: "some-future-model"},
 	}
 	for _, tc := range cases {
 		c := newKimiCodingClientWithOptions([]string{"k1"}, tc.baseURL, tc.model, nil)
