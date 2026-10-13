@@ -36,17 +36,40 @@ var codexSSEDataPrefix = []byte("data:")
 //
 // A completed event is delivered compacted onto one line. One that never becomes valid JSON is
 // delivered as the same multi-line data field, so it still fails downstream, and one warning
-// describes its framing without any of its bytes. Other lines pass through in order.
+// describes its framing without any of its bytes.
+//
+// The scanner merges data lines and nothing else. It holds only the data lines of an event being
+// collected and delivers every other line the moment it reads it, in the order read. A comment,
+// id: or retry: line inside such an event therefore comes before the event's data instead of
+// between its pieces, which SSE treats alike: an event's fields take effect when it is dispatched.
+// The blank line or over-limit line that ends a collection follows the event's data.
 type CodexSSEScanner struct {
 	ctx      context.Context
 	lines    *bufio.Scanner
 	maxBytes int
 	guard    func(lines, bytes int) bool
-	queue    [][]byte
-	current  []byte
+	// held are the data lines of the event being collected, as read. joined is their joined value,
+	// nesting follows it, and size counts the held bytes.
+	held    [][]byte
+	joined  []byte
+	nesting codexJSONNesting
+	size    int
+	queue   []codexSSEItem
+	current []byte
 	// consumedLines and consumedBytes are the upstream lines and bytes behind current.
 	consumedLines int
 	consumedBytes int
+}
+
+// codexSSEItem is a line to deliver, with the upstream lines and bytes behind it.
+type codexSSEItem struct {
+	line  []byte
+	lines int
+	size  int
+}
+
+func codexSSELine(line []byte) codexSSEItem {
+	return codexSSEItem{line: line, lines: 1, size: len(line)}
 }
 
 // NewCodexSSEScanner returns a CodexSSEScanner over r. maxBytes bounds one line, as
@@ -60,77 +83,91 @@ func NewCodexSSEScanner(ctx context.Context, r io.Reader, maxBytes int) *CodexSS
 // Scan advances to the next line, or to the next assembled event data line.
 func (s *CodexSSEScanner) Scan() bool {
 	if len(s.queue) > 0 {
-		s.current, s.queue = s.queue[0], s.queue[1:]
-		s.consumedLines, s.consumedBytes = 1, len(s.current)
+		s.deliver(s.queue[0])
+		s.queue = s.queue[1:]
 		return true
 	}
-	if !s.lines.Scan() {
-		return false
-	}
-	line := s.lines.Bytes()
-	if !bytes.HasPrefix(line, codexSSEDataPrefix) || !codexSSEIncompleteJSON(bytes.TrimSpace(line[len(codexSSEDataPrefix):])) {
-		s.current = line
-		s.consumedLines, s.consumedBytes = 1, len(line)
-		return true
-	}
-	// An incomplete event: collect its continuation. The underlying scanner reuses its buffer, so keep copies.
-	first := bytes.Clone(line)
-	data := [][]byte{first}
-	read := [][]byte{first}
-	joined := bytes.Clone(codexSSEValue(line))
-	var nesting codexJSONNesting
-	closed := nesting.feed(joined)
-	var rest [][]byte
-	size := len(line)
-	for !closed && s.lines.Scan() {
-		next := s.lines.Bytes()
-		if len(next) == 0 {
-			rest = append(rest, []byte{})
-			break
-		}
-		if size+len(next) > s.maxBytes {
-			// Bounded like a single line: stop collecting and let the next line be read on its own.
-			rest = append(rest, bytes.Clone(next))
-			break
-		}
-		if s.guard != nil && !s.guard(len(read)+1, size+len(next)) {
-			// The caller's budget does not cover this event: deliver its lines one by one, as read.
-			s.current = first
-			s.consumedLines, s.consumedBytes = 1, len(first)
-			s.queue = append(read[1:], bytes.Clone(next))
+	for s.lines.Scan() {
+		line := s.lines.Bytes()
+		if !bytes.HasPrefix(line, codexSSEDataPrefix) {
+			if len(line) == 0 && s.held != nil {
+				s.release(codexSSELine([]byte{}))
+				return s.Scan()
+			}
+			s.deliver(codexSSELine(line))
 			return true
 		}
-		size += len(next)
-		kept := bytes.Clone(next)
-		read = append(read, kept)
-		if !bytes.HasPrefix(next, codexSSEDataPrefix) {
-			rest = append(rest, kept)
-			continue
+		switch {
+		case s.held == nil:
+			if !codexSSEIncompleteJSON(bytes.TrimSpace(line[len(codexSSEDataPrefix):])) {
+				s.deliver(codexSSELine(line))
+				return true
+			}
+		case s.size+len(line) > s.maxBytes:
+			// Bounded like a single line: stop collecting and let this line be read on its own.
+			s.release(codexSSELine(bytes.Clone(line)))
+			return s.Scan()
+		case s.guard != nil && !s.guard(len(s.held)+1, s.size+len(line)):
+			// The caller's budget does not cover this event: deliver its data lines one by one, as read.
+			held, _, _ := s.take()
+			for _, kept := range append(held, bytes.Clone(line)) {
+				s.queue = append(s.queue, codexSSELine(kept))
+			}
+			return s.Scan()
 		}
-		data = append(data, kept)
-		value := codexSSEValue(next)
-		joined = append(append(joined, '\n'), value...)
-		closed = nesting.feed([]byte{'\n'}) || nesting.feed(value)
+		// The underlying scanner reuses its buffer, so keep a copy.
+		if s.hold(bytes.Clone(line)) {
+			s.release()
+			return s.Scan()
+		}
 	}
-	s.current = s.assemble(data, joined)
-	s.consumedLines, s.consumedBytes = len(data), 0
-	for _, line := range data {
-		s.consumedBytes += len(line)
+	if s.held != nil {
+		s.release()
+		return s.Scan()
 	}
-	s.queue = rest
-	return true
+	return false
+}
+
+// hold adds a data line to the event being collected and reports whether its data has closed.
+func (s *CodexSSEScanner) hold(line []byte) bool {
+	value := codexSSEValue(line)
+	if s.held != nil {
+		s.joined = append(s.joined, '\n')
+		s.nesting.feed([]byte{'\n'})
+	}
+	s.held = append(s.held, line)
+	s.joined = append(s.joined, value...)
+	s.size += len(line)
+	return s.nesting.feed(value)
+}
+
+// release queues the collected event as one line, followed by the line that ended it, if any.
+func (s *CodexSSEScanner) release(end ...codexSSEItem) {
+	held, joined, size := s.take()
+	s.queue = append(s.queue, codexSSEItem{line: s.assemble(held, joined), lines: len(held), size: size})
+	s.queue = append(s.queue, end...)
+}
+
+// take ends the collection and returns what it held.
+func (s *CodexSSEScanner) take() (held [][]byte, joined []byte, size int) {
+	held, joined, size = s.held, s.joined, s.size
+	s.held, s.joined, s.nesting, s.size = nil, nil, codexJSONNesting{}, 0
+	return held, joined, size
+}
+
+func (s *CodexSSEScanner) deliver(item codexSSEItem) {
+	s.current, s.consumedLines, s.consumedBytes = item.line, item.lines, item.size
 }
 
 // Consumed reports how many upstream lines and bytes the current line stands for: one line and its
-// own length, or, for an event assembled from several data lines, all of those lines. Lines that
-// arrived inside such an event but are not data are delivered, and counted, on their own.
+// own length, or, for an event assembled from several data lines, all of those lines.
 func (s *CodexSSEScanner) Consumed() (lines, bytes int) { return s.consumedLines, s.consumedBytes }
 
-// SetCollectGuard installs a check made before an incomplete event collects each further line.
-// It receives how many upstream lines and bytes this Scan would then have read in total, the same
-// quantities Consumed and the queued lines will report. When it returns false, the scanner stops
-// collecting and delivers the lines read so far one by one, as bufio.Scanner would, so a caller
-// can keep its own per-line budgets while it holds a stream. A nil guard removes the check.
+// SetCollectGuard installs a check made before an event being collected holds each further data
+// line. It receives how many upstream lines and bytes the event would then hold, which Consumed
+// will report for it. When it returns false, the scanner stops collecting and delivers the held
+// lines one by one, as bufio.Scanner would, so a caller can keep its own per-line budgets while it
+// holds a stream. Lines that are not held need no check. A nil guard removes the check.
 func (s *CodexSSEScanner) SetCollectGuard(guard func(lines, bytes int) bool) { s.guard = guard }
 
 // codexSSEValue is one data line's value: the text after "data:" without the one leading space.

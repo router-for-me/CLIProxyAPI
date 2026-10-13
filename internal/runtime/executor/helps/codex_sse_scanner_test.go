@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -74,9 +75,9 @@ func TestCodexSSEScannerAssemblesEventData(t *testing.T) {
 			want:   []string{`data: {"a":[1,2]}`, ""},
 		},
 		{
-			name:   "comment and field lines inside an event follow its data",
-			stream: "data: {\"a\":\n: keep-alive\nid: 7\ndata: 1}\n\n",
-			want:   []string{`data: {"a":1}`, ": keep-alive", "id: 7", ""},
+			name:   "comment and field lines inside an event come before its data",
+			stream: "event: e\ndata: {\"a\":\n: keep-alive\nid: 7\nretry: 3000\ndata: 1}\n\n",
+			want:   []string{"event: e", ": keep-alive", "id: 7", "retry: 3000", `data: {"a":1}`, ""},
 		},
 		{
 			name:   "unterminated one-line event at end of stream",
@@ -238,12 +239,12 @@ func TestCodexSSEScannerGuardFallsBackToLineByLine(t *testing.T) {
 	for scanner.Scan() {
 		got = append(got, string(scanner.Bytes()))
 	}
-	// The second further line is refused: the lines read so far come out one by one, as read.
-	want := []string{"data: {\"a\":", "data: [1,", ": note", "data: 2]}", "", `data: {"b":2}`, ""}
+	// The comment is never held. The third data line is refused: the held lines come out one by one.
+	want := []string{": note", "data: {\"a\":", "data: [1,", "data: 2]}", "", `data: {"b":2}`, ""}
 	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
 		t.Fatalf("lines = %q\nwant    %q", got, want)
 	}
-	if fmt.Sprint(calls) != fmt.Sprint([]call{{2, 20}, {3, 26}}) {
+	if fmt.Sprint(calls) != fmt.Sprint([]call{{2, 20}, {3, 29}}) {
 		t.Fatalf("guard calls = %v", calls)
 	}
 	if len(hook.AllEntries()) != 0 {
@@ -260,9 +261,37 @@ func TestCodexSSEScannerReportsTheLinesEachItemConsumed(t *testing.T) {
 		got = append(got, fmt.Sprintf("%q:%d/%d", scanner.Bytes(), lines, size))
 	}
 	// The assembled event stands for its two data lines; the comment inside it is its own line.
-	want := []string{`"event: e":1/8`, `"data: {\"a\":1}":2/19`, `": note":1/6`, `"":1/0`, `"data: {\"b\":2}":1/13`}
+	want := []string{`"event: e":1/8`, `": note":1/6`, `"data: {\"a\":1}":2/19`, `"":1/0`, `"data: {\"b\":2}":1/13`}
 	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
 		t.Fatalf("consumed = %q\nwant       %q", got, want)
+	}
+}
+
+// codexSSEChunkReader returns one chunk per Read and counts the reads.
+type codexSSEChunkReader struct {
+	chunks []string
+	reads  int
+}
+
+func (r *codexSSEChunkReader) Read(p []byte) (int, error) {
+	if r.reads == len(r.chunks) {
+		return 0, io.EOF
+	}
+	r.reads++
+	return copy(p, r.chunks[r.reads-1]), nil
+}
+
+func TestCodexSSEScannerDeliversNonDataLinesAsTheyAreRead(t *testing.T) {
+	reader := &codexSSEChunkReader{chunks: []string{"data: {\"a\":\n: keep-alive\nid: 7\n", "data: 1}\n\n"}}
+	scanner := NewCodexSSEScanner(context.Background(), reader, 1<<20)
+	var got []string
+	for scanner.Scan() {
+		got = append(got, fmt.Sprintf("%q@%d", scanner.Bytes(), reader.reads))
+	}
+	// Only the data lines wait for the rest of their event; the other lines are not held for it.
+	want := []string{`": keep-alive"@1`, `"id: 7"@1`, `"data: {\"a\":1}"@2`, `""@2`}
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+		t.Fatalf("lines = %q\nwant    %q", got, want)
 	}
 }
 
