@@ -2149,11 +2149,15 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 
 // ensureExecutionAttemptMetadata guarantees a non-nil per-attempt metadata map
 // so executors can record the final wire model back to the conductor through
-// Options.Metadata (#5514 review).
+// Options.Metadata (#5514 review). The wire-model key is cleared up front: the
+// same caller-provided map can back consecutive attempts on different
+// credentials, and a stale report from a rewriting credential would keep
+// classifying the next credential's structured 404 against the wrong model.
 func ensureExecutionAttemptMetadata(metadata map[string]any) map[string]any {
 	if metadata == nil {
 		return make(map[string]any, 1)
 	}
+	delete(metadata, cliproxyexecutor.WireModelMetadataKey)
 	return metadata
 }
 
