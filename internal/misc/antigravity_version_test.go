@@ -151,3 +151,27 @@ func TestFetchAntigravityLatestVersionReturnsHubManifestError(t *testing.T) {
 		t.Fatal("fetchAntigravityLatestVersion() error = nil, want error")
 	}
 }
+
+func TestAntigravityConfiguredUserAgent(t *testing.T) {
+	const attrUA = "antigravity/cli/1.3.4 (aidev_client; os_type=linux)"
+	const metaUA = "antigravity/hub/2.23.0 linux/amd64"
+	cases := []struct {
+		name       string
+		attributes map[string]string
+		metadata   map[string]any
+		want       string
+	}{
+		{name: "none", want: ""},
+		{name: "metadata", metadata: map[string]any{"user_agent": "  " + metaUA + " "}, want: metaUA},
+		{name: "attribute wins", attributes: map[string]string{"user_agent": attrUA}, metadata: map[string]any{"user_agent": metaUA}, want: attrUA},
+		{name: "blank attribute falls back", attributes: map[string]string{"user_agent": " "}, metadata: map[string]any{"user_agent": metaUA}, want: metaUA},
+		{name: "non-string metadata", metadata: map[string]any{"user_agent": 42}, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := AntigravityConfiguredUserAgent(tc.attributes, tc.metadata); got != tc.want {
+				t.Fatalf("AntigravityConfiguredUserAgent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

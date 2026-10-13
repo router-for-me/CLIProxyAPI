@@ -18,6 +18,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -102,7 +103,8 @@ func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints
 	return antigravityModelCapabilityHints{WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs), ModelIDs: maps.Clone(h.ModelIDs), revision: h.revision}
 }
 
-// antigravityCapabilityKey isolates catalogs by account, project and route, not token lifetime.
+// antigravityCapabilityKey isolates catalogs by account, project, route and
+// client identity, not token lifetime.
 func (s *Service) antigravityCapabilityKey(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -117,7 +119,8 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy strin
 		token, _ := auth.Metadata["access_token"].(string)
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
-	return fmt.Sprintf("%q/%d/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy)
+	userAgent := misc.AntigravityConfiguredUserAgent(auth.Attributes, auth.Metadata)
+	return fmt.Sprintf("%q/%d/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, userAgent)
 }
 
 func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCapabilityHints {
@@ -469,7 +472,11 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", misc.AntigravityUserAgent())
+	// Use the same client identity as the executor: the upstream catalog is
+	// client-dependent, so probing with a different User-Agent than the one used
+	// for generation can hide models the account can actually call.
+	req.Header.Set("User-Agent", antigravityModelFetchUserAgent(auth))
+	util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
 	resp, errDo := client.Do(req)
 	if errDo != nil {
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
@@ -495,6 +502,13 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
 	}
 	return hints, antigravityProbeStatusSuccess
+}
+
+func antigravityModelFetchUserAgent(auth *coreauth.Auth) string {
+	if auth == nil {
+		return misc.AntigravityRequestUserAgent("")
+	}
+	return misc.AntigravityRequestUserAgent(misc.AntigravityConfiguredUserAgent(auth.Attributes, auth.Metadata))
 }
 
 func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
