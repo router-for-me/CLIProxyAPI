@@ -404,6 +404,25 @@ func (s *Service) wsOnDisconnected(channelID string, reason error) {
 	})
 }
 
+// rereadDroppedAuthSnapshot has the watcher read the snapshot's file again. The
+// dropped read may hold an edit made after the save, and the watcher would skip
+// that edit's own event as unchanged. The re-read runs on its own goroutine: it
+// dispatches through the auth update queue this consumer drains.
+func (s *Service) rereadDroppedAuthSnapshot(auth *coreauth.Auth) {
+	if auth == nil || auth.Attributes == nil {
+		return
+	}
+	path := strings.TrimSpace(auth.Attributes[coreauth.AttributePath])
+	if path == "" {
+		return
+	}
+	w := s.currentWatcher()
+	if w == nil {
+		return
+	}
+	go w.RereadAuthFile(path)
+}
+
 func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
 	auth = s.prepareCoreAuthForModelRegistration(ctx, auth)
 	if auth == nil {
@@ -452,6 +471,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 			current, applied, errSnapshot := s.coreManager.UpdateFromSnapshot(ctx, auth)
 			if errSnapshot == nil && !applied && current != nil {
 				log.Debugf("skipping auth snapshot for %s observed before its latest save", auth.ID)
+				s.rereadDroppedAuthSnapshot(auth)
 				return current
 			}
 			err = errSnapshot
