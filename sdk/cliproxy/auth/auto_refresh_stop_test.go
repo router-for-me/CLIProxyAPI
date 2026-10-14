@@ -129,6 +129,11 @@ func newHeldSave(t *testing.T) *heldSave {
 	return h
 }
 
+// waitingStop stops auto-refresh and waits for its workers without a bound.
+func waitingStop(manager *Manager) func() {
+	return func() { _ = manager.StopAutoRefreshContext(context.Background()) }
+}
+
 // stopAsync runs stop on its own goroutine and sends whether the held save had
 // finished when stop returned.
 func (h *heldSave) stopAsync(stop func()) <-chan bool {
@@ -190,18 +195,18 @@ func awaitReturned(t *testing.T, returned <-chan bool) bool {
 	}
 }
 
-// StopAutoRefresh must not return while a refresh it started is still saving:
-// callers (service shutdown, tests removing the auth directory) rely on no
+// StopAutoRefreshContext must not return while a refresh it started is still
+// saving: callers (service shutdown, tests removing the auth directory) rely on no
 // background save running afterwards.
-func TestStopAutoRefreshWaitsForInFlightRefreshSave(t *testing.T) {
+func TestStopAutoRefreshContextWaitsForInFlightRefreshSave(t *testing.T) {
 	h := newHeldSave(t)
 	manager := startRefreshWithHeldSave(t, h.store)
 
-	returned := h.stopAsync(manager.StopAutoRefresh)
+	returned := h.stopAsync(waitingStop(manager))
 	h.awaitWaiting(t, returned)
 	h.release()
 	if !awaitReturned(t, returned) {
-		t.Fatal("StopAutoRefresh returned before the refresh save finished")
+		t.Fatal("StopAutoRefreshContext returned before the refresh save finished")
 	}
 }
 
@@ -221,9 +226,9 @@ func TestStopAutoRefreshContextReturnsWhenContextEnds(t *testing.T) {
 	}
 }
 
-// A stop after one that gave up on its context must still wait for the same
-// loop's workers, not return because the loop was already detached.
-func TestStopAutoRefreshAfterTimedOutStopStillWaits(t *testing.T) {
+// A waiting stop after one that gave up on its context must still wait for the
+// same loop's workers, not return because the loop was already detached.
+func TestStopAutoRefreshContextAfterTimedOutStopStillWaits(t *testing.T) {
 	h := newHeldSave(t)
 	manager := startRefreshWithHeldSave(t, h.store)
 
@@ -234,34 +239,34 @@ func TestStopAutoRefreshAfterTimedOutStopStillWaits(t *testing.T) {
 	}
 	<-h.waiting // the first stop waited before giving up
 
-	returned := h.stopAsync(manager.StopAutoRefresh)
+	returned := h.stopAsync(waitingStop(manager))
 	h.awaitWaiting(t, returned)
 	h.release()
 	if !awaitReturned(t, returned) {
-		t.Fatal("second StopAutoRefresh returned before the refresh save finished")
+		t.Fatal("second StopAutoRefreshContext returned before the refresh save finished")
 	}
 }
 
-// StartAutoRefresh replaces a loop without waiting for it, so a later stop must
-// still wait for the replaced loop's worker that is saving.
-func TestStopAutoRefreshWaitsForReplacedLoop(t *testing.T) {
+// StartAutoRefresh replaces a loop without waiting for it, so a later waiting stop
+// must still wait for the replaced loop's worker that is saving.
+func TestStopAutoRefreshContextWaitsForReplacedLoop(t *testing.T) {
 	h := newHeldSave(t)
 	manager := startRefreshWithHeldSave(t, h.store)
 	replaced := replaceRefreshLoop(manager, h.store)
 
-	returned := h.stopAsync(manager.StopAutoRefresh)
+	returned := h.stopAsync(waitingStop(manager))
 	if loops := h.awaitWaiting(t, returned); !containsLoop(loops, replaced) {
-		t.Fatal("StopAutoRefresh does not wait for the loop StartAutoRefresh replaced")
+		t.Fatal("StopAutoRefreshContext does not wait for the loop StartAutoRefresh replaced")
 	}
 	h.release()
 	if !awaitReturned(t, returned) {
-		t.Fatal("StopAutoRefresh returned before the replaced loop's save finished")
+		t.Fatal("StopAutoRefreshContext returned before the replaced loop's save finished")
 	}
 }
 
 // A restart after a stop that gave up on its context must not drop the stopped
-// loop: the next stop still waits for its worker.
-func TestStopAutoRefreshAfterTimedOutStopAndRestartStillWaits(t *testing.T) {
+// loop: the next waiting stop still waits for its worker.
+func TestStopAutoRefreshContextAfterTimedOutStopAndRestartStillWaits(t *testing.T) {
 	h := newHeldSave(t)
 	manager := startRefreshWithHeldSave(t, h.store)
 	manager.mu.RLock()
@@ -276,12 +281,66 @@ func TestStopAutoRefreshAfterTimedOutStopAndRestartStillWaits(t *testing.T) {
 	<-h.waiting // the first stop waited before giving up
 	replaceRefreshLoop(manager, h.store)
 
-	returned := h.stopAsync(manager.StopAutoRefresh)
+	returned := h.stopAsync(waitingStop(manager))
 	if loops := h.awaitWaiting(t, returned); !containsLoop(loops, stopped) {
-		t.Fatal("StopAutoRefresh after a restart does not wait for the loop a timed-out stop left running")
+		t.Fatal("StopAutoRefreshContext after a restart does not wait for the loop a timed-out stop left running")
 	}
 	h.release()
 	if !awaitReturned(t, returned) {
-		t.Fatal("StopAutoRefresh returned before the stopped loop's save finished")
+		t.Fatal("StopAutoRefreshContext returned before the stopped loop's save finished")
+	}
+}
+
+// stopFromRefreshHook stops auto-refresh from the first OnAuthUpdated callback,
+// which runs on the refresh worker that is finishing the refresh.
+type stopFromRefreshHook struct {
+	NoopHook
+	manager  *Manager
+	once     sync.Once
+	returned chan struct{}
+}
+
+func (h *stopFromRefreshHook) OnAuthUpdated(context.Context, *Auth) {
+	h.once.Do(func() {
+		h.manager.StopAutoRefresh()
+		close(h.returned)
+	})
+}
+
+// A hook may stop auto-refresh from a refresh callback. StopAutoRefresh must not
+// wait for the workers there: the worker running the hook cannot return until
+// the stop does.
+func TestStopAutoRefreshFromRefreshHookDoesNotDeadlock(t *testing.T) {
+	hook := &stopFromRefreshHook{returned: make(chan struct{})}
+	manager := NewManager(nil, &RoundRobinSelector{}, hook)
+	hook.manager = manager
+	manager.RegisterExecutor(stopTestExecutor{})
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID:       "stop-from-hook",
+		Provider: "stop-test",
+		Runtime:  alwaysRefresh{},
+		Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-1",
+			"expires_at":    time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+	manager.StartAutoRefresh(context.Background(), 10*time.Millisecond)
+	t.Cleanup(func() {
+		// Bounded so a deadlocked worker fails the test instead of hanging it.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = manager.StopAutoRefreshContext(ctx)
+	})
+
+	// The timer only guards against a hang; the hook signals when its stop returns.
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case <-hook.returned:
+	case <-hangGuard.C:
+		t.Fatal("StopAutoRefresh called from OnAuthUpdated on the refresh worker never returned")
 	}
 }
