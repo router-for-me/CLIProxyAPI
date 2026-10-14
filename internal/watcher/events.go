@@ -70,7 +70,13 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
-	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
+	isConfigPath := normalizedName == normalizedConfigPath
+	isConfigEvent := isConfigPath && event.Op&configOps != 0
+	// Replacing the config by rename (atomic saves, many editors) drops the watch on
+	// the old file; inotify then reports Remove and nothing more. Watch the new file.
+	if isConfigPath && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		isConfigEvent = w.rearmConfigWatch()
+	}
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
@@ -232,4 +238,27 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 	}
 	w.clientsMutex.Unlock()
 	return false
+}
+
+// rearmConfigWatch watches the config path again after its file was replaced or
+// removed. It reports whether a config file exists there to reload.
+func (w *Watcher) rearmConfigWatch() bool {
+	exists := false
+	for attempt := 0; attempt < 4; attempt++ {
+		if _, errStat := os.Stat(w.configPath); errStat == nil {
+			exists = true
+			break
+		}
+		time.Sleep(replaceCheckDelay)
+	}
+	if !exists {
+		log.Warnf("config file %s was removed; it is no longer watched for changes", w.configPath)
+		return false
+	}
+	if w.watcher != nil {
+		if errAdd := w.watcher.Add(w.configPath); errAdd != nil {
+			log.WithError(errAdd).Warnf("failed to watch replaced config file %s", w.configPath)
+		}
+	}
+	return true
 }
