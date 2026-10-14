@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
@@ -180,6 +181,16 @@ func stripTranslatedDefaultMaxTokens(from sdktranslator.Format, originalPayload,
 		return originalTranslated
 	}
 	return stripped
+}
+
+// claudeThinkingModelInfo resolves the same model capabilities used by
+// ApplyRequestThinking, so post-payload thinking repair honors the model's
+// minimum budget.
+func claudeThinkingModelInfo(req cliproxyexecutor.Request, baseModel string) *registry.ModelInfo {
+	if modelInfo, ok := cliproxyauth.ResolvedModelInfo(req); ok {
+		return modelInfo
+	}
+	return registry.LookupModelInfo(baseModel, "claude")
 }
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {

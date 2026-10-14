@@ -133,6 +133,12 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
+	// CPA-005: NewServer clones its config, so documented OnBeforeStart
+	// mutations must happen before construction to reach the live server.
+	if s.hooks.OnBeforeStart != nil {
+		s.hooks.OnBeforeStart(s.currentConfig())
+	}
+	cfg = s.currentConfig()
 	s.server = api.NewServer(cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
@@ -167,10 +173,6 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 			log.Debugf("ws-auth disabled; existing websocket sessions remain connected")
 		})
-	}
-
-	if s.hooks.OnBeforeStart != nil {
-		s.hooks.OnBeforeStart(s.currentConfig())
 	}
 
 	s.serverErr = make(chan error, 1)
