@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -48,10 +49,9 @@ func TestAntigravityLatestVersionUsesCurrentHubFallback(t *testing.T) {
 	}
 }
 
-// Cloud Code resolves newer models only for clients reporting at least 2.9.0;
-// older versions get 404 Requested entity was not found.
+// The fallback must retain access to the current Gemini 4 model catalog.
 func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
-	const floorMajor, floorMinor = 2, 9
+	const floorMajor, floorMinor = 2, 23
 
 	var major, minor, patch int
 	if _, err := fmt.Sscanf(antigravityFallbackVersion, "%d.%d.%d", &major, &minor, &patch); err != nil {
@@ -59,6 +59,44 @@ func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
 	}
 	if major < floorMajor || (major == floorMajor && minor < floorMinor) {
 		t.Fatalf("antigravityFallbackVersion = %q, want at least %d.%d.0", antigravityFallbackVersion, floorMajor, floorMinor)
+	}
+}
+
+func TestStartAntigravityVersionUpdaterInitializesBeforeReturn(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		_, _ = w.Write([]byte("version: 2.24.0\n"))
+	}))
+	defer server.Close()
+	restoreURL := overrideAntigravityVersionURLsForTest(t, server.URL)
+	defer restoreURL()
+	restoreCache := overrideAntigravityVersionCacheForTest(t, "2.9.1", time.Now().Add(time.Hour))
+	defer restoreCache()
+	antigravityUpdaterOnce = sync.Once{}
+	defer func() { antigravityUpdaterOnce = sync.Once{} }()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		StartAntigravityVersionUpdater(ctx)
+		close(done)
+	}()
+	<-started
+	select {
+	case <-done:
+		t.Error("version updater returned before startup manifest was fetched")
+	default:
+	}
+	unblock()
+	<-done
+	if got := AntigravityLatestVersion(); got != "2.24.0" {
+		t.Fatalf("startup version = %q, want 2.24.0 before account discovery", got)
 	}
 }
 
