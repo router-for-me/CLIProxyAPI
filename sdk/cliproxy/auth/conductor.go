@@ -227,7 +227,8 @@ type Manager struct {
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
 	// retiredRefreshLoops are loops replaced by StartAutoRefresh or detached by a
-	// stop whose workers may still be running, so every later stop waits for them.
+	// stop whose workers may still be running, so every later waiting stop
+	// (StopAutoRefreshContext) waits for them.
 	retiredRefreshLoops []*authAutoRefreshLoop
 	// refreshJobs retains queued and running jobs across loop restarts under m.mu.
 	refreshJobs map[string]*authRefreshJob

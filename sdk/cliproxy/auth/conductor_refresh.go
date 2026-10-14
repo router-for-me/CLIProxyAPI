@@ -74,25 +74,46 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	go loop.run(ctx)
 }
 
-// StopAutoRefresh cancels the background refresh loop, if running, and waits until
-// its workers, and those of loops it replaced, have returned, so no refresh any of
-// them started is still saving afterwards.
+// StopAutoRefresh cancels the background refresh loop, if running, and returns
+// without waiting for its workers; it is safe to call from a refresh callback
+// (such as Hook.OnAuthUpdated), which runs on a refresh worker. Use
+// StopAutoRefreshContext to wait until no refresh is still saving.
 // It also stops the selector if it implements StoppableSelector.
 func (m *Manager) StopAutoRefresh() {
-	_ = m.StopAutoRefreshContext(context.Background())
+	m.stopAutoRefresh()
 }
 
-// StopAutoRefreshContext is StopAutoRefresh with a bound on the wait: if ctx ends
-// before the in-flight refreshes finish, it returns ctx.Err() and the loop keeps
-// winding down in the background.
+// StopAutoRefreshContext cancels the background refresh loop like StopAutoRefresh,
+// then waits until its workers, and those of loops it replaced, have returned, so
+// no refresh any of them started is still saving afterwards. If ctx ends first it
+// returns ctx.Err() and the loops keep winding down in the background.
+// Do not call it from a refresh callback: the worker running the callback cannot
+// return until the call does, so it waits until ctx ends.
 func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	loops := m.stopAutoRefresh()
+	if len(loops) == 0 {
+		return nil
+	}
+	beforeAutoRefreshStopWait(loops)
+	for _, loop := range loops {
+		select {
+		case <-loop.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// stopAutoRefresh cancels the running loop and stops the selector. It returns
+// the loops whose workers may still be running: the stopped loop, loops it
+// replaced, and loops an earlier stop did not wait for.
+func (m *Manager) stopAutoRefresh() []*authAutoRefreshLoop {
 	m.mu.Lock()
 	cancel := m.refreshCancel
-	// Replaced loops, and loops an earlier stop gave up waiting for, may still
-	// have workers saving; wait for them too.
 	loops := unfinishedRefreshLoops(m.retiredRefreshLoops)
 	if m.refreshLoop != nil {
 		loops = append(loops, m.refreshLoop)
@@ -109,18 +130,7 @@ func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
 	if stoppable, ok := sel.(StoppableSelector); ok && stoppable != nil {
 		stoppable.Stop()
 	}
-	if len(loops) == 0 {
-		return nil
-	}
-	beforeAutoRefreshStopWait(loops)
-	for _, loop := range loops {
-		select {
-		case <-loop.done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
+	return loops
 }
 
 // unfinishedRefreshLoops returns the loops whose workers have not all returned.
