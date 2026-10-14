@@ -120,7 +120,7 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy strin
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
 	scope := antigravityModelFetchScope(auth)
-	return fmt.Sprintf("%q/%d/%q/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, scope.UserAgent, scope.AuthorizationFingerprint)
+	return fmt.Sprintf("%q/%d/%q/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, scope.UserAgent, scope.HeadersFingerprint)
 }
 
 func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCapabilityHints {
@@ -250,8 +250,8 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, sco
 	if userAgent := strings.TrimSpace(scope.UserAgent); userAgent != "" {
 		value["user_agent"] = userAgent
 	}
-	if fingerprint := strings.TrimSpace(scope.AuthorizationFingerprint); fingerprint != "" {
-		value["authorization_fingerprint"] = fingerprint
+	if fingerprint := strings.TrimSpace(scope.HeadersFingerprint); fingerprint != "" {
+		value["headers_fingerprint"] = fingerprint
 	}
 	if len(hints.WebSearchModelIDs) > 0 {
 		webSearchIDs := make([]string, 0, len(hints.WebSearchModelIDs))
@@ -296,8 +296,8 @@ func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 	if strings.TrimSpace(persistedUserAgent) != strings.TrimSpace(expectedScope.UserAgent) {
 		return antigravityModelCapabilityHints{}, false
 	}
-	persistedFingerprint, _ := rawMap["authorization_fingerprint"].(string)
-	if strings.TrimSpace(persistedFingerprint) != strings.TrimSpace(expectedScope.AuthorizationFingerprint) {
+	persistedFingerprint, _ := rawMap["headers_fingerprint"].(string)
+	if strings.TrimSpace(persistedFingerprint) != strings.TrimSpace(expectedScope.HeadersFingerprint) {
 		return antigravityModelCapabilityHints{}, false
 	}
 	rawModels, hasModels := rawMap["model_ids"]
@@ -533,16 +533,17 @@ func antigravityModelFetchUserAgent(auth *coreauth.Auth) string {
 type antigravityCatalogScope struct {
 	// UserAgent is the overridden client identity sent to the upstream.
 	UserAgent string
-	// AuthorizationFingerprint is a non-secret fingerprint of an overridden
-	// Authorization header; the credential itself is never stored.
-	AuthorizationFingerprint string
+	// HeadersFingerprint is a non-secret fingerprint of the other header:
+	// overrides (for example Authorization or Host, which also changes where
+	// the probe is routed); their values are never stored.
+	HeadersFingerprint string
 }
 
 // antigravityModelFetchScope returns the overrides the model probe sends,
 // mirroring its header order: the configured user_agent first, then header:
-// attributes, which may replace User-Agent or Authorization. Defaults are
-// excluded on purpose so routine hub version refreshes and token refreshes do
-// not invalidate cached catalogs.
+// attributes, which may replace it or any other header. Defaults are excluded
+// on purpose so routine hub version refreshes and token refreshes do not
+// invalidate cached catalogs.
 func antigravityModelFetchScope(auth *coreauth.Auth) antigravityCatalogScope {
 	if auth == nil {
 		return antigravityCatalogScope{}
@@ -553,10 +554,23 @@ func antigravityModelFetchScope(auth *coreauth.Auth) antigravityCatalogScope {
 	}
 	util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
 	scope := antigravityCatalogScope{UserAgent: strings.TrimSpace(req.Header.Get("User-Agent"))}
-	if authorization := strings.TrimSpace(req.Header.Get("Authorization")); authorization != "" {
-		sum := sha256.Sum256([]byte(authorization))
-		scope.AuthorizationFingerprint = fmt.Sprintf("%x", sum[:8])
+	req.Header.Del("User-Agent")
+	if req.Host != "" {
+		req.Header.Set("Host", req.Host)
 	}
+	if len(req.Header) == 0 {
+		return scope
+	}
+	names := make([]string, 0, len(req.Header))
+	for name := range req.Header {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	hash := sha256.New()
+	for _, name := range names {
+		fmt.Fprintf(hash, "%q:%q\n", name, req.Header.Values(name))
+	}
+	scope.HeadersFingerprint = fmt.Sprintf("%x", hash.Sum(nil)[:8])
 	return scope
 }
 

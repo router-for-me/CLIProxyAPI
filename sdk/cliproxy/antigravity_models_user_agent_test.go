@@ -135,39 +135,45 @@ func TestAntigravityCapabilityKeyChangesWithUserAgent(t *testing.T) {
 	withHeader.Attributes["header:User-Agent"] = "antigravity/cli/9.9.9 (aidev_client)"
 	headerKey := antigravityCapabilityKeyForRoute(withHeader, endpoint, "")
 
-	withOtherHeader := withMetadata.Clone()
-	withOtherHeader.Attributes["header:X-Other"] = "unrelated"
-	otherHeaderKey := antigravityCapabilityKeyForRoute(withOtherHeader, endpoint, "")
-
 	if defaultKey == metadataKey {
 		t.Fatal("changing user_agent must invalidate the cached catalog")
 	}
 	if metadataKey == headerKey {
 		t.Fatal("changing header:User-Agent must invalidate the cached catalog")
 	}
-	if metadataKey != otherHeaderKey {
-		t.Fatal("headers other than User-Agent must not change the catalog key")
-	}
 }
 
-func TestAntigravityCapabilityKeyChangesWithAuthorizationOverride(t *testing.T) {
+func TestAntigravityCapabilityKeyChangesWithHeaderOverrides(t *testing.T) {
 	const endpoint = "https://example.invalid"
-	base := antigravityTestAuth("authz-key", endpoint)
+	base := antigravityTestAuth("header-key", endpoint)
 	defaultKey := antigravityCapabilityKeyForRoute(base, endpoint, "")
 
-	first := base.Clone()
-	first.Attributes["header:Authorization"] = "Bearer first-secret"
-	firstKey := antigravityCapabilityKeyForRoute(first, endpoint, "")
-
-	second := base.Clone()
-	second.Attributes["header:Authorization"] = "Bearer second-secret"
-	secondKey := antigravityCapabilityKeyForRoute(second, endpoint, "")
-
-	if defaultKey == firstKey || firstKey == secondKey {
-		t.Fatal("changing header:Authorization must invalidate the cached catalog")
+	keyWith := func(name, value string) string {
+		auth := base.Clone()
+		auth.Attributes["header:"+name] = value
+		return antigravityCapabilityKeyForRoute(auth, endpoint, "")
 	}
-	if strings.Contains(firstKey, "first-secret") {
-		t.Fatal("catalog key must not contain the overridden credential")
+	for _, tc := range []struct{ name, first, second string }{
+		{"Authorization", "Bearer first-secret", "Bearer second-secret"},
+		{"Host", "a.example.invalid", "b.example.invalid"},
+		{"X-Goog-User-Project", "project-a", "project-b"},
+	} {
+		firstKey := keyWith(tc.name, tc.first)
+		if firstKey == defaultKey || firstKey == keyWith(tc.name, tc.second) {
+			t.Fatalf("changing header:%s must invalidate the cached catalog", tc.name)
+		}
+		if firstKey != keyWith(tc.name, tc.first) {
+			t.Fatalf("the same header:%s must keep the catalog key stable", tc.name)
+		}
+		if strings.Contains(firstKey, tc.first) {
+			t.Fatalf("catalog key must not contain the header:%s value", tc.name)
+		}
+	}
+
+	host := base.Clone()
+	host.Attributes["header:Host"] = "a.example.invalid"
+	if got := antigravityModelFetchScope(host); got.UserAgent != "" || got.HeadersFingerprint == "" {
+		t.Fatalf("header:Host scope = %+v, want only a headers fingerprint", got)
 	}
 	refreshed := base.Clone()
 	refreshed.Metadata["access_token"] = "rotated-token"
@@ -184,7 +190,7 @@ func TestPersistedAntigravityCapabilityHintsAreScopedToOverrides(t *testing.T) {
 	)
 	hints := antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{"gemini-cli-only": {}}}
 	uaScope := antigravityCatalogScope{UserAgent: cliUA}
-	authScope := antigravityCatalogScope{AuthorizationFingerprint: "0123456789abcdef"}
+	headersScope := antigravityCatalogScope{HeadersFingerprint: "0123456789abcdef"}
 
 	scoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, uaScope, hints)}
 	if _, ok := parsePersistedAntigravityCapabilityHints(scoped, project, endpoint, uaScope); !ok {
@@ -197,15 +203,15 @@ func TestPersistedAntigravityCapabilityHintsAreScopedToOverrides(t *testing.T) {
 		t.Fatal("catalog persisted for one User-Agent must not load for another")
 	}
 
-	authScoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, authScope, hints)}
-	if _, ok := parsePersistedAntigravityCapabilityHints(authScoped, project, endpoint, authScope); !ok {
-		t.Fatal("catalog persisted for an Authorization override must load for the same override")
+	headersScoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, headersScope, hints)}
+	if _, ok := parsePersistedAntigravityCapabilityHints(headersScoped, project, endpoint, headersScope); !ok {
+		t.Fatal("catalog persisted for header overrides must load for the same overrides")
 	}
-	if _, ok := parsePersistedAntigravityCapabilityHints(authScoped, project, endpoint, antigravityCatalogScope{AuthorizationFingerprint: "fedcba9876543210"}); ok {
-		t.Fatal("catalog persisted for one Authorization override must not load for another")
+	if _, ok := parsePersistedAntigravityCapabilityHints(headersScoped, project, endpoint, antigravityCatalogScope{HeadersFingerprint: "fedcba9876543210"}); ok {
+		t.Fatal("catalog persisted for one set of header overrides must not load for another")
 	}
-	if _, ok := parsePersistedAntigravityCapabilityHints(authScoped, project, endpoint, antigravityCatalogScope{}); ok {
-		t.Fatal("catalog persisted for an Authorization override must not load without it")
+	if _, ok := parsePersistedAntigravityCapabilityHints(headersScoped, project, endpoint, antigravityCatalogScope{}); ok {
+		t.Fatal("catalog persisted for header overrides must not load without them")
 	}
 
 	unscoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, antigravityCatalogScope{}, hints)}
@@ -213,8 +219,8 @@ func TestPersistedAntigravityCapabilityHintsAreScopedToOverrides(t *testing.T) {
 	if _, hasUA := persisted["user_agent"]; hasUA {
 		t.Fatal("default identity must not persist a user_agent field")
 	}
-	if _, hasAuth := persisted["authorization_fingerprint"]; hasAuth {
-		t.Fatal("default credential must not persist an authorization_fingerprint field")
+	if _, hasHeaders := persisted["headers_fingerprint"]; hasHeaders {
+		t.Fatal("default headers must not persist a headers_fingerprint field")
 	}
 	if _, ok := parsePersistedAntigravityCapabilityHints(unscoped, project, endpoint, antigravityCatalogScope{}); !ok {
 		t.Fatal("catalogs without override fields must keep loading for the default scope")
