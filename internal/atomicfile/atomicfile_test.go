@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -95,6 +96,15 @@ func TestWriteFileFallsBackInPlaceWhenRenameFails(t *testing.T) {
 
 // Readers polling during repeated saves must only ever see a complete version.
 func TestWriteFileReadersNeverSeeTruncatedContent(t *testing.T) {
+	for name, write := range map[string]func(string, []byte, os.FileMode) error{
+		"WriteFile":   WriteFile,
+		"ReplaceFile": ReplaceFile,
+	} {
+		t.Run(name, func(t *testing.T) { assertReadersNeverSeeTruncatedContent(t, write) })
+	}
+}
+
+func assertReadersNeverSeeTruncatedContent(t *testing.T, write func(string, []byte, os.FileMode) error) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	versions := [][]byte{bytes.Repeat([]byte("a"), 64<<10), bytes.Repeat([]byte("b"), 64<<10)}
 	if err := os.WriteFile(path, versions[0], 0o600); err != nil {
@@ -115,8 +125,8 @@ func TestWriteFileReadersNeverSeeTruncatedContent(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 300; i++ {
-		if err := WriteFile(path, versions[i%2], 0o600); err != nil {
-			t.Fatalf("WriteFile() error = %v", err)
+		if err := write(path, versions[i%2], 0o600); err != nil {
+			t.Fatalf("write error = %v", err)
 		}
 	}
 	stop.Store(true)
@@ -172,12 +182,16 @@ func TestReplaceFileFallbackDoesNotRecreateRemovedFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	// The rename fails (as on a bind mount) after the file was deleted; the
+	// The replacement fails (as on a bind mount) after the file was deleted; the
 	// in-place fallback must not create it again.
-	rename = func(string, string) error {
+	originalExchange := exchange
+	t.Cleanup(func() { exchange = originalExchange })
+	busy := func(string, string) error {
 		_ = os.Remove(path)
-		return errors.New("device or resource busy")
+		return syscall.EBUSY
 	}
+	rename = busy
+	exchange = busy
 	if err := ReplaceFile(path, []byte("new"), 0o600); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ReplaceFile() error = %v, want os.ErrNotExist", err)
 	}
@@ -214,4 +228,31 @@ func TestWriteFileRespectsReadOnlyTarget(t *testing.T) {
 			assertNoTempFiles(t, dir)
 		})
 	}
+}
+
+// A deletion landing after ReplaceFile's existence check but before the file is
+// put in place must still win: the commit itself has to require the target.
+func TestReplaceFileDeletionBeforeCommitWins(t *testing.T) {
+	if !exchangeSupported() {
+		t.Skip("no atomic exchange rename on this platform")
+	}
+	original := beforeCommit
+	t.Cleanup(func() { beforeCommit = original })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	beforeCommit = func() {
+		if err := os.Remove(path); err != nil {
+			t.Errorf("remove target: %v", err)
+		}
+	}
+	if err := ReplaceFile(path, []byte("new"), 0o600); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReplaceFile() error = %v, want os.ErrNotExist", err)
+	}
+	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+		t.Fatalf("ReplaceFile() recreated the file deleted before commit (stat err %v)", errStat)
+	}
+	assertNoTempFiles(t, dir)
 }
