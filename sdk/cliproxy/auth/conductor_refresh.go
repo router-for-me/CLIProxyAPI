@@ -70,11 +70,23 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	go loop.run(ctx)
 }
 
-// StopAutoRefresh cancels the background refresh loop, if running.
+// StopAutoRefresh cancels the background refresh loop, if running, and waits until
+// its workers have returned, so no refresh it started is still saving afterwards.
 // It also stops the selector if it implements StoppableSelector.
 func (m *Manager) StopAutoRefresh() {
+	_ = m.StopAutoRefreshContext(context.Background())
+}
+
+// StopAutoRefreshContext is StopAutoRefresh with a bound on the wait: if ctx ends
+// before the in-flight refreshes finish, it returns ctx.Err() and the loop keeps
+// winding down in the background.
+func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	cancel := m.refreshCancel
+	loop := m.refreshLoop
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
@@ -85,6 +97,15 @@ func (m *Manager) StopAutoRefresh() {
 	sel := m.Selector()
 	if stoppable, ok := sel.(StoppableSelector); ok && stoppable != nil {
 		stoppable.Stop()
+	}
+	if loop == nil {
+		return nil
+	}
+	select {
+	case <-loop.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
