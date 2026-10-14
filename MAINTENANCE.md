@@ -101,7 +101,9 @@ Baseline: `go test ./...` passes fully with no accepted failing tests. `TestOpen
 
 Inherited at upstream `v8.0.28` (`0d18d3b365be000eeaee7de4615f9da596b2059d`), reproduced on an untouched checkout on 2026-10-14 UTC:
 
-- `internal/runtime/executor` `TestAIStudioTranslateRequestNormalizesThinkingLevel` and `TestAntigravityExecutorExecuteStreamTranslatesInteractionsRequest` fail deterministically (empty `thinkingLevel`), identically on upstream and fork. Gemini/Antigravity translation is outside every fork patch and the local Codex/Claude route.
 - `sdk/cliproxy` `TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559` is a race-timing flake (13/20 failures on untouched upstream). It covers the upstream #6559 management-API race; the local gateway keeps management disabled.
+- Under `-race` only, `internal/api/middleware` `TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger` reports a data race between the test handler's header write and `ResponseWriterWrapper.Finalize` (3/3 on untouched `v8.0.28`, also on prior fork main `0fe66fb7`).
+
+`TestAIStudioTranslateRequestNormalizesThinkingLevel` and `TestAntigravityExecutorExecuteStreamTranslatesInteractionsRequest` failed on untouched `v8.0.28` because its catalog removed their fixture models (`gemini-3.7-flash`, `gemini-3.1-pro-low`). The fork moves those fixtures to catalogued models (`gemini-3.8-flash`, `gemini-4-argon-high`), so both pass; drop that test-only change when upstream updates the fixtures.
 
 Retire these entries when a released upstream tag passes them.

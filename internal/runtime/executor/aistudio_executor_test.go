@@ -42,10 +42,10 @@ func TestAIStudioTranslateRequestPreservesSummaryFromOriginalRequest(t *testing.
 func TestAIStudioTranslateRequestNormalizesThinkingLevel(t *testing.T) {
 	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
 	req := cliproxyexecutor.Request{
-		Model: "gemini-3.7-flash",
+		Model: "gemini-3.8-flash",
 		Payload: []byte(`{
 			"contents":[{"role":"user","parts":[{"text":"Human: Hi"}]}],
-			"model":"gemini-3.7-flash",
+			"model":"gemini-3.8-flash",
 			"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}}
 		}`),
 	}
