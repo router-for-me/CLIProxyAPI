@@ -42,6 +42,17 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	mode := perm
 	if info, errStat := os.Stat(target); errStat == nil {
 		mode = info.Mode().Perm()
+		// The rename below is authorized by the directory, not the file. Keep the
+		// os.WriteFile rule that a file this process may not write stays untouched
+		// (read-only mode, write-denying ACL): opening it for writing, without
+		// truncating, fails exactly when os.WriteFile would.
+		probe, errOpen := os.OpenFile(target, os.O_WRONLY, 0)
+		if errOpen != nil {
+			return fmt.Errorf("atomicfile: write %s: %w", target, errOpen)
+		}
+		if errClose := probe.Close(); errClose != nil {
+			return fmt.Errorf("atomicfile: write %s: %w", target, errClose)
+		}
 	} else if mustExist {
 		return fmt.Errorf("atomicfile: replace %s: %w", target, errStat)
 	}
