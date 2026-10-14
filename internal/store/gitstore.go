@@ -2009,11 +2009,18 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 	if configPath == "" {
 		return fmt.Errorf("git token store: config path not configured")
 	}
-	if _, err := os.Stat(configPath); err != nil {
+	info, err := os.Stat(configPath)
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("git token store: stat config: %w", err)
+	}
+	if info.Size() == 0 {
+		// An empty file is a save caught mid-write, never a config worth committing;
+		// pushing it would wipe the config that restarts and replicas load.
+		log.Warn("git token store: local config is empty, keeping the committed copy")
+		return nil
 	}
 	rel, err := s.relativeToRepo(configPath)
 	if err != nil {
