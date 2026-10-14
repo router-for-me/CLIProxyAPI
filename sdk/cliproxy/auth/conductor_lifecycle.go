@@ -2,10 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -169,7 +171,23 @@ const (
 	updateModeReplace updateAuthMode = iota
 	updateModeRefresh
 	updateModePrepare
+	updateModeSnapshot
 )
+
+// UpdateFromSnapshot replaces an existing auth with an unversioned snapshot of its
+// stored state, such as a file rescan. auth.UpdatedAt must be the time the snapshot
+// was observed (taken before reading the store). A snapshot observed at or before
+// the latest save of this auth may predate it, so it is dropped and the current auth
+// is returned with applied=false. A zero UpdatedAt always applies.
+func (m *Manager) UpdateFromSnapshot(ctx context.Context, auth *Auth) (current *Auth, applied bool, err error) {
+	updated, errUpdate := m.updateInternal(ctx, nil, auth, updateModeSnapshot)
+	if errUpdate == errStaleAuthSnapshot {
+		return updated, false, nil
+	}
+	return updated, errUpdate == nil && updated != nil, errUpdate
+}
+
+var errStaleAuthSnapshot = errors.New("auth snapshot predates the latest save")
 
 // UpdatePreparedAuth atomically merges request preparation results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications without modifying refresh lifecycle fields.
@@ -246,6 +264,12 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if !ok || existing == nil {
 		m.mu.Unlock()
 		return nil, false, false, nil
+	}
+	// The mutation lock is held across saves, so this check cannot race one.
+	if mode == updateModeSnapshot && !auth.UpdatedAt.IsZero() && m.savedSince(auth.ID, auth.UpdatedAt) {
+		current := existing.Clone()
+		m.mu.Unlock()
+		return current, false, false, errStaleAuthSnapshot
 	}
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)
@@ -559,6 +583,24 @@ type authPersistLock struct {
 	mu             sync.Mutex
 	lastEpoch      uint64
 	lastGeneration uint64
+	// lastSavedAt is when the latest store save for this auth returned. It keeps
+	// the monotonic clock reading so snapshot ordering survives wall-clock jumps.
+	lastSavedAt atomic.Pointer[time.Time]
+}
+
+// savedSince reports whether a store save for id returned at or after observedAt,
+// meaning a snapshot observed at observedAt may predate the stored state.
+func (m *Manager) savedSince(id string, observedAt time.Time) bool {
+	lockVal, ok := m.persistLocks.Load(id)
+	if !ok {
+		return false
+	}
+	pLock, _ := lockVal.(*authPersistLock)
+	if pLock == nil {
+		return false
+	}
+	savedAt := pLock.lastSavedAt.Load()
+	return savedAt != nil && !observedAt.After(*savedAt)
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
@@ -606,6 +648,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		}
 		defer releaseFg()
 		_, err := store.Save(ctx, auth)
+		// Record failed saves too: the file may have changed either way.
+		savedAt := time.Now()
+		pLock.lastSavedAt.Store(&savedAt)
 		return err
 	}
 

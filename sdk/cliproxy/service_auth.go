@@ -446,7 +446,18 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 			}
 		}
 		op = "update"
-		_, err = s.coreManager.Update(ctx, auth)
+		if auth.Generation == 0 {
+			// Unversioned file-watcher snapshots may have been read before a newer
+			// save (for example a management PATCH); let the manager drop those.
+			current, applied, errSnapshot := s.coreManager.UpdateFromSnapshot(ctx, auth)
+			if errSnapshot == nil && !applied && current != nil {
+				log.Debugf("skipping auth snapshot for %s observed before its latest save", auth.ID)
+				return current
+			}
+			err = errSnapshot
+		} else {
+			_, err = s.coreManager.Update(ctx, auth)
+		}
 	} else {
 		_, err = s.coreManager.Register(ctx, auth)
 	}
