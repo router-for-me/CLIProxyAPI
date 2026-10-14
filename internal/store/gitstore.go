@@ -1727,6 +1727,12 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 		return fmt.Errorf("git token store: worktree: %w", err)
 	}
 	managedPaths, errPaths := normalizeManagedPaths(relPaths)
+	// Key expected bytes like managedPaths, or a caller's OS-specific path (for
+	// example backslashes on Windows) would never match and skip the check.
+	expectedByPath := make(map[string][]byte, len(expected))
+	for path, data := range expected {
+		expectedByPath[managedPathKey(path)] = data
+	}
 	if errPaths != nil {
 		return fmt.Errorf("git token store: validate commit paths: %w", errPaths)
 	}
@@ -1749,7 +1755,7 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 		stagedHash, errAdd := worktree.Add(rel)
 		err = errAdd
 		if err == nil {
-			if want, ok := expected[rel]; ok {
+			if want, ok := expectedByPath[rel]; ok {
 				same, errSame := stagedBlobEquals(repo, stagedHash, want)
 				if errSame != nil {
 					return fmt.Errorf("git token store: read staged %s: %w", rel, errSame)
@@ -1837,6 +1843,12 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 	return nil
 }
 
+// managedPathKey is the repository-relative form of path used for managed paths:
+// cleaned, with forward slashes on every OS.
+func managedPathKey(path string) string {
+	return filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+}
+
 func normalizeManagedPaths(paths []string) ([]string, error) {
 	normalized := make([]string, 0, len(paths))
 	seen := make(map[string]struct{}, len(paths))
@@ -1845,7 +1857,7 @@ func normalizeManagedPaths(paths []string) ([]string, error) {
 		if trimmed == "" {
 			continue
 		}
-		clean := filepath.ToSlash(filepath.Clean(trimmed))
+		clean := managedPathKey(trimmed)
 		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || filepath.IsAbs(trimmed) {
 			return nil, fmt.Errorf("path %q is not a repository-relative file", path)
 		}

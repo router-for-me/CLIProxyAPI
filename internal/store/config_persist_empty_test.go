@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -193,5 +194,37 @@ func TestGitTokenStorePersistConfigDoesNotCommitConfigTruncatedAfterCheck(t *tes
 	}
 	if contents == "" {
 		t.Fatal("committed the config truncated after the emptiness check")
+	}
+}
+
+// commitAndPushWithOptionsLocked compares staged content using normalized paths,
+// so the expected bytes must be found whatever form the caller's path takes
+// (backslashes on Windows, "./" segments).
+func TestGitTokenStoreCommitChecksExpectedBytesForUnnormalizedPath(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+	configPath := store.ConfigPath()
+	if err := os.WriteFile(configPath, []byte("version: one\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	rel, err := store.relativeToRepo(configPath)
+	if err != nil {
+		t.Fatalf("relativeToRepo: %v", err)
+	}
+	unnormalized := filepath.Dir(rel) + string(filepath.Separator) + "." + string(filepath.Separator) + filepath.Base(rel)
+
+	store.mu.Lock()
+	err = store.commitAndPushWithOptionsLocked(context.Background(), "Update config", false,
+		map[string][]byte{unnormalized: []byte("version: two\n")}, rel)
+	store.mu.Unlock()
+	if !errors.Is(err, errStagedContentChanged) {
+		t.Fatalf("commit error = %v, want errStagedContentChanged (expected bytes were not checked)", err)
 	}
 }
