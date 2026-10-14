@@ -269,7 +269,7 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	} else {
 		delete(w.fileAuthsByPath, normalized)
 	}
-	updates := w.computePerPathUpdatesLocked(oldByID, newByID)
+	updates := w.computePerPathUpdatesLocked(oldByID, newByID, observedAt)
 	w.clientsMutex.Unlock()
 
 	if errSynthesize == nil {
@@ -330,14 +330,9 @@ func (w *Watcher) RereadAuthFile(path string) {
 	w.clientsMutex.Unlock()
 }
 
-func (w *Watcher) removeClient(path string) {
-	w.authRescanMu.Lock()
-	defer w.authRescanMu.Unlock()
-
-	w.removeClientLocked(path)
-}
-
-func (w *Watcher) removeClientLocked(path string) {
+// removeClientLocked drops the auths of a removed file. observedAt must be taken
+// before the check that found the file gone.
+func (w *Watcher) removeClientLocked(path string, observedAt time.Time) {
 	w.observeAuthFile(path)
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
@@ -349,7 +344,7 @@ func (w *Watcher) removeClientLocked(path string) {
 	delete(w.lastAuthContents, normalized)
 	delete(w.fileAuthsByPath, normalized)
 
-	updates := w.computePerPathUpdatesLocked(oldByID, map[string]*coreauth.Auth{})
+	updates := w.computePerPathUpdatesLocked(oldByID, map[string]*coreauth.Auth{}, observedAt)
 	w.clientsMutex.Unlock()
 
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
@@ -357,7 +352,9 @@ func (w *Watcher) removeClientLocked(path string) {
 	redisqueue.NotifyUsageRefresh()
 }
 
-func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*coreauth.Auth) []AuthUpdate {
+// computePerPathUpdatesLocked diffs one file's auths. observedAt is when the file
+// was observed (taken before reading or checking it); deletes carry it.
+func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*coreauth.Auth, observedAt time.Time) []AuthUpdate {
 	if w.currentAuths == nil {
 		w.currentAuths = make(map[string]*coreauth.Auth)
 	}
@@ -379,7 +376,7 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 			continue
 		}
 		delete(w.currentAuths, id)
-		updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})
+		updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id, ObservedAt: observedAt})
 	}
 	w.stampAuthUpdatesLocked(updates)
 	return updates

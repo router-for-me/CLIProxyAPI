@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -293,7 +294,7 @@ func TestDispatchAuthUpdatesRejectsDelayedScan(t *testing.T) {
 			w.authQueue = make(chan AuthUpdate, 10)
 			// Suspend the full-scan pipeline between its state commit and dispatch.
 			w.clientsMutex.Lock()
-			delayed := w.prepareAuthUpdatesLocked([]*coreauth.Auth{w.currentAuths["account.json"].Clone()}, true)
+			delayed := w.prepareAuthUpdatesLocked([]*coreauth.Auth{w.currentAuths["account.json"].Clone()}, true, time.Now())
 			w.clientsMutex.Unlock()
 			if action == "delete" {
 				if errRemove := os.Remove(path); errRemove != nil {
@@ -475,5 +476,73 @@ func TestRereadAuthFileAcceptsUppercaseJSONExtension(t *testing.T) {
 
 	if len(w.pendingOrder) == 0 {
 		t.Fatal("re-read ignored a .JSON auth file the full scan accepts")
+	}
+}
+
+// A delete carries the time its file was observed gone, taken during the event
+// handling before the check that found it missing, so the core manager can drop a
+// delete observed before a re-create of the same account was saved (#6622).
+func TestHandleEventRemoveStampsDeleteObservedAt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "account.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	w := &Watcher{authDir: dir, config: &config.Config{AuthDir: dir}}
+	w.addOrUpdateClient(path)
+	w.authQueue = make(chan AuthUpdate, 10)
+	if errRemove := os.Remove(path); errRemove != nil {
+		t.Fatal(errRemove)
+	}
+
+	originalSleep := sleepFunc
+	t.Cleanup(func() { sleepFunc = originalSleep })
+	var lastSleepAt time.Time
+	sleepFunc = func(time.Duration) { lastSleepAt = time.Now() }
+
+	w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Remove})
+	doneAt := time.Now()
+
+	pending, ok := w.pendingUpdates["account.json"]
+	if !ok || pending.Action != AuthUpdateActionDelete {
+		t.Fatalf("pending update = %+v, want a delete", pending)
+	}
+	if lastSleepAt.IsZero() {
+		t.Fatal("remove handling never waited for an atomic replace")
+	}
+	// The stamp must follow the last wait, so it precedes only the final stat.
+	if pending.ObservedAt.Before(lastSleepAt) || pending.ObservedAt.After(doneAt) {
+		t.Fatalf("delete observed at %v, want a time between the last wait (%v) and the end of handling (%v)", pending.ObservedAt, lastSleepAt, doneAt)
+	}
+}
+
+// A full scan's deletes carry the scan start: the auth dir is listed after it.
+func TestRefreshAuthStateStampsDeletesWithScanStart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "account.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	w := &Watcher{authDir: dir, config: &config.Config{AuthDir: dir}}
+	w.addOrUpdateClient(path)
+	w.authQueue = make(chan AuthUpdate, 10)
+	originalSnapshot := snapshotCoreAuthsFunc
+	t.Cleanup(func() { snapshotCoreAuthsFunc = originalSnapshot })
+	var listedAt time.Time
+	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string, parser synthesizer.PluginAuthParser) []*coreauth.Auth {
+		if errRemove := os.Remove(path); errRemove != nil {
+			t.Fatal(errRemove)
+		}
+		listedAt = time.Now()
+		return originalSnapshot(cfg, authDir, parser)
+	}
+	w.refreshAuthState(false)
+
+	pending, ok := w.pendingUpdates["account.json"]
+	if !ok || pending.Action != AuthUpdateActionDelete {
+		t.Fatalf("pending update = %+v, want a delete", pending)
+	}
+	if pending.ObservedAt.IsZero() || pending.ObservedAt.After(listedAt) {
+		t.Fatalf("delete observed at %v, want a time no later than the listing at %v", pending.ObservedAt, listedAt)
 	}
 }

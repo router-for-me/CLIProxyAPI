@@ -1986,17 +1986,17 @@ func TestPrepareAuthUpdatesLockedForceAndDelete(t *testing.T) {
 		authQueue: make(chan AuthUpdate, 4),
 	}
 
-	updates := w.prepareAuthUpdatesLocked([]*coreauth.Auth{{ID: "a", Provider: "p2"}}, false)
+	updates := w.prepareAuthUpdatesLocked([]*coreauth.Auth{{ID: "a", Provider: "p2"}}, false, time.Now())
 	if len(updates) != 1 || updates[0].Action != AuthUpdateActionModify || updates[0].ID != "a" {
 		t.Fatalf("unexpected modify updates: %+v", updates)
 	}
 
-	updates = w.prepareAuthUpdatesLocked([]*coreauth.Auth{{ID: "a", Provider: "p2"}}, true)
+	updates = w.prepareAuthUpdatesLocked([]*coreauth.Auth{{ID: "a", Provider: "p2"}}, true, time.Now())
 	if len(updates) != 1 || updates[0].Action != AuthUpdateActionModify {
 		t.Fatalf("expected force modify, got %+v", updates)
 	}
 
-	updates = w.prepareAuthUpdatesLocked([]*coreauth.Auth{}, false)
+	updates = w.prepareAuthUpdatesLocked([]*coreauth.Auth{}, false, time.Now())
 	if len(updates) != 1 || updates[0].Action != AuthUpdateActionDelete || updates[0].ID != "a" {
 		t.Fatalf("expected delete for missing auth, got %+v", updates)
 	}

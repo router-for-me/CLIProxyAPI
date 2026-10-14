@@ -76,7 +76,7 @@ func TestAntigravityRemovedAccountsReleaseProbeSlots(t *testing.T) {
 		<-started
 	}
 	for i := range modelRegistrationMaxWorkersPerCategory {
-		svc.applyCoreAuthRemoval(ctx, fmt.Sprint("removed-", i))
+		svc.applyCoreAuthRemoval(ctx, fmt.Sprint("removed-", i), time.Time{})
 	}
 	auth, _ := svc.coreManager.Register(ctx, antigravityTestAuth("healthy", server.URL))
 	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })

@@ -212,7 +212,7 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 					continue
 				}
 			}
-			s.applyCoreAuthRemoval(registrationCtx, id)
+			s.applyCoreAuthRemoval(registrationCtx, id, update.ObservedAt)
 			needsAliasRebuild = true
 		default:
 			log.Debugf("received unknown auth update action: %v", update.Action)
@@ -582,7 +582,10 @@ func (s *Service) completeModelRegistrationForAuthWithCache(ctx context.Context,
 	return targetAuth.Generation
 }
 
-func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
+// applyCoreAuthRemoval removes an auth for a delete observed at observedAt (zero
+// when unknown). A delete that predates a re-create of the account is dropped by
+// the manager, and the registry is left alone.
+func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string, observedAt time.Time) {
 	if s == nil || id == "" {
 		return
 	}
@@ -597,7 +600,10 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	// Invalidate the auth before advancing the registry epoch. Otherwise a
 	// refresh can adopt the tombstone epoch while the auth still exists and
 	// republish its cached models after the registry has been cleared.
-	s.coreManager.Remove(ctx, id)
+	if !s.coreManager.RemoveUnlessRecreated(ctx, id, observedAt) {
+		log.Debugf("skipping auth delete for %s observed before it was re-created", id)
+		return
+	}
 	GlobalModelRegistry().UnregisterClient(id)
 	s.cancelStaleAntigravityProbes(id)
 	if strings.EqualFold(provider, "codex") {

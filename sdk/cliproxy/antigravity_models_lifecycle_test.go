@@ -60,7 +60,7 @@ func TestAntigravityRemovalInvalidatesAuthBeforeRegistry(t *testing.T) {
 			svc.WaitAntigravityProbes()
 		},
 	})
-	svc.applyCoreAuthRemoval(t.Context(), auth.ID)
+	svc.applyCoreAuthRemoval(t.Context(), auth.ID, time.Time{})
 	if !closed {
 		t.Fatal("removal cleanup boundary was not exercised")
 	}

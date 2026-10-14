@@ -79,10 +79,13 @@ const (
 
 // AuthUpdate describes an incremental change to auth configuration.
 type AuthUpdate struct {
-	Action   AuthUpdateAction
-	ID       string
-	Auth     *coreauth.Auth
-	revision uint64 // Watcher-local ordering, independent of runtime auth generations.
+	Action AuthUpdateAction
+	ID     string
+	Auth   *coreauth.Auth
+	// ObservedAt is set on file-backed deletes: a time taken before the watcher saw
+	// the auth's file (or its entry in the file) gone. Zero means unknown.
+	ObservedAt time.Time
+	revision   uint64 // Watcher-local ordering, independent of runtime auth generations.
 }
 
 // Revision returns the monotonic watcher revision assigned to this update.

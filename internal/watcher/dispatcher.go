@@ -144,6 +144,9 @@ func (w *Watcher) refreshAuthState(force bool) {
 	previous := maps.Clone(w.authRevisions)
 	previousFiles := maps.Clone(w.fileObservations)
 	w.clientsMutex.Unlock()
+	// The scan lists the auth dir after this, so an auth missing from it was
+	// observed gone no earlier than observedAt.
+	observedAt := time.Now()
 	auths := snapshotCoreAuthsFunc(cfg, authDir, parser)
 	w.clientsMutex.Lock()
 	w.activeAuthScans--
@@ -175,12 +178,14 @@ func (w *Watcher) refreshAuthState(force bool) {
 			}
 		}
 	}
-	updates := w.prepareAuthUpdatesLocked(auths, force)
+	updates := w.prepareAuthUpdatesLocked(auths, force, observedAt)
 	w.clientsMutex.Unlock()
 	w.dispatchAuthUpdates(updates)
 }
 
-func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) []AuthUpdate {
+// prepareAuthUpdatesLocked diffs a full set of auths against the current state.
+// Deletes carry observedAt, a time taken before the auths were listed.
+func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool, observedAt time.Time) []AuthUpdate {
 	newState := make(map[string]*coreauth.Auth, len(auths))
 	orderedIDs := make([]string, 0, len(auths))
 	for _, auth := range auths {
@@ -206,7 +211,7 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 	}
 	for id := range w.currentAuths {
 		if _, ok := newState[id]; !ok {
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})
+			updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id, ObservedAt: observedAt})
 		}
 	}
 	w.currentAuths = newState

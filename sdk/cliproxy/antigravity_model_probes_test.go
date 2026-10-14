@@ -84,7 +84,7 @@ func TestAntigravityDeletedAccountCannotStartQueuedProbe(t *testing.T) {
 	svc := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
 	auth, _ := svc.coreManager.Register(t.Context(), antigravityTestAuth("queued-removed", "http://127.0.0.1:1"))
 	key := svc.antigravityCapabilityKey(auth)
-	svc.applyCoreAuthRemoval(t.Context(), auth.ID)
+	svc.applyCoreAuthRemoval(t.Context(), auth.ID, time.Time{})
 	ctx, finish, active := svc.beginAntigravityAccountProbe(t.Context(), auth, key, "flight", "token-queued-removed")
 	defer finish()
 	if active || ctx.Err() == nil {

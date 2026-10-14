@@ -18,6 +18,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// sleepFunc waits for an atomic replace to settle before a remove is trusted;
+// tests replace it.
+var sleepFunc = time.Sleep
+
 func matchProvider(provider string, targets []string) (string, bool) {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	for _, t := range targets {
@@ -108,8 +112,12 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		}
 		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
-		time.Sleep(replaceCheckDelay)
+		sleepFunc(replaceCheckDelay)
 		statSucceeded := false
+		// observedAt precedes the last check that found the file missing. The core
+		// manager drops a delete observed at or before the auth's latest save if
+		// the auth's file exists again.
+		observedAt := time.Now()
 		if _, statErr := os.Stat(event.Name); statErr == nil {
 			statSucceeded = true
 		} else if w.isKnownAuthFile(event.Name) {
@@ -117,7 +125,8 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			// can trigger a NOTE_DELETE before the target inode is fully visible. Retry briefly
 			// before treating a known auth file as permanently removed.
 			for attempt := 0; attempt < 3; attempt++ {
-				time.Sleep(25 * time.Millisecond)
+				sleepFunc(25 * time.Millisecond)
+				observedAt = time.Now()
 				if _, retryErr := os.Stat(event.Name); retryErr == nil {
 					statSucceeded = true
 					break
@@ -138,7 +147,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			return
 		}
 		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-		w.removeClientLocked(event.Name)
+		w.removeClientLocked(event.Name, observedAt)
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {

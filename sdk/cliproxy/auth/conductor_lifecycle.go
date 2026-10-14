@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -414,22 +416,41 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 // Remove deletes an auth from runtime state without persisting.
 // Disk and token-store deletion must be handled by the caller.
 func (m *Manager) Remove(ctx context.Context, id string) {
+	m.remove(ctx, id, time.Time{})
+}
+
+// RemoveUnlessRecreated removes an auth like Remove, for a removal observed at
+// observedAt, taken before the check that found the auth's file gone. If the auth
+// was saved at or after observedAt and its file exists again, the removal predates
+// that re-create: it is dropped and RemoveUnlessRecreated returns false. A zero
+// observedAt, or an auth whose file is still missing, always removes.
+func (m *Manager) RemoveUnlessRecreated(ctx context.Context, id string, observedAt time.Time) bool {
+	return m.remove(ctx, id, observedAt)
+}
+
+// remove reports false only when the removal was dropped as predating a re-create.
+func (m *Manager) remove(ctx context.Context, id string, observedAt time.Time) bool {
 	if m == nil {
-		return
+		return true
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return
+		return true
 	}
 	_ = ctx
 	releaseMutation := m.lockAuthMutation(id)
 	defer releaseMutation()
 
+	// The mutation lock is held across saves, so this check cannot race one. A save
+	// that failed or wrote nothing leaves the file missing, so the removal applies.
+	if !observedAt.IsZero() && m.savedSince(id, observedAt) && m.authFileExists(id) {
+		return false
+	}
 	m.mu.Lock()
 	existing := m.auths[id]
 	if existing == nil {
 		m.mu.Unlock()
-		return
+		return true
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
@@ -477,6 +498,24 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		}
 	}
 	m.persistCooldownStates(context.Background())
+	return true
+}
+
+// authFileExists reports whether the local auth file of id may exist. An auth
+// without a path, or a file that cannot be checked, counts as existing.
+func (m *Manager) authFileExists(id string) bool {
+	m.mu.RLock()
+	existing := m.auths[id]
+	path := ""
+	if existing != nil && existing.Attributes != nil {
+		path = strings.TrimSpace(existing.Attributes[AttributePath])
+	}
+	m.mu.RUnlock()
+	if path == "" {
+		return true
+	}
+	_, errStat := os.Stat(path)
+	return !errors.Is(errStat, fs.ErrNotExist)
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {

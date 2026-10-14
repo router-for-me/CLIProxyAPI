@@ -2,6 +2,9 @@ package cliproxy
 
 import (
 	"context"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -234,5 +237,59 @@ func TestPrepareCoreAuthForModelRegistration_SnapshotDoesNotReplaceConcurrentReg
 	current, ok := manager.GetByID(authID)
 	if !ok || current.Prefix != "pfx-new" || current.RegistrationEpoch != uploaded.RegistrationEpoch {
 		t.Fatalf("core auth = %+v, want pfx-new at the upload's registration epoch %d", current, uploaded.RegistrationEpoch)
+	}
+}
+
+// A watcher delete observed before a re-create of the same account is saved must
+// not remove the re-created account or its models (#6622); a delete observed after
+// the save still applies.
+func TestHandleAuthUpdate_DeleteObservedBeforeRecreateIsDropped(t *testing.T) {
+	ctx := context.Background()
+	authID := "codex-delete-before-recreate.json"
+	reg := internalregistry.GetGlobalRegistry()
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	manager := coreauth.NewManager(snapshotTestStore{}, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	svc := &Service{cfg: &config.Config{}, coreManager: manager}
+	authPath := filepath.Join(t.TempDir(), authID)
+	if err := os.WriteFile(authPath, []byte(`{"type":"codex","access_token":"token"}`), 0o600); err != nil {
+		t.Fatalf("write re-created auth file: %v", err)
+	}
+
+	// The watcher saw the old file gone, then the account was re-created and saved
+	// before the queued delete reached the consumer.
+	observedAt := time.Now().Add(-time.Second)
+	recreated, errRegister := manager.Register(ctx, &coreauth.Auth{
+		ID:       authID,
+		FileName: authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"type": "codex", "access_token": "token"},
+		Attributes: map[string]string{
+			coreauth.AttributePath:          authPath,
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+		},
+	})
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	svc.registerModelsForAuth(ctx, recreated)
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("re-created auth has no registered models to protect")
+	}
+
+	svc.handleAuthUpdate(ctx, watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: authID, ObservedAt: observedAt})
+	if _, ok := manager.GetByID(authID); !ok {
+		t.Fatal("delete observed before the re-create removed the re-created account")
+	}
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("delete observed before the re-create unregistered the re-created account's models")
+	}
+
+	svc.handleAuthUpdate(ctx, watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: authID, ObservedAt: time.Now().Add(time.Second)})
+	if _, ok := manager.GetByID(authID); ok {
+		t.Fatal("delete observed after the latest save did not remove the account")
 	}
 }
