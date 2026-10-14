@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -464,6 +465,64 @@ func TestHandleEventConfigRemoveRearmsWatch(t *testing.T) {
 	}
 	if !watched {
 		t.Fatalf("expected %s to be watched again, watch list %v", configPath, fsWatcher.WatchList())
+	}
+	waitForReloadedPort(t, reloadedPorts, 8000)
+}
+
+// A second replace can remove the config between the existence check and the
+// add. The add fails with ENOENT and nothing else would retry it, so the re-arm
+// must retry until the watch is in place.
+func TestHandleEventConfigRemoveRetriesWatchLostToSecondReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := fsWatcher.Close(); errClose != nil {
+			t.Errorf("close fsnotify watcher: %v", errClose)
+		}
+	})
+	original := addConfigWatch
+	t.Cleanup(func() { addConfigWatch = original })
+	adds := 0
+	addConfigWatch = func(watcher *fsnotify.Watcher, path string) error {
+		adds++
+		if adds == 1 {
+			// The second save's rename lands here: the stat saw a file, the add does not.
+			return &os.PathError{Op: "inotify_add_watch", Path: path, Err: syscall.ENOENT}
+		}
+		return original(watcher, path)
+	}
+
+	reloadedPorts := make(chan int, 8)
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) { reloadedPorts <- cfg.Port },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	watched := false
+	for _, path := range fsWatcher.WatchList() {
+		if path == configPath {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Fatalf("expected %s to be watched after the retried add (adds=%d), watch list %v", configPath, adds, fsWatcher.WatchList())
 	}
 	waitForReloadedPort(t, reloadedPorts, 8000)
 }

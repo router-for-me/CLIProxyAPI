@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -243,22 +245,33 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 // rearmConfigWatch watches the config path again after its file was replaced or
 // removed. It reports whether a config file exists there to reload.
 func (w *Watcher) rearmConfigWatch() bool {
-	exists := false
 	for attempt := 0; attempt < 4; attempt++ {
-		if _, errStat := os.Stat(w.configPath); errStat == nil {
-			exists = true
-			break
+		if attempt > 0 {
+			time.Sleep(replaceCheckDelay)
 		}
-		time.Sleep(replaceCheckDelay)
-	}
-	if !exists {
-		log.Warnf("config file %s was removed; it is no longer watched for changes", w.configPath)
-		return false
-	}
-	if w.watcher != nil {
-		if errAdd := w.watcher.Add(w.configPath); errAdd != nil {
+		if _, errStat := os.Stat(w.configPath); errStat != nil {
+			continue
+		}
+		if w.watcher == nil {
+			return true
+		}
+		// Another replace can remove the file between the stat and the add. The
+		// old file's watch is already gone and no later event would retry, so
+		// check and add again until the add sticks.
+		errAdd := addConfigWatch(w.watcher, w.configPath)
+		if errAdd == nil {
+			return true
+		}
+		if !errors.Is(errAdd, fs.ErrNotExist) {
 			log.WithError(errAdd).Warnf("failed to watch replaced config file %s", w.configPath)
+			return true
 		}
 	}
-	return true
+	log.Warnf("config file %s was removed; it is no longer watched for changes", w.configPath)
+	return false
+}
+
+// addConfigWatch adds the config file to the fsnotify watcher; tests replace it.
+var addConfigWatch = func(watcher *fsnotify.Watcher, path string) error {
+	return watcher.Add(path)
 }
