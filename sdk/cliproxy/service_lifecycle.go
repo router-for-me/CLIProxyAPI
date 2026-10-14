@@ -325,7 +325,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			watcherCancel()
 		}
 		if s.coreManager != nil {
-			s.coreManager.StopAutoRefresh()
+			// Wait for in-flight refreshes to finish saving, within the shutdown deadline.
+			if errStop := s.coreManager.StopAutoRefreshContext(ctx); errStop != nil {
+				log.WithError(errStop).Warn("auth auto-refresh did not finish before shutdown deadline")
+			}
 		}
 		if watcher := s.currentWatcher(); watcher != nil {
 			if err := watcher.Stop(); err != nil {
