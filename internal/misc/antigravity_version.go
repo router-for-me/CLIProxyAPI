@@ -18,9 +18,9 @@ import (
 const (
 	// antigravityFallbackVersion is the client version reported when the hub
 	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
-	// newer models for clients below 2.9.0, so this floor must stay at or above
+	// newer models for clients below 2.23.0, so this floor must stay at or above
 	// that version.
-	antigravityFallbackVersion = "2.9.1"
+	antigravityFallbackVersion = "2.23.0"
 	antigravityHubPlatform     = "darwin/arm64"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second

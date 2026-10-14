@@ -238,6 +238,58 @@ func TestConvertAntigravityResponseToClaudeStream_EmptyCandidateClosesMessage(t 
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeStream_ZeroCandidatesDoesNotCountCachedAsOutput(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3.8-flash-high"}`)
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": ""}]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 142871, "cachedContentTokenCount": 140830, "candidatesTokenCount": 0, "thoughtsTokenCount": 0, "totalTokenCount": 142871},
+			"modelVersion": "gemini-3.8-flash-n",
+			"responseId": "resp_cached_zero_candidates"
+		}
+	}`)
+
+	var param any
+	output := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.8-flash-high", requestJSON, requestJSON, responseJSON, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.8-flash-high", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+
+	messageDelta := sseDataForEvent(t, string(output), "message_delta")
+	if got := gjson.Get(messageDelta, "usage.input_tokens").Int(); got != 2041 {
+		t.Fatalf("input_tokens = %d, want 2041: %s", got, messageDelta)
+	}
+	if outputTokens := gjson.Get(messageDelta, "usage.output_tokens"); !outputTokens.Exists() || outputTokens.Int() != 0 {
+		t.Fatalf("output_tokens = %s, want 0: %s", outputTokens.Raw, messageDelta)
+	}
+	if got := gjson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 140830 {
+		t.Fatalf("cache_read_input_tokens = %d, want 140830: %s", got, messageDelta)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_AppendFinalEventsFallbackUsesRawPrompt(t *testing.T) {
+	params := &Params{
+		HasUsageMetadata:     true,
+		HasContent:           true,
+		PromptTokenCount:     2041,
+		CachedTokenCount:     140830,
+		CandidatesTokenCount: 0,
+		ThoughtsTokenCount:   0,
+		TotalTokenCount:      142871,
+	}
+	output := make([]byte, 0, 256)
+	appendFinalEvents(params, &output, true)
+
+	messageDelta := sseDataForEvent(t, string(output), "message_delta")
+	if outputTokens := gjson.Get(messageDelta, "usage.output_tokens"); !outputTokens.Exists() || outputTokens.Int() != 0 {
+		t.Fatalf("output_tokens = %s, want 0: %s", outputTokens.Raw, messageDelta)
+	}
+	if got := gjson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 140830 {
+		t.Fatalf("cache_read_input_tokens = %d, want 140830: %s", got, messageDelta)
+	}
+}
+
 func testEmptyAntigravityResponse() []byte {
 	return []byte(`{
 		"response": {

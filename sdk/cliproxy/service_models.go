@@ -32,6 +32,10 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 	if ctx.Err() != nil {
 		return
 	}
+	// Capture the publication fence before any runtime read or model
+	// resolution: a registration superseded while it is being computed must
+	// not overwrite or remove the newer registration when it finishes last.
+	fence := newModelRegistrationFence(a)
 	s.cancelStaleAntigravityProbes(a.ID)
 	if a.Disabled {
 		if s != nil && s.coreManager != nil {
@@ -39,7 +43,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				return
 			}
 		}
-		GlobalModelRegistry().UnregisterClient(a.ID)
+		s.unregisterModelsForAuthFenced(a, fence)
 		return
 	}
 	if s != nil && s.coreManager != nil {
@@ -69,7 +73,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			excluded = strings.Split(val, ",")
 		}
 	}
-	if s.tryRegisterPluginModelsForAuthWithConfig(ctx, cfg, a, provider, authKind, excluded) {
+	if s.tryRegisterPluginModelsForAuthWithConfigFenced(ctx, cfg, a, fence, provider, authKind, excluded) {
 		return
 	}
 	if ctx.Err() != nil {
@@ -247,13 +251,13 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				}
 				if len(ms) > 0 {
 					ms = s.appendPluginModels(providerKey, ms)
-					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
+					s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 				} else {
 					ms = s.appendPluginModels(providerKey, nil)
 					if len(ms) > 0 {
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
+						s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
-						GlobalModelRegistry().UnregisterClient(a.ID)
+						s.unregisterModelsForAuthFenced(a, fence)
 					}
 				}
 				return true
@@ -270,13 +274,13 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					ms := cached.models
 					if len(ms) > 0 {
 						ms = s.appendPluginModels(providerKey, ms)
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
+						s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
 						ms = s.appendPluginModels(providerKey, nil)
 						if len(ms) > 0 {
-							s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
+							s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 						} else {
-							GlobalModelRegistry().UnregisterClient(a.ID)
+							s.unregisterModelsForAuthFenced(a, fence)
 						}
 					}
 					return
@@ -294,10 +298,10 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			if isCompatAuth {
 				models = s.appendPluginModels(providerKey, nil)
 				if len(models) > 0 {
-					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, cfg.ForceModelPrefix))
+					s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(models, a.Prefix, cfg.ForceModelPrefix))
 				} else {
 					// No matching provider found or models removed entirely; drop any prior registration.
-					GlobalModelRegistry().UnregisterClient(a.ID)
+					s.unregisterModelsForAuthFenced(a, fence)
 				}
 				return
 			}
@@ -317,14 +321,14 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
 		models = applyOAuthSettingsForAuth(cfg, provider, authKind, models)
-		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix))
+		s.registerResolvedModelsForAuthFenced(a, fence, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix))
 		if strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") {
 			s.asyncProbeAntigravityCapabilities(ctx, a, key)
 		}
 		return
 	}
 
-	GlobalModelRegistry().UnregisterClient(a.ID)
+	s.unregisterModelsForAuthFenced(a, fence)
 	if provider == "antigravity" {
 		s.asyncProbeAntigravityCapabilities(ctx, a, key)
 	}
@@ -366,7 +370,15 @@ func (s *Service) refreshModelRegistrationForAuthWithContext(ctx context.Context
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
 	if !ok || latest.Disabled {
-		GlobalModelRegistry().UnregisterClient(current.ID)
+		if ok && latest != nil {
+			// Conditional cleanup: only remove the registration that
+			// still belongs to the disabled snapshot just observed. A
+			// concurrent re-enable/re-register advances identity or
+			// epoch and must not lose its newer publication.
+			s.unregisterModelsForAuthFenced(latest, newModelRegistrationFence(latest))
+		}
+		// If the auth is absent, applyCoreAuthRemoval owns unregistration;
+		// a stale refresh must not delete a later re-registration.
 		s.coreManager.RefreshSchedulerEntry(current.ID)
 		return false
 	}

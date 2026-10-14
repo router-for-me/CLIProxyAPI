@@ -223,6 +223,17 @@ requests:
   # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
   proxy-url: ""
 
+  # Maximum time, in seconds, for upstream TLS handshakes made by the shared built-in
+  # uTLS client. It applies to both the Claude Code Anthropic transport and the Chrome
+  # ChatGPT/Codex transport; the standard fallback transport is unaffected. The timer
+  # starts after TCP or proxy connection establishment returns; it does not bound dialing
+  # or proxy CONNECT. When the upstream path accepts the connection but never answers the
+  # TLS ClientHello, the request would otherwise wait indefinitely and request-retry could
+  # never engage. The bound applies only during the TLS handshake and is lifted once it
+  # succeeds, so inference and long-running streams are never time-limited.
+  # Set to 0 to disable (default).
+  tls-handshake-timeout-seconds: 0
+
   # When true, forward filtered upstream response headers to downstream clients.
   # Default is false (disabled).
   passthrough-headers: false

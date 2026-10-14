@@ -3175,6 +3175,9 @@ func TestCleanJSONSchema_RemovesDependentKeywords_Issue6539(t *testing.T) {
 // Multi-branch anyOf/oneOf unions (such as string | image object | audio object) must not be
 // flattened to a single selected branch, which previously caused non-first object branches (e.g. audio)
 // to disappear from the cleaned schema.
+// Multi-branch unions are preserved by every cleaner except the Antigravity Claude
+// tool cleaner, which flattens them for the Claude-side upstream that rejects nested
+// multi-branch unions (Issue 3662 regression follow-up).
 func TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662(t *testing.T) {
 	input := `{
 		"type": "object",
@@ -3506,13 +3509,88 @@ func TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662(t *testing.T) 
 			t.Fatalf("[GeminiJSONSchema] expected both anyOf and oneOf to be preserved: %s", jsonSchemaSibling.Raw)
 		}
 
+		// Issue 3662 regression: only the Antigravity Claude tool cleaner flattens the
+		// multi-branch unions that every other cleaner above preserves, because only the
+		// Antigravity Claude backend is known to reject nested multi-branch unions when
+		// it converts function declarations to Claude custom.input_schema.
+		t.Run("AntigravityClaudeToolFlattensNestedUnions", func(t *testing.T) {
+			flattened := gjson.Parse(CleanJSONSchemaForAntigravityClaudeTool(input, false))
+			item := flattened.Get("properties.item")
+			if item.Get("anyOf").Exists() || item.Get("oneOf").Exists() {
+				t.Fatalf("Antigravity Claude tool union survived cleaning: %s", flattened.Raw)
+			}
+			if got := item.Get("type").String(); got != "object" {
+				t.Fatalf("Antigravity Claude flattened item type = %q, want object (strongest branch): %s", got, flattened.Raw)
+			}
+			if !item.Get("properties.image").Exists() {
+				t.Fatalf("Antigravity Claude flattened item lost the first object branch: %s", flattened.Raw)
+			}
+			if desc := item.Get("description").String(); !strings.Contains(desc, "Accepts:") || !strings.Contains(desc, "string") {
+				t.Fatalf("Antigravity Claude flattened item lost the dropped-branch hint: %s", flattened.Raw)
+			}
+
+			// Idempotency matters on the Antigravity path: translators clean the schema
+			// once, then the executor cleans it again before sending it upstream.
+			flattenedTwice := CleanJSONSchemaForAntigravityClaudeTool(flattened.Raw, false)
+			compareJSON(t, flattened.Raw, flattenedTwice)
+
+			// Double-cleaning across the canonical translator -> executor chain must
+			// keep the flattened Claude shape unchanged on the second pass.
+			recleaned := CleanJSONSchemaForAntigravityClaudeTool(CleanJSONSchemaForAntigravity(input), false)
+			compareJSON(t, flattened.Raw, recleaned)
+			compareJSON(t, flattened.Raw, CleanJSONSchemaForAntigravity(flattened.Raw))
+
+			// Nullable multi-branch unions must keep nullability through the whole
+			// translator -> executor chain: the union-preserving first pass strips the
+			// null branch and marks the parent nullable:true, so the flattening second
+			// pass must inherit that marker instead of silently dropping it.
+			nullableUnionInput := `{"type":"object","properties":{"value":{"anyOf":[{"type":"string"},{"type":"integer"},{"type":"null"}]}}}`
+			directFlattened := CleanJSONSchemaForAntigravityClaudeTool(nullableUnionInput, false)
+			directValue := gjson.Parse(directFlattened).Get("properties.value")
+			if !directValue.Get("nullable").Bool() || directValue.Get("type").String() != "string" {
+				t.Fatalf("direct Claude flattening lost nullability: %s", directFlattened)
+			}
+			chainedFlattened := CleanJSONSchemaForAntigravityClaudeTool(CleanJSONSchemaForAntigravity(nullableUnionInput), false)
+			chainedValue := gjson.Parse(chainedFlattened).Get("properties.value")
+			if !chainedValue.Get("nullable").Bool() || chainedValue.Get("type").String() != "string" || chainedValue.Get("anyOf").Exists() {
+				t.Fatalf("translator -> executor chain lost nullability while flattening: %s", chainedFlattened)
+			}
+			compareJSON(t, chainedFlattened, CleanJSONSchemaForAntigravityClaudeTool(chainedFlattened, false))
+
+			// Boolean subschema branches must not leak raw booleans or unions into the
+			// flattened output: true normalizes away, false is unstisfiable and dropped.
+			trueBranch := `{"type":"object","properties":{"value":{"anyOf":[true,{"type":"string"},{"type":"integer"}]}}}`
+			compareJSON(t, `{"type":"object","properties":{"value":{"type":"string","description":"Accepts: string | integer"}}}`, CleanJSONSchemaForAntigravityClaudeTool(trueBranch, false))
+			falseBranch := `{"type":"object","properties":{"value":{"oneOf":[false,{"type":"string"},{"type":"integer"}]}}}`
+			compareJSON(t, `{"type":"object","properties":{"value":{"type":"string","description":"Accepts: string | integer"}}}`, CleanJSONSchemaForAntigravityClaudeTool(falseBranch, false))
+
+			// Sibling anyOf + oneOf on one node: both are flattened and neither raw union
+			// JSON leaks into the description (paths are processed oneOf-first, so the
+			// oneOf branch set wins the single remaining node).
+			siblingClaude := gjson.Parse(CleanJSONSchemaForAntigravityClaudeTool(siblingUnions, false))
+			siblingValue := siblingClaude.Get("properties.value")
+			if siblingValue.Get("anyOf").Exists() || siblingValue.Get("oneOf").Exists() {
+				t.Fatalf("Antigravity Claude sibling union survived cleaning: %s", siblingClaude.Raw)
+			}
+			compareJSON(t, `{"type":"string","description":"Accepts: string | boolean"}`, siblingValue.Raw)
+			compareJSON(t, siblingClaude.Raw, CleanJSONSchemaForAntigravityClaudeTool(siblingClaude.Raw, false))
+		})
+
 		// Null-only unions (anyOf:[null], oneOf:[null], anyOf:[false, null]) must not panic across any cleaner.
+		nullOnlyCleaners := map[string]func(string) string{
+			"Antigravity":           CleanJSONSchemaForAntigravity,
+			"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+			"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, false) },
+			"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+			"Gemini":                CleanJSONSchemaForGemini,
+			"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
+		}
 		for _, nullOnlyInput := range []string{
 			`{"type":"object","properties":{"value":{"anyOf":[{"type":"null"}]}}}`,
 			`{"type":"object","properties":{"value":{"oneOf":[{"type":"null"},{"type":"null"}]}}}`,
 			`{"type":"object","properties":{"value":{"anyOf":[false,{"type":"null"}],"description":"Null only"}}}`,
 		} {
-			for name, clean := range cleaners {
+			for name, clean := range nullOnlyCleaners {
 				got := clean(nullOnlyInput)
 				if !gjson.Valid(got) {
 					t.Fatalf("[%s] invalid JSON for null-only union %s: %s", name, nullOnlyInput, got)

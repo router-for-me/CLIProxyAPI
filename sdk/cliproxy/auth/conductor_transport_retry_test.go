@@ -85,6 +85,123 @@ func TestManager_ShouldRetryAfterError_RetriesPreHTTPTransportFailure(t *testing
 	}
 }
 
+// TestConfiguredTLSHandshakeTimeoutIsRetryable pins the Issue #6615 retry
+// contract: an internal establishment deadline is a transient pre-HTTP
+// failure even though its chain contains context.DeadlineExceeded, while
+// caller-owned deadline and cancellation shapes remain non-retryable.
+func TestConfiguredTLSHandshakeTimeoutIsRetryable(t *testing.T) {
+	configuredClaudeErr := &url.Error{
+		Op:  "Post",
+		URL: "https://api.anthropic.com/v1/messages",
+		Err: fmt.Errorf("claude tls: handshake upstream: %w", cliproxyexecutor.NewConfiguredTLSHandshakeTimeoutError(context.DeadlineExceeded)),
+	}
+	configuredChromeErr := &url.Error{
+		Op:  "Post",
+		URL: "https://chatgpt.com/backend-api/codex/responses",
+		Err: fmt.Errorf("utls: TLS handshake: %w", cliproxyexecutor.NewConfiguredTLSHandshakeTimeoutError(context.DeadlineExceeded)),
+	}
+	tests := []struct {
+		name      string
+		err       error
+		wantRetry bool
+	}{
+		{
+			name:      "claude configured handshake timeout",
+			err:       configuredClaudeErr,
+			wantRetry: true,
+		},
+		{
+			name:      "chrome configured handshake timeout",
+			err:       configuredChromeErr,
+			wantRetry: true,
+		},
+		{
+			name: "caller deadline stays non retryable",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://api.anthropic.com/v1/messages",
+				Err: context.DeadlineExceeded,
+			},
+			wantRetry: false,
+		},
+		{
+			name: "percent encoded marker is not trusted",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://api.anthropic.com/v1/messages",
+				Err: fmt.Errorf("tls%%20handshake%%20timeout: %w", context.DeadlineExceeded),
+			},
+			wantRetry: false,
+		},
+		{
+			name: "plaintext timeout phrase is not trusted",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://api.anthropic.com/v1/messages",
+				Err: fmt.Errorf("external transport tls handshake timeout: %w", context.DeadlineExceeded),
+			},
+			wantRetry: false,
+		},
+		{
+			name: "caller cancellation stays non retryable",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://api.anthropic.com/v1/messages",
+				Err: context.Canceled,
+			},
+			wantRetry: false,
+		},
+		{
+			name: "caller cancellation joined with configured timeout stays non retryable",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://api.anthropic.com/v1/messages",
+				Err: errors.Join(cliproxyexecutor.NewConfiguredTLSHandshakeTimeoutError(context.DeadlineExceeded), context.Canceled),
+			},
+			wantRetry: false,
+		},
+		{
+			name: "caller deadline joined with configured timeout stays non retryable",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://api.anthropic.com/v1/messages",
+				Err: errors.Join(cliproxyexecutor.NewConfiguredTLSHandshakeTimeoutError(context.DeadlineExceeded), context.DeadlineExceeded),
+			},
+			wantRetry: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isTransientTransportError(tt.err); got != tt.wantRetry {
+				t.Fatalf("isTransientTransportError(%v) = %t, want %t", tt.err, got, tt.wantRetry)
+			}
+			if got := isRequestRetryRoundError(tt.err); got != tt.wantRetry {
+				t.Fatalf("isRequestRetryRoundError(%v) = %t, want %t", tt.err, got, tt.wantRetry)
+			}
+			resultErr := resultErrorFromError(tt.err)
+			if resultErr == nil {
+				t.Fatalf("resultErrorFromError(%v) = nil", tt.err)
+			}
+			if tt.wantRetry {
+				if resultErr.Code != transientTransportErrorCode {
+					t.Fatalf("result code = %q, want %q", resultErr.Code, transientTransportErrorCode)
+				}
+				if !isTransientTransportResultError(resultErr) {
+					t.Fatalf("isTransientTransportResultError(%#v) = false, want true", resultErr)
+				}
+				if isConnectionLifecycleResultError(resultErr) {
+					t.Fatalf("configured handshake timeout became a connection-lifecycle result: %#v", resultErr)
+				}
+			} else if resultErr.Code == transientTransportErrorCode {
+				t.Fatalf("caller-owned context error became transient transport: %#v", resultErr)
+			}
+			if !tt.wantRetry && isTransientTransportResultError(resultErr) {
+				t.Fatalf("message-only fallback promoted a non-retryable error: %#v", resultErr)
+			}
+		})
+	}
+}
+
 func TestManager_MarkResult_PreHTTPTransportFailureDoesNotCooldown(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -261,6 +378,90 @@ func TestExecuteDoesNotPoisonCredentialOnPreHTTPTransportFailure(t *testing.T) {
 	}
 	if calls := executor.callCount(); calls != 2 {
 		t.Fatalf("executor calls = %d, want 2", calls)
+	}
+}
+
+// alwaysFailExecutor is local to the configured-handshake retry-round test
+// because transportThenSuccessExecutor intentionally fails only once.
+type alwaysFailExecutor struct {
+	identifier string
+	fail       error
+	calls      int
+}
+
+func (e *alwaysFailExecutor) Identifier() string { return e.identifier }
+
+func (e *alwaysFailExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.calls++
+	return cliproxyexecutor.Response{}, e.fail
+}
+
+func (e *alwaysFailExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.calls++
+	return nil, e.fail
+}
+
+func (*alwaysFailExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *alwaysFailExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.calls++
+	return cliproxyexecutor.Response{}, e.fail
+}
+
+func (*alwaysFailExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *alwaysFailExecutor) callCount() int { return e.calls }
+
+// TestExecuteRetriesConfiguredClaudeHandshakeTimeoutToConfiguredRounds
+// verifies the complete request-retry round behavior with one credential:
+// request-retry 3 means the initial attempt plus three additional rounds,
+// and a caller deadline with the same retry setting still runs only once.
+func TestExecuteRetriesConfiguredClaudeHandshakeTimeoutToConfiguredRounds(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	configuredErr := &url.Error{
+		Op:  "Post",
+		URL: "https://api.anthropic.com/v1/messages",
+		Err: fmt.Errorf("claude tls: handshake upstream: %w", cliproxyexecutor.NewConfiguredTLSHandshakeTimeoutError(context.DeadlineExceeded)),
+	}
+	tests := []struct {
+		name      string
+		err       error
+		wantCalls int
+	}{
+		{name: "configured handshake timeout", err: configuredErr, wantCalls: 4},
+		{name: "caller deadline", err: context.DeadlineExceeded, wantCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.SetRetryConfig(3, 0, 0)
+			executor := &alwaysFailExecutor{identifier: "claude", fail: tt.err}
+			manager.RegisterExecutor(executor)
+
+			model := "claude-handshake-retry-" + uuid.NewString()
+			authID := "claude-handshake-auth-" + uuid.NewString()
+			registry.GetGlobalRegistry().RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: "claude"}); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			_, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			if errExecute == nil {
+				t.Fatal("Execute() error = nil, want final handshake failure")
+			}
+			if calls := executor.callCount(); calls != tt.wantCalls {
+				t.Fatalf("executor calls = %d, want %d", calls, tt.wantCalls)
+			}
+			assertNoCooldown(t, manager, authID, model)
+		})
 	}
 }
 

@@ -1577,6 +1577,12 @@ func resultErrorFromError(err error) *Error {
 		// Prefer true request-scoped faults (including Claude OAuth cancellation)
 		// over the broader connection-lifecycle classification.
 		resultErr.Code = requestScopedErrorCode
+	case isConfiguredTLSHandshakeTimeoutError(err):
+		// An internal TLS establishment deadline is a transient transport
+		// failure, not a caller-owned context lifecycle event.
+		if resultErr.Code == "" || resultErr.Code == transientTransportErrorCode {
+			resultErr.Code = transientTransportErrorCode
+		}
 	case isConnectionLifecycleError(err):
 		// Preserve lifecycle classification for MarkResult without making the error
 		// request-scoped (which would also stop credential fallback).
@@ -1619,6 +1625,9 @@ func isConnectionLifecycleError(err error) bool {
 	if statusCodeFromError(err) != 0 {
 		return false
 	}
+	if isConfiguredTLSHandshakeTimeoutError(err) {
+		return false
+	}
 	// Client abort and request-scoped timeouts are not credential faults.
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
@@ -1632,6 +1641,9 @@ func isConnectionLifecycleResultError(err *Error) bool {
 	}
 	if err.Code == connectionLifecycleErrorCode {
 		return true
+	}
+	if err.Code == transientTransportErrorCode {
+		return false
 	}
 	// Message fallback only when no HTTP status is attached, so 401/429/5xx
 	// response bodies cannot suppress credential cooldown.
@@ -1669,6 +1681,18 @@ func isHTTP2ClosedConnectionMessage(lower string) bool {
 		strings.Contains(lower, "http2: client conn is closed")
 }
 
+// isConfiguredTLSHandshakeTimeoutError identifies the typed internal
+// establishment deadline produced by the configured TLS handshake bound.
+// Delegating to the shared executor predicate ensures classification is
+// based on error identity rather than message text and that any
+// caller-owned context error outside a configured-timeout subtree wins.
+func isConfiguredTLSHandshakeTimeoutError(err error) bool {
+	if err == nil || statusCodeFromError(err) != 0 {
+		return false
+	}
+	return cliproxyexecutor.IsConfiguredTLSHandshakeTimeoutError(err)
+}
+
 // isTransientTransportError reports pre-HTTP dial/TLS/DNS/reset failures that
 // should retry under request-retry without cooling the selected credential.
 func isTransientTransportError(err error) bool {
@@ -1678,6 +1702,9 @@ func isTransientTransportError(err error) bool {
 	// HTTP-status failures stay on the credential/status retry path.
 	if statusCodeFromError(err) != 0 {
 		return false
+	}
+	if isConfiguredTLSHandshakeTimeoutError(err) {
+		return true
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -1711,6 +1738,14 @@ func isTransientTransportResultError(err *Error) bool {
 		return true
 	}
 	if statusCodeFromResult(err) != 0 {
+		return false
+	}
+	// Once an error has been reduced to a Result message, typed identity is
+	// no longer available. An explicit transient code assigned by
+	// resultErrorFromError is authoritative for configured handshake
+	// timeouts; matching text alone must not promote an external or
+	// caller-owned deadline that happens to use the same phrase.
+	if strings.Contains(strings.ToLower(err.Message), "tls handshake timeout") {
 		return false
 	}
 	return isTransientTransportMessage(err.Message)
