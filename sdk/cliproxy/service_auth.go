@@ -404,6 +404,10 @@ func (s *Service) wsOnDisconnected(channelID string, reason error) {
 	})
 }
 
+// beforeSnapshotRegister runs before an absent auth's snapshot is registered;
+// tests use it to land a concurrent registration in that window.
+var beforeSnapshotRegister = func(string) {}
+
 // rereadDroppedAuthSnapshot has the watcher read the snapshot's file again. The
 // dropped read may hold an edit made after the save, and the watcher would skip
 // that edit's own event as unchanged. The re-read runs on its own goroutine: it
@@ -443,7 +447,27 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 	// immediately for API calls, rather than waiting for model registration to complete.
 	op := "register"
 	var err error
-	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
+	existing, ok := s.coreManager.GetByID(auth.ID)
+	if !ok {
+		if auth.Generation == 0 {
+			// A registration (an upload, a login) can land after the lookup above.
+			// Register only if the auth is still absent, under its lock; otherwise
+			// apply this snapshot as an update of that auth, so a snapshot read
+			// before its save is dropped instead of replacing it.
+			beforeSnapshotRegister(auth.ID)
+			var registered bool
+			_, registered, err = s.coreManager.RegisterIfAbsent(ctx, auth)
+			if !registered && err == nil {
+				if existing, ok = s.coreManager.GetByID(auth.ID); !ok {
+					// Registered and removed again since this snapshot was read.
+					return nil
+				}
+			}
+		} else {
+			_, err = s.coreManager.Register(ctx, auth)
+		}
+	}
+	if ok {
 		if isStaleCoreAuth(existing, auth) {
 			log.Debugf("skipping stale auth update for %s: incoming gen=%d, existing gen=%d", auth.ID, auth.Generation, existing.Generation)
 			return existing
@@ -478,8 +502,6 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		} else {
 			_, err = s.coreManager.Update(ctx, auth)
 		}
-	} else {
-		_, err = s.coreManager.Register(ctx, auth)
 	}
 	if err != nil {
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
