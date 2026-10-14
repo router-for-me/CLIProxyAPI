@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/atomicfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -270,7 +271,7 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	if errWrite := atomicfile.WriteFile(dst, data, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {

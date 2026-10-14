@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/atomicfile"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -230,7 +231,7 @@ func setSourceAuthFileDisabled(path string, disabled bool) error {
 	if errMarshal != nil {
 		return fmt.Errorf("marshal auth file: %w", errMarshal)
 	}
-	if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+	if errWrite := atomicfile.WriteFile(path, raw, 0o600); errWrite != nil {
 		return errWrite
 	}
 	return nil

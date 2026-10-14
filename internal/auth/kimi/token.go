@@ -4,14 +4,15 @@
 package kimi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/atomicfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
-	log "github.com/sirupsen/logrus"
 )
 
 // KimiTokenStorage stores OAuth2 token information for Kimi API authentication.
@@ -114,20 +115,16 @@ func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
-	}
-	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("kimi token storage: close token file error: %v", errClose)
-		}
-	}()
-
-	encoder := json.NewEncoder(f)
+	// Encode first, then replace the file atomically so a concurrent reader
+	// (the auth watcher) never sees a truncated credential file.
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
 	encoder.SetIndent("", "  ")
-	if err = encoder.Encode(data); err != nil {
+	if err := encoder.Encode(data); err != nil {
 		return fmt.Errorf("failed to write token to file: %w", err)
+	}
+	if err := atomicfile.WriteFile(authFilePath, buf.Bytes(), 0o600); err != nil {
+		return fmt.Errorf("failed to create token file: %w", err)
 	}
 	return nil
 }
