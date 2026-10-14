@@ -97,10 +97,12 @@ func (w *Watcher) reloadConfigIfChanged() {
 		w.lastConfigHash = appliedHash
 		w.clientsMutex.Unlock()
 		// The load hashed a plaintext secret into the file, or a newer save replaced
-		// it; either write reloads again and is mirrored then. Mirroring now could
-		// publish the plaintext to a remote store.
+		// it. Reload that write without waiting for its file event and mirror then;
+		// mirroring now could publish the plaintext to a remote store. If the file
+		// could not be written, the reload finds it unchanged and stops.
 		if config.HasPlaintextSecretKey(data) {
 			log.Debug("config holds a plaintext management secret, mirroring it once hashed")
+			w.scheduleConfigReload()
 			return
 		}
 		w.persistConfigAsync()

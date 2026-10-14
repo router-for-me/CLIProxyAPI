@@ -453,6 +453,11 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 		log.Warn("postgres store: local config is empty, keeping the stored copy")
 		return nil
 	}
+	if config.HasPlaintextSecretKey(data) {
+		// A hot reload hashes the secret into the file; that write is mirrored.
+		log.Warn("postgres store: local config holds a plaintext management secret, keeping the stored copy")
+		return nil
+	}
 	return s.persistConfig(ctx, data)
 }
 
