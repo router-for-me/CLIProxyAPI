@@ -169,7 +169,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	return loadConfigData(configFile, data, optional)
+}
 
+// LoadConfigData parses config YAML that was already read from configFile, so a
+// caller that hashed those bytes loads exactly them. configFile is still used to
+// write back a newly hashed management secret.
+func LoadConfigData(configFile string, data []byte) (*Config, error) {
+	return loadConfigData(configFile, data, false)
+}
+
+func loadConfigData(configFile string, data []byte, optional bool) (*Config, error) {
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
 		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
@@ -209,7 +219,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
-	if err = yaml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
