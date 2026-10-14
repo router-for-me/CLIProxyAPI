@@ -228,3 +228,70 @@ func TestGitTokenStoreCommitChecksExpectedBytesForUnnormalizedPath(t *testing.T)
 		t.Fatalf("commit error = %v, want errStagedContentChanged (expected bytes were not checked)", err)
 	}
 }
+
+// A safe-save can remove or rename config.yaml after PersistConfig read it and
+// before git stages it. That must never be committed as a config deletion.
+func TestGitTokenStorePersistConfigDoesNotCommitConfigRemovedAfterCheck(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+	configPath := store.ConfigPath()
+	if err := os.WriteFile(configPath, []byte("version: one\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := store.PersistConfig(context.Background()); err != nil {
+		t.Fatalf("PersistConfig initial: %v", err)
+	}
+	// The same bytes again: git stages a removed tracked file as a deletion and
+	// reports the old blob, so a content comparison alone would pass.
+	original := beforeConfigCommit
+	t.Cleanup(func() { beforeConfigCommit = original })
+	beforeConfigCommit = func() {
+		if err := os.Remove(configPath); err != nil {
+			t.Errorf("remove config: %v", err)
+		}
+	}
+	if err := store.PersistConfig(context.Background()); err != nil {
+		t.Fatalf("PersistConfig: %v", err)
+	}
+
+	workspace := filepath.Join(root, "workspace")
+	repo, err := git.PlainOpen(workspace)
+	if err != nil {
+		t.Fatalf("open workspace repo: %v", err)
+	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close workspace repo: %v", errClose)
+		}
+	}()
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("head commit: %v", err)
+	}
+	rel, err := filepath.Rel(workspace, configPath)
+	if err != nil {
+		t.Fatalf("rel config path: %v", err)
+	}
+	file, err := commit.File(filepath.ToSlash(rel))
+	if err != nil {
+		t.Fatalf("committed config missing (removal was committed): %v", err)
+	}
+	contents, err := file.Contents()
+	if err != nil {
+		t.Fatalf("read committed config: %v", err)
+	}
+	if contents != "version: one\n" {
+		t.Fatalf("committed config = %q, want the last committed config kept", contents)
+	}
+}

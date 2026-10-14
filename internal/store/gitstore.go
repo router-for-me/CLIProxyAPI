@@ -1755,20 +1755,26 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 
 	added := false
 	for _, rel := range managedPaths {
-		stagedHash, errAdd := worktree.Add(rel)
+		_, errAdd := worktree.Add(rel)
 		err = errAdd
-		if err == nil {
-			if want, ok := expectedByPath[rel]; ok {
-				same, errSame := stagedBlobEquals(repo, stagedHash, want)
+		if want, ok := expectedByPath[rel]; ok {
+			// The caller checked these bytes. A file that is now gone or unreadable was
+			// changed by a save after that check, so never stage its removal. Compare
+			// the index entry, not Add's hash: Add stages a removed tracked file as a
+			// deletion and still returns the old blob's hash.
+			same := false
+			if err == nil {
+				var errSame error
+				same, errSame = stagedEntryEquals(repo, rel, want)
 				if errSame != nil {
 					return fmt.Errorf("git token store: read staged %s: %w", rel, errSame)
 				}
-				if !same {
-					if errReset := resetIndexToHead(repo, worktree); errReset != nil {
-						return fmt.Errorf("git token store: reset index after %s changed: %w", rel, errReset)
-					}
-					return errStagedContentChanged
+			}
+			if !same {
+				if errReset := resetIndexToHead(repo, worktree); errReset != nil {
+					return fmt.Errorf("git token store: reset index after %s changed: %w", rel, errReset)
 				}
+				return errStagedContentChanged
 			}
 		}
 		if err != nil {
@@ -2156,6 +2162,23 @@ func deepEqualJSON(a, b any) bool {
 }
 
 // stagedBlobEquals reports whether the blob git staged holds exactly want.
+// stagedEntryEquals reports whether the index holds rel with exactly want. A
+// missing entry (a staged deletion) is reported as different.
+func stagedEntryEquals(repo *git.Repository, rel string, want []byte) (bool, error) {
+	idx, err := repo.Storer.Index()
+	if err != nil {
+		return false, err
+	}
+	entry, errEntry := idx.Entry(rel)
+	if errEntry != nil {
+		if errors.Is(errEntry, gitindex.ErrEntryNotFound) {
+			return false, nil
+		}
+		return false, errEntry
+	}
+	return stagedBlobEquals(repo, entry.Hash, want)
+}
+
 func stagedBlobEquals(repo *git.Repository, hash plumbing.Hash, want []byte) (bool, error) {
 	blob, err := repo.BlobObject(hash)
 	if err != nil {
