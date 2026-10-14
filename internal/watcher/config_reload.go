@@ -49,6 +49,12 @@ func (w *Watcher) ReloadConfigIfChanged() {
 }
 
 func (w *Watcher) reloadConfigIfChanged() {
+	w.reloadRunMu.Lock()
+	defer w.reloadRunMu.Unlock()
+	if w.stopped.Load() {
+		return
+	}
+
 	data, err := os.ReadFile(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
@@ -70,19 +76,21 @@ func (w *Watcher) reloadConfigIfChanged() {
 		return
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
-	if w.reloadConfig() {
-		finalHash := newHash
-		if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
-			sumUpdated := sha256.Sum256(updatedData)
-			finalHash = hex.EncodeToString(sumUpdated[:])
-		} else if errRead != nil {
-			log.WithError(errRead).Debug("failed to compute updated config hash after reload")
-		}
-		w.clientsMutex.Lock()
-		w.lastConfigHash = finalHash
-		w.clientsMutex.Unlock()
-		w.persistConfigAsync()
+	if w.reloadTestHook != nil {
+		w.reloadTestHook()
 	}
+	newConfig, persisted, errLoadConfig := config.ParseConfigBytesAndPersistMigrations(w.configPath, data)
+	if errLoadConfig != nil {
+		log.Errorf("failed to reload config: %v", errLoadConfig)
+		return
+	}
+
+	w.applyConfig(newConfig)
+	persistedSum := sha256.Sum256(persisted)
+	w.clientsMutex.Lock()
+	w.lastConfigHash = hex.EncodeToString(persistedSum[:])
+	w.clientsMutex.Unlock()
+	w.persistConfigAsync()
 }
 
 func (w *Watcher) reloadConfig() bool {
@@ -94,7 +102,11 @@ func (w *Watcher) reloadConfig() bool {
 		log.Errorf("failed to reload config: %v", errLoadConfig)
 		return false
 	}
+	w.applyConfig(newConfig)
+	return true
+}
 
+func (w *Watcher) applyConfig(newConfig *config.Config) {
 	if w.mirroredAuthDir != "" {
 		newConfig.AuthDir = w.mirroredAuthDir
 	} else {
@@ -140,5 +152,4 @@ func (w *Watcher) reloadConfig() bool {
 
 	log.Infof("config successfully reloaded, triggering client reload")
 	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
-	return true
 }
