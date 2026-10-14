@@ -11,8 +11,7 @@ import (
 )
 
 // toolResultTargets names, per target format, the JSON path where a base64 file
-// from a Claude tool_result must end up. Codex has no file part inside a function_call_output,
-// so the file rides in the user message that follows it. Bytes anywhere else, such as inside an
+// from a Claude tool_result must end up. Bytes anywhere else, such as inside an
 // escaped string, are text the model has to decode itself.
 var toolResultTargets = []struct {
 	name   string
@@ -21,7 +20,6 @@ var toolResultTargets = []struct {
 }{
 	{"gemini", sdktranslator.FormatGemini, "contents.#.parts.#.inline_data.data"},
 	{"antigravity", sdktranslator.FormatAntigravity, "request.contents.#.parts.#.functionResponse.parts.#.inlineData.data"},
-	{"codex", sdktranslator.FormatCodex, "input.#.content.#.file_data"},
 	{"openai", sdktranslator.FormatOpenAI, "messages.#.content.#.file.file_data"},
 	{"interactions", sdktranslator.FormatInteractions, "input.#.result.#.data"},
 }
