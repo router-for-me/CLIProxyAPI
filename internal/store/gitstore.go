@@ -1,10 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -414,7 +416,7 @@ func (s *GitTokenStore) ensureRepositoryContextLocked(ctx context.Context) (errR
 	}
 	s.dirLock.Unlock()
 	if len(initPaths) > 0 {
-		if errCommit := s.commitAndPushWithOptionsLocked(ctx, "Initialize git token store", true, initPaths...); errCommit != nil {
+		if errCommit := s.commitAndPushWithOptionsLocked(ctx, "Initialize git token store", true, nil, initPaths...); errCommit != nil {
 			return errCommit
 		}
 	}
@@ -1684,18 +1686,21 @@ func checkoutRemoteDefaultBranch(ctx context.Context, repo *git.Repository, work
 }
 
 func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) error {
-	return s.commitAndPushWithOptionsLocked(context.Background(), message, false, relPaths...)
+	return s.commitAndPushWithOptionsLocked(context.Background(), message, false, nil, relPaths...)
 }
 
 func (s *GitTokenStore) commitAndPushContextLocked(ctx context.Context, message string, relPaths ...string) error {
-	return s.commitAndPushWithOptionsLocked(ctx, message, false, relPaths...)
+	return s.commitAndPushWithOptionsLocked(ctx, message, false, nil, relPaths...)
 }
 
 func (s *GitTokenStore) commitAndPushInitialLocked(message string, relPaths ...string) error {
-	return s.commitAndPushWithOptionsLocked(context.Background(), message, true, relPaths...)
+	return s.commitAndPushWithOptionsLocked(context.Background(), message, true, nil, relPaths...)
 }
 
-func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, message string, allowMissingRemote bool, relPaths ...string) (errResult error) {
+// commitAndPushWithOptionsLocked commits relPaths. For a path in expected, the
+// staged blob must hold exactly those bytes; otherwise the index is reset and
+// errStagedContentChanged is returned without committing.
+func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, message string, allowMissingRemote bool, expected map[string][]byte, relPaths ...string) (errResult error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1744,7 +1749,23 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 
 	added := false
 	for _, rel := range managedPaths {
-		if _, err = worktree.Add(rel); err != nil {
+		stagedHash, errAdd := worktree.Add(rel)
+		err = errAdd
+		if err == nil {
+			if want, ok := expected[rel]; ok {
+				same, errSame := stagedBlobEquals(repo, stagedHash, want)
+				if errSame != nil {
+					return fmt.Errorf("git token store: read staged %s: %w", rel, errSame)
+				}
+				if !same {
+					if errReset := resetIndexToHead(repo, worktree); errReset != nil {
+						return fmt.Errorf("git token store: reset index after %s changed: %w", rel, errReset)
+					}
+					return errStagedContentChanged
+				}
+			}
+		}
+		if err != nil {
 			if errors.Is(err, gitindex.ErrEntryNotFound) {
 				continue
 			}
@@ -2014,14 +2035,14 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 	if configPath == "" {
 		return fmt.Errorf("git token store: config path not configured")
 	}
-	info, err := os.Stat(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("git token store: stat config: %w", err)
+		return fmt.Errorf("git token store: read config: %w", err)
 	}
-	if info.Size() == 0 {
+	if len(data) == 0 {
 		// An empty file is a save caught mid-write, never a config worth committing;
 		// pushing it would wipe the config that restarts and replicas load.
 		log.Warn("git token store: local config is empty, keeping the committed copy")
@@ -2031,8 +2052,24 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.commitAndPushLocked("Update config", rel)
+	beforeConfigCommit()
+	// Git stages the file by reading it again; commit only if that is still the
+	// content checked above. A save that changed it in between persists itself.
+	expected := map[string][]byte{rel: data}
+	errCommit := s.commitAndPushWithOptionsLocked(context.Background(), "Update config", false, expected, rel)
+	if errors.Is(errCommit, errStagedContentChanged) {
+		log.Warn("git token store: config changed while committing, leaving it to the newer save")
+		return nil
+	}
+	return errCommit
 }
+
+// errStagedContentChanged reports that a file changed between the check and git staging it.
+var errStagedContentChanged = errors.New("git token store: staged content changed")
+
+// beforeConfigCommit runs between reading config.yaml and staging it; tests use it
+// to land a concurrent save in that window.
+var beforeConfigCommit = func() {}
 
 func ensureEmptyFile(path string) error {
 	if _, err := os.Stat(path); err != nil {
@@ -2104,4 +2141,27 @@ func deepEqualJSON(a, b any) bool {
 	default:
 		return false
 	}
+}
+
+// stagedBlobEquals reports whether the blob git staged holds exactly want.
+func stagedBlobEquals(repo *git.Repository, hash plumbing.Hash, want []byte) (bool, error) {
+	blob, err := repo.BlobObject(hash)
+	if err != nil {
+		return false, err
+	}
+	if blob.Size != int64(len(want)) {
+		return false, nil
+	}
+	reader, err := blob.Reader()
+	if err != nil {
+		return false, err
+	}
+	got, errRead := io.ReadAll(reader)
+	if errClose := reader.Close(); errClose != nil && errRead == nil {
+		errRead = errClose
+	}
+	if errRead != nil {
+		return false, errRead
+	}
+	return bytes.Equal(got, want), nil
 }
