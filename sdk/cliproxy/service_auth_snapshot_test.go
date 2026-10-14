@@ -123,3 +123,60 @@ func TestPrepareCoreAuthForModelRegistration_SnapshotReadAfterSaveApplies(t *tes
 		t.Fatalf("core auth = %+v, want the newer file snapshot applied", current)
 	}
 }
+
+// A dropped snapshot may hold an external edit made after the save, which the
+// watcher would then skip as unchanged; the Service asks the watcher to re-read
+// that file.
+func TestPrepareCoreAuthForModelRegistration_DroppedSnapshotRereadsFile(t *testing.T) {
+	ctx := context.Background()
+	authID := "codex-snapshot-dropped-reread.json"
+	authPath := "/auths/" + authID
+	reg := internalregistry.GetGlobalRegistry()
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	manager := coreauth.NewManager(snapshotTestStore{}, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	reread := make(chan string, 1)
+	svc := &Service{cfg: &config.Config{}, coreManager: manager}
+	svc.setWatcher(&WatcherWrapper{rereadAuthFile: func(path string) { reread <- path }})
+
+	registered, errRegister := manager.Register(ctx, &coreauth.Auth{
+		ID:       authID,
+		FileName: authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Prefix:   "pfx-1",
+		Metadata: map[string]any{"type": "codex", "access_token": "token", "prefix": "pfx-1"},
+		Attributes: map[string]string{
+			coreauth.AttributePath:          authPath,
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+		},
+	})
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	// Observed explicitly before the save Register just made.
+	dropped := registered.Clone()
+	dropped.Generation = 0
+	dropped.Prefix = "pfx-edited"
+	dropped.Metadata = map[string]any{"type": "codex", "access_token": "token", "prefix": "pfx-edited"}
+	dropped.UpdatedAt = time.Now().Add(-time.Second)
+
+	svc.prepareCoreAuthForModelRegistration(ctx, dropped)
+
+	if current, ok := manager.GetByID(authID); !ok || current == nil || current.Prefix != "pfx-1" {
+		t.Fatalf("core auth = %+v, want the snapshot dropped", current)
+	}
+	hangGuard := time.NewTimer(5 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case path := <-reread:
+		if path != authPath {
+			t.Fatalf("re-read path = %q, want %q", path, authPath)
+		}
+	case <-hangGuard.C:
+		t.Fatal("dropped snapshot did not ask the watcher to re-read its file")
+	}
+}

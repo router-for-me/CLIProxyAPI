@@ -279,6 +279,34 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	redisqueue.NotifyUsageRefresh()
 }
 
+// RereadAuthFile reads an auth file again even if its content is unchanged. The
+// core manager drops a file snapshot observed before the auth's latest save, but
+// the read may already hold a newer edit, and caching its hash and auths would
+// suppress the event for that edit. Forgetting both makes this read dispatch the
+// file's current state, observed after the save.
+func (w *Watcher) RereadAuthFile(path string) {
+	if w == nil || strings.TrimSpace(path) == "" {
+		return
+	}
+	normalized := w.normalizeAuthPath(path)
+	if filepath.Dir(normalized) != w.normalizeAuthPath(w.authDir) || !strings.HasSuffix(normalized, ".json") {
+		return
+	}
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+	if _, errStat := os.Stat(path); errStat != nil {
+		// A removed file is handled by its remove event.
+		return
+	}
+	w.clientsMutex.Lock()
+	delete(w.lastAuthHashes, normalized)
+	for id := range w.fileAuthsByPath[normalized] {
+		delete(w.currentAuths, id)
+	}
+	w.clientsMutex.Unlock()
+	w.addOrUpdateClientLocked(path)
+}
+
 func (w *Watcher) removeClient(path string) {
 	w.authRescanMu.Lock()
 	defer w.authRescanMu.Unlock()

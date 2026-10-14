@@ -43,5 +43,8 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		reloadConfigIfChanged: func() {
 			w.ReloadConfigIfChanged()
 		},
+		rereadAuthFile: func(path string) {
+			w.RereadAuthFile(path)
+		},
 	}, nil
 }

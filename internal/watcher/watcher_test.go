@@ -2122,3 +2122,79 @@ func TestAddOrUpdateClientStampsSnapshotBeforeReading(t *testing.T) {
 		}
 	}
 }
+
+// The core manager drops a snapshot observed before the auth's latest save. When
+// that read already held a later external edit, the watcher has cached the edit's
+// hash and auths, so the edit's own event is skipped as unchanged. RereadAuthFile
+// must dispatch the file's current state again, stamped after the call.
+func TestRereadAuthFileDispatchesContentCachedByDroppedSnapshot(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex.json")
+	write := func(prefix string) {
+		t.Helper()
+		data := fmt.Sprintf(`{"type":"codex","email":"user@example.com","prefix":%q}`, prefix)
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatalf("write auth file: %v", err)
+		}
+	}
+	queue := make(chan AuthUpdate, 16)
+	w := &Watcher{authDir: authDir, lastAuthHashes: make(map[string]string)}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.SetAuthUpdateQueue(queue)
+	t.Cleanup(w.stopDispatch)
+	next := func(what string) AuthUpdate {
+		t.Helper()
+		hangGuard := time.NewTimer(5 * time.Second)
+		defer hangGuard.Stop()
+		select {
+		case update := <-queue:
+			return update
+		case <-hangGuard.C:
+			t.Fatalf("no auth update dispatched for %s", what)
+		}
+		return AuthUpdate{}
+	}
+
+	write("pfx-1")
+	w.addOrUpdateClient(path)
+	next("the initial file")
+
+	// The read the manager drops: it already holds the external edit.
+	write("pfx-edited")
+	w.addOrUpdateClient(path)
+	if update := next("the dropped read"); update.Auth == nil || update.Auth.Prefix != "pfx-edited" {
+		t.Fatalf("dropped read update = %+v, want pfx-edited", update)
+	}
+	// The edit's own event finds the cached hash and dispatches nothing.
+	w.addOrUpdateClient(path)
+
+	beforeReread := time.Now()
+	w.RereadAuthFile(path)
+	update := next("the re-read")
+	if update.Auth == nil || update.Auth.Prefix != "pfx-edited" {
+		t.Fatalf("re-read update = %+v, want the file's pfx-edited state", update)
+	}
+	if update.Auth.UpdatedAt.Before(beforeReread) {
+		t.Fatalf("re-read stamped %v, before the re-read started at %v", update.Auth.UpdatedAt, beforeReread)
+	}
+	select {
+	case extra := <-queue:
+		t.Fatalf("unexpected extra update %+v (the unchanged event should have been skipped)", extra)
+	default:
+	}
+}
+
+// RereadAuthFile only reads auth files the watcher manages.
+func TestRereadAuthFileIgnoresPathsOutsideAuthDir(t *testing.T) {
+	authDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "codex.json")
+	if err := os.WriteFile(outside, []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	w := &Watcher{authDir: authDir, lastAuthHashes: make(map[string]string)}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.RereadAuthFile(outside)
+	if len(w.currentAuths) != 0 || len(w.lastAuthHashes) != 0 {
+		t.Fatalf("read a file outside the auth dir: auths=%v hashes=%v", w.currentAuths, w.lastAuthHashes)
+	}
+}
