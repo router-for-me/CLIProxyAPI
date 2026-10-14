@@ -740,6 +740,7 @@ func TestPluginDisplayFieldsEscapeHTML(t *testing.T) {
 	fields := pluginConfigFields([]pluginapi.ConfigField{{
 		Name:        `<img src=x onerror=alert(1)>`,
 		Type:        pluginapi.ConfigFieldTypeEnum,
+		Default:     "safe & sound",
 		EnumValues:  []string{`<fast>`, `safe & sound`},
 		Description: `"quoted" 'single' <b>mode</b>`,
 	}})
@@ -751,6 +752,9 @@ func TestPluginDisplayFieldsEscapeHTML(t *testing.T) {
 	}
 	if fields[0].EnumValues[0] != html.EscapeString(`<fast>`) || fields[0].EnumValues[1] != html.EscapeString(`safe & sound`) {
 		t.Fatalf("enum values = %#v, want escaped values", fields[0].EnumValues)
+	}
+	if fields[0].Default != "safe & sound" {
+		t.Fatalf("field default = %#v, want preserved default", fields[0].Default)
 	}
 	if fields[0].Description != html.EscapeString(`"quoted" 'single' <b>mode</b>`) {
 		t.Fatalf("description = %q, want escaped", fields[0].Description)
