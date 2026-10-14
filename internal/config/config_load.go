@@ -81,6 +81,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
+	// Hash plaintext management secrets in the document and write it back before
+	// parsing it, so the file and the parsed config carry the same hash and the
+	// plaintext does not stay on disk. Comments and key order are kept.
+	if hashedData, plaintexts, errHashSecrets := hashSecretKeysInYAML(data); errHashSecrets == nil && len(plaintexts) > 0 {
+		data = hashedData
+		_ = os.WriteFile(configFile, data, 0o600)
+	}
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -111,23 +118,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, errValidate
 	}
 
-	// Hash remote management key if plaintext is detected (nested)
-	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
+	// The document was hashed above; this covers a secret the document hashing
+	// could not rewrite, in memory only.
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
 		hashed, errHash := hashSecret(cfg.RemoteManagement.SecretKey)
 		if errHash != nil {
 			return nil, fmt.Errorf("failed to hash remote management key: %w", errHash)
 		}
 		cfg.RemoteManagement.SecretKey = hashed
-
-		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
-		// Preserve YAML comments and ordering; update only the nested key.
-		secretPath := []string{"remote-management", "secret-key"}
-		var source yaml.Node
-		if yaml.Unmarshal(data, &source) == nil && len(source.Content) > 0 && yamlPath(expandConfigAliases(source.Content[0]), "management.secret-key") != nil {
-			secretPath[0] = "management"
-		}
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, secretPath, hashed)
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)

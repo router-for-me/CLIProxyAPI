@@ -470,9 +470,9 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 				}
 			}
 		}
-		data, errRead := os.ReadFile(s.configPath)
-		if errRead != nil {
-			return fmt.Errorf("postgres store: read local config: %w", errRead)
+		data, ok := hashLocalConfigForSeeding(s.configPath, "postgres store")
+		if !ok {
+			return nil
 		}
 		if errPersist := s.persistConfig(ctx, data); errPersist != nil {
 			return errPersist

@@ -394,9 +394,9 @@ func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example str
 				}
 			}
 		}
-		data, errRead := os.ReadFile(s.configPath)
-		if errRead != nil {
-			return fmt.Errorf("object store: read local config: %w", errRead)
+		data, ok := hashLocalConfigForSeeding(s.configPath, "object store")
+		if !ok {
+			return nil
 		}
 		if len(data) > 0 {
 			if errPut := s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml"); errPut != nil {
