@@ -272,16 +272,6 @@ func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 // WithAntigravityBuiltins normalizes Gemini 4 Argon tier definitions so that
 // remote models.json refreshes do not drop medium/low tiers or revert output token limits.
 func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
-	hasArgon := false
-	for _, m := range models {
-		if m != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(m.ID)), "gemini-4-argon") {
-			hasArgon = true
-			break
-		}
-	}
-	if !hasArgon {
-		return models
-	}
 	return upsertModelInfos(models,
 		antigravityBuiltinArgonModelInfo("gemini-4-argon-high", "Gemini 4 Argon (High)"),
 		antigravityBuiltinArgonModelInfo("gemini-4-argon-medium", "Gemini 4 Argon (Medium)"),

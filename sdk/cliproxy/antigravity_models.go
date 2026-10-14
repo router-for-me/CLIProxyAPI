@@ -187,11 +187,12 @@ func (s *Service) persistedAntigravityHintsForAuth(auth *coreauth.Auth, endpoint
 		}
 	}
 	project, _ := auth.Metadata["project_id"].(string)
-	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint, resolveAntigravityUserAgent(auth)); ok {
+	requestUserAgent := resolveAntigravityUserAgent(auth)
+	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint, requestUserAgent); ok {
 		return hints, true
 	}
 	if current != nil {
-		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint, resolveAntigravityUserAgent(current))
+		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint, requestUserAgent)
 	}
 	return antigravityModelCapabilityHints{}, false
 }

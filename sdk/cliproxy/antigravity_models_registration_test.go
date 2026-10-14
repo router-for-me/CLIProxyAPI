@@ -1048,3 +1048,38 @@ func TestAntigravityPersistedHintsInvalidateOnUserAgentUpgrade(t *testing.T) {
 		t.Fatalf("expected stale 2.9.1 persisted hints to be invalidated under 2.23.0 UA, got %v", hints.ModelIDs)
 	}
 }
+
+func TestAntigravityPersistedHintsManagerFallbackUsesRequestUserAgent(t *testing.T) {
+	resetAntigravityCapabilityCache()
+	t.Cleanup(resetAntigravityCapabilityCache)
+
+	const endpoint = "https://daily.invalid"
+	manager := coreauth.NewManager(nil, nil, nil)
+	current, errRegister := manager.Register(t.Context(), &coreauth.Auth{
+		ID:       "antigravity-manager-ua.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "token-manager-ua",
+			"project_id":   "project-manager-ua",
+			"base_url":     endpoint,
+			"user_agent":   "antigravity/hub/2.9.1 darwin/arm64",
+			antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(
+				"project-manager-ua",
+				endpoint,
+				"antigravity/hub/2.9.1 darwin/arm64",
+				antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{"gemini-3-flash": {}}},
+			),
+		},
+	})
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+
+	request := current.Clone()
+	request.Metadata["user_agent"] = "antigravity/hub/2.23.0 darwin/arm64"
+	svc := &Service{cfg: &config.Config{}, coreManager: manager}
+	if hints := svc.cachedAntigravityHints(request); hints.ModelIDs != nil {
+		t.Fatalf("expected manager hints for the old User-Agent to be rejected, got %v", hints.ModelIDs)
+	}
+}
