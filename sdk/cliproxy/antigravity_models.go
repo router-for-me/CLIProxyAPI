@@ -102,7 +102,8 @@ func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints
 	return antigravityModelCapabilityHints{WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs), ModelIDs: maps.Clone(h.ModelIDs), revision: h.revision}
 }
 
-// antigravityCapabilityKey isolates catalogs by account, project and route, not token lifetime.
+// antigravityCapabilityKey isolates catalogs by account, project, route and
+// client version, not token lifetime. Cloud Code gates models by User-Agent.
 func (s *Service) antigravityCapabilityKey(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -117,7 +118,19 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy strin
 		token, _ := auth.Metadata["access_token"].(string)
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
-	return fmt.Sprintf("%q/%d/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy)
+	return fmt.Sprintf("%q/%d/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, antigravityModelUserAgent(auth))
+}
+
+func antigravityModelUserAgent(auth *coreauth.Auth) string {
+	if auth != nil {
+		if userAgent := strings.TrimSpace(auth.Attributes["user_agent"]); userAgent != "" {
+			return misc.AntigravityRequestUserAgent(userAgent)
+		}
+		if userAgent, _ := auth.Metadata["user_agent"].(string); strings.TrimSpace(userAgent) != "" {
+			return misc.AntigravityRequestUserAgent(userAgent)
+		}
+	}
+	return misc.AntigravityUserAgent()
 }
 
 func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCapabilityHints {
@@ -469,7 +482,7 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", misc.AntigravityUserAgent())
+	req.Header.Set("User-Agent", antigravityModelUserAgent(auth))
 	resp, errDo := client.Do(req)
 	if errDo != nil {
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError

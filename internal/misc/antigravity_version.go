@@ -18,9 +18,9 @@ import (
 const (
 	// antigravityFallbackVersion is the client version reported when the hub
 	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
-	// newer models for clients below 2.9.0, so this floor must stay at or above
-	// that version.
-	antigravityFallbackVersion = "2.9.1"
+	// newer models for older clients. Keep the fallback current enough to expose
+	// Gemini 4 when the startup manifest cannot be reached.
+	antigravityFallbackVersion = "2.23.0"
 	antigravityHubPlatform     = "darwin/arm64"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
@@ -43,10 +43,14 @@ var (
 	antigravityUpdaterOnce   sync.Once
 )
 
-// StartAntigravityVersionUpdater starts a background goroutine that periodically refreshes the cached antigravity version.
-// This is intentionally decoupled from request execution to avoid blocking executors on version lookups.
+// StartAntigravityVersionUpdater initializes the version before account model
+// discovery, then refreshes it in the background without blocking executors.
 func StartAntigravityVersionUpdater(ctx context.Context) {
 	antigravityUpdaterOnce.Do(func() {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		refreshAntigravityVersion(ctx)
 		go runAntigravityVersionUpdater(ctx)
 	})
 }
@@ -60,8 +64,6 @@ func runAntigravityVersionUpdater(ctx context.Context) {
 	defer ticker.Stop()
 
 	log.Infof("periodic antigravity version refresh started (interval=%s)", antigravityVersionCacheTTL/2)
-
-	refreshAntigravityVersion(ctx)
 
 	for {
 		select {
