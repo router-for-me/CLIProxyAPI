@@ -183,7 +183,10 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 // GetConfigYAML returns the raw config.yaml file bytes without re-encoding.
 // It preserves comments and original formatting/styles.
 func (h *Handler) GetConfigYAML(c *gin.Context) {
+	// Saves hold h.mu while rewriting the file; read only between saves.
+	h.mu.Lock()
 	data, err := os.ReadFile(h.configFilePath)
+	h.mu.Unlock()
 	if err != nil {
 		if os.IsNotExist(err) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "config file not found"})
