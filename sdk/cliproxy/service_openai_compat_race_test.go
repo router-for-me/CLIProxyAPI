@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -177,7 +178,13 @@ func TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559(t *testing.T) {
 	service.reloadConfigFromWatcher()
 	service.registerConfigAPIKeyAuths(ctx, service.currentConfig())
 
+	// The reload re-dispatches the auth file through the async auth update queue, so
+	// wait for that registration to settle before checking the prefix.
 	finalPrefixModel := fmt.Sprintf("pfx-%d/gpt-6-astra", iterations-1)
+	deadline := time.Now().Add(2 * time.Second)
+	for !reg.ClientSupportsModel(authID, finalPrefixModel) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if !reg.ClientSupportsModel(authID, finalPrefixModel) {
 		t.Fatalf("expected auth %s to support final prefixed model %q", authID, finalPrefixModel)
 	}
