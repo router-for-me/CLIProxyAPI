@@ -582,17 +582,20 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int, int) 
 	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, metaAPIKeyCount, openAICompatCount
 }
 
+// runConfigPersist runs a config mirror off the caller's goroutine; tests replace it.
+var runConfigPersist = func(persist func()) { go persist() }
+
 func (w *Watcher) persistConfigAsync() {
 	if w == nil || w.storePersister == nil {
 		return
 	}
-	go func() {
+	runConfigPersist(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := w.storePersister.PersistConfig(ctx); err != nil {
 			log.Errorf("failed to persist config change: %v", err)
 		}
-	}()
+	})
 }
 
 func (w *Watcher) persistAuthAsync(message string, paths ...string) {

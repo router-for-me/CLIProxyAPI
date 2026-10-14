@@ -2147,3 +2147,62 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
 }
+
+type recordingConfigPersister struct {
+	path     string
+	mirrored [][]byte
+}
+
+func (p *recordingConfigPersister) PersistConfig(context.Context) error {
+	data, err := os.ReadFile(p.path)
+	if err != nil {
+		return err
+	}
+	p.mirrored = append(p.mirrored, data)
+	return nil
+}
+
+func (p *recordingConfigPersister) PersistAuthFiles(context.Context, string, ...string) error {
+	return nil
+}
+
+// A reload that loaded a plaintext management secret hashes it into the file and
+// leaves mirroring to the reload of that hashed write, so remote stores (and git
+// history) never receive the plaintext.
+func TestReloadConfigMirrorsManagementSecretOnlyOnceHashed(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	data, errMarshal := yaml.Marshal(&config.Config{
+		AuthDir:            authDir,
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		RemoteManagement:   config.RemoteManagement{SecretKey: "plain-secret"},
+	})
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	runConfigPersist = func(persist func()) { persist() }
+	persister := &recordingConfigPersister{path: configPath}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+
+	w.reloadConfigIfChanged()
+	if len(persister.mirrored) != 0 {
+		t.Fatalf("mirrored the config loaded with a plaintext secret: %q", persister.mirrored)
+	}
+	// The write-back changed the file; its reload mirrors the hashed config.
+	w.reloadConfigIfChanged()
+	if len(persister.mirrored) != 1 {
+		t.Fatalf("mirrors after the hashed reload = %d, want 1", len(persister.mirrored))
+	}
+	if mirrored := persister.mirrored[0]; strings.Contains(string(mirrored), "plain-secret") || config.HasPlaintextSecretKey(mirrored) {
+		t.Fatalf("mirrored a plaintext secret: %q", mirrored)
+	}
+}

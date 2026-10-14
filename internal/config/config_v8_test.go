@@ -740,10 +740,9 @@ func TestV8SecretHashUsesNewPath(t *testing.T) {
 	}
 }
 
-// Hot reloads parse bytes that a concurrent save may already have replaced, and a
-// compare-then-write against the file can still race a save. LoadConfigData must
-// therefore never write: the secret is hashed in memory only.
-func TestLoadConfigDataDoesNotWriteTheFile(t *testing.T) {
+// A hot reload hashes a plaintext secret into the file it parsed, so remote store
+// mirrors of the file never carry the plaintext.
+func TestLoadConfigDataHashesSecretIntoUnchangedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := []byte("management: {secret-key: plain-secret}\n")
 	if err := os.WriteFile(path, content, 0600); err != nil {
@@ -757,8 +756,77 @@ func TestLoadConfigDataDoesNotWriteTheFile(t *testing.T) {
 		t.Fatal("parsed secret was not hashed in memory")
 	}
 	saved, _ := os.ReadFile(path)
-	if !bytes.Equal(saved, content) {
-		t.Fatalf("LoadConfigData rewrote the file: %q", saved)
+	if strings.Contains(string(saved), "plain-secret") || HasPlaintextSecretKey(saved) {
+		t.Fatalf("plaintext secret left in the file: %q", saved)
+	}
+}
+
+// A hot reload can parse bytes that a newer save has already replaced. Hashing the
+// older plaintext secret into the file would destroy a rotated secret, so the
+// write-back must only touch the file that was actually parsed.
+func TestLoadConfigDataSkipsSecretWriteBackWhenFileChanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	older := []byte("management: {secret-key: old-secret}\n")
+	newer := []byte("management: {secret-key: rotated-secret}\n")
+	if err := os.WriteFile(path, newer, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigData(path, older)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
+		t.Fatal("parsed secret was not hashed in memory")
+	}
+	saved, _ := os.ReadFile(path)
+	if !bytes.Equal(saved, newer) {
+		t.Fatalf("newer config was rewritten from older bytes: %q", saved)
+	}
+}
+
+// The check and the write of a hot-reload write-back run under the lock every
+// config save takes, so a save cannot land between them.
+func TestLoadConfigDataWriteBackHoldsConfigWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte("management: {secret-key: plain-secret}\n")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := beforeConfigWriteBack
+	t.Cleanup(func() { beforeConfigWriteBack = original })
+	checked := false
+	beforeConfigWriteBack = func() {
+		checked = true
+		if configWriteMu.TryLock() {
+			configWriteMu.Unlock()
+			t.Error("write-back runs without the config write lock")
+		}
+	}
+	if _, err := LoadConfigData(path, content); err != nil {
+		t.Fatal(err)
+	}
+	if !checked {
+		t.Fatal("write-back never ran")
+	}
+}
+
+func TestHasPlaintextSecretKey(t *testing.T) {
+	hashed, err := hashSecret("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		data string
+		want bool
+	}{
+		{"management: {secret-key: plain-secret}\n", true},
+		{"remote-management: {secret-key: plain-secret}\n", true},
+		{"management: {secret-key: '" + hashed + "'}\n", false},
+		{"port: 8317\n", false},
+	} {
+		if got := HasPlaintextSecretKey([]byte(tc.data)); got != tc.want {
+			t.Errorf("HasPlaintextSecretKey(%q) = %v, want %v", tc.data, got, tc.want)
+		}
 	}
 }
 
