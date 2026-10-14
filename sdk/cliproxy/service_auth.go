@@ -173,7 +173,8 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 			if update.Auth == nil || update.Auth.ID == "" {
 				continue
 			}
-			auth := s.prepareCoreAuthForModelRegistration(registrationCtx, update.Auth)
+			auth, prepared := s.prepareCoreAuthForModelRegistrationWithSupersede(registrationCtx, update.Auth, s.unversionedSnapshotMarkFor(update))
+			s.recordUnversionedSnapshot(update, prepared)
 			if auth == nil {
 				continue
 			}
@@ -212,6 +213,7 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 					continue
 				}
 			}
+			delete(s.unversionedSnapshots, id)
 			s.applyCoreAuthRemoval(registrationCtx, id)
 			needsAliasRebuild = true
 		default:
@@ -349,8 +351,37 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 }
 
 func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth *coreauth.Auth) *coreauth.Auth {
+	prepared, _ := s.prepareCoreAuthForModelRegistrationWithSupersede(ctx, auth, nil)
+	return prepared
+}
+
+// unversionedSnapshotMark records an unversioned (Generation 0) file snapshot
+// applied by the watcher consumer: its watcher revision, the manager generation
+// it replaced, and the generation it produced.
+type unversionedSnapshotMark struct {
+	revision       uint64
+	baseGeneration uint64
+	generation     uint64
+}
+
+// prepareResult reports what prepareCoreAuthForModelRegistrationWithSupersede
+// did to the manager. applied is false when the update was rejected as stale.
+type prepareResult struct {
+	applied        bool
+	baseGeneration uint64
+	generation     uint64
+}
+
+// prepareCoreAuthForModelRegistrationWithSupersede is prepareCoreAuthForModelRegistration
+// with an optional unversioned-snapshot mark. A versioned update older than the
+// manager state is normally stale. It is still applied when the only newer
+// manager write is that unversioned snapshot (generation unchanged since it was
+// applied) and the update is at least as new as the state the snapshot replaced:
+// the snapshot was read from disk before this persisted write landed, so the
+// versioned update carries the newer content (upstream #6559 race).
+func (s *Service) prepareCoreAuthForModelRegistrationWithSupersede(ctx context.Context, auth *coreauth.Auth, mark *unversionedSnapshotMark) (*coreauth.Auth, prepareResult) {
 	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" {
-		return nil
+		return nil, prepareResult{}
 	}
 	auth = auth.Clone()
 	s.ensureExecutorsForAuthWithContext(ctx, auth, false)
@@ -360,11 +391,14 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 	// immediately for API calls, rather than waiting for model registration to complete.
 	op := "register"
 	var err error
+	var updated *coreauth.Auth
+	result := prepareResult{}
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
-		if isStaleCoreAuth(existing, auth) {
+		if isStaleCoreAuth(existing, auth) && !supersedesUnversionedSnapshot(existing, auth, mark) {
 			log.Debugf("skipping stale auth update for %s: incoming gen=%d, existing gen=%d", auth.ID, auth.Generation, existing.Generation)
-			return existing
+			return existing, prepareResult{}
 		}
+		result.baseGeneration = existing.Generation
 		auth.CreatedAt = existing.CreatedAt
 		if existing.Metadata != nil {
 			if persistedHints, hasHints := existing.Metadata[antigravityPersistedHintsMetaKey]; hasHints {
@@ -382,21 +416,88 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 			}
 		}
 		op = "update"
-		_, err = s.coreManager.Update(ctx, auth)
+		updated, err = s.coreManager.Update(ctx, auth)
 	} else {
-		_, err = s.coreManager.Register(ctx, auth)
+		updated, err = s.coreManager.Register(ctx, auth)
 	}
 	if err != nil {
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
 		current, ok := s.coreManager.GetByID(auth.ID)
 		if !ok || current.Disabled {
 			GlobalModelRegistry().UnregisterClient(auth.ID)
-			return nil
+			return nil, prepareResult{}
 		}
 		auth = current
+	} else if updated != nil {
+		result.applied = true
+		result.generation = updated.Generation
 	}
 	s.cancelStaleAntigravityProbes(auth.ID)
-	return auth
+	return auth, result
+}
+
+// supersedesUnversionedSnapshot reports whether a versioned incoming auth may
+// replace manager state that only differs from it by a later unversioned file
+// snapshot. Any other manager write since the snapshot (persisted update,
+// request result) changes the generation and keeps the stale rejection.
+func supersedesUnversionedSnapshot(existing, incoming *coreauth.Auth, mark *unversionedSnapshotMark) bool {
+	if existing == nil || incoming == nil || mark == nil {
+		return false
+	}
+	if incoming.Generation == 0 || existing.Generation != mark.generation {
+		return false
+	}
+	if incoming.RegistrationEpoch > 0 && incoming.RegistrationEpoch < existing.RegistrationEpoch {
+		return false
+	}
+	return incoming.Generation >= mark.baseGeneration
+}
+
+func isUnversionedAuthSnapshot(auth *coreauth.Auth) bool {
+	return auth != nil && auth.Generation == 0 && auth.RegistrationEpoch == 0
+}
+
+// unversionedSnapshotMarkFor returns the last applied unversioned snapshot mark
+// for a versioned update dispatched by the watcher after that snapshot. Watcher
+// revisions are stamped in observation order, so a higher revision means the
+// versioned (persisted) update was dispatched after the snapshot was taken and
+// is the newer state. Unrevisioned or older updates get no mark and keep the
+// normal stale-generation check. Caller holds authUpdateMu.
+func (s *Service) unversionedSnapshotMarkFor(update watcher.AuthUpdate) *unversionedSnapshotMark {
+	if s == nil || update.Auth == nil || isUnversionedAuthSnapshot(update.Auth) {
+		return nil
+	}
+	rev := update.Revision()
+	if rev == 0 {
+		return nil
+	}
+	mark, ok := s.unversionedSnapshots[update.Auth.ID]
+	if !ok || rev <= mark.revision {
+		return nil
+	}
+	return &mark
+}
+
+// recordUnversionedSnapshot remembers an applied unversioned file snapshot and
+// forgets the mark once any versioned update is applied. Caller holds authUpdateMu.
+func (s *Service) recordUnversionedSnapshot(update watcher.AuthUpdate, prepared prepareResult) {
+	if s == nil || update.Auth == nil || !prepared.applied {
+		return
+	}
+	id := update.Auth.ID
+	rev := update.Revision()
+	if !isUnversionedAuthSnapshot(update.Auth) || rev == 0 {
+		delete(s.unversionedSnapshots, id)
+		return
+	}
+	if s.unversionedSnapshots == nil {
+		s.unversionedSnapshots = make(map[string]unversionedSnapshotMark)
+	}
+	s.unversionedSnapshots[id] = unversionedSnapshotMark{
+		revision:       rev,
+		baseGeneration: prepared.baseGeneration,
+		generation:     prepared.generation,
+	}
 }
 
 type authRegistrationWait struct {

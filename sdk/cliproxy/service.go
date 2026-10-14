@@ -40,10 +40,14 @@ type Service struct {
 	executorRegistrationMu sync.Mutex
 	authUpdateMu           sync.Mutex
 	authRevisions          map[string]uint64
-	authRegWaitMu          sync.Mutex
-	authRegWaiters         map[string]chan struct{}
-	configSequence         uint64
-	appliedRoutingState    *routingRuntimeState
+	// unversionedSnapshots records, per auth ID, the watcher revision and the
+	// resulting manager generation of the last applied unversioned file
+	// snapshot. Guarded by authUpdateMu.
+	unversionedSnapshots map[string]unversionedSnapshotMark
+	authRegWaitMu        sync.Mutex
+	authRegWaiters       map[string]chan struct{}
+	configSequence       uint64
+	appliedRoutingState  *routingRuntimeState
 
 	// configPath is the path to the configuration file.
 	configPath string

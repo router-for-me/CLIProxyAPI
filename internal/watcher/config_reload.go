@@ -49,6 +49,11 @@ func (w *Watcher) ReloadConfigIfChanged() {
 }
 
 func (w *Watcher) reloadConfigIfChanged() {
+	// Serialize reloads so a debounced filesystem reload and an explicit reload
+	// cannot interleave their hash bookkeeping.
+	w.configLoadMu.Lock()
+	defer w.configLoadMu.Unlock()
+
 	data, err := os.ReadFile(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
@@ -71,15 +76,12 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
 	if w.reloadConfig() {
-		finalHash := newHash
-		if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
-			sumUpdated := sha256.Sum256(updatedData)
-			finalHash = hex.EncodeToString(sumUpdated[:])
-		} else if errRead != nil {
-			log.WithError(errRead).Debug("failed to compute updated config hash after reload")
-		}
+		// Record the hash of the content observed before loading, never a later
+		// re-read: a write landing after the load would otherwise be marked as
+		// applied and skipped. A load that rewrites the file costs one extra
+		// reload, which then converges.
 		w.clientsMutex.Lock()
-		w.lastConfigHash = finalHash
+		w.lastConfigHash = newHash
 		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
 	}

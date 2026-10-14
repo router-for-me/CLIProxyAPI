@@ -77,7 +77,16 @@ This fork supplies the local gateway build from fork `main` and tracks upstream 
 - Durable regressions: `TestClaudeExecutor_PayloadDefaultMaxTokensKeepsThinkingBudgetBelowLimit` (execute and stream: clamp, disable below model minimum, operator thinking override preserved) and `TestEnforceClaudeThinkingBudgetBelowMaxTokens`; `TestServiceRun_OnBeforeStartConfigReachesLiveServer` occupies the pre-hook port and requires the live server on the hook-selected port. Clamp/disable and hook cases fail on the unpatched `v8.0.28` sources and pass with the fix under the loopback sandbox.
 - Retirement condition: retire each half once a released upstream version ships an equivalent fix that passes these regressions. Source rollback is a focused revert.
 
-Use stable IDs `CPA-006` and onward for future logical patches.
+### CPA-006 — lost config and auth updates in the upstream #6559 management race
+
+- Required behavior: concurrent `PUT /v0/management/openai-compatibility` and `PATCH /v0/management/auth-files/fields` both converge: the service ends with the last written config and the last persisted auth fields. (a) The watcher records the config hash it observed before loading, never a post-load re-read, and serializes `reloadConfigIfChanged`, so a config write landing during a reload is reloaded instead of being marked applied. (b) When an unversioned (`Generation 0`) watcher file snapshot, read from disk before a persisted auth write landed, is applied over that write, the persisted versioned update that the watcher dispatches after it (higher watcher revision) may replace it, provided the manager generation is unchanged since the snapshot and the update is at least as new as the state the snapshot replaced. Otherwise the existing stale-generation and revision checks still reject older versioned snapshots, unrevisioned updates and anything after an intervening manager write.
+- Upstream origin: inherited from unmodified upstream `v8.0.28` (`0d18d3b365be000eeaee7de4615f9da596b2059d`). `e235fb3d` added `TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559` for issue #6559 (13/20 failures on untouched upstream). Root causes: `reloadConfigIfChanged` stored the hash of a post-load re-read; `isStaleCoreAuth` rejected the newer persisted auth because the older file snapshot's manager write bumped the generation past it.
+- Source surfaces: `internal/watcher/config_reload.go`, `internal/watcher/watcher.go` (`configLoadMu`), `sdk/cliproxy/service_auth.go` (`unversionedSnapshotMark`, `supersedesUnversionedSnapshot`), `sdk/cliproxy/service.go` (`unversionedSnapshots`).
+- Impact: the local gateway runs with management disabled (no secret key, `allow-remote: false`), so live impact is low; the fix keeps the baseline free of failing tests.
+- Durable regressions: `TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559` (unchanged upstream assertions; 0/50 failures, 0/10 under `-race`) and `sdk/cliproxy/service_auth_unversioned_snapshot_test.go` (supersede, older versioned snapshot, intervening write, unrevisioned update). Existing `service_auth_sync_test.go`, `sdk/cliproxy/auth` and `internal/watcher` suites guard the prior stale-update protections.
+- Retirement condition: retire once a released upstream version fixes #6559 so the upstream test passes reliably without this patch. Source rollback is a focused revert.
+
+Use stable IDs `CPA-007` and onward for future logical patches.
 Upstream maintenance-contract issue/PR associations: none found when checked 2026-09-13.
 Retain this contract while maintaining the fork. Retire behavioral patches only after a released upstream implementation passes their complete regression contract.
 
@@ -101,7 +110,6 @@ Baseline: `go test ./...` passes fully with no accepted failing tests. `TestOpen
 
 Inherited at upstream `v8.0.28` (`0d18d3b365be000eeaee7de4615f9da596b2059d`), reproduced on an untouched checkout on 2026-10-14 UTC:
 
-- `sdk/cliproxy` `TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559` is a race-timing flake (13/20 failures on untouched upstream). It covers the upstream #6559 management-API race; the local gateway keeps management disabled.
 - Under `-race` only, `internal/api/middleware` `TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger` reports a data race between the test handler's header write and `ResponseWriterWrapper.Finalize` (3/3 on untouched `v8.0.28`, also on prior fork main `0fe66fb7`).
 
 `TestAIStudioTranslateRequestNormalizesThinkingLevel` and `TestAntigravityExecutorExecuteStreamTranslatesInteractionsRequest` failed on untouched `v8.0.28` because its catalog removed their fixture models (`gemini-3.7-flash`, `gemini-3.1-pro-low`). The fork moves those fixtures to catalogued models (`gemini-3.8-flash`, `gemini-4-argon-high`), so both pass; drop that test-only change when upstream updates the fixtures.
