@@ -446,6 +446,12 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 		}
 		return fmt.Errorf("postgres store: read config file: %w", err)
 	}
+	if len(data) == 0 {
+		// An empty file is a save caught mid-write, never a config worth mirroring;
+		// storing it would wipe the config that restarts and replicas load.
+		log.Warn("postgres store: local config is empty, keeping the stored copy")
+		return nil
+	}
 	return s.persistConfig(ctx, data)
 }
 
