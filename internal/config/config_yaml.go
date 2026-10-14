@@ -162,11 +162,6 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -177,9 +172,9 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	if err = enc.Close(); err != nil {
 		return err
 	}
-	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	// Encode before touching the file so a failed encode leaves it intact. The
+	// write stays in place to keep the inode of a mounted configuration file.
+	return os.WriteFile(configFile, NormalizeCommentIndentation(buf.Bytes()), 0600)
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.
