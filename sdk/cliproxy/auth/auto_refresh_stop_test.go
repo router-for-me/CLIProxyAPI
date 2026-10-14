@@ -108,7 +108,7 @@ func startRefreshWithHeldSave(t *testing.T, store *refreshSaveStore) *Manager {
 type heldSave struct {
 	store   *refreshSaveStore
 	release func()
-	waiting chan struct{} // receives when a stop starts waiting for the workers
+	waiting chan []*authAutoRefreshLoop // receives the loops a stop starts waiting for
 }
 
 func newHeldSave(t *testing.T) *heldSave {
@@ -118,10 +118,10 @@ func newHeldSave(t *testing.T) *heldSave {
 	h := &heldSave{
 		store:   &refreshSaveStore{entered: make(chan struct{}, 1), hold: func() { <-releaseCh }},
 		release: func() { once.Do(func() { close(releaseCh) }) },
-		waiting: make(chan struct{}, 4),
+		waiting: make(chan []*authAutoRefreshLoop, 4),
 	}
 	original := beforeAutoRefreshStopWait
-	beforeAutoRefreshStopWait = func() { h.waiting <- struct{}{} }
+	beforeAutoRefreshStopWait = func(loops []*authAutoRefreshLoop) { h.waiting <- loops }
 	t.Cleanup(func() {
 		h.release()
 		beforeAutoRefreshStopWait = original
@@ -140,19 +140,41 @@ func (h *heldSave) stopAsync(stop func()) <-chan bool {
 	return returned
 }
 
-// awaitWaiting fails if stop returns while the save is held, and returns once
-// stop is waiting for the workers. The timer only guards against a hang.
-func (h *heldSave) awaitWaiting(t *testing.T, returned <-chan bool) {
+// awaitWaiting fails if stop returns while the save is held, and returns the
+// loops stop is waiting for once it waits. The timer only guards against a hang.
+func (h *heldSave) awaitWaiting(t *testing.T, returned <-chan bool) []*authAutoRefreshLoop {
 	t.Helper()
 	hangGuard := time.NewTimer(30 * time.Second)
 	defer hangGuard.Stop()
 	select {
-	case <-h.waiting:
+	case loops := <-h.waiting:
+		return loops
 	case <-returned:
 		t.Fatal("stop returned while the refresh save was still held")
 	case <-hangGuard.C:
 		t.Fatal("stop never started waiting for the refresh workers")
 	}
+	return nil
+}
+
+// replaceRefreshLoop starts a new loop over the running one, whose worker is
+// holding the save, and returns the replaced loop. The new loop's saves pass.
+func replaceRefreshLoop(manager *Manager, store *refreshSaveStore) *authAutoRefreshLoop {
+	manager.mu.RLock()
+	replaced := manager.refreshLoop
+	manager.mu.RUnlock()
+	store.armed.Store(false)
+	manager.StartAutoRefresh(context.Background(), 10*time.Millisecond)
+	return replaced
+}
+
+func containsLoop(loops []*authAutoRefreshLoop, want *authAutoRefreshLoop) bool {
+	for _, loop := range loops {
+		if loop == want {
+			return true
+		}
+	}
+	return false
 }
 
 func awaitReturned(t *testing.T, returned <-chan bool) bool {
@@ -217,5 +239,49 @@ func TestStopAutoRefreshAfterTimedOutStopStillWaits(t *testing.T) {
 	h.release()
 	if !awaitReturned(t, returned) {
 		t.Fatal("second StopAutoRefresh returned before the refresh save finished")
+	}
+}
+
+// StartAutoRefresh replaces a loop without waiting for it, so a later stop must
+// still wait for the replaced loop's worker that is saving.
+func TestStopAutoRefreshWaitsForReplacedLoop(t *testing.T) {
+	h := newHeldSave(t)
+	manager := startRefreshWithHeldSave(t, h.store)
+	replaced := replaceRefreshLoop(manager, h.store)
+
+	returned := h.stopAsync(manager.StopAutoRefresh)
+	if loops := h.awaitWaiting(t, returned); !containsLoop(loops, replaced) {
+		t.Fatal("StopAutoRefresh does not wait for the loop StartAutoRefresh replaced")
+	}
+	h.release()
+	if !awaitReturned(t, returned) {
+		t.Fatal("StopAutoRefresh returned before the replaced loop's save finished")
+	}
+}
+
+// A restart after a stop that gave up on its context must not drop the stopped
+// loop: the next stop still waits for its worker.
+func TestStopAutoRefreshAfterTimedOutStopAndRestartStillWaits(t *testing.T) {
+	h := newHeldSave(t)
+	manager := startRefreshWithHeldSave(t, h.store)
+	manager.mu.RLock()
+	stopped := manager.refreshLoop
+	manager.mu.RUnlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.StopAutoRefreshContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first StopAutoRefreshContext() error = %v, want context.Canceled", err)
+	}
+	<-h.waiting // the first stop waited before giving up
+	replaceRefreshLoop(manager, h.store)
+
+	returned := h.stopAsync(manager.StopAutoRefresh)
+	if loops := h.awaitWaiting(t, returned); !containsLoop(loops, stopped) {
+		t.Fatal("StopAutoRefresh after a restart does not wait for the loop a timed-out stop left running")
+	}
+	h.release()
+	if !awaitReturned(t, returned) {
+		t.Fatal("StopAutoRefresh returned before the stopped loop's save finished")
 	}
 }
