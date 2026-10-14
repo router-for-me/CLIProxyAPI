@@ -239,6 +239,8 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 	}
 	auth.Attributes[cliproxyauth.AttributePath] = path
 	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceObjectStore
+	// The local file is written; the upload below can take a while.
+	cliproxyauth.MarkAuthFileWritten(ctx)
 
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID

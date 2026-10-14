@@ -588,6 +588,21 @@ type authPersistLock struct {
 	lastSavedAt atomic.Pointer[time.Time]
 }
 
+type authWriteMarkKey struct{}
+
+// MarkAuthFileWritten tells the manager that the Store.Save call running with ctx
+// has finished writing its local auth file. Stores that do slower work after that
+// write (committing, uploading) call it so a file snapshot observed after the write
+// is ordered after the save. It is a no-op outside Store.Save.
+func MarkAuthFileWritten(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if mark, ok := ctx.Value(authWriteMarkKey{}).(func()); ok && mark != nil {
+		mark()
+	}
+}
+
 // savedSince reports whether a store save for id returned at or after observedAt,
 // meaning a snapshot observed at observedAt may predate the stored state.
 func (m *Manager) savedSince(id string, observedAt time.Time) bool {
@@ -647,10 +662,22 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 			return errWait
 		}
 		defer releaseFg()
-		_, err := store.Save(ctx, auth)
-		// Record failed saves too: the file may have changed either way.
-		savedAt := time.Now()
-		pLock.lastSavedAt.Store(&savedAt)
+		// Snapshots are ordered against the local write. A store that does slower
+		// work afterwards (pushing to a remote) marks that point; otherwise the end
+		// of Save is used. Failed saves are recorded too: the file may have changed.
+		var marked atomic.Bool
+		markWritten := func() {
+			if marked.CompareAndSwap(false, true) {
+				writtenAt := time.Now()
+				pLock.lastSavedAt.Store(&writtenAt)
+			}
+		}
+		saveCtx := ctx
+		if saveCtx == nil {
+			saveCtx = context.Background()
+		}
+		_, err := store.Save(context.WithValue(saveCtx, authWriteMarkKey{}, markWritten), auth)
+		markWritten()
 		return err
 	}
 
