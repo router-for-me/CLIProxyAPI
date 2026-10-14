@@ -186,3 +186,32 @@ func TestReplaceFileFallbackDoesNotRecreateRemovedFile(t *testing.T) {
 	}
 	assertNoTempFiles(t, dir)
 }
+
+// A rename is authorized by the directory, not the file. An existing file the
+// process may not write (made read-only on purpose) must stay untouched, as with
+// os.WriteFile.
+func TestWriteFileRespectsReadOnlyTarget(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a non-root Unix user for file permission checks")
+	}
+	for name, write := range map[string]func(string, []byte, os.FileMode) error{
+		"WriteFile":   WriteFile,
+		"ReplaceFile": ReplaceFile,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "auth.json")
+			if err := os.WriteFile(path, []byte("old"), 0o400); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			if err := write(path, []byte("new"), 0o600); !errors.Is(err, os.ErrPermission) {
+				t.Fatalf("%s() error = %v, want os.ErrPermission", name, err)
+			}
+			got, _ := os.ReadFile(path)
+			if string(got) != "old" {
+				t.Fatalf("read-only file was replaced: %q", got)
+			}
+			assertNoTempFiles(t, dir)
+		})
+	}
+}
