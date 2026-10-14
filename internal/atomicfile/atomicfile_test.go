@@ -230,8 +230,10 @@ func TestWriteFileRespectsReadOnlyTarget(t *testing.T) {
 	}
 }
 
-// A deletion landing after ReplaceFile's existence check but before the file is
-// put in place must still win: the commit itself has to require the target.
+// A deletion landing right before the file is put in place must still win: the
+// commit itself has to require the target. The hook runs at that point on every
+// path, so this fails on the check-then-rename fallback (its known window) and is
+// skipped where no atomic exchange exists.
 func TestReplaceFileDeletionBeforeCommitWins(t *testing.T) {
 	if !exchangeSupported() {
 		t.Skip("no atomic exchange rename on this platform")
