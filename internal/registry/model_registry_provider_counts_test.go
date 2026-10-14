@@ -70,6 +70,29 @@ func TestGetModelProviderCountsIgnoresQuotaAndSuspension(t *testing.T) {
 	}
 }
 
+func TestGetModelProviderCountsCountsAliasPoolClientOnce(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("compat-a", "openai-compatible-acme", []*ModelInfo{
+		{ID: "pool-model"}, {ID: "pool-model"}, {ID: "pool-model"},
+	})
+	r.RegisterClient("claude-a", "claude", []*ModelInfo{{ID: "pool-model"}})
+	r.RegisterClient("claude-b", "claude", []*ModelInfo{{ID: "pool-model"}})
+
+	got := r.GetModelProviderCounts()
+	want := []ProviderClientCount{
+		{Provider: "claude", Clients: 2},
+		{Provider: "openai-compatible-acme", Clients: 1},
+	}
+	if len(got) != 1 || len(got[0].Providers) != len(want) {
+		t.Fatalf("counts = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[0].Providers[i] != want[i] {
+			t.Fatalf("provider[%d] = %+v, want %+v", i, got[0].Providers[i], want[i])
+		}
+	}
+}
+
 func TestGetModelProviderCountsReturnsCopy(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("claude-a", "claude", []*ModelInfo{{ID: "shared-model"}})

@@ -1678,26 +1678,38 @@ type ModelProviderCounts struct {
 }
 
 // GetModelProviderCounts returns every registered model with the providers that serve it.
-// Counts are registered clients per provider; quota and suspension state are not subtracted.
+// Counts are registered clients per provider; a client that lists the same model ID several
+// times (an alias pool) counts once. Quota and suspension state are not subtracted.
 // Models are sorted by ID; providers by client count (descending), then name.
 // The result is a copy and holds no client identifiers.
 func (r *ModelRegistry) GetModelProviderCounts() []ModelProviderCounts {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	result := make([]ModelProviderCounts, 0, len(r.models))
-	for modelID, registration := range r.models {
-		if registration == nil {
+	counts := make(map[string]map[string]int)
+	for clientID, modelIDs := range r.clientModels {
+		provider := r.clientProviders[clientID]
+		if provider == "" {
 			continue
 		}
-		providers := make([]ProviderClientCount, 0, len(registration.Providers))
-		for name, count := range registration.Providers {
-			if count > 0 {
-				providers = append(providers, ProviderClientCount{Provider: name, Clients: count})
+		seen := make(map[string]struct{}, len(modelIDs))
+		for _, modelID := range modelIDs {
+			if _, dup := seen[modelID]; dup {
+				continue
 			}
+			seen[modelID] = struct{}{}
+			if counts[modelID] == nil {
+				counts[modelID] = make(map[string]int)
+			}
+			counts[modelID][provider]++
 		}
-		if len(providers) == 0 {
-			continue
+	}
+
+	result := make([]ModelProviderCounts, 0, len(counts))
+	for modelID, byProvider := range counts {
+		providers := make([]ProviderClientCount, 0, len(byProvider))
+		for name, count := range byProvider {
+			providers = append(providers, ProviderClientCount{Provider: name, Clients: count})
 		}
 		sort.Slice(providers, func(i, j int) bool {
 			if providers[i].Clients == providers[j].Clients {
@@ -1706,7 +1718,7 @@ func (r *ModelRegistry) GetModelProviderCounts() []ModelProviderCounts {
 			return providers[i].Clients > providers[j].Clients
 		})
 		entry := ModelProviderCounts{ID: modelID, Providers: providers}
-		if registration.Info != nil {
+		if registration := r.models[modelID]; registration != nil && registration.Info != nil {
 			entry.OwnedBy = registration.Info.OwnedBy
 		}
 		result = append(result, entry)
