@@ -11,8 +11,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// configWriteMu serializes this process's writes to config files, so a write-back
-// that first checks the file's bytes cannot interleave with a save.
+// configWriteMu serializes the config file writes made through this package, so a
+// write-back that first checks the file's bytes cannot interleave with such a save.
+// Writes from other processes, and the remote stores' startup sync of the local
+// file, do not take it.
 var configWriteMu sync.Mutex
 
 // beforeConfigWriteBack runs inside a checked write-back, after the check; tests

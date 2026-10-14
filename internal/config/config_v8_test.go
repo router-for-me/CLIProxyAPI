@@ -810,6 +810,38 @@ func TestLoadConfigDataWriteBackHoldsConfigWriteLock(t *testing.T) {
 	}
 }
 
+// A write-back that cannot write (a read-only mount) leaves the plaintext in the
+// file, so remote stores keep their previous copy; that must not be silent.
+func TestLoadConfigDataWarnsWhenSecretWriteBackFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte("management: {secret-key: plain-secret}\n")
+	if err := os.WriteFile(path, content, 0400); err != nil {
+		t.Fatal(err)
+	}
+	if f, errOpen := os.OpenFile(path, os.O_WRONLY, 0); errOpen == nil {
+		_ = f.Close()
+		t.Skip("file stays writable (running as root)")
+	}
+	previousHooks := log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	t.Cleanup(func() { log.StandardLogger().ReplaceHooks(previousHooks) })
+	hook := logtest.NewGlobal()
+	if _, err := LoadConfigData(path, content); err != nil {
+		t.Fatalf("LoadConfigData() error = %v, want the config loaded", err)
+	}
+	warned := false
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "failed to write the hashed management secret back") {
+			warned = true
+			if strings.Contains(entry.Message, "plain-secret") {
+				t.Fatalf("warning leaks the secret: %q", entry.Message)
+			}
+		}
+	}
+	if !warned {
+		t.Fatal("no warning for a failed secret write-back")
+	}
+}
+
 func TestHasPlaintextSecretKey(t *testing.T) {
 	hashed, err := hashSecret("secret")
 	if err != nil {
