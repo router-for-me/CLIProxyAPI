@@ -255,6 +255,47 @@ func TestParseRetryDelay_HumanReadableDuration(t *testing.T) {
 	}
 }
 
+func TestParseRetryDelay_ResetsInMessage(t *testing.T) {
+	body := []byte(`{"error":{"code":429,"message":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h39m14s.","status":"RESOURCE_EXHAUSTED"}}`)
+	retryAfter, err := helps.ParseRetryDelay(body)
+	if err != nil {
+		t.Fatalf("helps.ParseRetryDelay() error = %v", err)
+	}
+	if retryAfter == nil {
+		t.Fatal("helps.ParseRetryDelay() returned nil")
+	}
+	want := 2*time.Hour + 39*time.Minute + 14*time.Second
+	if *retryAfter != want {
+		t.Fatalf("helps.ParseRetryDelay() = %v, want %v", *retryAfter, want)
+	}
+}
+
+func TestNewAntigravityStatusErr_RateLimitWithoutHintUsesDefaultRetryAfter(t *testing.T) {
+	body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)
+	err := newAntigravityStatusErr(http.StatusTooManyRequests, body)
+	if err.retryAfter == nil {
+		t.Fatal("newAntigravityStatusErr().retryAfter = nil, want default")
+	}
+	if *err.retryAfter != antigravityDefaultRateLimitRetryAfter {
+		t.Fatalf("newAntigravityStatusErr().retryAfter = %v, want %v", *err.retryAfter, antigravityDefaultRateLimitRetryAfter)
+	}
+
+	hinted := []byte(`{"error":{"code":429,"message":"Your quota will reset after 1h43m56s.","status":"RESOURCE_EXHAUSTED"}}`)
+	err = newAntigravityStatusErr(http.StatusTooManyRequests, hinted)
+	if err.retryAfter == nil || *err.retryAfter != time.Hour+43*time.Minute+56*time.Second {
+		t.Fatalf("newAntigravityStatusErr().retryAfter = %v, want parsed hint", err.retryAfter)
+	}
+
+	other := []byte(`{"error":{"code":429,"message":"slow down","status":"UNAVAILABLE"}}`)
+	err = newAntigravityStatusErr(http.StatusTooManyRequests, other)
+	if err.retryAfter != nil {
+		t.Fatalf("newAntigravityStatusErr().retryAfter = %v, want nil for non RESOURCE_EXHAUSTED", *err.retryAfter)
+	}
+	if err = newAntigravityStatusErr(http.StatusInternalServerError, body); err.retryAfter != nil {
+		t.Fatalf("newAntigravityStatusErr().retryAfter = %v, want nil for non 429", *err.retryAfter)
+	}
+}
+
 func TestAntigravityExecute_DoesNotUseRequestRetryForInternalRetries(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
