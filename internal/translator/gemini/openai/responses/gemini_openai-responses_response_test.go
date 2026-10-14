@@ -774,17 +774,31 @@ func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureCompletesActiveR
 		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"visible answer","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"resp_active_reasoning"}}`,
 	}
 	var param any
-	var out [][]byte
-	for _, line := range in {
-		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param)...)
+	firstOut := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(in[0]), &param)
+	secondOut := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(in[1]), &param)
+	out := append(append([][]byte(nil), firstOut...), secondOut...)
+
+	var firstChunkDeltas []string
+	for _, chunk := range firstOut {
+		event, data := parseSSEEvent(t, chunk)
+		if event == "response.reasoning_summary_text.delta" {
+			firstChunkDeltas = append(firstChunkDeltas, data.Get("delta").String())
+		}
 	}
+	if strings.Join(firstChunkDeltas, "") != "hidden thought" {
+		t.Fatalf("first thought chunk did not stream delta immediately: got %q", firstChunkDeltas)
+	}
+
 	var doneTypes []string
-	var addedID, addedSignature, doneID, doneSignature string
+	var addedID, addedSignature, doneID, doneSignature, completedSignature string
 	for _, chunk := range out {
 		event, data := parseSSEEvent(t, chunk)
 		if event == "response.output_item.added" && data.Get("item.type").String() == "reasoning" {
 			addedID = data.Get("item.id").String()
 			addedSignature = data.Get("item.encrypted_content").String()
+		}
+		if event == "response.completed" {
+			completedSignature = data.Get("response.output.0.encrypted_content").String()
 		}
 		if event != "response.output_item.done" {
 			continue
@@ -798,8 +812,8 @@ func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureCompletesActiveR
 	if got := strings.Join(doneTypes, ","); got != "reasoning,message" {
 		t.Fatalf("done item order = %q, want reasoning,message", got)
 	}
-	if addedID == "" || addedID != doneID || decodedResponsesCarrierSignature(t, addedSignature) != testResponsesGeminiThoughtSignature || doneSignature != addedSignature {
-		t.Fatalf("reasoning item changed between added and done: added=(%q,%q) done=(%q,%q)", addedID, addedSignature, doneID, doneSignature)
+	if addedID == "" || addedID != doneID || addedSignature != "" || decodedResponsesCarrierSignature(t, doneSignature) != testResponsesGeminiThoughtSignature || completedSignature != doneSignature {
+		t.Fatalf("reasoning item signature lifecycle mismatch: added=(%q,%q) done=(%q,%q) completed=%q", addedID, addedSignature, doneID, doneSignature, completedSignature)
 	}
 }
 
@@ -811,8 +825,10 @@ func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(
 		`data: [DONE]`,
 	}
 	var param any
-	var addedID, addedSignature, doneID, doneSignature, doneText string
+	var addedID, addedSignature, doneID, doneSignature, doneText, completedSignature string
+	var chunkDeltas [][]string
 	for _, line := range in {
+		var lineDeltas []string
 		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param) {
 			event, data := parseSSEEvent(t, chunk)
 			switch event {
@@ -821,29 +837,37 @@ func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(
 					addedID = data.Get("item.id").String()
 					addedSignature = data.Get("item.encrypted_content").String()
 				}
+			case "response.reasoning_summary_text.delta":
+				lineDeltas = append(lineDeltas, data.Get("delta").String())
 			case "response.output_item.done":
 				if data.Get("item.type").String() == "reasoning" {
 					doneID = data.Get("item.id").String()
 					doneSignature = data.Get("item.encrypted_content").String()
 					doneText = data.Get("item.summary.0.text").String()
 				}
+			case "response.completed":
+				completedSignature = data.Get("response.output.0.encrypted_content").String()
 			}
 		}
+		chunkDeltas = append(chunkDeltas, lineDeltas)
 	}
-	if addedID == "" || addedID != doneID || decodedResponsesCarrierSignature(t, addedSignature) != signature || doneSignature != addedSignature || doneText != "onetwo" {
-		t.Fatalf("late thought signature replay malformed: added=(%q,%q) done=(%q,%q,%q)", addedID, addedSignature, doneID, doneSignature, doneText)
+	if len(chunkDeltas) < 2 || strings.Join(chunkDeltas[0], "") != "one" || strings.Join(chunkDeltas[1], "") != "two" {
+		t.Fatalf("thought deltas were not streamed per chunk: %v", chunkDeltas)
+	}
+	if addedID == "" || addedID != doneID || addedSignature != "" || decodedResponsesCarrierSignature(t, doneSignature) != signature || completedSignature != doneSignature || doneText != "onetwo" {
+		t.Fatalf("late thought signature replay malformed: added=(%q,%q) done=(%q,%q,%q) completed=%q", addedID, addedSignature, doneID, doneSignature, doneText, completedSignature)
 	}
 }
 
 func TestConvertGeminiResponseToOpenAIResponses_DoneFinalizesStartedStreamExactlyOnce(t *testing.T) {
 	var param any
-	ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned thought","thought":true}]}}],"responseId":"done-finalize"}}`), &param)
+	firstOut := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned thought","thought":true}]}}],"responseId":"done-finalize"}}`), &param)
 	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("[DONE]"), &param)
 
 	var deltas []string
 	outputDoneCount := 0
 	completedCount := 0
-	for _, chunk := range out {
+	for _, chunk := range append(append([][]byte(nil), firstOut...), out...) {
 		event, data := parseSSEEvent(t, chunk)
 		switch event {
 		case "response.reasoning_summary_text.delta":

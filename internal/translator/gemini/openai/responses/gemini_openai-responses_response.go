@@ -1027,7 +1027,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 						st.ReasoningPendingDeltas = append(st.ReasoningPendingDeltas, t.String())
 					}
 				}
-				if !st.ReasoningOpened && st.ReasoningEnc != "" {
+				if !st.ReasoningOpened && (st.ReasoningBuf.Len() > 0 || st.ReasoningEnc != "") {
 					openReasoning()
 				}
 				return true
