@@ -279,31 +279,36 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 }
 
 // SafeResponseHeaders returns trusted response headers only for concrete
-// retry/cooldown errors.
+// retry/cooldown errors. Home conductor wrappers are checked before a locally
+// computed upstream retry hint: the Home retry round or cooldown wraps the
+// upstream error, and its delay describes when this client may retry, so a
+// nested hint must not override it. The hint remains the fallback when no Home
+// wrapper is present or the wrapper carries no delay.
 func SafeResponseHeaders(err error) http.Header {
-	var safeRetryAfter *safeRetryAfterError
-	if errors.As(err, &safeRetryAfter) && safeRetryAfter != nil {
-		return safeRetryAfterHeader(safeRetryAfter.retryAfter)
-	}
 	var busy *HomeConcurrencyBusyError
 	if errors.As(err, &busy) && busy != nil {
 		return busy.SafeResponseHeaders()
 	}
+	var homeRetryAfter *time.Duration
+	homeWrapped := false
 	var exhausted *homeRetryRoundExhaustedError
-	if errors.As(err, &exhausted) && exhausted != nil {
-		retryAfter := exhausted.RetryAfter()
-		if retryAfter == nil {
-			return nil
-		}
-		return safeRetryAfterHeader(*retryAfter)
-	}
 	var cooldown *homeDispatchRetryAfterError
-	if errors.As(err, &cooldown) && cooldown != nil {
-		retryAfter := cooldown.RetryAfter()
-		if retryAfter == nil {
-			return nil
-		}
-		return safeRetryAfterHeader(*retryAfter)
+	if errors.As(err, &exhausted) && exhausted != nil {
+		homeWrapped = true
+		homeRetryAfter = exhausted.RetryAfter()
+	} else if errors.As(err, &cooldown) && cooldown != nil {
+		homeWrapped = true
+		homeRetryAfter = cooldown.RetryAfter()
+	}
+	if homeRetryAfter != nil {
+		return safeRetryAfterHeader(*homeRetryAfter)
+	}
+	var safeRetryAfter *safeRetryAfterError
+	if errors.As(err, &safeRetryAfter) && safeRetryAfter != nil {
+		return safeRetryAfterHeader(safeRetryAfter.retryAfter)
+	}
+	if homeWrapped {
+		return nil
 	}
 	var modelCooldown *modelCooldownError
 	if errors.As(err, &modelCooldown) && modelCooldown != nil {
