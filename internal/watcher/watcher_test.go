@@ -230,6 +230,56 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChanged_WriteDuringReloadIsNotSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(port int) {
+		data, err := yaml.Marshal(&config.Config{
+			Port:               port,
+			AuthDir:            authDir,
+			CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		})
+		if err != nil {
+			t.Fatalf("failed to marshal config: %v", err)
+		}
+		if err = os.WriteFile(configPath, data, 0o644); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+	}
+
+	writeConfig(8080)
+
+	// A management save that lands while the first reload is applying its config
+	// must still be picked up by the next trigger instead of matching the hash.
+	var appliedPorts []int
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+	}
+	w.reloadCallback = func(cfg *config.Config) {
+		appliedPorts = append(appliedPorts, cfg.Port)
+		if len(appliedPorts) == 1 {
+			writeConfig(9090)
+		}
+	}
+
+	w.reloadConfigIfChanged()
+	w.reloadConfigIfChanged()
+	if len(appliedPorts) != 2 || appliedPorts[1] != 9090 {
+		t.Fatalf("expected the write made during reload to be applied next, applied ports %v", appliedPorts)
+	}
+
+	w.reloadConfigIfChanged()
+	if len(appliedPorts) != 2 {
+		t.Fatalf("expected unchanged config to be skipped after catching up, applied ports %v", appliedPorts)
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
