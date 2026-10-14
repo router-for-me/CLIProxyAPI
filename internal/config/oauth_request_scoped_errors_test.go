@@ -16,6 +16,7 @@ oauth-request-scoped-errors:
         - "maximum_context_length$"
         - "^context_length_exceeded"
       action: "stop"
+      cooldown: " 30m "
   aistudio:
     - status: 400
       match:
@@ -67,7 +68,7 @@ oauth-request-scoped-errors:
 		t.Fatalf("vertex rules missing or len != 1: %#v", vertexRules)
 	}
 	rule := vertexRules[0]
-	if rule.Status != 400 || rule.Action != "stop" {
+	if rule.Status != 400 || rule.Action != "stop" || rule.Cooldown != "30m" {
 		t.Errorf("unexpected vertex rule: %+v", rule)
 	}
 	if len(rule.Match) != 2 || len(rule.MatchRegexr) != 2 {
@@ -84,6 +85,7 @@ func TestSanitizeOAuthRequestScopedErrors(t *testing.T) {
 					Match:       []string{"  context_length  ", ""},
 					MatchRegexr: []string{"  ^error.*  ", ""},
 					Action:      " STOP ",
+					Cooldown:    " 45m ",
 				},
 				{
 					Status: 0, // invalid status
@@ -92,6 +94,12 @@ func TestSanitizeOAuthRequestScopedErrors(t *testing.T) {
 				},
 				{
 					Status: 400, // missing match / action
+				},
+				{
+					Status:   500,
+					Match:    []string{"bad cooldown"},
+					Action:   "stop-and-cooldown",
+					Cooldown: "not-a-duration",
 				},
 			},
 			" empty-channel ": {},
@@ -108,7 +116,7 @@ func TestSanitizeOAuthRequestScopedErrors(t *testing.T) {
 	if len(rules) != 1 {
 		t.Fatalf("expected 1 rule for vertex, got %d", len(rules))
 	}
-	if rules[0].Status != 400 || rules[0].Action != "stop" {
+	if rules[0].Status != 400 || rules[0].Action != "stop" || rules[0].Cooldown != "45m" {
 		t.Errorf("unexpected sanitized rule: %+v", rules[0])
 	}
 	if len(rules[0].Match) != 1 || rules[0].Match[0] != "context_length" {

@@ -637,8 +637,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if isCredentialScopedError(errExec) {
 					result.CredentialScope = true
 				}
-				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
-				applyRequestScopedActionToResult(action, okAction, &result)
+				action, cooldown, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
+				applyRequestScopedActionToResult(action, cooldown, okAction, &result)
 				if isResponsesCompactAvailabilityNeutralError(execOpts, errExec, result.Error) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
@@ -669,7 +669,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return resp, nil
 		}
 		if authErr != nil {
-			action, okAction := matchRequestScopedErrorAction(auth, authErr, m.runtimeConfigSnapshot())
+			action, _, okAction := matchRequestScopedErrorAction(auth, authErr, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					return cliproxyexecutor.Response{}, wrapRequestStopError(authErr)
@@ -846,8 +846,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
-				applyRequestScopedActionToResult(action, okAction, &result)
+				action, cooldown, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
+				applyRequestScopedActionToResult(action, cooldown, okAction, &result)
 				// Some Anthropic-compatible upstreams do not implement the
 				// count_tokens route and return a generic endpoint 404. Record
 				// the failure for hooks and metrics without suspending a model
@@ -885,7 +885,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return resp, nil
 		}
 		if authErr != nil {
-			action, okAction := matchRequestScopedErrorAction(auth, authErr, m.runtimeConfigSnapshot())
+			action, _, okAction := matchRequestScopedErrorAction(auth, authErr, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					return cliproxyexecutor.Response{}, wrapRequestStopError(authErr)
@@ -1200,7 +1200,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
 			}
-			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
+			action, _, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					return nil, wrapRequestStopError(errStream)
