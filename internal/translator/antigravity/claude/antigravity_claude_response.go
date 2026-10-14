@@ -581,7 +581,6 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	thinkingSignature := ""
 	thinkingSignatureDirection := geminiClaudeCarrierStandalone
 	thinkingSignatureTargetKind := geminiClaudeCarrierText
-	toolIDCounter := 0
 	hasToolCall := false
 	hasSemanticContent := false
 	lastSemanticKind := geminiClaudeCarrierAny
@@ -647,12 +646,11 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				hasToolCall = true
 
 				name := util.RestoreSanitizedToolName(toolNameMap, functionCall.Get("name").String())
-				toolIDCounter++
 				if !isClaudeTarget && signature != "" && !signatureAttachedToThought {
 					appendSignatureCarrier(signature, geminiClaudeCarrierNext, geminiClaudeCarrierFunction)
 				}
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolBlock, _ = sjson.SetBytes(toolBlock, "id", antigravityClaudeToolUseID(modelName, functionCall, fmt.Sprintf("tool_%d", toolIDCounter)))
+				toolBlock, _ = sjson.SetBytes(toolBlock, "id", antigravityClaudeToolUseID(modelName, functionCall, fmt.Sprintf("tool_%d", atomic.AddUint64(&toolUseIDCounter, 1))))
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", name)
 				if isClaudeTarget && signature != "" {
 					toolBlock, _ = sjson.SetBytes(toolBlock, "signature", formatClaudeSignatureValue(modelName, signature))

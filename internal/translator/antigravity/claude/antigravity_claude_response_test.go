@@ -1617,3 +1617,29 @@ func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartFollowedByThinkin
 		t.Fatalf("expected exactly 2 stopped blocks (0=thinking, 1=text), got: %v", stopped)
 	}
 }
+
+func TestConvertAntigravityResponseToClaudeNonStream_Issue6604_FallbackToolUseIDsAreUniqueAcrossResponses(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent","messages":[{"role":"user","content":"hi"}]}`)
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[
+		{"functionCall":{"name":"Bash","args":{"command":"ls"}}},
+		{"functionCall":{"name":"Bash","args":{"command":"pwd"}}}
+	]},"finishReason":"STOP"}],"responseId":"resp-6604"}}`)
+
+	seen := map[string]bool{}
+	for turn := 0; turn < 2; turn++ {
+		output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, responseJSON, nil)
+		for _, block := range gjson.GetBytes(output, "content").Array() {
+			if block.Get("type").String() != "tool_use" {
+				continue
+			}
+			id := block.Get("id").String()
+			if seen[id] {
+				t.Fatalf("tool_use id %q repeated (turn %d): %s", id, turn, output)
+			}
+			seen[id] = true
+		}
+	}
+	if len(seen) != 4 {
+		t.Fatalf("expected 4 distinct tool_use ids, got %d", len(seen))
+	}
+}
