@@ -52,7 +52,11 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 					}
 					auth.Metadata["disabled"] = auth.Disabled
 					NormalizeCredentialMetadata(auth.Metadata)
-					return codex.WriteJSONFileAtomic(path, auth.Metadata)
+					if errWrite := codex.WriteJSONFileAtomic(path, auth.Metadata); errWrite != nil {
+						return errWrite
+					}
+					MarkAuthFileWritten(ctx)
+					return nil
 				}
 				return fmt.Errorf("auth filestore: read refresh source failed: %w", errRead)
 			}
@@ -65,6 +69,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 			if errWrite := codex.WriteJSONFileAtomic(path, merged); errWrite != nil {
 				return errWrite
 			}
+			MarkAuthFileWritten(ctx)
 			auth.Metadata = merged
 			return nil
 		})
@@ -94,6 +99,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 		if errSave := auth.Storage.SaveTokenToFile(path); errSave != nil {
 			return true, errSave
 		}
+		MarkAuthFileWritten(ctx)
 		if persistedBytes, errReadPersisted := os.ReadFile(path); errReadPersisted == nil && len(persistedBytes) > 0 {
 			var diskMap map[string]any
 			if errUnmarshal := json.Unmarshal(persistedBytes, &diskMap); errUnmarshal == nil && len(diskMap) > 0 {
@@ -116,13 +122,18 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 					auth.Metadata["disabled"] = auth.Disabled
 					NormalizeCredentialMetadata(auth.Metadata)
 					if raw, errMarshal := json.Marshal(auth.Metadata); errMarshal == nil && string(existing) == string(raw) {
+						MarkAuthFileWritten(ctx)
 						return nil
 					}
 				}
 			} else if errRead != nil && !os.IsNotExist(errRead) {
 				return fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 			}
-			return codex.WriteJSONFileAtomic(path, auth.Metadata)
+			if errWrite := codex.WriteJSONFileAtomic(path, auth.Metadata); errWrite != nil {
+				return errWrite
+			}
+			MarkAuthFileWritten(ctx)
+			return nil
 		})
 		if errLock != nil {
 			return true, errLock

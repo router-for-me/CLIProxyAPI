@@ -505,6 +505,9 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		default:
 			return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
 		}
+		// Mark the local write before any bookkeeping, so a file snapshot observed
+		// after it is never ordered before this save.
+		cliproxyauth.MarkAuthFileWritten(ctx)
 	}
 
 	if auth.Attributes == nil {
@@ -512,8 +515,6 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	}
 	auth.Attributes[cliproxyauth.AttributePath] = path
 	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceGit
-	// The local file is written; the commit and push below can take a while.
-	cliproxyauth.MarkAuthFileWritten(ctx)
 
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
