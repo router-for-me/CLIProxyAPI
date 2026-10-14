@@ -2017,3 +2017,35 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
 }
+
+// The snapshot time must not be later than the file read: the core manager drops a
+// snapshot observed at or before the auth's latest save, and a timestamp taken after
+// the read would let a stale read look newer than a save that landed in between.
+func TestAddOrUpdateClientStampsSnapshotBeforeReading(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex.json")
+	if err := os.WriteFile(path, []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	var readAt time.Time
+	original := readAuthFile
+	t.Cleanup(func() { readAuthFile = original })
+	readAuthFile = func(name string) ([]byte, error) {
+		data, err := original(name)
+		readAt = time.Now()
+		return data, err
+	}
+
+	w := &Watcher{authDir: authDir, lastAuthHashes: make(map[string]string)}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.addOrUpdateClient(path)
+
+	if len(w.currentAuths) == 0 {
+		t.Fatal("expected the auth file to be synthesized")
+	}
+	for id, auth := range w.currentAuths {
+		if auth.UpdatedAt.After(readAt) {
+			t.Fatalf("auth %s snapshot stamped %v after the file read finished", id, auth.UpdatedAt.Sub(readAt))
+		}
+	}
+}

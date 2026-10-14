@@ -171,7 +171,10 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
 	w.observeAuthFile(path)
-	data, errRead := os.ReadFile(path)
+	// Stamp the snapshot before reading: the core manager drops snapshots observed
+	// at or before an auth's latest save, so the time must not postdate the read.
+	observedAt := time.Now()
+	data, errRead := readAuthFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
 		return
@@ -251,7 +254,7 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	sctx := &synthesizer.SynthesisContext{
 		Config:           cfg,
 		AuthDir:          authDir,
-		Now:              time.Now(),
+		Now:              observedAt,
 		IDGenerator:      synthesizer.NewStableIDGenerator(),
 		PluginAuthParser: parser,
 	}
