@@ -344,7 +344,10 @@ func (s *ObjectTokenStore) PersistConfig(ctx context.Context) error {
 		return fmt.Errorf("object store: read config file: %w", err)
 	}
 	if len(data) == 0 {
-		return s.deleteObject(ctx, objectStoreConfigKey)
+		// An empty file is a save caught mid-write or a placeholder, never a config
+		// worth mirroring; deleting the remote copy would wipe it for restarts.
+		log.Warn("object store: local config is empty, keeping the remote copy")
+		return nil
 	}
 	return s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml")
 }
