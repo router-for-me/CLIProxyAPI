@@ -294,6 +294,11 @@ func TestNewAntigravityStatusErr_RateLimitWithoutHintUsesDefaultRetryAfter(t *te
 	if err = newAntigravityStatusErr(http.StatusInternalServerError, body); err.retryAfter != nil {
 		t.Fatalf("newAntigravityStatusErr().retryAfter = %v, want nil for non 429", *err.retryAfter)
 	}
+
+	responseErr := newAntigravityResponseError(http.StatusTooManyRequests, body)
+	if got := cliproxyauth.SafeResponseHeaders(responseErr).Get("Retry-After"); got != "60" {
+		t.Fatalf("SafeResponseHeaders() Retry-After = %q, want 60", got)
+	}
 }
 
 func TestAntigravityExecute_DoesNotUseRequestRetryForInternalRetries(t *testing.T) {

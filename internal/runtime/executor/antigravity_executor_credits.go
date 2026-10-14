@@ -355,6 +355,14 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	}
 	return err
 }
+
+func newAntigravityResponseError(statusCode int, body []byte) error {
+	err := newAntigravityStatusErr(statusCode, body)
+	if err.retryAfter == nil {
+		return err
+	}
+	return cliproxyauth.WithSafeRetryAfter(err, *err.retryAfter)
+}
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
 		return
