@@ -22,6 +22,19 @@ var rename = os.Rename
 // returns EBUSY, Windows refuses to replace an open file), it falls back to writing
 // in place, which is what os.WriteFile does.
 func WriteFile(path string, data []byte, perm os.FileMode) error {
+	return write(path, data, perm, false)
+}
+
+// ReplaceFile is WriteFile for a file that must already exist: it never creates
+// path. If the file is gone (a deletion raced the save), it returns an error
+// wrapping os.ErrNotExist and leaves nothing behind, so the deletion wins. The
+// existence check runs right before the rename; the in-place fallback opens the
+// file without O_CREATE.
+func ReplaceFile(path string, data []byte, perm os.FileMode) error {
+	return write(path, data, perm, true)
+}
+
+func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	target := path
 	if resolved, errResolve := filepath.EvalSymlinks(path); errResolve == nil {
 		target = resolved
@@ -29,6 +42,8 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	mode := perm
 	if info, errStat := os.Stat(target); errStat == nil {
 		mode = info.Mode().Perm()
+	} else if mustExist {
+		return fmt.Errorf("atomicfile: replace %s: %w", target, errStat)
 	}
 
 	// The temp name must not match what watchers and scanners pick up (*.json, the
@@ -36,7 +51,7 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	tmp, errCreate := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-*")
 	if errCreate != nil {
 		log.WithError(errCreate).Debugf("atomicfile: cannot create temp file next to %s, writing in place", target)
-		return os.WriteFile(target, data, perm)
+		return writeInPlace(target, data, perm, mustExist)
 	}
 	tmpPath := tmp.Name()
 	committed := false
@@ -63,10 +78,32 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	if errClose := tmp.Close(); errClose != nil {
 		return fmt.Errorf("atomicfile: close temp file: %w", errClose)
 	}
+	if mustExist {
+		if _, errStat := os.Lstat(target); errStat != nil {
+			return fmt.Errorf("atomicfile: replace %s: %w", target, errStat)
+		}
+	}
 	if errRename := rename(tmpPath, target); errRename != nil {
 		log.WithError(errRename).Debugf("atomicfile: cannot replace %s, writing in place", target)
-		return os.WriteFile(target, data, perm)
+		return writeInPlace(target, data, perm, mustExist)
 	}
 	committed = true
 	return nil
+}
+
+// writeInPlace is the non-atomic fallback. With mustExist it opens without O_CREATE,
+// so a file removed in the meantime is not brought back.
+func writeInPlace(path string, data []byte, perm os.FileMode, mustExist bool) error {
+	if !mustExist {
+		return os.WriteFile(path, data, perm)
+	}
+	file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, perm)
+	if errOpen != nil {
+		return fmt.Errorf("atomicfile: replace %s: %w", path, errOpen)
+	}
+	if _, errWrite := file.Write(data); errWrite != nil {
+		_ = file.Close()
+		return fmt.Errorf("atomicfile: replace %s: %w", path, errWrite)
+	}
+	return file.Close()
 }
