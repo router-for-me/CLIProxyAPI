@@ -133,3 +133,56 @@ func assertNoTempFiles(t *testing.T, dir string) {
 		t.Fatalf("temp files left behind: %v", matches)
 	}
 }
+
+// ReplaceFile must never bring back a file that is gone: a runtime save racing a
+// deletion has to lose, as the previous O_TRUNC write without O_CREATE did.
+func TestReplaceFileDoesNotRecreateRemovedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	err := ReplaceFile(path, []byte("{}"), 0o600)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReplaceFile() error = %v, want os.ErrNotExist", err)
+	}
+	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+		t.Fatalf("ReplaceFile() recreated the removed file (stat err %v)", errStat)
+	}
+	assertNoTempFiles(t, dir)
+}
+
+func TestReplaceFileReplacesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := ReplaceFile(path, []byte("new"), 0o600); err != nil {
+		t.Fatalf("ReplaceFile() error = %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != "new" {
+		t.Fatalf("content = %q, want new", got)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
+}
+
+func TestReplaceFileFallbackDoesNotRecreateRemovedFile(t *testing.T) {
+	original := rename
+	t.Cleanup(func() { rename = original })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// The rename fails (as on a bind mount) after the file was deleted; the
+	// in-place fallback must not create it again.
+	rename = func(string, string) error {
+		_ = os.Remove(path)
+		return errors.New("device or resource busy")
+	}
+	if err := ReplaceFile(path, []byte("new"), 0o600); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReplaceFile() error = %v, want os.ErrNotExist", err)
+	}
+	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+		t.Fatalf("fallback recreated the removed file (stat err %v)", errStat)
+	}
+	assertNoTempFiles(t, dir)
+}
