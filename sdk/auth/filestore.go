@@ -138,8 +138,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 				if jsonEqual(existing, raw) {
 					break
 				}
-				// Replace atomically: the auth watcher may rescan this file at any time.
-				if errWrite := atomicfile.WriteFile(path, raw, 0o600); errWrite != nil {
+				// Replace atomically (the auth watcher may rescan this file at any time),
+				// but never recreate it: a deletion racing this save must win.
+				if errWrite := atomicfile.ReplaceFile(path, raw, 0o600); errWrite != nil {
 					return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
 				}
 			} else if os.IsNotExist(errRead) {
