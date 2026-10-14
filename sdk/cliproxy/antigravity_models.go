@@ -110,6 +110,23 @@ func (s *Service) antigravityCapabilityKey(auth *coreauth.Auth) string {
 	return antigravityCapabilityKeyForRoute(auth, antigravityModelBaseURLs(auth)[0], s.antigravityModelFetchProxyURL(auth))
 }
 
+func resolveAntigravityUserAgent(auth *coreauth.Auth) string {
+	raw := ""
+	if auth != nil {
+		if auth.Attributes != nil {
+			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+				raw = ua
+			}
+		}
+		if raw == "" && auth.Metadata != nil {
+			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
+				raw = strings.TrimSpace(ua)
+			}
+		}
+	}
+	return misc.AntigravityRequestUserAgent(raw)
+}
+
 func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy string) string {
 	project, _ := auth.Metadata["project_id"].(string)
 	identity := auth.ID
@@ -117,7 +134,8 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy strin
 		token, _ := auth.Metadata["access_token"].(string)
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
-	return fmt.Sprintf("%q/%d/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy)
+	userAgent := strings.ToLower(strings.TrimSpace(resolveAntigravityUserAgent(auth)))
+	return fmt.Sprintf("%q/%d/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, userAgent)
 }
 
 func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCapabilityHints {
@@ -169,11 +187,11 @@ func (s *Service) persistedAntigravityHintsForAuth(auth *coreauth.Auth, endpoint
 		}
 	}
 	project, _ := auth.Metadata["project_id"].(string)
-	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint); ok {
+	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint, resolveAntigravityUserAgent(auth)); ok {
 		return hints, true
 	}
 	if current != nil {
-		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint)
+		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint, resolveAntigravityUserAgent(current))
 	}
 	return antigravityModelCapabilityHints{}, false
 }
@@ -196,7 +214,7 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 		return false
 	}
 	project, _ := auth.Metadata["project_id"].(string)
-	value := buildPersistedAntigravityCapabilityHintsValue(project, endpoint, hints)
+	value := buildPersistedAntigravityCapabilityHintsValue(project, endpoint, resolveAntigravityUserAgent(auth), hints)
 	persisted, preempted := s.coreManager.PersistMetadataEntry(ctx, auth.ID, auth.RegistrationEpoch, antigravityPersistedHintsMetaKey, value, func(existing *coreauth.Auth) bool {
 		if existing == nil || existing.Disabled || existing.Provider != auth.Provider || existing.RegistrationEpoch != auth.RegistrationEpoch || s.antigravityCapabilityKey(existing) != expectedKey {
 			return false
@@ -220,7 +238,7 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 	return false
 }
 
-func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hints antigravityModelCapabilityHints) map[string]any {
+func buildPersistedAntigravityCapabilityHintsValue(project, endpoint, userAgent string, hints antigravityModelCapabilityHints) map[string]any {
 	modelIDs := make([]string, 0, len(hints.ModelIDs))
 	for id := range hints.ModelIDs {
 		if normalized := normalizeAntigravityFetchedModelID(id); normalized != "" {
@@ -241,6 +259,9 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hin
 	if endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/"); endpoint != "" {
 		value["endpoint"] = endpoint
 	}
+	if userAgent = strings.TrimSpace(userAgent); userAgent != "" {
+		value["user_agent"] = userAgent
+	}
 	if len(hints.WebSearchModelIDs) > 0 {
 		webSearchIDs := make([]string, 0, len(hints.WebSearchModelIDs))
 		for id := range hints.WebSearchModelIDs {
@@ -260,7 +281,7 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hin
 	return value
 }
 
-func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedProject, expectedEndpoint string) (antigravityModelCapabilityHints, bool) {
+func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedProject, expectedEndpoint, expectedUserAgent string) (antigravityModelCapabilityHints, bool) {
 	if metadata == nil {
 		return antigravityModelCapabilityHints{}, false
 	}
@@ -274,10 +295,14 @@ func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 	}
 	persistedProject, _ := rawMap["project_id"].(string)
 	persistedEndpoint, _ := rawMap["endpoint"].(string)
+	persistedUserAgent, _ := rawMap["user_agent"].(string)
 	if strings.TrimSpace(persistedProject) != strings.TrimSpace(expectedProject) {
 		return antigravityModelCapabilityHints{}, false
 	}
 	if strings.TrimRight(strings.TrimSpace(persistedEndpoint), "/") != strings.TrimRight(strings.TrimSpace(expectedEndpoint), "/") {
+		return antigravityModelCapabilityHints{}, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(persistedUserAgent), strings.TrimSpace(expectedUserAgent)) {
 		return antigravityModelCapabilityHints{}, false
 	}
 	rawModels, hasModels := rawMap["model_ids"]
@@ -469,7 +494,7 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", misc.AntigravityUserAgent())
+	req.Header.Set("User-Agent", resolveAntigravityUserAgent(auth))
 	resp, errDo := client.Do(req)
 	if errDo != nil {
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
@@ -632,7 +657,12 @@ func filterAntigravityModels(models []*ModelInfo, hints antigravityModelCapabili
 	filtered := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
 		if model != nil {
-			if _, ok := hints.ModelIDs[normalizeAntigravityFetchedModelID(model.ID)]; ok {
+			id := normalizeAntigravityFetchedModelID(model.ID)
+			_, ok := hints.ModelIDs[id]
+			if !ok && (id == "gemini-4-argon-medium" || id == "gemini-4-argon-low") {
+				_, ok = hints.ModelIDs["gemini-4-argon-high"]
+			}
+			if ok {
 				filtered = append(filtered, model)
 			}
 		}

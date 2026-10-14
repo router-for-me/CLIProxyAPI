@@ -67,12 +67,12 @@ func TestAIStudioTranslateRequestNormalizesThinkingLevel(t *testing.T) {
 
 func TestAIStudioTranslateRequestPayloadOverrideWinsThinkingNormalization(t *testing.T) {
 	executor := NewAIStudioExecutor(&config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
-		Models: []config.PayloadModelRule{{Name: "gemini-3.7-flash", Protocol: "gemini"}},
+		Models: []config.PayloadModelRule{{Name: "gemini-3.8-flash", Protocol: "gemini"}},
 		Params: map[string]any{"generationConfig.thinkingConfig.thinkingLevel": "medium"},
 	}}}}, "aistudio", nil)
 	req := cliproxyexecutor.Request{
-		Model:   "gemini-3.7-flash",
-		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"model":"gemini-3.7-flash"}`),
+		Model:   "gemini-3.8-flash",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"model":"gemini-3.8-flash"}`),
 	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
 
