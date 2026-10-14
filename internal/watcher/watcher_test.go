@@ -369,10 +369,10 @@ func TestConfigWatchSurvivesRenameReplace(t *testing.T) {
 		t.Fatalf("failed to create config file: %v", err)
 	}
 
-	var lastPort atomic.Int32
+	reloadedPorts := make(chan int, 64)
 	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) {
 		if cfg != nil {
-			lastPort.Store(int32(cfg.Port))
+			reloadedPorts <- cfg.Port
 		}
 	})
 	if err != nil {
@@ -384,7 +384,11 @@ func TestConfigWatchSurvivesRenameReplace(t *testing.T) {
 	if err = w.Start(ctx); err != nil {
 		t.Fatalf("expected Start to succeed: %v", err)
 	}
-	t.Cleanup(func() { _ = w.Stop() })
+	t.Cleanup(func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
+	})
 
 	// Atomic saves replace the file by rename, which drops a watch on the old
 	// inode. Every replace, not just the first, must still reload.
@@ -396,12 +400,24 @@ func TestConfigWatchSurvivesRenameReplace(t *testing.T) {
 		if err = os.Rename(tmp, configPath); err != nil {
 			t.Fatalf("failed to replace config: %v", err)
 		}
-		deadline := time.Now().Add(3 * time.Second)
-		for lastPort.Load() != int32(port) && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if got := lastPort.Load(); got != int32(port) {
-			t.Fatalf("after replacing config with port %d, last reloaded port = %d", port, got)
+		waitForReloadedPort(t, reloadedPorts, port)
+	}
+}
+
+// waitForReloadedPort consumes reload callbacks until one carries port. The
+// timeout only guards against a hang; ordering comes from the callbacks.
+func waitForReloadedPort(t *testing.T, reloadedPorts <-chan int, port int) {
+	t.Helper()
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	for {
+		select {
+		case got := <-reloadedPorts:
+			if got == port {
+				return
+			}
+		case <-hangGuard.C:
+			t.Fatalf("no reload with port %d after replacing the config", port)
 		}
 	}
 }
@@ -420,15 +436,19 @@ func TestHandleEventConfigRemoveRearmsWatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create fsnotify watcher: %v", err)
 	}
-	t.Cleanup(func() { _ = fsWatcher.Close() })
+	t.Cleanup(func() {
+		if errClose := fsWatcher.Close(); errClose != nil {
+			t.Errorf("close fsnotify watcher: %v", errClose)
+		}
+	})
 
-	var reloads atomic.Int32
+	reloadedPorts := make(chan int, 8)
 	w := &Watcher{
 		authDir:        authDir,
 		configPath:     configPath,
 		watcher:        fsWatcher,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { reloads.Add(1) },
+		reloadCallback: func(cfg *config.Config) { reloadedPorts <- cfg.Port },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
@@ -436,13 +456,6 @@ func TestHandleEventConfigRemoveRearmsWatch(t *testing.T) {
 	// for it; the new file at the same path must be watched again and reloaded.
 	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for reloads.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if reloads.Load() == 0 {
-		t.Fatal("expected a config reload after the config file was replaced")
-	}
 	watched := false
 	for _, path := range fsWatcher.WatchList() {
 		if path == configPath {
@@ -452,6 +465,7 @@ func TestHandleEventConfigRemoveRearmsWatch(t *testing.T) {
 	if !watched {
 		t.Fatalf("expected %s to be watched again, watch list %v", configPath, fsWatcher.WatchList())
 	}
+	waitForReloadedPort(t, reloadedPorts, 8000)
 }
 
 func TestStartFailsWhenConfigMissing(t *testing.T) {
