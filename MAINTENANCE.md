@@ -7,7 +7,7 @@ Both default branches are `main`. Canonical checkout: `~/Repos/CLIProxyAPI`.
 Initial local, `origin/main`, and `upstream/main` baseline on 2026-09-13:
 `44e62bc8acc2f224bff9c62d222717d3f6723dea` (upstream v7.3.1), with exact parity.
 Accepted upstream baseline before CPA-001: `d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5` (`v8.0.23`).
-Current accepted upstream release: `bf9341629ef2300ac9d846a2e80fe2756f63a671` (`v8.0.27`), merged after reviewing the `v8.0.25`–`v8.0.27` release notes. Its canceled-stream cooldown path (`recordCanceledUpstreamCooldown`) carries the CPA-001 explicit cooldown. The new request-body limit and pre-first-token heartbeats remain disabled when unset; session-affinity rebinding retains the existing `any` default. Sign in with ChatGPT is opt-in through credential metadata and does not replace the existing Codex route.
+Current accepted upstream release: `0d18d3b365be000eeaee7de4615f9da596b2059d` (`v8.0.28`), merged after reviewing the `v8.0.28` release notes. `v8.0.28` adds the Codex SSE scanner, treats closed HTTP/2 client connections as transient lifecycle drops without credential cooldown, clones runtime config against reload races and adopts #6560's tool-search cache anchor. It changes none of the CPA-001–CPA-004 source surfaces (request-scoped cooldown rules, cache observation, Codex refresh/storage, body-limit/CORS ordering), so every active patch remains required. Prior accepted release `bf9341629ef2300ac9d846a2e80fe2756f63a671` (`v8.0.27`), merged after reviewing the `v8.0.25`–`v8.0.27` release notes. Its canceled-stream cooldown path (`recordCanceledUpstreamCooldown`) carries the CPA-001 explicit cooldown. The new request-body limit and pre-first-token heartbeats remain disabled when unset; session-affinity rebinding retains the existing `any` default. Sign in with ChatGPT is opt-in through credential metadata and does not replace the existing Codex route.
 `origin` publishes to the owned fork. `upstream` is fetch-only.
 This fork supplies the local gateway build from fork `main` and tracks upstream RELEASE TAGS, not upstream `main`.
 
@@ -89,3 +89,10 @@ After publication verify local `main` equals `origin/main`, and the selected ups
 Report source, publication, installation, and active runtime state separately. A maintenance run succeeds only after the published fork revision is active and verified. Preserve the prior release for rollback.
 
 Baseline: `go test ./...` passes fully with no accepted failing tests. `TestOpenAICompatExecutorToolResultContentByInputModalities` was an accepted inherited failure from 2026-09-13 through the 2026-09-15 sync; it passes as of upstream `b773607e3e7756dc6020a291825e4eb08899595a` and is retired. Any test failure now blocks promotion. If a future inherited failure appears, reproduce it on an untouched upstream checkout first, record the exact test name and upstream SHA here, and report it separately only while unchanged-source proof, routing/quota tests, build, and live Codex/Claude canaries pass.
+
+Inherited at upstream `v8.0.28` (`0d18d3b365be000eeaee7de4615f9da596b2059d`), reproduced on an untouched checkout on 2026-10-14 UTC:
+
+- `internal/runtime/executor` `TestAIStudioTranslateRequestNormalizesThinkingLevel` and `TestAntigravityExecutorExecuteStreamTranslatesInteractionsRequest` fail deterministically (empty `thinkingLevel`), identically on upstream and fork. Gemini/Antigravity translation is outside every fork patch and the local Codex/Claude route.
+- `sdk/cliproxy` `TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559` is a race-timing flake (13/20 failures on untouched upstream). It covers the upstream #6559 management-API race; the local gateway keeps management disabled.
+
+Retire these entries when a released upstream tag passes them.
