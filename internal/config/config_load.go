@@ -137,7 +137,9 @@ func loadConfigData(configFile string, data []byte, optional bool) (*Config, err
 		if yaml.Unmarshal(data, &source) == nil && len(source.Content) > 0 && yamlPath(expandConfigAliases(source.Content[0]), "management.secret-key") != nil {
 			secretPath[0] = "management"
 		}
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, secretPath, hashed)
+		// Write back only to the bytes that were parsed: a hot reload may parse a
+		// file that a newer save (perhaps with a rotated secret) already replaced.
+		_ = updateNestedScalar(configFile, data, secretPath, hashed)
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)

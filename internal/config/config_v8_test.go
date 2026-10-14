@@ -740,6 +740,29 @@ func TestV8SecretHashUsesNewPath(t *testing.T) {
 	}
 }
 
+// A hot reload can parse bytes that a newer save has already replaced. Hashing the
+// older plaintext secret into the file would destroy a rotated secret, so the
+// write-back must only touch the file that was actually parsed.
+func TestLoadConfigDataSkipsSecretWriteBackWhenFileChanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	older := []byte("management: {secret-key: old-secret}\n")
+	newer := []byte("management: {secret-key: rotated-secret}\n")
+	if err := os.WriteFile(path, newer, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigData(path, older)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
+		t.Fatal("parsed secret was not hashed in memory")
+	}
+	saved, _ := os.ReadFile(path)
+	if !bytes.Equal(saved, newer) {
+		t.Fatalf("newer config was rewritten from older bytes: %q", saved)
+	}
+}
+
 func TestV8LegacyClientKeysDoNotOverwriteUpstreamGroups(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("api-keys: {codex: [{name: upstream, base-url: 'https://example.invalid', keys: [{api-key: upstream-key}]}]}\n"), 0600); err != nil {
