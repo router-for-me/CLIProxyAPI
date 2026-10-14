@@ -105,7 +105,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 		// mirroring now could publish the plaintext to a remote store. If the file
 		// could not be written, the reload finds it unchanged and stops.
 		if config.HasPlaintextSecretKey(data) {
-			log.Debug("config holds a plaintext management secret, mirroring it once hashed")
+			log.Info("config holds a plaintext management secret, not mirroring it until it is hashed")
 			w.scheduleConfigReload()
 			return
 		}

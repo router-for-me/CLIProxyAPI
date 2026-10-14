@@ -182,13 +182,69 @@ func LoadConfigData(configFile string, data []byte) (*Config, error) {
 }
 
 // HasPlaintextSecretKey reports whether config YAML holds a management secret that
-// is not bcrypt-hashed yet.
+// is not bcrypt-hashed yet at either path the loader reads one from:
+// management.secret-key or the legacy remote-management.secret-key, even when the
+// loader would use the other one. Aliases and merge keys are followed to the node
+// that defines each value, so a plaintext anchor a secret path reads counts too,
+// as does a merged value a direct key shadows. YAML that does not parse reports
+// false.
 func HasPlaintextSecretKey(data []byte) bool {
-	var cfg Config
-	if yaml.Unmarshal(data, &cfg) != nil {
+	var root yaml.Node
+	if yaml.Unmarshal(data, &root) != nil || len(root.Content) == 0 {
 		return false
 	}
-	return cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey)
+	for _, path := range [][]string{{"management", "secret-key"}, {"remote-management", "secret-key"}} {
+		nodes := []*yaml.Node{root.Content[0]}
+		for _, key := range path {
+			var next []*yaml.Node
+			for _, node := range nodes {
+				next = append(next, yamlKeyValues(node, key, map[*yaml.Node]bool{})...)
+			}
+			nodes = next
+		}
+		for _, secret := range nodes {
+			if secret.Kind != yaml.ScalarNode || (secret.Value != "" && !looksLikeBcrypt(secret.Value)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// yamlKeyValues returns the values key has in mapping, its own and those merged
+// in, each resolved through aliases to the node that defines it. seen stops a
+// merge that refers back to a mapping being searched.
+func yamlKeyValues(mapping *yaml.Node, key string, seen map[*yaml.Node]bool) []*yaml.Node {
+	mapping = resolveYAMLAlias(mapping)
+	if mapping == nil || mapping.Kind != yaml.MappingNode || seen[mapping] {
+		return nil
+	}
+	seen[mapping] = true
+	var values []*yaml.Node
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		name, value := mapping.Content[i], resolveYAMLAlias(mapping.Content[i+1])
+		if name.Tag != "!!merge" {
+			if name.Value == key && value != nil {
+				values = append(values, value)
+			}
+			continue
+		}
+		sources := []*yaml.Node{value}
+		if value != nil && value.Kind == yaml.SequenceNode {
+			sources = value.Content
+		}
+		for _, source := range sources {
+			values = append(values, yamlKeyValues(source, key, seen)...)
+		}
+	}
+	return values
+}
+
+func resolveYAMLAlias(node *yaml.Node) *yaml.Node {
+	for node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
 }
 
 // loadConfigData parses data. persist allows startup writes to configFile: an
