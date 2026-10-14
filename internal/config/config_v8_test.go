@@ -855,6 +855,15 @@ func TestHasPlaintextSecretKey(t *testing.T) {
 		{"remote-management: {secret-key: plain-secret}\n", true},
 		{"management: {secret-key: '" + hashed + "'}\n", false},
 		{"port: 8317\n", false},
+		// The loader reads the empty v8 secret; the legacy plaintext would still leave.
+		{"management: {secret-key: ''}\nremote-management: {secret-key: plain-secret}\n", true},
+		{"remote-management: &rm {secret-key: plain-secret}\nmanagement: *rm\n", true},
+		{"remote-management: &rm {secret-key: '" + hashed + "'}\nmanagement: *rm\n", false},
+		// Hashing the merged secret's expanded copy leaves the anchor in plaintext.
+		{"defaults: &d {secret-key: plain-secret}\nmanagement: {<<: *d}\n", true},
+		{"defaults: &d {secret-key: plain-secret}\nmanagement: {<<: *d, secret-key: '" + hashed + "'}\n", true},
+		{"management: {secret-key: {value: plain-secret}}\n", true},
+		{"management: [secret-key: plain-secret\n", false},
 	} {
 		if got := HasPlaintextSecretKey([]byte(tc.data)); got != tc.want {
 			t.Errorf("HasPlaintextSecretKey(%q) = %v, want %v", tc.data, got, tc.want)
