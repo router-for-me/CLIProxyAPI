@@ -740,17 +740,16 @@ func TestV8SecretHashUsesNewPath(t *testing.T) {
 	}
 }
 
-// A hot reload can parse bytes that a newer save has already replaced. Hashing the
-// older plaintext secret into the file would destroy a rotated secret, so the
-// write-back must only touch the file that was actually parsed.
-func TestLoadConfigDataSkipsSecretWriteBackWhenFileChanged(t *testing.T) {
+// Hot reloads parse bytes that a concurrent save may already have replaced, and a
+// compare-then-write against the file can still race a save. LoadConfigData must
+// therefore never write: the secret is hashed in memory only.
+func TestLoadConfigDataDoesNotWriteTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	older := []byte("management: {secret-key: old-secret}\n")
-	newer := []byte("management: {secret-key: rotated-secret}\n")
-	if err := os.WriteFile(path, newer, 0600); err != nil {
+	content := []byte("management: {secret-key: plain-secret}\n")
+	if err := os.WriteFile(path, content, 0600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfigData(path, older)
+	cfg, err := LoadConfigData(path, content)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,8 +757,8 @@ func TestLoadConfigDataSkipsSecretWriteBackWhenFileChanged(t *testing.T) {
 		t.Fatal("parsed secret was not hashed in memory")
 	}
 	saved, _ := os.ReadFile(path)
-	if !bytes.Equal(saved, newer) {
-		t.Fatalf("newer config was rewritten from older bytes: %q", saved)
+	if !bytes.Equal(saved, content) {
+		t.Fatalf("LoadConfigData rewrote the file: %q", saved)
 	}
 }
 
