@@ -13,6 +13,8 @@ type Store interface {
 	// values, pointers, Storage and Runtime instead. Auth.Clone shares these objects.
 	// Save may call manager read APIs, but must not synchronously mutate the
 	// manager or call Load (the reload barrier remains held until publication).
+	// A store that does slow work after writing a local auth file (pushing to a
+	// remote) should call MarkAuthFileWritten(ctx) once that file is written.
 	Save(ctx context.Context, auth *Auth) (string, error)
 	// Delete removes the auth record identified by id.
 	Delete(ctx context.Context, id string) error
