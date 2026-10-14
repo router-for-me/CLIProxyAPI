@@ -25,6 +25,10 @@ var readConfigFile = os.ReadFile
 // a concurrent save between the change check and the load.
 var loadConfigDataFunc = config.LoadConfigData
 
+// readAuthFile reads one auth file for an incremental update; tests replace it to
+// observe when the read happens.
+var readAuthFile = os.ReadFile
+
 func (w *Watcher) stopConfigReloadTimer() {
 	w.configReloadMu.Lock()
 	if w.configReloadTimer != nil {
