@@ -11,7 +11,14 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertInteractionsRequestToCodex(modelName, inputRawJSON, stream)
+
+}
+
+// convertInteractionsRequestToCodex also reports a user turn that was left empty
+// because its only attachment has no Codex equivalent.
+func convertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","instructions":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -21,11 +28,11 @@ func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	out = copyInteractionsSystemToCodex(out, root)
 	out = copyInteractionsGenerationConfigToCodex(out, root)
 	inputItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
-	appendInteractionsInputToCodex(&inputItems, root.Get("input"))
+	errInput := appendInteractionsInputToCodex(&inputItems, root.Get("input"))
 	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	out = copyInteractionsToolsToCodex(out, root)
 	out = copyInteractionsCodexTopLevel(out, root)
-	return out
+	return out, errInput
 }
 
 func copyInteractionsSystemToCodex(out []byte, root gjson.Result) []byte {
@@ -181,41 +188,54 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 	return ""
 }
 
-func appendInteractionsInputToCodex(items *[][]byte, input gjson.Result) {
+// appendInteractionsInputToCodex adds the input steps and reports a user turn that
+// was left with nothing to send because of an attachment Codex cannot carry.
+func appendInteractionsInputToCodex(items *[][]byte, input gjson.Result) error {
 	if !input.Exists() {
-		return
+		return nil
 	}
 	if input.Type == gjson.String {
 		appendInteractionsTextToCodex(items, "user", input.String())
-		return
+		return nil
 	}
+	var run translatorcommon.UserRun
 	if input.IsArray() {
 		input.ForEach(func(_, step gjson.Result) bool {
-			appendInteractionsStepToCodex(items, step, "user")
+			appendInteractionsStepToCodex(items, step, "user", &run)
 			return true
 		})
-		return
-	}
-	if steps := input.Get("steps"); steps.Exists() && steps.IsArray() {
-		defaultRole := interactionsCodexDefaultRole(input.Get("role").String(), "user")
+	} else if steps := input.Get("steps"); steps.Exists() && steps.IsArray() {
+		defaultRole := interactionsCodexStepRole(input, "user")
 		steps.ForEach(func(_, step gjson.Result) bool {
-			appendInteractionsStepToCodex(items, step, defaultRole)
+			appendInteractionsStepToCodex(items, step, defaultRole, &run)
 			return true
 		})
-		return
+	} else {
+		appendInteractionsStepToCodex(items, input, "user", &run)
 	}
-	appendInteractionsStepToCodex(items, input, "user")
+	run.End()
+	return run.Err()
 }
 
-func appendInteractionsStepToCodex(items *[][]byte, step gjson.Result, defaultRole string) {
+// interactionsCodexUserRun returns run for user content. Content of any other
+// role closes the open user turn and has no tracker.
+func interactionsCodexUserRun(run *translatorcommon.UserRun, role string) *translatorcommon.UserRun {
+	if role == "user" {
+		return run
+	}
+	run.End()
+	return nil
+}
+
+func appendInteractionsStepToCodex(items *[][]byte, step gjson.Result, defaultRole string, run *translatorcommon.UserRun) {
 	if step.Type == gjson.String {
-		appendInteractionsTextToCodex(items, defaultRole, step.String())
+		appendInteractionsRoleTextToCodex(items, defaultRole, step.String(), run)
 		return
 	}
 	if steps := step.Get("steps"); steps.Exists() && steps.IsArray() {
-		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
+		role := interactionsCodexStepRole(step, defaultRole)
 		steps.ForEach(func(_, nested gjson.Result) bool {
-			appendInteractionsStepToCodex(items, nested, role)
+			appendInteractionsStepToCodex(items, nested, role, run)
 			return true
 		})
 		return
@@ -223,52 +243,88 @@ func appendInteractionsStepToCodex(items *[][]byte, step gjson.Result, defaultRo
 	stepType := strings.ToLower(strings.TrimSpace(step.Get("type").String()))
 	switch stepType {
 	case "function_call":
+		run.End()
 		appendInteractionsFunctionCallToCodex(items, step)
 	case "function_result", "function_call_output":
+		// A tool result is content the model reads, so it keeps the surrounding user turn.
+		run.Add()
 		appendInteractionsFunctionResultToCodex(items, step)
 	case "model_output", "assistant":
-		appendInteractionsContentToCodexItem(items, step.Get("content"), "assistant")
+		run.End()
+		appendInteractionsContentToCodexItem(items, step.Get("content"), "assistant", run)
 	case "thought", "reasoning":
+		run.End()
 		appendInteractionsThoughtToCodex(items, step)
 	case "user_input", "message", "":
-		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
+		role := interactionsCodexStepRole(step, defaultRole)
 		if content := step.Get("content"); content.Exists() {
-			appendInteractionsContentToCodexItem(items, content, role)
+			appendInteractionsContentToCodexItem(items, content, role, run)
 		} else if text := step.Get("text"); text.Exists() {
-			appendInteractionsTextToCodex(items, role, text.String())
+			appendInteractionsRoleTextToCodex(items, role, text.String(), run)
 		}
 	default:
-		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
+		role := interactionsCodexStepRole(step, defaultRole)
 		if content := step.Get("content"); content.Exists() {
-			appendInteractionsContentToCodexItem(items, content, role)
+			appendInteractionsContentToCodexItem(items, content, role, run)
 		} else if text := step.Get("text"); text.Exists() {
-			appendInteractionsTextToCodex(items, role, text.String())
+			appendInteractionsRoleTextToCodex(items, role, text.String(), run)
 		}
 	}
 }
 
-func appendInteractionsContentToCodexItem(items *[][]byte, content gjson.Result, role string) {
+// appendInteractionsRoleTextToCodex adds a text message; blank text does not keep a user turn alive.
+func appendInteractionsRoleTextToCodex(items *[][]byte, role, text string, run *translatorcommon.UserRun) {
+	appendInteractionsTextToCodex(items, role, text)
+	userRun := interactionsCodexUserRun(run, role)
+	if strings.TrimSpace(text) != "" {
+		userRun.Add()
+	}
+}
+
+func appendInteractionsContentToCodexItem(items *[][]byte, content gjson.Result, role string, run *translatorcommon.UserRun) {
 	if !content.Exists() {
 		return
 	}
 	if content.Type == gjson.String {
-		appendInteractionsTextToCodex(items, role, content.String())
+		appendInteractionsRoleTextToCodex(items, role, content.String(), run)
 		return
 	}
+	userRun := interactionsCodexUserRun(run, role)
 	if content.IsArray() {
 		content.ForEach(func(_, part gjson.Result) bool {
-			if item := interactionsCodexMessagePart(part, role); len(item) > 0 {
-				appendInteractionsMessagePartToCodex(items, role, item)
-			}
+			appendInteractionsContentPartToCodex(items, part, role, userRun)
 			return true
 		})
 		return
 	}
 	if content.IsObject() {
-		if item := interactionsCodexMessagePart(content, role); len(item) > 0 {
-			appendInteractionsMessagePartToCodex(items, role, item)
-		}
+		appendInteractionsContentPartToCodex(items, content, role, userRun)
 	}
+}
+
+// appendInteractionsContentPartToCodex adds one content part. run is nil for
+// content that is not user content; for user content it records what is sent and
+// what cannot be.
+func appendInteractionsContentPartToCodex(items *[][]byte, part gjson.Result, role string, run *translatorcommon.UserRun) {
+	item := interactionsCodexMessagePart(part, role)
+	if len(item) == 0 {
+		if droppedType := translatorcommon.InteractionsAttachmentType(part); droppedType != "" {
+			run.Drop(droppedType)
+		}
+		return
+	}
+	appendInteractionsMessagePartToCodex(items, role, item)
+	if !interactionsCodexIsBlankText(item) {
+		run.Add()
+	}
+}
+
+// interactionsCodexIsBlankText reports whether a Codex message part is a text part
+// holding only whitespace.
+func interactionsCodexIsBlankText(item []byte) bool {
+	parsed := gjson.ParseBytes(item)
+	partType := parsed.Get("type").String()
+	return (partType == "input_text" || partType == "output_text") && strings.TrimSpace(parsed.Get("text").String()) == ""
 }
 
 func appendInteractionsFunctionCallToCodex(items *[][]byte, step gjson.Result) {
@@ -452,14 +508,10 @@ func interactionsCodexMessagePart(part gjson.Result, role string) []byte {
 }
 
 func interactionsCodexImagePart(part gjson.Result) []byte {
-	if url := part.Get("url"); url.Exists() {
+	// uri is the Interactions spelling of file_uri.
+	if imageURL := firstNonBlankString(part, "url", "file_uri", "fileUri", "uri"); imageURL != "" {
 		item := []byte(`{"type":"input_image","image_url":""}`)
-		item, _ = sjson.SetBytes(item, "image_url", url.String())
-		return item
-	}
-	if fileURI := firstString(part, "file_uri", "fileUri"); fileURI != "" {
-		item := []byte(`{"type":"input_image","image_url":""}`)
-		item, _ = sjson.SetBytes(item, "image_url", fileURI)
+		item, _ = sjson.SetBytes(item, "image_url", imageURL)
 		return item
 	}
 	mimeType := firstString(part, "mime_type", "mimeType")
@@ -492,7 +544,8 @@ func interactionsCodexFilePart(part gjson.Result) []byte {
 		return item
 	}
 	mimeType := firstString(part, "mime_type", "mimeType")
-	if fileURI := firstString(part, "file_uri", "fileUri", "url"); fileURI != "" {
+	// uri is the Interactions spelling of file_uri.
+	if fileURI := firstNonBlankString(part, "file_uri", "fileUri", "uri", "url"); fileURI != "" {
 		item := []byte(`{"type":"input_file","file_url":"","filename":""}`)
 		item, _ = sjson.SetBytes(item, "file_url", fileURI)
 		item, _ = sjson.SetBytes(item, "filename", codexFileNameFromMIME(mimeType))
@@ -638,6 +691,17 @@ func interactionsCodexOutputString(value gjson.Result) string {
 	return ""
 }
 
+// interactionsCodexStepRole resolves the Codex role of a step. A step that
+// carries system or developer content, named by its role or by its type, is
+// developer content: it closes the open user turn and never keeps an emptied one
+// alive. Any other step uses its own role, then the role it inherits.
+func interactionsCodexStepRole(step gjson.Result, inherited string) string {
+	if translatorcommon.IsInteractionsInstructionStep(step, inherited == "developer") {
+		return "developer"
+	}
+	return interactionsCodexDefaultRole(step.Get("role").String(), inherited)
+}
+
 func interactionsCodexDefaultRole(role, fallback string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "model", "assistant":
@@ -715,6 +779,16 @@ func shortenCodexToolNameIfNeeded(name string) string {
 		}
 	}
 	return name[:limit]
+}
+
+// firstNonBlankString returns the first non-blank string found at paths.
+func firstNonBlankString(root gjson.Result, paths ...string) string {
+	for _, path := range paths {
+		if value := strings.TrimSpace(root.Get(path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func firstString(root gjson.Result, paths ...string) string {

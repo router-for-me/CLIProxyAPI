@@ -61,6 +61,8 @@ func TestManager_ShouldRetryAfterError_RetriesPreHTTPTransportFailure(t *testing
 		{name: "windows tls handshake", err: windowsCodexTLSHandshakeError(), want: true},
 		{name: "dial refused", err: dialRefusedError(), want: true},
 		{name: "unexpected eof", err: io.ErrUnexpectedEOF, want: true},
+		{name: "http2 force closed", err: errors.New("http2: client connection force closed via ClientConn.Close"), want: true},
+		{name: "http2 conn closed", err: &url.Error{Op: "Post", URL: "https://example.com", Err: errors.New("http2: client conn is closed")}, want: true},
 		{name: "unauthorized", err: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}, want: false},
 		{name: "canceled", err: context.Canceled, want: false},
 		{name: "certificate", err: &url.Error{Op: "Post", URL: "https://chatgpt.com/backend-api/codex/responses", Err: x509.UnknownAuthorityError{}}, want: false},
@@ -153,6 +155,74 @@ func TestExecuteRetriesPreHTTPTransportFailureWithoutCooling(t *testing.T) {
 	assertNoCooldown(t, manager, authID, model)
 }
 
+func TestManager_HTTP2ClosedConnectionRespectsRequestRetry(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	for _, message := range []string{
+		"http2: client connection force closed via ClientConn.Close",
+		"http2: client conn is closed",
+	} {
+		for _, kind := range []string{"execute", "stream", "count"} {
+			for _, retries := range []int{0, 1} {
+				t.Run(fmt.Sprintf("%s/%s/retries=%d", message, kind, retries), func(t *testing.T) {
+					m := NewManager(nil, nil, nil)
+					m.SetRetryConfig(retries, 0, 0)
+					executor := &transportThenSuccessExecutor{identifier: "openai-compatibility", fail: errors.New(message)}
+					m.RegisterExecutor(executor)
+					model := "http2-retry-" + uuid.NewString()
+					authID := "http2-auth-" + uuid.NewString()
+					registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+					if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: executor.Identifier()}); errRegister != nil {
+						t.Fatalf("register auth: %v", errRegister)
+					}
+					call := func() error {
+						providers := []string{executor.Identifier()}
+						req := cliproxyexecutor.Request{Model: model}
+						switch kind {
+						case "execute":
+							_, errExecute := m.Execute(context.Background(), providers, req, cliproxyexecutor.Options{})
+							return errExecute
+						case "stream":
+							stream, errStream := m.ExecuteStream(context.Background(), providers, req, cliproxyexecutor.Options{})
+							if errStream != nil {
+								return errStream
+							}
+							for chunk := range stream.Chunks {
+								if chunk.Err != nil {
+									return chunk.Err
+								}
+							}
+							return nil
+						default:
+							_, errCount := m.ExecuteCount(context.Background(), providers, req, cliproxyexecutor.Options{})
+							return errCount
+						}
+					}
+					errCall := call()
+					assertNoCooldown(t, m, authID, model)
+					if retries == 0 {
+						if !errors.Is(errCall, executor.fail) || executor.callCount() != 1 {
+							t.Fatalf("retry disabled: error = %v, calls = %d; want original error and one call", errCall, executor.callCount())
+						}
+						if errNext := call(); errNext != nil {
+							t.Fatalf("next request on the same credential: %v", errNext)
+						}
+					} else if errCall != nil {
+						t.Fatalf("request failed instead of using its retry round: %v", errCall)
+					}
+					if executor.callCount() != 2 {
+						t.Fatalf("executor calls = %d, want 2", executor.callCount())
+					}
+					assertNoCooldown(t, m, authID, model)
+				})
+			}
+		}
+	}
+}
+
 func TestExecuteDoesNotPoisonCredentialOnPreHTTPTransportFailure(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -239,7 +309,8 @@ func (e *transportThenSuccessExecutor) ExecuteStream(context.Context, *Auth, cli
 	if e.recordCall() == 1 {
 		return nil, e.fail
 	}
-	chunks := make(chan cliproxyexecutor.StreamChunk)
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("ok")}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }

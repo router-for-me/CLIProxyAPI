@@ -11,6 +11,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -37,9 +39,42 @@ const (
 	exampleAPIKeyManagementURL  = "/management.html?safe-mode=configure"
 )
 
+func (s *Server) maxRequestBodyBytes() int64 {
+	if s == nil {
+		return 0
+	}
+	cfg := s.getConfig()
+	if cfg == nil || cfg.MaxRequestBodyBytes <= 0 {
+		return 0
+	}
+	return cfg.MaxRequestBodyBytes
+}
+
+func (s *Server) maxRequestBodyBytesMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		maxBytes := s.maxRequestBodyBytes()
+		if maxBytes <= 0 || c == nil || c.Request == nil {
+			c.Next()
+			return
+		}
+		c.Set(handlers.MaxRequestBodyBytesContextKey, maxBytes)
+		if c.Request.ContentLength > maxBytes {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error": "http: request body too large",
+			})
+			return
+		}
+		if c.Request.Body != nil && c.Request.Body != http.NoBody {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		}
+		c.Next()
+	}
+}
+
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s == nil || s.cfg == nil || !s.cfg.Home.Enabled {
+		cfg := s.getConfig()
+		if s == nil || cfg == nil || !cfg.Home.Enabled {
 			c.Next()
 			return
 		}
@@ -93,7 +128,7 @@ func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
-	cfg := s.cfg
+	cfg := s.getConfig()
 	var keys []string
 	if cfg != nil {
 		keys = safemode.ExampleAPIKeys(cfg.APIKeys)
@@ -171,6 +206,10 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
+				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
+				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
+				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
+				c.Request = c.Request.WithContext(reqCtx)
 			}
 			c.Next()
 			return
@@ -183,7 +222,10 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 		if realtimeError {
 			errorType := "authentication_error"
 			code := "invalid_api_key"
-			if statusCode >= http.StatusInternalServerError {
+			if statusCode == http.StatusRequestEntityTooLarge {
+				errorType = "invalid_request_error"
+				code = "request_body_too_large"
+			} else if statusCode >= http.StatusInternalServerError {
 				errorType = "server_error"
 				code = "authentication_service_error"
 			}
@@ -226,6 +268,10 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		}
 		c.Set("userApiKey", principal)
 		c.Set("accessProvider", provider)
+		reqCtx := coreusage.WithAPIKey(c.Request.Context(), principal)
+		reqCtx = coreusage.WithAccessProvider(reqCtx, provider)
+		reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(provider))
+		c.Request = c.Request.WithContext(reqCtx)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
 		c.Next()

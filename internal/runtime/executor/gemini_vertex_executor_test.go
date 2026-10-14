@@ -1,7 +1,9 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +11,10 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -110,4 +114,198 @@ func TestGeminiVertexApplyPatchExecutorReuse(t *testing.T) {
 	}
 	assertExecutorPatchDeclaration(t, <-requests)
 	assertExecutorPatchStream(t, stream.Chunks)
+}
+
+func TestGeminiVertexExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *testing.T) {
+	malformedBody := `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":10,"thoughtsTokenCount":313,"totalTokenCount":443},"modelVersion":"gemini-4-argon"}`
+	for _, authMode := range []string{"api_key", "service_account"} {
+		t.Run(authMode, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"access_token":"local-token","token_type":"Bearer","expires_in":3600}`)
+					return
+				}
+				if strings.Contains(r.URL.Path, "streamGenerateContent") {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: "+malformedBody+"\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, malformedBody)
+			}))
+			defer server.Close()
+
+			ctx := context.Background()
+			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: "vertex"}
+			if authMode == "api_key" {
+				auth.Attributes = map[string]string{"api_key": "test-key", "base_url": server.URL}
+			} else {
+				var serviceAccount map[string]any
+				if errUnmarshal := json.Unmarshal(testVertexServiceAccountJSON(t, server.URL+"/token"), &serviceAccount); errUnmarshal != nil {
+					t.Fatal(errUnmarshal)
+				}
+				auth.Metadata = map[string]any{
+					"project_id":      "proxy-test",
+					"location":        "global",
+					"service_account": serviceAccount,
+				}
+				target, errParse := parseTestURL(t, server.URL)
+				if errParse != nil {
+					t.Fatal(errParse)
+				}
+				transport := http.DefaultTransport.(*http.Transport).Clone()
+				transport.Proxy = nil
+				t.Cleanup(transport.CloseIdleConnections)
+				ctx = context.WithValue(ctx, "cliproxy.roundtripper", issue6258RedirectTransport{target: target, base: transport})
+			}
+
+			capture := &malformedFunctionCallUsageCapture{authID: auth.ID, records: make(chan usage.Record, 2)}
+			usage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
+			})
+
+			exec := NewGeminiVertexExecutor(&config.Config{})
+			req := cliproxyexecutor.Request{
+				Model:   "gemini-4-argon",
+				Payload: []byte(`{"model":"gemini-4-argon","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatClaude,
+				ResponseFormat: sdktranslator.FormatClaude,
+			}
+
+			_, errExec := exec.Execute(ctx, auth, req, opts)
+			if errExec == nil {
+				t.Fatal("Execute() error = nil, want retryable 502 error for MALFORMED_FUNCTION_CALL")
+			}
+			status, okStatus := errExec.(interface{ StatusCode() int })
+			if !okStatus || status.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("Execute() error = %T %v, want status 502", errExec, errExec)
+			}
+			if got := gjson.Get(errExec.Error(), "error.type").String(); got != "api_error" {
+				t.Fatalf("Execute() error.type = %q, want api_error. Error: %s", got, errExec.Error())
+			}
+			assertMalformedFunctionCallFailedUsage(t, capture.records)
+
+			streamRes, errStream := exec.ExecuteStream(ctx, auth, req, opts)
+			if errStream != nil {
+				t.Fatalf("ExecuteStream() error = %v", errStream)
+			}
+			var combined bytes.Buffer
+			var streamErr error
+			for chunk := range streamRes.Chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+					continue
+				}
+				combined.Write(chunk.Payload)
+			}
+			if streamErr == nil {
+				t.Fatal("ExecuteStream() chunk.Err = nil, want 502 error propagated")
+			}
+			streamText := combined.String()
+			if strings.Contains(streamText, `"stop_reason":"refusal"`) {
+				t.Fatalf("stream unexpectedly emitted stop_reason refusal:\n%s", streamText)
+			}
+			if !strings.Contains(streamText, "event: error\n") || !strings.Contains(streamText, `"type":"api_error"`) {
+				t.Fatalf("stream missing retryable api_error event:\n%s", streamText)
+			}
+			assertMalformedFunctionCallFailedUsage(t, capture.records)
+		})
+	}
+}
+
+func TestGeminiVertexExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsFailure(t *testing.T) {
+	malformedBody := `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":10,"thoughtsTokenCount":313,"totalTokenCount":443},"modelVersion":"gemini-4-argon"}`
+	for _, authMode := range []string{"api_key", "service_account"} {
+		t.Run(authMode, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"access_token":"local-token","token_type":"Bearer","expires_in":3600}`)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: "+malformedBody+"\n\n")
+				if flusher, okFlush := w.(http.Flusher); okFlush {
+					flusher.Flush()
+				}
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+
+			ctx := context.Background()
+			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: "vertex", Status: cliproxyauth.StatusActive}
+			if authMode == "api_key" {
+				auth.Attributes = map[string]string{"api_key": "test-key", "base_url": server.URL}
+			} else {
+				var serviceAccount map[string]any
+				if errUnmarshal := json.Unmarshal(testVertexServiceAccountJSON(t, server.URL+"/token"), &serviceAccount); errUnmarshal != nil {
+					t.Fatal(errUnmarshal)
+				}
+				auth.Metadata = map[string]any{
+					"project_id":      "proxy-test",
+					"location":        "global",
+					"service_account": serviceAccount,
+				}
+				target, errParse := parseTestURL(t, server.URL)
+				if errParse != nil {
+					t.Fatal(errParse)
+				}
+				transport := http.DefaultTransport.(*http.Transport).Clone()
+				transport.Proxy = nil
+				t.Cleanup(transport.CloseIdleConnections)
+				ctx = context.WithValue(ctx, "cliproxy.roundtripper", issue6258RedirectTransport{target: target, base: transport})
+			}
+
+			capture := &malformedFunctionCallUsageCapture{authID: auth.ID, records: make(chan usage.Record, 1)}
+			usage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
+			})
+
+			exec := NewGeminiVertexExecutor(&config.Config{})
+			manager := cliproxyauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(exec)
+			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gemini-4-argon"}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+			})
+
+			streamCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			req := cliproxyexecutor.Request{
+				Model:   "gemini-4-argon",
+				Payload: []byte(`{"model":"gemini-4-argon","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatClaude,
+				ResponseFormat: sdktranslator.FormatClaude,
+				Stream:         true,
+			}
+
+			streamRes, errStream := manager.ExecuteStream(streamCtx, []string{"vertex"}, req, opts)
+			if errStream != nil {
+				t.Fatalf("manager.ExecuteStream() error = %v", errStream)
+			}
+			for chunk := range streamRes.Chunks {
+				if strings.Contains(string(chunk.Payload), "event: error\n") {
+					cancel()
+				}
+			}
+			assertMalformedFunctionCallFailedUsage(t, capture.records)
+			updated, okAuth := manager.GetByID(auth.ID)
+			if !okAuth || updated.ModelStates["gemini-4-argon"] == nil || updated.ModelStates["gemini-4-argon"].LastError == nil {
+				t.Fatalf("expected conductor to record failure on model state after client cancel on error event, got %+v", updated)
+			}
+			if updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus != http.StatusBadGateway {
+				t.Fatalf("LastError.HTTPStatus = %d, want 502; err=%+v", updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus, updated.ModelStates["gemini-4-argon"].LastError)
+			}
+		})
+	}
 }

@@ -123,6 +123,81 @@ func TestStreaming_LateUsageOnlyDoesNotEmitAfterMessageStop(t *testing.T) {
 	}
 }
 
+func TestStreaming_SplitUsageFinishReasonThenTrailingUsageChunk_PreservesCachedTokens(t *testing.T) {
+	tests := []struct {
+		name         string
+		firstChunks  []string
+		finishChunk  string
+		wantStopType string
+	}{
+		{
+			name: "text content with stop finish_reason",
+			firstChunks: []string{
+				`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}`,
+			},
+			finishChunk:  `{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":140025,"completion_tokens":741,"total_tokens":140766,"prompt_tokens_details":{}}}`,
+			wantStopType: "end_turn",
+		},
+		{
+			name: "tool call with tool_calls finish_reason",
+			firstChunks: []string{
+				`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":null}]}`,
+			},
+			finishChunk:  `{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":140025,"completion_tokens":741,"total_tokens":140766,"prompt_tokens_details":{}}}`,
+			wantStopType: "tool_use",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trailingUsageChunk := `{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":140025,"completion_tokens":741,"total_tokens":140766,"prompt_tokens_details":{"cached_tokens":139136}}}`
+			allChunks := append(append([]string{}, tt.firstChunks...), tt.finishChunk, trailingUsageChunk)
+
+			events := runStream(t, streamReq, allChunks...)
+
+			if got := countByType(events, "message_delta"); got != 1 {
+				t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+			}
+			if got := countByType(events, "message_stop"); got != 1 {
+				t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+			}
+			if len(events) == 0 || events[len(events)-1].Type != "message_stop" {
+				t.Fatalf("message_stop must be the last semantic event (events=%+v)", events)
+			}
+
+			var deltaPayload string
+			for _, e := range events {
+				if e.Type == "message_delta" {
+					deltaPayload = e.Payload
+					break
+				}
+			}
+			if deltaPayload == "" {
+				t.Fatalf("missing message_delta event in %+v", events)
+			}
+
+			if gotStop := gjson.Get(deltaPayload, "delta.stop_reason").String(); gotStop != tt.wantStopType {
+				t.Fatalf("stop_reason = %q, want %q", gotStop, tt.wantStopType)
+			}
+
+			cached := gjson.Get(deltaPayload, "usage.cache_read_input_tokens").Int()
+			if cached != 139136 {
+				t.Fatalf("expected cache_read_input_tokens = 139136, got %d (payload=%s)", cached, deltaPayload)
+			}
+
+			input := gjson.Get(deltaPayload, "usage.input_tokens").Int()
+			if input != 889 {
+				t.Fatalf("expected deducted input_tokens = 889, got %d (payload=%s)", input, deltaPayload)
+			}
+
+			output := gjson.Get(deltaPayload, "usage.output_tokens").Int()
+			if output != 741 {
+				t.Fatalf("expected output_tokens = 741, got %d (payload=%s)", output, deltaPayload)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIResponseToClaude_StreamIgnoresNullToolNameDelta(t *testing.T) {
 	originalRequest := []byte(streamReq)
 	var param any

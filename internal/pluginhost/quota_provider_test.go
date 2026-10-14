@@ -493,3 +493,95 @@ func TestRegisterRPCPlugin_ContextCancellation(t *testing.T) {
 		t.Fatal("expected error when registering with canceled context")
 	}
 }
+
+func TestQuotaProviderPluginIDsSkipsPluginsFusedDuringDescribe(t *testing.T) {
+	for _, healthyIdentifier := range []string{"foo", "healthy-quota"} {
+		t.Run(healthyIdentifier, func(t *testing.T) {
+			broken := &testQuotaProvider{
+				identifier: "foo",
+				describeFn: func(context.Context, pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
+					panic("broken quota description")
+				},
+			}
+			healthy := &testQuotaProvider{
+				identifier: healthyIdentifier,
+				describeFn: func(context.Context, pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
+					return pluginapi.QuotaDescribeResponse{SupportedProviders: []string{"foo"}}, nil
+				},
+			}
+			host := newHostWithRecords(
+				capabilityRecord{id: "a-broken", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{QuotaProvider: broken}}},
+				capabilityRecord{id: "b-healthy", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{QuotaProvider: healthy}}},
+			)
+			ctx := context.Background()
+			initial := host.quotaProviderRecord(ctx, "foo")
+			if initial == nil || initial.id != "a-broken" {
+				t.Fatalf("initial selection = %#v, want a-broken", initial)
+			}
+
+			got := host.QuotaProviderPluginIDs(ctx)
+			if !host.isPluginFused("a-broken") {
+				t.Fatal("expected a-broken to be fused during DescribeQuota")
+			}
+			if got["foo"] != "b-healthy" {
+				t.Fatalf("quota plugin for foo = %q, want b-healthy", got["foo"])
+			}
+			if _, exists := got["a-broken"]; exists {
+				t.Fatal("fused plugin's unique alias must be removed")
+			}
+			for provider, pluginID := range got {
+				if !host.HasQuotaProviderForPlugin(pluginID) {
+					t.Fatalf("provider %q references unavailable plugin %q", provider, pluginID)
+				}
+				record := host.quotaProviderRecord(ctx, provider)
+				if record == nil || record.id != pluginID {
+					t.Fatalf("quotaProviderRecord(%q) = %#v, want plugin %q", provider, record, pluginID)
+				}
+			}
+		})
+	}
+}
+
+func TestQuotaProviderPluginIDsMatchesQuotaProviderRecordPrecedence(t *testing.T) {
+	multi := &testQuotaProvider{
+		identifier: "multi-quota",
+		describeFn: func(context.Context, pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
+			return pluginapi.QuotaDescribeResponse{SupportedProviders: []string{" FOO ", "bar"}}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{id: "a-multi", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{QuotaProvider: multi}}},
+		// Same-pass collision: the earlier record wins "foo" over z-foo.
+		capabilityRecord{id: "b-foo", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{QuotaProvider: &testQuotaProvider{identifier: "foo"}}}},
+		// AuthProvider alias is a first-pass match and beats a-multi's SupportedProviders for "bar".
+		capabilityRecord{id: "m-bar-auth", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			QuotaProvider: &testQuotaProvider{identifier: "m-quota"},
+			AuthProvider:  fakeAuthProvider{identifier: " Bar "},
+		}}},
+		capabilityRecord{id: "z-foo", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{QuotaProvider: &testQuotaProvider{identifier: "foo"}}}},
+	)
+
+	got := host.QuotaProviderPluginIDs(context.Background())
+	want := map[string]string{
+		"multi-quota": "a-multi",
+		"a-multi":     "a-multi",
+		"foo":         "b-foo",
+		"b-foo":       "b-foo",
+		"bar":         "m-bar-auth",
+		"m-quota":     "m-bar-auth",
+		"m-bar-auth":  "m-bar-auth",
+		"z-foo":       "z-foo",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("QuotaProviderPluginIDs() = %#v, want %#v", got, want)
+	}
+	for provider, pluginID := range want {
+		if got[provider] != pluginID {
+			t.Fatalf("QuotaProviderPluginIDs()[%q] = %q, want %q", provider, got[provider], pluginID)
+		}
+		record := host.quotaProviderRecord(context.Background(), provider)
+		if record == nil || record.id != pluginID {
+			t.Fatalf("quotaProviderRecord(%q) = %#v, want plugin %q", provider, record, pluginID)
+		}
+	}
+}

@@ -68,7 +68,7 @@ func assertRecoveredCustomCall(t *testing.T, item gjson.Result, withInput bool) 
 func TestCustomToolReplayPreservesNamespaceAndResultPair(t *testing.T) {
 	for _, namespace := range []string{`,"namespace":"functions"`, ""} {
 		request := strings.TrimSuffix(namespaceRecoveryRequest, "]}") + fmt.Sprintf(`,{"type":"custom_tool_call","name":"exec"%s,"call_id":"call_fixture","input":"text(1);"},{"type":"custom_tool_call_output","call_id":"call_fixture","output":[{"type":"input_text","text":"1"}]}]}`, namespace)
-		body := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("fixture", []byte(request), false)
+		body, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("fixture", []byte(request), false)
 		if got := gjson.GetBytes(body, "messages.0.tool_calls.0.function.name").String(); got != "functions__exec" {
 			t.Fatalf("replay name %q: %s", got, body)
 		}

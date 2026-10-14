@@ -905,6 +905,48 @@ func TestMerklePrefixMatcherRemoveFingerprintsBeforeGenerationGuard(t *testing.T
 	}
 }
 
+func TestMerklePrefixMatcherRemoveSessionBeforeGenerationGuard(t *testing.T) {
+	t.Parallel()
+
+	matcher := NewMerklePrefixMatcher(time.Hour)
+	defer matcher.Clear()
+	namespace := "lcp:v1:session-gen-test:model:caller"
+
+	turns := turnsFromTexts("1", "2")
+	fps, minPrefix := matcher.Prepare(turns)
+
+	res1 := matcher.BindFingerprintsWithResult(namespace, fps, minPrefix, "auth-1")
+	if res1.SessionID == "" || res1.AccessNumber == 0 {
+		t.Fatalf("expected non-empty session and generation, got %+v", res1)
+	}
+
+	// Match advances generation of the group beyond res1.AccessNumber.
+	match, ok := matcher.MatchFingerprints(namespace, fps, minPrefix)
+	if !ok || match.AccessNumber <= res1.AccessNumber {
+		t.Fatalf("expected match generation > %d, got ok=%v match=%+v", res1.AccessNumber, ok, match)
+	}
+
+	// Stale generation must not remove the session group.
+	if matcher.RemoveSessionBefore(namespace, res1.SessionID, "auth-1", res1.AccessNumber) {
+		t.Fatal("stale RemoveSessionBefore should not remove refreshed group")
+	}
+	if _, ok := matcher.MatchFingerprints(namespace, fps, minPrefix); !ok {
+		t.Fatal("group should still be present after stale RemoveSessionBefore")
+	}
+
+	// Current generation removes the session group.
+	latestMatch, ok := matcher.MatchFingerprints(namespace, fps, minPrefix)
+	if !ok {
+		t.Fatal("expected match before current-generation removal")
+	}
+	if !matcher.RemoveSessionBefore(namespace, res1.SessionID, "auth-1", latestMatch.AccessNumber) {
+		t.Fatal("current-generation RemoveSessionBefore should succeed")
+	}
+	if _, ok := matcher.MatchFingerprints(namespace, fps, minPrefix); ok {
+		t.Fatal("group should be removed after RemoveSessionBefore")
+	}
+}
+
 func TestMerklePrefixMatcherClearPreservesMonotonicGeneration(t *testing.T) {
 	t.Parallel()
 	matcher := NewMerklePrefixMatcher(time.Hour)

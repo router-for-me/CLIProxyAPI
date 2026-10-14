@@ -90,7 +90,7 @@ func TestConvertGeminiRequestToAntigravityBoundsLargePayloadCopies(t *testing.T)
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	output := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	output, _ := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
 	runtime.ReadMemStats(&after)
 
 	if got := gjson.GetBytes(output, "request.contents.0.parts.0.inlineData.data").String(); len(got) != inlineDataSize {

@@ -1045,7 +1045,7 @@ func TestApplyPatchChatCompletionNativeHistoryRoundTrip(t *testing.T) {
 	out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, original, response, nil)
 	message := gjson.GetBytes(out, "choices.0.message")
 	followup := []byte(`{"messages":[` + message.Raw + `,{"role":"tool","tool_call_id":"c","content":"ok"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
-	request := ConvertOpenAIRequestToCodex("m", followup, true)
+	request, _ := ConvertOpenAIRequestToCodex("m", followup, true)
 	if got := gjson.GetBytes(request, "input.0.input").String(); got != "p" {
 		t.Fatalf("normalized function history must restore raw patch before native Codex: got %q, request=%s", got, request)
 	}

@@ -10,6 +10,11 @@ import (
 
 const claudeOAuthToolAliasStateLimit = 1024
 
+// claudeOAuthToolAliasStoreInitMu guards lazy allocation for executors built
+// without a constructor. It lives outside ClaudeExecutor because ForAPIKey
+// copies the executor by value, and a mutex field would be copied with it.
+var claudeOAuthToolAliasStoreInitMu sync.Mutex
+
 type claudeOAuthToolAliasStore struct {
 	mu      sync.Mutex
 	entries map[string]map[string]string
@@ -69,8 +74,8 @@ func cloneClaudeOAuthToolAliasMap(source map[string]string) map[string]string {
 }
 
 func (e *ClaudeExecutor) claudeOAuthToolAliasStore() *claudeOAuthToolAliasStore {
-	e.oauthToolAliasStoreMu.Lock()
-	defer e.oauthToolAliasStoreMu.Unlock()
+	claudeOAuthToolAliasStoreInitMu.Lock()
+	defer claudeOAuthToolAliasStoreInitMu.Unlock()
 	if e.oauthToolAliases == nil {
 		e.oauthToolAliases = &claudeOAuthToolAliasStore{}
 	}
@@ -123,6 +128,8 @@ func (e *ClaudeExecutor) rememberClaudeOAuthToolAliases(payload []byte, aliases 
 	e.claudeOAuthToolAliasStore().save(keys, aliases)
 }
 
+const claudeThreadNotFoundErrorMessage = "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."
+
 type claudeThreadNotFoundError struct {
 	statusErr
 }
@@ -130,10 +137,14 @@ type claudeThreadNotFoundError struct {
 func newClaudeThreadNotFoundError() claudeThreadNotFoundError {
 	return claudeThreadNotFoundError{statusErr: statusErr{
 		code: http.StatusNotFound,
-		msg:  "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread.",
+		msg:  claudeThreadNotFoundErrorMessage,
 	}}
 }
 
 func (claudeThreadNotFoundError) IsRequestScoped() bool { return true }
+
+func (claudeThreadNotFoundError) ResponseBody() []byte {
+	return []byte(`{"type":"error","error":{"type":"not_found_error","message":"` + claudeThreadNotFoundErrorMessage + `"}}`)
+}
 
 var _ cliproxyexecutor.RequestScopedError = claudeThreadNotFoundError{}

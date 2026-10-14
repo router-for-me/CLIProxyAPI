@@ -16,6 +16,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const (
+	defaultClaudeChatMaxTokens = 32000
+	defaultFableChatMaxTokens  = 64000
+)
+
 // ConvertOpenAIRequestToClaude parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
@@ -33,24 +38,27 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
-func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertOpenAIRequestToClaude(modelName, inputRawJSON, stream, false)
+
 }
 
 // ConvertOpenAIRequestToClaudeWithCompat preserves assistant reasoning content
 // as an unsigned thinking block for configured compatibility endpoints.
-func ConvertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertOpenAIRequestToClaude(modelName, inputRawJSON, stream, true)
 }
 
-func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
+func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	var drops common.UserTurnDrops
 
 	userID := common.DeriveClaudeUserID(rawJSON)
 
 	// Base Claude Code API template with default max_tokens value
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
 	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
+	out, _ = sjson.SetBytes(out, "max_tokens", defaultClaudeChatMaxTokensForModel(modelName))
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -208,12 +216,17 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					contentBlocks = append(contentBlocks, part)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
-						claudePart := convertOpenAIContentPartToClaudePart(part)
-						if claudePart != "" {
+						if claudePart := convertOpenAIContentPartToClaudePart(part); claudePart != "" {
 							contentBlocks = append(contentBlocks, []byte(claudePart))
+						} else if partType := part.Get("type").String(); role == "user" && (partType == "file" || partType == "input_audio") {
+							drops.Drop(partType)
 						}
 						return true
 					})
+				}
+
+				if role == "user" {
+					drops.EndTurn(len(contentBlocks))
 				}
 
 				// Handle tool calls (for assistant messages)
@@ -304,6 +317,9 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		systemBlock, _ = sjson.SetBytes(systemBlock, "text", formatInstruction)
 		systemBlocks = append(systemBlocks, systemBlock)
 	}
+
+	// Decided per user turn, so neither a system prompt nor the blank turn added below hides an emptied turn.
+	nothingLeftErr := drops.Err()
 
 	// Preserve a minimal conversational turn for system-only inputs.
 	// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
@@ -458,7 +474,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		}
 	}
 
-	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai", modelName)
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai", modelName), nothingLeftErr
 }
 
 func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {
@@ -567,10 +583,29 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	return content.Raw, false
 }
 
-// firstExisting returns the first result that exists, or an empty result.
+func defaultClaudeChatMaxTokensForModel(modelName string) int {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	maxTokens := defaultClaudeChatMaxTokens
+	if strings.Contains(normalized, "fable") {
+		maxTokens = defaultFableChatMaxTokens
+	}
+	info := registry.LookupModelInfo(modelName, "claude")
+	if info == nil || info.MaxCompletionTokens <= 0 {
+		return maxTokens
+	}
+	// Fable keeps its conservative omitted-field ceiling. Every other registered
+	// model uses its output limit, including when that limit is above the
+	// historical 32000 default.
+	if strings.Contains(normalized, "fable") && info.MaxCompletionTokens >= maxTokens {
+		return maxTokens
+	}
+	return info.MaxCompletionTokens
+}
+
+// firstExisting returns the first non-null result that exists, or an empty result.
 func firstExisting(values ...gjson.Result) gjson.Result {
 	for _, value := range values {
-		if value.Exists() {
+		if value.Exists() && value.Type != gjson.Null {
 			return value
 		}
 	}

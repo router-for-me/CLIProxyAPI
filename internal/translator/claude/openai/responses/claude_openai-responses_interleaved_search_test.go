@@ -65,7 +65,7 @@ func TestInterleavedThinkingAndSearchSurvivesRoundTrip(t *testing.T) {
 		return true
 	})
 	req, _ := json.Marshal(map[string]any{"model": "claude-test", "input": items})
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
 
 	got := claudeAssistantBlockTypes(t, out)
 	want := []string{

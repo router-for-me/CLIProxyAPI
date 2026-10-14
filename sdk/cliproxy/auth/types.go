@@ -15,6 +15,7 @@ import (
 	"time"
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -50,6 +51,8 @@ type Auth struct {
 	ID string `json:"id"`
 	// RegistrationEpoch tracks monotonic registration cycles across unregister/re-register.
 	RegistrationEpoch uint64 `json:"registration_epoch,omitempty"`
+	// CredentialVersion tracks monotonic credential replacements for secret material.
+	CredentialVersion uint64 `json:"credential_version,omitempty"`
 	// Generation tracks monotonic mutations to resolve scheduler/reconcile snapshot races.
 	Generation uint64 `json:"generation,omitempty"`
 	// Index is a stable runtime identifier derived from auth metadata (not persisted).
@@ -62,6 +65,8 @@ type Auth struct {
 	FileName string `json:"-"`
 	// Storage holds the token persistence implementation used during login flows.
 	Storage baseauth.TokenStorage `json:"-"`
+	// CodexRefreshPatch carries an immutable pending credential update, never configuration.
+	CodexRefreshPatch *codex.CredentialRefreshPatch `json:"-"`
 	// Label is an optional human readable label for logging.
 	Label string `json:"label,omitempty"`
 	// Status is the lifecycle status managed by the AuthManager.
@@ -99,6 +104,9 @@ type Auth struct {
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+
+	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
+	RejectedAccessToken string `json:"-"`
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -300,10 +308,7 @@ func (a *Auth) Clone() *Auth {
 		}
 	}
 	if a.Metadata != nil {
-		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
-		}
+		copyAuth.Metadata = cloneMetadataMap(a.Metadata)
 	}
 	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
@@ -313,6 +318,30 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
+}
+
+func cloneMetadataMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		switch typed := value.(type) {
+		case map[string]any:
+			dst[key] = cloneMetadataMap(typed)
+		case []string:
+			s := make([]string, len(typed))
+			copy(s, typed)
+			dst[key] = s
+		case []any:
+			s := make([]any, len(typed))
+			copy(s, typed)
+			dst[key] = s
+		default:
+			dst[key] = value
+		}
+	}
+	return dst
 }
 
 func stableAuthIndex(seed string) string {
@@ -609,15 +638,37 @@ func (a *Auth) AccountInfo() (string, string) {
 	}
 }
 
-// ExpirationTime attempts to extract the credential expiration timestamp from metadata.
-// It inspects common absolute expiry keys, expires_in plus timestamp, and nested
-// token objects to remain compatible with legacy auth file formats.
-// If the access_token contains a valid JWT exp claim, it is given priority.
-func (a *Auth) ExpirationTime() (time.Time, bool) {
+// IsCodexUseSIWC reports whether a Codex auth record is configured to use its nested "siwc" section.
+func IsCodexUseSIWC(a *Auth) bool {
+	if a == nil {
+		return false
+	}
+	enabled := false
+	if len(a.Attributes) > 0 {
+		if raw := strings.TrimSpace(a.Attributes["use_siwc"]); raw != "" {
+			if parsed, ok := parseBoolAny(raw); ok {
+				enabled = parsed
+			}
+		}
+	}
+	if !enabled && a.Metadata != nil {
+		if parsed, ok := parseBoolAny(a.Metadata["use_siwc"]); ok {
+			enabled = parsed
+		}
+	}
+	return enabled
+}
+
+// OuterExpirationTime extracts the outer credential expiration timestamp, ignoring the nested "siwc" section.
+func (a *Auth) OuterExpirationTime() (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
 	}
-	if tokenStr := authAccessToken(a); tokenStr != "" {
+	tokenStr := authOuterAccessToken(a)
+	if tokenStr != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
+	}
+	if tokenStr != "" {
 		if jwtExp, ok := parseJWTExp(tokenStr); ok {
 			return jwtExp, true
 		}
@@ -626,6 +677,165 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 		return ts, true
 	}
 	return time.Time{}, false
+}
+
+// ExpirationTime attempts to extract the active credential expiration timestamp from metadata.
+// When use_siwc is enabled on a Codex credential, the active SIWC section expiration is returned.
+func (a *Auth) ExpirationTime() (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	if IsCodexUseSIWC(a) {
+		siwcToken := authSIWCTokenField(a, "access_token")
+		if siwcToken != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken {
+			return time.Unix(0, 0), true
+		}
+		return a.SIWCExpirationTime()
+	}
+	return a.OuterExpirationTime()
+}
+
+// CodexSIWCRefreshLead is the minimum remaining validity required before refreshing
+// a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
+const CodexSIWCRefreshLead = 5 * time.Minute
+
+// SIWCExpirationTime extracts the expiration timestamp from the nested "siwc" metadata section.
+func (a *Auth) SIWCExpirationTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false
+	}
+	if ts, okExp := expirationFromMap(siwcMap); okExp && !ts.IsZero() {
+		return ts, true
+	}
+	if rawToken, okTok := siwcMap["access_token"].(string); okTok && strings.TrimSpace(rawToken) != "" {
+		if jwtExp, okJWT := parseJWTExp(rawToken); okJWT && !jwtExp.IsZero() {
+			return jwtExp, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// CodexOuterNeedsRefresh evaluates the outer credential refresh due time and whether it needs refresh at now.
+func CodexOuterNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh bool, needsRefresh bool) {
+	if a == nil {
+		return time.Time{}, false, false
+	}
+	if authRefreshToken(a) == "" {
+		return time.Time{}, false, false
+	}
+	hasRefresh = true
+
+	var lastRefresh time.Time
+	if ts, ok := authLastRefreshTimestamp(a); ok && !ts.IsZero() {
+		lastRefresh = ts
+	} else {
+		lastRefresh = a.LastRefreshedAt
+	}
+	expiry, hasExpiry := a.OuterExpirationTime()
+
+	if pref := authPreferredInterval(a); pref > 0 {
+		candidates := make([]time.Time, 0, 2)
+		if hasExpiry && !expiry.IsZero() {
+			candidates = append(candidates, expiry.Add(-pref))
+		}
+		if lastRefresh.IsZero() {
+			return now, true, true
+		}
+		candidates = append(candidates, lastRefresh.Add(pref))
+		next := candidates[0]
+		for _, candidate := range candidates[1:] {
+			if candidate.Before(next) {
+				next = candidate
+			}
+		}
+		if !next.After(now) {
+			return now, true, true
+		}
+		return next, true, false
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	if provider == "" {
+		provider = strings.ToLower(authMetadataString(a, "type"))
+	}
+	lead := ProviderRefreshLead(provider, a.Runtime)
+	if lead == nil && provider == "codex" {
+		d := 24 * time.Hour
+		lead = &d
+	}
+	if lead == nil {
+		return time.Time{}, false, false
+	}
+	if *lead <= 0 {
+		if hasExpiry && !expiry.IsZero() {
+			if !expiry.After(now) {
+				return now, true, true
+			}
+			return expiry, true, false
+		}
+		return time.Time{}, false, false
+	}
+	if hasExpiry && !expiry.IsZero() {
+		due := expiry.Add(-*lead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	if !lastRefresh.IsZero() {
+		due := lastRefresh.Add(*lead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	return now, true, true
+}
+
+// CodexSIWCNeedsRefresh evaluates the nested "siwc" credential section refresh due time and whether it needs refresh at now.
+func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh bool, needsRefresh bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false, false
+	}
+	refreshToken, _ := siwcMap["refresh_token"].(string)
+	clientID, _ := siwcMap["client_id"].(string)
+	if strings.TrimSpace(refreshToken) == "" || strings.TrimSpace(clientID) == "" {
+		return time.Time{}, false, false
+	}
+	hasRefresh = true
+
+	siwcToken, _ := siwcMap["access_token"].(string)
+	siwcToken = strings.TrimSpace(siwcToken)
+	if siwcToken == "" {
+		return now, true, true
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken {
+		return now, true, true
+	}
+	expiry, hasExpiry := a.SIWCExpirationTime()
+	if hasExpiry && !expiry.IsZero() {
+		due := expiry.Add(-CodexSIWCRefreshLead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
+		due := lastRefresh.Add(CodexSIWCRefreshLead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	return now, true, true
 }
 
 // AccessTokenExpirationTime returns the expiration time of the specific access_token.
@@ -637,6 +847,9 @@ func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
 	tokenStr := authAccessToken(a)
 	if tokenStr == "" {
 		return time.Time{}, false
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
 	}
 	if jwtExp, ok := parseJWTExp(tokenStr); ok {
 		return jwtExp, true

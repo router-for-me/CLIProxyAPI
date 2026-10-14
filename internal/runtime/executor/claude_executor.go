@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -27,8 +29,9 @@ type ClaudeExecutor struct {
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
 	oauthProfileFetcher     claudeOAuthProfileFetcher
-	oauthToolAliasStoreMu   sync.Mutex
-	oauthToolAliases        *claudeOAuthToolAliasStore
+	// oauthToolAliases is shared by every ForAPIKey copy of this executor;
+	// constructors allocate it so copies made per request reuse one store.
+	oauthToolAliases *claudeOAuthToolAliasStore
 }
 
 type claudeOAuthCancellationError struct {
@@ -79,7 +82,7 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body 
 		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel, preserveEmptyThinkingBlocks...)
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
-	return sanitizeClaudeWebSearchDomains(sanitized)
+	return helps.NormalizeClaudeToolCallIDs(sanitizeClaudeWebSearchDomains(sanitized))
 }
 
 // sanitizeClaudeWebSearchDomains removes empty allowed_domains/blocked_domains
@@ -140,9 +143,110 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
 
-func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
+// stripTranslatedDefaultMaxTokens removes the translator-synthesized default
+// max_tokens from originalTranslated when the caller's original request did not
+// explicitly supply an output token limit in the source protocol, allowing
+// payload.default rules targeting max_tokens to take effect.
+func stripTranslatedDefaultMaxTokens(from sdktranslator.Format, originalPayload, originalTranslated []byte) []byte {
+	if len(originalTranslated) == 0 || from == sdktranslator.FormatClaude {
+		return originalTranslated
+	}
+	hasExplicitMaxTokens := func(paths ...string) bool {
+		for _, path := range paths {
+			if v := gjson.GetBytes(originalPayload, path); v.Exists() && v.Type != gjson.Null {
+				return true
+			}
+		}
+		return false
+	}
+	switch from {
+	case sdktranslator.FormatOpenAI:
+		if hasExplicitMaxTokens("max_tokens", "max_completion_tokens") {
+			return originalTranslated
+		}
+	case sdktranslator.FormatOpenAIResponse:
+		if hasExplicitMaxTokens("max_output_tokens") {
+			return originalTranslated
+		}
+	case sdktranslator.FormatGemini:
+		if hasExplicitMaxTokens("generationConfig.maxOutputTokens") {
+			return originalTranslated
+		}
+	default:
+		return originalTranslated
+	}
+	stripped, errDelete := sjson.DeleteBytes(originalTranslated, "max_tokens")
+	if errDelete != nil {
+		return originalTranslated
+	}
+	return stripped
+}
+
+func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
+	return &ClaudeExecutor{cfg: cfg, oauthToolAliases: &claudeOAuthToolAliasStore{}}
+}
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
+
+var _ cliproxyauth.NativeToolSearchSupport = (*ClaudeExecutor)(nil)
+
+// SupportsNativeToolSearch reports whether a credential can receive Codex
+// tool_search as Anthropic native tool search (defer_loading tools and
+// tool_reference results) for the given upstream model. Anthropic's own origin
+// qualifies; a custom base URL qualifies only when native-tool-search is
+// enabled for it. Models that predate tool search never qualify, and nothing
+// qualifies while upstream.claude.tool-search is off. That switch is read from
+// the translator so the executor and the translator always agree on it.
+func (e *ClaudeExecutor) SupportsNativeToolSearch(auth *cliproxyauth.Auth, upstreamModel string) bool {
+	return e.supportsNativeToolSearch(responsesclaude.ClientToolSearchEnabled(), auth, upstreamModel)
+}
+
+func (e *ClaudeExecutor) supportsNativeToolSearch(toolSearch bool, auth *cliproxyauth.Auth, upstreamModel string) bool {
+	if !toolSearch || helps.ClaudeModelLacksToolSearch(upstreamModel) {
+		return false
+	}
+	_, baseURL := claudeCreds(auth)
+	if baseURL = strings.TrimSpace(baseURL); baseURL == "" || isAnthropicUpstreamBase(baseURL) {
+		return true
+	}
+	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["native_tool_search"]), "true") {
+		return true
+	}
+	entry := resolveClaudeKeyConfig(e.cfg, auth)
+	return entry != nil && entry.NativeToolSearch
+}
+
+// applyNativeToolSearchFallback removes Codex tool_search from a Responses
+// request before translation when the credential cannot use native tool
+// search, so the translated body matches the pre-tool-search translation.
+// While upstream.claude.tool-search is off the translator already produces
+// that translation from the unmodified request, so nothing is removed.
+//
+// The returned context pins upstream.claude.tool-search for the rest of the
+// request, so this decision and the request and response translations agree
+// even if the configuration is reloaded mid-request.
+func (e *ClaudeExecutor) applyNativeToolSearchFallback(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, upstreamModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	if from != sdktranslator.FormatOpenAIResponse {
+		return ctx, req, opts
+	}
+	toolSearch := responsesclaude.ClientToolSearchEnabledFor(ctx)
+	ctx = responsesclaude.WithClientToolSearch(ctx, toolSearch)
+	if !toolSearch {
+		return ctx, req, opts
+	}
+	if !helps.ResponsesHasToolSearch(req.Payload) && !helps.ResponsesHasToolSearch(opts.OriginalRequest) {
+		return ctx, req, opts
+	}
+	if e.supportsNativeToolSearch(toolSearch, auth, upstreamModel) {
+		return ctx, req, opts
+	}
+	req.Payload = helps.StripResponsesToolSearch(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		opts.OriginalRequest = helps.StripResponsesToolSearch(opts.OriginalRequest)
+	}
+	log.Debugf("claude executor: native tool search unavailable, removed tool_search from request (model=%s)", upstreamModel)
+	return ctx, req, opts
+}
 
 func (e *ClaudeExecutor) modelLevelCooling() bool {
 	return e != nil && e.cfg != nil && e.cfg.Claude.ModelLevelCooling
