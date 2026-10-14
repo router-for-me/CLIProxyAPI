@@ -114,6 +114,17 @@ var staticDevinModels = []*ModelInfo{
 		},
 	},
 	{
+		ID:                  "devin/claude-sonnet-5-5",
+		Type:                "devin",
+		OwnedBy:             "anthropic",
+		DisplayName:         "Claude Sonnet 5.5",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "xhigh", "max"},
+		},
+	},
+	{
 		ID:                  "devin/gpt-6-astra",
 		Type:                "devin",
 		OwnedBy:             "openai",
@@ -122,6 +133,17 @@ var staticDevinModels = []*ModelInfo{
 		MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{
 			Levels: []string{"low", "medium", "high", "xhigh", "max"},
+		},
+	},
+	{
+		ID:                  "devin/gpt-6-1-sol",
+		Type:                "devin",
+		OwnedBy:             "openai",
+		DisplayName:         "GPT-6.1 Sol",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"none", "low", "medium", "high", "xhigh", "max"},
 		},
 	},
 	{

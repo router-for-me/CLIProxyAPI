@@ -136,6 +136,8 @@ func TestEmbeddedDevinModelsLoadedOnStartup(t *testing.T) {
 		"devin/grok-4-6",
 		"devin/claude-fable-5-1",
 		"devin/gpt-6-astra",
+		"devin/claude-sonnet-5-5",
+		"devin/gpt-6-1-sol",
 	}
 
 	for _, id := range expectedIDs {
