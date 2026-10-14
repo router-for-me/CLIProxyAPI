@@ -98,7 +98,11 @@ func TestGitTokenStorePersistConfigKeepsCommittedConfigWhenLocalConfigEmpty(t *t
 	if err != nil {
 		t.Fatalf("open workspace repo: %v", err)
 	}
-	defer func() { _ = repo.Close() }()
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close workspace repo: %v", errClose)
+		}
+	}()
 	head, err := repo.Head()
 	if err != nil {
 		t.Fatalf("head: %v", err)
