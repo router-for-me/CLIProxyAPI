@@ -280,6 +280,49 @@ func TestReloadConfigIfChanged_WriteDuringReloadIsNotSkipped(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChanged_LoadsTheBytesItHashed(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte("port: 8317\nremote-management:\n  secret-key: \"$2a$10$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz01234\"\n")
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// A management save truncates the file right after the watcher reads it, as
+	// os.Create/os.WriteFile do. Loading must use the bytes that were read, or the
+	// reload applies an empty config and drops the management secret.
+	original := readConfigFile
+	t.Cleanup(func() { readConfigFile = original })
+	readConfigFile = func(path string) ([]byte, error) {
+		data, err := original(path)
+		if err == nil {
+			if errTruncate := os.WriteFile(path, nil, 0o600); errTruncate != nil {
+				t.Fatalf("failed to truncate config: %v", errTruncate)
+			}
+		}
+		return data, err
+	}
+
+	var applied *config.Config
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		reloadCallback: func(cfg *config.Config) { applied = cfg },
+	}
+	w.reloadConfigIfChanged()
+
+	if applied == nil {
+		t.Fatal("expected the reload to apply the config that was read")
+	}
+	if applied.Port != 8317 || applied.RemoteManagement.SecretKey == "" {
+		t.Fatalf("applied config port=%d secret empty=%v, want the read config with its secret", applied.Port, applied.RemoteManagement.SecretKey == "")
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
