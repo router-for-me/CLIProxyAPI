@@ -11,10 +11,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// rename and exchange are replaced in tests to exercise the fallbacks.
+// rename, exchange and exchangeAvailable are replaced in tests to exercise the
+// fallbacks.
 var (
-	rename   = os.Rename
-	exchange = exchangeFiles
+	rename            = os.Rename
+	exchange          = exchangeFiles
+	exchangeAvailable = exchangeSupported
 )
 
 // beforeCommit runs after the temp file is complete, right before it replaces the
@@ -100,11 +102,20 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	if errClose := tmp.Close(); errClose != nil {
 		return fmt.Errorf("atomicfile: close temp file: %w", errClose)
 	}
-	beforeCommit()
-	if mustExist {
+	// The test hook runs once, right before the step that puts the file in place,
+	// so a deletion it lands falls in that step's real window.
+	hookRan := false
+	runCommitHook := func() {
+		if !hookRan {
+			hookRan = true
+			beforeCommit()
+		}
+	}
+	if mustExist && exchangeAvailable() {
 		// Swap the temp file with the target in one step: it fails when the target
 		// is gone, so a deletion racing this save always wins. The previous content
 		// ends up at tmpPath and is removed.
+		runCommitHook()
 		errSwap := exchange(tmpPath, target)
 		switch {
 		case errSwap == nil:
@@ -119,12 +130,15 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 			log.WithError(errSwap).Debugf("atomicfile: cannot replace %s, writing in place", target)
 			return writeInPlace(target, data, perm, mustExist)
 		}
+	}
+	if mustExist {
 		// No atomic exchange on this platform or filesystem: check, then rename.
 		// A deletion landing between the two can still be undone.
 		if _, errStat := os.Lstat(target); errStat != nil {
 			return fmt.Errorf("atomicfile: replace %s: %w", target, errStat)
 		}
 	}
+	runCommitHook()
 	if errRename := rename(tmpPath, target); errRename != nil {
 		log.WithError(errRename).Debugf("atomicfile: cannot replace %s, writing in place", target)
 		return writeInPlace(target, data, perm, mustExist)
