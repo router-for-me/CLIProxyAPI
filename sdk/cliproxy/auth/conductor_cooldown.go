@@ -27,6 +27,8 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
+var modelCooldownStatusCode atomic.Int32
+
 // SetQuotaCooldownDisabled toggles auth/model cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -36,6 +38,15 @@ func SetQuotaCooldownDisabled(disable bool) {
 // 0 keeps the legacy default; negative values disable transient error cooldowns.
 func SetTransientErrorCooldownSeconds(seconds int) {
 	transientErrorCooldownSeconds.Store(int64(seconds))
+}
+
+// SetModelCooldownStatusCode configures the HTTP status returned to clients when a
+// cooled-down model is requested. Values outside 400-599 keep the 429 default.
+func SetModelCooldownStatusCode(code int) {
+	if code < 400 || code > 599 {
+		code = 0
+	}
+	modelCooldownStatusCode.Store(int32(code))
 }
 
 // QuotaCooldownDisabledForAuth returns whether cooling is disabled for the auth under global settings.
