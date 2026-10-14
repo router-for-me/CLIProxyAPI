@@ -158,6 +158,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		default:
 			return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
 		}
+		// Mark the local write before any bookkeeping, so a file snapshot observed
+		// after it is never ordered before this save.
+		cliproxyauth.MarkAuthFileWritten(ctx)
 	}
 
 	if auth.Attributes == nil {
