@@ -87,6 +87,12 @@ func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
 	m.mu.Lock()
 	cancel := m.refreshCancel
 	loop := m.refreshLoop
+	if loop == nil {
+		// An earlier stop may have returned on its context before this loop's
+		// workers finished; wait for them here too.
+		loop = m.stoppedRefreshLoop
+	}
+	m.stoppedRefreshLoop = loop
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
@@ -101,6 +107,7 @@ func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
 	if loop == nil {
 		return nil
 	}
+	beforeAutoRefreshStopWait()
 	select {
 	case <-loop.done:
 		return nil
@@ -108,6 +115,10 @@ func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
+
+// beforeAutoRefreshStopWait runs when StopAutoRefreshContext starts waiting for
+// the loop's workers; tests use it to know a stop is waiting.
+var beforeAutoRefreshStopWait = func() {}
 
 func (m *Manager) queueRefreshReschedule(authID string) {
 	if m == nil || authID == "" {
