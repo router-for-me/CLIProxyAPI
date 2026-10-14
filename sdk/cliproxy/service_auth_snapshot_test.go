@@ -112,7 +112,9 @@ func TestPrepareCoreAuthForModelRegistration_SnapshotReadAfterSaveApplies(t *tes
 	edited.Generation = 0
 	edited.Prefix = "pfx-edited"
 	edited.Metadata = map[string]any{"type": "codex", "access_token": "token", "prefix": "pfx-edited"}
-	edited.UpdatedAt = time.Now()
+	// Explicitly after the save: with a coarse clock, time.Now() can equal the save
+	// time, which is deliberately treated as stale.
+	edited.UpdatedAt = time.Now().Add(time.Second)
 
 	svc.prepareCoreAuthForModelRegistration(ctx, edited)
 
