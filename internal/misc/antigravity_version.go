@@ -112,13 +112,13 @@ func AntigravityLatestVersion() string {
 	return antigravityFallbackVersion
 }
 
-// AntigravityUserAgent returns the User-Agent string used by the Antigravity Hub family.
+// AntigravityUserAgent returns the User-Agent string used by the Antigravity CLI family.
 func AntigravityUserAgent() string {
-	return fmt.Sprintf("antigravity/hub/%s %s", AntigravityLatestVersion(), antigravityHubPlatform)
+	return fmt.Sprintf("antigravity/cli/%s %s", AntigravityLatestVersion(), antigravityHubPlatform)
 }
 
 func isAntigravityFamilyUserAgent(lower string) bool {
-	return strings.HasPrefix(lower, "antigravity/hub/") || strings.HasPrefix(lower, "antigravity/")
+	return strings.HasPrefix(lower, "antigravity/cli/") || strings.HasPrefix(lower, "antigravity/hub/") || strings.HasPrefix(lower, "antigravity/")
 }
 
 func antigravityBaseUserAgent(userAgent string) string {
@@ -172,6 +172,17 @@ func AntigravityOnboardUserUserAgent(userAgent string) string {
 func AntigravityVersionFromUserAgent(userAgent string) string {
 	base := antigravityBaseUserAgent(userAgent)
 	lower := strings.ToLower(base)
+	if strings.HasPrefix(lower, "antigravity/cli/") {
+		rest := base[len("antigravity/cli/"):]
+		if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+			rest = rest[:idx]
+		}
+		rest = strings.TrimSpace(rest)
+		if rest == "" {
+			return AntigravityLatestVersion()
+		}
+		return rest
+	}
 	if strings.HasPrefix(lower, "antigravity/hub/") {
 		rest := base[len("antigravity/hub/"):]
 		if idx := strings.IndexAny(rest, " 	"); idx >= 0 {
