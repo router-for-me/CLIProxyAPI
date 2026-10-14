@@ -289,7 +289,8 @@ func (w *Watcher) RereadAuthFile(path string) {
 		return
 	}
 	normalized := w.normalizeAuthPath(path)
-	if filepath.Dir(normalized) != w.normalizeAuthPath(w.authDir) || !strings.HasSuffix(normalized, ".json") {
+	// Match the full scan, which accepts any case of the .json extension.
+	if filepath.Dir(normalized) != w.normalizeAuthPath(w.authDir) || !strings.HasSuffix(strings.ToLower(normalized), ".json") {
 		return
 	}
 	w.authRescanMu.Lock()
@@ -299,12 +300,34 @@ func (w *Watcher) RereadAuthFile(path string) {
 		return
 	}
 	w.clientsMutex.Lock()
-	delete(w.lastAuthHashes, normalized)
+	prevHash, hadHash := w.lastAuthHashes[normalized]
+	prevAuths := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
 	for id := range w.fileAuthsByPath[normalized] {
+		if auth, ok := w.currentAuths[id]; ok {
+			prevAuths[id] = auth
+		}
 		delete(w.currentAuths, id)
 	}
+	delete(w.lastAuthHashes, normalized)
 	w.clientsMutex.Unlock()
+
 	w.addOrUpdateClientLocked(path)
+
+	// A read that failed (the file was removed after the stat, or is mid-write)
+	// records no hash. Restore what was known, so the file's remove event still
+	// finds it and deletes its auths instead of being ignored as unknown.
+	w.clientsMutex.Lock()
+	if _, read := w.lastAuthHashes[normalized]; !read {
+		if hadHash {
+			w.lastAuthHashes[normalized] = prevHash
+		}
+		for id, auth := range prevAuths {
+			if _, ok := w.currentAuths[id]; !ok {
+				w.currentAuths[id] = auth
+			}
+		}
+	}
+	w.clientsMutex.Unlock()
 }
 
 func (w *Watcher) removeClient(path string) {
