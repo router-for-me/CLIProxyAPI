@@ -18,9 +18,9 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -447,14 +447,15 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 	if len(baseURLs) == 0 {
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
 	}
-	client := &http.Client{}
-	transport, _, errProxy := proxyutil.BuildHTTPTransport(proxyURL)
+	// Probes must use the same HTTP/1.1 transport profile as the executor; a bare
+	// http.Client would fall back to http.DefaultTransport and negotiate h2.
+	transport, errProxy := executor.NewAntigravityProbeTransport(proxyURL)
 	if errProxy != nil {
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
 	}
-	if transport != nil {
-		client.Transport = transport
-		defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+	if ownedTransport, ok := transport.(*http.Transport); ok {
+		defer ownedTransport.CloseIdleConnections()
 	}
 	project, _ := auth.Metadata["project_id"].(string)
 	body, errMarshal := json.Marshal(map[string]string{"project": project})
