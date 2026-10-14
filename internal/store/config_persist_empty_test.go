@@ -295,3 +295,87 @@ func TestGitTokenStorePersistConfigDoesNotCommitConfigRemovedAfterCheck(t *testi
 		t.Fatalf("committed config = %q, want the last committed config kept", contents)
 	}
 }
+
+// A config that still holds a plaintext management secret must not leave the
+// machine: a hot reload hashes it into the file, and that write is mirrored.
+const plaintextSecretConfig = "remote-management:\n  secret-key: plain-secret\n"
+
+func TestObjectTokenStorePersistConfigKeepsRemoteWhenSecretIsPlaintext(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(plaintextSecretConfig), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var puts int
+	store := &ObjectTokenStore{
+		configPath: configPath,
+		putObjectFn: func(context.Context, string, []byte, string) error {
+			puts++
+			return nil
+		},
+	}
+	if err := store.PersistConfig(context.Background()); err != nil {
+		t.Fatalf("PersistConfig() error = %v, want the plaintext config skipped", err)
+	}
+	if puts != 0 {
+		t.Fatalf("uploaded a config with a plaintext secret %d times, want 0", puts)
+	}
+}
+
+func TestPostgresStorePersistConfigKeepsStoredCopyWhenSecretIsPlaintext(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(plaintextSecretConfig), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// No database is configured, so an upsert of the plaintext config would fail here.
+	store := &PostgresStore{configPath: configPath}
+	if err := store.PersistConfig(context.Background()); err != nil {
+		t.Fatalf("PersistConfig() error = %v, want the plaintext config skipped", err)
+	}
+}
+
+func TestGitTokenStorePersistConfigDoesNotCommitPlaintextSecret(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+	configPath := store.ConfigPath()
+	if err := os.WriteFile(configPath, []byte(plaintextSecretConfig), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := store.PersistConfig(context.Background()); err != nil {
+		t.Fatalf("PersistConfig: %v", err)
+	}
+
+	workspace := filepath.Join(root, "workspace")
+	repo, err := git.PlainOpen(workspace)
+	if err != nil {
+		t.Fatalf("open workspace repo: %v", err)
+	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close workspace repo: %v", errClose)
+		}
+	}()
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("head commit: %v", err)
+	}
+	rel, err := filepath.Rel(workspace, configPath)
+	if err != nil {
+		t.Fatalf("rel config path: %v", err)
+	}
+	if _, errFile := commit.File(filepath.ToSlash(rel)); errFile == nil {
+		t.Fatal("committed a config holding a plaintext management secret")
+	}
+}

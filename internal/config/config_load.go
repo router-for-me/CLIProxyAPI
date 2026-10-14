@@ -281,8 +281,13 @@ func loadConfigData(configFile string, data []byte, optional, persist bool) (*Co
 			expected = data
 		}
 		configWriteMu.Lock()
-		_ = updateNestedScalarLocked(configFile, expected, managementSecretKeyPath(data), hashed)
+		errWriteBack := updateNestedScalarLocked(configFile, expected, managementSecretKeyPath(data), hashed)
 		configWriteMu.Unlock()
+		if errWriteBack != nil {
+			// Remote stores refuse to mirror the plaintext, so they keep the previous
+			// config until the file can be written.
+			log.WithError(errWriteBack).Warnf("failed to write the hashed management secret back to %s", configFile)
+		}
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)

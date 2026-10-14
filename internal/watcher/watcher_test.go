@@ -2201,7 +2201,7 @@ func TestRereadAuthFileIgnoresPathsOutsideAuthDir(t *testing.T) {
 
 type recordingConfigPersister struct {
 	path     string
-	mirrored [][]byte
+	mirrored chan []byte
 }
 
 func (p *recordingConfigPersister) PersistConfig(context.Context) error {
@@ -2209,7 +2209,7 @@ func (p *recordingConfigPersister) PersistConfig(context.Context) error {
 	if err != nil {
 		return err
 	}
-	p.mirrored = append(p.mirrored, data)
+	p.mirrored <- data
 	return nil
 }
 
@@ -2218,8 +2218,9 @@ func (p *recordingConfigPersister) PersistAuthFiles(context.Context, string, ...
 }
 
 // A reload that loaded a plaintext management secret hashes it into the file and
-// leaves mirroring to the reload of that hashed write, so remote stores (and git
-// history) never receive the plaintext.
+// schedules a reload of that write, which mirrors it; remote stores (and git
+// history) never receive the plaintext, and the mirror does not depend on a file
+// event for the write-back.
 func TestReloadConfigMirrorsManagementSecretOnlyOnceHashed(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -2241,19 +2242,36 @@ func TestReloadConfigMirrorsManagementSecretOnlyOnceHashed(t *testing.T) {
 	original := runConfigPersist
 	t.Cleanup(func() { runConfigPersist = original })
 	runConfigPersist = func(persist func()) { persist() }
-	persister := &recordingConfigPersister{path: configPath}
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
 	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
 
 	w.reloadConfigIfChanged()
-	if len(persister.mirrored) != 0 {
-		t.Fatalf("mirrored the config loaded with a plaintext secret: %q", persister.mirrored)
+	// Run the scheduled reload here, unless it already fired. Once it is stopped,
+	// any mirror so far came from the plaintext reload.
+	w.configReloadMu.Lock()
+	scheduled := w.configReloadTimer
+	stopped := scheduled != nil && scheduled.Stop()
+	w.configReloadTimer = nil
+	w.configReloadMu.Unlock()
+	if stopped {
+		select {
+		case mirrored := <-persister.mirrored:
+			t.Fatalf("mirrored the config loaded with a plaintext secret: %q", mirrored)
+		default:
+		}
+		w.reloadConfigIfChanged()
 	}
-	// The write-back changed the file; its reload mirrors the hashed config.
-	w.reloadConfigIfChanged()
-	if len(persister.mirrored) != 1 {
-		t.Fatalf("mirrors after the hashed reload = %d, want 1", len(persister.mirrored))
-	}
-	if mirrored := persister.mirrored[0]; strings.Contains(string(mirrored), "plain-secret") || config.HasPlaintextSecretKey(mirrored) {
-		t.Fatalf("mirrored a plaintext secret: %q", mirrored)
+	// The reload of the write-back mirrors the hashed config; without a scheduled
+	// reload nothing mirrors. The timer only guards against a hang.
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case mirrored := <-persister.mirrored:
+		if strings.Contains(string(mirrored), "plain-secret") || config.HasPlaintextSecretKey(mirrored) {
+			t.Fatalf("mirrored a plaintext secret: %q", mirrored)
+		}
+	case <-hangGuard.C:
+		t.Fatal("the hashed write-back was never reloaded and mirrored")
 	}
 }

@@ -352,6 +352,11 @@ func (s *ObjectTokenStore) PersistConfig(ctx context.Context) error {
 		log.Warn("object store: local config is empty, keeping the remote copy")
 		return nil
 	}
+	if config.HasPlaintextSecretKey(data) {
+		// A hot reload hashes the secret into the file; that write is mirrored.
+		log.Warn("object store: local config holds a plaintext management secret, keeping the remote copy")
+		return nil
+	}
 	return s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml")
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -2062,6 +2063,12 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 		// An empty file is a save caught mid-write, never a config worth committing;
 		// pushing it would wipe the config that restarts and replicas load.
 		log.Warn("git token store: local config is empty, keeping the committed copy")
+		return nil
+	}
+	if internalconfig.HasPlaintextSecretKey(data) {
+		// Git history would keep the plaintext for good. A hot reload hashes the
+		// secret into the file; that write is committed.
+		log.Warn("git token store: local config holds a plaintext management secret, keeping the committed copy")
 		return nil
 	}
 	rel, err := s.relativeToRepo(configPath)
