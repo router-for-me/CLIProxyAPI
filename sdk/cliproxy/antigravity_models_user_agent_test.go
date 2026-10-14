@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -106,7 +107,7 @@ func TestAntigravityModelProbeHeaderUserAgentOverridesConfigured(t *testing.T) {
 	auth := antigravityTestAuth("ua-header", server.URL)
 	auth.Metadata["user_agent"] = "antigravity/cli/1.3.4 (aidev_client)"
 	auth.Attributes["header:User-Agent"] = headerUA
-	if got := antigravityModelFetchUserAgentOverride(auth); got != headerUA {
+	if got := antigravityModelFetchScope(auth).UserAgent; got != headerUA {
 		t.Fatalf("override = %q, want header:User-Agent %q", got, headerUA)
 	}
 	svc := &Service{cfg: &config.Config{}}
@@ -122,8 +123,8 @@ func TestAntigravityCapabilityKeyChangesWithUserAgent(t *testing.T) {
 	const endpoint = "https://example.invalid"
 	base := antigravityTestAuth("ua-key", endpoint)
 	defaultKey := antigravityCapabilityKeyForRoute(base, endpoint, "")
-	if got := antigravityModelFetchUserAgentOverride(base); got != "" {
-		t.Fatalf("override without configuration = %q, want empty", got)
+	if got := antigravityModelFetchScope(base); got != (antigravityCatalogScope{}) {
+		t.Fatalf("scope without configuration = %+v, want empty", got)
 	}
 
 	withMetadata := base.Clone()
@@ -149,33 +150,76 @@ func TestAntigravityCapabilityKeyChangesWithUserAgent(t *testing.T) {
 	}
 }
 
-func TestPersistedAntigravityCapabilityHintsAreScopedToUserAgent(t *testing.T) {
+func TestAntigravityCapabilityKeyChangesWithAuthorizationOverride(t *testing.T) {
+	const endpoint = "https://example.invalid"
+	base := antigravityTestAuth("authz-key", endpoint)
+	defaultKey := antigravityCapabilityKeyForRoute(base, endpoint, "")
+
+	first := base.Clone()
+	first.Attributes["header:Authorization"] = "Bearer first-secret"
+	firstKey := antigravityCapabilityKeyForRoute(first, endpoint, "")
+
+	second := base.Clone()
+	second.Attributes["header:Authorization"] = "Bearer second-secret"
+	secondKey := antigravityCapabilityKeyForRoute(second, endpoint, "")
+
+	if defaultKey == firstKey || firstKey == secondKey {
+		t.Fatal("changing header:Authorization must invalidate the cached catalog")
+	}
+	if strings.Contains(firstKey, "first-secret") {
+		t.Fatal("catalog key must not contain the overridden credential")
+	}
+	refreshed := base.Clone()
+	refreshed.Metadata["access_token"] = "rotated-token"
+	if antigravityCapabilityKeyForRoute(refreshed, endpoint, "") != defaultKey {
+		t.Fatal("routine OAuth token rotation must not invalidate the cached catalog")
+	}
+}
+
+func TestPersistedAntigravityCapabilityHintsAreScopedToOverrides(t *testing.T) {
 	const (
 		project  = "project-1"
 		endpoint = "https://example.invalid"
 		cliUA    = "antigravity/cli/1.3.4 (aidev_client)"
 	)
 	hints := antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{"gemini-cli-only": {}}}
+	uaScope := antigravityCatalogScope{UserAgent: cliUA}
+	authScope := antigravityCatalogScope{AuthorizationFingerprint: "0123456789abcdef"}
 
-	scoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, cliUA, hints)}
-	if _, ok := parsePersistedAntigravityCapabilityHints(scoped, project, endpoint, cliUA); !ok {
+	scoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, uaScope, hints)}
+	if _, ok := parsePersistedAntigravityCapabilityHints(scoped, project, endpoint, uaScope); !ok {
 		t.Fatal("catalog persisted for a User-Agent must load for the same User-Agent")
 	}
-	if _, ok := parsePersistedAntigravityCapabilityHints(scoped, project, endpoint, ""); ok {
+	if _, ok := parsePersistedAntigravityCapabilityHints(scoped, project, endpoint, antigravityCatalogScope{}); ok {
 		t.Fatal("catalog persisted for an override must not load for the default identity")
 	}
-	if _, ok := parsePersistedAntigravityCapabilityHints(scoped, project, endpoint, "antigravity/cli/9.9.9"); ok {
+	if _, ok := parsePersistedAntigravityCapabilityHints(scoped, project, endpoint, antigravityCatalogScope{UserAgent: "antigravity/cli/9.9.9"}); ok {
 		t.Fatal("catalog persisted for one User-Agent must not load for another")
 	}
 
-	unscoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, "", hints)}
-	if _, hasUA := unscoped[antigravityPersistedHintsMetaKey].(map[string]any)["user_agent"]; hasUA {
+	authScoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, authScope, hints)}
+	if _, ok := parsePersistedAntigravityCapabilityHints(authScoped, project, endpoint, authScope); !ok {
+		t.Fatal("catalog persisted for an Authorization override must load for the same override")
+	}
+	if _, ok := parsePersistedAntigravityCapabilityHints(authScoped, project, endpoint, antigravityCatalogScope{AuthorizationFingerprint: "fedcba9876543210"}); ok {
+		t.Fatal("catalog persisted for one Authorization override must not load for another")
+	}
+	if _, ok := parsePersistedAntigravityCapabilityHints(authScoped, project, endpoint, antigravityCatalogScope{}); ok {
+		t.Fatal("catalog persisted for an Authorization override must not load without it")
+	}
+
+	unscoped := map[string]any{antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(project, endpoint, antigravityCatalogScope{}, hints)}
+	persisted := unscoped[antigravityPersistedHintsMetaKey].(map[string]any)
+	if _, hasUA := persisted["user_agent"]; hasUA {
 		t.Fatal("default identity must not persist a user_agent field")
 	}
-	if _, ok := parsePersistedAntigravityCapabilityHints(unscoped, project, endpoint, ""); !ok {
-		t.Fatal("catalogs without a user_agent field must keep loading for the default identity")
+	if _, hasAuth := persisted["authorization_fingerprint"]; hasAuth {
+		t.Fatal("default credential must not persist an authorization_fingerprint field")
 	}
-	if _, ok := parsePersistedAntigravityCapabilityHints(unscoped, project, endpoint, cliUA); ok {
-		t.Fatal("catalogs without a user_agent field must not load for an override")
+	if _, ok := parsePersistedAntigravityCapabilityHints(unscoped, project, endpoint, antigravityCatalogScope{}); !ok {
+		t.Fatal("catalogs without override fields must keep loading for the default scope")
+	}
+	if _, ok := parsePersistedAntigravityCapabilityHints(unscoped, project, endpoint, uaScope); ok {
+		t.Fatal("catalogs without override fields must not load for an override")
 	}
 }

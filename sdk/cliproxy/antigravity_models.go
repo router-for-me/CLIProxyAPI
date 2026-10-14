@@ -119,8 +119,8 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy strin
 		token, _ := auth.Metadata["access_token"].(string)
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
-	userAgent := antigravityModelFetchUserAgentOverride(auth)
-	return fmt.Sprintf("%q/%d/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, userAgent)
+	scope := antigravityModelFetchScope(auth)
+	return fmt.Sprintf("%q/%d/%q/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, scope.UserAgent, scope.AuthorizationFingerprint)
 }
 
 func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCapabilityHints {
@@ -172,12 +172,12 @@ func (s *Service) persistedAntigravityHintsForAuth(auth *coreauth.Auth, endpoint
 		}
 	}
 	project, _ := auth.Metadata["project_id"].(string)
-	userAgent := antigravityModelFetchUserAgentOverride(auth)
-	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint, userAgent); ok {
+	scope := antigravityModelFetchScope(auth)
+	if hints, ok := parsePersistedAntigravityCapabilityHints(auth.Metadata, project, endpoint, scope); ok {
 		return hints, true
 	}
 	if current != nil {
-		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint, userAgent)
+		return parsePersistedAntigravityCapabilityHints(current.Metadata, project, endpoint, scope)
 	}
 	return antigravityModelCapabilityHints{}, false
 }
@@ -200,7 +200,7 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 		return false
 	}
 	project, _ := auth.Metadata["project_id"].(string)
-	value := buildPersistedAntigravityCapabilityHintsValue(project, endpoint, antigravityModelFetchUserAgentOverride(auth), hints)
+	value := buildPersistedAntigravityCapabilityHintsValue(project, endpoint, antigravityModelFetchScope(auth), hints)
 	persisted, preempted := s.coreManager.PersistMetadataEntry(ctx, auth.ID, auth.RegistrationEpoch, antigravityPersistedHintsMetaKey, value, func(existing *coreauth.Auth) bool {
 		if existing == nil || existing.Disabled || existing.Provider != auth.Provider || existing.RegistrationEpoch != auth.RegistrationEpoch || s.antigravityCapabilityKey(existing) != expectedKey {
 			return false
@@ -224,7 +224,7 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 	return false
 }
 
-func buildPersistedAntigravityCapabilityHintsValue(project, endpoint, userAgent string, hints antigravityModelCapabilityHints) map[string]any {
+func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, scope antigravityCatalogScope, hints antigravityModelCapabilityHints) map[string]any {
 	modelIDs := make([]string, 0, len(hints.ModelIDs))
 	for id := range hints.ModelIDs {
 		if normalized := normalizeAntigravityFetchedModelID(id); normalized != "" {
@@ -245,10 +245,13 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint, userAgent 
 	if endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/"); endpoint != "" {
 		value["endpoint"] = endpoint
 	}
-	// Omitted for the default identity so catalogs persisted before User-Agent
-	// scoping stay valid for auths without an override.
-	if userAgent = strings.TrimSpace(userAgent); userAgent != "" {
+	// Omitted for defaults so catalogs persisted before override scoping stay
+	// valid for auths without overrides.
+	if userAgent := strings.TrimSpace(scope.UserAgent); userAgent != "" {
 		value["user_agent"] = userAgent
+	}
+	if fingerprint := strings.TrimSpace(scope.AuthorizationFingerprint); fingerprint != "" {
+		value["authorization_fingerprint"] = fingerprint
 	}
 	if len(hints.WebSearchModelIDs) > 0 {
 		webSearchIDs := make([]string, 0, len(hints.WebSearchModelIDs))
@@ -269,7 +272,7 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint, userAgent 
 	return value
 }
 
-func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedProject, expectedEndpoint, expectedUserAgent string) (antigravityModelCapabilityHints, bool) {
+func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedProject, expectedEndpoint string, expectedScope antigravityCatalogScope) (antigravityModelCapabilityHints, bool) {
 	if metadata == nil {
 		return antigravityModelCapabilityHints{}, false
 	}
@@ -290,7 +293,11 @@ func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 		return antigravityModelCapabilityHints{}, false
 	}
 	persistedUserAgent, _ := rawMap["user_agent"].(string)
-	if strings.TrimSpace(persistedUserAgent) != strings.TrimSpace(expectedUserAgent) {
+	if strings.TrimSpace(persistedUserAgent) != strings.TrimSpace(expectedScope.UserAgent) {
+		return antigravityModelCapabilityHints{}, false
+	}
+	persistedFingerprint, _ := rawMap["authorization_fingerprint"].(string)
+	if strings.TrimSpace(persistedFingerprint) != strings.TrimSpace(expectedScope.AuthorizationFingerprint) {
 		return antigravityModelCapabilityHints{}, false
 	}
 	rawModels, hasModels := rawMap["model_ids"]
@@ -521,21 +528,36 @@ func antigravityModelFetchUserAgent(auth *coreauth.Auth) string {
 	return misc.AntigravityRequestUserAgent(misc.AntigravityConfiguredUserAgent(auth.Attributes, auth.Metadata))
 }
 
-// antigravityModelFetchUserAgentOverride returns the User-Agent the model probe
-// sends when the auth overrides the default identity, or "" when it does not.
-// It mirrors the probe's header order: the configured user_agent first, then
-// header: attributes, which may replace it. The default UA is excluded on
-// purpose so routine version refreshes do not invalidate cached catalogs.
-func antigravityModelFetchUserAgentOverride(auth *coreauth.Auth) string {
+// antigravityCatalogScope identifies request overrides that change which
+// catalog the upstream returns. Empty fields mean the default is used.
+type antigravityCatalogScope struct {
+	// UserAgent is the overridden client identity sent to the upstream.
+	UserAgent string
+	// AuthorizationFingerprint is a non-secret fingerprint of an overridden
+	// Authorization header; the credential itself is never stored.
+	AuthorizationFingerprint string
+}
+
+// antigravityModelFetchScope returns the overrides the model probe sends,
+// mirroring its header order: the configured user_agent first, then header:
+// attributes, which may replace User-Agent or Authorization. Defaults are
+// excluded on purpose so routine hub version refreshes and token refreshes do
+// not invalidate cached catalogs.
+func antigravityModelFetchScope(auth *coreauth.Auth) antigravityCatalogScope {
 	if auth == nil {
-		return ""
+		return antigravityCatalogScope{}
 	}
 	req := &http.Request{Header: make(http.Header)}
 	if configured := misc.AntigravityConfiguredUserAgent(auth.Attributes, auth.Metadata); configured != "" {
 		req.Header.Set("User-Agent", misc.AntigravityRequestUserAgent(configured))
 	}
 	util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
-	return strings.TrimSpace(req.Header.Get("User-Agent"))
+	scope := antigravityCatalogScope{UserAgent: strings.TrimSpace(req.Header.Get("User-Agent"))}
+	if authorization := strings.TrimSpace(req.Header.Get("Authorization")); authorization != "" {
+		sum := sha256.Sum256([]byte(authorization))
+		scope.AuthorizationFingerprint = fmt.Sprintf("%x", sum[:8])
+	}
+	return scope
 }
 
 func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
