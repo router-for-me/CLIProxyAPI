@@ -19,15 +19,20 @@ import (
 // tool, the call and output become a tool_use/tool_result pair, and every tool
 // discovered in history is declared on later requests.
 //
-// Declaring a newly discovered tool changes the tools[] prefix, so the request
-// right after a discovery misses Anthropic's prompt cache once; later turns
-// keep the same prefix and cache normally.
+// With native tool search, discovered tools are declared with defer_loading
+// and referenced through tool_reference blocks. Anthropic keeps the prompt
+// cache when deferred tools are added, but not when a request goes from no
+// deferred tool to one, so a constant deferred anchor is declared from the
+// first request on and discoveries only append after it.
 const (
 	// responsesToolSearchType is both the declaration type and the tool name,
 	// as Codex names the tool after its type.
 	responsesToolSearchType = "tool_search"
 	// responsesToolSearchIDPrefix mirrors Codex's item id prefix for tool_search_call.
 	responsesToolSearchIDPrefix = "tsc_"
+	// responsesDeferredAnchorName names the constant deferred tool declared with
+	// native tool search; nothing ever references it.
+	responsesDeferredAnchorName = "tool_search_deferred_anchor"
 )
 
 // clientToolSearchEnabled mirrors upstream.claude.tool-search. While it is off
@@ -70,6 +75,21 @@ func ClientToolSearchEnabledFor(ctx context.Context) bool {
 }
 
 const claudeToolSearchDefaultSchema = `{"type":"object","properties":{"query":{"type":"string","description":"Search query for deferred tools."},"limit":{"type":"number","description":"Maximum number of tools to return."}},"required":["query"],"additionalProperties":false}`
+
+const responsesDeferredAnchorJSON = `{"name":"` + responsesDeferredAnchorName + `","description":"Placeholder that is never loaded; tool search returns the real tools.","input_schema":{"type":"object","properties":{}},"defer_loading":true}`
+
+// responsesDeferredAnchorTool returns the deferred anchor declaration, unless a
+// converted tool already carries its Claude name (names are normalized during
+// conversion, so the check runs on the final tools[]). On a clash the request
+// keeps the client's tool and simply has no anchor.
+func responsesDeferredAnchorTool(toolItems [][]byte) ([]byte, bool) {
+	for _, tool := range toolItems {
+		if gjson.GetBytes(tool, "name").String() == responsesDeferredAnchorName {
+			return nil, false
+		}
+	}
+	return []byte(responsesDeferredAnchorJSON), true
+}
 
 // isResponsesClientToolSearch reports whether a tool declaration asks the
 // client to execute tool search. Hosted (server) search cannot run on Claude.

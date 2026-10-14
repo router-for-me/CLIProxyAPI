@@ -1720,6 +1720,7 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	server.cfg.Plugins.Configs = map[string]proxyconfig.PluginInstanceConfig{
 		"sample": {Enabled: &enabled, Priority: 4},
 	}
+	server.mgmt.SetConfig(server.cfg)
 	if errWrite := os.WriteFile(server.configFilePath, []byte("{}\n"), 0o600); errWrite != nil {
 		t.Fatalf("failed to write config file: %v", errWrite)
 	}

@@ -151,10 +151,11 @@ func (w *Watcher) Stop() error {
 
 // SetConfig updates the current configuration
 func (w *Watcher) SetConfig(cfg *config.Config) {
+	cloned := cfg.CloneForRuntime()
 	w.clientsMutex.Lock()
 	defer w.clientsMutex.Unlock()
-	w.config = cfg
-	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+	w.config = cloned
+	w.oldConfigYaml, _ = yaml.Marshal(cloned)
 }
 
 // SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.

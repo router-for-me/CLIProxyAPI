@@ -275,6 +275,15 @@ func TestSanitizeAntigravityRequestSchemasProjectsUnionsAndPreservesEnumTypes(t 
 	payload := `{"request":{
 		"tools":[{"functionDeclarations":[{"name":"tool","parameters":{"type":"object","properties":{
 			"choice":{"anyOf":[{"type":"string"},{"type":"null"}]},
+			"item":{"anyOf":[
+				{"type":"string"},
+				{"type":"object","properties":{"image":{"type":"string"}},"required":["image"]},
+				{"type":"object","properties":{"audio":{"type":"string"}},"required":["audio"]}
+			]},
+			"variant":{"oneOf":[
+				{"type":"object","properties":{"image":{"type":"string"}},"required":["image"]},
+				{"type":"object","properties":{"audio":{"type":"string"}},"required":["audio"]}
+			]},
 			"level":{"type":"number","enum":[1,2]}
 		}}}]}],
 		"generationConfig":{"responseSchema":{"type":"object","properties":{
@@ -304,7 +313,22 @@ func TestSanitizeAntigravityRequestSchemasProjectsUnionsAndPreservesEnumTypes(t 
 
 	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
 	if toolSchema.Get("properties.choice.anyOf").Exists() {
-		t.Errorf("tool anyOf union was not flattened: %s", toolSchema.Raw)
+		t.Errorf("tool nullable single-branch anyOf union was not flattened: %s", toolSchema.Raw)
+	}
+	if gotBranches := len(toolSchema.Get("properties.item.anyOf").Array()); gotBranches != 3 {
+		t.Errorf("tool multi-branch anyOf count = %d, want 3: %s", gotBranches, toolSchema.Raw)
+	}
+	if !toolSchema.Get("properties.item.anyOf.2.properties.audio").Exists() {
+		t.Errorf("tool multi-branch anyOf lost audio branch: %s", toolSchema.Raw)
+	}
+	if toolSchema.Get("properties.variant.oneOf").Exists() {
+		t.Errorf("tool multi-branch oneOf should be converted to anyOf for parameters Schema carrier: %s", toolSchema.Raw)
+	}
+	if gotVariantBranches := len(toolSchema.Get("properties.variant.anyOf").Array()); gotVariantBranches != 2 {
+		t.Errorf("tool multi-branch variant.anyOf count = %d, want 2: %s", gotVariantBranches, toolSchema.Raw)
+	}
+	if !toolSchema.Get("properties.variant.anyOf.1.properties.audio").Exists() {
+		t.Errorf("tool multi-branch variant.anyOf lost audio branch: %s", toolSchema.Raw)
 	}
 	if gotType := toolSchema.Get("properties.level.type").String(); gotType != "number" {
 		t.Errorf("tool enum type = %q, want number: %s", gotType, toolSchema.Raw)

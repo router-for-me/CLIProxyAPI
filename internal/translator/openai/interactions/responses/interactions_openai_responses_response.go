@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
@@ -19,6 +20,7 @@ import (
 type interactionsToResponsesStreamState struct {
 	translatorcommon.ApplyPatchErrorState
 	ID                    string
+	ItemIDPrefix          string
 	EnvironmentID         string
 	FunctionCalls         map[int]*interactionsFunctionCallState
 	ItemIDs               map[int]string
@@ -86,9 +88,12 @@ func ConvertInteractionsResponseToOpenAIResponses(ctx context.Context, modelName
 		param = &local
 	}
 	if *param == nil {
-		*param = &interactionsToResponsesStreamState{}
+		*param = &interactionsToResponsesStreamState{ItemIDPrefix: uuid.NewString()}
 	}
 	st := (*param).(*interactionsToResponsesStreamState)
+	if st.ItemIDPrefix == "" {
+		st.ItemIDPrefix = uuid.NewString()
+	}
 	st.ForAntigravity = isAntigravityModel(modelName)
 	if st.FunctionCalls == nil {
 		st.FunctionCalls = make(map[int]*interactionsFunctionCallState)
@@ -400,7 +405,7 @@ func interactionsStepStartToResponses(modelName string, root gjson.Result, st *i
 	if call := st.FunctionCalls[index]; call != nil && (call.PatchCall != nil || st.ToolIdentityMap[call.RawName].ApplyPatch || (call.RawName == "" && interactionsHasPatchBridge(st))) {
 		return interactionsUpdateFunctionCall(index, step, st, true)
 	}
-	itemID := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String(), fmt.Sprintf("item_%d", index))
+	itemID := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String(), interactionsFallbackItemID(st, index))
 	if stepType == "function_call" {
 		return interactionsUpdateFunctionCall(index, step, st, true)
 	}
@@ -1386,6 +1391,13 @@ func firstUsageInt(root gjson.Result, paths ...string) (int64, bool) {
 	return 0, false
 }
 
+func interactionsFallbackItemID(st *interactionsToResponsesStreamState, index int) string {
+	if st != nil && st.ItemIDPrefix != "" {
+		return fmt.Sprintf("item_%s_%d", st.ItemIDPrefix, index)
+	}
+	return fmt.Sprintf("item_%d", index)
+}
+
 func nextResponsesSeq(st *interactionsToResponsesStreamState) int {
 	st.Seq++
 	return st.Seq
@@ -1776,7 +1788,7 @@ func interactionsUpdateFunctionCall(index int, step gjson.Result, st *interactio
 	} else {
 		call.ArgumentFragments = nil
 		if !call.ItemIDSeen && !call.Added {
-			call.ID = firstNonEmpty(call.CallID, fmt.Sprintf("item_%d", index))
+			call.ID = firstNonEmpty(call.CallID, interactionsFallbackItemID(st, index))
 		}
 		if !call.CallIDSeen && !call.Added {
 			call.CallID = call.ID
@@ -1848,10 +1860,10 @@ func interactionsFinishPatchCalls(st *interactionsToResponsesStreamState) [][]by
 		call := st.FunctionCalls[index]
 		if call.PatchCall == nil {
 			// Interactions already maps an absent call_id to id (and an absent id
-			// to call_id/item_<index>). Freeze that compatibility mapping only at
-			// the response terminal, after all supplied snapshot IDs were reconciled.
+			// to call_id or a per-response fallback item ID). Freeze that compatibility
+			// mapping only at the response terminal, after all supplied snapshot IDs were reconciled.
 			if !call.ItemIDSeen {
-				call.ID = firstNonEmpty(call.CallID, fmt.Sprintf("item_%d", index))
+				call.ID = firstNonEmpty(call.CallID, interactionsFallbackItemID(st, index))
 			}
 			if !call.CallIDSeen {
 				call.CallID = call.ID

@@ -73,7 +73,8 @@ func (s *Server) maxRequestBodyBytesMiddleware() gin.HandlerFunc {
 
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s == nil || s.cfg == nil || !s.cfg.Home.Enabled {
+		cfg := s.getConfig()
+		if s == nil || cfg == nil || !cfg.Home.Enabled {
 			c.Next()
 			return
 		}
@@ -127,7 +128,7 @@ func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
-	cfg := s.cfg
+	cfg := s.getConfig()
 	var keys []string
 	if cfg != nil {
 		keys = safemode.ExampleAPIKeys(cfg.APIKeys)

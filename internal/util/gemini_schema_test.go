@@ -158,8 +158,10 @@ func TestCleanJSONSchemaForAntigravity_OneOfFlattening(t *testing.T) {
 		"type": "object",
 		"properties": {
 			"config": {
-				"type": "string",
-				"description": "Accepts: string | integer"
+				"anyOf": [
+					{ "type": "string" },
+					{ "type": "integer" }
+				]
 			}
 		}
 	}`
@@ -445,14 +447,22 @@ func TestCleanJSONSchemaForAntigravity_AnyOfAlternativeHints(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForAntigravity(input)
+	expected := `{
+		"type": "object",
+		"properties": {
+			"value": {
+				"anyOf": [
+					{ "type": "string" },
+					{ "type": "integer" }
+				],
+				"nullable": true,
+				"description": "(nullable)"
+			}
+		}
+	}`
 
-	if !strings.Contains(result, "Accepts:") {
-		t.Errorf("Expected alternative types hint, got: %s", result)
-	}
-	if !strings.Contains(result, "string") || !strings.Contains(result, "integer") {
-		t.Errorf("Expected all alternative types in hint, got: %s", result)
-	}
+	result := CleanJSONSchemaForAntigravity(input)
+	compareJSON(t, expected, result)
 }
 
 func TestCleanJSONSchemaForAntigravity_NullableHint(t *testing.T) {
@@ -549,7 +559,34 @@ func TestCleanJSONSchemaForAntigravity_AdditionalPropertiesHint(t *testing.T) {
 }
 
 func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_PreservesDescription(t *testing.T) {
-	input := `{
+	nullableInput := `{
+		"type": "object",
+		"properties": {
+			"config": {
+				"description": "Parent desc",
+				"anyOf": [
+					{ "type": "string", "description": "Child desc" },
+					{ "type": "null" }
+				]
+			}
+		}
+	}`
+
+	expectedNullable := `{
+		"type": "object",
+		"properties": {
+			"config": {
+				"type": "string",
+				"nullable": true,
+				"description": "Parent desc (Child desc) (Accepts: string | null)"
+			}
+		}
+	}`
+
+	resultNullable := CleanJSONSchemaForAntigravity(nullableInput)
+	compareJSON(t, expectedNullable, resultNullable)
+
+	multiBranchInput := `{
 		"type": "object",
 		"properties": {
 			"config": {
@@ -562,18 +599,8 @@ func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_PreservesDescription(t *t
 		}
 	}`
 
-	expected := `{
-		"type": "object",
-		"properties": {
-			"config": {
-				"type": "string",
-				"description": "Parent desc (Child desc) (Accepts: string | integer)"
-			}
-		}
-	}`
-
-	result := CleanJSONSchemaForAntigravity(input)
-	compareJSON(t, expected, result)
+	resultMulti := CleanJSONSchemaForAntigravity(multiBranchInput)
+	compareJSON(t, multiBranchInput, resultMulti)
 }
 
 func TestCleanJSONSchemaForAntigravity_SingleEnumBecomesHint(t *testing.T) {
@@ -2280,7 +2307,8 @@ func TestCleanJSONSchema_PreservesAdditionalPropertiesObjectSchema(t *testing.T)
 }
 
 // TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches tests issue 5219 #2:
-// anyOf with required-only branches should not overwrite the parent object's type and properties.
+// anyOf with required-only branches should not overwrite the parent object's type and properties,
+// and should materialize valid typed object branches from parent properties so the union is preserved.
 func TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches(t *testing.T) {
 	input := `{
 		"type": "object",
@@ -2304,8 +2332,15 @@ func TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches(t *test
 	if !parsed.Get("properties.left").Exists() || !parsed.Get("properties.right").Exists() {
 		t.Fatalf("properties were wiped out; cleaned: %s", got)
 	}
-	if parsed.Get("anyOf").Exists() {
-		t.Fatalf("anyOf was not removed; cleaned: %s", got)
+	branches := parsed.Get("anyOf").Array()
+	if len(branches) != 2 {
+		t.Fatalf("anyOf branch count = %d, want 2; cleaned: %s", len(branches), got)
+	}
+	if branches[0].Get("type").String() != "object" || !branches[0].Get("properties.left").Exists() || branches[0].Get("required.0").String() != "left" {
+		t.Fatalf("anyOf[0] was not materialized into valid object branch: %s", branches[0].Raw)
+	}
+	if branches[1].Get("type").String() != "object" || !branches[1].Get("properties.right").Exists() || branches[1].Get("required.0").String() != "right" {
+		t.Fatalf("anyOf[1] was not materialized into valid object branch: %s", branches[1].Raw)
 	}
 }
 
@@ -3134,4 +3169,358 @@ func TestCleanJSONSchema_RemovesDependentKeywords_Issue6539(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662 covers Issue #3662:
+// Multi-branch anyOf/oneOf unions (such as string | image object | audio object) must not be
+// flattened to a single selected branch, which previously caused non-first object branches (e.g. audio)
+// to disappear from the cleaned schema.
+func TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"item": {
+				"anyOf": [
+					{ "type": "string" },
+					{
+						"type": "object",
+						"properties": {
+							"image": { "type": "string" }
+						},
+						"required": ["image"]
+					},
+					{
+						"type": "object",
+						"properties": {
+							"audio": { "type": "string" }
+						},
+						"required": ["audio"]
+					}
+				]
+			}
+		},
+		"required": ["item"]
+	}`
+
+	cleaners := map[string]func(string) string{
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Gemini":              CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":    CleanJSONSchemaForGeminiJSONSchema,
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			compareJSON(t, input, got)
+
+			// Verify idempotency when cleaned a second time
+			gotSecond := clean(got)
+			compareJSON(t, got, gotSecond)
+		})
+	}
+
+	t.Run("NullableMultiBranchUnionStripsNullBranchAndSetsNullable", func(t *testing.T) {
+		nullableUnion := `{
+			"type": "object",
+			"properties": {
+				"item": {
+					"anyOf": [
+						{ "type": "string" },
+						{
+							"type": "object",
+							"properties": { "image": { "type": "string" } },
+							"required": ["image"]
+						},
+						{
+							"type": "object",
+							"properties": { "audio": { "type": "string" } },
+							"required": ["audio"]
+						},
+						{ "type": "null" }
+					]
+				}
+			},
+			"required": ["item"]
+		}`
+
+		agCleaned := gjson.Parse(CleanJSONSchemaForAntigravity(nullableUnion))
+		branches := agCleaned.Get("properties.item.anyOf").Array()
+		if len(branches) != 3 {
+			t.Fatalf("Antigravity anyOf branch count = %d, want 3: %s", len(branches), agCleaned.Raw)
+		}
+		if !agCleaned.Get("properties.item.nullable").Bool() {
+			t.Fatalf("Antigravity properties.item.nullable = false, want true: %s", agCleaned.Raw)
+		}
+		if !agCleaned.Get("properties.item.anyOf.2.properties.audio").Exists() {
+			t.Fatalf("Antigravity lost audio branch: %s", agCleaned.Raw)
+		}
+
+		geminiCleaned := gjson.Parse(CleanJSONSchemaForGeminiJSONSchema(nullableUnion))
+		if len(geminiCleaned.Get("properties.item.anyOf").Array()) != 3 {
+			t.Fatalf("GeminiJSONSchema anyOf branch count = %d, want 3: %s", len(geminiCleaned.Get("properties.item.anyOf").Array()), geminiCleaned.Raw)
+		}
+		if geminiCleaned.Get("properties.item.nullable").Exists() {
+			t.Fatalf("GeminiJSONSchema should not keep nullable keyword: %s", geminiCleaned.Raw)
+		}
+		if !strings.Contains(geminiCleaned.Get("properties.item.description").String(), "(nullable)") {
+			t.Fatalf("GeminiJSONSchema missing (nullable) hint: %s", geminiCleaned.Raw)
+		}
+
+		// Nested nullable union in both [null, nestedUnion] and [nestedUnion, null] orders
+		// must unwrap to the nested union with nullable metadata and remain idempotent.
+		for _, nestedNullable := range []string{
+			`{"type":"object","properties":{"item":{"anyOf":[{"type":"null"},{"anyOf":[{"type":"string"},{"type":"integer"}]}]}}}`,
+			`{"type":"object","properties":{"item":{"anyOf":[{"anyOf":[{"type":"string"},{"type":"integer"}]},{"type":"null"}]}}}`,
+		} {
+			expectedNested := `{
+				"type": "object",
+				"properties": {
+					"item": {
+						"anyOf": [
+							{ "type": "string" },
+							{ "type": "integer" }
+						],
+						"nullable": true,
+						"description": "(nullable)"
+					}
+				}
+			}`
+			cleanedOnce := CleanJSONSchemaForAntigravity(nestedNullable)
+			compareJSON(t, expectedNested, cleanedOnce)
+			cleanedTwice := CleanJSONSchemaForAntigravity(cleanedOnce)
+			compareJSON(t, expectedNested, cleanedTwice)
+		}
+	})
+
+	t.Run("OneOfNormalizedToAnyOfOnNativeSchemaCarriers", func(t *testing.T) {
+		oneOfInput := `{
+			"type": "object",
+			"properties": {
+				"item": {
+					"oneOf": [
+						{ "type": "string" },
+						{
+							"type": "object",
+							"properties": { "image": { "type": "string" } },
+							"required": ["image"]
+						},
+						{
+							"type": "object",
+							"properties": { "audio": { "type": "string" } },
+							"required": ["audio"]
+						}
+					]
+				}
+			},
+			"required": ["item"]
+		}`
+
+		for name, clean := range map[string]func(string) string{
+			"Antigravity":         CleanJSONSchemaForAntigravity,
+			"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+			"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+			"Gemini":              CleanJSONSchemaForGemini,
+		} {
+			parsed := gjson.Parse(clean(oneOfInput))
+			if parsed.Get("properties.item.oneOf").Exists() {
+				t.Fatalf("[%s] oneOf survived on native Schema carrier: %s", name, parsed.Raw)
+			}
+			if got := len(parsed.Get("properties.item.anyOf").Array()); got != 3 {
+				t.Fatalf("[%s] anyOf branch count = %d, want 3: %s", name, got, parsed.Raw)
+			}
+		}
+
+		// parametersJsonSchema carrier preserves standard JSON Schema oneOf
+		jsonSchemaParsed := gjson.Parse(CleanJSONSchemaForGeminiJSONSchema(oneOfInput))
+		if got := len(jsonSchemaParsed.Get("properties.item.oneOf").Array()); got != 3 {
+			t.Fatalf("[GeminiJSONSchema] oneOf branch count = %d, want 3: %s", got, jsonSchemaParsed.Raw)
+		}
+	})
+
+	t.Run("PreservesUnionAndBranchRequiredWhenParentHasProperties", func(t *testing.T) {
+		parentPropsUnion := `{
+			"type": "object",
+			"properties": {},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				}
+			]
+		}`
+
+		for name, clean := range cleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(parentPropsUnion)
+				compareJSON(t, parentPropsUnion, got)
+			})
+		}
+
+		// Mixed union with a required-only branch materializes the required-only branch from parent properties
+		// so that the alternative branch (e.g. text) is preserved in anyOf.
+		mixedRequiredOnlyBranch := `{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" },
+				"text": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				},
+				{
+					"required": ["text"]
+				}
+			]
+		}`
+		expectedMixedRequiredOnly := `{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" },
+				"text": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				},
+				{
+					"type": "object",
+					"properties": { "text": { "type": "string" } },
+					"required": ["text"]
+				}
+			]
+		}`
+		compareJSON(t, expectedMixedRequiredOnly, CleanJSONSchemaForAntigravity(mixedRequiredOnlyBranch))
+
+		// Pure required-only union branches on an object with parent properties are materialized into valid object branches.
+		pureRequiredOnlyUnion := `{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" }
+			},
+			"anyOf": [
+				{ "required": ["image"] },
+				{ "required": ["audio"] }
+			]
+		}`
+		expectedPureRequiredOnly := `{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				}
+			]
+		}`
+		compareJSON(t, expectedPureRequiredOnly, CleanJSONSchemaForAntigravity(pureRequiredOnlyUnion))
+	})
+
+	t.Run("BooleanUnionBranchesAndSiblingAnyOfOneOf", func(t *testing.T) {
+		// Boolean false subschema branches in anyOf/oneOf are unsatisfiable and must be stripped
+		// instead of leaking raw boolean false into protobuf Schema anyOf.
+		falseSingleBranch := `{"type":"object","properties":{"value":{"anyOf":[false,{"type":"string"}]}}}`
+		expectedFalseSingle := `{"type":"object","properties":{"value":{"type":"string"}}}`
+		compareJSON(t, expectedFalseSingle, CleanJSONSchemaForAntigravity(falseSingleBranch))
+
+		falseMultiBranch := `{"type":"object","properties":{"value":{"oneOf":[false,{"type":"string"},{"type":"integer"}]}}}`
+		expectedFalseMulti := `{"type":"object","properties":{"value":{"anyOf":[{"type":"string"},{"type":"integer"}]}}}`
+		compareJSON(t, expectedFalseMulti, CleanJSONSchemaForAntigravity(falseMultiBranch))
+
+		// Boolean true subschema branch in anyOf/oneOf is normalized to an unconstrained {} branch and preserved.
+		trueMultiBranch := `{"type":"object","properties":{"value":{"anyOf":[true,{"type":"string"},{"type":"integer"}]}}}`
+		expectedTrueMulti := `{"type":"object","properties":{"value":{"anyOf":[{},{"type":"string"},{"type":"integer"}]}}}`
+		compareJSON(t, expectedTrueMulti, CleanJSONSchemaForAntigravityTool(trueMultiBranch, false))
+
+		// When a node declares both anyOf and oneOf, native Schema carriers keep anyOf without concatenating
+		// oneOf into it and record oneOf as a description hint, while GeminiJSONSchema preserves both.
+		siblingUnions := `{
+			"type": "object",
+			"properties": {
+				"value": {
+					"anyOf": [
+						{ "type": "string" },
+						{ "type": "integer" }
+					],
+					"oneOf": [
+						{ "type": "string" },
+						{ "type": "boolean" }
+					]
+				}
+			}
+		}`
+		for name, clean := range map[string]func(string) string{
+			"Antigravity":         CleanJSONSchemaForAntigravity,
+			"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+			"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+			"Gemini":              CleanJSONSchemaForGemini,
+		} {
+			parsed := gjson.Parse(clean(siblingUnions))
+			if parsed.Get("properties.value.oneOf").Exists() {
+				t.Fatalf("[%s] sibling oneOf survived on native Schema carrier: %s", name, parsed.Raw)
+			}
+			if got := len(parsed.Get("properties.value.anyOf").Array()); got != 2 {
+				t.Fatalf("[%s] anyOf branch count = %d, want 2 (must not concatenate oneOf): %s", name, got, parsed.Raw)
+			}
+			if !strings.Contains(parsed.Get("properties.value.description").String(), "oneOf:") {
+				t.Fatalf("[%s] missing oneOf description hint: %s", name, parsed.Raw)
+			}
+		}
+
+		jsonSchemaSibling := gjson.Parse(CleanJSONSchemaForGeminiJSONSchema(siblingUnions))
+		if len(jsonSchemaSibling.Get("properties.value.anyOf").Array()) != 2 || len(jsonSchemaSibling.Get("properties.value.oneOf").Array()) != 2 {
+			t.Fatalf("[GeminiJSONSchema] expected both anyOf and oneOf to be preserved: %s", jsonSchemaSibling.Raw)
+		}
+
+		// Null-only unions (anyOf:[null], oneOf:[null], anyOf:[false, null]) must not panic across any cleaner.
+		for _, nullOnlyInput := range []string{
+			`{"type":"object","properties":{"value":{"anyOf":[{"type":"null"}]}}}`,
+			`{"type":"object","properties":{"value":{"oneOf":[{"type":"null"},{"type":"null"}]}}}`,
+			`{"type":"object","properties":{"value":{"anyOf":[false,{"type":"null"}],"description":"Null only"}}}`,
+		} {
+			for name, clean := range cleaners {
+				got := clean(nullOnlyInput)
+				if !gjson.Valid(got) {
+					t.Fatalf("[%s] invalid JSON for null-only union %s: %s", name, nullOnlyInput, got)
+				}
+				if gjson.Get(got, "properties.value.type").String() != "null" {
+					t.Fatalf("[%s] expected properties.value.type = null, got: %s", name, got)
+				}
+			}
+		}
+	})
 }

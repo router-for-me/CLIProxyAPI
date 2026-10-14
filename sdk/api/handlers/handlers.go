@@ -25,6 +25,7 @@ import (
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
@@ -407,6 +408,8 @@ func setGenerateMetadata(meta map[string]any, rawJSON []byte) {
 // It holds a pool of clients to interact with the backend service and manages
 // load balancing, client selection, and configuration.
 type BaseAPIHandler struct {
+	runtimeMu sync.RWMutex
+
 	// AuthManager manages auth lifecycle and execution in the new architecture.
 	AuthManager *coreauth.Manager
 
@@ -443,7 +446,25 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 // Parameters:
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
-func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
+	if h == nil {
+		return
+	}
+	h.runtimeMu.Lock()
+	h.Cfg = cfg
+	h.runtimeMu.Unlock()
+}
+
+// CurrentConfig returns the current application configuration snapshot.
+func (h *BaseAPIHandler) CurrentConfig() *config.SDKConfig {
+	if h == nil {
+		return nil
+	}
+	h.runtimeMu.RLock()
+	cfg := h.Cfg
+	h.runtimeMu.RUnlock()
+	return cfg
+}
 
 // SetPluginHost configures the optional plugin interceptor host.
 func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
@@ -451,10 +472,11 @@ func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
 		return
 	}
 	if isNilPluginInterceptorHost(host) {
-		h.PluginHost = nil
-		return
+		host = nil
 	}
+	h.runtimeMu.Lock()
 	h.PluginHost = host
+	h.runtimeMu.Unlock()
 }
 
 // SetModelRouterHost configures the optional plugin model router host.
@@ -463,10 +485,25 @@ func (h *BaseAPIHandler) SetModelRouterHost(host PluginModelRouterHost) {
 		return
 	}
 	if isNilPluginModelRouterHost(host) {
-		h.ModelRouterHost = nil
-		return
+		host = nil
 	}
+	h.runtimeMu.Lock()
 	h.ModelRouterHost = host
+	h.runtimeMu.Unlock()
+}
+
+// ModelRouterHostSnapshot returns the configured plugin model router host snapshot.
+func (h *BaseAPIHandler) ModelRouterHostSnapshot() PluginModelRouterHost {
+	if h == nil {
+		return nil
+	}
+	h.runtimeMu.RLock()
+	host := h.ModelRouterHost
+	h.runtimeMu.RUnlock()
+	if isNilPluginModelRouterHost(host) {
+		return nil
+	}
+	return host
 }
 
 func isNilPluginInterceptorHost(host PluginInterceptorHost) bool {
@@ -535,6 +572,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		requestCtx = c.Request.Context()
 	}
 
+	if requestCtx != nil {
+		parentCtx = httptransport.InheritDecorator(parentCtx, requestCtx)
+	}
 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
@@ -592,7 +632,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
 		}
-		if h.Cfg.RequestLog && len(params) == 1 {
+		if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog && len(params) == 1 {
 			if captured, exists := c.Get(logging.APIResponseCapturedContextKey); exists {
 				if capturedBool, ok := captured.(bool); ok && capturedBool {
 					cancel()
@@ -644,7 +684,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	if h == nil || c == nil {
 		return func() {}
 	}
-	interval := NonStreamingKeepAliveInterval(h.Cfg)
+	interval := NonStreamingKeepAliveInterval(h.CurrentConfig())
 	if interval <= 0 {
 		return func() {}
 	}

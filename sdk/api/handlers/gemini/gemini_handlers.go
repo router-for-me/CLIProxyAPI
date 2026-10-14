@@ -225,7 +225,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	var keepAliveC <-chan time.Time
 	stopKeepAlive := func() {}
 	if alt == "" {
-		keepAliveC, stopKeepAlive = handlers.NewPreFirstTokenKeepAliveTicker(h.Cfg)
+		keepAliveC, stopKeepAlive = handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
 	}
 	defer stopKeepAlive()
 

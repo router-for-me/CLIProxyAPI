@@ -278,14 +278,21 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	c.Request = c.Request.WithContext(socketCtx)
 	// The reader owns the client socket so an in-flight interrupt is not stuck
 	// behind the response currently being forwarded.
-	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
+	requestLogEnabled := false
+	codexResponseSteering := false
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil {
+			requestLogEnabled = cfg.RequestLog
+			codexResponseSteering = cfg.CodexResponseSteering
+		}
+	}
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
 	localInterrupt := newResponsesLocalInterrupt()
 	input, inputDone := readResponsesWebsocketInput(socketCtx, cancelSocket, conn, func(payload []byte) error {
 		return h.forwardResponsesWebsocketInterrupt(socketCtx, passthroughSessionID, payload)
 	}, localInterrupt, writer, wsTimelineLog)
 	var duplexInput <-chan cliproxyexecutor.WebsocketInput
-	if h != nil && h.Cfg != nil && h.Cfg.CodexResponseSteering {
+	if codexResponseSteering {
 		duplexInput = input
 	}
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)

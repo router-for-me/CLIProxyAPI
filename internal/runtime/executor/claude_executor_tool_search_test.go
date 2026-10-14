@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -229,16 +230,17 @@ func TestClaudeExecutor_NativeToolSearchCountTokensLocalFallback(t *testing.T) {
 func TestClaudeExecutor_NativeToolSearchPayloadRuleIsFinal(t *testing.T) {
 	enableClaudeToolSearchForTest(t, true)
 	cfg := &config.Config{}
+	// tools: exec_command, tool_search, the constant deferred anchor, then the discovered calendar.
 	cfg.Payload.Override = []config.PayloadRule{{
 		Models: []config.PayloadModelRule{{Name: "*"}},
-		Params: map[string]any{"tools.2.defer_loading": false},
+		Params: map[string]any{"tools.3.defer_loading": false},
 	}}
 	body := captureNativeToolSearchBody(t, cfg, sendNativeToolSearchExecute, nativeToolSearchAuth(nil), "claude-sonnet-4-5", []byte(nativeToolSearchResponsesPayload), nil)
-	if got := gjson.GetBytes(body, "tools.2.name").String(); got != nativeToolSearchCalendar {
-		t.Fatalf("tools.2.name = %q, want %s: %s", got, nativeToolSearchCalendar, gjson.GetBytes(body, "tools").Raw)
+	if got := gjson.GetBytes(body, "tools.3.name").String(); got != nativeToolSearchCalendar {
+		t.Fatalf("tools.3.name = %q, want %s: %s", got, nativeToolSearchCalendar, gjson.GetBytes(body, "tools").Raw)
 	}
-	if deferred := gjson.GetBytes(body, "tools.2.defer_loading"); !deferred.Exists() || deferred.Bool() {
-		t.Fatalf("payload rule did not win over native tool search: %s", gjson.GetBytes(body, "tools.2").Raw)
+	if deferred := gjson.GetBytes(body, "tools.3.defer_loading"); !deferred.Exists() || deferred.Bool() {
+		t.Fatalf("payload rule did not win over native tool search: %s", gjson.GetBytes(body, "tools.3").Raw)
 	}
 }
 
@@ -298,7 +300,8 @@ func TestClaudeExecutor_NativeToolSearchOAuthAliasesRenamedReferences(t *testing
 	}
 	var deferred []string
 	gjson.GetBytes(body, "tools").ForEach(func(_, tool gjson.Result) bool {
-		if tool.Get("defer_loading").Bool() {
+		// The constant deferred anchor is aliased too but never referenced.
+		if tool.Get("defer_loading").Bool() && !strings.HasSuffix(tool.Get("name").String(), "tool_search_deferred_anchor") {
 			deferred = append(deferred, tool.Get("name").String())
 		}
 		return true

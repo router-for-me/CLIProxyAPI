@@ -2293,6 +2293,20 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 	return resolver
 }
 
+// restorePassthroughWrapped maps a tail that is exactly a declared caller-owned MCP
+// tool name (mcp__server__tool) back to that tool.
+func (resolver claudeMCPAliasResolver) restorePassthroughWrapped(tail string) (string, bool) {
+	if tail == "" {
+		return "", false
+	}
+	for _, original := range resolver.passthroughs {
+		if original == tail {
+			return original, true
+		}
+	}
+	return "", false
+}
+
 func parseClaudeMCPAlias(name string) (claudeMCPAliasParts, bool) {
 	if !helps.IsClaudeMCPToolName(name) {
 		return claudeMCPAliasParts{}, false
@@ -2439,6 +2453,14 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 	}
 
 	if len(resolver.passthroughs) > 0 {
+		// Recovery 0: The model kept the caller's full tool name, mcp__ prefix included,
+		// under the virtual server (e.g. "mcp__<virtual>__mcp__<server>__<tool>").
+		// Recoveries 1 and 2 below only cover the <server>__<tool> and <tool> tails.
+		if original, ok := resolver.restorePassthroughWrapped(suffix); ok {
+			log.Debugf("claude oauth mcp alias: recovered %q as caller-owned tool %q", name, original)
+			return original, true, nil
+		}
+
 		// Recovery 1: The model prepended the virtual server to the full caller MCP tool name
 		// (e.g. "mcp__<virtual>__<real_server>__<tool>"). After stripping the virtual server prefix,
 		// re-prefixing suffix with "mcp__" produces the original caller tool name.
