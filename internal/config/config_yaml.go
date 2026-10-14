@@ -126,9 +126,19 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
 // while preserving comments and positions.
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
+	return updateNestedScalar(configFile, nil, path, value)
+}
+
+// updateNestedScalar implements SaveConfigPreserveCommentsUpdateNestedScalar. When
+// expected is non-nil the file is left untouched unless it still holds exactly
+// those bytes, so a value derived from an older read cannot overwrite a newer save.
+func updateNestedScalar(configFile string, expected []byte, path []string, value string) error {
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return err
+	}
+	if expected != nil && !bytes.Equal(data, expected) {
+		return nil
 	}
 	data, err = updateNestedScalarYAML(data, path, value)
 	if err != nil {

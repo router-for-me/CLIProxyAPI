@@ -257,7 +257,9 @@ func loadConfigData(configFile string, data []byte, optional bool) (*Config, err
 
 		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
 		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed)
+		// Write back only to the bytes that were parsed: a hot reload may parse a
+		// file that a newer save (perhaps with a rotated secret) already replaced.
+		_ = updateNestedScalar(configFile, data, managementSecretKeyPath(data), hashed)
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
