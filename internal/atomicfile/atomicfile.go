@@ -3,6 +3,7 @@
 package atomicfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,8 +11,15 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// rename is replaced in tests to exercise the in-place fallback.
-var rename = os.Rename
+// rename and exchange are replaced in tests to exercise the fallbacks.
+var (
+	rename   = os.Rename
+	exchange = exchangeFiles
+)
+
+// beforeCommit runs after the temp file is complete, right before it replaces the
+// target; tests use it to land a concurrent deletion in that window.
+var beforeCommit = func() {}
 
 // WriteFile writes data to path like os.WriteFile, but through a temp file in the
 // same directory that is synced and then renamed over path.
@@ -27,9 +35,12 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 
 // ReplaceFile is WriteFile for a file that must already exist: it never creates
 // path. If the file is gone (a deletion raced the save), it returns an error
-// wrapping os.ErrNotExist and leaves nothing behind, so the deletion wins. The
-// existence check runs right before the rename; the in-place fallback opens the
-// file without O_CREATE.
+// wrapping os.ErrNotExist and leaves nothing behind, so the deletion wins. On
+// Linux (renameat2 RENAME_EXCHANGE) and macOS (renamex_np RENAME_SWAP) the
+// replacement is an atomic swap that fails on a missing target. Elsewhere, or on a
+// filesystem without exchange support, it checks existence right before a plain
+// rename, which leaves a few-syscall window. The in-place fallback opens the file
+// without O_CREATE.
 func ReplaceFile(path string, data []byte, perm os.FileMode) error {
 	return write(path, data, perm, true)
 }
@@ -89,7 +100,27 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	if errClose := tmp.Close(); errClose != nil {
 		return fmt.Errorf("atomicfile: close temp file: %w", errClose)
 	}
+	beforeCommit()
 	if mustExist {
+		// Swap the temp file with the target in one step: it fails when the target
+		// is gone, so a deletion racing this save always wins. The previous content
+		// ends up at tmpPath and is removed.
+		errSwap := exchange(tmpPath, target)
+		switch {
+		case errSwap == nil:
+			committed = true
+			if errRemove := os.Remove(tmpPath); errRemove != nil && !os.IsNotExist(errRemove) {
+				log.WithError(errRemove).Debugf("atomicfile: failed to remove replaced file %s", tmpPath)
+			}
+			return nil
+		case errors.Is(errSwap, os.ErrNotExist):
+			return fmt.Errorf("atomicfile: replace %s: %w", target, errSwap)
+		case !exchangeUnsupported(errSwap):
+			log.WithError(errSwap).Debugf("atomicfile: cannot replace %s, writing in place", target)
+			return writeInPlace(target, data, perm, mustExist)
+		}
+		// No atomic exchange on this platform or filesystem: check, then rename.
+		// A deletion landing between the two can still be undone.
 		if _, errStat := os.Lstat(target); errStat != nil {
 			return fmt.Errorf("atomicfile: replace %s: %w", target, errStat)
 		}
