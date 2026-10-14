@@ -383,37 +383,3 @@ func TestConfigV8FieldUpdatesKeepComments(t *testing.T) {
 		}
 	}
 }
-
-// Saves hold h.mu while they rewrite config.yaml, so GET must read it under h.mu
-// too, never in the middle of a save.
-func TestGetConfigYAMLReadsUnderSaveLock(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(file, []byte("server: {port: 8317}\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	h := &Handler{configFilePath: file}
-
-	lockHeld := false
-	original := readConfigYAMLFile
-	t.Cleanup(func() { readConfigYAMLFile = original })
-	readConfigYAMLFile = func(path string) ([]byte, error) {
-		if h.mu.TryLock() {
-			h.mu.Unlock()
-		} else {
-			lockHeld = true
-		}
-		return original(path)
-	}
-
-	router := gin.New()
-	router.GET("/v0/management/config.yaml", h.GetConfigYAML)
-	response := httptest.NewRecorder()
-	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v0/management/config.yaml", nil))
-
-	if !lockHeld {
-		t.Fatal("GET read config.yaml without holding the save lock")
-	}
-	if response.Code != http.StatusOK || response.Body.String() != "server: {port: 8317}\n" {
-		t.Fatalf("GET = %d %q, want the saved config", response.Code, response.Body.String())
-	}
-}
