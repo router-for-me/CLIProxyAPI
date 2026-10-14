@@ -639,3 +639,52 @@ func summarizeClaudeCodeClientHelloSpec(t *testing.T, spec *tls.ClientHelloSpec)
 	summary.JA3MD5 = hex.EncodeToString(digest[:])
 	return summary
 }
+
+func TestClaudeCodeTransport_TLSHandshakeTimesOutOnSilentPeer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	serverGotConnection := make(chan struct{})
+	go func() {
+		conn, errAccept := ln.Accept()
+		if errAccept != nil {
+			return
+		}
+		defer conn.Close()
+		close(serverGotConnection)
+		buf := make([]byte, 1024)
+		_, _ = conn.Read(buf)
+		time.Sleep(2 * time.Second)
+	}()
+
+	rt := newClaudeCodeRoundTripper("")
+	transport, ok := rt.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", rt)
+	}
+	transport.TLSHandshakeTimeout = 100 * time.Millisecond
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://"+ln.Addr().String(), bytes.NewReader([]byte("test")))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	start := time.Now()
+	_, err = transport.RoundTrip(req)
+	duration := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if duration > 1*time.Second {
+		t.Fatalf("handshake took %v, expected TLSHandshakeTimeout of ~100ms to abort sooner", duration)
+	}
+
+	if !strings.Contains(err.Error(), "handshake") && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected handshake error or deadline exceeded, got: %v", err)
+	}
+}

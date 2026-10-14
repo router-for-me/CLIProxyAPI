@@ -332,8 +332,10 @@ func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 		}
 	}
 
-	transport := &http.Transport{
-		ForceAttemptHTTP2: false,
+	var transport *http.Transport
+	transport = &http.Transport{
+		ForceAttemptHTTP2:   false,
+		TLSHandshakeTimeout: 10 * time.Second,
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var (
 				conn net.Conn
@@ -362,7 +364,15 @@ func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 				}
 				return nil, fmt.Errorf("claude tls: apply Claude Code ClientHello: %w", errPreset)
 			}
-			if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+
+			handshakeTimeout := transport.TLSHandshakeTimeout
+			if handshakeTimeout <= 0 {
+				handshakeTimeout = 10 * time.Second
+			}
+			handshakeCtx, cancelHandshake := context.WithTimeout(ctx, handshakeTimeout)
+			defer cancelHandshake()
+
+			if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
 				if errClose := tlsConn.Close(); errClose != nil {
 					log.Debugf("claude tls: close connection after handshake failure: %v", errClose)
 				}
