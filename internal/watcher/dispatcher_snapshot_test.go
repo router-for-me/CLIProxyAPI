@@ -423,3 +423,57 @@ func TestRefreshAuthStatePreservesConcurrentProxyUpdate(t *testing.T) {
 		})
 	}
 }
+
+// If the file is removed after RereadAuthFile's stat and before its read, the
+// failed read must leave the file known, so its remove event still deletes the
+// auths instead of being ignored and leaving the credential live.
+func TestRereadAuthFileKeepsFileKnownWhenReadFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "account.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	w := &Watcher{authDir: dir, config: &config.Config{AuthDir: dir}}
+	w.addOrUpdateClient(path)
+	w.authQueue = make(chan AuthUpdate, 10)
+
+	original := readAuthFile
+	t.Cleanup(func() { readAuthFile = original })
+	readAuthFile = func(name string) ([]byte, error) {
+		// The file goes away between the existence check and this read.
+		if errRemove := os.Remove(name); errRemove != nil {
+			t.Fatal(errRemove)
+		}
+		return original(name)
+	}
+	w.RereadAuthFile(path)
+	readAuthFile = original
+	if len(w.pendingOrder) != 0 {
+		t.Fatalf("failed re-read dispatched updates: %v", w.pendingUpdates)
+	}
+
+	w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Remove})
+
+	pending, ok := w.pendingUpdates["account.json"]
+	if !ok || pending.Action != AuthUpdateActionDelete {
+		t.Fatalf("pending update = %+v, want the removed file's auth deleted", pending)
+	}
+}
+
+// RereadAuthFile accepts the same file names as the full scan, which lowercases
+// the extension before matching .json.
+func TestRereadAuthFileAcceptsUppercaseJSONExtension(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "TOKEN.JSON")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	w := &Watcher{authDir: dir, config: &config.Config{AuthDir: dir}}
+	w.authQueue = make(chan AuthUpdate, 10)
+
+	w.RereadAuthFile(path)
+
+	if len(w.pendingOrder) == 0 {
+		t.Fatal("re-read ignored a .JSON auth file the full scan accepts")
+	}
+}
