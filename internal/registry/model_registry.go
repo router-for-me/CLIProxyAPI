@@ -1663,6 +1663,60 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	return result
 }
 
+// ProviderClientCount is the number of registered clients of one provider that serve a model.
+type ProviderClientCount struct {
+	Provider string `json:"provider"`
+	Clients  int    `json:"clients"`
+}
+
+// ModelProviderCounts lists the providers that serve one model ID.
+// OwnedBy comes from the most recently registered client, as in /v1/models.
+type ModelProviderCounts struct {
+	ID        string                `json:"id"`
+	OwnedBy   string                `json:"owned_by"`
+	Providers []ProviderClientCount `json:"providers"`
+}
+
+// GetModelProviderCounts returns every registered model with the providers that serve it.
+// Counts are registered clients per provider; quota and suspension state are not subtracted.
+// Models are sorted by ID; providers by client count (descending), then name.
+// The result is a copy and holds no client identifiers.
+func (r *ModelRegistry) GetModelProviderCounts() []ModelProviderCounts {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	result := make([]ModelProviderCounts, 0, len(r.models))
+	for modelID, registration := range r.models {
+		if registration == nil {
+			continue
+		}
+		providers := make([]ProviderClientCount, 0, len(registration.Providers))
+		for name, count := range registration.Providers {
+			if count > 0 {
+				providers = append(providers, ProviderClientCount{Provider: name, Clients: count})
+			}
+		}
+		if len(providers) == 0 {
+			continue
+		}
+		sort.Slice(providers, func(i, j int) bool {
+			if providers[i].Clients == providers[j].Clients {
+				return providers[i].Provider < providers[j].Provider
+			}
+			return providers[i].Clients > providers[j].Clients
+		})
+		entry := ModelProviderCounts{ID: modelID, Providers: providers}
+		if registration.Info != nil {
+			entry.OwnedBy = registration.Info.OwnedBy
+		}
+		result = append(result, entry)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
+	return result
+}
+
 // GetModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
 func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 	r.mutex.RLock()
