@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -104,50 +104,118 @@ func startRefreshWithHeldSave(t *testing.T, store *refreshSaveStore) *Manager {
 	return manager
 }
 
+// heldSave holds the refresh save until released, and reports stop progress.
+type heldSave struct {
+	store   *refreshSaveStore
+	release func()
+	waiting chan struct{} // receives when a stop starts waiting for the workers
+}
+
+func newHeldSave(t *testing.T) *heldSave {
+	t.Helper()
+	releaseCh := make(chan struct{})
+	var once sync.Once
+	h := &heldSave{
+		store:   &refreshSaveStore{entered: make(chan struct{}, 1), hold: func() { <-releaseCh }},
+		release: func() { once.Do(func() { close(releaseCh) }) },
+		waiting: make(chan struct{}, 4),
+	}
+	original := beforeAutoRefreshStopWait
+	beforeAutoRefreshStopWait = func() { h.waiting <- struct{}{} }
+	t.Cleanup(func() {
+		h.release()
+		beforeAutoRefreshStopWait = original
+	})
+	return h
+}
+
+// stopAsync runs stop on its own goroutine and sends whether the held save had
+// finished when stop returned.
+func (h *heldSave) stopAsync(stop func()) <-chan bool {
+	returned := make(chan bool, 1)
+	go func() {
+		stop()
+		returned <- h.store.done.Load()
+	}()
+	return returned
+}
+
+// awaitWaiting fails if stop returns while the save is held, and returns once
+// stop is waiting for the workers. The timer only guards against a hang.
+func (h *heldSave) awaitWaiting(t *testing.T, returned <-chan bool) {
+	t.Helper()
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case <-h.waiting:
+	case <-returned:
+		t.Fatal("stop returned while the refresh save was still held")
+	case <-hangGuard.C:
+		t.Fatal("stop never started waiting for the refresh workers")
+	}
+}
+
+func awaitReturned(t *testing.T, returned <-chan bool) bool {
+	t.Helper()
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case saveDone := <-returned:
+		return saveDone
+	case <-hangGuard.C:
+		t.Fatal("stop did not return after the save was released")
+		return false
+	}
+}
+
 // StopAutoRefresh must not return while a refresh it started is still saving:
 // callers (service shutdown, tests removing the auth directory) rely on no
 // background save running afterwards.
 func TestStopAutoRefreshWaitsForInFlightRefreshSave(t *testing.T) {
-	var stopCalled atomic.Bool
-	store := &refreshSaveStore{entered: make(chan struct{}, 1)}
-	store.hold = func() {
-		// Hold the save until Stop has been called, then keep working briefly, so a
-		// Stop that does not wait returns before the save completes.
-		for !stopCalled.Load() {
-			runtime.Gosched()
-		}
-		for i := 0; i < 1000; i++ {
-			runtime.Gosched()
-		}
-	}
-	manager := startRefreshWithHeldSave(t, store)
+	h := newHeldSave(t)
+	manager := startRefreshWithHeldSave(t, h.store)
 
-	stopCalled.Store(true)
-	manager.StopAutoRefresh()
-
-	if !store.done.Load() {
-		t.Fatal("StopAutoRefresh returned while the refresh save was still running")
+	returned := h.stopAsync(manager.StopAutoRefresh)
+	h.awaitWaiting(t, returned)
+	h.release()
+	if !awaitReturned(t, returned) {
+		t.Fatal("StopAutoRefresh returned before the refresh save finished")
 	}
 }
 
 // StopAutoRefreshContext gives up waiting when its context ends, so a refresh
 // that never finishes cannot hang shutdown.
 func TestStopAutoRefreshContextReturnsWhenContextEnds(t *testing.T) {
-	release := make(chan struct{})
-	store := &refreshSaveStore{entered: make(chan struct{}, 1)}
-	store.hold = func() { <-release }
-	manager := startRefreshWithHeldSave(t, store)
-	t.Cleanup(func() {
-		close(release)
-		manager.StopAutoRefresh()
-	})
+	h := newHeldSave(t)
+	manager := startRefreshWithHeldSave(t, h.store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := manager.StopAutoRefreshContext(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("StopAutoRefreshContext() error = %v, want context.Canceled", err)
 	}
-	if store.done.Load() {
+	if h.store.done.Load() {
 		t.Fatal("held save finished early; the test did not exercise the wait")
+	}
+}
+
+// A stop after one that gave up on its context must still wait for the same
+// loop's workers, not return because the loop was already detached.
+func TestStopAutoRefreshAfterTimedOutStopStillWaits(t *testing.T) {
+	h := newHeldSave(t)
+	manager := startRefreshWithHeldSave(t, h.store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.StopAutoRefreshContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first StopAutoRefreshContext() error = %v, want context.Canceled", err)
+	}
+	<-h.waiting // the first stop waited before giving up
+
+	returned := h.stopAsync(manager.StopAutoRefresh)
+	h.awaitWaiting(t, returned)
+	h.release()
+	if !awaitReturned(t, returned) {
+		t.Fatal("second StopAutoRefresh returned before the refresh save finished")
 	}
 }
