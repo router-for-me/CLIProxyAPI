@@ -180,12 +180,16 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
+// readConfigYAMLFile reads config.yaml for GetConfigYAML; tests replace it to check
+// that the read happens while h.mu is held.
+var readConfigYAMLFile = os.ReadFile
+
 // GetConfigYAML returns the raw config.yaml file bytes without re-encoding.
 // It preserves comments and original formatting/styles.
 func (h *Handler) GetConfigYAML(c *gin.Context) {
 	// Saves hold h.mu while rewriting the file; read only between saves.
 	h.mu.Lock()
-	data, err := os.ReadFile(h.configFilePath)
+	data, err := readConfigYAMLFile(h.configFilePath)
 	h.mu.Unlock()
 	if err != nil {
 		if os.IsNotExist(err) {
