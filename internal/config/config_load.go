@@ -168,17 +168,20 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
-	return loadConfigData(configFile, data, optional)
+	return loadConfigData(configFile, data, optional, true)
 }
 
 // LoadConfigData parses config YAML that was already read from configFile, so a
-// caller that hashed those bytes loads exactly them. configFile is still used to
-// write back a newly hashed management secret.
+// caller that hashed those bytes loads exactly them. It never writes configFile:
+// the bytes may already be replaced by a concurrent save, so a plaintext secret is
+// hashed in memory only and is written back by the next startup load.
 func LoadConfigData(configFile string, data []byte) (*Config, error) {
-	return loadConfigData(configFile, data, false)
+	return loadConfigData(configFile, data, false, false)
 }
 
-func loadConfigData(configFile string, data []byte, optional bool) (*Config, error) {
+// loadConfigData parses data. persist allows writing back to configFile (a hashed
+// management secret, removal of conflicting legacy fields).
+func loadConfigData(configFile string, data []byte, optional, persist bool) (*Config, error) {
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
 		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
@@ -257,9 +260,9 @@ func loadConfigData(configFile string, data []byte, optional bool) (*Config, err
 
 		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
 		// Preserve YAML comments and ordering; update only the nested key.
-		// Write back only to the bytes that were parsed: a hot reload may parse a
-		// file that a newer save (perhaps with a rotated secret) already replaced.
-		_ = updateNestedScalar(configFile, data, managementSecretKeyPath(data), hashed)
+		if persist {
+			_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed)
+		}
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
@@ -341,6 +344,14 @@ func loadConfigData(configFile string, data []byte, optional bool) (*Config, err
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Record the exact bytes this config was parsed from, so a consumer can tell
+	// it apart from a newer version of the file.
+	cfg.SourceHash = ComputeSourceHash(data)
+
+	if !persist {
+		return &cfg, nil
+	}
+
 	// Only conflicting legacy fields are removed on load. A legacy-only document
 	// stays legacy until a v8 configuration write explicitly migrates it.
 	current, errRead := os.ReadFile(configFile)
@@ -356,10 +367,6 @@ func loadConfigData(configFile string, data []byte, optional bool) (*Config, err
 			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
 		}
 	}
-
-	// Record the exact bytes this config was parsed from, so a consumer can tell
-	// it apart from a newer version of the file.
-	cfg.SourceHash = ComputeSourceHash(data)
 
 	// Return the populated configuration struct.
 	return &cfg, nil
