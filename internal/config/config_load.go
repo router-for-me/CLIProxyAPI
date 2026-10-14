@@ -41,6 +41,8 @@ func ComputeSourceHash(data []byte) string {
 // copies stay identical. When the plaintext cannot be removed it returns an error and
 // leaves configFile untouched, so every later attempt refuses the file again.
 func PrepareConfigFileForUpload(configFile string) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
 	data, errRead := os.ReadFile(configFile)
 	if errRead != nil {
 		return errRead
@@ -173,15 +175,26 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 }
 
 // LoadConfigData parses config YAML that was already read from configFile, so a
-// caller that hashed those bytes loads exactly them. It never writes configFile:
-// the bytes may already be replaced by a concurrent save, so a plaintext secret is
-// hashed in memory only and is written back by the next startup load.
+// caller that hashed those bytes loads exactly them. A plaintext management secret
+// is hashed and written back only while configFile still holds data, so a newer
+// save is never overwritten; conflicting legacy fields are left for startup.
 func LoadConfigData(configFile string, data []byte) (*Config, error) {
 	return loadConfigData(configFile, data, false, false)
 }
 
-// loadConfigData parses data. persist allows writing back to configFile (a hashed
-// management secret, removal of conflicting legacy fields).
+// HasPlaintextSecretKey reports whether config YAML holds a management secret that
+// is not bcrypt-hashed yet.
+func HasPlaintextSecretKey(data []byte) bool {
+	var cfg Config
+	if yaml.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+	return cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey)
+}
+
+// loadConfigData parses data. persist allows startup writes to configFile: an
+// unchecked secret write-back and removal of conflicting legacy fields. Without
+// it, the secret write-back is checked against data.
 func loadConfigData(configFile string, data []byte, optional, persist bool) (*Config, error) {
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
@@ -262,11 +275,18 @@ func loadConfigData(configFile string, data []byte, optional, persist bool) (*Co
 		}
 		cfg.RemoteManagement.SecretKey = hashed
 
-		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
-		// Preserve YAML comments and ordering; update only the nested key.
-		if persist {
-			_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed)
+		// Persist the hashed value back to the config file to avoid re-hashing on next startup
+		// and to keep the plaintext out of remote store mirrors. Preserve YAML comments and
+		// ordering; update only the nested key.
+		// A hot reload may parse bytes a newer save (perhaps with a rotated secret)
+		// already replaced, so it writes back only over the bytes it parsed.
+		var expected []byte
+		if !persist {
+			expected = data
 		}
+		configWriteMu.Lock()
+		_ = updateNestedScalarLocked(configFile, expected, managementSecretKeyPath(data), hashed)
+		configWriteMu.Unlock()
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
@@ -359,6 +379,8 @@ func loadConfigData(configFile string, data []byte, optional, persist bool) (*Co
 
 	// Only conflicting legacy fields are removed on load. A legacy-only document
 	// stays legacy until a v8 configuration write explicitly migrates it.
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
 	current, errRead := os.ReadFile(configFile)
 	if errRead != nil {
 		return nil, errRead
