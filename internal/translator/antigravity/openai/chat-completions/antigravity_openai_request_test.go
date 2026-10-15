@@ -8,7 +8,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestConvertOpenAIRequestToAntigravity_StripsLeadingCLIIdentityPrefix(t *testing.T) {
+func TestConvertOpenAIRequestToAntigravity_PreservesCLIIdentityForRequestBuilder(t *testing.T) {
 	inputJSON := `{
 		"model": "gemini-3-flash",
 		"messages": [
@@ -20,14 +20,14 @@ func TestConvertOpenAIRequestToAntigravity_StripsLeadingCLIIdentityPrefix(t *tes
 	result, _ := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
 	parts := gjson.GetBytes(result, "request.systemInstruction.parts").Array()
 	if len(parts) != 1 {
-		t.Fatalf("Expected 1 system part after identity strip, got %d: %s", len(parts), result)
+		t.Fatalf("Expected 1 unchanged system part, got %d: %s", len(parts), result)
 	}
-	if got := parts[0].Get("text").String(); got != "You are an interactive agent that helps users." {
+	if got := parts[0].Get("text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nYou are an interactive agent that helps users." {
 		t.Fatalf("Unexpected system part: %q. Output: %s", got, result)
 	}
 }
 
-func TestConvertOpenAIRequestToAntigravity_DropsIdentityOnlySystem(t *testing.T) {
+func TestConvertOpenAIRequestToAntigravity_PreservesIdentityOnlySystem(t *testing.T) {
 	inputJSON := `{
 		"model": "gemini-3-flash",
 		"messages": [
@@ -37,8 +37,8 @@ func TestConvertOpenAIRequestToAntigravity_DropsIdentityOnlySystem(t *testing.T)
 	}`
 
 	result, _ := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
-	if gjson.GetBytes(result, "request.systemInstruction").Exists() {
-		t.Fatalf("Expected no systemInstruction after identity-only strip, got: %s", result)
+	if got := gjson.GetBytes(result, "request.systemInstruction.parts.0.text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("Expected identity to reach the model-scoped request builder, got: %q", got)
 	}
 }
 

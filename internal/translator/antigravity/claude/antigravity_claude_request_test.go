@@ -135,7 +135,7 @@ func TestConvertClaudeRequestToAntigravity_StripsClaudeCodeAttribution(t *testin
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_StripsLeadingCLIIdentityPrefix(t *testing.T) {
+func TestConvertClaudeRequestToAntigravity_PreservesCLIIdentityForRequestBuilder(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash",
 		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
@@ -147,14 +147,14 @@ func TestConvertClaudeRequestToAntigravity_StripsLeadingCLIIdentityPrefix(t *tes
 
 	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
 	if len(parts) != 1 {
-		t.Fatalf("Expected 1 system part after identity strip, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
+		t.Fatalf("Expected 1 unchanged system part, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
 	}
-	if got := parts[0].Get("text").String(); got != "You are an interactive agent that helps users." {
+	if got := parts[0].Get("text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nYou are an interactive agent that helps users." {
 		t.Fatalf("Unexpected system part: %q", got)
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_DropsIdentityOnlySystem(t *testing.T) {
+func TestConvertClaudeRequestToAntigravity_PreservesIdentityOnlySystem(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash",
 		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
@@ -164,8 +164,8 @@ func TestConvertClaudeRequestToAntigravity_DropsIdentityOnlySystem(t *testing.T)
 	output, _ := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
 	outputStr := string(output)
 
-	if gjson.Get(outputStr, "request.systemInstruction").Exists() {
-		t.Fatalf("Expected no systemInstruction after identity-only strip, got: %s", gjson.Get(outputStr, "request.systemInstruction").Raw)
+	if got := gjson.Get(outputStr, "request.systemInstruction.parts.0.text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("Expected identity to reach the model-scoped request builder, got: %q", got)
 	}
 }
 

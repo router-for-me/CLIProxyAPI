@@ -334,24 +334,17 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
 					continue
 				}
-				// A leading Anthropic CLI identity sentence makes the Antigravity
-				// upstream reject the request, so drop the prefix and keep the rest.
-				systemPrompt = util.StripLeadingCLIIdentityPrefix(systemPrompt)
-				if systemPrompt == "" {
-					continue
+				partJSON := []byte(`{}`)
+				if systemPrompt != "" {
+					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
 				}
-				partJSON, _ := sjson.SetBytes([]byte(`{}`), "text", systemPrompt)
 				systemParts = append(systemParts, partJSON)
 			}
 		}
 	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
-		// Same leading-identity strip applies to the string form of system.
-		systemPrompt := util.StripLeadingCLIIdentityPrefix(systemResult.String())
-		if systemPrompt != "" {
-			partJSON := []byte(`{"text":""}`)
-			partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
-			systemParts = append(systemParts, partJSON)
-		}
+		partJSON := []byte(`{"text":""}`)
+		partJSON, _ = sjson.SetBytes(partJSON, "text", systemResult.String())
+		systemParts = append(systemParts, partJSON)
 	}
 
 	// contents

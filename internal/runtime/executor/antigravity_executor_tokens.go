@@ -96,6 +96,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		requestURL.WriteString(url.QueryEscape(opts.Alt))
 	}
 
+	payload = helps.StripAntigravityCLIIdentity(baseModel, payload)
 	payload = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "request", originalTranslatedForPayload, req, opts)(payload)
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {

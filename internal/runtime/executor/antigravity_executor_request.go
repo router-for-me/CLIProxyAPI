@@ -56,6 +56,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errProject != nil {
 		return nil, errProject
 	}
+	payload = helps.StripAntigravityCLIIdentity(modelName, payload)
 	payload = geminiToAntigravity(modelName, payload, projectID, derivedSessionIDs...)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
