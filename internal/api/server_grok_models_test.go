@@ -137,8 +137,9 @@ func TestModelsSurfacesContextLengthForAutoDiscoveringClients(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-context-length-models"
 	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
-		{ID: "ctx-model", ContextLength: 400000, MaxContextLength: 400000, MaxCompletionTokens: 64000, Created: 1770912000, OwnedBy: "openai"},
-		{ID: "no-ctx-model"},
+		{ID: "ctx-model", ContextLength: 372000, InputTokenLimit: 500000, MaxContextLength: 368000, MaxCompletionTokens: 128000, OutputTokenLimit: 64000, Created: 1770912000, OwnedBy: "openai"},
+		{ID: "input-output-fallback-model", InputTokenLimit: 1048576, OutputTokenLimit: 65536},
+		{ID: "no-context-model"},
 	})
 	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
 
@@ -169,14 +170,14 @@ func TestModelsSurfacesContextLengthForAutoDiscoveringClients(t *testing.T) {
 		switch id {
 		case "ctx-model":
 			withCtx++
-			if got := model["context_length"]; got != float64(400000) {
-				t.Fatalf("ctx-model context_length = %#v, want 400000 (body=%s)", got, recorder.Body.String())
+			if got := model["context_length"]; got != float64(372000) {
+				t.Fatalf("ctx-model context_length = %#v, want 372000 (body=%s)", got, recorder.Body.String())
 			}
-			if got := model["max_context_length"]; got != float64(400000) {
-				t.Fatalf("ctx-model max_context_length = %#v, want 400000", got)
+			if got := model["max_context_length"]; got != float64(368000) {
+				t.Fatalf("ctx-model max_context_length = %#v, want 368000", got)
 			}
-			if got := model["max_completion_tokens"]; got != float64(64000) {
-				t.Fatalf("ctx-model max_completion_tokens = %#v, want 64000", got)
+			if got := model["max_completion_tokens"]; got != float64(128000) {
+				t.Fatalf("ctx-model max_completion_tokens = %#v, want 128000", got)
 			}
 			if got, ok := model["created"].(float64); !ok || got != 1770912000 {
 				t.Fatalf("ctx-model created = %#v, want 1770912000", model["created"])
@@ -184,16 +185,24 @@ func TestModelsSurfacesContextLengthForAutoDiscoveringClients(t *testing.T) {
 			if got := model["owned_by"]; got != "openai" {
 				t.Fatalf("ctx-model owned_by = %#v, want openai", got)
 			}
-		case "no-ctx-model":
+		case "input-output-fallback-model":
+			withCtx++
+			if got := model["context_length"]; got != float64(1048576) {
+				t.Fatalf("input-output-fallback-model context_length = %#v, want 1048576", got)
+			}
+			if got := model["max_completion_tokens"]; got != float64(65536) {
+				t.Fatalf("input-output-fallback-model max_completion_tokens = %#v, want 65536", got)
+			}
+		case "no-context-model":
 			noCtx++
 			// Zero-context models must not gain a context_length key.
 			if _, exists := model["context_length"]; exists {
-				t.Fatalf("no-ctx-model leaked empty context_length: %#v", model)
+				t.Fatalf("no-context-model leaked empty context_length: %#v", model)
 			}
 		}
 	}
-	if withCtx != 1 || noCtx != 1 {
-		t.Fatalf("withCtx=%d noCtx=%d, want both present (body=%s)", withCtx, noCtx, recorder.Body.String())
+	if withCtx != 2 || noCtx != 1 {
+		t.Fatalf("withCtx=%d noCtx=%d, want 2 withCtx and 1 noCtx (body=%s)", withCtx, noCtx, recorder.Body.String())
 	}
 }
 
