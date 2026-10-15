@@ -824,6 +824,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			} else if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 				// Retain active credential-scoped cooldown
+			} else if modelKey != "" && successPredatesQuotaCooldown(existingModelState(auth, modelKey), result.StartedAt, now) {
+				// The request was dispatched before this quota cooldown was recorded,
+				// so its success says nothing about whether the quota has recovered.
 			} else if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
 				modelState = state
@@ -1268,6 +1271,21 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	}
 	*target = merged
 	return target
+}
+
+// successPredatesQuotaCooldown reports whether a successful result must leave the
+// model's quota cooldown in place: the cooldown is still active and was recorded
+// after the successful request had already been dispatched. Concurrent requests
+// that were in flight when the quota ran out can still complete, and their
+// success does not show that the quota has recovered.
+func successPredatesQuotaCooldown(state *ModelState, startedAt, now time.Time) bool {
+	if state == nil || startedAt.IsZero() || !state.Quota.Exceeded {
+		return false
+	}
+	if !state.Quota.NextRecoverAt.After(now) {
+		return false
+	}
+	return startedAt.Before(state.UpdatedAt)
 }
 
 func resetModelState(state *ModelState, now time.Time) {

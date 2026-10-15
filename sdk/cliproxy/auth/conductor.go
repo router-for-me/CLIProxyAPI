@@ -90,6 +90,11 @@ type Result struct {
 	CredentialVersion uint64
 	// RegistrationEpoch captures the registration epoch under which the request was executed.
 	RegistrationEpoch uint64
+	// StartedAt is when the request was dispatched to the upstream executor. A success
+	// that started before a quota cooldown was recorded does not prove that the quota
+	// recovered, so MarkResult uses it to keep that cooldown in place. The zero value
+	// disables the check.
+	StartedAt time.Time
 }
 
 // Selector chooses an auth candidate for execution.
