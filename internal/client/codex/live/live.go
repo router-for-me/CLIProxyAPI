@@ -837,8 +837,6 @@ func writeLiveError(c *gin.Context, status int, message string) {
 
 func writeSelectionError(c *gin.Context, err error) {
 	status := clienterror.HTTPStatusFromErrorOr(err, http.StatusServiceUnavailable)
-	for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
-		c.Writer.Header().Add("Retry-After", value)
-	}
+	handlers.WriteSafeRetryHeaders(c, err)
 	writeLiveError(c, status, err.Error())
 }
