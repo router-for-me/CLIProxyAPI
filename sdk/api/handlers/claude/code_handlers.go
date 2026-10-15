@@ -157,7 +157,8 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
+	cfg := h.CurrentConfig()
+	disableCloaking := cfg != nil && cfg.ClaudeCode.DisableCloakingModelList
 	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(h.Models(), disableCloaking))
 }
 
@@ -261,7 +262,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 		flusher.Flush()
 		return true
 	}
-	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.Cfg)
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
 	defer stopKeepAlive()
 
 	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
@@ -331,13 +332,14 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			commitSSE()
 
 			// Write the first chunk
+			sawErrorEvent := claudeChunkHasErrorEvent(chunk)
 			if len(chunk) > 0 {
 				_, _ = c.Writer.Write(chunk)
 				flusher.Flush()
 			}
 
 			// Continue streaming the rest
-			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, sawErrorEvent)
 			return
 		case <-keepAliveC:
 			writeKeepAlive()
@@ -345,16 +347,24 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	}
 }
 
-func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func claudeChunkHasErrorEvent(chunk []byte) bool {
+	return bytes.Contains(chunk, []byte("event: error\n")) || bytes.Contains(chunk, []byte("event: error\r\n"))
+}
+
+func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialErrorWritten ...bool) {
+	sawErrorEvent := len(initialErrorWritten) > 0 && initialErrorWritten[0]
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
 				return
 			}
+			if claudeChunkHasErrorEvent(chunk) {
+				sawErrorEvent = true
+			}
 			_, _ = c.Writer.Write(chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			if errMsg == nil {
+			if errMsg == nil || sawErrorEvent {
 				return
 			}
 			if !c.Writer.Written() {
@@ -451,7 +461,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 			c.Writer.Header().Add("Retry-After", value)
 		}
 	}
-	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
+	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.CurrentConfig()) {
 		for key, values := range msg.Addon {
 			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
 				continue

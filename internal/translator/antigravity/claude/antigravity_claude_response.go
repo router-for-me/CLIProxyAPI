@@ -405,13 +405,19 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 
 	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
 		params.HasUsageMetadata = true
+		rawPromptTokenCount := usageResult.Get("promptTokenCount").Int()
 		params.CachedTokenCount = usageResult.Get("cachedContentTokenCount").Int()
-		params.PromptTokenCount = usageResult.Get("promptTokenCount").Int() - params.CachedTokenCount
+		params.PromptTokenCount = rawPromptTokenCount - params.CachedTokenCount
+		if params.PromptTokenCount < 0 {
+			params.PromptTokenCount = 0
+		}
 		params.CandidatesTokenCount = usageResult.Get("candidatesTokenCount").Int()
 		params.ThoughtsTokenCount = usageResult.Get("thoughtsTokenCount").Int()
 		params.TotalTokenCount = usageResult.Get("totalTokenCount").Int()
 		if params.CandidatesTokenCount == 0 && params.TotalTokenCount > 0 {
-			params.CandidatesTokenCount = params.TotalTokenCount - params.PromptTokenCount - params.ThoughtsTokenCount
+			// totalTokenCount includes the cached part of promptTokenCount, so the
+			// fallback must use the raw prompt count, not the cache-reduced one.
+			params.CandidatesTokenCount = params.TotalTokenCount - rawPromptTokenCount - params.ThoughtsTokenCount
 			if params.CandidatesTokenCount < 0 {
 				params.CandidatesTokenCount = 0
 			}
@@ -475,7 +481,9 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 	stopReason := resolveStopReason(params)
 	usageOutputTokens := params.CandidatesTokenCount + params.ThoughtsTokenCount
 	if usageOutputTokens == 0 && params.TotalTokenCount > 0 {
-		usageOutputTokens = params.TotalTokenCount - params.PromptTokenCount
+		// PromptTokenCount excludes cached tokens for input_tokens, while
+		// TotalTokenCount includes them; add the cache back for the fallback.
+		usageOutputTokens = params.TotalTokenCount - (params.PromptTokenCount + params.CachedTokenCount)
 		if usageOutputTokens < 0 {
 			usageOutputTokens = 0
 		}

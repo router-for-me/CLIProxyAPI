@@ -79,7 +79,7 @@ func (h *OpenAIAPIHandler) newImagesStreamKeepAliveTicker() (func(), <-chan time
 	if h == nil || h.BaseAPIHandler == nil {
 		return func() {}, nil
 	}
-	keepAliveC, stop := handlers.NewStreamingKeepAliveTicker(handlers.StreamingKeepAliveInterval(h.Cfg))
+	keepAliveC, stop := handlers.NewStreamingKeepAliveTicker(handlers.StreamingKeepAliveInterval(h.CurrentConfig()))
 	return stop, keepAliveC
 }
 
@@ -87,7 +87,7 @@ func (h *OpenAIAPIHandler) newImagesPreFirstTokenKeepAliveTicker() (func(), <-ch
 	if h == nil || h.BaseAPIHandler == nil {
 		return func() {}, nil
 	}
-	keepAliveC, stop := handlers.NewPreFirstTokenKeepAliveTicker(h.Cfg)
+	keepAliveC, stop := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
 	return stop, keepAliveC
 }
 
@@ -624,9 +624,11 @@ func parseBoolField(raw string, fallback bool) bool {
 }
 
 func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
-	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil && cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
 	}
 
 	rawJSON, err := handlers.ReadRequestBody(c)
@@ -728,9 +730,11 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 }
 
 func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
-	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil && cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
 	}
 
 	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))

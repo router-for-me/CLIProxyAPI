@@ -147,6 +147,9 @@ func TestInteractionsApplyPatchTerminalIdentityFallback(t *testing.T) {
 				if events := patchSend(&param, patchStep("step.start", step)); len(events) != 0 {
 					t.Fatalf("early fallback: %v", events)
 				}
+				if first == "neither" {
+					id = "item_" + param.(*interactionsToResponsesStreamState).ItemIDPrefix + "_2"
+				}
 				if events := patchSend(&param, []byte(`{"event_type":"step.delta","index":2,"delta":{"type":"arguments_delta","arguments":"{\"input\":\"pq\"}"}}`)); len(events) != 0 {
 					t.Fatalf("early delta: %v", events)
 				}

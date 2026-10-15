@@ -32,4 +32,6 @@ type SynthesisContext struct {
 	IDGenerator *StableIDGenerator
 	// PluginAuthParser parses plugin-owned auth files
 	PluginAuthParser PluginAuthParser
+	// StrictFileParsing surfaces parse errors instead of silently skipping or falling back.
+	StrictFileParsing bool
 }

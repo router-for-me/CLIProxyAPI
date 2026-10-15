@@ -8,7 +8,7 @@ func ResolveAntigravityUpstreamModel(modelName string, entitled map[string]struc
 	model := strings.ToLower(strings.TrimSpace(modelName))
 	preferred := modelName
 	switch model {
-	case "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash":
+	case "gemini-4-argon", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash":
 		preferred = model + "-high"
 	case "gemini-3.1-pro", "gemini-3-pro":
 		preferred = "gemini-pro-agent"

@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +26,129 @@ import (
 //   - error: An error if the configuration could not be loaded
 func LoadConfig(configFile string) (*Config, error) {
 	return LoadConfigOptional(configFile, false)
+}
+
+// ComputeSourceHash returns the Config.SourceHash value for config file bytes.
+func ComputeSourceHash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// PrepareConfigFileForUpload applies the file rewrites of a startup load: a plaintext
+// management secret is replaced with its bcrypt hash and conflicting legacy fields are
+// removed. Stores that seed remote storage from configFile before the startup load call
+// it first, so the plaintext secret never leaves the machine and the local and remote
+// copies stay identical. When the plaintext cannot be removed it returns an error and
+// leaves configFile untouched, so every later attempt refuses the file again.
+func PrepareConfigFileForUpload(configFile string) error {
+	data, errRead := os.ReadFile(configFile)
+	if errRead != nil {
+		return errRead
+	}
+	prepared, errPrepare := prepareConfigForUpload(data)
+	if errPrepare != nil {
+		return errPrepare
+	}
+	if bytes.Equal(prepared, data) {
+		return nil
+	}
+	if errWrite := os.WriteFile(configFile, prepared, 0600); errWrite != nil {
+		return fmt.Errorf("failed to write prepared config file: %w", errWrite)
+	}
+	return nil
+}
+
+// prepareConfigForUpload returns data with the file rewrites of a startup load applied.
+// It fails when the result would still hold a plaintext management secret: hashing
+// replaces only the effective key and the layout cleanup only drops an overridden legacy
+// key, so a YAML anchor or a copy elsewhere keeps the plaintext, and rewriting those could
+// change other settings that share them.
+func prepareConfigForUpload(data []byte) ([]byte, error) {
+	var cfg Config
+	if errParse := yaml.Unmarshal(data, &cfg); errParse != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", errParse)
+	}
+	prepared := data
+	if secret := cfg.RemoteManagement.SecretKey; secret != "" && !looksLikeBcrypt(secret) {
+		hashed, errHash := hashSecret(secret)
+		if errHash != nil {
+			return nil, fmt.Errorf("failed to hash remote management key: %w", errHash)
+		}
+		updated, errUpdate := updateNestedScalarYAML(data, managementSecretKeyPath(data), hashed)
+		if errUpdate != nil {
+			return nil, fmt.Errorf("failed to update remote management key: %w", errUpdate)
+		}
+		prepared = updated
+	}
+	cleaned, _, errLayout := NormalizeConfigLayout(prepared, false)
+	if errLayout != nil {
+		return nil, errLayout
+	}
+	if plaintexts := plaintextManagementSecrets(data, cfg.RemoteManagement.SecretKey); len(plaintexts) > 0 {
+		var doc yaml.Node
+		if errParse := yaml.Unmarshal(cleaned, &doc); errParse != nil {
+			return nil, fmt.Errorf("failed to parse prepared config: %w", errParse)
+		}
+		for _, plaintext := range plaintexts {
+			if yamlScalarExists(&doc, plaintext) {
+				return nil, errors.New("plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value")
+			}
+		}
+	}
+	return cleaned, nil
+}
+
+// plaintextManagementSecrets returns the plaintext management secrets of data: the
+// effective one and the values of the legacy and v8 secret keys, since an overridden
+// legacy key still holds its own. YAML anchors, aliases and merge keys are resolved, so
+// data must already decode as a Config, which rejects cyclic aliases.
+func plaintextManagementSecrets(data []byte, effective string) []string {
+	candidates := []string{effective}
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) == nil && len(doc.Content) > 0 {
+		root := expandConfigAliases(doc.Content[0])
+		for _, path := range []string{"remote-management.secret-key", "management.secret-key"} {
+			if node := yamlPath(root, path); node != nil && node.Kind == yaml.ScalarNode && node.ShortTag() != "!!null" {
+				candidates = append(candidates, node.Value)
+			}
+		}
+	}
+	var plaintexts []string
+	for _, candidate := range candidates {
+		if candidate != "" && !looksLikeBcrypt(candidate) {
+			plaintexts = append(plaintexts, candidate)
+		}
+	}
+	return plaintexts
+}
+
+// yamlScalarExists reports whether node or any value below it is a non-null scalar equal
+// to value. Mapping keys only name settings and are skipped, as are alias nodes, whose
+// anchors are visited where they are defined.
+func yamlScalarExists(node *yaml.Node, value string) bool {
+	if node.Kind == yaml.ScalarNode {
+		return node.ShortTag() != "!!null" && node.Value == value
+	}
+	first, step := 0, 1
+	if node.Kind == yaml.MappingNode {
+		first, step = 1, 2
+	}
+	for i := first; i < len(node.Content); i += step {
+		if yamlScalarExists(node.Content[i], value) {
+			return true
+		}
+	}
+	return false
+}
+
+// managementSecretKeyPath returns the management secret key path used by data: the v8
+// path when the document defines it, the legacy path otherwise.
+func managementSecretKeyPath(data []byte) []string {
+	var source yaml.Node
+	if yaml.Unmarshal(data, &source) == nil && len(source.Content) > 0 && yamlPath(expandConfigAliases(source.Content[0]), "management.secret-key") != nil {
+		return []string{"management", "secret-key"}
+	}
+	return []string{"remote-management", "secret-key"}
 }
 
 // LoadConfigOptional reads YAML from configFile.
@@ -122,12 +247,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
 		// Preserve YAML comments and ordering; update only the nested key.
-		secretPath := []string{"remote-management", "secret-key"}
-		var source yaml.Node
-		if yaml.Unmarshal(data, &source) == nil && len(source.Content) > 0 && yamlPath(expandConfigAliases(source.Content[0]), "management.secret-key") != nil {
-			secretPath[0] = "management"
-		}
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, secretPath, hashed)
+		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed)
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
@@ -224,6 +344,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
 		}
 	}
+
+	// Record the exact bytes this config was parsed from, so a consumer can tell
+	// it apart from a newer version of the file.
+	cfg.SourceHash = ComputeSourceHash(data)
 
 	// Return the populated configuration struct.
 	return &cfg, nil

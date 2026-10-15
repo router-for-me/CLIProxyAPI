@@ -386,3 +386,41 @@ func TestClaudeMessagesHandlerSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *te
 		t.Fatalf("missing Claude SSE JSON error event after keepalive: %q", body)
 	}
 }
+
+func TestClaudeMessagesHandlerDeduplicatesTranslatedSSEErrorAndTerminalChunkError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	chunks := make(chan coreexecutor.StreamChunk, 2)
+	executor := &preFTKeepAliveClaudeExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "dedup-sse-error-claude-model"
+	auth := &coreauth.Auth{ID: "dedup-sse-error-claude-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	const sseErrorChunk = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"m\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Gemini response finished with MALFORMED_FUNCTION_CALL\"}}\n\n"
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(sseErrorChunk)}
+	chunks <- coreexecutor.StreamChunk{Err: errors.New(`{"type":"error","error":{"type":"api_error","message":"Gemini response finished with MALFORMED_FUNCTION_CALL"}}`)}
+	close(chunks)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewClaudeCodeAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/messages", h.ClaudeMessages)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{\"model\":\""+model+"\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	body := recorder.Body.String()
+	if got := strings.Count(body, "event: error\n"); got != 1 {
+		t.Fatalf("SSE error event count = %d, want 1; body=%q", got, body)
+	}
+}

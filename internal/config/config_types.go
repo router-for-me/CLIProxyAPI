@@ -128,16 +128,31 @@ type ClaudeConfig struct {
 // Claude Code, package, and runtime versions exactly match this baseline; unmeasured
 // versions use the configured values. Timeout remains a fallback. Stabilized profiles
 // also pin OS and Arch and never learn newer software versions automatically.
+// AnthropicBetaStrip and AnthropicBetaAppend are exact-name operator overrides applied
+// to the final Anthropic-Beta set; InjectDiagnostics and ClientRequestID tune the
+// first-party Claude Code CLI request shape.
 type ClaudeHeaderDefaults struct {
-	UserAgent              string `yaml:"user-agent" json:"user-agent"`
-	PackageVersion         string `yaml:"package-version" json:"package-version"`
-	RuntimeVersion         string `yaml:"runtime-version" json:"runtime-version"`
-	OS                     string `yaml:"os" json:"os"`
-	Arch                   string `yaml:"arch" json:"arch"`
-	Timeout                string `yaml:"timeout" json:"timeout"`
-	Timezone               string `yaml:"timezone" json:"timezone"`
-	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+	UserAgent              string   `yaml:"user-agent" json:"user-agent"`
+	PackageVersion         string   `yaml:"package-version" json:"package-version"`
+	RuntimeVersion         string   `yaml:"runtime-version" json:"runtime-version"`
+	OS                     string   `yaml:"os" json:"os"`
+	Arch                   string   `yaml:"arch" json:"arch"`
+	Timeout                string   `yaml:"timeout" json:"timeout"`
+	Timezone               string   `yaml:"timezone" json:"timezone"`
+	StabilizeDeviceProfile *bool    `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+	AnthropicBetaStrip     []string `yaml:"anthropic-beta-strip,omitempty" json:"anthropic-beta-strip,omitempty"`
+	AnthropicBetaAppend    []string `yaml:"anthropic-beta-append,omitempty" json:"anthropic-beta-append,omitempty"`
+	InjectDiagnostics      *bool    `yaml:"inject-diagnostics,omitempty" json:"inject-diagnostics,omitempty"`
+	ClientRequestID        string   `yaml:"client-request-id,omitempty" json:"client-request-id,omitempty"`
 }
+
+// Supported ClaudeHeaderDefaults.ClientRequestID values. An empty value means
+// ClaudeClientRequestIDOn.
+const (
+	ClaudeClientRequestIDOn          = "on"
+	ClaudeClientRequestIDOff         = "off"
+	ClaudeClientRequestIDPassthrough = "passthrough"
+)
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
 // model requests for OAuth/file-backed auth when the client omits them.

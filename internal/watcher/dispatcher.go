@@ -204,6 +204,8 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: auth.Clone()})
 		}
 	}
+	// A missing ID in a full scan does not imply its source file was removed.
+	// Leave these deletes unmarked so content/config changes still remove auths.
 	for id := range w.currentAuths {
 		if _, ok := newState[id]; !ok {
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})

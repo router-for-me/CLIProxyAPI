@@ -1242,6 +1242,189 @@ func TestNormalizeKimiToolsDirect(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorStreamNormalizesNamespacedToolSchemasFromResponses(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"usage\":{\"total_tokens\":2}}}\n\n",
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+
+	payload := []byte(`{
+		"model": "kimi-k3",
+		"stream": true,
+		"input": [
+			{"type": "message", "role": "user", "content": "Reply with OK."},
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "mcp__extra",
+						"tools": [
+							{
+								"type": "function",
+								"name": "extra_fn",
+								"parameters": {
+									"$defs": {"val": {"type": "string"}},
+									"properties": {"arg": {"$ref": "#/$defs/val"}}
+								}
+							}
+						]
+					}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "mcp__rea",
+				"tools": [
+					{
+						"type": "function",
+						"name": "capture_native_ui_scenario",
+						"description": "Capture a native UI scenario.",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"steps": {"$ref": "#/$defs/__schema6"}
+							},
+							"required": ["steps"],
+							"additionalProperties": false,
+							"$defs": {
+								"__schema6": {
+									"type": "array",
+									"items": {"$ref": "#/$defs/__schema7"},
+									"minItems": 1
+								},
+								"__schema7": {
+									"oneOf": [
+										{
+											"type": "object",
+											"properties": {
+												"kind": {"type": "string", "enum": ["click"]},
+												"path": {
+													"type": "array",
+													"items": {"$ref": "#/$defs/__schema8"}
+												}
+											},
+											"required": ["kind", "path"],
+											"additionalProperties": false
+										},
+										{
+											"type": "object",
+											"properties": {
+												"direction": {
+													"type": "string",
+													"enum": ["increment", "decrement"]
+												},
+												"kind": {"type": "string", "enum": ["scroll"]},
+												"path": {
+													"type": "array",
+													"items": {"$ref": "#/$defs/__schema9"}
+												}
+											},
+											"required": ["kind", "path", "direction"],
+											"additionalProperties": false
+										},
+										{
+											"type": "object",
+											"properties": {
+												"kind": {"type": "string", "enum": ["key-entry"]},
+												"path": {
+													"type": "array",
+													"items": {"$ref": "#/$defs/__schema10"}
+												},
+												"text": {"type": "string"}
+											},
+											"required": ["kind", "path", "text"],
+											"additionalProperties": false
+										},
+										{
+											"type": "object",
+											"properties": {
+												"kind": {"type": "string", "enum": ["wait"]},
+												"milliseconds": {"type": "integer"}
+											},
+											"required": ["kind", "milliseconds"],
+											"additionalProperties": false
+										}
+									]
+								},
+								"__schema8": {"type": "integer"},
+								"__schema9": {"type": "integer"},
+								"__schema10": {"type": "integer"}
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	streamResult, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+		Stream:          true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if streamResult != nil && streamResult.Chunks != nil {
+		for range streamResult.Chunks {
+		}
+	}
+
+	nestedTool := gjson.GetBytes(upstreamBody, "tools.0.tools.0")
+	if !nestedTool.Exists() {
+		t.Fatalf("upstream namespaced tool not found: %s", upstreamBody)
+	}
+	if defs := nestedTool.Get("parameters.$defs"); defs.Exists() {
+		t.Fatalf("upstream namespaced tool parameter still contains $defs: %s", nestedTool.Get("parameters").Raw)
+	}
+	if ref := nestedTool.Get("parameters.properties.steps.$ref"); ref.Exists() {
+		t.Fatalf("upstream namespaced tool parameter still contains $ref at properties.steps: %s", nestedTool.Get("parameters").Raw)
+	}
+	if got := nestedTool.Get("parameters.properties.steps.type").String(); got != "array" {
+		t.Fatalf("steps.type = %q, want array", got)
+	}
+	if got := nestedTool.Get("parameters.properties.steps.items.oneOf.0.properties.path.items.type").String(); got != "integer" {
+		t.Fatalf("steps.items.oneOf.0.properties.path.items.type = %q, want integer", got)
+	}
+
+	extraTool := gjson.GetBytes(upstreamBody, "input.1.tools.0.tools.0")
+	if !extraTool.Exists() {
+		t.Fatalf("upstream additional_tools namespaced tool not found: %s", upstreamBody)
+	}
+	if defs := extraTool.Get("parameters.$defs"); defs.Exists() {
+		t.Fatalf("upstream additional_tools namespaced tool parameter still contains $defs: %s", extraTool.Get("parameters").Raw)
+	}
+	if got := extraTool.Get("parameters.properties.arg.type").String(); got != "string" {
+		t.Fatalf("extra_fn arg.type = %q, want string", got)
+	}
+	if got := extraTool.Get("parameters.type").String(); got != "object" {
+		t.Fatalf("extra_fn parameters.type = %q, want object", got)
+	}
+}
+
 func TestNormalizeKimiTemperature(t *testing.T) {
 	tests := []struct {
 		name      string

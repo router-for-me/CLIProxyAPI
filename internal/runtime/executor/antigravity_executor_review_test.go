@@ -38,22 +38,26 @@ func TestAntigravityBuildRequestPreservesHiddenThinking(t *testing.T) {
 }
 
 func TestAntigravityBuildRequestClampsNumericBudget(t *testing.T) {
-	for _, tc := range []struct {
-		budget int
-		level  string
-	}{{1, "low"}, {512, "low"}, {8192, "medium"}, {32768, "high"}} {
-		payload, err := sjson.SetBytes([]byte(`{"request":{}}`), "request.generationConfig.thinkingConfig.thinkingBudget", tc.budget)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body := buildRequestBodyFromRawPayload(t, "gemini-3.8-flash", payload)
-		encoded, errMarshal := sjson.SetBytes([]byte(`{}`), "body", body)
-		if errMarshal != nil {
-			t.Fatal(errMarshal)
-		}
-		if got := gjson.GetBytes(encoded, "body.request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.level {
-			t.Errorf("budget=%d: level=%q, want %q", tc.budget, got, tc.level)
-		}
+	for _, model := range []string{"gemini-3.8-flash", "gemini-4-argon"} {
+		t.Run(model, func(t *testing.T) {
+			for _, tc := range []struct {
+				budget int
+				level  string
+			}{{1, "low"}, {512, "low"}, {8192, "medium"}, {32768, "high"}} {
+				payload, err := sjson.SetBytes([]byte(`{"request":{}}`), "request.generationConfig.thinkingConfig.thinkingBudget", tc.budget)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body := buildRequestBodyFromRawPayload(t, model, payload)
+				encoded, errMarshal := sjson.SetBytes([]byte(`{}`), "body", body)
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				if got := gjson.GetBytes(encoded, "body.request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.level {
+					t.Errorf("budget=%d: level=%q, want %q", tc.budget, got, tc.level)
+				}
+			}
+		})
 	}
 }
 

@@ -296,11 +296,13 @@ func firstPostForm(c *gin.Context, keys ...string) string {
 }
 
 func (h *OpenAIAPIHandler) videoAuthBindingTTL() time.Duration {
-	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
-		raw := strings.TrimSpace(h.Cfg.VideoResultAuthCacheTTL)
-		if raw != "" {
-			if ttl, err := time.ParseDuration(raw); err == nil && ttl > 0 {
-				return ttl
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil {
+			raw := strings.TrimSpace(cfg.VideoResultAuthCacheTTL)
+			if raw != "" {
+				if ttl, err := time.ParseDuration(raw); err == nil && ttl > 0 {
+					return ttl
+				}
 			}
 		}
 	}
@@ -947,8 +949,10 @@ func (h *OpenAIAPIHandler) videoContentHTTPClient(c *gin.Context) *http.Client {
 		ctx = c.Request.Context()
 	}
 	var cfg *config.Config
-	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
-		cfg = &config.Config{SDKConfig: *h.Cfg}
+	if h != nil {
+		if sdkCfg := h.CurrentConfig(); sdkCfg != nil {
+			cfg = &config.Config{SDKConfig: *sdkCfg}
+		}
 	}
 	return helps.NewProxyAwareHTTPClient(ctx, cfg, h.videoContentDownloadAuth(c), 0)
 }

@@ -130,18 +130,28 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	if err != nil {
 		return err
 	}
-	var root yaml.Node
-	if err = yaml.Unmarshal(data, &root); err != nil {
+	data, err = updateNestedScalarYAML(data, path, value)
+	if err != nil {
 		return err
 	}
+	return os.WriteFile(configFile, data, 0600)
+}
+
+// updateNestedScalarYAML returns data with the nested scalar key path like ["a","b"] set to
+// value, preserving comments and positions.
+func updateNestedScalarYAML(data []byte, path []string, value string) ([]byte, error) {
+	var root yaml.Node
+	if errUnmarshal := yaml.Unmarshal(data, &root); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return fmt.Errorf("invalid yaml document structure")
+		return nil, fmt.Errorf("invalid yaml document structure")
 	}
 	// Resolve aliases and merge keys before updating a path. Otherwise replacing
 	// an alias with a mapping drops inherited siblings or mutates a shared anchor.
 	var decoded map[string]any
-	if err = root.Decode(&decoded); err != nil {
-		return err
+	if errDecode := root.Decode(&decoded); errDecode != nil {
+		return nil, errDecode
 	}
 	root.Content[0] = expandConfigAliases(root.Content[0])
 	node := root.Content[0]
@@ -162,24 +172,17 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if err = enc.Encode(&root); err != nil {
+	if errEncode := enc.Encode(&root); errEncode != nil {
 		_ = enc.Close()
-		return err
+		return nil, errEncode
 	}
-	if err = enc.Close(); err != nil {
-		return err
+	if errClose := enc.Close(); errClose != nil {
+		return nil, errClose
 	}
-	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	return NormalizeCommentIndentation(buf.Bytes()), nil
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.

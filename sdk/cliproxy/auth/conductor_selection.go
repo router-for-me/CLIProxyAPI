@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"reflect"
@@ -1561,6 +1562,69 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 		return nil, false
 	}
 	return auth.Clone(), true
+}
+
+// PublishIfRegistrationCurrent serializes the final model-registration
+// publication against identity mutations for this auth, then calls publish
+// only if the manager still holds auth with the same model-registration
+// inputs. It does not persist or clone auth state. publish must be fast and
+// must not re-enter the manager.
+func (m *Manager) PublishIfRegistrationCurrent(id string, registrationEpoch uint64, prefix, provider string, disabled bool, authKind string, attributes map[string]string, publish func() bool) bool {
+	if m == nil || id == "" || publish == nil {
+		return false
+	}
+	releaseMutation := m.lockAuthMutation(id)
+	defer releaseMutation()
+	m.mu.RLock()
+	current, ok := m.auths[id]
+	matches := ok && current != nil && modelRegistrationInputsMatch(current, registrationEpoch, prefix, provider, disabled, authKind, attributes)
+	m.mu.RUnlock()
+	if !matches {
+		return false
+	}
+	return publish()
+}
+
+// UpdateIfRegistrationCurrent applies a plugin-returned auth update only
+// while the manager still holds the exact registration inputs the plugin
+// computation started from. It prevents an old plugin result from adopting
+// a removed or re-registered identity merely because its zero registration
+// epoch would otherwise inherit the current epoch during Update.
+func (m *Manager) UpdateIfRegistrationCurrent(ctx context.Context, base *Auth, updated *Auth) (*Auth, bool, error) {
+	if m == nil || base == nil || updated == nil || base.ID == "" || updated.ID != base.ID {
+		return nil, false, nil
+	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, base.ID)
+	if errMutation != nil {
+		return nil, false, errMutation
+	}
+	defer releaseMutation()
+	m.mu.RLock()
+	current, ok := m.auths[base.ID]
+	matches := ok && current != nil && modelRegistrationInputsMatch(current, base.RegistrationEpoch, base.Prefix, base.Provider, base.Disabled || base.Status == StatusDisabled, base.AuthKind(), base.Attributes)
+	m.mu.RUnlock()
+	if !matches {
+		return nil, false, nil
+	}
+	committedAuth, didCommit, persistCooldown, errUpdate := m.updateInternalLocked(ctx, nil, updated, updateModeReplace)
+	releaseMutation()
+	if errUpdate == nil && didCommit && committedAuth != nil {
+		m.finishAuthUpdate(ctx, committedAuth, persistCooldown)
+	}
+	return committedAuth, errUpdate == nil && didCommit && committedAuth != nil, errUpdate
+}
+
+func modelRegistrationInputsMatch(current *Auth, registrationEpoch uint64, prefix, provider string, disabled bool, authKind string, attributes map[string]string) bool {
+	if current == nil {
+		return false
+	}
+	currentDisabled := current.Disabled || current.Status == StatusDisabled
+	return current.RegistrationEpoch == registrationEpoch &&
+		current.Prefix == prefix &&
+		current.Provider == provider &&
+		currentDisabled == disabled &&
+		current.AuthKind() == authKind &&
+		maps.Equal(current.Attributes, attributes)
 }
 
 // GetExecutionSessionAuthByID retrieves a Home runtime auth scoped to an execution session.

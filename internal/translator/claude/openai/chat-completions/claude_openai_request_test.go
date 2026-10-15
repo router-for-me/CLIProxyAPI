@@ -781,9 +781,79 @@ func TestConvertOpenAIRequestToClaude_MaxTokensAndMaxCompletionTokens(t *testing
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out, _ := ConvertOpenAIRequestToClaude("claude-3-7-sonnet-20250219", []byte(tc.rawJSON), false)
+			out, _ := ConvertOpenAIRequestToClaude("claude-opus-4-1-20250805", []byte(tc.rawJSON), false)
 			got := gjson.GetBytes(out, "max_tokens").Int()
 			if got != tc.wantLimit {
+				t.Fatalf("max_tokens = %d, want %d. Output: %s", got, tc.wantLimit, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_OmittedMaxTokensUsesRegistryLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		rawJSON   string
+		wantLimit int64
+	}{
+		{
+			name:      "opus 5.5 omitted field uses 128k registry limit",
+			model:     "claude-opus-5-5",
+			rawJSON:   `{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 128000,
+		},
+		{
+			name:      "opus 5.5 null max_tokens uses 128k registry limit",
+			model:     "claude-opus-5-5",
+			rawJSON:   `{"model":"claude-opus-5-5","max_tokens":null,"messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 128000,
+		},
+		{
+			name:      "opus 5.5 null max_completion_tokens uses 128k registry limit",
+			model:     "claude-opus-5-5",
+			rawJSON:   `{"model":"claude-opus-5-5","max_completion_tokens":null,"messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 128000,
+		},
+		{
+			name:      "null max_tokens falls back to explicit max_completion_tokens",
+			model:     "claude-opus-5-5",
+			rawJSON:   `{"model":"claude-opus-5-5","max_tokens":null,"max_completion_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 4096,
+		},
+		{
+			name:      "sonnet 4.6 omitted field uses 64k registry limit",
+			model:     "claude-sonnet-4-6",
+			rawJSON:   `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 64000,
+		},
+		{
+			name:      "fable 5.1 omitted field keeps conservative 64k ceiling",
+			model:     "claude-fable-5-1",
+			rawJSON:   `{"model":"claude-fable-5-1","messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 64000,
+		},
+		{
+			name:      "haiku 3.5 omitted field uses 8192 registry limit",
+			model:     "claude-3-5-haiku-20241022",
+			rawJSON:   `{"model":"claude-3-5-haiku-20241022","messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 8192,
+		},
+		{
+			name:      "unregistered model omitted field falls back to 32000",
+			model:     "claude-test",
+			rawJSON:   `{"model":"claude-test","messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 32000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errConvert := ConvertOpenAIRequestToClaude(tc.model, []byte(tc.rawJSON), false)
+			if errConvert != nil {
+				t.Fatalf("convert: %v", errConvert)
+			}
+			if got := gjson.GetBytes(out, "max_tokens").Int(); got != tc.wantLimit {
 				t.Fatalf("max_tokens = %d, want %d. Output: %s", got, tc.wantLimit, string(out))
 			}
 		})

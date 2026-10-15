@@ -19,21 +19,21 @@ import (
 )
 
 func TestAntigravityCatalogRetainsOnlyRawEntitlements(t *testing.T) {
-	hints, ok := parseAntigravityModelCapabilityHints([]byte(`{"models":{"gemini-3.8-flash-low":{},"gemini-3.1-pro-high":{}}}`))
+	hints, ok := parseAntigravityModelCapabilityHints([]byte(`{"models":{"gemini-3.8-flash-low":{},"gemini-3.1-pro-high":{},"gemini-4-argon-high":{}}}`))
 	if !ok {
 		t.Fatal("catalog parsing failed")
 	}
 	check := func(hints antigravityModelCapabilityHints) {
 		t.Helper()
-		if len(hints.ModelIDs) != 2 {
+		if len(hints.ModelIDs) != 3 {
 			t.Fatalf("catalog invented upstream IDs: %v", hints.ModelIDs)
 		}
-		for _, id := range []string{"gemini-3.8-flash-low", "gemini-3.1-pro-high"} {
+		for _, id := range []string{"gemini-3.8-flash-low", "gemini-3.1-pro-high", "gemini-4-argon-high"} {
 			if _, exists := hints.ModelIDs[id]; !exists {
 				t.Fatalf("raw entitlement %q was lost", id)
 			}
 		}
-		for _, id := range []string{"gemini-3.8-flash", "gemini-3.1-pro"} {
+		for _, id := range []string{"gemini-3.8-flash", "gemini-3.1-pro", "gemini-4-argon"} {
 			if !hasAntigravityModelEntitlement(hints, id) {
 				t.Fatalf("public model %q should remain entitled", id)
 			}
@@ -47,7 +47,7 @@ func TestAntigravityCatalogRetainsOnlyRawEntitlements(t *testing.T) {
 	}
 	check(restored)
 	svc := &Service{cfg: &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
-		"antigravity": {{Name: "gemini-3.8-flash", Alias: "flash-alias"}},
+		"antigravity": {{Name: "gemini-3.8-flash", Alias: "flash-alias"}, {Name: "gemini-4-argon", Alias: "argon-alias"}},
 	}}}
 	auth := &coreauth.Auth{ID: "restored-variant-alias", Provider: "antigravity", Prefix: "account"}
 	models := svc.antigravityModelsForHints(auth, restored)
@@ -59,6 +59,11 @@ func TestAntigravityCatalogRetainsOnlyRawEntitlements(t *testing.T) {
 			t.Fatalf("restored alias %q resolved to %q", id, got)
 		}
 	}
+	for _, id := range []string{"argon-alias", "account/argon-alias", "gemini-4-argon"} {
+		if got := helps.AntigravityUpstreamModel(auth, id); got != "gemini-4-argon-high" {
+			t.Fatalf("restored Argon alias %q resolved to %q", id, got)
+		}
+	}
 }
 
 func TestAntigravityPublishedVariantReachesSelectedAccountUpstream(t *testing.T) {
@@ -67,7 +72,7 @@ func TestAntigravityPublishedVariantReachesSelectedAccountUpstream(t *testing.T)
 	for _, tc := range []struct {
 		public string
 		raw    string
-	}{{"gemini-3.8-flash", "gemini-3.8-flash-low"}, {"gemini-3.8-flash", "gemini-3.8-flash-tiered"}, {"gemini-3.1-pro", "gemini-3.1-pro-high"}, {"gemini-3.8-flash", "gemini-3.8-flash-high"}} {
+	}{{"gemini-3.8-flash", "gemini-3.8-flash-low"}, {"gemini-3.8-flash", "gemini-3.8-flash-tiered"}, {"gemini-3.1-pro", "gemini-3.1-pro-high"}, {"gemini-3.8-flash", "gemini-3.8-flash-high"}, {"gemini-4-argon", "gemini-4-argon-high"}, {"gemini-4-argon", "gemini-4-argon-low"}, {"gemini-4-argon", "gemini-4-argon"}} {
 		t.Run(tc.raw, func(t *testing.T) {
 			seen := make(chan string, 2)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +112,9 @@ func TestAntigravityPublishedVariantReachesSelectedAccountUpstream(t *testing.T)
 			if !reg.ClientSupportsModel(auth.ID, tc.public) {
 				t.Fatalf("public model %q was not advertised", tc.public)
 			}
+			if tc.raw != tc.public && reg.ClientSupportsModel(auth.ID, tc.raw) {
+				t.Fatalf("raw variant %q must not be advertised as a separate model", tc.raw)
+			}
 			models := reg.GetModelsForClient(auth.ID)
 			for _, model := range models {
 				encoded, err := json.Marshal(model)
@@ -142,6 +150,33 @@ func TestAntigravityPublishedVariantReachesSelectedAccountUpstream(t *testing.T)
 			}
 			if got := <-seen; got != tc.raw {
 				t.Fatalf("stream model=%q, want %q", got, tc.raw)
+			}
+		})
+	}
+}
+
+func TestAntigravityArgonRequiresAccountEntitlement(t *testing.T) {
+	svc := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{ID: "argon-entitlement", Provider: "antigravity"}
+	for _, tc := range []struct {
+		name    string
+		catalog map[string]struct{}
+		want    bool
+	}{
+		{"unknown catalog retains fallback", nil, true},
+		{"empty catalog", map[string]struct{}{}, false},
+		{"other model only", map[string]struct{}{"gemini-3.8-flash-high": {}}, false},
+		{"raw high entitled", map[string]struct{}{"gemini-4-argon-high": {}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			found := false
+			for _, model := range svc.antigravityModelsForHints(auth, antigravityModelCapabilityHints{ModelIDs: tc.catalog}) {
+				if model.ID == "gemini-4-argon" {
+					found = true
+				}
+			}
+			if found != tc.want {
+				t.Fatalf("Argon advertised = %v, want %v", found, tc.want)
 			}
 		})
 	}

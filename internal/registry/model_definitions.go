@@ -591,7 +591,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 }
 
 // WithAntigravityBuiltins injects standard non-suffixed Antigravity Gemini model definitions
-// (e.g. gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro) that should
+// (e.g. gemini-4-argon, gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro) that should
 // not depend on remote models.json updates.
 func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
 	filtered := make([]*ModelInfo, 0, len(models))
@@ -600,7 +600,8 @@ func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
 			continue
 		}
 		id := strings.ToLower(strings.TrimSpace(m.ID))
-		if id == "gemini-3.8-flash-high" || id == "gemini-3.8-flash-medium" || id == "gemini-3.8-flash-low" || id == "gemini-3.8-flash-tiered" ||
+		if id == "gemini-4-argon-high" || id == "gemini-4-argon-medium" || id == "gemini-4-argon-low" || id == "gemini-4-argon-tiered" ||
+			id == "gemini-3.8-flash-high" || id == "gemini-3.8-flash-medium" || id == "gemini-3.8-flash-low" || id == "gemini-3.8-flash-tiered" ||
 			id == "gemini-3.7-flash-high" || id == "gemini-3.7-flash-medium" || id == "gemini-3.7-flash-low" ||
 			id == "gemini-3.6-flash-high" || id == "gemini-3.6-flash-medium" || id == "gemini-3.6-flash-low" ||
 			id == "gemini-3.1-pro-low" || id == "gemini-3.1-pro-high" || id == "gemini-3.1-pro-medium" ||
@@ -610,6 +611,7 @@ func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
 		filtered = append(filtered, m)
 	}
 	return upsertModelInfos(filtered,
+		antigravityBuiltinGemini4ArgonModelInfo(),
 		antigravityBuiltinGemini38FlashModelInfo(),
 		antigravityBuiltinGemini37FlashModelInfo(),
 		antigravityBuiltinGemini36FlashModelInfo(),
@@ -625,6 +627,8 @@ func NormalizeAntigravityModelID(modelID string) string {
 
 func normalizeAntigravityModelID(modelID string) string {
 	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low", "gemini-4-argon-tiered":
+		return "gemini-4-argon"
 	case "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "gemini-3.8-flash-tiered":
 		return "gemini-3.8-flash"
 	case "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low":
@@ -635,6 +639,33 @@ func normalizeAntigravityModelID(modelID string) string {
 		return "gemini-3.1-pro"
 	default:
 		return modelID
+	}
+}
+
+func antigravityBuiltinGemini4ArgonModelInfo() *ModelInfo {
+	webSearch := true
+	return &ModelInfo{
+		ID:                  "gemini-4-argon",
+		Object:              "model",
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		DisplayName:         "Gemini 4 Argon",
+		Name:                "gemini-4-argon",
+		Description:         "Gemini 4 Argon",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 1048576,
+		SupportsWebSearch:   true,
+		Thinking: &ThinkingSupport{
+			Min:            1,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		SupportedInputModalities:  []string{"text", "image", "audio", "video"},
+		SupportedOutputModalities: []string{"text"},
+		NativeCapabilities: &NativeCapabilities{
+			WebSearch: &webSearch,
+		},
 	}
 }
 
