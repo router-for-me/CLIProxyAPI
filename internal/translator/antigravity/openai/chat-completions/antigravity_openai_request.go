@@ -149,14 +149,21 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			content := m.Get("content")
 
 			if (role == "system" || role == "developer") && len(arr) > 1 && !hasEncounteredConversation {
-				// system -> request.systemInstruction as a user message style
+				// system -> request.systemInstruction as a user message style.
+				// A leading Anthropic CLI identity sentence makes the Antigravity
+				// upstream reject the request, so drop the prefix and keep the rest.
+				appendSystemPart := func(text string) {
+					if stripped := util.StripLeadingCLIIdentityPrefix(text); stripped != "" {
+						systemParts = append(systemParts, antigravityOpenAITextPart(stripped))
+					}
+				}
 				if content.Type == gjson.String {
-					systemParts = append(systemParts, antigravityOpenAITextPart(content.String()))
+					appendSystemPart(content.String())
 				} else if content.IsObject() && content.Get("type").String() == "text" {
-					systemParts = append(systemParts, antigravityOpenAITextPart(content.Get("text").String()))
+					appendSystemPart(content.Get("text").String())
 				} else if content.IsArray() {
 					for _, contentPart := range content.Array() {
-						systemParts = append(systemParts, antigravityOpenAITextPart(contentPart.Get("text").String()))
+						appendSystemPart(contentPart.Get("text").String())
 					}
 				}
 			} else if role == "user" || role == "system" || role == "developer" {

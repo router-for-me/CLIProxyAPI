@@ -135,6 +135,40 @@ func TestConvertClaudeRequestToAntigravity_StripsClaudeCodeAttribution(t *testin
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_StripsLeadingCLIIdentityPrefix(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+		"system": [{"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nYou are an interactive agent that helps users."}]
+	}`)
+
+	output, _ := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected 1 system part after identity strip, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "You are an interactive agent that helps users." {
+		t.Fatalf("Unexpected system part: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DropsIdentityOnlySystem(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+		"system": "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+	}`)
+
+	output, _ := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "request.systemInstruction").Exists() {
+		t.Fatalf("Expected no systemInstruction after identity-only strip, got: %s", gjson.Get(outputStr, "request.systemInstruction").Raw)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserContent(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3.5-flash",

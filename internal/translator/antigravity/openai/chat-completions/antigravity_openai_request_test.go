@@ -8,6 +8,40 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToAntigravity_StripsLeadingCLIIdentityPrefix(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "system", "content": "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nYou are an interactive agent that helps users."},
+			{"role": "user", "content": "hi"}
+		]
+	}`
+
+	result, _ := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(result, "request.systemInstruction.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected 1 system part after identity strip, got %d: %s", len(parts), result)
+	}
+	if got := parts[0].Get("text").String(); got != "You are an interactive agent that helps users." {
+		t.Fatalf("Unexpected system part: %q. Output: %s", got, result)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravity_DropsIdentityOnlySystem(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "system", "content": "You are a Claude agent, built on Anthropic's Claude Agent SDK."},
+			{"role": "user", "content": "hi"}
+		]
+	}`
+
+	result, _ := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	if gjson.GetBytes(result, "request.systemInstruction").Exists() {
+		t.Fatalf("Expected no systemInstruction after identity-only strip, got: %s", result)
+	}
+}
+
 func TestConvertOpenAIRequestToAntigravitySkipsEmptyTextPartsWithoutNulls(t *testing.T) {
 	inputJSON := `{
 		"model": "gemini-3-flash",
