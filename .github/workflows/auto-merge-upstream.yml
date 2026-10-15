@@ -1,12 +1,11 @@
 name: Auto Merge Upstream Release
 on:
   schedule:
-    - cron: '0 */6 * * *'  # кажд 6ч merge main
-  workflow_dispatch:  # manual trigger
+    - cron: '0 */6 * * *'  # кажд 6ч
+  workflow_dispatch:
     inputs:
       ref:
-        description: 'Upstream ref (tag/main/dev)'
-        required: false
+        description: 'Upstream ref (main/dev/tag)'
         default: 'main'
 jobs:
   merge:
@@ -19,14 +18,9 @@ jobs:
     - name: Merge upstream
       run: |
         git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
-        git fetch upstream
+        git fetch upstream --tags
         REF=\${{ github.event.inputs.ref || 'main' }}
         git merge upstream/\$REF --no-ff -m "auto-merge upstream/\$REF @ \$(date)"
         git push origin main
-    - name: Tag patched
-      if: startsWith(github.ref, 'refs/tags/')
-      run: |
-        git tag -a "\${{ github.ref_name }}-patched" -m "patched \${{ github.ref_name }}"
-        git push origin --tags
     - name: Trigger docker-build-patched
       run: gh workflow run docker-build-patched.yml
