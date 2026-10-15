@@ -86,6 +86,7 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.Reason = cooldown.Reason
 	dst.NextRecoverAt = cooldown.NextRecoverAt
 	dst.BackoffLevel = cooldown.BackoffLevel
+	dst.RecordedAt = cooldown.RecordedAt
 }
 
 // collectQuotaSignals builds the bounded snapshot for a single response.

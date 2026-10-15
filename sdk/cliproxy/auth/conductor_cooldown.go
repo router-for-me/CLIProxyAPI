@@ -949,6 +949,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								Reason:        "quota",
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
+								RecordedAt:    now,
 							})
 							if result.CredentialScope && !disableCooling {
 								for _, otherState := range auth.ModelStates {
@@ -971,6 +972,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 											Reason:        "credential_quota",
 											NextRecoverAt: otherQuotaNext,
 											BackoffLevel:  backoffLevel,
+											RecordedAt:    now,
 										})
 									}
 								}
@@ -1252,6 +1254,10 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.Quota.BackoffLevel > merged.Quota.BackoffLevel {
 		merged.Quota.BackoffLevel = source.Quota.BackoffLevel
 	}
+	merged.Quota.RecordedAt = target.Quota.RecordedAt
+	if source.Quota.RecordedAt.After(merged.Quota.RecordedAt) {
+		merged.Quota.RecordedAt = source.Quota.RecordedAt
+	}
 	if source.UpdatedAt.After(merged.UpdatedAt) {
 		merged.UpdatedAt = source.UpdatedAt
 	}
@@ -1285,7 +1291,7 @@ func successPredatesQuotaCooldown(state *ModelState, startedAt, now time.Time) b
 	if !state.Quota.NextRecoverAt.After(now) {
 		return false
 	}
-	return startedAt.Before(state.UpdatedAt)
+	return startedAt.Before(state.Quota.RecordedAt)
 }
 
 func resetModelState(state *ModelState, now time.Time) {

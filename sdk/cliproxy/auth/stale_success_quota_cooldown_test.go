@@ -119,18 +119,71 @@ func TestMarkResult_SuccessWithoutDispatchTimeClearsCooldown(t *testing.T) {
 	}
 }
 
+func TestMarkResult_UnrelatedFailureDoesNotMoveQuotaRecordedAt(t *testing.T) {
+	const model = "gemini-quota-then-server-error"
+	manager, auth := registerStaleSuccessTestAuth(t, model)
+
+	// A 429 records the quota cooldown.
+	markQuotaExhausted(manager, auth, model, time.Now(), 2*time.Hour)
+	recorded, ok := manager.GetByID(auth.ID)
+	if !ok || recorded == nil || recorded.ModelStates[model] == nil {
+		t.Fatal("auth model state not found")
+	}
+	recordedAt := recorded.ModelStates[model].Quota.RecordedAt
+	if recordedAt.IsZero() {
+		t.Fatal("quota cooldown did not record its time")
+	}
+
+	// A fresh request is dispatched after the quota error...
+	freshDispatch := time.Now().Add(time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
+
+	// ...then an older request fails with a server error, which updates the
+	// model state but is not a quota observation.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:    auth.ID,
+		Provider:  "antigravity",
+		Model:     model,
+		Success:   false,
+		Error:     &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream error"},
+		StartedAt: recordedAt.Add(-time.Second),
+	})
+	afterFailure, _ := manager.GetByID(auth.ID)
+	if got := afterFailure.ModelStates[model].Quota.RecordedAt; !got.Equal(recordedAt) {
+		t.Fatalf("server error moved quota RecordedAt from %v to %v", recordedAt, got)
+	}
+
+	// The fresh request succeeds: it was dispatched after the quota cooldown
+	// was recorded, so the cooldown is cleared.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:    auth.ID,
+		Provider:  "antigravity",
+		Model:     model,
+		Success:   true,
+		StartedAt: freshDispatch,
+	})
+	updated, _ := manager.GetByID(auth.ID)
+	if blocked, reason, _ := isAuthBlockedForModel(updated, model, time.Now()); blocked {
+		t.Fatalf("success dispatched after the quota error stayed blocked after an unrelated failure: reason=%v state=%+v", reason, updated.ModelStates[model])
+	}
+}
+
 func TestSuccessPredatesQuotaCooldown(t *testing.T) {
 	now := time.Now()
 	recorded := now.Add(-time.Second)
 	active := &ModelState{
-		UpdatedAt: recorded,
-		Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour)},
+		UpdatedAt: now,
+		Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour), RecordedAt: recorded},
 	}
 	expired := &ModelState{
-		UpdatedAt: recorded,
-		Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(-time.Minute)},
+		UpdatedAt: now,
+		Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(-time.Minute), RecordedAt: recorded},
 	}
-	notExceeded := &ModelState{UpdatedAt: recorded}
+	notExceeded := &ModelState{UpdatedAt: now}
+	unrecorded := &ModelState{
+		UpdatedAt: now,
+		Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour)},
+	}
 
 	tests := []struct {
 		name      string
@@ -143,6 +196,7 @@ func TestSuccessPredatesQuotaCooldown(t *testing.T) {
 		{name: "dispatched at the same instant", state: active, startedAt: recorded, want: false},
 		{name: "cooldown already expired", state: expired, startedAt: recorded.Add(-time.Millisecond), want: false},
 		{name: "no quota cooldown", state: notExceeded, startedAt: recorded.Add(-time.Millisecond), want: false},
+		{name: "cooldown without recorded time", state: unrecorded, startedAt: recorded.Add(-time.Millisecond), want: false},
 		{name: "unknown dispatch time", state: active, startedAt: time.Time{}, want: false},
 		{name: "no model state", state: nil, startedAt: recorded.Add(-time.Millisecond), want: false},
 	}
