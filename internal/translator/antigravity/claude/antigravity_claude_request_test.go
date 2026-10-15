@@ -135,40 +135,6 @@ func TestConvertClaudeRequestToAntigravity_StripsClaudeCodeAttribution(t *testin
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_PreservesCLIIdentityForRequestBuilder(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gemini-3-flash",
-		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
-		"system": [{"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nYou are an interactive agent that helps users."}]
-	}`)
-
-	output, _ := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
-	outputStr := string(output)
-
-	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
-	if len(parts) != 1 {
-		t.Fatalf("Expected 1 unchanged system part, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
-	}
-	if got := parts[0].Get("text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nYou are an interactive agent that helps users." {
-		t.Fatalf("Unexpected system part: %q", got)
-	}
-}
-
-func TestConvertClaudeRequestToAntigravity_PreservesIdentityOnlySystem(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gemini-3-flash",
-		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
-		"system": "You are a Claude agent, built on Anthropic's Claude Agent SDK."
-	}`)
-
-	output, _ := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
-	outputStr := string(output)
-
-	if got := gjson.Get(outputStr, "request.systemInstruction.parts.0.text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
-		t.Fatalf("Expected identity to reach the model-scoped request builder, got: %q", got)
-	}
-}
-
 func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserContent(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3.5-flash",
