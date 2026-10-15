@@ -28,6 +28,7 @@ var corsExposedResponseHeaders = []string{
 	"X-SERVER-BUILD-DATE",
 	"Location",
 	"Retry-After",
+	"X-Should-Retry",
 	"X-Request-Id",
 	"OpenAI-Request-Id",
 }

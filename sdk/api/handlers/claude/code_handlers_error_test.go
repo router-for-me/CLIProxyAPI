@@ -286,6 +286,35 @@ func TestWriteClaudeErrorResponse_IncludesRetryAfterForModelCooldownDefaultSetti
 	}
 }
 
+func TestWriteClaudeErrorResponse_LongQuotaCooldownIsFinalRateLimitError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      coreauth.NewModelCooldownError("claude-opus-4-6", "antigravity", 140*time.Hour),
+	})
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After = %q, want absent", got)
+	}
+	if got := recorder.Header().Get("X-Should-Retry"); got != "false" {
+		t.Fatalf("X-Should-Retry = %q, want false", got)
+	}
+	body := recorder.Body.Bytes()
+	if got := gjson.GetBytes(body, "type").String(); got != "error" {
+		t.Fatalf("type = %q, want error; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "error.type").String(); got != "rate_limit_error" {
+		t.Fatalf("error.type = %q, want rate_limit_error; body=%s", got, body)
+	}
+}
+
 func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	wantErr := &interfaces.ErrorMessage{
 		StatusCode: http.StatusBadRequest,

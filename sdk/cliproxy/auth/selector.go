@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -83,8 +84,23 @@ const (
 type modelCooldownError struct {
 	model    string
 	resetIn  time.Duration
+	resetAt  time.Time
 	provider string
 	cause    error
+}
+
+// QuotaExhaustedCooldownThreshold separates short cooldowns, which clients should
+// retry after Retry-After, from quota exhaustion that will not clear within a
+// reasonable client retry budget. A cooldown strictly longer than this is
+// reported as a usage limit that OpenAI and Anthropic API clients do not retry.
+const QuotaExhaustedCooldownThreshold = 5 * time.Minute
+
+// IsQuotaExhaustedError reports whether err is a model cooldown in which every
+// candidate credential is out of quota for longer than
+// QuotaExhaustedCooldownThreshold.
+func IsQuotaExhaustedError(err error) bool {
+	var cooldown *modelCooldownError
+	return errors.As(err, &cooldown) && cooldown.IsQuotaExhausted()
 }
 
 // NewModelCooldownError creates an error representing model-level cooldown.
@@ -104,12 +120,19 @@ func newModelCooldownErrorWithCause(model, provider string, resetIn time.Duratio
 		model:    model,
 		provider: provider,
 		resetIn:  resetIn,
+		resetAt:  time.Now().Add(resetIn),
 		cause:    cause,
 	}
 }
 
 func (e *modelCooldownError) IsModelCooldown() bool {
 	return true
+}
+
+// IsQuotaExhausted reports whether every candidate credential is out of quota for
+// longer than clients should keep retrying.
+func (e *modelCooldownError) IsQuotaExhausted() bool {
+	return e != nil && e.resetIn > QuotaExhaustedCooldownThreshold
 }
 
 func (e *modelCooldownError) Unwrap() error {
@@ -119,31 +142,59 @@ func (e *modelCooldownError) Unwrap() error {
 	return e.cause
 }
 
-func (e *modelCooldownError) Error() string {
-	modelName := e.model
-	if modelName == "" {
-		modelName = "requested model"
+func (e *modelCooldownError) resetSeconds() int {
+	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
+	if resetSeconds < 0 {
+		return 0
 	}
-	message := fmt.Sprintf("All credentials for model %s are cooling down", modelName)
+	return resetSeconds
+}
+
+func (e *modelCooldownError) displayDuration() time.Duration {
+	if e.resetIn > 0 && e.resetIn < time.Second {
+		return time.Second
+	}
+	return e.resetIn.Round(time.Second)
+}
+
+func (e *modelCooldownError) modelName() string {
+	if e.model == "" {
+		return "requested model"
+	}
+	return e.model
+}
+
+func (e *modelCooldownError) quotaMessage() string {
+	message := fmt.Sprintf("Usage limit reached: all credentials for model %s have exhausted their quota", e.modelName())
 	if e.provider != "" {
 		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
+	return fmt.Sprintf("%s. Try again in %s.", message, e.displayDuration().String())
+}
+
+func (e *modelCooldownError) Error() string {
+	quotaExhausted := e.IsQuotaExhausted()
+	message := fmt.Sprintf("All credentials for model %s are cooling down", e.modelName())
+	if e.provider != "" {
+		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}
-	displayDuration := e.resetIn
-	if displayDuration > 0 && displayDuration < time.Second {
-		displayDuration = time.Second
-	} else {
-		displayDuration = displayDuration.Round(time.Second)
+	if quotaExhausted {
+		message = e.quotaMessage()
 	}
 	errorBody := map[string]any{
 		"code":          "model_cooldown",
 		"message":       message,
 		"model":         e.model,
-		"reset_time":    displayDuration.String(),
-		"reset_seconds": resetSeconds,
+		"reset_time":    e.displayDuration().String(),
+		"reset_seconds": e.resetSeconds(),
+	}
+	if quotaExhausted {
+		// OpenAI API clients classify a 429 by error.type: usage_limit_reached is
+		// final and resets_at tells the user when to come back. The code stays
+		// model_cooldown so existing consumers keep matching on it.
+		errorBody["type"] = "usage_limit_reached"
+		errorBody["resets_at"] = e.resetAt.Unix()
+		errorBody["retryable"] = false
 	}
 	if e.provider != "" {
 		errorBody["provider"] = e.provider
@@ -158,7 +209,7 @@ func (e *modelCooldownError) Error() string {
 	payload := map[string]any{"error": errorBody}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Sprintf(`{"error":{"code":"model_cooldown","message":"%s"}}`, message)
+		return fmt.Sprintf(`{"error":{"code":"model_cooldown","message":%q}}`, message)
 	}
 	return string(data)
 }
@@ -353,11 +404,14 @@ func (e *modelCooldownError) StatusCode() int {
 func (e *modelCooldownError) Headers() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
+	if e.IsQuotaExhausted() {
+		// A long cooldown carries no Retry-After: clients that honor it would sleep
+		// through the whole window. X-Should-Retry is honored by the official
+		// OpenAI and Anthropic SDKs ahead of the status code.
+		headers.Set("X-Should-Retry", "false")
+		return headers
 	}
-	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
+	headers.Set("Retry-After", strconv.Itoa(e.resetSeconds()))
 	return headers
 }
 
