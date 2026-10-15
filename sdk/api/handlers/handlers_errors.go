@@ -113,6 +113,21 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 	return enriched
 }
 
+// WriteSafeRetryHeaders copies the retry guidance CPA derives for local selection
+// errors onto the response. X-Should-Retry is set only when every candidate
+// credential is out of quota for longer than a client retry budget can cover.
+func WriteSafeRetryHeaders(c *gin.Context, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	safe := coreauth.SafeResponseHeaders(err)
+	for _, name := range []string{"Retry-After", "X-Should-Retry"} {
+		for _, value := range safe.Values(name) {
+			c.Writer.Header().Add(name, value)
+		}
+	}
+}
+
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
@@ -124,9 +139,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		return
 	}
 	if msg != nil && msg.Error != nil {
-		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
-			c.Writer.Header().Add("Retry-After", value)
-		}
+		WriteSafeRetryHeaders(c, msg.Error)
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.CurrentConfig()) {
 		for key, values := range msg.Addon {

@@ -25,7 +25,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -457,9 +456,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		return
 	}
 	if msg != nil && msg.Error != nil {
-		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
-			c.Writer.Header().Add("Retry-After", value)
-		}
+		handlers.WriteSafeRetryHeaders(c, msg.Error)
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.CurrentConfig()) {
 		for key, values := range msg.Addon {
@@ -529,7 +526,18 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 		}
 	}
 
-	return errType, message
+	return claudeErrorTypeAlias(errType), message
+}
+
+// claudeErrorTypeAlias maps OpenAI quota error types onto the Anthropic error type
+// for the same condition, so Anthropic API clients see a type they recognize.
+func claudeErrorTypeAlias(errType string) string {
+	switch errType {
+	case "usage_limit_reached", "insufficient_quota":
+		return "rate_limit_error"
+	default:
+		return errType
+	}
 }
 
 func claudeErrorTypeFromStatus(status int) string {
