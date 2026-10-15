@@ -288,6 +288,110 @@ func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
 	}
 }
 
+// Gemini 4 Argon must populate both OpenAI-compatible (ContextLength /
+// MaxCompletionTokens) and Gemini-native (InputTokenLimit / OutputTokenLimit)
+// limits so /v1/models and /v1beta/models both report its token bounds.
+func TestWithGeminiBuiltinsIncludesArgon(t *testing.T) {
+	models := WithGeminiBuiltins(nil)
+	var argon *ModelInfo
+	for _, model := range models {
+		if model != nil && model.ID == geminiBuiltinArgonModelID {
+			argon = model
+			break
+		}
+	}
+	if argon == nil {
+		t.Fatalf("expected builtin model %s in WithGeminiBuiltins", geminiBuiltinArgonModelID)
+	}
+	if argon.Object != "model" || argon.OwnedBy != "google" || argon.Type != "gemini" {
+		t.Errorf("argon object/owned_by/type = %s/%s/%s, want model/google/gemini", argon.Object, argon.OwnedBy, argon.Type)
+	}
+	if argon.Name != "models/"+geminiBuiltinArgonModelID {
+		t.Errorf("argon name = %q, want models/%s", argon.Name, geminiBuiltinArgonModelID)
+	}
+	if argon.InputTokenLimit != 1048576 || argon.OutputTokenLimit != 65536 {
+		t.Errorf("argon Gemini token limits = %d/%d, want 1048576/65536", argon.InputTokenLimit, argon.OutputTokenLimit)
+	}
+	if argon.ContextLength != 1048576 || argon.MaxCompletionTokens != 65536 {
+		t.Errorf("argon OpenAI token limits = %d/%d, want 1048576/65536", argon.ContextLength, argon.MaxCompletionTokens)
+	}
+	reg := GetGlobalRegistry()
+	openaiView := reg.convertModelToMap(argon, "openai")
+	if openaiView["context_length"] != 1048576 || openaiView["max_completion_tokens"] != 65536 {
+		t.Errorf("convertModelToMap(openai) = %+v, want context_length=1048576 max_completion_tokens=65536", openaiView)
+	}
+	geminiView := reg.convertModelToMap(argon, "gemini")
+	if geminiView["inputTokenLimit"] != 1048576 || geminiView["outputTokenLimit"] != 65536 {
+		t.Errorf("convertModelToMap(gemini) = %+v, want inputTokenLimit=1048576 outputTokenLimit=65536", geminiView)
+	}
+	if argon.Thinking == nil {
+		t.Fatal("argon thinking support is nil")
+	}
+	wantLevels := []string{"low", "medium", "high"}
+	if len(argon.Thinking.Levels) != len(wantLevels) {
+		t.Fatalf("argon thinking levels = %v, want %v", argon.Thinking.Levels, wantLevels)
+	}
+	for i, level := range wantLevels {
+		if argon.Thinking.Levels[i] != level {
+			t.Fatalf("argon thinking levels = %v, want %v", argon.Thinking.Levels, wantLevels)
+		}
+	}
+	if argon.NativeCapabilities == nil || argon.NativeCapabilities.WebSearch == nil || !*argon.NativeCapabilities.WebSearch {
+		t.Error("argon should advertise native web search")
+	}
+}
+
+// The built-in must replace, not duplicate, a catalog entry with the same ID so
+// the model list never reports Argon twice.
+func TestWithGeminiBuiltinsReplacesCatalogEntry(t *testing.T) {
+	catalog := []*ModelInfo{
+		{ID: geminiBuiltinArgonModelID, Object: "model", OwnedBy: "google", Type: "gemini", DisplayName: "Stale Argon"},
+		{ID: "gemini-3.8-flash", Object: "model", OwnedBy: "google", Type: "gemini"},
+	}
+	models := WithGeminiBuiltins(catalog)
+	count := 0
+	for _, model := range models {
+		if model != nil && model.ID == geminiBuiltinArgonModelID {
+			count++
+			if model.DisplayName != "Gemini 4 Argon" {
+				t.Errorf("argon DisplayName = %q, want the built-in definition", model.DisplayName)
+			}
+			if model.ContextLength != 1048576 || model.MaxCompletionTokens != 65536 {
+				t.Errorf("argon OpenAI limits after upsert = %d/%d, want 1048576/65536", model.ContextLength, model.MaxCompletionTokens)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("argon appears %d times after upsert, want 1", count)
+	}
+	foundOther := false
+	for _, model := range models {
+		if model != nil && model.ID == "gemini-3.8-flash" {
+			foundOther = true
+		}
+	}
+	if !foundOther {
+		t.Error("upsert dropped an unrelated catalog model")
+	}
+}
+
+// GetGeminiModels is what the Gemini API-key provider registers, so the model
+// must be present there without any explicit per-key configuration.
+func TestGetGeminiModelsIncludesArgon(t *testing.T) {
+	for _, model := range GetGeminiModels() {
+		if model != nil && model.ID == geminiBuiltinArgonModelID {
+			if model.ContextLength != 1048576 || model.MaxCompletionTokens != 65536 {
+				t.Fatalf("GetGeminiModels() argon OpenAI limits = %d/%d, want 1048576/65536", model.ContextLength, model.MaxCompletionTokens)
+			}
+			if model.InputTokenLimit != 1048576 || model.OutputTokenLimit != 65536 {
+				t.Fatalf("GetGeminiModels() argon Gemini limits = %d/%d, want 1048576/65536", model.InputTokenLimit, model.OutputTokenLimit)
+			}
+			return
+		}
+	}
+	t.Fatalf("GetGeminiModels() does not include %s", geminiBuiltinArgonModelID)
+}
+
 func TestGetDevinModelsFallback(t *testing.T) {
 	devinModels := GetDevinModels()
 	if len(devinModels) == 0 {

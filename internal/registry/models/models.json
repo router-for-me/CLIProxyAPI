@@ -1013,9 +1013,18 @@
       "type": "gemini",
       "display_name": "Gemini 4 Argon",
       "name": "models/gemini-4-argon",
+      "version": "4",
       "description": "Gemini 4 Argon",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
       "context_length": 1048576,
-      "max_completion_tokens": 1048576,
+      "max_completion_tokens": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
       "thinking": {
         "min": 128,
         "max": 65535,

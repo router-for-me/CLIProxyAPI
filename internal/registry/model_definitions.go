@@ -20,6 +20,7 @@ const (
 	xaiBuiltinVideo15PreviewID         = "grok-imagine-video-1.5-preview"
 	xaiBuiltinSpeechModelID            = "grok-tts"
 	xaiBuiltinSpeechVoiceModelID       = "grok-voice-tts-1.0"
+	geminiBuiltinArgonModelID          = "gemini-4-argon"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -46,7 +47,7 @@ func GetClaudeModels() []*ModelInfo {
 
 // GetGeminiModels returns the standard Gemini model definitions.
 func GetGeminiModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Gemini)
+	return WithGeminiBuiltins(cloneModelInfos(getModels().Gemini))
 }
 
 // GetGeminiVertexModels returns Gemini model definitions for Vertex AI.
@@ -261,6 +262,47 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // that should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinSpeechModelInfo(), xaiBuiltinSpeechVoiceModelInfo())
+}
+
+// WithGeminiBuiltins injects hard-coded Gemini model definitions that should not
+// depend on remote models.json updates, populating both OpenAI-compatible
+// (ContextLength / MaxCompletionTokens) and Gemini-native (InputTokenLimit /
+// OutputTokenLimit / SupportedGenerationMethods) fields.
+func WithGeminiBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, geminiBuiltinArgonModelInfo())
+}
+
+func geminiBuiltinArgonModelInfo() *ModelInfo {
+	webSearch := true
+	return &ModelInfo{
+		ID:                  geminiBuiltinArgonModelID,
+		Object:              "model",
+		OwnedBy:             "google",
+		Type:                "gemini",
+		DisplayName:         "Gemini 4 Argon",
+		Name:                "models/" + geminiBuiltinArgonModelID,
+		Version:             "4",
+		Description:         "Gemini 4 Argon",
+		InputTokenLimit:     1048576,
+		OutputTokenLimit:    65536,
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		SupportedGenerationMethods: []string{
+			"generateContent",
+			"countTokens",
+			"createCachedContent",
+			"batchGenerateContent",
+		},
+		Thinking: &ThinkingSupport{
+			Min:            128,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		SupportedInputModalities:  []string{"text", "image", "audio", "video"},
+		SupportedOutputModalities: []string{"text"},
+		NativeCapabilities:        &NativeCapabilities{WebSearch: &webSearch},
+	}
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
