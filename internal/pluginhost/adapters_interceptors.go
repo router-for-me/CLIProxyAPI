@@ -425,9 +425,16 @@ func readAndRestoreRequestBody(r *http.Request) ([]byte, error) {
 	if r == nil || r.Body == nil {
 		return nil, nil
 	}
-	body, errReadAll := io.ReadAll(r.Body)
+	origBody := r.Body
+	body, errReadAll := io.ReadAll(origBody)
 	if errReadAll != nil {
-		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{
+			Reader: io.MultiReader(bytes.NewReader(body), origBody),
+			Closer: origBody,
+		}
 		return nil, errReadAll
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))

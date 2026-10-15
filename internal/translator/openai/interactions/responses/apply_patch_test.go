@@ -35,7 +35,11 @@ func patchSend(param *any, raw []byte) []gjson.Result {
 func TestInteractionsApplyPatchDeclarationAndHistory(t *testing.T) {
 	request := gjson.Parse(patchRequest).Value().(map[string]any)
 	request["input"] = []any{map[string]any{"type": "custom_tool_call", "name": "apply_patch", "namespace": "functions", "call_id": "c1", "input": patchText}, map[string]any{"type": "custom_tool_call_output", "call_id": "c1", "output": "ok"}}
-	out := gjson.ParseBytes(ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", patchJSON(request), false))
+	body1, errConvert1 := ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", patchJSON(request), false)
+	if errConvert1 != nil {
+		t.Fatal(errConvert1)
+	}
+	out := gjson.ParseBytes(body1)
 	if !strings.Contains(out.Get("tools.0.description").String(), "*** Begin Patch") || out.Get("tools.0.parameters.additionalProperties").Bool() || !out.Get("tools.0.parameters.additionalProperties").Exists() {
 		t.Fatalf("missing patch contract: %s", out.Raw)
 	}
@@ -214,7 +218,11 @@ func TestInteractionsApplyPatchWinningDeclarationAndNegativeCompatibility(t *tes
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			request := []byte(test.request)
-			translated := gjson.ParseBytes(ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", request, false))
+			body2, errConvert2 := ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", request, false)
+			if errConvert2 != nil {
+				t.Fatal(errConvert2)
+			}
+			translated := gjson.ParseBytes(body2)
 			declaration := translated.Get("tools.0")
 			if strings.Contains(declaration.Get("description").String(), "*** Begin Patch") != test.patch {
 				t.Fatalf("wrong contract: %s", translated.Raw)

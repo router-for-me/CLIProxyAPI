@@ -63,7 +63,7 @@ func TestClaudeCloakedDateReminderPinnedToSessionAcrossMidnight(t *testing.T) {
 	if cCtx1.PinnedDate == "" {
 		t.Fatal("first request must establish a pinned session date")
 	}
-	out1 := checkSystemInstructionsWithSigningModeAt(payload1, false, false, "2.1.280", "cli", "", cCtx1.PinnedDate, false, prevReq1, promptID1)
+	out1 := checkSystemInstructionsWithSigningModeAt(payload1, false, false, "2.1.280", "cli", "", cCtx1.PinnedDate, false, prevReq1, promptID1, false)
 	date1 := extractClaudeCloakDate(t, out1)
 	if date1 != cCtx1.PinnedDate {
 		t.Fatalf("first request date = %q, want pinned anchor %q", date1, cCtx1.PinnedDate)
@@ -96,7 +96,7 @@ func TestClaudeCloakedDateReminderPinnedToSessionAcrossMidnight(t *testing.T) {
 	if cCtx2.PinnedDate != cCtx1.PinnedDate {
 		t.Fatalf("second request continuity pin = %q, want anchor %q", cCtx2.PinnedDate, cCtx1.PinnedDate)
 	}
-	out2 := checkSystemInstructionsWithSigningModeAt(payload2, false, false, "2.1.280", "cli", "", cCtx2.PinnedDate, false, prevReq2, promptID2)
+	out2 := checkSystemInstructionsWithSigningModeAt(payload2, false, false, "2.1.280", "cli", "", cCtx2.PinnedDate, false, prevReq2, promptID2, false)
 	date2 := extractClaudeCloakDate(t, out2)
 	if date2 != date1 {
 		t.Fatalf("date reminder changed within one session: %q -> %q (busts prompt cache prefix)", date1, date2)

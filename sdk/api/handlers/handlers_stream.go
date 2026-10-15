@@ -92,7 +92,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		return nil, nil, errChan
 	}
 
-	passthroughHeadersEnabled := executionPassthroughHeaders(h.Cfg, execOptions.InternalSource)
+	passthroughHeadersEnabled := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
@@ -283,6 +283,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
+	// Speech-only models are reachable solely through the speech entry protocol.
+	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
 	if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
@@ -373,7 +375,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	if executedReq, executedOpts := executedRequest(); len(executedOpts.Headers) > 0 || len(executedReq.Payload) > 0 || len(executedOpts.Metadata) > 0 {
 		ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
 	}
-	passthroughHeadersEnabled := executionPassthroughHeaders(h.Cfg, execOptions.InternalSource)
+	passthroughHeadersEnabled := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	// Resolve bootstrap retries and header initialization before returning so the
@@ -537,7 +539,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 	}
 
-	maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+	maxBootstrapRetries := StreamingBootstrapRetries(h.CurrentConfig())
 	if h.AuthManager.HomeEnabled() {
 		maxBootstrapRetries = 0
 	}

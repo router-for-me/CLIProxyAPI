@@ -1,12 +1,18 @@
 package managementasset
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
+
+type githubAssetTransport func(*http.Request) (*http.Response, error)
+
+func (f githubAssetTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func TestFetchLatestAssetSetsGitHubAuthorization(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "asset-token")
@@ -25,8 +31,17 @@ func TestFetchLatestAssetSetsGitHubAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchLatestAsset() error = %v", err)
 	}
-	if authorization != "Bearer asset-token" {
-		t.Fatalf("Authorization = %q, want %q", authorization, "Bearer asset-token")
+	if authorization != "" {
+		t.Fatal("token leaked to non-GitHub release URL")
+	}
+	client := &http.Client{Transport: githubAssetTransport(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Authorization") != "Bearer asset-token" {
+			t.Fatal("GitHub API token missing")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"assets":[{"name":"management.html","digest":"sha256:abc123"}]}`))}, nil
+	})}
+	if _, _, errGitHub := fetchLatestAsset(t.Context(), client, "https://api.github.com/repos/owner/repo/releases/latest"); errGitHub != nil {
+		t.Fatal(errGitHub)
 	}
 	if asset == nil || asset.Name != managementAssetName {
 		t.Fatalf("asset = %#v, want %q", asset, managementAssetName)

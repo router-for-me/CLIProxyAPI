@@ -310,8 +310,9 @@ const claudeCodeFableReportingOutcomes = `# Reporting outcomes
 
 Report what actually happened, not what you intended. When you say something is done, sent, saved, fixed, or verified, that claim must rest on a result you observed in this session — tool output, the file as it now reads, the page as it now loads — not on what the step should have produced. If you did not check, say you did not check. If any step failed, was skipped, or came back different from what you expected, say so in the first sentence of your report, before anything else, even when the rest of the work succeeded. Never quietly work around a failure in a way that makes it look resolved; a problem the user can see is recoverable, one your summary hides is not. When you stop before the task is complete, your first line says so plainly and names what is left. Do not describe partial work as done, and do not let a summary read as more certain than the evidence behind it.`
 
-func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.280", "cli", "")
+func checkSystemInstructionsWithMode(payload []byte, strictMode bool, keepCallerSystemTopLevel ...bool) []byte {
+	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.280", "cli", "", keepAtTopLevel)
 }
 
 // checkSystemInstructionsWithSigningMode keeps the top-level system in Claude
@@ -319,8 +320,9 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // mid-conversation system message after the first user turn, where supported
 // Claude models give it operator-level authority without changing the cached
 // top-level prefix.
-func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string) []byte {
-	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", "")
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string, keepCallerSystemTopLevel ...bool) []byte {
+	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
+	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
@@ -406,6 +408,7 @@ func checkSystemInstructionsWithSigningModeAt(
 	currentDate string,
 	isSubagent bool,
 	prevReq, promptID string,
+	keepCallerSystemTopLevel bool,
 	turnOrigin ...string,
 ) []byte {
 	system := gjson.GetBytes(payload, "system")
@@ -444,7 +447,7 @@ func checkSystemInstructionsWithSigningModeAt(
 	}
 	if claudeUsesLegacySystemReminder(payload) {
 		payload = prependClaudeSystemReminderBlocksToFirstUserMessage(payload, forwardedSystemBlocks, isExplicit)
-	} else if claudeMidConversationSystemMessagesAtEnd(payload) {
+	} else if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEnd(payload) {
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
 		}
@@ -463,11 +466,16 @@ func checkSystemInstructionsWithSigningModeAt(
 // tokens aligned with the request the caller is about to send while preventing a
 // third-party system prompt from reaching Anthropic in the system slot.
 func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool, explicitCacheMode ...bool) []byte {
+	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheMode(payload)
+	return relocateClaudeSystemPromptForCountTokensWithPolicy(payload, strictMode, isExplicit, false)
+}
+
+func relocateClaudeSystemPromptForCountTokensWithPolicy(payload []byte, strictMode, explicitCacheMode, keepCallerSystemTopLevel bool) []byte {
 	system := gjson.GetBytes(payload, "system")
 	if !system.Exists() {
 		return payload
 	}
-	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheMode(payload)
+	isExplicit := explicitCacheMode
 	// Strict mode drops caller prompts on the Messages path, so it must not
 	// reintroduce them here either.
 	var forwardedSystemBlocks []forwardedClaudeSystemPromptBlock
@@ -498,7 +506,7 @@ func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool, e
 	if claudeUsesLegacySystemReminder(payload) {
 		return prependClaudeSystemReminderBlocksToFirstUserMessage(payload, forwardedSystemBlocks, isExplicit)
 	}
-	if claudeMidConversationSystemMessagesAtEnd(payload) {
+	if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEnd(payload) {
 		blocks := make([]string, 0, len(forwardedSystemBlocks))
 		for _, block := range forwardedSystemBlocks {
 			blocks = append(blocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
@@ -845,6 +853,28 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 	return false
 }
 
+// claudeLeadingUserRunEnd skips directive-only system turns because Anthropic
+// accepts them at any position. They must not cause caller system blocks to be
+// inserted before a subsequent user turn.
+func claudeLeadingUserRunEnd(messageBlocks []gjson.Result, firstUserIdx int) int {
+	insertAt := firstUserIdx + 1
+	for insertAt < len(messageBlocks) {
+		message := messageBlocks[insertAt]
+		if message.Get("role").String() != "user" && !isClaudeSystemDirectiveMessage(message) {
+			break
+		}
+		insertAt++
+	}
+	return insertAt
+}
+
+func isClaudeSystemDirectiveMessage(message gjson.Result) bool {
+	content := message.Get("content")
+	return message.Get("role").String() == "system" &&
+		message.Get("output_config").Exists() &&
+		content.IsArray() && len(content.Array()) == 0
+}
+
 func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
 	firstUserIdx := firstClaudeUserMessageIndex(payload)
 	if firstUserIdx < 0 {
@@ -856,10 +886,7 @@ func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
 		return false
 	}
 	messageBlocks := messages.Array()
-	insertAt := firstUserIdx + 1
-	for insertAt < len(messageBlocks) && messageBlocks[insertAt].Get("role").String() == "user" {
-		insertAt++
-	}
+	insertAt := claudeLeadingUserRunEnd(messageBlocks, firstUserIdx)
 	return insertAt == len(messageBlocks) || insertAt > firstUserIdx+1
 }
 
@@ -882,10 +909,7 @@ func insertClaudeMidConversationSystemBlocks(payload []byte, blocks []forwardedC
 		return payload
 	}
 	messageBlocks := messages.Array()
-	insertAt := firstUserIdx + 1
-	for insertAt < len(messageBlocks) && messageBlocks[insertAt].Get("role").String() == "user" {
-		insertAt++
-	}
+	insertAt := claudeLeadingUserRunEnd(messageBlocks, firstUserIdx)
 	if len(messageBlocks)-insertAt >= len(blocks) {
 		matches := true
 		for idx, block := range blocks {
@@ -968,10 +992,7 @@ func captureClaudeCodeSystemPlacement(before, after []byte, cloaked bool) claude
 	if firstUserIdx < 0 {
 		return claudeCodeSystemPlacementState{}
 	}
-	insertAt := firstUserIdx + 1
-	for insertAt < len(beforeMessages) && beforeMessages[insertAt].Get("role").String() == "user" {
-		insertAt++
-	}
+	insertAt := claudeLeadingUserRunEnd(beforeMessages, firstUserIdx)
 	if insertAt+len(texts) > len(afterMessages) {
 		return claudeCodeSystemPlacementState{}
 	}
@@ -1607,6 +1628,7 @@ func applyCloakingInternal(
 		isSubagent,
 		prevReq,
 		promptID,
+		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
 		turnOriginArgs...,
 	)
 
@@ -1881,7 +1903,7 @@ func countCacheControls(payload []byte) int {
 	system := gjson.GetBytes(payload, "system")
 	if system.IsArray() {
 		system.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("cache_control").Exists() {
+			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				count++
 			}
 			return true
@@ -1892,7 +1914,7 @@ func countCacheControls(payload []byte) int {
 	tools := gjson.GetBytes(payload, "tools")
 	if tools.IsArray() {
 		tools.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("cache_control").Exists() {
+			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				count++
 			}
 			return true
@@ -1906,7 +1928,7 @@ func countCacheControls(payload []byte) int {
 			content := msg.Get("content")
 			if content.IsArray() {
 				content.ForEach(func(_, item gjson.Result) bool {
-					if item.Get("cache_control").Exists() {
+					if isValidClaudeCacheControl(item.Get("cache_control")) {
 						count++
 					}
 					return true
@@ -1941,11 +1963,7 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 
 	processBlock := func(path string, obj gjson.Result) {
 		cc := obj.Get("cache_control")
-		if !cc.Exists() {
-			return
-		}
-		if !cc.IsObject() {
-			seen5m = true
+		if !isValidClaudeCacheControl(cc) {
 			return
 		}
 		ttl := cc.Get("ttl")
@@ -2040,7 +2058,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 	if system.IsArray() {
 		lastIdx := -1
 		system.ForEach(func(idx, item gjson.Result) bool {
-			if item.Get("cache_control").Exists() {
+			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				lastIdx = int(idx.Int())
 			}
 			return true
@@ -2054,7 +2072,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 				if i == lastIdx {
 					return true
 				}
-				if !item.Get("cache_control").Exists() {
+				if !isValidClaudeCacheControl(item.Get("cache_control")) {
 					return true
 				}
 				path := fmt.Sprintf("system.%d.cache_control", i)
@@ -2076,7 +2094,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 	if tools.IsArray() {
 		lastIdx := -1
 		tools.ForEach(func(idx, item gjson.Result) bool {
-			if item.Get("cache_control").Exists() {
+			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				lastIdx = int(idx.Int())
 			}
 			return true
@@ -2090,7 +2108,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 				if i == lastIdx {
 					return true
 				}
-				if !item.Get("cache_control").Exists() {
+				if !isValidClaudeCacheControl(item.Get("cache_control")) {
 					return true
 				}
 				path := fmt.Sprintf("tools.%d.cache_control", i)
@@ -2122,7 +2140,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 				if excess <= 0 {
 					return false
 				}
-				if !item.Get("cache_control").Exists() {
+				if !isValidClaudeCacheControl(item.Get("cache_control")) {
 					return true
 				}
 				path := fmt.Sprintf("messages.%d.content.%d.cache_control", int(msgIdx.Int()), int(itemIdx.Int()))
@@ -2147,7 +2165,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 			if excess <= 0 {
 				return false
 			}
-			if !item.Get("cache_control").Exists() {
+			if !isValidClaudeCacheControl(item.Get("cache_control")) {
 				return true
 			}
 			path := fmt.Sprintf("system.%d.cache_control", int(idx.Int()))
@@ -2170,7 +2188,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 			if excess <= 0 {
 				return false
 			}
-			if !item.Get("cache_control").Exists() {
+			if !isValidClaudeCacheControl(item.Get("cache_control")) {
 				return true
 			}
 			path := fmt.Sprintf("tools.%d.cache_control", int(idx.Int()))
@@ -2305,7 +2323,7 @@ func messageContentHasCacheControl(content gjson.Result) bool {
 	if content.IsArray() {
 		found := false
 		content.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("cache_control").Exists() {
+			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				found = true
 				return false
 			}
@@ -2329,7 +2347,7 @@ func injectToolsCacheControl(payload []byte) []byte {
 	hasCacheControlInTools := false
 	lastEligibleToolIndex := -1
 	tools.ForEach(func(index, tool gjson.Result) bool {
-		if tool.Get("cache_control").Exists() {
+		if isValidClaudeCacheControl(tool.Get("cache_control")) {
 			hasCacheControlInTools = true
 			return false
 		}
@@ -2370,7 +2388,7 @@ func injectSystemCacheControl(payload []byte) []byte {
 		// Check if ANY system element already has cache_control
 		hasCacheControlInSystem := false
 		system.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("cache_control").Exists() {
+			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				hasCacheControlInSystem = true
 				return false
 			}

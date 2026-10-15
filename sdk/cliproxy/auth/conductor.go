@@ -50,6 +50,18 @@ type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
 }
 
+// ExecutionSessionSharer reports whether a replaced executor shares its execution
+// session store with the replacement executor so active sessions stay open.
+type ExecutionSessionSharer interface {
+	SharesExecutionSessionsWith(other ProviderExecutor) bool
+}
+
+// AuthExecutionSessionCloser allows executors to release execution sessions
+// associated with a removed credential without tearing down other credentials' sessions.
+type AuthExecutionSessionCloser interface {
+	CloseAuthExecutionSessions(authID string)
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.
@@ -215,7 +227,9 @@ type Manager struct {
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
 	persistLocks sync.Map
 	// authMutationLocks coordinate credential mutations without blocking unrelated readers.
-	authMutationLocks sync.Map
+	authMutationLocks      sync.Map
+	metadataPersistCancels sync.Map
+	metadataSaveGate       sync.Map
 	// authLoadGate allows concurrent credential transactions, but excludes whole-store reloads.
 	// Mutations acquire one permit; Load acquires all permits before reading the store.
 	authLoadGate *semaphore.Weighted

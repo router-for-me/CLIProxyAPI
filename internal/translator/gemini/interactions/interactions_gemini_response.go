@@ -67,10 +67,10 @@ func ConvertInteractionsResponseToGeminiNonStream(_ context.Context, modelName s
 	return out
 }
 
-func ConvertInteractionsRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertInteractionsRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	_ = modelName
 	_ = stream
-	return inputRawJSON
+	return inputRawJSON, nil
 }
 
 func ConvertInteractionsResponsePassthrough(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {

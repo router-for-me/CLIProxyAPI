@@ -20,7 +20,7 @@ import (
 // ConvertGeminiRequestToOpenAI parses and transforms a Gemini API request into OpenAI Chat Completions API format.
 // It extracts the model name, generation config, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
-func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	rawJSON := inputRawJSON
 	// Base OpenAI Chat Completions API template
 	out := []byte(`{"model":"","messages":[]}`)
@@ -369,7 +369,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		}
 	}
 
-	return out
+	return out, nil
 }
 
 func deterministicToolCallID(kind string, msgIdx, partIdx int, name, payload string) string {

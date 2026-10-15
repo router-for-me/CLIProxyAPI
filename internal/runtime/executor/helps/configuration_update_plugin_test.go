@@ -76,7 +76,7 @@ func TestRequestPairPreservesPluginConfigurationUpdateIntent(t *testing.T) {
 					wantCalls = 2
 				}
 				inputBefore := bytes.Clone(request)
-				base, work, updatesChanged := helps.TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(t.Context(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatCodex, "opaque-route", original, request, stream, compat)
+				base, work, updatesChanged, _ := helps.TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(t.Context(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatCodex, "opaque-route", original, request, stream, compat)
 				if hooks.calls != wantCalls {
 					t.Fatalf("stream=%v compat=%v distinct=%v: plugin calls = %d, want %d", stream, compat, distinct, hooks.calls, wantCalls)
 				}

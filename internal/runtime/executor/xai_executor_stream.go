@@ -20,6 +20,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
+	if xaiIsSpeechRequest(opts) {
+		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /audio/speech"}
+	}
 	if xaiInputHasItemType(req.Payload, "compaction_trigger") {
 		return e.executeCompactionTriggerStream(ctx, auth, req, opts)
 	}

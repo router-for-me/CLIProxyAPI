@@ -8,17 +8,18 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func ConvertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertClaudeRequestToInteractions(modelName, inputRawJSON, stream, false)
+
 }
 
 // ConvertClaudeRequestToInteractionsWithCompat preserves empty assistant
 // thinking blocks for configured compatibility endpoints.
-func ConvertClaudeRequestToInteractionsWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertClaudeRequestToInteractionsWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	return convertClaudeRequestToInteractions(modelName, inputRawJSON, stream, true)
 }
 
-func convertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
+func convertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) ([]byte, error) {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
@@ -27,9 +28,9 @@ func convertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, s
 	}
 	out = copyClaudeSystemToInteractions(out, root)
 	out = copyClaudeGenerationConfigToInteractions(out, root)
-	out = appendClaudeMessagesToInteractions(out, root.Get("messages"), preserveEmptyThinkingBlocks)
+	out, errDrops := appendClaudeMessagesToInteractions(out, root.Get("messages"), preserveEmptyThinkingBlocks)
 	out = copyClaudeToolsToInteractions(out, root)
-	return out
+	return out, errDrops
 }
 
 func claudeRequestStreamValue(root gjson.Result, stream bool) (bool, bool) {
@@ -122,10 +123,11 @@ func copyClaudeToolChoiceToInteractions(out []byte, toolChoice gjson.Result) []b
 	return out
 }
 
-func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, preserveEmptyThinkingBlocks bool) []byte {
+func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, preserveEmptyThinkingBlocks bool) ([]byte, error) {
 	if !messages.Exists() || !messages.IsArray() {
-		return out
+		return out, nil
 	}
+	var drops translatorcommon.UserTurnDrops
 	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
 	var pendingToolUseIDs []string
 	var pendingSystemReminders [][]byte
@@ -152,7 +154,10 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, prese
 		}
 		pendingToolUseIDs = nil
 
-		appendClaudeMessageToInteractions(&inputItems, &pendingToolUseIDs, &pendingSystemReminders, toolNamesByID, role, content, preserveEmptyThinkingBlocks)
+		sendable := appendClaudeMessageToInteractions(&inputItems, &pendingToolUseIDs, &pendingSystemReminders, toolNamesByID, role, content, preserveEmptyThinkingBlocks, &drops)
+		if role == "user" {
+			drops.EndTurn(sendable)
+		}
 		if len(pendingSystemReminders) > 0 {
 			inputItems = append(inputItems, pendingSystemReminders...)
 			pendingSystemReminders = nil
@@ -163,10 +168,10 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, prese
 		inputItems = append(inputItems, pendingSystemReminders...)
 	}
 	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
-	return out
+	return out, drops.Err()
 }
 
-func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]string, pendingSystemReminders *[][]byte, toolNamesByID map[string]string, role string, content gjson.Result, preserveEmptyThinkingBlocks bool) {
+func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]string, pendingSystemReminders *[][]byte, toolNamesByID map[string]string, role string, content gjson.Result, preserveEmptyThinkingBlocks bool, drops *translatorcommon.UserTurnDrops) int {
 	defaultStepType := "user_input"
 	if role == "assistant" {
 		defaultStepType = "model_output"
@@ -180,11 +185,14 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 		step, _ = sjson.SetBytes(step, "type", defaultStepType)
 		step, _ = sjson.SetBytes(step, "content.0.text", content.String())
 		*items = append(*items, step)
-		return
+		return 1
 	}
 	if !content.IsArray() {
-		return
+		return 0
 	}
+	// Counts only what this turn itself sends, not system reminders flushed beside it.
+	// Whitespace-only text is forwarded but never keeps an emptied turn alive.
+	sendable := 0
 	stepContent := make([][]byte, 0, 4)
 	flushContent := func() {
 		if len(stepContent) == 0 {
@@ -209,6 +217,9 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 				contentPart := []byte(`{"type":"text","text":""}`)
 				contentPart, _ = sjson.SetBytes(contentPart, "text", text)
 				stepContent = append(stepContent, contentPart)
+				if strings.TrimSpace(text) != "" {
+					sendable++
+				}
 			}
 		case "thinking":
 			flushContent()
@@ -217,8 +228,9 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 				step := []byte(`{"type":"thought","content":[{"type":"text","text":""}]}`)
 				step, _ = sjson.SetBytes(step, "content.0.text", text)
 				*items = append(*items, step)
+				sendable++
 			}
-		case "image", "document":
+		case "image", "document", "container_upload":
 			if mediaPart, ok := claudeMediaPartToInteractions(part, partType); ok {
 				if pendingSystemReminders != nil && len(*pendingSystemReminders) > 0 {
 					flushContent()
@@ -226,6 +238,9 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 					*pendingSystemReminders = nil
 				}
 				stepContent = append(stepContent, mediaPart)
+				sendable++
+			} else if drops != nil && role == "user" {
+				drops.Drop(partType)
 			}
 		case "tool_use":
 			flushContent()
@@ -240,13 +255,16 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 				}
 			}
 			*items = append(*items, claudeToolUseToInteractions(part))
+			sendable++
 		case "tool_result":
 			flushContent()
 			*items = append(*items, claudeToolResultToInteractions(part, toolNamesByID))
+			sendable++
 		}
 		return true
 	})
 	flushContent()
+	return sendable
 }
 
 func claudeMediaPartToInteractions(part gjson.Result, partType string) ([]byte, bool) {
@@ -327,7 +345,7 @@ func claudeToolResultToInteractions(part gjson.Result, toolNamesByID map[string]
 					} else if raw := strings.TrimSpace(item.Raw); raw != "" {
 						contentItems = append(contentItems, []byte(raw))
 					}
-				case "image", "document":
+				case "image", "document", "container_upload":
 					if mediaPart, ok := claudeMediaPartToInteractions(item, itemType); ok {
 						contentItems = append(contentItems, mediaPart)
 					} else if raw := strings.TrimSpace(item.Raw); raw != "" {

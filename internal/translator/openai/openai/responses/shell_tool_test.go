@@ -13,7 +13,7 @@ import (
 
 func TestLocalShellDeclarationSurvivesChatTranslation(t *testing.T) {
 	request := []byte(`{"tools":[{"type":"shell","environment":{"type":"local"}}],"tool_choice":"auto","input":"Run echo SHELL_OK"}`)
-	got := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
+	got, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
 	if gjson.GetBytes(got, "tools.#").Int() != 1 {
 		t.Fatalf("local shell declaration was dropped from chat request: %s", got)
 	}
@@ -66,7 +66,7 @@ func shellStream(request []byte, name, args string) []gjson.Result {
 
 func TestLocalShellRoundTrip(t *testing.T) {
 	request := []byte(shellRequest)
-	chat := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
+	chat, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
 	name := gjson.GetBytes(chat, "tools.0.function.name").String()
 	if name == "" || name == "__cpa_local_shell" || name == "__cpa_local_shell_1" || gjson.GetBytes(chat, "tools.#").Int() != 4 {
 		t.Fatalf("synthetic tool collided with user tools: %s", chat)
@@ -100,7 +100,7 @@ func TestLocalShellRoundTrip(t *testing.T) {
 	}
 	output := `{"type":"shell_call_output","call_id":"call_shell","max_output_length":4096,"output":[{"stdout":"SHELL_OK\n","stderr":"warning","outcome":{"type":"exit","exit_code":0}},{"stdout":"partial","stderr":"","outcome":{"type":"timeout"}}]}`
 	replay, _ := sjson.SetRawBytes(request, "input", []byte("["+item.Raw+`,`+`{"type":"function_call","call_id":"call_user","name":"__cpa_local_shell","arguments":"{}"},`+output+`,`+`{"type":"function_call_output","call_id":"call_user","output":"ok"}]`))
-	replayed := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", replay, false)
+	replayed, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", replay, false)
 	if gjson.GetBytes(replayed, "messages.0.tool_calls.#").Int() != 2 || gjson.GetBytes(replayed, "messages.0.tool_calls.0.function.name").String() != name || gjson.GetBytes(replayed, "messages.0.tool_calls.0.function.arguments").String() != args {
 		t.Fatalf("shell history not grouped/replayed: %s", replayed)
 	}
@@ -147,14 +147,14 @@ func TestLocalShellInvalidActions(t *testing.T) {
 func TestLocalShellOnlyExplicitLocalEnvironment(t *testing.T) {
 	for _, environment := range []string{`{"type":"container_auto"}`, `{"type":"container_reference","container_id":"cntr_x"}`, `{}`} {
 		request := []byte(`{"tools":[{"type":"shell","environment":` + environment + `}]}`)
-		got := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
+		got, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
 		if gjson.GetBytes(got, "tools.#").Int() != 0 {
 			t.Fatalf("hosted shell represented as local: %s", got)
 		}
 	}
 	for _, choice := range []string{`"auto"`, `"required"`, `"none"`} {
 		request := []byte(`{"tools":[{"type":"shell","environment":{"type":"local"}}],"tool_choice":` + choice + `}`)
-		got := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
+		got, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
 		var expected string
 		if errUnmarshal := json.Unmarshal([]byte(choice), &expected); errUnmarshal != nil {
 			t.Fatal(errUnmarshal)
@@ -168,7 +168,7 @@ func TestLocalShellOnlyExplicitLocalEnvironment(t *testing.T) {
 func TestLocalShellHistoryWithoutDeclaration(t *testing.T) {
 	for _, tools := range []string{``, `,"tools":[]`, `,"tools":[{"type":"function","name":"__cpa_local_shell_1","parameters":{}}]`} {
 		request := []byte(`{"input":[{"type":"shell_call","call_id":"shell_1","action":{"commands":["pwd"]}},{"type":"shell_call_output","call_id":"shell_1","output":[{"stdout":"/workspace","stderr":"","outcome":{"type":"exit","exit_code":0}}]},{"type":"function_call","call_id":"user_1","name":"__cpa_local_shell","arguments":"{}"},{"type":"function_call_output","call_id":"user_1","output":"ok"}]` + tools + `}`)
-		got := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
+		got, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("test", request, false)
 		calls := gjson.GetBytes(got, "messages.0.tool_calls").Array()
 		if len(calls) != 1 || calls[0].Get("id").String() != "shell_1" || gjson.GetBytes(got, "messages.2.tool_calls.0.id").String() != "user_1" {
 			t.Fatalf("shell history dropped without declaration: %s", got)

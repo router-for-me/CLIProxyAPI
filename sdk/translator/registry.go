@@ -36,7 +36,7 @@ func (r *Registry) Register(from, to Format, request RequestTransform, response 
 	}
 	if request != nil {
 		r.requests[from][to] = func(_ context.Context, req RequestEnvelope) RequestEnvelope {
-			req.Body = request(req.Model, req.Body, req.Stream)
+			req.Body, req.Err = request(req.Model, req.Body, req.Stream)
 			return req
 		}
 	}

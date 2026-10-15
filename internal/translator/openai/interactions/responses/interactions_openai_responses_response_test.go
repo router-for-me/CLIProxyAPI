@@ -22,6 +22,50 @@ func TestConvertInteractionsResponseToOpenAIResponsesNonStream(t *testing.T) {
 	}
 }
 
+func TestInteractionsResponsesGeneratedItemIDsDoNotCollideAcrossResponses(t *testing.T) {
+	seen := make(map[string]bool)
+	for _, tc := range []struct {
+		name       string
+		req        []byte
+		step       string
+		delta      string
+		deltaEvent string
+	}{
+		{"reasoning", nil, `{"type":"thought"}`, `{"type":"thought_summary","text":"thinking"}`, "response.reasoning_summary_text.delta"},
+		{"message", nil, `{"type":"model_output"}`, `{"type":"text","text":"ready"}`, "response.output_text.delta"},
+		{"function", nil, `{"type":"function_call","name":"exec_command","arguments":{}}`, `{"type":"arguments_delta","arguments":"{\"cmd\":\"pwd\"}"}`, "response.function_call_arguments.delta"},
+		{"apply_patch", []byte(patchRequest), `{"type":"function_call","name":"functions__apply_patch"}`, `{"type":"arguments_delta","arguments":"{\"input\":\"pq\"}"}`, "response.custom_tool_call_input.delta"},
+	} {
+		for response := 0; response < 2; response++ {
+			var param any
+			var events [][]byte
+			for _, raw := range []string{
+				fmt.Sprintf(`{"event_type":"interaction.created","interaction":{"id":"interaction_%s_%d"}}`, tc.name, response),
+				fmt.Sprintf(`{"event_type":"step.start","index":0,"step":%s}`, tc.step),
+				fmt.Sprintf(`{"event_type":"step.delta","index":0,"delta":%s}`, tc.delta),
+				`{"event_type":"step.stop","index":0}`,
+				`{"event_type":"interaction.completed","interaction":{"status":"completed"}}`,
+			} {
+				events = append(events, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/gpt-6-1-sol", tc.req, nil, []byte(raw), &param)...)
+			}
+			id := gjson.GetBytes(findResponsesEventPayload(events, "response.output_item.added"), "item.id").String()
+			if id == "" || seen[id] {
+				t.Fatalf("%s response %d generated duplicate or empty item ID %q", tc.name, response, id)
+			}
+			seen[id] = true
+			for _, check := range []struct{ event, path string }{
+				{tc.deltaEvent, "item_id"},
+				{"response.output_item.done", "item.id"},
+				{"response.completed", "response.output.0.id"},
+			} {
+				if got := gjson.GetBytes(findResponsesEventPayload(events, check.event), check.path).String(); got != id {
+					t.Fatalf("%s response %d %s item ID = %q, want %q", tc.name, response, check.event, got, id)
+				}
+			}
+		}
+	}
+}
+
 func TestConvertInteractionsResponseToOpenAIResponsesStream(t *testing.T) {
 	var param any
 	var out [][]byte

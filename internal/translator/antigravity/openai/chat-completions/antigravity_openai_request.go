@@ -28,8 +28,16 @@ const antigravityFunctionThoughtSignature = "skip_thought_signature_validator"
 //
 // Returns:
 //   - []byte: The transformed request data in Antigravity API format
-func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIRequestToAntigravity(modelName, inputRawJSON, stream)
+
+}
+
+// convertOpenAIRequestToAntigravity also reports a file part Antigravity cannot
+// receive when it leaves a user turn with nothing to send.
+func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	var drops translatorcommon.UserTurnDrops
 	functionNameMap := util.SanitizedFunctionNameMap(rawJSON)
 	// Base envelope (no default thinkingConfig)
 	out := []byte(`{"project":"","request":{"contents":[]},"model":"gemini-2.5-pro"}`)
@@ -167,21 +175,17 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								partItems = append(partItems, antigravityOpenAITextPart(antigravityDemotedSystemText(text, isDemotedSystem)))
 							}
 						case "image_url":
-							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false)
-									partItems = append(partItems, part)
-								}
+							// Only a base64 data URL can be inlined; a remote URL has no equivalent here.
+							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("image_url.url").String()); ok {
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
+							} else {
+								drops.Drop("image_url")
 							}
 						case "video_url":
-							videoURL := item.Get("video_url.url").String()
-							if len(videoURL) > 5 {
-								pieces := strings.SplitN(videoURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									partItems = append(partItems, antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false))
-								}
+							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("video_url.url").String()); ok {
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
+							} else {
+								drops.Drop("video_url")
 							}
 						case "file":
 							filename := item.Get("file.filename").String()
@@ -190,16 +194,21 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
 							} else {
 								log.Warn("Invalid file data or unknown file name extension in user message, skip")
+								drops.Drop("file")
 							}
 						case "input_audio":
 							audioData := item.Get("input_audio.data").String()
 							if audioData != "" {
 								mimeType := antigravityOpenAIAudioMIMEType(item.Get("input_audio.format").String())
 								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, audioData, true))
+							} else {
+								drops.Drop("input_audio")
 							}
 						}
 					}
 				}
+				// Whitespace-only text is forwarded but never keeps an emptied turn alive.
+				drops.EndTurn(translatorcommon.CountSendableGeminiParts(partItems))
 				if len(partItems) > 0 {
 					contentItems = append(contentItems, antigravityOpenAIContent("user", partItems))
 				}
@@ -438,7 +447,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if strings.Contains(strings.ToLower(modelName), "claude") {
 		out = gemini.SanitizeAntigravityClaudeGeminiRequestSignatures(modelName, out)
 	}
-	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
+	return common.AttachDefaultSafetySettings(out, "request.safetySettings"), drops.Err()
 }
 
 func antigravityOpenAITextPart(text string) []byte {

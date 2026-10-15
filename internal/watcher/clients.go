@@ -296,6 +296,13 @@ func (w *Watcher) removeClientLocked(path string) {
 	delete(w.fileAuthsByPath, normalized)
 
 	updates := w.computePerPathUpdatesLocked(oldByID, map[string]*coreauth.Auth{})
+	// Only the whole-file removal path gets this mark. Content diffs may drop
+	// individual plugin auth IDs while their source file still exists.
+	for index := range updates {
+		if updates[index].Action == AuthUpdateActionDelete {
+			updates[index].SetFileRemoval(true)
+		}
+	}
 	w.clientsMutex.Unlock()
 
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
@@ -315,8 +322,8 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: newAuth.Clone()})
 			continue
 		}
+		w.currentAuths[id] = newAuth.Clone()
 		if !authEqual(existing, newAuth) {
-			w.currentAuths[id] = newAuth.Clone()
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: newAuth.Clone()})
 		}
 	}

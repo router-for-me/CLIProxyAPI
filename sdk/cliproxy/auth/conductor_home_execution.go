@@ -136,7 +136,8 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		// Home owns credential availability; execute its dispatch without local state filtering.
+		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
