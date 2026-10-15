@@ -303,7 +303,7 @@ func TestAvailableAuthsForRouteModel_CrossCandidateModelErrorPrioritizedOverNewe
 func TestSafeResponseHeaders_IncludesModelCooldownRetryAfter(t *testing.T) {
 	t.Parallel()
 
-	err := newModelCooldownError("gpt-5.6-sol", "codex", 15*time.Second)
+	err := newModelCooldownError("gpt-5.6-sol", "codex", 15*time.Second, false)
 	headers := SafeResponseHeaders(err)
 	if headers == nil {
 		t.Fatal("SafeResponseHeaders(modelCooldownError) = nil, want http.Header")

@@ -630,6 +630,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	cooldownCount := 0
 	unauthorizedCount := 0
 	earliest := time.Time{}
+	quotaExhausted := true
 
 	var latestModelTime time.Time
 	var latestModelAuthID string
@@ -652,6 +653,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		total += localTotal
 		cooldownCount += localCooldownCount
 		unauthorizedCount += localUnauthorizedCount
+		quotaExhausted = quotaExhausted && shard.allQuotaExhaustedLocked(predicate, now)
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -687,7 +689,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr)
+		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr, quotaExhausted)
 	}
 	if unauthorizedCount == total {
 		terminalCause := latestAuthErr
@@ -1432,7 +1434,7 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr)
+		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr, m.allQuotaExhaustedLocked(predicate, now))
 	}
 	if unauthorizedCount == total {
 		terminalCause := authErr
@@ -1555,6 +1557,24 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		}
 	}
 	return total, cooldownCount, unauthorizedCount, earliest
+}
+
+// allQuotaExhaustedLocked reports whether every entry accepted by predicate is in
+// a cooldown backed by explicit upstream quota-exhaustion evidence. It is
+// vacuously true for no entries; callers combine it with a full cooldown count.
+func (m *modelScheduler) allQuotaExhaustedLocked(predicate func(*scheduledAuth) bool, now time.Time) bool {
+	if m == nil {
+		return true
+	}
+	for _, entry := range m.entries {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if entry == nil || entry.auth == nil || entry.state != scheduledStateCooldown || !hasQuotaExhaustionEvidence(entry.auth, m.modelKey, now) {
+			return false
+		}
+	}
+	return true
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.

@@ -320,3 +320,14 @@ type TransientRateLimitError interface {
 	error
 	IsTransientRateLimit() bool
 }
+
+// QuotaExhaustedError identifies a 429 that the upstream explicitly marked as
+// quota exhaustion with a structured code (for example Codex
+// usage_limit_reached, OpenAI insufficient_quota or Google QUOTA_EXHAUSTED).
+// Auth managers report a pool-wide cooldown as a final usage limit only when
+// every candidate credential carries this evidence; unclassified 429s stay
+// ordinary, retryable rate limits.
+type QuotaExhaustedError interface {
+	error
+	IsQuotaExhausted() bool
+}
