@@ -126,3 +126,40 @@ func TestConvertGeminiResponseToOpenAINonStream_TextPrecedenceOverAudioTranscrip
 		t.Fatalf("expected content to prioritize explicit text, got %v. Output: %s", content.Raw, result)
 	}
 }
+
+func TestConvertGeminiResponseToOpenAINormalizesReasoningNewlines(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// 1. Streaming: excessive trailing newlines (\n\n\n) emitted by Gemini should be collapsed to \n\n
+	streamingChunk := []byte(`{"candidates":[{"content":{"parts":[{"text":"Thinking step 1.\n\n\n","thought":true}]}}]}`)
+	results := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, streamingChunk, &param)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	gotRC := gjson.GetBytes(results[0], "choices.0.delta.reasoning_content").String()
+	wantRC := "Thinking step 1.\n\n"
+	if gotRC != wantRC {
+		t.Fatalf("streaming delta reasoning_content = %q, want %q", gotRC, wantRC)
+	}
+
+	// 2. Non-streaming: thought parts containing \n\n\n should be normalized to \n\n
+	nonStreamJSON := []byte(`{
+		"candidates": [{
+			"index": 0,
+			"content": {
+				"parts": [
+					{"text": "Thought section.\n\n\n", "thought": true},
+					{"text": "Final answer."}
+				]
+			},
+			"finishReason": "STOP"
+		}]
+	}`)
+	nonStreamOut := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-2.5-flash", nil, nil, nonStreamJSON, nil)
+	gotNonStreamRC := gjson.GetBytes(nonStreamOut, "choices.0.message.reasoning_content").String()
+	wantNonStreamRC := "Thought section.\n\n"
+	if gotNonStreamRC != wantNonStreamRC {
+		t.Fatalf("non-stream reasoning_content = %q, want %q", gotNonStreamRC, wantNonStreamRC)
+	}
+}

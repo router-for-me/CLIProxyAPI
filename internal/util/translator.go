@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -493,4 +494,18 @@ func RestoreSanitizedToolName(toolNameMap map[string]string, sanitizedName strin
 		return original
 	}
 	return sanitizedName
+}
+
+var consecutiveNewlinesRegex = regexp.MustCompile(`(?:\r?\n){3,}`)
+
+// NormalizeReasoningContent collapses runs of 3 or more consecutive newlines
+// (e.g., "\n\n\n" or "\r\n\r\n\r\n") into standard paragraph breaks ("\n\n").
+// This normalizes thought-step delimiters emitted by Google Antigravity / Gemini
+// so downstream clients rendering reasoning content as pre-wrapped plain text
+// do not display excessive empty lines between thought blocks.
+func NormalizeReasoningContent(text string) string {
+	if !strings.Contains(text, "\n\n\n") && !strings.Contains(text, "\r\n\r\n\r\n") {
+		return text
+	}
+	return consecutiveNewlinesRegex.ReplaceAllString(text, "\n\n")
 }

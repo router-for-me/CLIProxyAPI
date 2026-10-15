@@ -193,6 +193,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						setAssistantRole()
 						// Handle text content, distinguishing between regular content and reasoning/thoughts.
 						if partResult.Get("thought").Bool() {
+							text = util.NormalizeReasoningContent(text)
 							template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", text)
 						} else {
 							template, _ = sjson.SetBytes(template, "choices.0.delta.content", text)
@@ -387,7 +388,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 						// Append text content, distinguishing between regular content and reasoning.
 						if partResult.Get("thought").Bool() {
 							hasReasoningContent = true
-							reasoningContent.WriteString(partTextResult.String())
+							reasoningContent.WriteString(util.NormalizeReasoningContent(partTextResult.String()))
 						} else {
 							hasTextContent = true
 							textContent.WriteString(partTextResult.String())

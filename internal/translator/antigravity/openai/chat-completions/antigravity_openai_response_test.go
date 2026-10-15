@@ -406,3 +406,42 @@ func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDe
 		}
 	}
 }
+
+func TestConvertAntigravityResponseToOpenAINormalizesReasoningNewlines(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// 1. Streaming: excessive trailing newlines (\n\n\n) emitted by Google Antigravity should be collapsed to \n\n
+	streamingChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Evaluating safety policy.\n\n\n","thought":true}]}}]}}`)
+	results := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.8-flash-high", nil, nil, streamingChunk, &param)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	gotRC := gjson.GetBytes(results[0], "choices.0.delta.reasoning_content").String()
+	wantRC := "Evaluating safety policy.\n\n"
+	if gotRC != wantRC {
+		t.Fatalf("streaming delta reasoning_content = %q, want %q", gotRC, wantRC)
+	}
+
+	// 2. Non-streaming: thought parts containing \n\n\n should be normalized to \n\n
+	nonStreamJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"index": 0,
+				"content": {
+					"parts": [
+						{"text": "Step 1.\n\n\n", "thought": true},
+						{"text": "Final answer"}
+					]
+				},
+				"finishReason": "STOP"
+			}]
+		}
+	}`)
+	nonStreamOut := ConvertAntigravityResponseToOpenAINonStream(ctx, "gemini-3.8-flash-high", nil, nil, nonStreamJSON, nil)
+	gotNonStreamRC := gjson.GetBytes(nonStreamOut, "choices.0.message.reasoning_content").String()
+	wantNonStreamRC := "Step 1.\n\n"
+	if gotNonStreamRC != wantNonStreamRC {
+		t.Fatalf("non-stream reasoning_content = %q, want %q", gotNonStreamRC, wantNonStreamRC)
+	}
+}

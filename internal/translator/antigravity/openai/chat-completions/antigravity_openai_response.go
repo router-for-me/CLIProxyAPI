@@ -167,6 +167,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 				// Handle text content, distinguishing between regular content and reasoning/thoughts.
 				if partResult.Get("thought").Bool() {
+					textContent = util.NormalizeReasoningContent(textContent)
 					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
 				} else {
 					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
