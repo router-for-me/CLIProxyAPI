@@ -63,7 +63,7 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
-		clientVersion := c.Query("client_version")
+		clientVersion := codexmodels.ResolveClientVersion(c.Query("client_version"), c.GetHeader("User-Agent"))
 		body, errMarshal := codexmodels.MarshalCompact(h.codexClientModelsResponse(clientVersion))
 		if errMarshal != nil {
 			c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{

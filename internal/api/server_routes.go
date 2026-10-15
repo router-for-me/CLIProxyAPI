@@ -619,7 +619,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		cfg := s.getConfig()
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
-			clientVersion := c.Query("client_version")
+			clientVersion := codexmodels.ResolveClientVersion(c.Query("client_version"), c.GetHeader("User-Agent"))
 			if cfg != nil && cfg.Home.Enabled {
 				s.handleHomeCodexClientModels(c, clientVersion)
 				return
