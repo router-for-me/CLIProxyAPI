@@ -45,6 +45,11 @@ jobs:
       - name: Generate build metadata
         id: meta
         run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+          git fetch upstream --tags || true
+          UPSTREAM_TAG=$(git describe --tags --abbrev=0 upstream/main 2>/dev/null || echo "v8.0.29")
+          echo "VERSION=${UPSTREAM_TAG}-p" >> $GITHUB_OUTPUT
+          echo "UPSTREAM_TAG=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
           echo "REPO_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
           echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
@@ -56,10 +61,10 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            VERSION=v8-patched
+            VERSION=${{ steps.meta.outputs.VERSION }}
             COMMIT=${{ steps.meta.outputs.COMMIT }}
             BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
           tags: |
             ghcr.io/${{ steps.meta.outputs.REPO_LOWER }}/cli-proxy-api:latest
-            ghcr.io/${{ steps.meta.outputs.REPO_LOWER }}/cli-proxy-api:v8-patched
+            ghcr.io/${{ steps.meta.outputs.REPO_LOWER }}/cli-proxy-api:${{ steps.meta.outputs.VERSION }}
             ghcr.io/${{ steps.meta.outputs.REPO_LOWER }}/cli-proxy-api:${{ steps.meta.outputs.COMMIT }}
