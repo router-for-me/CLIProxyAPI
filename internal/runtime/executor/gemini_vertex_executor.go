@@ -1447,6 +1447,7 @@ func (e *GeminiVertexExecutor) executeInteractions(ctx context.Context, auth *cl
 	url := vertexInteractionsURL(baseURL, projectID, false)
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.RecordWireModelMetadata(opts, body, req.Model)
 
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errRequest != nil {
@@ -1576,6 +1577,7 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 	url := vertexInteractionsURL(baseURL, projectID, true)
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.RecordWireModelMetadata(opts, body, req.Model)
 
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errRequest != nil {

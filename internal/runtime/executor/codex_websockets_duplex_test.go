@@ -465,3 +465,23 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 		t.Fatal("server did not finish")
 	}
 }
+
+// Continuation finalizers run on the duplex writer goroutine: they must never
+// share the metadata map the conductor reads on the stream goroutine, and an
+// isolated clone must keep the previously recorded values (#5514 review).
+func TestIsolatedContinuationOptionsClonesMetadata(t *testing.T) {
+	shared := map[string]any{core.WireModelMetadataKey: "initial", "other": "value"}
+	opts := core.Options{Metadata: shared}
+	isolated := isolatedContinuationOptions(opts)
+	isolated.Metadata[core.WireModelMetadataKey] = "continuation"
+	if shared[core.WireModelMetadataKey] != "initial" {
+		t.Fatalf("shared map mutated through the isolated options: %v", shared)
+	}
+	if isolated.Metadata["other"] != "value" {
+		t.Fatal("isolated metadata lost existing values")
+	}
+	empty := isolatedContinuationOptions(core.Options{})
+	if empty.Metadata != nil {
+		t.Fatalf("empty metadata must stay empty, got %v", empty.Metadata)
+	}
+}

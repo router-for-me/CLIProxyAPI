@@ -583,6 +583,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if len(payload) == 0 {
 				payload = execReq.Payload
 			}
+			execOpts.Metadata = ensureExecutionAttemptMetadata(execOpts.Metadata)
 			execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
@@ -628,7 +629,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+			// Record the model actually sent upstream: a selection override
+			// replaces execReq.Model after the alias expansion, and structured
+			// 404s name that executed model (#5514 review).
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: executedUpstreamModel(execReq, execOpts), RouteModel: routeModel, Success: errExec == nil, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -795,6 +799,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if len(payload) == 0 {
 				payload = execReq.Payload
 			}
+			execOpts.Metadata = ensureExecutionAttemptMetadata(execOpts.Metadata)
 			execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
@@ -840,7 +845,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+			// Record the model actually sent upstream: a selection override
+			// replaces execReq.Model after the alias expansion, and structured
+			// 404s name that executed model (#5514 review).
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: executedUpstreamModel(execReq, execOpts), RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -852,7 +860,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// count_tokens route and return a generic endpoint 404. Record
 				// the failure for hooks and metrics without suspending a model
 				// that remains usable through the messages endpoint.
-				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
+				if isCountTokensEndpointNotFoundError(errExec, executedUpstreamModel(execReq, execOpts)) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					if isCredentialScopedError(errExec) {
@@ -1169,6 +1177,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if len(payload) == 0 {
 			payload = execReq.Payload
 		}
+		execOpts.Metadata = ensureExecutionAttemptMetadata(execOpts.Metadata)
 		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 		if homeMode && len(models) > 1 {
@@ -2079,6 +2088,34 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
 	return exec.HttpRequest(ctx, auth, req)
+}
+
+// ensureExecutionAttemptMetadata guarantees a non-nil per-attempt metadata map
+// so executors can record the final wire model back to the conductor through
+// Options.Metadata (#5514 review). The wire-model key is cleared up front: the
+// same caller-provided map can back consecutive attempts on different
+// credentials, and a stale report from a rewriting credential would keep
+// classifying the next credential's structured 404 against the wrong model.
+func ensureExecutionAttemptMetadata(metadata map[string]any) map[string]any {
+	if metadata == nil {
+		return make(map[string]any, 1)
+	}
+	delete(metadata, cliproxyexecutor.WireModelMetadataKey)
+	return metadata
+}
+
+// executedUpstreamModel prefers the final wire model the executor recorded when
+// payload rules rewrote the request body's model after this snapshot; that is
+// the identifier structured 404s quote (#5514 review).
+func executedUpstreamModel(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	if opts.Metadata != nil {
+		if wire, ok := opts.Metadata[cliproxyexecutor.WireModelMetadataKey].(string); ok {
+			if trimmed := strings.TrimSpace(wire); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return req.Model
 }
 
 func ensureCanonicalSessionMetadata(metadata map[string]any, headers http.Header, payload []byte) map[string]any {
