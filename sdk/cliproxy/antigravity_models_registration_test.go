@@ -1047,6 +1047,36 @@ func TestAntigravityPersistedHintsInvalidateOnUserAgentUpgrade(t *testing.T) {
 	if hints := svc.cachedAntigravityHints(authUpgradedUA); hints.ModelIDs != nil {
 		t.Fatalf("expected stale 2.9.1 persisted hints to be invalidated under 2.23.0 UA, got %v", hints.ModelIDs)
 	}
+
+	// Patch updates at or above the 2.23.0 capability floor (e.g. 2.23.0 <-> 2.23.1)
+	// must preserve persisted hints at startup and share the same capability cohort key.
+	auth2231 := &coreauth.Auth{
+		ID:       "antigravity-ua-cohort.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "token-ua-cohort",
+			"project_id":   "project-ua",
+			"base_url":     endpoint,
+			"user_agent":   "antigravity/hub/2.23.0 darwin/arm64",
+			antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(
+				"project-ua",
+				endpoint,
+				"antigravity/hub/2.23.1 darwin/arm64",
+				antigravityModelCapabilityHints{
+					ModelIDs: map[string]struct{}{"gemini-4-argon": {}},
+				},
+			),
+		},
+	}
+	auth2231Updated := auth2231.Clone()
+	auth2231Updated.Metadata["user_agent"] = "antigravity/hub/2.23.1 darwin/arm64"
+	if svc.antigravityCapabilityKey(auth2231) != svc.antigravityCapabilityKey(auth2231Updated) {
+		t.Fatal("expected capability cache key to remain stable across >=2.23.0 Hub patch versions")
+	}
+	if hints := svc.cachedAntigravityHints(auth2231); len(hints.ModelIDs) != 1 {
+		t.Fatalf("expected >=2.23.0 persisted hints to survive minor/patch Hub version skew at startup, got %v", hints.ModelIDs)
+	}
 }
 
 func TestAntigravityPersistedHintsManagerFallbackUsesRequestUserAgent(t *testing.T) {

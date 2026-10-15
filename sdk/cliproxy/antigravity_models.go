@@ -127,6 +127,60 @@ func resolveAntigravityUserAgent(auth *coreauth.Auth) string {
 	return misc.AntigravityRequestUserAgent(raw)
 }
 
+func isAntigravityVersionAtLeast(version string, minMajor, minMinor, minPatch int) bool {
+	var major, minor, patch int
+	n, _ := fmt.Sscanf(strings.TrimSpace(version), "%d.%d.%d", &major, &minor, &patch)
+	if n < 2 {
+		return false
+	}
+	if major != minMajor {
+		return major > minMajor
+	}
+	if minor != minMinor {
+		return minor > minMinor
+	}
+	return patch >= minPatch
+}
+
+// antigravityCapabilityUserAgentCohort groups Hub User-Agents at or above the
+// 2.23.0 capability floor into a single cohort so background auto-updater
+// refreshes (for example 2.23.0 -> 2.23.1) do not invalidate persisted startup
+// hints or discard in-flight capability probes, while still invalidating
+// pre-2.23.0 hints.
+func antigravityCapabilityUserAgentCohort(userAgent string) string {
+	normalized := strings.ToLower(strings.TrimSpace(userAgent))
+	const prefix = "antigravity/hub/"
+	if !strings.HasPrefix(normalized, prefix) {
+		return normalized
+	}
+	rest := normalized[len(prefix):]
+	versionPart := rest
+	platformSuffix := ""
+	if spaceIdx := strings.IndexByte(rest, ' '); spaceIdx >= 0 {
+		versionPart = rest[:spaceIdx]
+		platformSuffix = strings.TrimSpace(rest[spaceIdx+1:])
+	}
+	if isAntigravityVersionAtLeast(versionPart, 2, 23, 0) {
+		if platformSuffix != "" {
+			return prefix + ">=2.23.0 " + platformSuffix
+		}
+		return prefix + ">=2.23.0"
+	}
+	return normalized
+}
+
+func antigravityPersistedUserAgentMatches(persistedUserAgent, expectedUserAgent string) bool {
+	persistedTrimmed := strings.TrimSpace(persistedUserAgent)
+	expectedTrimmed := strings.TrimSpace(expectedUserAgent)
+	if strings.EqualFold(persistedTrimmed, expectedTrimmed) {
+		return true
+	}
+	if persistedTrimmed == "" || expectedTrimmed == "" {
+		return false
+	}
+	return antigravityCapabilityUserAgentCohort(persistedTrimmed) == antigravityCapabilityUserAgentCohort(expectedTrimmed)
+}
+
 func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy string) string {
 	project, _ := auth.Metadata["project_id"].(string)
 	identity := auth.ID
@@ -134,7 +188,7 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy strin
 		token, _ := auth.Metadata["access_token"].(string)
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
-	userAgent := strings.ToLower(strings.TrimSpace(resolveAntigravityUserAgent(auth)))
+	userAgent := antigravityCapabilityUserAgentCohort(resolveAntigravityUserAgent(auth))
 	return fmt.Sprintf("%q/%d/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, userAgent)
 }
 
@@ -303,7 +357,7 @@ func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 	if strings.TrimRight(strings.TrimSpace(persistedEndpoint), "/") != strings.TrimRight(strings.TrimSpace(expectedEndpoint), "/") {
 		return antigravityModelCapabilityHints{}, false
 	}
-	if !strings.EqualFold(strings.TrimSpace(persistedUserAgent), strings.TrimSpace(expectedUserAgent)) {
+	if !antigravityPersistedUserAgentMatches(persistedUserAgent, expectedUserAgent) {
 		return antigravityModelCapabilityHints{}, false
 	}
 	rawModels, hasModels := rawMap["model_ids"]
