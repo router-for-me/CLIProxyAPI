@@ -1617,3 +1617,34 @@ func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartFollowedByThinkin
 		t.Fatalf("expected exactly 2 stopped blocks (0=thinking, 1=text), got: %v", stopped)
 	}
 }
+
+func TestConvertAntigravityResponseToClaude_SanitizesZeroArgToolArguments(t *testing.T) {
+	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}}]}`)
+	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{"reason":"Switching to plan mode to inspect files"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+
+	// 1. Non-streaming test
+	nonStream := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, responseJSON, nil)
+	inputNonStream := gjson.GetBytes(nonStream, "content.0.input").Raw
+	if inputNonStream != "{}" {
+		t.Fatalf("expected non-streaming input {}, got %s", inputNonStream)
+	}
+
+	// 2. Streaming test
+	var param any
+	streamChunks := ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, responseJSON, &param)
+	streamText := string(bytes.Join(streamChunks, nil))
+	var deltaPartial string
+	for _, line := range strings.Split(streamText, "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			payload := strings.TrimPrefix(line, "data: ")
+			if gjson.Get(payload, "delta.type").String() == "input_json_delta" {
+				deltaPartial = gjson.Get(payload, "delta.partial_json").String()
+			}
+		}
+	}
+	if deltaPartial != "{}" {
+		t.Fatalf("expected streaming delta.partial_json {}, got %q (full output: %s)", deltaPartial, streamText)
+	}
+}
+

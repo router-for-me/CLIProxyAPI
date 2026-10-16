@@ -494,3 +494,96 @@ func RestoreSanitizedToolName(toolNameMap map[string]string, sanitizedName strin
 	}
 	return sanitizedName
 }
+
+// CleanClaudeToolArguments strips placeholder arguments (such as "reason" or "_")
+// injected during schema normalization for empty object schemas when returning
+// responses to Claude clients. If the tool definition in originalRequestRawJSON
+// was declared with empty or missing properties, or did not declare a "reason" property,
+// the injected arguments are sanitized so that Claude Code input validation succeeds.
+func CleanClaudeToolArguments(rawArgs string, toolName string, originalRequestRawJSON []byte) string {
+	rawArgs = strings.TrimSpace(rawArgs)
+	if rawArgs == "" || rawArgs == "{}" {
+		return "{}"
+	}
+	if !gjson.Valid(rawArgs) {
+		return rawArgs
+	}
+
+	isZeroArgTool := false
+	hasDeclaredReason := false
+	hasDeclaredUnderscore := false
+	foundTool := false
+
+	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
+		tools := gjson.GetBytes(originalRequestRawJSON, "tools")
+		if tools.IsArray() {
+			for _, t := range tools.Array() {
+				name := t.Get("name").String()
+				if name == "" {
+					name = t.Get("function.name").String()
+				}
+				if name == toolName {
+					foundTool = true
+					schema := t.Get("input_schema")
+					if !schema.Exists() {
+						schema = t.Get("parameters")
+					}
+					if !schema.Exists() {
+						schema = t.Get("function.parameters")
+					}
+
+					props := schema.Get("properties")
+					if !props.Exists() || (props.IsObject() && len(props.Map()) == 0) {
+						isZeroArgTool = true
+					} else if props.IsObject() {
+						if props.Get("reason").Exists() {
+							hasDeclaredReason = true
+						}
+						if props.Get("_").Exists() {
+							hasDeclaredUnderscore = true
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Fallback for well-known parameterless tools if original request was not available or tool was not matched
+	if !foundTool {
+		switch toolName {
+		case "EnterPlanMode", "CronList", "TaskList", "ExitPlanMode", "TestingPermission":
+			isZeroArgTool = true
+		}
+	}
+
+	if isZeroArgTool {
+		return "{}"
+	}
+
+	argsResult := gjson.Parse(rawArgs)
+	if !argsResult.IsObject() {
+		return rawArgs
+	}
+
+	cleaned := rawArgs
+	modified := false
+	if !hasDeclaredReason && argsResult.Get("reason").Exists() {
+		cleaned, _ = sjson.Delete(cleaned, "reason")
+		modified = true
+	}
+	if !hasDeclaredUnderscore && argsResult.Get("_").Exists() {
+		cleaned, _ = sjson.Delete(cleaned, "_")
+		modified = true
+	}
+
+	if modified {
+		parsedCleaned := gjson.Parse(cleaned)
+		if !parsedCleaned.IsObject() || len(parsedCleaned.Map()) == 0 {
+			return "{}"
+		}
+		return cleaned
+	}
+
+	return rawArgs
+}

@@ -34,6 +34,7 @@ type Params struct {
 	InputTokens      int64
 	OutputTokens     int64
 	CachedTokens     int64
+	CurrentToolName  string
 }
 
 const geminiMalformedFunctionCallErrorPayload = `{"type":"error","error":{"type":"api_error","message":"Gemini response finished with MALFORMED_FUNCTION_CALL"}}`
@@ -262,7 +263,8 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 				if (*param).(*Params).ResponseType == 3 && upstreamToolName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+						cleanArgs := util.CleanClaudeToolArguments(fcArgsResult.Raw, (*param).(*Params).CurrentToolName, originalRequestRawJSON)
+						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", cleanArgs)
 						appendEvent("content_block_delta", string(data))
 					}
 					if hasThoughtSignature {
@@ -285,13 +287,15 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					(*param).(*Params).ResponseIndex++
 				}
 
+				(*param).(*Params).CurrentToolName = clientToolName
 				data := []byte(fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, (*param).(*Params).ResponseIndex))
 				data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
 				data, _ = sjson.SetBytes(data, "content_block.name", clientToolName)
 				appendEvent("content_block_start", string(data))
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+					cleanArgs := util.CleanClaudeToolArguments(fcArgsResult.Raw, clientToolName, originalRequestRawJSON)
+					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", cleanArgs)
 					appendEvent("content_block_delta", string(data))
 				}
 				(*param).(*Params).ResponseType = 3
@@ -532,7 +536,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", clientToolName)
 				inputRaw := "{}"
 				if args := functionCall.Get("args"); args.Exists() && gjson.Valid(args.Raw) && args.IsObject() {
-					inputRaw = args.Raw
+					inputRaw = util.CleanClaudeToolArguments(args.Raw, clientToolName, originalRequestRawJSON)
 				}
 				toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(inputRaw))
 				blocks = append(blocks, toolBlock)

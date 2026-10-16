@@ -1078,3 +1078,45 @@ func TestConvertGeminiResponseToClaudeNonStream_UniqueToolUseIDsAcrossTurns(t *t
 		t.Fatalf("non-stream tool_use ids repeated across turns: first=%q second=%q", nonStreamID1, nonStreamID2)
 	}
 }
+
+func TestConvertGeminiResponseToClaude_SanitizesZeroArgToolArguments(t *testing.T) {
+	origRequest := []byte(`{"model":"gemini-3-flash","tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}}]}`)
+	rawResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"functionCall": {"name": "EnterPlanMode", "args": {"reason": "Plan mode switch"}}}
+				],
+				"role": "model"
+			},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "gemini-3-flash",
+		"responseId": "resp-test-zero-arg"
+	}`)
+
+	ctx := context.Background()
+
+	// 1. Non-streaming
+	nonStream := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-3-flash", origRequest, origRequest, rawResponse, nil)
+	inputNonStream := gjson.GetBytes(nonStream, "content.0.input").Raw
+	if inputNonStream != "{}" {
+		t.Fatalf("expected non-streaming input {}, got %s", inputNonStream)
+	}
+
+	// 2. Streaming
+	var param any
+	streamBytes := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-3-flash", origRequest, origRequest, rawResponse, &param), nil)
+	var deltaPartial string
+	for _, line := range strings.Split(string(streamBytes), "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			payload := strings.TrimPrefix(line, "data: ")
+			if gjson.Get(payload, "delta.type").String() == "input_json_delta" {
+				deltaPartial = gjson.Get(payload, "delta.partial_json").String()
+			}
+		}
+	}
+	if deltaPartial != "{}" {
+		t.Fatalf("expected streaming delta.partial_json {}, got %q (stream: %s)", deltaPartial, string(streamBytes))
+	}
+}
