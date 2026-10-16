@@ -1737,6 +1737,15 @@ func TestMetaExecutor_ClaudeRequestReplaysMuseReasoning(t *testing.T) {
 		if got := input.Get("3.type").String(); got != "function_call" {
 			t.Fatalf("input.3.type = %q, want function_call; body=%s", got, body)
 		}
+		// The preamble before the tool call is commentary; the last answer is not.
+		if got := input.Get("2.phase").String(); got != "commentary" {
+			t.Fatalf("input.2.phase = %q, want commentary; body=%s", got, body)
+		}
+		for _, item := range input.Array()[3:] {
+			if item.Get("phase").Exists() {
+				t.Fatalf("unexpected phase on %s; body=%s", item.Raw, body)
+			}
+		}
 	}
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{

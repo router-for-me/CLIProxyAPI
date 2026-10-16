@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -78,6 +79,48 @@ func TestDropMetaUnreplayableReasoning(t *testing.T) {
 			body := []byte(`{"model":"muse-wonder-1.0","input":` + tt.input + `}`)
 			assertMetaInputKinds(t, DropMetaUnreplayableReasoning(body), tt.want)
 		})
+	}
+}
+
+func TestTagMetaCommentaryPhase(t *testing.T) {
+	body := []byte(`{"input":[` +
+		`{"type":"message","role":"user","content":"hi"},` +
+		`{"type":"reasoning","summary":[],"encrypted_content":"Q-PaD1"},` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Let me check."}]},` +
+		`{"type":"reasoning","summary":[],"encrypted_content":"Q-PaD2"},` +
+		`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
+		`{"type":"function_call","call_id":"c2","name":"f","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"a"},` +
+		`{"type":"function_call_output","call_id":"c2","output":"b"},` +
+		`{"role":"assistant","content":[{"type":"output_text","text":"Now the other one."}]},` +
+		`{"type":"function_call","call_id":"c3","name":"f","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c3","output":"c"},` +
+		`{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Kept."}]},` +
+		`{"type":"function_call","call_id":"c4","name":"f","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c4","output":"d"},` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]},` +
+		`{"type":"message","role":"user","content":"thanks"}` +
+		`]}`)
+
+	got := TagMetaCommentaryPhase(body)
+
+	wantPhase := map[int]string{2: "commentary", 8: "commentary", 11: "final_answer", 14: ""}
+	for index, want := range wantPhase {
+		phase := gjson.GetBytes(got, "input."+strconv.Itoa(index)+".phase")
+		if want == "" {
+			if phase.Exists() {
+				t.Fatalf("input.%d.phase = %q, want none; body=%s", index, phase.String(), got)
+			}
+			continue
+		}
+		if phase.String() != want {
+			t.Fatalf("input.%d.phase = %q, want %q; body=%s", index, phase.String(), want, got)
+		}
+	}
+	for _, index := range []int{0, 1, 3, 15} {
+		if gjson.GetBytes(got, "input."+strconv.Itoa(index)+".phase").Exists() {
+			t.Fatalf("input.%d got a phase; body=%s", index, got)
+		}
 	}
 }
 

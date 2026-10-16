@@ -78,6 +78,7 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 	body = sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx, "meta executor", body)
 	if from == sdktranslator.FormatClaude {
 		body = helps.DropMetaUnreplayableReasoning(body)
+		body = helps.TagMetaCommentaryPhase(body)
 	}
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
