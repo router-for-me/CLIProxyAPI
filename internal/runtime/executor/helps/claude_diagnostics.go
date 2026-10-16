@@ -22,6 +22,13 @@ const (
 	claudeDiagnosticsCleanupPeriod  = 15 * time.Minute
 	claudeDiagnosticsMaxEntries     = 4096
 	claudeDiagnosticsEvictBatchSize = 256
+
+	// claudeSessionDatePinTTL bounds how long a session keeps its pinned
+	// currentDate after its last request. It is deliberately much longer than
+	// claudeDiagnosticsTTL: the reminder sits in front of every earlier turn,
+	// so re-anchoring it after an ordinary idle gap invalidates the prompt
+	// cache and every earlier thinking signature (prefix_binding_mismatch).
+	claudeSessionDatePinTTL = 7 * 24 * time.Hour
 )
 
 var (
@@ -112,20 +119,27 @@ type claudeDiagnosticsEntry struct {
 	previousMessageID string
 	previousRequestID string
 	promptID          string
-	pinnedDate        string
 	minimumSequence   uint64
 	committedSequence uint64
 	lastAccess        uint64
 	expiresAt         time.Time
 }
 
+// claudeSessionDatePin outlives continuity entries so that continuity TTL
+// expiry or capacity eviction does not re-anchor the session date.
+type claudeSessionDatePin struct {
+	date      string
+	expiresAt time.Time
+}
+
 var claudeDiagnosticsState = struct {
 	sync.Mutex
 	entries      map[string]claudeDiagnosticsEntry
+	datePins     map[string]claudeSessionDatePin
 	lastCleanup  time.Time
 	nextSequence uint64
 	nextAccess   uint64
-}{entries: make(map[string]claudeDiagnosticsEntry)}
+}{entries: make(map[string]claudeDiagnosticsEntry), datePins: make(map[string]claudeSessionDatePin)}
 
 // IsValidClaudePromptID verifies whether an explicit prompt ID adheres to strict RFC 4122 UUIDv4 semantics.
 func IsValidClaudePromptID(id string) bool {
@@ -201,28 +215,36 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 // session, recording date on the first call of a session and returning the
 // pinned value on later calls. This keeps the cloaked currentDate reminder
 // byte-stable within a session so a local-midnight flip cannot invalidate the
-// prompt-cache prefix. TTL expiry resets the entry, which re-anchors the next
-// request of the same session to the then-current date. An unknown key (for
-// example after a process restart) returns date unchanged, matching the
-// per-request behaviour.
+// prompt-cache prefix. The pin is stored apart from the continuity entry with
+// its own sliding claudeSessionDatePinTTL, so continuity TTL expiry or capacity
+// eviction keeps the anchor. Pin expiry, pin-store capacity eviction, and a
+// process restart (pins are in memory) re-anchor the session to the
+// then-current date. A key without a continuity entry returns date unchanged,
+// matching the per-request behaviour.
 func PinClaudeSessionDate(key, date string) string {
 	key = strings.TrimSpace(key)
 	date = strings.TrimSpace(date)
 	if key == "" || date == "" {
 		return date
 	}
+	now := time.Now()
 	claudeDiagnosticsState.Lock()
 	defer claudeDiagnosticsState.Unlock()
-	entry, ok := claudeDiagnosticsState.entries[key]
+	if _, ok := claudeDiagnosticsState.entries[key]; !ok {
+		return date
+	}
+	pin, ok := claudeDiagnosticsState.datePins[key]
 	if !ok {
-		return date
+		// Only a new key grows the store; refreshing an expired pin must not
+		// evict live pins of other sessions.
+		evictClaudeSessionDatePinsLocked()
 	}
-	if entry.pinnedDate == "" {
-		entry.pinnedDate = date
-		claudeDiagnosticsState.entries[key] = entry
-		return date
+	if !ok || now.After(pin.expiresAt) {
+		pin.date = date
 	}
-	return entry.pinnedDate
+	pin.expiresAt = now.Add(claudeSessionDatePinTTL)
+	claudeDiagnosticsState.datePins[key] = pin
+	return pin.date
 }
 
 // BeginClaudeDiagnostics starts one request generation for a stable credential
@@ -287,7 +309,35 @@ func cleanupClaudeDiagnosticsLocked(now time.Time) {
 			delete(claudeDiagnosticsState.entries, key)
 		}
 	}
+	for key, pin := range claudeDiagnosticsState.datePins {
+		if now.After(pin.expiresAt) {
+			delete(claudeDiagnosticsState.datePins, key)
+		}
+	}
 	claudeDiagnosticsState.lastCleanup = now
+}
+
+// evictClaudeSessionDatePinsLocked drops the pins closest to expiry once the
+// store is full. Sliding expiry makes that the least recently used sessions.
+func evictClaudeSessionDatePinsLocked() {
+	if len(claudeDiagnosticsState.datePins) < claudeDiagnosticsMaxEntries {
+		return
+	}
+	type candidate struct {
+		key       string
+		expiresAt time.Time
+	}
+	candidates := make([]candidate, 0, len(claudeDiagnosticsState.datePins))
+	for key, pin := range claudeDiagnosticsState.datePins {
+		candidates = append(candidates, candidate{key: key, expiresAt: pin.expiresAt})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].expiresAt.Before(candidates[j].expiresAt)
+	})
+	count := min(claudeDiagnosticsEvictBatchSize, len(candidates))
+	for _, candidate := range candidates[:count] {
+		delete(claudeDiagnosticsState.datePins, candidate.key)
+	}
 }
 
 func evictClaudeDiagnosticsLocked() {
@@ -320,6 +370,7 @@ func resetClaudeDiagnosticsForTest() {
 	claudeDiagnosticsState.Lock()
 	defer claudeDiagnosticsState.Unlock()
 	claudeDiagnosticsState.entries = make(map[string]claudeDiagnosticsEntry)
+	claudeDiagnosticsState.datePins = make(map[string]claudeSessionDatePin)
 	claudeDiagnosticsState.lastCleanup = time.Time{}
 	claudeDiagnosticsState.nextSequence = 0
 	claudeDiagnosticsState.nextAccess = 0

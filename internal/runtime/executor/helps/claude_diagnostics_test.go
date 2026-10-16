@@ -442,7 +442,45 @@ func TestClaudeSubagentRequests1h(t *testing.T) {
 	}
 }
 
-func TestPinClaudeSessionDateAnchorsFirstRequestAndReanchorsAfterTTL(t *testing.T) {
+func TestPinClaudeSessionDateExpiredRefreshInFullStoreKeepsLivePins(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	key, _, _ := BeginClaudeDiagnostics("credential", "session")
+	PinClaudeSessionDate(key, "2026-08-01")
+
+	// Fill the store with live pins, expire only this session's pin, and keep
+	// periodic cleanup throttled so the expired pin is still present.
+	claudeDiagnosticsState.Lock()
+	live := time.Now().Add(time.Hour)
+	for i := len(claudeDiagnosticsState.datePins); i < claudeDiagnosticsMaxEntries; i++ {
+		claudeDiagnosticsState.datePins[fmt.Sprintf("live-%d", i)] = claudeSessionDatePin{date: "2026-07-01", expiresAt: live}
+	}
+	pin := claudeDiagnosticsState.datePins[key]
+	pin.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.datePins[key] = pin
+	claudeDiagnosticsState.lastCleanup = time.Now()
+	claudeDiagnosticsState.Unlock()
+
+	if got := PinClaudeSessionDate(key, "2026-08-02"); got != "2026-08-02" {
+		t.Fatalf("expired pin refresh = %q, want re-anchored 2026-08-02", got)
+	}
+
+	// Refreshing an existing key does not grow the store, so no live pin may
+	// be evicted for it.
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	if got := len(claudeDiagnosticsState.datePins); got != claudeDiagnosticsMaxEntries {
+		t.Fatalf("pin count = %d, want %d", got, claudeDiagnosticsMaxEntries)
+	}
+	for pinKey, livePin := range claudeDiagnosticsState.datePins {
+		if pinKey != key && livePin.date != "2026-07-01" {
+			t.Fatalf("live pin %q date = %q, want 2026-07-01", pinKey, livePin.date)
+		}
+	}
+}
+
+func TestPinClaudeSessionDateAnchorsFirstRequestAndReanchorsAfterPinTTL(t *testing.T) {
 	resetClaudeDiagnosticsForTest()
 	defer resetClaudeDiagnosticsForTest()
 
@@ -456,15 +494,38 @@ func TestPinClaudeSessionDateAnchorsFirstRequestAndReanchorsAfterTTL(t *testing.
 		t.Fatalf("second pin = %q, want anchored 2026-08-01", got)
 	}
 
-	// TTL expiry resets the entry, so the session re-anchors to the current date.
+	// An idle gap longer than the continuity TTL starts a new continuity
+	// generation. The date must stay anchored: the reminder sits in front of
+	// every earlier turn, so re-anchoring it invalidates the prompt cache and
+	// every earlier thinking signature (prefix_binding_mismatch).
 	claudeDiagnosticsState.Lock()
 	entry := claudeDiagnosticsState.entries[key]
 	entry.expiresAt = time.Now().Add(-time.Second)
 	claudeDiagnosticsState.entries[key] = entry
+	claudeDiagnosticsState.lastCleanup = time.Time{}
 	claudeDiagnosticsState.Unlock()
 	BeginClaudeDiagnostics("credential", "session")
-	if got := PinClaudeSessionDate(key, "2026-08-02"); got != "2026-08-02" {
-		t.Fatalf("post-TTL pin = %q, want re-anchored 2026-08-02", got)
+	if got := PinClaudeSessionDate(key, "2026-08-02"); got != "2026-08-01" {
+		t.Fatalf("post-continuity-TTL pin = %q, want anchored 2026-08-01", got)
+	}
+
+	// Capacity eviction of continuity entries must not drop the pin either.
+	claudeDiagnosticsState.Lock()
+	delete(claudeDiagnosticsState.entries, key)
+	claudeDiagnosticsState.Unlock()
+	BeginClaudeDiagnostics("credential", "session")
+	if got := PinClaudeSessionDate(key, "2026-08-02"); got != "2026-08-01" {
+		t.Fatalf("post-eviction pin = %q, want anchored 2026-08-01", got)
+	}
+
+	// Only the pin's own TTL re-anchors the session to the current date.
+	claudeDiagnosticsState.Lock()
+	pin := claudeDiagnosticsState.datePins[key]
+	pin.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.datePins[key] = pin
+	claudeDiagnosticsState.Unlock()
+	if got := PinClaudeSessionDate(key, "2026-08-03"); got != "2026-08-03" {
+		t.Fatalf("post-pin-TTL pin = %q, want re-anchored 2026-08-03", got)
 	}
 
 	// Unknown keys (no continuity entry) fall back to the candidate date,
