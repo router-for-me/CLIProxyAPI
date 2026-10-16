@@ -200,9 +200,7 @@ func (e *DevinExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	}
 
 	// Quota observation signals for management UI and conductor
-	if updated.Quota.Signals == nil {
-		updated.Quota.Signals = make(map[string]string)
-	}
+	updated.Quota.Signals = make(map[string]string)
 	if status.Plan != "" {
 		updated.Quota.Signals["plan"] = status.Plan
 	}

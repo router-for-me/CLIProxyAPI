@@ -335,7 +335,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
 			auth.Unavailable = existing.Unavailable
 			auth.NextRetryAfter = existing.NextRetryAfter
-			auth.Quota = existing.Quota
+			if mode == updateModeRefresh {
+				applyCooldownFields(&auth.Quota, existing.Quota)
+			} else {
+				auth.Quota = existing.Quota
+			}
 			if auth.Status == StatusActive {
 				auth.Status = existing.Status
 			}
