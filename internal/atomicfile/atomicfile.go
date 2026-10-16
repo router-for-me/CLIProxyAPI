@@ -5,18 +5,21 @@ package atomicfile
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	log "github.com/sirupsen/logrus"
 )
 
-// rename, exchange and exchangeAvailable are replaced in tests to exercise the
-// fallbacks.
+// rename, exchange, exchangeAvailable and matchOwner are replaced in tests to
+// exercise the fallbacks.
 var (
 	rename            = os.Rename
 	exchange          = exchangeFiles
 	exchangeAvailable = exchangeSupported
+	matchOwner        = keepOwner
 )
 
 // beforeCommit runs after the temp file is complete, right before it replaces the
@@ -27,10 +30,17 @@ var beforeCommit = func() {}
 // same directory that is synced and then renamed over path.
 //
 // A symlinked path is resolved so the link itself stays in place. An existing file
-// keeps its permission bits; perm applies to a new file. When no temp file can be
-// created next to the target, or the rename fails (a single-file bind mount
-// returns EBUSY, Windows refuses to replace an open file), it falls back to writing
-// in place, which is what os.WriteFile does.
+// keeps its permission bits and, on Unix, its owner and group; a new file gets perm
+// less the umask, as with os.WriteFile. Other inode metadata (extended attributes,
+// POSIX ACLs, SELinux labels, Windows DACLs) is not copied: the new file gets the
+// defaults for its directory.
+//
+// It writes in place, which is what os.WriteFile does, when a rename would change
+// what path refers to: a dangling symlink (the link would be replaced), a special
+// file such as a device or FIFO, a file with other hard links (Unix), or an existing
+// file whose owner the process cannot give the temp file. It also writes in place
+// when no temp file can be created next to the target, or the rename fails (a
+// single-file bind mount returns EBUSY, Windows refuses to replace an open file).
 func WriteFile(path string, data []byte, perm os.FileMode) error {
 	return write(path, data, perm, false)
 }
@@ -51,10 +61,21 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	target := path
 	if resolved, errResolve := filepath.EvalSymlinks(path); errResolve == nil {
 		target = resolved
+	} else if linkInfo, errLstat := os.Lstat(path); errLstat == nil && linkInfo.Mode()&os.ModeSymlink != 0 {
+		// A dangling symlink: a rename would replace the link. Writing through it
+		// creates its target, as os.WriteFile does (ReplaceFile fails instead).
+		return writeInPlace(path, data, perm, mustExist)
 	}
-	mode := perm
-	if info, errStat := os.Stat(target); errStat == nil {
-		mode = info.Mode().Perm()
+	existing, errStat := os.Stat(target)
+	if errStat == nil {
+		if !existing.Mode().IsRegular() {
+			// A device, FIFO or other special file: a rename would replace the node.
+			return writeInPlace(target, data, perm, mustExist)
+		}
+		if linkCount(existing) > 1 {
+			// A rename would leave the other hard links on the old content.
+			return writeInPlace(target, data, perm, mustExist)
+		}
 		// The rename below is authorized by the directory, not the file. Keep the
 		// os.WriteFile rule that a file this process may not write stays untouched
 		// (read-only mode, write-denying ACL): opening it for writing, without
@@ -72,7 +93,7 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 
 	// The temp name must not match what watchers and scanners pick up (*.json, the
 	// config file name), so it is hidden and ends in a random suffix.
-	tmp, errCreate := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-*")
+	tmp, errCreate := createTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-", perm)
 	if errCreate != nil {
 		log.WithError(errCreate).Debugf("atomicfile: cannot create temp file next to %s, writing in place", target)
 		return writeInPlace(target, data, perm, mustExist)
@@ -87,9 +108,17 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		}
 	}()
 
-	if errChmod := tmp.Chmod(mode); errChmod != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("atomicfile: chmod temp file: %w", errChmod)
+	if existing != nil {
+		// Owner first: a chown can clear mode bits.
+		if errOwner := matchOwner(tmp, existing); errOwner != nil {
+			_ = tmp.Close()
+			log.WithError(errOwner).Debugf("atomicfile: cannot keep the owner of %s, writing in place", target)
+			return writeInPlace(target, data, perm, mustExist)
+		}
+		if errChmod := tmp.Chmod(existing.Mode().Perm()); errChmod != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("atomicfile: chmod temp file: %w", errChmod)
+		}
 	}
 	if _, errWrite := tmp.Write(data); errWrite != nil {
 		_ = tmp.Close()
@@ -145,6 +174,19 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	}
 	committed = true
 	return nil
+}
+
+// createTemp is os.CreateTemp with a mode: the file is created with perm less the
+// umask, so a new file ends up with the mode os.WriteFile would give it.
+func createTemp(dir, prefix string, perm os.FileMode) (*os.File, error) {
+	for attempt := 0; ; attempt++ {
+		name := filepath.Join(dir, prefix+strconv.FormatUint(rand.Uint64(), 36))
+		file, errOpen := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
+		if errOpen != nil && os.IsExist(errOpen) && attempt < 100 {
+			continue
+		}
+		return file, errOpen
+	}
 }
 
 // writeInPlace is the non-atomic fallback. With mustExist it opens without O_CREATE,
