@@ -202,7 +202,7 @@ func translateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context
 	case from == sdktranslator.FormatOpenAI && to == sdktranslator.FormatClaude:
 		translated, convertErr = openaichatclaude.ConvertOpenAIRequestToClaudeWithCompat(model, payload, stream)
 	case from == sdktranslator.FormatOpenAIResponse && to == sdktranslator.FormatClaude:
-		translated, convertErr = responsesclaude.ConvertOpenAIResponsesRequestToClaudeWithCompat(model, payload, stream)
+		translated, convertErr = responsesclaude.ConvertOpenAIResponsesRequestToClaudeWithCompatContext(ctx, model, payload, stream)
 	default:
 		return translateRequestWithCodexMultiAgentV2Checked(ctx, headers, cfg, from, to, model, payload, stream)
 	}

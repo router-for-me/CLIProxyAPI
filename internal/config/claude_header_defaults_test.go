@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -55,5 +56,40 @@ claude-header-defaults:
 	}
 	if got := *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile; got {
 		t.Fatalf("StabilizeDeviceProfile = %v, want false", got)
+	}
+}
+
+func TestParseConfigBytes_ClaudeHeaderDefaultsOperatorOverrides(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte(`upstream:
+  claude:
+    header-defaults:
+      anthropic-beta-strip: [" cache-diagnosis-2026-04-07 ", "", "cache-diagnosis-2026-04-07"]
+      anthropic-beta-append: ["context-1m-2025-08-07", " context-1m-2025-08-07 ", "advisor-tool-2026-03-01"]
+      inject-diagnostics: false
+      client-request-id: " PassThrough "
+`))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", err)
+	}
+	hd := cfg.ClaudeHeaderDefaults
+	if want := []string{"cache-diagnosis-2026-04-07"}; !reflect.DeepEqual(hd.AnthropicBetaStrip, want) {
+		t.Fatalf("AnthropicBetaStrip = %q, want %q", hd.AnthropicBetaStrip, want)
+	}
+	if want := []string{"context-1m-2025-08-07", "advisor-tool-2026-03-01"}; !reflect.DeepEqual(hd.AnthropicBetaAppend, want) {
+		t.Fatalf("AnthropicBetaAppend = %q, want %q", hd.AnthropicBetaAppend, want)
+	}
+	if hd.InjectDiagnostics == nil || *hd.InjectDiagnostics {
+		t.Fatalf("InjectDiagnostics = %v, want explicit false", hd.InjectDiagnostics)
+	}
+	if hd.ClientRequestID != ClaudeClientRequestIDPassthrough {
+		t.Fatalf("ClientRequestID = %q, want %q", hd.ClientRequestID, ClaudeClientRequestIDPassthrough)
+	}
+
+	cfg, err = ParseConfigBytes([]byte("claude-header-defaults: {client-request-id: sometimes}\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", err)
+	}
+	if got := cfg.ClaudeHeaderDefaults.ClientRequestID; got != "" {
+		t.Fatalf("ClientRequestID = %q, want unknown mode reset to default", got)
 	}
 }

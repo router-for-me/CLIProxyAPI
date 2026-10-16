@@ -2,6 +2,7 @@ package chat_completions
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -1741,5 +1742,111 @@ func TestApplyPatchChatHistoryBoundary(t *testing.T) {
 				t.Fatalf("history boundary: %s", out)
 			}
 		})
+	}
+}
+
+// Codex rejects call_id values longer than 64 characters, so over-length client
+// IDs must be shortened consistently for calls and their outputs.
+func TestOverLengthToolCallIDsAreShortenedConsistently(t *testing.T) {
+	sharedPrefix := strings.Repeat("a", 70)
+	longA := sharedPrefix + "_A"
+	longB := sharedPrefix + "_B"
+	input := []byte(`{
+		"model": "gpt-6.1-sol",
+		"messages": [
+			{"role": "user", "content": "Multi-tool"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "` + longA + `", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+					{"id": "` + longB + `", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}},
+					{"id": "short_id", "type": "function", "function": {"name": "tool_c", "arguments": "{}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "` + longA + `", "content": "res_a"},
+			{"role": "tool", "tool_call_id": "` + longB + `", "content": "res_b"},
+			{"role": "tool", "tool_call_id": "short_id", "content": "res_c"}
+		]
+	}`)
+
+	out, _ := ConvertOpenAIRequestToCodex("gpt-6.1-sol", input, true)
+
+	var callIDs, outputIDs []string
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		switch item.Get("type").String() {
+		case "function_call":
+			callIDs = append(callIDs, item.Get("call_id").String())
+		case "function_call_output":
+			outputIDs = append(outputIDs, item.Get("call_id").String())
+		}
+	}
+	if len(callIDs) != 3 || len(outputIDs) != 3 {
+		t.Fatalf("expected 3 calls and 3 outputs, got %d and %d: %s", len(callIDs), len(outputIDs), out)
+	}
+	for i := range callIDs {
+		if len(callIDs[i]) > 64 {
+			t.Fatalf("call_id %d length = %d, want <= 64: %q", i, len(callIDs[i]), callIDs[i])
+		}
+		if callIDs[i] != outputIDs[i] {
+			t.Fatalf("output %d call_id = %q, want %q", i, outputIDs[i], callIDs[i])
+		}
+	}
+	if callIDs[0] == callIDs[1] {
+		t.Fatalf("distinct over-length IDs collapsed to %q", callIDs[0])
+	}
+	if callIDs[2] != "short_id" {
+		t.Fatalf("short call_id = %q, want unchanged", callIDs[2])
+	}
+}
+
+// A legal 64-character client ID may equal the shortened form of another
+// over-length ID; results must still reach their own calls.
+func TestShortenedToolCallIDCollisionWithLegalIDKeepsResultsMatched(t *testing.T) {
+	longA := strings.Repeat("a", 70) + "_A"
+	idB := shortenCodexCallIDIfNeeded(longA)
+	if len(idB) != 64 || idB == longA {
+		t.Fatalf("test setup: shortened ID = %q", idB)
+	}
+	input := []byte(`{
+		"model": "gpt-6.1-sol",
+		"messages": [
+			{"role": "user", "content": "Multi-tool"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "` + longA + `", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+					{"id": "` + idB + `", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "` + idB + `", "content": "res_b"},
+			{"role": "tool", "tool_call_id": "` + longA + `", "content": "res_a"}
+		]
+	}`)
+
+	out, _ := ConvertOpenAIRequestToCodex("gpt-6.1-sol", input, true)
+
+	callIDByName := map[string]string{}
+	outputIDByResult := map[string]string{}
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		switch item.Get("type").String() {
+		case "function_call":
+			callIDByName[item.Get("name").String()] = item.Get("call_id").String()
+		case "function_call_output":
+			outputIDByResult[item.Get("output").String()] = item.Get("call_id").String()
+		}
+	}
+	if len(callIDByName) != 2 || len(outputIDByResult) != 2 {
+		t.Fatalf("expected 2 calls and 2 outputs: %s", out)
+	}
+	if callIDByName["tool_a"] == callIDByName["tool_b"] {
+		t.Fatalf("calls share call_id %q", callIDByName["tool_a"])
+	}
+	if callIDByName["tool_b"] != idB {
+		t.Fatalf("legal call_id = %q, want unchanged %q", callIDByName["tool_b"], idB)
+	}
+	if outputIDByResult["res_a"] != callIDByName["tool_a"] || outputIDByResult["res_b"] != callIDByName["tool_b"] {
+		t.Fatalf("results mismatched: calls=%v outputs=%v", callIDByName, outputIDByResult)
 	}
 }

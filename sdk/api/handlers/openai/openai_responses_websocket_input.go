@@ -3,12 +3,14 @@ package openai
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -77,9 +79,11 @@ func (s *responsesLocalInterrupt) framesChan() <-chan []byte {
 // readResponsesWebsocketInput is the only downstream reader. Interrupts are
 // handled immediately so they are not queued behind an active response.
 // The bounded queue backpressures clients instead of retaining unlimited input.
-func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter) <-chan cliproxyexecutor.WebsocketInput {
+func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, timeline websocketTimelineAppender) (<-chan cliproxyexecutor.WebsocketInput, <-chan struct{}) {
 	input := make(chan cliproxyexecutor.WebsocketInput, 16)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer close(input)
 		for {
 			kind, payload, errRead := conn.ReadMessage()
@@ -93,13 +97,19 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 			// Control frames bypass response.create normalization. The original
 			// response_id, mode, and extension fields must reach upstream unchanged.
 			if json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "response.interrupt" {
+				appendResponsesInterruptDiagnostic(timeline, payload, "")
 				errInterrupt := interrupt(payload)
 				switch {
 				case errInterrupt == nil:
+					appendResponsesInterruptDiagnostic(timeline, payload, "handled")
 					continue
 				case errors.Is(errInterrupt, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) && local.deliver(payload):
+					appendResponsesInterruptDiagnostic(timeline, payload, "local_http")
 					continue
 				default:
+					appendResponsesInterruptDiagnostic(timeline, payload, "rejected")
+					// The sanitized outcome replaces raw error logging here: errors
+					// from transport dependencies may contain credentials or URLs.
 					_, errWrite := writeResponsesWebsocketError(writer, nil, &interfaces.ErrorMessage{
 						StatusCode: http.StatusBadRequest,
 						Error:      errInterrupt,
@@ -118,7 +128,30 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 			}
 		}
 	}()
-	return input
+	return input, done
+}
+
+func appendResponsesInterruptDiagnostic(timeline websocketTimelineAppender, payload []byte, outcome string) {
+	if timeline == nil {
+		return
+	}
+	// Hash client-controlled IDs and omit all arbitrary fields, including mode.
+	// Only correlation metadata is needed to diagnose control-frame timing.
+	idHash := sha256.Sum256([]byte(gjson.GetBytes(payload, "response_id").String()))
+	diagnostic := struct {
+		Type           string `json:"type"`
+		ResponseIDHash string `json:"response_id_hash"`
+		Outcome        string `json:"outcome,omitempty"`
+	}{Type: "response.interrupt", ResponseIDHash: fmt.Sprintf("%x", idHash[:8]), Outcome: outcome}
+	data, errMarshal := json.Marshal(diagnostic)
+	if errMarshal != nil {
+		return
+	}
+	event := "interrupt"
+	if outcome != "" {
+		event = "interrupt.outcome"
+	}
+	timeline.Append(event, data, time.Now())
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketInterrupt(ctx context.Context, sessionID string, payload []byte) error {

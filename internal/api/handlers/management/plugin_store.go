@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -228,7 +229,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 	requestedVersion, errVersionRequest := pluginInstallRequestedVersion(c)
 	if errVersionRequest != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": errVersionRequest.Error()})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errVersionRequest, http.StatusBadRequest), gin.H{"error": "invalid_request", "message": errVersionRequest.Error()})
 		return
 	}
 	installCtx := c.Request.Context()

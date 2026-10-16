@@ -67,13 +67,14 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 
-	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	isClaudeModel := strings.Contains(modelName, "claude")
+	useAntigravitySchema := isClaudeModel || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
 	var (
 		bodyReader io.Reader
 		payloadLog []byte
 	)
 	if antigravityRequestNeedsSchemaSanitization(payload) {
-		payloadStr := sanitizeAntigravityRequestSchemas(string(payload), useAntigravitySchema)
+		payloadStr := sanitizeAntigravityRequestSchemasForModel(string(payload), useAntigravitySchema, isClaudeModel)
 
 		if strings.Contains(modelName, "claude") {
 			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
@@ -164,8 +165,19 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 // data keys inside functionCall arguments replayed from conversation history. Running it over the
 // whole document silently mutated that history, so tools lost required argument fields and the
 // model imitated the corrupted examples on later turns.
+// sanitizeAntigravityRequestSchemas cleans with union-preserving (Gemini) tool semantics.
+// Claude tool unions are flattened only when the caller supplies the model flag via
+// sanitizeAntigravityRequestSchemasForModel; the placeholder group alone must not decide it,
+// because gemini-3-pro models share that group and accept preserved unions.
 func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema bool) string {
-	payloadStr = sanitizeAntigravityToolSchemas(payloadStr, useAntigravitySchema)
+	return sanitizeAntigravityRequestSchemasForModel(payloadStr, useAntigravitySchema, false)
+}
+
+// sanitizeAntigravityRequestSchemasForModel applies sanitizeAntigravityRequestSchemas with an
+// explicit Antigravity Claude flag. Antigravity Claude tool schemas additionally flatten
+// multi-branch anyOf/oneOf unions, which the Claude-side upstream rejects (Issue 3662).
+func sanitizeAntigravityRequestSchemasForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
+	payloadStr = sanitizeAntigravityToolSchemasForModel(payloadStr, useAntigravitySchema, isClaudeModel)
 	return sanitizeAntigravityGenerationSchemas(payloadStr)
 }
 
@@ -174,13 +186,17 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 // once. This preserves rewrite order and bytes without copying the full request
 // for every declaration schema.
 func sanitizeAntigravityToolSchemas(payloadStr string, useAntigravitySchema bool) string {
+	return sanitizeAntigravityToolSchemasForModel(payloadStr, useAntigravitySchema, false)
+}
+
+func sanitizeAntigravityToolSchemasForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
 	tools := gjson.Get(payloadStr, "request.tools")
 	if !tools.IsArray() {
 		return payloadStr
 	}
 
 	toolDocument := `{"request":{"tools":` + tools.Raw + `}}`
-	toolDocument = sanitizeAntigravityToolSchemaDocument(toolDocument, useAntigravitySchema)
+	toolDocument = sanitizeAntigravityToolSchemaDocumentForModel(toolDocument, useAntigravitySchema, isClaudeModel)
 	cleanedTools := gjson.Get(toolDocument, "request.tools")
 	if !cleanedTools.IsArray() || cleanedTools.Raw == tools.Raw {
 		return payloadStr
@@ -194,6 +210,10 @@ func sanitizeAntigravityToolSchemas(payloadStr string, useAntigravitySchema bool
 }
 
 func sanitizeAntigravityToolSchemaDocument(payloadStr string, useAntigravitySchema bool) string {
+	return sanitizeAntigravityToolSchemaDocumentForModel(payloadStr, useAntigravitySchema, false)
+}
+
+func sanitizeAntigravityToolSchemaDocumentForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
 	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
 		oldPath := base + ".parametersJsonSchema"
 		if !gjson.Get(payloadStr, oldPath).Exists() {
@@ -207,17 +227,37 @@ func sanitizeAntigravityToolSchemaDocument(payloadStr string, useAntigravitySche
 		payloadStr = renamed
 	}
 
-	toolSchemaCleaner := func(schema string) string {
+	toolSchemaCleaner := func(schema string, isParameterSchema bool) string {
+		// Only declaration parameter schemas become Claude custom.input_schema upstream,
+		// so only they need Claude union flattening. Function return schemas keep the
+		// union-preserving cleaning like every other response-side schema.
+		if isClaudeModel && isParameterSchema {
+			return util.CleanJSONSchemaForAntigravityClaudeTool(schema, useAntigravitySchema)
+		}
 		return util.CleanJSONSchemaForAntigravityTool(schema, useAntigravitySchema)
 	}
-	cleanNestedToolSchema := func(schemaRaw string) string {
-		return cleanNestedSchema(toolSchemaCleaner, schemaRaw)
+	cleanNestedToolSchema := func(schemaRaw string, isParameterSchema bool) string {
+		return cleanNestedSchema(func(schema string) string {
+			return toolSchemaCleaner(schema, isParameterSchema)
+		}, schemaRaw)
 	}
-	return cleanAntigravitySchemasAtPaths(
-		payloadStr,
-		antigravityDeclarationSchemaPaths(payloadStr),
-		cleanNestedToolSchema,
-	)
+	for _, schemaPath := range antigravityDeclarationSchemaPaths(payloadStr) {
+		schema := gjson.Get(payloadStr, schemaPath)
+		if !schema.Exists() {
+			continue
+		}
+		cleanedSchema := cleanNestedToolSchema(schema.Raw, isParameterSchemaPath(schemaPath))
+		if cleanedSchema == schema.Raw {
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(cleanedSchema))
+		if errSet != nil {
+			log.Debugf("antigravity: failed to write cleaned schema at %s: %v", schemaPath, errSet)
+			continue
+		}
+		payloadStr = string(updated)
+	}
+	return payloadStr
 }
 
 // sanitizeAntigravityGenerationSchemas batches every schema edit within one
@@ -256,6 +296,16 @@ func sanitizeAntigravityGenerationSchemas(payloadStr string) string {
 		payloadStr = string(updated)
 	}
 	return payloadStr
+}
+
+// isParameterSchemaPath reports whether a declaration schema path holds tool input
+// parameters rather than a function return schema.
+func isParameterSchemaPath(schemaPath string) bool {
+	key := schemaPath
+	if idx := strings.LastIndex(schemaPath, "."); idx >= 0 {
+		key = schemaPath[idx+1:]
+	}
+	return strings.HasPrefix(key, "parameters")
 }
 
 func cleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, clean func(string) string) string {

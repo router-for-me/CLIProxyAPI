@@ -4866,3 +4866,111 @@ func TestDevinApplyPatchExecutorReuse(t *testing.T) {
 	assertWire(<-requests)
 	assertExecutorPatchStream(t, stream.Chunks)
 }
+
+func TestRegressionIssue6505_DevinClaudeStreamingNoFullInputEstimate(t *testing.T) {
+	runTest := func(t *testing.T, promptTokens, cacheWriteTokens int64) {
+		// Frame with Usage Field 7:
+		// Field 2: prompt tokens
+		// Field 3: completion tokens = 4
+		// Field 4: cache_write_tokens
+		// Field 5: cached tokens = 50000
+		var f7Bytes []byte
+		f7Bytes = protowire.AppendTag(f7Bytes, 2, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, uint64(promptTokens))
+		f7Bytes = protowire.AppendTag(f7Bytes, 3, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, 4)
+		if cacheWriteTokens > 0 {
+			f7Bytes = protowire.AppendTag(f7Bytes, 4, protowire.VarintType)
+			f7Bytes = protowire.AppendVarint(f7Bytes, uint64(cacheWriteTokens))
+		}
+		f7Bytes = protowire.AppendTag(f7Bytes, 5, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, 50000)
+
+		var frame []byte
+		frame = protowire.AppendTag(frame, 7, protowire.BytesType)
+		frame = protowire.AppendBytes(frame, f7Bytes)
+
+		var buf bytes.Buffer
+		buf.Write(helps.WrapConnectEnvelope(frame))
+		buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+		exec := NewDevinExecutor(&config.Config{})
+		out := make(chan cliproxyexecutor.StreamChunk, 50)
+		originalPayload := []byte(`{"model":"devin/claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"hello cache test prompt with enough words to produce non-zero tokens"}]}`)
+		opts := cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatClaude,
+			OriginalRequest: originalPayload,
+		}
+
+		go func() {
+			defer close(out)
+			exec.streamDevinFrames(
+				context.Background(),
+				&buf,
+				cliproxyexecutor.Request{Model: "devin/claude-opus-5-5", Payload: originalPayload},
+				opts,
+				"claude-opus-5-5",
+				sdktranslator.FormatClaude,
+				nil,
+				out,
+			)
+		}()
+
+		var messageStartEvent []byte
+		var messageDeltaEvent []byte
+		for chunk := range out {
+			if chunk.Err != nil {
+				t.Fatalf("unexpected chunk error: %v", chunk.Err)
+			}
+			lines := strings.Split(string(chunk.Payload), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "data: ") {
+					data := []byte(strings.TrimPrefix(line, "data: "))
+					eventType := gjson.GetBytes(data, "type").String()
+					if eventType == "message_start" {
+						messageStartEvent = data
+					} else if eventType == "message_delta" {
+						messageDeltaEvent = data
+					}
+				}
+			}
+		}
+
+		if len(messageStartEvent) == 0 {
+			t.Fatal("expected message_start event in Claude stream")
+		}
+		startRoot := gjson.ParseBytes(messageStartEvent)
+		inputTokensNode := startRoot.Get("message.usage.input_tokens")
+		if !inputTokensNode.Exists() || inputTokensNode.Int() != 0 {
+			t.Fatalf("message_start message.usage.input_tokens = %v (exists=%v), want 0 (must not seed full-input estimate)", inputTokensNode.Value(), inputTokensNode.Exists())
+		}
+
+		if len(messageDeltaEvent) == 0 {
+			t.Fatal("expected message_delta event in Claude stream")
+		}
+		deltaRoot := gjson.ParseBytes(messageDeltaEvent)
+		deltaInputNode := deltaRoot.Get("usage.input_tokens")
+		if !deltaInputNode.Exists() || deltaInputNode.Int() != promptTokens {
+			t.Errorf("message_delta usage.input_tokens = %v (exists=%v), want %d", deltaInputNode.Value(), deltaInputNode.Exists(), promptTokens)
+		}
+		if cachedTokens := deltaRoot.Get("usage.cache_read_input_tokens").Int(); cachedTokens != 50000 {
+			t.Errorf("message_delta usage.cache_read_input_tokens = %d, want 50000", cachedTokens)
+		}
+		if cacheWriteTokens > 0 {
+			if gotWrite := deltaRoot.Get("usage.cache_creation_input_tokens").Int(); gotWrite != cacheWriteTokens {
+				t.Errorf("message_delta usage.cache_creation_input_tokens = %d, want %d", gotWrite, cacheWriteTokens)
+			}
+		}
+		if outputTokens := deltaRoot.Get("usage.output_tokens").Int(); outputTokens != 4 {
+			t.Errorf("message_delta usage.output_tokens = %d, want 4", outputTokens)
+		}
+	}
+
+	t.Run("fully cached prompt (input_tokens 0)", func(t *testing.T) {
+		runTest(t, 0, 7)
+	})
+	t.Run("partially cached prompt (input_tokens positive)", func(t *testing.T) {
+		runTest(t, 10, 0)
+	})
+}

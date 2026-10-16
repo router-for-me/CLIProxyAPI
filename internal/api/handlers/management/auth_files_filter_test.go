@@ -238,7 +238,7 @@ func TestAuthFileLookupAndEntryBuildConcurrentEnsureIndex(t *testing.T) {
 				if !matchesAuthFileLookup(auth, fileName, "idx-concurrent") {
 					t.Errorf("auth lookup did not match")
 				}
-				entry := h.buildAuthFileEntry(auth)
+				entry := h.buildAuthFileEntry(auth, authFileQuotaContext{})
 				if entry == nil {
 					t.Errorf("entry is nil")
 					continue

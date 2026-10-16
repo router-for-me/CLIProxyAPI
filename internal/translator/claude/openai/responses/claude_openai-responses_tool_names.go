@@ -22,15 +22,15 @@ type claudeToolNames struct {
 	fromClaude map[string]string
 }
 
-func buildClaudeToolNames(root gjson.Result) claudeToolNames {
-	return buildClaudeToolNamesWithWinners(root, responsesToolWinners(root))
+func buildClaudeToolNames(root gjson.Result, toolSearch bool) claudeToolNames {
+	return buildClaudeToolNamesWithWinners(root, responsesToolWinners(root, toolSearch), toolSearch)
 }
 
-func buildClaudeToolNamesWithWinners(root gjson.Result, winners map[string]responsesToolDescriptor) claudeToolNames {
+func buildClaudeToolNamesWithWinners(root gjson.Result, winners map[string]responsesToolDescriptor, toolSearch bool) claudeToolNames {
 	m := claudeToolNames{toClaude: map[string]string{}, fromClaude: map[string]string{}}
 	taken := map[string]bool{}
 	var declared []string
-	for _, d := range responsesToolDescriptors(root) {
+	for _, d := range responsesToolDescriptors(root, toolSearch) {
 		if w, ok := winners[d.name]; !ok || w.order != d.order {
 			continue
 		}

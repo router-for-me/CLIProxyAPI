@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 )
 
 // RefreshAuthFiles triggers active refresh for a single auth file or all auth files.
@@ -24,7 +25,7 @@ func (h *Handler) RefreshAuthFiles(c *gin.Context) {
 	}
 	if c.Request.Body != nil && c.Request.ContentLength != 0 {
 		if errBind := c.ShouldBindJSON(&req); errBind != nil && !errors.Is(errBind, io.EOF) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + errBind.Error()})
+			c.JSON(clienterror.HTTPStatusFromErrorOr(errBind, http.StatusBadRequest), gin.H{"error": "invalid request body: " + errBind.Error()})
 			return
 		}
 	}

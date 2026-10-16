@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -893,4 +894,198 @@ func TestForwardResponsesStreamFailsWhenUpstreamClosesWithoutTerminalEvent(t *te
 	if !strings.Contains(body, "closed before a terminal event") {
 		t.Fatalf("response.failed does not explain the premature close: %q", body)
 	}
+}
+
+type preFTKeepAliveResponsesExecutor struct {
+	chunks chan coreexecutor.StreamChunk
+}
+
+func (*preFTKeepAliveResponsesExecutor) Identifier() string { return "pre-ft-keepalive-responses" }
+
+func (*preFTKeepAliveResponsesExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *preFTKeepAliveResponsesExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return &coreexecutor.StreamResult{Chunks: e.chunks}, nil
+}
+
+func (*preFTKeepAliveResponsesExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (*preFTKeepAliveResponsesExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (*preFTKeepAliveResponsesExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestResponsesHandlerSendKeepAliveBeforeFT(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("enabled sends keepalive then terminal SSE error on bootstrap failure", func(t *testing.T) {
+		tickChan := make(chan time.Time)
+		restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+			return tickChan, func() {}
+		})
+		defer restore()
+
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		executor := &preFTKeepAliveResponsesExecutor{chunks: chunks}
+		manager := coreauth.NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		model := "pre-ft-keepalive-error-responses-model"
+		auth := &coreauth.Auth{ID: "pre-ft-keepalive-error-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		})
+
+		go func() {
+			tickChan <- time.Unix(1, 0)
+			tickChan <- time.Unix(2, 0)
+			chunks <- coreexecutor.StreamChunk{Err: errors.New("upstream failed after initial keepalive")}
+			close(chunks)
+		}()
+
+		base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				KeepAliveSeconds:      10,
+				SendKeepAliveBeforeFT: true,
+			},
+		}, manager)
+		h := NewOpenAIResponsesAPIHandler(base)
+		router := gin.New()
+		router.POST("/v1/responses", h.Responses)
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\""+model+"\",\"input\":\"hi\",\"stream\":true}"))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+		}
+		body := recorder.Body.String()
+		if !strings.Contains(body, ": keep-alive\n\n") {
+			t.Fatalf("initial keepalive missing: %q", body)
+		}
+		if !strings.Contains(body, "event: response.failed") || !strings.Contains(body, "upstream failed after initial keepalive") {
+			t.Fatalf("terminal SSE JSON failure missing after keepalive: %q", body)
+		}
+	})
+
+	t.Run("enabled sends keepalive then forwards normal response stream", func(t *testing.T) {
+		tickChan := make(chan time.Time)
+		restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+			return tickChan, func() {}
+		})
+		defer restore()
+
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		executor := &preFTKeepAliveResponsesExecutor{chunks: chunks}
+		manager := coreauth.NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		model := "pre-ft-keepalive-ok-responses-model"
+		auth := &coreauth.Auth{ID: "pre-ft-keepalive-ok-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		})
+
+		go func() {
+			tickChan <- time.Unix(1, 0)
+			tickChan <- time.Unix(2, 0)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")}
+			close(chunks)
+		}()
+
+		base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				KeepAliveSeconds:      10,
+				SendKeepAliveBeforeFT: true,
+			},
+		}, manager)
+		h := NewOpenAIResponsesAPIHandler(base)
+		router := gin.New()
+		router.POST("/v1/responses", h.Responses)
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\""+model+"\",\"input\":\"hi\",\"stream\":true}"))
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%q", recorder.Code, recorder.Body.String())
+		}
+		body := recorder.Body.String()
+		if !strings.HasPrefix(body, ": keep-alive\n\n") || !strings.Contains(body, "event: response.completed") {
+			t.Fatalf("unexpected stream body: %q", body)
+		}
+	})
+
+	t.Run("enabled preserves HTTP error status when error arrives before first keepalive", func(t *testing.T) {
+		tickChan := make(chan time.Time)
+		restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+			return tickChan, func() {}
+		})
+		defer restore()
+
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		chunks <- coreexecutor.StreamChunk{Err: errors.New("upstream failed before keepalive")}
+		close(chunks)
+		executor := &preFTKeepAliveResponsesExecutor{chunks: chunks}
+		manager := coreauth.NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		model := "pre-ft-keepalive-early-err-responses-model"
+		auth := &coreauth.Auth{ID: "pre-ft-keepalive-early-err-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		})
+
+		base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				KeepAliveSeconds:      10,
+				SendKeepAliveBeforeFT: true,
+			},
+		}, manager)
+		h := NewOpenAIResponsesAPIHandler(base)
+		router := gin.New()
+		router.POST("/v1/responses", h.Responses)
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\""+model+"\",\"input\":\"hi\",\"stream\":true}"))
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+
+		if recorder.Code == http.StatusOK {
+			t.Fatalf("expected non-200 HTTP error status before first keepalive, got 200: %q", recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), "upstream failed before keepalive") {
+			t.Fatalf("unexpected error body: %q", recorder.Body.String())
+		}
+	})
+
+	t.Run("disabled by default does not create pre-FT ticker even when keepalive-seconds > 0", func(t *testing.T) {
+		ch, stop := handlers.NewPreFirstTokenKeepAliveTicker(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				KeepAliveSeconds:      10,
+				SendKeepAliveBeforeFT: false,
+			},
+		})
+		defer stop()
+		if ch != nil {
+			t.Fatal("expected nil pre-FT keepalive channel when send-keepalive-before-ft is false")
+		}
+	})
 }
