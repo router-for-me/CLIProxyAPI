@@ -60,7 +60,8 @@ func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	if err := encoder.Encode(data); err != nil {
 		return fmt.Errorf("xai token storage: write token file: %w", err)
 	}
-	if err := atomicfile.WriteFile(authFilePath, buf.Bytes(), 0o600); err != nil {
+	// 0o666 less the umask: the mode os.Create gave a new file. An existing file keeps its own.
+	if err := atomicfile.WriteFile(authFilePath, buf.Bytes(), 0o666); err != nil {
 		return fmt.Errorf("xai token storage: create token file: %w", err)
 	}
 	return nil
