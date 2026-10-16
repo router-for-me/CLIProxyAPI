@@ -117,6 +117,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			}
 		}
 		if statSucceeded {
+			// A replace, not a removal: don't let it debounce a real removal that
+			// follows within the window. A Linux exchange rename (atomicfile) reports
+			// the target as renamed on every save.
+			w.forgetRemove(normalizedName)
 			if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return
@@ -205,6 +209,14 @@ func (w *Watcher) normalizeAuthPath(path string) string {
 		cleaned = strings.ToLower(cleaned)
 	}
 	return cleaned
+}
+
+// forgetRemove drops the remove time shouldDebounceRemove recorded for a path that
+// turned out to still exist.
+func (w *Watcher) forgetRemove(normalizedPath string) {
+	w.clientsMutex.Lock()
+	delete(w.lastRemoveTimes, normalizedPath)
+	w.clientsMutex.Unlock()
 }
 
 func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) bool {
