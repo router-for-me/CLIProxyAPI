@@ -18,6 +18,7 @@ import (
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -1773,4 +1774,61 @@ func TestMetaExecutor_ClaudeRequestReplaysMuseReasoning(t *testing.T) {
 	for range result.Chunks {
 	}
 	assertReplay(t, gotBody)
+}
+
+func TestMetaExecutor_ClaudeCodeRequestSendsPromptCacheKey(t *testing.T) {
+	var gotBodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		gotBodies = append(gotBodies, body)
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+	send := func(sessionID, agentID string) string {
+		t.Helper()
+		headers := http.Header{}
+		if sessionID != "" {
+			headers.Set(helps.ClaudeCodeSessionHeader, sessionID)
+		}
+		if agentID != "" {
+			headers.Set(helps.ClaudeCodeAgentHeader, agentID)
+		}
+		_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "muse-spark-1.3",
+			Payload: []byte(`{"model":"muse-spark-1.3","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Headers:      headers,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		return gjson.GetBytes(gotBodies[len(gotBodies)-1], "prompt_cache_key").String()
+	}
+
+	first := send("session-1", "")
+	if first == "" {
+		t.Fatalf("prompt_cache_key missing; body=%s", gotBodies[0])
+	}
+	if again := send("session-1", ""); again != first {
+		t.Fatalf("prompt_cache_key = %q on the same session, want %q", again, first)
+	}
+	if subagent := send("session-1", "agent-2"); subagent == "" || subagent == first {
+		t.Fatalf("subagent prompt_cache_key = %q, want a distinct key", subagent)
+	}
+	if none := send("", ""); none != "" {
+		t.Fatalf("prompt_cache_key = %q without a Claude Code session, want none", none)
+	}
 }
