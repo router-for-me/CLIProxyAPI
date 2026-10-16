@@ -744,6 +744,19 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 		svc.WaitAntigravityProbes()
 		t.Fatal("stalled persistence on authA blocked authB probe")
 	}
+	// The probe signal fires when the server has answered, not when authB's
+	// models are published. Wait for the publication itself: the foreground
+	// Update below changes authB's prefix, and the registration fence then
+	// correctly drops a publication that is still in flight.
+	authBPublishedBy := time.Now().Add(time.Second)
+	for !GlobalModelRegistry().ClientSupportsModel(authB.ID, "gemini-3-flash") {
+		if time.Now().After(authBPublishedBy) {
+			cancelLifetime()
+			svc.WaitAntigravityProbes()
+			t.Fatal("stalled persistence on authA blocked authB model publication")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	select {
 	case <-authARefreshed:
 	case <-time.After(time.Second):
