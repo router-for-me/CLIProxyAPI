@@ -96,6 +96,12 @@ func TestWriteFileFallsBackInPlaceWhenRenameFails(t *testing.T) {
 
 // Readers polling during repeated saves must only ever see a complete version.
 func TestWriteFileReadersNeverSeeTruncatedContent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The reader below holds the file open without delete sharing, so Windows
+		// refuses the rename and WriteFile falls back to its documented in-place
+		// write, which this test would rightly flag.
+		t.Skip("Windows cannot replace a file another handle has open")
+	}
 	for name, write := range map[string]func(string, []byte, os.FileMode) error{
 		"WriteFile":   WriteFile,
 		"ReplaceFile": ReplaceFile,
@@ -257,4 +263,29 @@ func TestReplaceFileDeletionBeforeCommitWins(t *testing.T) {
 		t.Fatalf("ReplaceFile() recreated the file deleted before commit (stat err %v)", errStat)
 	}
 	assertNoTempFiles(t, dir)
+}
+
+// When the temp file cannot get the existing file's owner (a root writer may, a
+// plain user may not), the save writes in place, keeping the file and its owner.
+func TestWriteFileWritesInPlaceWhenOwnerCannotBeKept(t *testing.T) {
+	original := matchOwner
+	t.Cleanup(func() { matchOwner = original })
+	matchOwner = func(*os.File, os.FileInfo) error { return syscall.EPERM }
+
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	before, _ := os.Stat(path)
+	if err := WriteFile(path, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	after, _ := os.Stat(path)
+	if !os.SameFile(before, after) {
+		t.Fatal("WriteFile() replaced the file whose owner it could not keep")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new" {
+		t.Fatalf("content = %q, want new", got)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
 }
