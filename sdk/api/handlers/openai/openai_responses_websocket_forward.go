@@ -61,7 +61,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	var keepAliveC <-chan time.Time
 	keepAliveInterval := time.Duration(0)
 	if h != nil {
-		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.Cfg)
+		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.CurrentConfig())
 	}
 	if opts.keepAliveInterval != nil {
 		keepAliveInterval = *opts.keepAliveInterval

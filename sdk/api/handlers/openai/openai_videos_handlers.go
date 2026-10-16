@@ -255,6 +255,15 @@ func readXAIVideosNativeRequest(c *gin.Context) ([]byte, error) {
 }
 
 func videosCreateRequestFromForm(c *gin.Context) ([]byte, error) {
+	if strings.EqualFold(strings.TrimSpace(c.ContentType()), "multipart/form-data") {
+		if _, errForm := c.MultipartForm(); errForm != nil {
+			return nil, errForm
+		}
+	} else if c != nil && c.Request != nil {
+		if errForm := c.Request.ParseForm(); errForm != nil {
+			return nil, errForm
+		}
+	}
 	rawJSON := []byte(`{}`)
 	for _, field := range []string{"model", "prompt", "seconds", "size", "aspect_ratio", "resolution"} {
 		if value := strings.TrimSpace(c.PostForm(field)); value != "" {
@@ -287,11 +296,13 @@ func firstPostForm(c *gin.Context, keys ...string) string {
 }
 
 func (h *OpenAIAPIHandler) videoAuthBindingTTL() time.Duration {
-	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
-		raw := strings.TrimSpace(h.Cfg.VideoResultAuthCacheTTL)
-		if raw != "" {
-			if ttl, err := time.ParseDuration(raw); err == nil && ttl > 0 {
-				return ttl
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil {
+			raw := strings.TrimSpace(cfg.VideoResultAuthCacheTTL)
+			if raw != "" {
+				if ttl, err := time.ParseDuration(raw); err == nil && ttl > 0 {
+					return ttl
+				}
 			}
 		}
 	}
@@ -692,7 +703,7 @@ func openAIVideoStatus(status string) string {
 func (h *OpenAIAPIHandler) VideosCreate(c *gin.Context) {
 	rawJSON, err := readVideosCreateRequest(c)
 	if err != nil {
-		writeVideosFailedError(c, http.StatusBadRequest, defaultXAIVideosModel, "invalid_request_error", fmt.Sprintf("Invalid request: %v", err))
+		writeVideosFailedError(c, clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), defaultXAIVideosModel, "invalid_request_error", fmt.Sprintf("Invalid request: %v", err))
 		return
 	}
 
@@ -728,7 +739,7 @@ func (h *OpenAIAPIHandler) XAIVideosExtensions(c *gin.Context) {
 func (h *OpenAIAPIHandler) handleXAIVideosNativePost(c *gin.Context) {
 	rawJSON, err := readXAIVideosNativeRequest(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -938,8 +949,10 @@ func (h *OpenAIAPIHandler) videoContentHTTPClient(c *gin.Context) *http.Client {
 		ctx = c.Request.Context()
 	}
 	var cfg *config.Config
-	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
-		cfg = &config.Config{SDKConfig: *h.Cfg}
+	if h != nil {
+		if sdkCfg := h.CurrentConfig(); sdkCfg != nil {
+			cfg = &config.Config{SDKConfig: *sdkCfg}
+		}
 	}
 	return helps.NewProxyAwareHTTPClient(ctx, cfg, h.videoContentDownloadAuth(c), 0)
 }

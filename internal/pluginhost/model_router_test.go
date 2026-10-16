@@ -296,6 +296,7 @@ func TestHostRouteModelClonesPluginMetadata(t *testing.T) {
 			Name: "Router",
 			ConfigFields: []pluginapi.ConfigField{{
 				Name:       "mode",
+				Default:    map[string]any{"tier": "safe"},
 				EnumValues: []string{"safe", "fast"},
 			}},
 		},
@@ -304,6 +305,7 @@ func TestHostRouteModelClonesPluginMetadata(t *testing.T) {
 			ModelRouter: modelRouterFunc(func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
 				req.Plugin.ConfigFields[0].Name = "mutated"
 				req.Plugin.ConfigFields[0].EnumValues[0] = "mutated"
+				req.Plugin.ConfigFields[0].Default.(map[string]any)["tier"] = "mutated"
 				return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetSelf}, nil
 			}),
 		}},
@@ -314,7 +316,10 @@ func TestHostRouteModelClonesPluginMetadata(t *testing.T) {
 		t.Fatalf("RouteModel() = %#v, %v; want router executor handled", resp, ok)
 	}
 	meta := host.Snapshot().records[0].meta
-	if meta.ConfigFields[0].Name != "mode" || meta.ConfigFields[0].EnumValues[0] != "safe" {
+	defaultValue := meta.ConfigFields[0].Default.(map[string]any)
+	if meta.ConfigFields[0].Name != "mode" ||
+		meta.ConfigFields[0].EnumValues[0] != "safe" ||
+		defaultValue["tier"] != "safe" {
 		t.Fatalf("snapshot metadata was mutated: %#v", meta.ConfigFields[0])
 	}
 }

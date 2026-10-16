@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/tidwall/gjson"
 )
@@ -375,5 +377,62 @@ func TestForwardInteractionsStreamWrapsBareJSONAsSSEData(t *testing.T) {
 
 	if got := rec.Body.String(); got != "data: {\"type\":\"interaction.completed\"}\n\n" {
 		t.Fatalf("body = %q, want SSE data frame", got)
+	}
+}
+
+func TestInteractionsStreamSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tickChan := make(chan time.Time)
+	restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		return tickChan, func() {}
+	})
+	defer restore()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	exec := &preFTKeepAliveGeminiExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(exec)
+	model := "pre-ft-keepalive-interactions-model"
+	auth := &coreauth.Auth{ID: "pre-ft-keepalive-interactions-auth", Provider: exec.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	go func() {
+		tickChan <- time.Unix(1, 0)
+		tickChan <- time.Unix(2, 0)
+		chunks <- coreexecutor.StreamChunk{Err: errors.New("interactions upstream failed after keepalive")}
+		close(chunks)
+	}()
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			KeepAliveSeconds:      10,
+			SendKeepAliveBeforeFT: true,
+		},
+	}, manager)
+	h := NewGeminiAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1beta/interactions", h.Interactions)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader("{\"model\":\""+model+"\",\"input\":\"hi\",\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ": keep-alive\n\n") {
+		t.Fatalf("missing keep-alive comment: %q", body)
+	}
+	if !strings.Contains(body, "event: error\ndata: ") || !strings.Contains(body, "interactions upstream failed after keepalive") {
+		t.Fatalf("missing Interactions SSE JSON error event after keepalive: %q", body)
 	}
 }

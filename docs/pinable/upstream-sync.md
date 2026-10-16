@@ -1,3 +1,19 @@
+# 2026-10-17 synchronization target
+
+This synchronization integrates upstream `router-for-me/CLIProxyAPI` at
+`e7003d2a3e2cee2d45f9950c067bf8e02a2ac0f8` into fork main `474c2fa7f0efd4cf6c2428c6a6e8b17ca9a2ae91`. The verified merge base is
+`67465884ca179a8f9098328d03a361b50003fdd7`; upstream contributes 37 commits
+since the previous integration point, while the fork retains its 37 fork-only
+commits.
+
+The reviewed overlap is limited to `cmd/server/main.go`,
+`internal/api/handlers/management/handler.go`, `internal/api/server.go`,
+`internal/api/server_management.go`, and `internal/api/server_reload.go`.
+The merge keeps Pinable host version/parent supervision, authenticated runtime
+control, isolated ephemeral API keys, and host runtime provider merging while
+retaining upstream SIWC binding, config cloning/reload fencing, request-body
+limits, Claude tool-search configuration, and the updated management lifecycle.
+
 # Pinable upstream synchronization
 
 ## Baseline and invariant

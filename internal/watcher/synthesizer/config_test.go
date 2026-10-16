@@ -229,6 +229,7 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 					BaseURL:                 "https://api.anthropic.com",
 					DisableCooling:          boolPointer(true),
 					RebuildMidSystemMessage: true,
+					NativeToolSearch:        true,
 					FingerprintProfile:      "claude-code-cli",
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
@@ -273,8 +274,25 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	if got := auths[0].Attributes["fingerprint_profile"]; got != "claude-code-cli" {
 		t.Errorf("expected fingerprint_profile=claude-code-cli, got %s", got)
 	}
+	if got := auths[0].Attributes["native_tool_search"]; got != "true" {
+		t.Errorf("expected native_tool_search=true, got %s", got)
+	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
+	}
+}
+
+func TestConfigSynthesizer_ClaudeKeys_NativeToolSearchDefaultOff(t *testing.T) {
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", BaseURL: "https://gateway.example.com"}}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil || len(auths) != 1 {
+		t.Fatalf("synthesize: auths=%d err=%v", len(auths), err)
+	}
+	if value, exists := auths[0].Attributes["native_tool_search"]; exists {
+		t.Fatalf("native_tool_search = %q, want absent by default", value)
 	}
 }
 

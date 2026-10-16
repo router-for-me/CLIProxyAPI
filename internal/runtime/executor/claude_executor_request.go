@@ -600,6 +600,23 @@ func withoutClaudeBeta(betas, removeBeta string) string {
 	return strings.Join(res, ",")
 }
 
+// withClaudeBetaAppended appends beta at the end unless it is already present.
+func withClaudeBetaAppended(betas, beta string) string {
+	beta = strings.TrimSpace(beta)
+	if beta == "" {
+		return betas
+	}
+	for _, existing := range strings.Split(betas, ",") {
+		if strings.TrimSpace(existing) == beta {
+			return betas
+		}
+	}
+	if strings.TrimSpace(betas) == "" {
+		return beta
+	}
+	return betas + "," + beta
+}
+
 func withClaudeExtendedCacheTTLBeta(betas string) string {
 	parts := make([]string, 0, 16)
 	seen := make(map[string]bool)
@@ -1260,12 +1277,22 @@ func applyClaudeHeadersWithNativeProfile(
 		if isClaudeHaikuModel(reqModel) && !gjson.GetBytes(body, "fallbacks").Exists() && !helperProfile {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
 		}
+		// Operator overrides get the last word over the derived and caller betas:
+		// strip filters without re-sorting, append adds missing names at the end.
+		// They only shape the emitted value, so re-applying the header stays stable.
+		emittedBetas := baseBetas
+		for _, beta := range hd.AnthropicBetaStrip {
+			emittedBetas = withoutClaudeBeta(emittedBetas, beta)
+		}
+		for _, beta := range hd.AnthropicBetaAppend {
+			emittedBetas = withClaudeBetaAppended(emittedBetas, beta)
+		}
 
-		if strings.TrimSpace(baseBetas) == "" {
+		if strings.TrimSpace(emittedBetas) == "" {
 			r.Header.Del("Anthropic-Beta")
 			return
 		}
-		r.Header.Set("Anthropic-Beta", baseBetas)
+		r.Header.Set("Anthropic-Beta", emittedBetas)
 	}
 	applyBetaHeader()
 
@@ -1277,6 +1304,9 @@ func applyClaudeHeadersWithNativeProfile(
 			defaultAcceptEncoding = "identity"
 		}
 		copyClaudeCallerFingerprintHeaders(r.Header, incomingHeaders, confirmedClaudeCode)
+		if hd.ClientRequestID == config.ClaudeClientRequestIDOff {
+			r.Header.Del("X-Client-Request-Id")
+		}
 		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
 		misc.EnsureHeader(r.Header, incomingHeaders, "Accept", defaultAccept)
 		misc.EnsureHeader(r.Header, incomingHeaders, "Accept-Encoding", defaultAcceptEncoding)
@@ -1410,8 +1440,15 @@ func applyClaudeHeadersWithNativeProfile(
 	// request ID they already sent: 2.1.258 attaches the header just for a first-party
 	// base URL, so a helper that arrived without one keeps it absent upstream rather
 	// than gaining a synthesized ID the real client would not have sent.
-	if isAnthropicBase || (helperProfile && helps.HeaderValueCaseInsensitive(incomingHeaders, "x-client-request-id") != "") {
-		identityHeader("x-client-request-id", uuid.New().String())
+	// header-defaults.client-request-id=passthrough forwards only the caller's own
+	// value and never synthesizes one; off never sends the header.
+	incomingClientRequestID := helps.HeaderValueCaseInsensitive(incomingHeaders, "x-client-request-id")
+	if hd.ClientRequestID != config.ClaudeClientRequestIDOff && (isAnthropicBase || (helperProfile && incomingClientRequestID != "")) {
+		if hd.ClientRequestID != config.ClaudeClientRequestIDPassthrough {
+			identityHeader("x-client-request-id", uuid.New().String())
+		} else if incomingClientRequestID != "" {
+			r.Header.Set("x-client-request-id", incomingClientRequestID)
+		}
 	}
 	r.Header.Set("Connection", "keep-alive")
 	// Regular Claude Code requests negotiate transport identically for streaming
@@ -1460,7 +1497,7 @@ func applyClaudeHeadersWithNativeProfile(
 	// overridden Accept-Encoding contradicts the negotiated transport. Both were
 	// reachable because this ran after the whole header set was assembled.
 	if isAnthropicBase {
-		r.Header.Set("Anthropic-Beta", baseBetas)
+		applyBetaHeader()
 		applyTransportNegotiation()
 	} else if stream {
 		// Elsewhere only streaming is protected, so an Accept override cannot
@@ -2293,6 +2330,20 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 	return resolver
 }
 
+// restorePassthroughWrapped maps a tail that is exactly a declared caller-owned MCP
+// tool name (mcp__server__tool) back to that tool.
+func (resolver claudeMCPAliasResolver) restorePassthroughWrapped(tail string) (string, bool) {
+	if tail == "" {
+		return "", false
+	}
+	for _, original := range resolver.passthroughs {
+		if original == tail {
+			return original, true
+		}
+	}
+	return "", false
+}
+
 func parseClaudeMCPAlias(name string) (claudeMCPAliasParts, bool) {
 	if !helps.IsClaudeMCPToolName(name) {
 		return claudeMCPAliasParts{}, false
@@ -2439,6 +2490,14 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 	}
 
 	if len(resolver.passthroughs) > 0 {
+		// Recovery 0: The model kept the caller's full tool name, mcp__ prefix included,
+		// under the virtual server (e.g. "mcp__<virtual>__mcp__<server>__<tool>").
+		// Recoveries 1 and 2 below only cover the <server>__<tool> and <tool> tails.
+		if original, ok := resolver.restorePassthroughWrapped(suffix); ok {
+			log.Debugf("claude oauth mcp alias: recovered %q as caller-owned tool %q", name, original)
+			return original, true, nil
+		}
+
 		// Recovery 1: The model prepended the virtual server to the full caller MCP tool name
 		// (e.g. "mcp__<virtual>__<real_server>__<tool>"). After stripping the virtual server prefix,
 		// re-prefixing suffix with "mcp__" produces the original caller tool name.

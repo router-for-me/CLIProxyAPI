@@ -7,6 +7,8 @@
 package chat_completions
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
 	"strings"
 
@@ -348,6 +350,17 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 									callID = baseCallID + "_" + strconv.Itoa(suffix)
 								}
 								usedCallIDs[callID] = struct{}{}
+							}
+							// Codex rejects call_id values longer than 64 characters.
+							if shortID := shortenCodexCallIDIfNeeded(callID); shortID != callID {
+								for attempt := 1; ; attempt++ {
+									if _, used := usedCallIDs[shortID]; !used {
+										break
+									}
+									shortID = shortenCodexCallIDIfNeeded(callID + "_" + strconv.Itoa(attempt))
+								}
+								usedCallIDs[shortID] = struct{}{}
+								callID = shortID
 							}
 							pendingToolCalls = append(pendingToolCalls, pendingToolCall{
 								callID:       callID,
@@ -823,4 +836,17 @@ func normalizeCodexServiceTier(result gjson.Result) string {
 	default:
 		return ""
 	}
+}
+
+// shortenCodexCallIDIfNeeded keeps client tool call IDs within the Codex
+// call_id limit with a deterministic, low-collision mapping.
+func shortenCodexCallIDIfNeeded(id string) string {
+	const limit = 64
+	if len(id) <= limit {
+		return id
+	}
+
+	sum := sha256.Sum256([]byte(id))
+	suffix := "_" + hex.EncodeToString(sum[:8])
+	return id[:limit-len(suffix)] + suffix
 }

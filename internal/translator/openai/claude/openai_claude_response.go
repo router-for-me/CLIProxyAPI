@@ -404,12 +404,14 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	}
 
 	// Emit message_delta and message_stop only when generation is finished:
-	// 1. Upstream provided a finish_reason, or
-	// 2. Upstream sent a trailing usage-only chunk (choices array is empty or absent) after content/tools started.
+	// - Upstream sent a trailing usage-only chunk (choices array is empty or absent) after content/tools started, or
+	// - Upstream sent [DONE] (handled in convertOpenAIDoneToAnthropic).
+	// Content chunks with finish_reason and preliminary usage must not emit message_delta early,
+	// because authoritative token counts (such as cached_tokens) can arrive in the trailing usage-only chunk.
 	isTrailingUsageChunk := hasUsage && !root.Get("choices.0").Exists() &&
 		(param.FinishReason != "" || param.SawToolCall || param.TextContentBlockStarted || param.ThinkingContentBlockStarted || param.ContentAccumulator.Len() > 0 || len(param.InterleavedContentChunks) > 0)
 
-	if !param.MessageDeltaSent && (param.FinishReason != "" || isTrailingUsageChunk) && hasUsage {
+	if !param.MessageDeltaSent && isTrailingUsageChunk {
 		finalizeOpenAIAnthropicContentBlocks(param, &results)
 		emitAnthropicMessageDelta(param, &results, param.UsageInputTokens, param.UsageOutputTokens, param.UsageCachedTokens, param.UsageCacheWriteTokens)
 		emitMessageStopIfNeeded(param, &results)
