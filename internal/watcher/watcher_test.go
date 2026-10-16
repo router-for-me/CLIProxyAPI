@@ -1092,6 +1092,39 @@ func TestHandleEventAtomicReplaceUnchangedSkips(t *testing.T) {
 	}
 }
 
+// A Linux exchange rename reports the replaced target as renamed. That replace must
+// not debounce a real removal of the same file right after it.
+func TestHandleEventAtomicReplaceDoesNotDebounceLaterRemove(t *testing.T) {
+	authDir := t.TempDir()
+	authFile := filepath.Join(authDir, "replaced.json")
+	content := []byte(`{"type":"demo"}`)
+	if err := os.WriteFile(authFile, content, 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+	sum := sha256.Sum256(content)
+
+	w := &Watcher{
+		authDir:        authDir,
+		config:         &config.Config{AuthDir: authDir},
+		lastAuthHashes: make(map[string]string),
+	}
+	key := w.normalizeAuthPath(authFile)
+	w.lastAuthHashes[key] = hexString(sum[:])
+
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Rename})
+	if _, ok := w.lastAuthHashes[key]; !ok {
+		t.Fatal("expected the replaced file to stay known")
+	}
+
+	if err := os.Remove(authFile); err != nil {
+		t.Fatalf("failed to remove auth file: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
+	if _, ok := w.lastAuthHashes[key]; ok {
+		t.Fatal("expected the removal after a replace to be processed, not debounced")
+	}
+}
+
 func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
