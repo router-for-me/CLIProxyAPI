@@ -833,6 +833,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		} else {
 			auth.Failed++
 		}
+		m.requestCountersSeq.Add(1)
 		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
 
 		// retainModelCooldown pins a still-live model cooldown against a success
@@ -1200,6 +1201,7 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 		} else {
 			auth.Failed++
 		}
+		m.requestCountersSeq.Add(1)
 		auth.Generation++
 		auth.UpdatedAt = now
 		_ = m.persistLocked(ctx, auth)

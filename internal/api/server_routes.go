@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
@@ -48,7 +49,12 @@ func (s *Server) setupRoutes() {
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		payload := gin.H{
+			"status":  "ok",
+			"version": buildinfo.Version,
+		}
+
+		c.JSON(http.StatusOK, payload)
 	}
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
@@ -134,18 +140,6 @@ func (s *Server) setupRoutes() {
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
 		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 	}
-
-	// Root endpoint
-	s.engine.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "CLI Proxy API Server",
-			"endpoints": []string{
-				"POST /v1/chat/completions",
-				"POST /v1/completions",
-				"GET /v1/models",
-			},
-		})
-	})
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist

@@ -552,3 +552,28 @@ func TestFileTokenStoreSaveAllowsDeletingNonCredentialMetadata(t *testing.T) {
 		t.Fatalf("deleted proxy_url was resurrected in memory: %v", auth.Metadata["proxy_url"])
 	}
 }
+
+// TestFileTokenStoreListIgnoresUsageStateFile guards the management panel: the
+// runtime usage state file lives under the auth directory but must never be
+// loaded as a credential, so it deliberately avoids a .json extension.
+func TestFileTokenStoreListIgnoresUsageStateFile(t *testing.T) {
+	baseDir := t.TempDir()
+	usageDir := filepath.Join(baseDir, "usage")
+	if errMkdir := os.MkdirAll(usageDir, 0o700); errMkdir != nil {
+		t.Fatalf("create usage dir: %v", errMkdir)
+	}
+	state := []byte(`{"version":1,"updated_at":"2026-01-01T00:00:00Z","counters":[],"tokens":{"requests":1}}`)
+	if errWrite := os.WriteFile(filepath.Join(usageDir, "usage.state"), state, 0o600); errWrite != nil {
+		t.Fatalf("write usage state: %v", errWrite)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if len(auths) != 0 {
+		t.Fatalf("List() returned %d auths for the usage state file, want 0: %#v", len(auths), auths)
+	}
+}

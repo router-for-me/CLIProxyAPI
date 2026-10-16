@@ -24,7 +24,7 @@ models:
 server:
   # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
   # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-  host: ""
+  host: "127.0.0.1"
 
   # Server port
   port: 8317
@@ -81,11 +81,12 @@ server:
 management:
   # Whether to allow remote (non-localhost) management access.
   # When false, only localhost can access management endpoints (a key is still required).
-  allow-remote: false
+  allow-remote: true
 
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for /v0/management and /v8/management routes).
+  # The running service sets this to the bcrypt hash of its management key (kept out of this file).
   secret-key: ""
 
   # Disable the bundled management control panel asset download and HTTP route when true.
@@ -93,7 +94,8 @@ management:
 
   # Disable automatic periodic background updates of the management panel from GitHub (default: false).
   # When enabled, the panel is only downloaded on first access if missing, and never auto-updated afterward.
-  # disable-auto-update-panel: false
+  # The service deployment serves a locally built panel from bin/static/management.html.
+  disable-auto-update-panel: true
 
   # Base URL of remote management API when using TUI client mode (cliproxyapi --tui).
   # Defaults to http://127.0.0.1:<port> if not set. Can also be set via --management-base-url.
@@ -159,7 +161,7 @@ routing:
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
-  session-affinity: false # default: false
+  session-affinity: true # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind

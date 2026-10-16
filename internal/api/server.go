@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/usagestate"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -84,6 +85,10 @@ type Server struct {
 
 	// management handler
 	mgmt *managementHandlers.Handler
+
+	// usageState persists runtime usage state (request counters + token
+	// distribution) to a single file asynchronously. Nil when disabled.
+	usageState *usagestate.Manager
 
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
@@ -166,6 +171,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		wsRoutes:                     make(map[string]struct{}),
 		pluginHost:                   optionState.pluginHost,
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
+		usageState:                   newUsageState(cfg, authManager),
 	}
 
 	// Add middleware
@@ -341,6 +347,10 @@ func (s *Server) Start() error {
 	s.muxHTTPListener = httpListener
 	s.listenerMu.Unlock()
 
+	if s.usageState != nil {
+		s.usageState.Run()
+	}
+
 	httpErrCh := make(chan error, 1)
 	acceptErrCh := make(chan error, 1)
 
@@ -448,6 +458,9 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 	if s.codexLiveHandler != nil {
 		s.codexLiveHandler.Close()
+	}
+	if s.usageState != nil {
+		s.usageState.Close()
 	}
 	if errCloseServer != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errCloseServer)

@@ -23,6 +23,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -700,13 +701,26 @@ func TestHealthz(t *testing.T) {
 		}
 
 		var resp struct {
-			Status string `json:"status"`
+			Status  string `json:"status"`
+			Version string `json:"version"`
 		}
 		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
 		}
 		if resp.Status != "ok" {
 			t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+		}
+		if resp.Version != buildinfo.Version {
+			t.Fatalf("version = %q, want %q", resp.Version, buildinfo.Version)
+		}
+
+		// The health payload is intentionally minimal.
+		var fields map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &fields); err != nil {
+			t.Fatalf("failed to parse response JSON: %v", err)
+		}
+		if len(fields) != 2 {
+			t.Fatalf("health fields = %v, want only status and version", fields)
 		}
 	})
 

@@ -180,7 +180,10 @@ type Manager struct {
 	syncSchedulerMu           sync.Mutex
 	// executionSeq stamps upstream dispatches with a monotonic sequence used
 	// to reject cooldown clears from executions dispatched before the cooldown.
-	executionSeq       atomic.Uint64
+	executionSeq atomic.Uint64
+	// requestCountersSeq advances whenever a credential request counter changes.
+	// A background persistence loop polls it instead of scanning on a timer.
+	requestCountersSeq atomic.Uint64
 	structuralEpoch    atomic.Uint64
 	syncedVersion      atomic.Uint64
 	auths              map[string]*Auth
