@@ -180,6 +180,10 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 这些项目基于 CLIProxyAPI:
 
+### [Juice Bar](https://github.com/mindtheflo/juice-bar)
+
+设计优雅、简约的原生 macOS 菜单栏工具，适用于 CLIProxyAPI 和 CPAMC，可一目了然地查看 Claude 与 OpenAI Codex 的订阅总剩余额度、账户重置时间及有充分数据支持的使用量预测；只需向编程智能体提供一行提示即可从源码安装。
+
 ### [vibeproxy](https://github.com/automazeio/vibeproxy)
 
 一个原生 macOS 菜单栏应用，让您可以使用 Claude Code & ChatGPT 订阅服务和 AI 编程工具，无需 API 密钥。
