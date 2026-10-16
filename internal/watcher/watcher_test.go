@@ -1121,6 +1121,39 @@ func TestHandleEventAtomicReplaceDoesNotDebounceLaterRemove(t *testing.T) {
 	}
 }
 
+// A Rename for a file that is already in place (an exchange save on Linux) is
+// handled without the settle delay; a missing file still waits for a replace.
+func TestHandleEventRenameWaitsOnlyForMissingFile(t *testing.T) {
+	var waits atomic.Int32
+	original := waitForReplace
+	waitForReplace = func() { waits.Add(1) }
+	t.Cleanup(func() { waitForReplace = original })
+
+	authDir := t.TempDir()
+	present := filepath.Join(authDir, "present.json")
+	content := []byte(`{"type":"demo"}`)
+	if err := os.WriteFile(present, content, 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+	sum := sha256.Sum256(content)
+	w := &Watcher{
+		authDir:        authDir,
+		config:         &config.Config{AuthDir: authDir},
+		lastAuthHashes: make(map[string]string),
+	}
+	w.lastAuthHashes[w.normalizeAuthPath(present)] = hexString(sum[:])
+
+	w.handleEvent(fsnotify.Event{Name: present, Op: fsnotify.Rename})
+	if n := waits.Load(); n != 0 {
+		t.Fatalf("Rename of a file in place waited %d times, want 0", n)
+	}
+
+	w.handleEvent(fsnotify.Event{Name: filepath.Join(authDir, "missing.json"), Op: fsnotify.Rename})
+	if n := waits.Load(); n != 1 {
+		t.Fatalf("Rename of a missing file waited %d times, want 1", n)
+	}
+}
+
 func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
