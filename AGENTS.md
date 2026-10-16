@@ -61,3 +61,6 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Avoid wall-clock `time.Sleep` in TTL, expiration, ordering, or cache-eviction unit tests due to platform timer granularity (e.g. Windows default timer resolution of ~15.6ms) and CI jitter under load; prefer controllable clocks (`nowFunc` / mock clock), explicit timestamp manipulation, or deterministic synchronization primitives.
 - Note: if modifying features that involve CLIProxyAPIHome, check if corresponding updates are needed in the CLIProxyAPIHome repository.
 - Endpoints under the `/v0/management` base URL are deprecated and no longer maintained. For any feature changes, do not modify endpoints under `/v0/management` unless necessary to fix compilation errors.
+
+## Lessons
+- SSE physical lines may end in CR, LF, or CRLF; `bufio.ScanLines` alone does not implement SSE framing. Exercise production executors over real sockets and split CRLF across reads when changing SSE readers. Output streaming must not be confused with provider-side `previous_response_id` continuation or persistent proxy history.

@@ -138,6 +138,28 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
+### HTTP, SSE, and WebSocket semantics
+
+`POST /v1/responses` supports ordinary HTTP responses and incremental SSE output
+with `stream: true`; `GET /v1/responses` upgrades to an RFC 6455 WebSocket.
+The WebSocket application protocol supports multiple turns with `response.create`
+and `response.append`, including provider-dependent incremental input. Realtime
+has separate `/v1/realtime` routes; it is not the Responses application protocol.
+
+Streaming output is not the same as resumable input. A native Responses provider
+must support and retain a response ID for `previous_response_id` plus delta input
+to work. Generic OpenAI-compatible providers here use Chat Completions upstream,
+which does not provide native Responses continuation. Codex HTTP requests require
+the conversation input rather than relying on HTTP `previous_response_id` state;
+Codex/xAI WebSocket continuation depends on the selected upstream connection.
+The Responses WebSocket handler can reconstruct turns from its current connection
+when using HTTP fallback, but this is not persistent history across reconnections
+or proxy restarts. Resend full conversation input when starting a new session;
+do not assume an SSE response ID creates a proxy-side resumable conversation.
+
+Codex upstream SSE accepts standard LF, CRLF, and CR line endings, including
+line terminators split across network reads.
+
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)

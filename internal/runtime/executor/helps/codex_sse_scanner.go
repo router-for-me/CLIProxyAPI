@@ -50,7 +50,7 @@ type codexSSEQueuedItem struct {
 // between its pieces, which SSE treats alike: an event's fields take effect when it is dispatched.
 // The blank line or over-limit line that ends a collection follows the event's data.
 //
-// SetAssembly(false) makes the scanner read exactly as bufio.Scanner does, for a caller that
+// SetAssembly(false) delivers individual physical SSE lines, for a caller that
 // budgets every upstream line while it holds a stream.
 type CodexSSEScanner struct {
 	ctx      context.Context
@@ -78,8 +78,38 @@ type CodexSSEScanner struct {
 // as bufio.Scanner.Buffer does, and also the data lines collected for one event.
 func NewCodexSSEScanner(ctx context.Context, r io.Reader, maxBytes int) *CodexSSEScanner {
 	lines := bufio.NewScanner(r)
+	lines.Split(newCodexSSELineSplitter())
 	lines.Buffer(nil, maxBytes)
 	return &CodexSSEScanner{ctx: ctx, lines: lines, maxBytes: maxBytes}
+}
+
+// SSE permits CR, LF, and CRLF. Dispatch CR immediately, then consume an
+// optional LF on the next call without manufacturing another empty line.
+func newCodexSSELineSplitter() bufio.SplitFunc {
+	skipLF := false
+	return func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		prefix := 0
+		if skipLF && len(data) > 0 {
+			skipLF = false
+			if data[0] == '\n' {
+				prefix = 1
+				data = data[1:]
+			}
+		}
+		for i, b := range data {
+			switch b {
+			case '\n':
+				return prefix + i + 1, data[:i], nil
+			case '\r':
+				skipLF = true
+				return prefix + i + 1, data[:i], nil
+			}
+		}
+		if atEOF && len(data) > 0 {
+			return prefix + len(data), data, nil
+		}
+		return prefix, nil, nil
+	}
 }
 
 // SetOnLine sets a callback invoked for every physical line read from upstream.
@@ -105,7 +135,7 @@ func (s *CodexSSEScanner) SetBudgetChecker(fn func(line []byte, heldLines int, h
 }
 
 // SetAssembly turns event assembly on or off. While it is off, no data line starts a collection and
-// every line is delivered as read, exactly as bufio.Scanner delivers it. An event already being
+// every physical SSE line is delivered as read. An event already being
 // collected is still completed.
 func (s *CodexSSEScanner) SetAssembly(on bool) { s.stock = !on }
 
