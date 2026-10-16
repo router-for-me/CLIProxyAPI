@@ -84,9 +84,6 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 	if l.manager == nil {
 		return
 	}
-	// Deferred calls run after the body, so queued jobs are released only once the
-	// workers below have exited.
-	defer l.releaseQueuedJobs()
 
 	workers := l.concurrency
 	if workers <= 0 {
@@ -102,6 +99,10 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 	}
 
 	l.loop(ctx)
+	// Release queued jobs before joining the workers: a worker held in a slow save
+	// must not keep the others' credentials from the loop that replaced this one.
+	// No job starts once ctx has ended (beginRefreshJob), and running jobs are kept.
+	l.releaseQueuedJobs()
 	// A worker may be mid-refresh (and mid-save) when ctx ends; wait for it so
 	// done means no refresh from this loop is still running.
 	workersWG.Wait()
