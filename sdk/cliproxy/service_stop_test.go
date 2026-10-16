@@ -30,7 +30,10 @@ func TestServiceShutdown_ViolentShutdownImmediatelyClosesServer(t *testing.T) {
 	}
 
 	server := api.NewServer(cfg, nil, nil, "")
+	// Start returns once Stop has closed the listener.
+	serverStopped := make(chan struct{})
 	go func() {
+		defer close(serverStopped)
 		_ = server.Start()
 	}()
 
@@ -71,11 +74,12 @@ func TestServiceShutdown_ViolentShutdownImmediatelyClosesServer(t *testing.T) {
 		t.Fatalf("service.Shutdown error = %v, want nil", errShutdown)
 	}
 
-	// Verify server port is closed.
-	conn2, errDial2 := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if errDial2 == nil {
-		_ = conn2.Close()
-		t.Fatal("expected server to be closed, but dial succeeded")
+	// Verify the server stopped listening. A dial can't tell: during a full test run
+	// another package may already be listening on the freed port.
+	select {
+	case <-serverStopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected server to be closed, but it is still serving")
 	}
 }
 
@@ -151,10 +155,12 @@ func TestServiceRun_ShutdownContextFreshAtExit(t *testing.T) {
 		t.Fatal("timed out waiting for service.Run to exit")
 	}
 
-	// Verify server port is closed.
-	connClosed, errDialClosed := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if errDialClosed == nil {
-		_ = connClosed.Close()
-		t.Fatal("expected server to be closed after Run exit, but dial succeeded")
+	// Verify the server stopped listening: Run's server goroutine reports on
+	// serverErr once Start returns. A dial can't tell: during a full test run
+	// another package may already be listening on the freed port.
+	select {
+	case <-service.serverErr:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected server to be closed after Run exit, but it is still serving")
 	}
 }
