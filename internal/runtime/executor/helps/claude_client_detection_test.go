@@ -221,6 +221,11 @@ func TestDetectClaudeCodeRequestRecognizesMeasuredHaikuHelpers(t *testing.T) {
 			payload: measuredClaudeCodeStructuredHelperPayload(),
 		},
 		{
+			name:    "structured title helper from an API-key gateway session",
+			beta:    "interleaved-thinking-2025-05-14,structured-outputs-2025-12-15",
+			payload: measuredClaudeCodeStructuredHelperPayload(),
+		},
+		{
 			name:    "structured title helper 2.1.280",
 			beta:    claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15", "server-side-fallback-2026-06-01", "fallback-credit-2026-06-01", "cache-diagnosis-2026-04-07"),
 			payload: measuredClaudeCodeTitle280HelperPayload(),
