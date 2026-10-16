@@ -372,8 +372,14 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if got := gjson.GetBytes(interrupted, "response.incomplete_details.reason").String(); got != "interrupted" {
 		t.Fatalf("interrupt reason = %q, payload %s", got, interrupted)
 	}
-	if !executor.canceled.Load() {
-		t.Fatal("http upstream was not canceled")
+	// The handler acknowledges the interrupt and then cancels the execution;
+	// the executor observes the canceled context on its own goroutine.
+	canceledBy := time.Now().Add(time.Second)
+	for !executor.canceled.Load() {
+		if time.Now().After(canceledBy) {
+			t.Fatal("http upstream was not canceled")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if errSend := client.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"previous_response_id":"r-http","input":[]}`, model))); errSend != nil {
 		t.Fatal(errSend)
