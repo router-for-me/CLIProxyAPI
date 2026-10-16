@@ -678,6 +678,11 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if thinkingSupport == nil {
 			thinkingSupport = info.Thinking
 		}
+		if thinkingSupport == nil && info.ExplicitThinking {
+			// Explicitly without thinking: drop the template's reasoning levels,
+			// as the template path does for such models.
+			thinkingSupport = &registry.ThinkingSupport{Levels: []string{}}
+		}
 	}
 	applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 

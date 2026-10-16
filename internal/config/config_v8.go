@@ -99,7 +99,7 @@ func buildV8Paths() []configPath {
 		{"antigravity-signature-cache-enabled", "oauth.providers.antigravity.signature-cache-enabled"},
 		{"antigravity-signature-bypass-strict", "oauth.providers.antigravity.signature-bypass-strict"},
 		{"quota-exceeded.antigravity-credits", "oauth.providers.antigravity.antigravity-credits"},
-		{"xai", "upstream.xai"}, {"devin", "oauth.providers.devin"},
+		{"xai", "upstream.xai"}, {"devin", "oauth.providers.devin"}, {"meta", "oauth.providers.meta"},
 		{"disable-image-generation", "multimedia.disable-image-generation"}, {"gpt-image-2-base-model", "multimedia.gpt-image-2-base-model"},
 		{"video-result-auth-cache-ttl", "multimedia.video-result-auth-cache-ttl"},
 		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},

@@ -528,7 +528,7 @@ func TestV8MigrationPreservesEmptyLegacyContainers(t *testing.T) {
 		{"claude", "upstream.claude"}, {"claude-code", "upstream.claude"},
 		{"claude-header-defaults", "upstream.claude.header-defaults"},
 		{"antigravity", "oauth.providers.antigravity"}, {"antigravity.connection-pool", "oauth.providers.antigravity.connection-pool"},
-		{"xai", "upstream.xai"}, {"devin", "oauth.providers.devin"},
+		{"xai", "upstream.xai"}, {"devin", "oauth.providers.devin"}, {"meta", "oauth.providers.meta"},
 	} {
 		for _, empty := range []string{"{}", "null"} {
 			t.Run(section.old+"/"+empty, func(t *testing.T) {

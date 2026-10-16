@@ -810,6 +810,11 @@ func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider stri
 	}
 }
 
+// CloneModelInfo returns an independent copy of a model definition.
+func CloneModelInfo(model *ModelInfo) *ModelInfo {
+	return cloneModelInfo(model)
+}
+
 func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	if model == nil {
 		return nil
