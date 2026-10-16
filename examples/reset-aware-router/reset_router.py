@@ -180,10 +180,43 @@ def redemption_key(state_path, account_id, credit_id):
     return state[key]
 
 
+def claude_offer_active(expires_on, now):
+    """Claude's UI currently exposes only a calendar date for an offer."""
+    try:
+        expiry_date = dt.date.fromisoformat(expires_on)
+    except (TypeError, ValueError):
+        return False
+    return now.astimezone().date() <= expiry_date
+
+
+def apply_claude_offers(args, key, auths, now):
+    path = Path(args.claude_offers_file)
+    if not path.exists():
+        return
+    offers = json.loads(path.read_text()).get("offers", [])
+    by_name = {item.get("name"): item for item in auths if item.get("type") == "claude"}
+    by_email = {}
+    for auth_path in glob.glob(str(Path(args.auth_dir) / "claude-*.json")):
+        credential = json.loads(Path(auth_path).read_text())
+        by_email[credential.get("email")] = Path(auth_path).name
+    for offer in offers:
+        name = by_email.get(offer.get("email"))
+        entry = by_name.get(name)
+        if not entry or entry.get("disabled"):
+            continue
+        desired = 100 if claude_offer_active(offer.get("expires_on"), now) else 0
+        current = entry.get("priority") or 0
+        print(f"{name}: Claude {offer.get('kind', 'limit')} reset expires "
+              f"{offer.get('expires_on')}; priority {current} -> {desired}")
+        if current != desired and not args.dry_run:
+            management("PATCH", "/auth-files/fields", key, {"name": name, "priority": desired})
+
+
 def run_once(args, now=None):
     now = now or dt.datetime.now(UTC)
     key = Path(args.management_key).read_text().strip()
     auths = management("GET", "/auth-files", key).get("files", [])
+    apply_claude_offers(args, key, auths, now)
     by_name = {item.get("name"): item for item in auths if item.get("type") == "codex"}
     observations = []
     for path in sorted(glob.glob(str(Path(args.auth_dir) / "codex-*.json"))):
@@ -248,6 +281,7 @@ def main():
     parser.add_argument("--auth-dir", default=str(auth_dir))
     parser.add_argument("--management-key", default=str(auth_dir / "management-key"))
     parser.add_argument("--state-file", default=str(state_root / "cliproxy-reset-router" / "state.json"))
+    parser.add_argument("--claude-offers-file", default=str(state_root / "cliproxy-reset-router" / "claude-offers.json"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--interval", type=int, default=900)

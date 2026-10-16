@@ -25,4 +25,22 @@ If the account API omits individual credit expiry details, the companion
 cannot make an expiry-aware decision for that account. If this process is not
 running, CLIProxyAPI keeps its last assigned priorities. This program changes
 Codex credential priorities, so manual priorities for those credentials will
-be overwritten while it runs. It never touches Claude credentials.
+be overwritten while it runs. Claude credentials are touched only when a
+separate verified-offer file is present.
+
+## Claude limit-reset offers
+
+Anthropic exposes earned limit-reset offers in Claude web/Desktop under
+Settings > Usage. There is no documented account API for reading or redeeming
+them. To prioritize an account with a verified offer, provide a local JSON file
+at `~/.local/state/cliproxy-reset-router/claude-offers.json` (or use
+`--claude-offers-file`):
+
+```json
+{"offers": [{"email": "you@example.com", "kind": "full", "expires_on": "2026-10-22"}]}
+```
+
+The companion gives that Claude credential priority 100 through the listed
+calendar date, then restores priority 0. It cannot redeem the Claude offer;
+open Claude Settings > Usage and select **Reset for free** yourself when the
+available capacity makes it worthwhile. It never clicks that button for a test.

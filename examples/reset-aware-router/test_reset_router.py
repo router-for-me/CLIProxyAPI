@@ -54,6 +54,11 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(first, router.redemption_key(path, "account", "earned-1"))
             self.assertNotEqual(first, router.redemption_key(path, "account", "earned-2"))
 
+    def test_claude_date_only_offer_expires_after_its_calendar_day(self):
+        self.assertTrue(router.claude_offer_active("2026-10-22", self.now))
+        self.assertFalse(router.claude_offer_active("2026-10-15", self.now))
+        self.assertFalse(router.claude_offer_active("invalid", self.now))
+
 
 if __name__ == "__main__":
     unittest.main()
