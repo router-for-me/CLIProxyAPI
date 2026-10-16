@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -790,5 +791,70 @@ func TestClaudeExecutor_AuthManager_MultiModelPoolStreamStopsProbingOn429(t *tes
 	}
 	if got := attemptsCred2.Load(); got != 1 {
 		t.Fatalf("attempts on cred2 = %d, want 1", got)
+	}
+}
+
+func TestClaudeExecutor_ErrorCarriesRetryHeaders(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		stream bool
+	}{
+		{name: "execute 429", status: http.StatusTooManyRequests},
+		{name: "stream 429", status: http.StatusTooManyRequests, stream: true},
+		{name: "execute 529", status: 529},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "30")
+				w.Header().Set("Retry-After-Ms", "30000")
+				w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+				w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+				w.Header().Set("Anthropic-Organization-Id", "org-1")
+				w.Header().Set("Request-Id", "req-1")
+				w.Header().Set("Set-Cookie", "session=1")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}`))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID:         "claude-auth-1",
+				Provider:   "claude",
+				Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+			}
+			req := cliproxyexecutor.Request{
+				Model:   "claude-3-5-sonnet-20241022",
+				Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+			}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+			var err error
+			if tc.stream {
+				_, err = executor.ExecuteStream(context.Background(), auth, req, opts)
+			} else {
+				_, err = executor.Execute(context.Background(), auth, req, opts)
+			}
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+
+			// The handler reads headers from the returned error by direct assertion.
+			carrier, ok := err.(interface{ Headers() http.Header })
+			if !ok {
+				t.Fatalf("error %T does not carry headers", err)
+			}
+			want := http.Header{
+				"Retry-After":                           {"30"},
+				"Retry-After-Ms":                        {"30000"},
+				"Anthropic-Ratelimit-Unified-Status":    {"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"},
+			}
+			if got := carrier.Headers(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("Headers() = %v, want %v", got, want)
+			}
+		})
 	}
 }

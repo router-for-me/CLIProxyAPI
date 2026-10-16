@@ -21,6 +21,24 @@ const (
 	maxClaudeRateLimitWindow = 7*24*time.Hour + time.Hour
 )
 
+// ClaudeRetryHeaders returns the upstream headers that tell a client when it may
+// retry: Retry-After, Retry-After-Ms and the Anthropic-Ratelimit-Unified-* family.
+// It returns nil when none are present.
+func ClaudeRetryHeaders(headers http.Header) http.Header {
+	var retry http.Header
+	for key, values := range headers {
+		name := http.CanonicalHeaderKey(key)
+		if name != "Retry-After" && name != "Retry-After-Ms" && !strings.HasPrefix(name, "Anthropic-Ratelimit-Unified-") {
+			continue
+		}
+		if retry == nil {
+			retry = make(http.Header)
+		}
+		retry[name] = append(retry[name], values...)
+	}
+	return retry
+}
+
 // ClaudeHeadersIndicateUnifiedRateLimitRejection reports whether response headers explicitly
 // declare an Anthropic shared 5h or 7d rate-limit rejection. An overage-only or Fable-only rejection
 // remains model-scoped when shared subscription windows are not rejected (status "allowed", "allowed_warning",

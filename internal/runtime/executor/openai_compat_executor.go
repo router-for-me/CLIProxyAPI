@@ -1108,6 +1108,9 @@ type statusErr struct {
 	msg              string
 	retryAfter       *time.Duration
 	credentialScoped bool
+	// headers are upstream response headers that may be forwarded to the client
+	// when passthrough-headers is enabled.
+	headers http.Header
 }
 
 func (e statusErr) Error() string {
@@ -1119,6 +1122,7 @@ func (e statusErr) Error() string {
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
+func (e statusErr) Headers() http.Header       { return e.headers }
 
 const openAICompatTPMFallbackRetryAfter = time.Minute
 
