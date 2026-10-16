@@ -248,6 +248,12 @@ func (s *Service) Run(ctx context.Context) error {
 // It ensures all resources are properly cleaned up and connections are closed.
 // The shutdown is idempotent and can be called multiple times safely.
 //
+// Shutdown waits, until ctx ends, for in-flight auth refreshes to finish saving.
+// Do not call it from a refresh callback (such as a core auth manager hook's
+// OnAuthUpdated, which runs on a refresh worker) with a context that has no
+// deadline: that worker cannot return until Shutdown does. Hand it to another
+// goroutine instead.
+//
 // Parameters:
 //   - ctx: The context for controlling the shutdown timeout
 //
