@@ -277,3 +277,79 @@ func TestDropGeminiTrailingThoughtOnlyContent(t *testing.T) {
 		})
 	}
 }
+
+func TestStripClaudeDisabledThoughtContents(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		inputJSON string
+		path      string
+		want      string
+	}{
+		{
+			name:      "disabled (no thinkingConfig) + claude model strips thought parts and drops thought-only turns",
+			model:     "claude-3-7-sonnet",
+			inputJSON: `{"request":{"generationConfig":{},"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"thought":true,"text":"thinking"}]},{"role":"user","parts":[{"text":"more"}]},{"role":"model","parts":[{"thought":true,"text":"thinking2"},{"text":"final answer"}]}]}}`,
+			path:      "request.contents",
+			want:      `[{"role":"user","parts":[{"text":"hello"}]},{"role":"user","parts":[{"text":"more"}]},{"role":"model","parts":[{"text":"final answer"}]}]`,
+		},
+		{
+			name:      "enabled (thinkingConfig.thinkingLevel=high) + claude unchanged",
+			model:     "claude-3-7-sonnet",
+			inputJSON: `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}},"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"thought":true,"text":"thinking"}]}]}}`,
+			path:      "request.contents",
+			want:      `[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"thought":true,"text":"thinking"}]}]`,
+		},
+		{
+			name:      "gemini model name + no thinkingConfig unchanged",
+			model:     "gemini-2.5-pro",
+			inputJSON: `{"request":{"generationConfig":{},"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"thought":true,"text":"thinking"}]}]}}`,
+			path:      "request.contents",
+			want:      `[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"thought":true,"text":"thinking"}]}]`,
+		},
+		{
+			name:      "mixed: keeps non-thought parts including thoughtSignature on kept parts; drops thought:true parts",
+			model:     "claude-3-5-sonnet-v2",
+			inputJSON: `{"request":{"contents":[{"role":"user","parts":[{"text":"run tool"}]},{"role":"model","parts":[{"thought":true,"text":"pondering"},{"thought":true,"thoughtSignature":"sig-thought"},{"text":"calling","thoughtSignature":"sig-text"},{"functionCall":{"name":"search","args":{"q":"test"}},"thoughtSignature":"sig-fn"}]}]}}`,
+			path:      "request.contents",
+			want:      `[{"role":"user","parts":[{"text":"run tool"}]},{"role":"model","parts":[{"text":"calling","thoughtSignature":"sig-text"},{"functionCall":{"name":"search","args":{"q":"test"}},"thoughtSignature":"sig-fn"}]}]`,
+		},
+		{
+			name:      "thought-only model turn dropped entirely",
+			model:     "claude-opus",
+			inputJSON: `{"request":{"contents":[{"role":"user","parts":[{"text":"first"}]},{"role":"model","parts":[{"thought":true,"text":"thought only"}]},{"role":"user","parts":[{"text":"second"}]}]}}`,
+			path:      "request.contents",
+			want:      `[{"role":"user","parts":[{"text":"first"}]},{"role":"user","parts":[{"text":"second"}]}]`,
+		},
+		{
+			name:      "ModeNone via thinkingLevel none strips",
+			model:     "claude-3-7-sonnet",
+			inputJSON: `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"none"}},"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"thought":true,"text":"internal thought"},{"text":"visible text"}]}]}}`,
+			path:      "request.contents",
+			want:      `[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"visible text"}]}]`,
+		},
+		{
+			name:      "assistant role strips thought parts",
+			model:     "claude-sonnet",
+			inputJSON: `{"request":{"contents":[{"role":"assistant","parts":[{"thought":true,"text":"thought"},{"text":"reply"}]}]}}`,
+			path:      "request.contents",
+			want:      `[{"role":"assistant","parts":[{"text":"reply"}]}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := StripClaudeDisabledThoughtContents(tt.model, []byte(tt.inputJSON), tt.path)
+			got := gjson.GetBytes(out, tt.path).Raw
+			if got != tt.want {
+				t.Fatalf("contents = %s, want %s", got, tt.want)
+			}
+			// Idempotent double-apply check
+			outSecond := StripClaudeDisabledThoughtContents(tt.model, out, tt.path)
+			gotSecond := gjson.GetBytes(outSecond, tt.path).Raw
+			if gotSecond != tt.want {
+				t.Fatalf("second apply contents = %s, want %s", gotSecond, tt.want)
+			}
+		})
+	}
+}
