@@ -42,7 +42,11 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := bytes.Clone(originalPayloadSource)
-	isCompat := helps.APIKeyModelIsCompat(req)
+	// Muse returns its reasoning as unknown-format encrypted_content, which a
+	// Claude client replays as a thinking signature. The compatibility
+	// translation keeps those signatures as reasoning items, so Claude requests
+	// always take it here.
+	isCompat := helps.APIKeyModelIsCompat(req) || from == sdktranslator.FormatClaude
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, stream, isCompat)
 	body, err := helps.TranslateRequestReturningError(ctx, opts.Headers, e.cfg, from, to, baseModel, bytes.Clone(req.Payload), stream, isCompat)
 	if err != nil {
@@ -72,6 +76,9 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 	}
 	body = normalizeCodexInstructions(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx, "meta executor", body)
+	if from == sdktranslator.FormatClaude {
+		body = helps.DropMetaUnreplayableReasoning(body)
+	}
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 

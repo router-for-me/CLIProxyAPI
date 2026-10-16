@@ -1673,3 +1673,95 @@ func TestMetaExecutor_Execute_PreservesMuseReasoningEncryptedContent_Issue6450(t
 		t.Fatalf("stream Claude reasoning id should be dropped: %s", gotBody)
 	}
 }
+
+func TestMetaExecutor_ClaudeRequestReplaysMuseReasoning(t *testing.T) {
+	const museEncryptedContent = "Q-PaDg-mock-muse-spark-encrypted-reasoning-payload"
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+	// Turn 2 of a tool round trip, then a thinking-only turn, then a turn with
+	// a thinking block another provider signed and one with no signature.
+	payload := []byte(`{"model":"muse-spark-1.3","max_tokens":1024,"messages":[` +
+		`{"role":"user","content":"list the files"},` +
+		`{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"","signature":"` + museEncryptedContent + `"},` +
+		`{"type":"text","text":"Let me check."},` +
+		`{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.txt"}]},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"` + museEncryptedContent + `-only"}]},` +
+		`{"role":"user","content":"and now?"},` +
+		`{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"","signature":"` + testClaudeCAISSample + `"},` +
+		`{"type":"thinking","thinking":"","signature":""},` +
+		`{"type":"text","text":"Done."}]},` +
+		`{"role":"user","content":"thanks"}]}`)
+
+	assertReplay := func(t *testing.T, body []byte) {
+		t.Helper()
+		var reasoning []gjson.Result
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			if item.Get("type").String() == "reasoning" {
+				reasoning = append(reasoning, item)
+			}
+		}
+		if len(reasoning) != 1 {
+			t.Fatalf("reasoning items = %d, want 1; body=%s", len(reasoning), body)
+		}
+		if got := reasoning[0].Get("encrypted_content").String(); got != museEncryptedContent {
+			t.Fatalf("encrypted_content = %q, want %q; body=%s", got, museEncryptedContent, body)
+		}
+		// The reasoning item stays ahead of the preamble and tool call it produced.
+		input := gjson.GetBytes(body, "input")
+		if got := input.Get("1.type").String(); got != "reasoning" {
+			t.Fatalf("input.1.type = %q, want reasoning; body=%s", got, body)
+		}
+		if got := input.Get("2.role").String(); got != "assistant" {
+			t.Fatalf("input.2.role = %q, want assistant; body=%s", got, body)
+		}
+		if got := input.Get("3.type").String(); got != "function_call" {
+			t.Fatalf("input.3.type = %q, want function_call; body=%s", got, body)
+		}
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertReplay(t, gotBody)
+
+	gotBody = nil
+	result, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for range result.Chunks {
+	}
+	assertReplay(t, gotBody)
+}
