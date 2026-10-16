@@ -10,10 +10,11 @@ import datetime as dt
 import glob
 import json
 import os
-import select
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import uuid
@@ -24,25 +25,32 @@ EXPIRY_HORIZON = dt.timedelta(days=7)
 REDEEM_HORIZON = dt.timedelta(hours=24)
 
 
-def rpc(proc, method, request_id, params=None, timeout=20):
+def read_responses(proc, inbox):
+    for line in proc.stdout:
+        try:
+            inbox.put(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    inbox.put(None)
+
+
+def rpc(proc, inbox, method, request_id, params=None, timeout=None):
     request = {"method": method, "id": request_id}
     if params is not None:
         request["params"] = params
     proc.stdin.write(json.dumps(request) + "\n")
     proc.stdin.flush()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not select.select([proc.stdout], [], [], max(0, deadline - time.monotonic()))[0]:
-            break
-        line = proc.stdout.readline()
-        if not line:
-            break
-        response = json.loads(line)
+    while True:
+        try:
+            response = inbox.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError(method) from exc
+        if response is None:
+            raise RuntimeError(f"{method}: app-server closed its output")
         if response.get("id") == request_id:
             if "error" in response:
                 raise RuntimeError(f"{method}: {response['error']}")
             return response.get("result", {})
-    raise TimeoutError(method)
 
 
 def app_server(credential, consume=None):
@@ -54,23 +62,29 @@ def app_server(credential, consume=None):
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, env=env,
         )
+        inbox = queue.Queue()
+        threading.Thread(target=read_responses, args=(proc, inbox), daemon=True).start()
         try:
-            rpc(proc, "initialize", 1, {
+            rpc(proc, inbox, "initialize", 1, {
                 "clientInfo": {"name": "cliproxy_reset_router", "title": "CLIProxy Reset Router", "version": "0.1.0"},
                 "capabilities": {"experimentalApi": True},
-            })
+            }, timeout=20)
             proc.stdin.write('{"method":"initialized","params":{}}\n')
             proc.stdin.flush()
-            rpc(proc, "account/login/start", 2, {
+            rpc(proc, inbox, "account/login/start", 2, {
                 "type": "chatgptAuthTokens",
                 "accessToken": credential["access_token"],
                 "chatgptAccountId": credential["account_id"],
                 "chatgptPlanType": credential.get("plan_type"),
-            })
-            result = rpc(proc, "account/rateLimits/read", 3)
+            }, timeout=20)
+            result = rpc(proc, inbox, "account/rateLimits/read", 3)
             if consume is not None:
-                outcome = rpc(proc, "account/rateLimitResetCredit/consume", 4, consume)
-                result = rpc(proc, "account/rateLimits/read", 5)
+                outcome = rpc(proc, inbox, "account/rateLimitResetCredit/consume", 4, consume)
+                try:
+                    result = rpc(proc, inbox, "account/rateLimits/read", 5)
+                except Exception as exc:
+                    print(f"rate limits refresh after redemption failed: {exc}", file=sys.stderr)
+                    result = None
                 return result, outcome.get("outcome")
             return result, None
         finally:
@@ -154,10 +168,10 @@ def account_rank(result, now):
 def management(method, path, key, payload=None):
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(
-        "http://127.0.0.1:8317/v0/management" + path, data=data, method=method,
+        "http://127.0.0.1:8317/v8/management" + path, data=data, method=method,
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request) as response:
         return json.load(response)
 
 
@@ -178,6 +192,29 @@ def redemption_key(state_path, account_id, credit_id):
             json.dump(state, stream)
         os.replace(temporary, path)
     return state[key]
+
+
+def clear_redemption_key(state_path, account_id, credit_id):
+    path = Path(state_path)
+    try:
+        state = json.loads(path.read_text())
+    except FileNotFoundError:
+        return
+    if state.pop(account_id + ":" + credit_id, None) is None:
+        return
+    temporary = path.with_suffix(".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as stream:
+        json.dump(state, stream)
+    os.replace(temporary, path)
+
+
+def has_usable_credit_details(result):
+    reset = result.get("rateLimitResetCredits")
+    if not isinstance(reset, dict):
+        return False
+    credits = reset.get("credits")
+    return isinstance(credits, list) and (bool(credits) or reset.get("availableCount") == 0)
 
 
 def claude_offer_active(expires_on, now):
@@ -209,13 +246,13 @@ def apply_claude_offers(args, key, auths, now):
         print(f"{name}: Claude {offer.get('kind', 'limit')} reset expires "
               f"{offer.get('expires_on')}; priority {current} -> {desired}")
         if current != desired and not args.dry_run:
-            management("PATCH", "/auth-files/fields", key, {"name": name, "priority": desired})
+            management("PATCH", "/credentials/fields", key, {"name": name, "priority": desired})
 
 
 def run_once(args, now=None):
     now = now or dt.datetime.now(UTC)
     key = Path(args.management_key).read_text().strip()
-    auths = management("GET", "/auth-files", key).get("files", [])
+    auths = management("GET", "/credentials", key).get("files", [])
     apply_claude_offers(args, key, auths, now)
     by_name = {item.get("name"): item for item in auths if item.get("type") == "codex"}
     observations = []
@@ -242,14 +279,16 @@ def run_once(args, now=None):
         if rank is not None:
             ranked.append((rank, name))
     ranked.sort(key=lambda item: item[0])
-    priorities = {name: max(10, 100 - index * 10) for index, (_, name) in enumerate(ranked)}
+    priorities = {name: len(ranked) - index for index, (_, name) in enumerate(ranked)}
     for name, credential, result in observations:
+        if not has_usable_credit_details(result):
+            continue
         desired = priorities.get(name, 0)
         current = by_name[name].get("priority") or 0
         if current != desired:
             print(f"{name}: priority {current} -> {desired}")
             if not args.dry_run:
-                management("PATCH", "/auth-files/fields", key, {"name": name, "priority": desired})
+                management("PATCH", "/credentials/fields", key, {"name": name, "priority": desired})
         credit = should_redeem(result, now)
         if credit is None:
             continue
@@ -267,11 +306,13 @@ def run_once(args, now=None):
         }
         updated, outcome = app_server(credential, consume=attempt)
         print(f"{name}: reset outcome={outcome}, remaining="
-              f"{(updated.get('rateLimitResetCredits') or {}).get('availableCount', 'unknown')}")
+              f"{((updated or {}).get('rateLimitResetCredits') or {}).get('availableCount', 'unknown')}")
         if outcome in ("reset", "alreadyRedeemed"):
             index = by_name[name].get("auth_index")
             if index:
-                management("POST", "/reset-quota", key, {"auth_index": index})
+                management("POST", "/routing/cooldown/reset", key, {"auth_index": index})
+        elif outcome in ("nothingToReset", "noCredit"):
+            clear_redemption_key(args.state_file, credential["account_id"], credit["id"])
 
 
 def main():

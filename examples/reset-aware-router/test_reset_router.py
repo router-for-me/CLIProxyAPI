@@ -53,6 +53,16 @@ class PolicyTests(unittest.TestCase):
             first = router.redemption_key(path, "account", "earned-1")
             self.assertEqual(first, router.redemption_key(path, "account", "earned-1"))
             self.assertNotEqual(first, router.redemption_key(path, "account", "earned-2"))
+            router.clear_redemption_key(path, "account", "earned-1")
+            self.assertNotEqual(first, router.redemption_key(path, "account", "earned-1"))
+
+    def test_unknown_credit_details_do_not_allow_priority_write(self):
+        self.assertFalse(router.has_usable_credit_details({"rateLimitResetCredits": {
+            "availableCount": 1, "credits": None,
+        }}))
+        self.assertTrue(router.has_usable_credit_details({"rateLimitResetCredits": {
+            "availableCount": 0, "credits": [],
+        }}))
 
     def test_claude_date_only_offer_expires_after_its_calendar_day(self):
         self.assertTrue(router.claude_offer_active("2026-10-22", self.now))
