@@ -98,13 +98,19 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
 			return
 		}
-		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
-		// Wait briefly; if the path exists again, treat as an update instead of removal.
-		time.Sleep(replaceCheckDelay)
-		statSucceeded := false
-		if _, statErr := os.Stat(event.Name); statErr == nil {
-			statSucceeded = true
-		} else if w.isKnownAuthFile(event.Name) {
+		// A file already in place is a replace and needs no settle delay: an exchange
+		// rename (atomicfile on Linux) reports the target as renamed on every save,
+		// with the new file present.
+		_, statErr := os.Stat(event.Name)
+		statSucceeded := statErr == nil
+		if !statSucceeded {
+			// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
+			// Wait briefly; if the path exists again, treat as an update instead of removal.
+			waitForReplace()
+			_, statErr = os.Stat(event.Name)
+			statSucceeded = statErr == nil
+		}
+		if !statSucceeded && w.isKnownAuthFile(event.Name) {
 			// On macOS (and under disk I/O pressure), atomic replace (e.g. os.Rename from temp file)
 			// can trigger a NOTE_DELETE before the target inode is fully visible. Retry briefly
 			// before treating a known auth file as permanently removed.
@@ -210,6 +216,10 @@ func (w *Watcher) normalizeAuthPath(path string) string {
 	}
 	return cleaned
 }
+
+// waitForReplace lets a replace that surfaced as Rename or Remove settle before
+// the path is checked again; tests replace it to see whether an event waited.
+var waitForReplace = func() { time.Sleep(replaceCheckDelay) }
 
 // forgetRemove drops the remove time shouldDebounceRemove recorded for a path that
 // turned out to still exist.
