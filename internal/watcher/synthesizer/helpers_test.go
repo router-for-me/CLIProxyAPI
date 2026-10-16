@@ -201,7 +201,7 @@ func TestApplyAuthExcludedModelsMeta(t *testing.T) {
 	}
 }
 
-func TestApplyAuthExcludedModelsMeta_OAuthMergeWritesCombinedModels(t *testing.T) {
+func TestApplyAuthExcludedModelsMeta_OAuthCredentialRulesOverrideGlobal(t *testing.T) {
 	auth := &coreauth.Auth{
 		Provider:   "claude",
 		Attributes: make(map[string]string),
@@ -214,14 +214,34 @@ func TestApplyAuthExcludedModelsMeta_OAuthMergeWritesCombinedModels(t *testing.T
 
 	ApplyAuthExcludedModelsMeta(auth, cfg, []string{"per", "SHARED"}, "oauth")
 
-	const wantCombined = "global-a,per,shared"
+	const wantCombined = "per,shared"
 	if gotCombined := auth.Attributes["excluded_models"]; gotCombined != wantCombined {
 		t.Fatalf("expected excluded_models=%q, got %q", wantCombined, gotCombined)
 	}
 
-	expectedHash := diff.ComputeExcludedModelsHash([]string{"global-a", "per", "shared"})
+	expectedHash := diff.ComputeExcludedModelsHash([]string{"per", "shared"})
 	if gotHash := auth.Attributes["excluded_models_hash"]; gotHash != expectedHash {
 		t.Fatalf("expected excluded_models_hash=%q, got %q", expectedHash, gotHash)
+	}
+}
+
+func TestApplyAuthExcludedModelsMeta_EmptyRulesFallbackAndClearStaleAttributes(t *testing.T) {
+	for _, rules := range [][]string{nil, {}, {" ", "\t"}} {
+		auth := &coreauth.Auth{Provider: "codex", Attributes: map[string]string{
+			"excluded_models": "stale", "excluded_models_hash": "stale",
+		}}
+		cfg := &config.Config{OAuthExcludedModels: map[string][]string{"codex": {"global-a"}}}
+		ApplyAuthExcludedModelsMeta(auth, cfg, rules, "oauth")
+		if got := auth.Attributes["excluded_models"]; got != "global-a" {
+			t.Fatalf("rules=%v: got %q, want global fallback", rules, got)
+		}
+		cfg.OAuthExcludedModels = nil
+		ApplyAuthExcludedModelsMeta(auth, cfg, rules, "oauth")
+		for _, key := range []string{"excluded_models", "excluded_models_hash"} {
+			if _, exists := auth.Attributes[key]; exists {
+				t.Fatalf("rules=%v: stale %s not cleared", rules, key)
+			}
+		}
 	}
 }
 

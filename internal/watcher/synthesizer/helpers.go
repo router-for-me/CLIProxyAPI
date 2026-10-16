@@ -53,8 +53,8 @@ func (g *StableIDGenerator) Next(kind string, parts ...string) (string, string) 
 
 // ApplyAuthExcludedModelsMeta applies excluded models metadata to an auth entry.
 // It computes a hash of excluded models and sets the auth_kind attribute.
-// For OAuth entries, perKey (from the JSON file's excluded-models field) is merged
-// with the global oauth-excluded-models config for the provider.
+// For OAuth entries, nonempty per-account rules override the global provider rules.
+// Empty or whitespace-only per-account rules fall back to the global rules.
 func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey []string, authKind string) {
 	if auth == nil || cfg == nil {
 		return
@@ -72,15 +72,10 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 			}
 		}
 	}
-	if authKindKey == "apikey" {
-		add(perKey)
-	} else {
-		// For OAuth: merge per-account excluded models with global provider-level exclusions
-		add(perKey)
-		if cfg.OAuthExcludedModels != nil {
-			providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
-			add(cfg.OAuthExcludedModels[providerKey])
-		}
+	add(perKey)
+	if authKindKey != "apikey" && len(seen) == 0 {
+		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+		add(cfg.OAuthExcludedModels[providerKey])
 	}
 	combined := make([]string, 0, len(seen))
 	for k := range seen {
@@ -91,10 +86,12 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
+	delete(auth.Attributes, "excluded_models_hash")
+	delete(auth.Attributes, "excluded_models")
 	if hash != "" {
 		auth.Attributes["excluded_models_hash"] = hash
 	}
-	// Store the combined excluded models list so that routing can read it at runtime
+	// Store the effective rules so routing and metadata hashes use the same exclusions.
 	if len(combined) > 0 {
 		auth.Attributes["excluded_models"] = strings.Join(combined, ",")
 	}

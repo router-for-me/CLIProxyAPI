@@ -388,6 +388,16 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 	if changed {
 		syncAuthFileMetadataFields(targetAuth, touchedRoots)
+		if _, touched := touchedRoots["excluded_models"]; touched {
+			authKind := targetAuth.AuthKind()
+			if authKind == "" {
+				authKind = coreauth.AuthKindOAuth
+			}
+			h.mu.Lock()
+			synthesizer.ApplyAuthExcludedModelsMeta(targetAuth, h.cfg,
+				synthesizer.ExtractExcludedModelsFromMetadata(targetAuth.Metadata), authKind)
+			h.mu.Unlock()
+		}
 	}
 
 	if !changed {
