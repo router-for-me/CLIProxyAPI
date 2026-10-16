@@ -1755,6 +1755,16 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
+		// Expose the reasoning/thinking capabilities as a provider-specific
+		// extension so clients can build effort controls from /v1/models.
+		// The OpenAI model-list handler keeps this field when writing the response.
+		if model.Thinking != nil {
+			thinking := *model.Thinking
+			if len(model.Thinking.Levels) > 0 {
+				thinking.Levels = append([]string(nil), model.Thinking.Levels...)
+			}
+			result["thinking"] = &thinking
+		}
 		return result
 
 	case "claude":

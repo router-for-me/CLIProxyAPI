@@ -99,6 +99,12 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
+		// Keep the provider-specific thinking extension available to clients
+		// that use /models to configure reasoning controls.
+		if thinking, exists := model["thinking"]; exists {
+			filteredModel["thinking"] = thinking
+		}
+
 		filteredModels[i] = filteredModel
 	}
 
