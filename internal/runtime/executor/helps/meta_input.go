@@ -12,7 +12,10 @@ import (
 // cannot use or would reject.
 //
 // Meta restores chain of thought only from encrypted_content, so a reasoning
-// item with neither encrypted_content nor an id carries nothing to replay.
+// item with neither encrypted_content nor an id carries nothing to replay, and
+// encrypted_content without Muse's envelope (museEncryptedContentPrefix) came
+// from another provider: a Claude history that switched models, say from Grok
+// to Muse, replays opaque blobs Meta cannot decrypt.
 // Meta also rejects, with HTTP 400, a reasoning item that is not followed by an
 // assistant message or a function_call before the next user, system or
 // developer message, which a thinking-only assistant turn would produce.
@@ -57,10 +60,20 @@ func DropMetaUnreplayableReasoning(body []byte) []byte {
 	return updated
 }
 
+// museEncryptedContentPrefix begins every Muse reasoning blob observed from
+// api.meta.ai (301 of 301 captured). Grok and other opaque ciphertexts carry no
+// envelope, so this shape check, not provider detection, is what keeps them from
+// being replayed to Meta. Should Meta change the envelope, replay stops rather
+// than sending blobs Meta may reject.
+const museEncryptedContentPrefix = "Q-PaD"
+
 func metaReasoningReplayable(items []gjson.Result, index int) bool {
 	item := items[index]
 	encryptedContent := item.Get("encrypted_content")
 	hasEncryptedContent := encryptedContent.Type == gjson.String && encryptedContent.String() != ""
+	if hasEncryptedContent && !strings.HasPrefix(encryptedContent.String(), museEncryptedContentPrefix) {
+		return false
+	}
 	if !hasEncryptedContent && strings.TrimSpace(item.Get("id").String()) == "" {
 		return false
 	}

@@ -64,6 +64,11 @@ func TestDropMetaUnreplayableReasoning(t *testing.T) {
 			want:  []string{"message:assistant"},
 		},
 		{
+			name:  "drops another provider's opaque reasoning",
+			input: `[{"type":"reasoning","summary":[],"encrypted_content":"k3Jv9xQ2mZpL8wR4tY6uB1nC5dF7gH0j"},{"type":"reasoning","summary":[],"encrypted_content":"Q-PaD1"},{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"}]`,
+			want:  []string{"reasoning", "function_call"},
+		},
+		{
 			name:  "keeps a stored reasoning id without encrypted content",
 			input: `[{"type":"reasoning","id":"rs_1","summary":[]},{"type":"message","role":"assistant","content":[]}]`,
 			want:  []string{"reasoning", "message:assistant"},
