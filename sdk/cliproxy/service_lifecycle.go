@@ -325,10 +325,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			watcherCancel()
 		}
 		if s.coreManager != nil {
-			// Wait for in-flight refreshes to finish saving, within the shutdown deadline.
-			if errStop := s.coreManager.StopAutoRefreshContext(ctx); errStop != nil {
-				log.WithError(errStop).Warn("auth auto-refresh did not finish before shutdown deadline")
-			}
+			// Cancel now; the wait for in-flight saves comes after the API server
+			// stops, so a slow save cannot keep it accepting requests.
+			s.coreManager.StopAutoRefresh()
 		}
 		if watcher := s.currentWatcher(); watcher != nil {
 			if err := watcher.Stop(); err != nil {
@@ -371,6 +370,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				if shutdownErr == nil {
 					shutdownErr = errStop
 				}
+			}
+		}
+		if s.coreManager != nil {
+			// Wait for in-flight refreshes to finish saving, within the shutdown
+			// deadline, before plugin executors they may use are shut down.
+			if errStop := s.coreManager.StopAutoRefreshContext(ctx); errStop != nil {
+				log.WithError(errStop).Warn("auth auto-refresh did not finish before shutdown deadline")
 			}
 		}
 
