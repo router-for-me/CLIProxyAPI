@@ -47,6 +47,10 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
+	// Held to the end: between the two critical sections below no loop is
+	// installed, and a concurrent start or stop there would lose track of one.
+	m.refreshStartMu.Lock()
+	defer m.refreshStartMu.Unlock()
 
 	m.mu.Lock()
 	cancelPrev := m.refreshCancel
@@ -71,8 +75,13 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	m.mu.Unlock()
 
 	loop.rebuild(time.Now())
+	refreshLoopStarted(loop)
 	go loop.run(ctx)
 }
+
+// refreshLoopStarted runs for every loop StartAutoRefresh launches; tests use it
+// to check that each one is stopped.
+var refreshLoopStarted = func(*authAutoRefreshLoop) {}
 
 // StopAutoRefresh cancels the background refresh loop, if running, and returns
 // without waiting for its workers; it is safe to call from a refresh callback
@@ -112,6 +121,9 @@ func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
 // the loops whose workers may still be running: the stopped loop, loops it
 // replaced, and loops an earlier stop did not wait for.
 func (m *Manager) stopAutoRefresh() []*authAutoRefreshLoop {
+	// StartAutoRefresh does not wait for workers, so this is safe from a refresh
+	// callback too.
+	m.refreshStartMu.Lock()
 	m.mu.Lock()
 	cancel := m.refreshCancel
 	loops := unfinishedRefreshLoops(m.retiredRefreshLoops)
@@ -122,6 +134,7 @@ func (m *Manager) stopAutoRefresh() []*authAutoRefreshLoop {
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
+	m.refreshStartMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}

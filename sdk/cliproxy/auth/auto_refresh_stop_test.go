@@ -438,3 +438,55 @@ func TestStopAutoRefreshFromRefreshHookDoesNotDeadlock(t *testing.T) {
 		t.Fatal("StopAutoRefresh called from OnAuthUpdated on the refresh worker never returned")
 	}
 }
+
+// Concurrent StartAutoRefresh calls must each retire the loop they replace, so a
+// waiting stop afterwards leaves no loop running.
+func TestConcurrentStartAutoRefreshLeavesNoLoopRunning(t *testing.T) {
+	var mu sync.Mutex
+	var loops []*authAutoRefreshLoop
+	original := refreshLoopStarted
+	refreshLoopStarted = func(loop *authAutoRefreshLoop) {
+		mu.Lock()
+		loops = append(loops, loop)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { refreshLoopStarted = original })
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	const starts = 40
+	begin := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < starts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-begin
+			manager.StartAutoRefresh(context.Background(), time.Hour)
+		}()
+	}
+	close(begin)
+	wg.Wait()
+
+	// Bounded so an orphaned loop fails the test instead of hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := manager.StopAutoRefreshContext(ctx); err != nil {
+		t.Fatalf("StopAutoRefreshContext() error = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(loops) != starts {
+		t.Fatalf("started %d loops, want %d", len(loops), starts)
+	}
+	running := 0
+	for _, loop := range loops {
+		select {
+		case <-loop.done:
+		default:
+			running++
+		}
+	}
+	if running != 0 {
+		t.Fatalf("%d of %d loops still running after StopAutoRefreshContext", running, starts)
+	}
+}
