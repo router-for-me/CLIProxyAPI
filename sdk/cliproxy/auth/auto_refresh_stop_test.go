@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -54,14 +56,23 @@ type refreshSaveStore struct {
 	entered chan struct{}
 	hold    func()
 	done    atomic.Bool
+	heldID  atomic.Value  // string: the auth whose save is held
+	passed  chan<- string // if set, receives the ID of each save that is not held
 }
 
 func (*refreshSaveStore) List(context.Context) ([]*Auth, error) { return nil, nil }
 
 func (s *refreshSaveStore) Save(_ context.Context, auth *Auth) (string, error) {
 	if !s.armed.Load() {
+		if s.passed != nil {
+			select {
+			case s.passed <- auth.ID:
+			default:
+			}
+		}
 		return auth.ID, nil
 	}
+	s.heldID.Store(auth.ID)
 	select {
 	case s.entered <- struct{}{}:
 	default:
@@ -288,6 +299,89 @@ func TestStopAutoRefreshContextAfterTimedOutStopAndRestartStillWaits(t *testing.
 	h.release()
 	if !awaitReturned(t, returned) {
 		t.Fatal("StopAutoRefreshContext returned before the stopped loop's save finished")
+	}
+}
+
+// A loop replaced while its only worker is held in a save must release its queued
+// jobs at once, so the new loop refreshes those credentials instead of waiting for
+// the held save.
+func TestReplacedLoopReleasesQueuedJobsWhileWorkerSaves(t *testing.T) {
+	h := newHeldSave(t)
+	passed := make(chan string, 8)
+	h.store.passed = passed
+	manager := NewManager(h.store, &RoundRobinSelector{}, nil)
+	manager.runtimeConfig.Store(&internalconfig.Config{AuthAutoRefreshWorkers: 1})
+	manager.RegisterExecutor(stopTestExecutor{})
+	ids := []string{"replaced-loop-a", "replaced-loop-b"}
+	for _, id := range ids {
+		if _, err := manager.Register(context.Background(), &Auth{
+			ID:       id,
+			Provider: "stop-test",
+			Runtime:  alwaysRefresh{},
+			Metadata: map[string]any{
+				"access_token":  "expired-token",
+				"refresh_token": "refresh-1",
+				"expires_at":    time.Now().Add(-time.Hour).Format(time.RFC3339),
+			},
+		}); err != nil {
+			t.Fatalf("Register(%s) error: %v", id, err)
+		}
+	}
+	// Drop the saves Register made; only refresh saves count below.
+	for len(passed) > 0 {
+		<-passed
+	}
+	h.store.armed.Store(true)
+	manager.StartAutoRefresh(context.Background(), 10*time.Millisecond)
+	t.Cleanup(func() {
+		h.release()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = manager.StopAutoRefreshContext(ctx)
+	})
+
+	// The timer only guards against a hang.
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case <-h.store.entered:
+	case <-hangGuard.C:
+		t.Fatal("auto-refresh never saved a refreshed credential")
+	}
+	queued := ids[0]
+	if h.store.heldID.Load() == queued {
+		queued = ids[1]
+	}
+	manager.mu.RLock()
+	oldLoop := manager.refreshLoop
+	manager.mu.RUnlock()
+	// The other credential's job must be waiting on the old loop's busy worker.
+	for {
+		manager.mu.RLock()
+		job := manager.refreshJobs[queued]
+		isQueued := job != nil && job.loop == oldLoop && !job.running
+		manager.mu.RUnlock()
+		if isQueued {
+			break
+		}
+		select {
+		case <-hangGuard.C:
+			t.Fatalf("%s was never queued behind the held save", queued)
+		default:
+			runtime.Gosched()
+		}
+	}
+
+	replaceRefreshLoop(manager, h.store)
+	for {
+		select {
+		case id := <-passed:
+			if id == queued {
+				return
+			}
+		case <-hangGuard.C:
+			t.Fatalf("the new loop did not refresh %s while the replaced loop's worker held its save", queued)
+		}
 	}
 }
 
