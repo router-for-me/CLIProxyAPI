@@ -99,3 +99,43 @@ func TestWriteFileNewFileHonorsUmask(t *testing.T) {
 		t.Fatalf("mode = %v, want 0400 (0600 less umask 0277)", info.Mode().Perm())
 	}
 }
+
+// A root writer (the Docker image) saving a file another user owns, through a bind
+// mount, must leave it owned by that user.
+func TestWriteFileKeepsOwnerAsRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to own a file as another user")
+	}
+	const uid, gid = 12345, 12345
+	for name, write := range map[string]func(string, []byte, os.FileMode) error{
+		"WriteFile":   WriteFile,
+		"ReplaceFile": ReplaceFile,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "auth.json")
+			if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			if err := os.Chown(path, uid, gid); err != nil {
+				t.Fatalf("chown: %v", err)
+			}
+			before, _ := os.Stat(path)
+			if err := write(path, []byte("new"), 0o600); err != nil {
+				t.Fatalf("write error = %v", err)
+			}
+			after, _ := os.Stat(path)
+			st := after.Sys().(*syscall.Stat_t)
+			if st.Uid != uid || st.Gid != gid {
+				t.Fatalf("owner = %d:%d, want %d:%d", st.Uid, st.Gid, uid, gid)
+			}
+			if os.SameFile(before, after) {
+				t.Fatal("the file was written in place; root should replace it with the owner kept")
+			}
+			if got, _ := os.ReadFile(path); string(got) != "new" {
+				t.Fatalf("content = %q, want new", got)
+			}
+			assertNoTempFiles(t, dir)
+		})
+	}
+}
