@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +35,22 @@ class WatchTests(unittest.TestCase):
         self.assertIsNone(watch.account_change({"provider": "codex", "auth_index": "a1"}, credentials, previous))
         self.assertIsNone(watch.account_change({"provider": "claude", "source": "claude@example.com"}, credentials, previous))
         self.assertEqual(watch.account_change({"provider": "codex", "auth_index": "a2"}, credentials, previous), "codex account changed: first@example.com -> second@example.com")
+
+    def test_api_key_source_is_never_printed(self):
+        secret = "sk-secret-upstream-key"
+        record = {"provider": "claude", "model": "claude-sonnet-4-6", "source": secret, "auth_index": "opaque-123"}
+        credentials = [{"provider": "claude", "auth_index": "opaque-123"}]
+        previous = {}
+        self.assertNotIn(secret, watch.format_record(record, credentials))
+        self.assertNotIn(secret, str(watch.account_change(record, credentials, previous)))
+        self.assertIn("credential opaque-123", watch.format_record(record, credentials))
+
+    def test_credential_failure_does_not_pop_usage_queue(self):
+        with mock.patch.object(watch, "get_json", side_effect=TimeoutError("credential lookup")) as get_json:
+            with mock.patch.dict(watch.os.environ, {"CLIPROXY_MANAGEMENT_KEY": "test-key"}):
+                self.assertEqual(watch.main(["--once"]), 1)
+        self.assertEqual(get_json.call_count, 1)
+        self.assertEqual(get_json.call_args.args[2], "/credentials")
 
 
 if __name__ == "__main__":

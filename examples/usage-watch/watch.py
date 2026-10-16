@@ -89,9 +89,19 @@ def credential_for_record(record, credentials):
     return {}
 
 
+def account_label(record, credential):
+    email = credential.get("email")
+    if email:
+        return str(email)
+    auth_index = credential.get("auth_index") or record.get("auth_index")
+    if auth_index:
+        return f"credential {auth_index}"
+    return "unknown account"
+
+
 def format_record(record, credentials):
     credential = credential_for_record(record, credentials)
-    account = credential.get("email") or record.get("source") or "unknown account"
+    account = account_label(record, credential)
     model = record.get("model") or "unknown model"
     provider = record.get("provider") or "unknown provider"
     tokens = (record.get("tokens") or {}).get("total_tokens")
@@ -104,7 +114,9 @@ def format_record(record, credentials):
 def account_change(record, credentials, previous_by_provider):
     provider = record.get("provider") or "unknown provider"
     credential = credential_for_record(record, credentials)
-    account = credential.get("email") or record.get("source") or "unknown account"
+    account = account_label(record, credential)
+    if account == "unknown account":
+        return None
     previous = previous_by_provider.get(provider)
     previous_by_provider[provider] = account
     if previous and previous != account:
@@ -131,9 +143,13 @@ def main(argv=None):
         print("Watching completed API requests (Ctrl-C to stop)...", flush=True)
     while True:
         try:
+            # The queue GET pops records. Resolve credentials first so a
+            # transient lookup failure cannot discard an already-popped batch.
+            credentials = get_json(args.base_url, key, "/credentials").get("files", [])
+            if not isinstance(credentials, list) or any(not isinstance(item, dict) for item in credentials):
+                raise ValueError("invalid credential list")
             records = get_json(args.base_url, key, "/observability/usage/queue?" + urlencode({"count": 100}))
             if records:
-                credentials = get_json(args.base_url, key, "/credentials").get("files", [])
                 for record in records:
                     if args.provider and record.get("provider") != args.provider:
                         continue
