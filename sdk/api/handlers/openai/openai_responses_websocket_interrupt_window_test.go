@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -21,10 +22,21 @@ import (
 // then be rejected by the input reader, not completed locally as a synthetic
 // response.incomplete for an unrelated response_id.
 func TestForwardResponsesWebsocketClosesLocalInterruptWindowAtTerminalEvent(t *testing.T) {
-	for _, terminal := range []string{
-		`{"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}`,
-		`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","output":[]}}`,
+	for _, tc := range []struct {
+		terminal string
+		// wantForwardErr is the existing end-of-stream result. A failed turn is
+		// not completed, so the forwarder closes the client socket when the
+		// data channel closes; only the interrupt window is under test here.
+		wantForwardErr error
+	}{
+		{terminal: `{"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}`},
+		{terminal: `{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","output":[]}}`},
+		{
+			terminal:       `{"type":"response.failed","response":{"id":"r1","status":"failed","error":{"code":"server_error","message":"upstream failed"}}}`,
+			wantForwardErr: websocket.ErrCloseSent,
+		},
 	} {
+		terminal := tc.terminal
 		event := gjson.Get(terminal, "type").String()
 		t.Run(event, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
@@ -82,8 +94,8 @@ func TestForwardResponsesWebsocketClosesLocalInterruptWindowAtTerminalEvent(t *t
 			close(data)
 			select {
 			case errForward := <-forwardDone:
-				if errForward != nil {
-					t.Fatalf("forward error = %v", errForward)
+				if !errors.Is(errForward, tc.wantForwardErr) {
+					t.Fatalf("forward error = %v, want %v", errForward, tc.wantForwardErr)
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("forward did not return after the data channel closed")

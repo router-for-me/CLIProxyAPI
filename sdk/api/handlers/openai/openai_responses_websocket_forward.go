@@ -211,6 +211,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					if opts.localInterrupt != nil {
 						opts.localInterrupt.end()
 					}
+				} else if eventType == "response.failed" {
+					// response.failed is terminal as well. It carries no completed
+					// output, so only the local interrupt window is closed here.
+					if opts.localInterrupt != nil {
+						opts.localInterrupt.end()
+					}
 				}
 				markAPIResponseTimestamp(c)
 				if payloadErrMsg != nil {
