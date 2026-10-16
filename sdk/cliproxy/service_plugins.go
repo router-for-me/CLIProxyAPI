@@ -29,6 +29,7 @@ const (
 )
 
 type modelRegistrationTask struct {
+	authID   string
 	phase    int
 	category string
 	run      func(*openAICompatibilityRegistrationCache)
@@ -51,8 +52,8 @@ var registerPluginExecutors = func(host *pluginhost.Host, manager *coreauth.Mana
 
 // modelRegistrationTaskHook, if set, runs after auth-update commits and before
 // model registration workers start. Tests use it to prove registration no longer
-// holds authUpdateMu.
-var modelRegistrationTaskHook func()
+// holds authUpdateMu. It receives the ID of the auth the task registers.
+var modelRegistrationTaskHook func(authID string)
 
 // modelRegistrationTaskPostRunHook, if set, runs synchronously inside model registration
 // tasks after completeModelRegistrationForAuthWithCache completes. Tests use it to inject
@@ -185,6 +186,7 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 		}
 		authForRegistration := auth.Clone()
 		tasks = append(tasks, modelRegistrationTask{
+			authID:   authForRegistration.ID,
 			phase:    modelRegistrationPhase(authForRegistration),
 			category: modelRegistrationCategory(authForRegistration),
 			run: func(compatCache *openAICompatibilityRegistrationCache) {
@@ -287,7 +289,7 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 						default:
 						}
 						if modelRegistrationTaskHook != nil {
-							modelRegistrationTaskHook()
+							modelRegistrationTaskHook(task.authID)
 						}
 						task.run(compatCache)
 					}(task)
@@ -389,6 +391,7 @@ func (s *Service) registerModelRefreshCallback() {
 			}
 			authForRefresh := auth
 			tasks = append(tasks, modelRegistrationTask{
+				authID:   authForRefresh.ID,
 				phase:    modelRegistrationPhase(authForRefresh),
 				category: modelRegistrationCategory(authForRefresh),
 				run: func(compatCache *openAICompatibilityRegistrationCache) {
