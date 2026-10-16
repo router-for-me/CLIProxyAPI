@@ -250,3 +250,85 @@ func TestRestoreSanitizedToolName(t *testing.T) {
 		t.Errorf("expected empty for empty name, got %q", got)
 	}
 }
+
+func TestCleanClaudeToolArguments(t *testing.T) {
+	origRequest := []byte(`{
+		"tools": [
+			{
+				"name": "EnterPlanMode",
+				"description": "Switch to plan mode",
+				"input_schema": {
+					"type": "object",
+					"properties": {}
+				}
+			},
+			{
+				"name": "CronList",
+				"description": "List scheduled jobs",
+				"input_schema": {
+					"type": "object"
+				}
+			},
+			{
+				"name": "Bash",
+				"description": "Run bash command",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"command": {"type": "string"}
+					},
+					"required": ["command"]
+				}
+			},
+			{
+				"name": "CustomToolWithReason",
+				"description": "Tool that declares reason",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"reason": {"type": "string"}
+					}
+				}
+			}
+		]
+	}`)
+
+	// 1. Parameterless tool with placeholder reason injected -> should be sanitized to "{}"
+	if got := CleanClaudeToolArguments(`{"reason":"Entering plan mode"}`, "EnterPlanMode", origRequest); got != "{}" {
+		t.Errorf("EnterPlanMode: expected {}, got %q", got)
+	}
+
+	// 2. Parameterless tool with no properties field -> should be sanitized to "{}"
+	if got := CleanClaudeToolArguments(`{"reason":"List jobs"}`, "CronList", origRequest); got != "{}" {
+		t.Errorf("CronList: expected {}, got %q", got)
+	}
+
+	// 3. Fallback when origRequest is nil/empty for known zero-arg tool
+	if got := CleanClaudeToolArguments(`{"reason":"Entering plan mode"}`, "EnterPlanMode", nil); got != "{}" {
+		t.Errorf("EnterPlanMode (fallback): expected {}, got %q", got)
+	}
+
+	// 4. Normal tool with arguments -> preserved untouched
+	if got := CleanClaudeToolArguments(`{"command":"ls -la"}`, "Bash", origRequest); got != `{"command":"ls -la"}` {
+		t.Errorf("Bash: expected untouched args, got %q", got)
+	}
+
+	// 5. Normal tool where unexpected placeholder reason was also present -> reason stripped
+	if got := CleanClaudeToolArguments(`{"command":"ls -la","reason":"why"}`, "Bash", origRequest); got != `{"command":"ls -la"}` {
+		t.Errorf("Bash with extra reason: expected stripped reason, got %q", got)
+	}
+
+	// 6. Tool that genuinely declared "reason" in its schema -> reason preserved
+	if got := CleanClaudeToolArguments(`{"reason":"valid user reason"}`, "CustomToolWithReason", origRequest); got != `{"reason":"valid user reason"}` {
+		t.Errorf("CustomToolWithReason: expected preserved reason, got %q", got)
+	}
+
+	// 7. Empty or invalid arguments
+	if got := CleanClaudeToolArguments(``, "EnterPlanMode", origRequest); got != "{}" {
+		t.Errorf("empty args: expected {}, got %q", got)
+	}
+	if got := CleanClaudeToolArguments(`{}`, "EnterPlanMode", origRequest); got != "{}" {
+		t.Errorf("{} args: expected {}, got %q", got)
+	}
+}
+

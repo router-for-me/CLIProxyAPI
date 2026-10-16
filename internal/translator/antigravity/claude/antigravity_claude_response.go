@@ -387,7 +387,8 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 				appendEvent("content_block_start", string(data))
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+					cleanArgs := util.CleanClaudeToolArguments(fcArgsResult.Raw, fcName, originalRequestRawJSON)
+					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", cleanArgs)
 					appendEvent("content_block_delta", string(data))
 				}
 				params.ResponseType = 3
@@ -659,7 +660,8 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				}
 
 				if args := functionCall.Get("args"); args.Exists() && args.Raw != "" && gjson.Valid(args.Raw) && args.IsObject() {
-					toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(args.Raw))
+					cleanArgs := util.CleanClaudeToolArguments(args.Raw, name, originalRequestRawJSON)
+					toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(cleanArgs))
 				}
 
 				blocks = append(blocks, toolBlock)
