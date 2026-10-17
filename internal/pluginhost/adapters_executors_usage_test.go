@@ -126,6 +126,57 @@ func TestExecutorAdapterExecutePublishesUsage(t *testing.T) {
 	}
 }
 
+func TestExecutorAdapterExecuteForwardsCacheInputMode(t *testing.T) {
+	plugin := newTestUsageCapturePlugin("plugin-provider")
+	registerTestUsagePlugin(t, "test-executor-adapter-execute-cache-input-mode", plugin)
+
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin"})
+	host := newHostWithRecords(executorRecord)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider",
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{
+				Payload: []byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":64021,"completion_tokens":144,"total_tokens":64165,"prompt_tokens_details":{"cached_tokens":63872},"cache_input_mode":"included_in_input"}}`),
+				Headers: http.Header{"Content-Type": []string{"application/json"}},
+			}, nil
+		},
+	}
+
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+
+	auth := &coreauth.Auth{
+		ID:         "auth-1",
+		Provider:   "plugin-provider",
+		FileName:   "auth-1.json",
+		Attributes: map[string]string{"type": "oauth"},
+	}
+
+	req := coreexecutor.Request{
+		Model:   "test-model",
+		Payload: []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+	}
+
+	if _, err := adapter.Execute(context.Background(), auth, req, opts); err != nil {
+		t.Fatalf("adapter.Execute returned unexpected error: %v", err)
+	}
+
+	rec := plugin.waitRecord(t, 200*time.Millisecond)
+	if rec.Detail.CacheInputMode != "included_in_input" {
+		t.Errorf("got cache input mode %q, want %q", rec.Detail.CacheInputMode, "included_in_input")
+	}
+	if rec.Detail.InputTokens != 64021 || rec.Detail.CacheReadTokens != 63872 {
+		t.Errorf("got usage %+v, want 64021 input with 63872 cache read", rec.Detail)
+	}
+}
+
 func TestExecutorAdapterExecuteThroughAuthManagerPublishesUsage(t *testing.T) {
 	plugin := newTestUsageCapturePlugin("plugin-provider-mgr")
 	registerTestUsagePlugin(t, "test-executor-adapter-auth-manager-usage", plugin)
