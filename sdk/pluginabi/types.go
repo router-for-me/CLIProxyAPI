@@ -127,6 +127,13 @@ type Error struct {
 	// HTTPStatus is the HTTP status code (e.g. 401, 403, 429) to surface to the client.
 	// When omitted or 0, CPA defaults to HTTP 500 (internal_server_error).
 	HTTPStatus int `json:"http_status,omitempty"`
+	// RetryAfterMS asks the host to cool the selected credential down for this many
+	// milliseconds before retrying it. Zero or negative values are ignored, so the
+	// host falls back to its default cooldown policy for HTTPStatus.
+	RetryAfterMS int64 `json:"retry_after_ms,omitempty"`
+	// CredentialScoped marks the failure as affecting the whole credential (for
+	// example an account-wide quota) rather than only the requested model.
+	CredentialScoped bool `json:"credential_scoped,omitempty"`
 }
 
 // Error implements the error interface for Error.

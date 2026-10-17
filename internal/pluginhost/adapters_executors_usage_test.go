@@ -2,7 +2,9 @@ package pluginhost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -192,6 +195,89 @@ func TestExecutorAdapterExecuteThroughAuthManagerPublishesUsage(t *testing.T) {
 	}
 	if rec.Detail.InputTokens != 10 || rec.Detail.OutputTokens != 20 || rec.Detail.TotalTokens != 30 {
 		t.Errorf("got usage %+v, want 10 input, 20 output, 30 total", rec.Detail)
+	}
+}
+
+func TestPluginRetryHintsDriveAuthManagerCooldown(t *testing.T) {
+	tests := []struct {
+		name             string
+		pluginErr        pluginabi.Error
+		wantMinCooldown  time.Duration
+		wantCredentialed bool
+	}{
+		{
+			name:             "credential scoped retry hint",
+			pluginErr:        pluginabi.Error{Code: "quota_exhausted", Message: "monthly quota", HTTPStatus: http.StatusTooManyRequests, RetryAfterMS: int64(2 * time.Hour / time.Millisecond), CredentialScoped: true},
+			wantMinCooldown:  2 * time.Hour,
+			wantCredentialed: true,
+		},
+		{
+			name:      "legacy envelope keeps default model cooldown",
+			pluginErr: pluginabi.Error{Code: "rate_limited", Message: "slow down", HTTPStatus: http.StatusTooManyRequests},
+		},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := fmt.Sprintf("plugin-retry-hint-%d", i)
+			raw, errMarshal := json.Marshal(pluginabi.Envelope{OK: false, Error: &tt.pluginErr})
+			if errMarshal != nil {
+				t.Fatalf("marshal envelope: %v", errMarshal)
+			}
+			executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: provider})
+			host := newHostWithRecords(executorRecord)
+			rpcExecutor := rpcProviderExecutor{&rpcPluginAdapter{id: provider, host: host, client: staticEnvelopePluginClient{raw: raw}}}
+			adapter := newExecutorAdapterForRecordForTest(host, executorRecord, rpcExecutor,
+				[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+				[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+			)
+			adapter.provider = provider
+
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(adapter)
+			model := "retry-hint-model"
+			siblingModel := "retry-hint-sibling"
+			auth := &coreauth.Auth{ID: provider + "-auth", Provider: provider, Status: coreauth.StatusActive}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: model}, {ID: siblingModel}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			// Seed the sibling model state so credential-scoped propagation has a target.
+			manager.MarkResult(context.Background(), coreauth.Result{AuthID: auth.ID, Provider: provider, Model: siblingModel, Success: true})
+
+			before := time.Now()
+			_, errExecute := manager.Execute(context.Background(), []string{provider}, coreexecutor.Request{
+				Model:   model,
+				Payload: []byte(`{"model":"retry-hint-model","messages":[{"role":"user","content":"hi"}]}`),
+			}, coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatOpenAI})
+			if errExecute == nil {
+				t.Fatal("Execute() error = nil, want plugin failure")
+			}
+
+			updated, ok := manager.GetByID(auth.ID)
+			if !ok {
+				t.Fatal("auth disappeared from manager")
+			}
+			state := updated.ModelStates[model]
+			if state == nil || !state.Unavailable {
+				t.Fatalf("model state = %+v, want cooled-down model", state)
+			}
+			if tt.wantMinCooldown > 0 && state.NextRetryAfter.Before(before.Add(tt.wantMinCooldown)) {
+				t.Fatalf("model NextRetryAfter = %v, want at least %v after %v", state.NextRetryAfter, tt.wantMinCooldown, before)
+			}
+			if tt.wantMinCooldown == 0 && !state.NextRetryAfter.Before(before.Add(time.Hour)) {
+				t.Fatalf("model NextRetryAfter = %v, want default short quota backoff", state.NextRetryAfter)
+			}
+			credentialQuota := updated.Quota.Exceeded && updated.Quota.Reason == "credential_quota"
+			if credentialQuota != tt.wantCredentialed {
+				t.Fatalf("auth quota = %+v, want credential quota %t", updated.Quota, tt.wantCredentialed)
+			}
+			sibling := updated.ModelStates[siblingModel]
+			siblingCooled := sibling != nil && sibling.Unavailable
+			if siblingCooled != tt.wantCredentialed {
+				t.Fatalf("sibling model state = %+v, want cooled %t", sibling, tt.wantCredentialed)
+			}
+		})
 	}
 }
 
