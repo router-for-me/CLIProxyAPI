@@ -1092,6 +1092,72 @@ func TestHandleEventAtomicReplaceUnchangedSkips(t *testing.T) {
 	}
 }
 
+// A Linux exchange rename reports the replaced target as renamed. That replace must
+// not debounce a real removal of the same file right after it.
+func TestHandleEventAtomicReplaceDoesNotDebounceLaterRemove(t *testing.T) {
+	authDir := t.TempDir()
+	authFile := filepath.Join(authDir, "replaced.json")
+	content := []byte(`{"type":"demo"}`)
+	if err := os.WriteFile(authFile, content, 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+	sum := sha256.Sum256(content)
+
+	w := &Watcher{
+		authDir:        authDir,
+		config:         &config.Config{AuthDir: authDir},
+		lastAuthHashes: make(map[string]string),
+	}
+	key := w.normalizeAuthPath(authFile)
+	w.lastAuthHashes[key] = hexString(sum[:])
+
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Rename})
+	if _, ok := w.lastAuthHashes[key]; !ok {
+		t.Fatal("expected the replaced file to stay known")
+	}
+
+	if err := os.Remove(authFile); err != nil {
+		t.Fatalf("failed to remove auth file: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
+	if _, ok := w.lastAuthHashes[key]; ok {
+		t.Fatal("expected the removal after a replace to be processed, not debounced")
+	}
+}
+
+// A Rename for a file that is already in place (an exchange save on Linux) is
+// handled without the settle delay; a missing file still waits for a replace.
+func TestHandleEventRenameWaitsOnlyForMissingFile(t *testing.T) {
+	var waits atomic.Int32
+	original := waitForReplace
+	waitForReplace = func() { waits.Add(1) }
+	t.Cleanup(func() { waitForReplace = original })
+
+	authDir := t.TempDir()
+	present := filepath.Join(authDir, "present.json")
+	content := []byte(`{"type":"demo"}`)
+	if err := os.WriteFile(present, content, 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+	sum := sha256.Sum256(content)
+	w := &Watcher{
+		authDir:        authDir,
+		config:         &config.Config{AuthDir: authDir},
+		lastAuthHashes: make(map[string]string),
+	}
+	w.lastAuthHashes[w.normalizeAuthPath(present)] = hexString(sum[:])
+
+	w.handleEvent(fsnotify.Event{Name: present, Op: fsnotify.Rename})
+	if n := waits.Load(); n != 0 {
+		t.Fatalf("Rename of a file in place waited %d times, want 0", n)
+	}
+
+	w.handleEvent(fsnotify.Event{Name: filepath.Join(authDir, "missing.json"), Op: fsnotify.Rename})
+	if n := waits.Load(); n != 1 {
+		t.Fatalf("Rename of a missing file waited %d times, want 1", n)
+	}
+}
+
 func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
