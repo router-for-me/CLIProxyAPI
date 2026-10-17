@@ -151,3 +151,50 @@ func TestFetchAntigravityLatestVersionReturnsHubManifestError(t *testing.T) {
 		t.Fatal("fetchAntigravityLatestVersion() error = nil, want error")
 	}
 }
+
+func TestAntigravityLatestVersionRetainsCachedVersionAfterExpiry(t *testing.T) {
+	restore := overrideAntigravityVersionCacheForTest(t, "2.99.0", time.Now().Add(-time.Hour))
+	defer restore()
+
+	if got := AntigravityLatestVersion(); got != "2.99.0" {
+		t.Fatalf("AntigravityLatestVersion() = %q, want %q", got, "2.99.0")
+	}
+}
+
+func TestRefreshAntigravityVersionKeepsCachedVersionAfterExpiryOnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporary outage", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	restoreURL := overrideAntigravityVersionURLsForTest(t, server.URL+"/hub/latest-arm64-mac.yml")
+	defer restoreURL()
+
+	restoreCache := overrideAntigravityVersionCacheForTest(t, "2.99.0", time.Now().Add(-time.Hour))
+	defer restoreCache()
+
+	refreshAntigravityVersion(context.Background())
+
+	if got := AntigravityLatestVersion(); got != "2.99.0" {
+		t.Fatalf("AntigravityLatestVersion() after failed refresh = %q, want %q", got, "2.99.0")
+	}
+}
+
+func TestRefreshAntigravityVersionUsesFallbackWhenUninitializedOnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporary outage", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	restoreURL := overrideAntigravityVersionURLsForTest(t, server.URL+"/hub/latest-arm64-mac.yml")
+	defer restoreURL()
+
+	restoreCache := overrideAntigravityVersionCacheForTest(t, "", time.Time{})
+	defer restoreCache()
+
+	refreshAntigravityVersion(context.Background())
+
+	if got := AntigravityLatestVersion(); got != antigravityFallbackVersion {
+		t.Fatalf("AntigravityLatestVersion() after initial failed refresh = %q, want %q", got, antigravityFallbackVersion)
+	}
+}
