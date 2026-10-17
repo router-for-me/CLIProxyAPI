@@ -3533,3 +3533,65 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 		})
 	}
 }
+
+func TestAntigravityHybridModelConvertsClaudeBudgetToLevel(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	uid := fmt.Sprintf("thinking-antigravity-argon-%d", time.Now().UnixNano())
+	reg.RegisterClient(uid, "antigravity", registry.GetAntigravityModels())
+	defer reg.UnregisterClient(uid)
+
+	cases := []thinkingTestCase{
+		{
+			name:         "ArgonHigh_Budget1024_ToLow",
+			from:         "claude",
+			to:           "antigravity",
+			model:        "gemini-4-argon-high",
+			inputJSON:    `{"model":"gemini-4-argon-high","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			expectField:  "request.generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:  "low",
+			expectAbsent: []string{"request.generationConfig.thinkingConfig.thinkingBudget"},
+		},
+		{
+			name:         "ArgonHigh_Budget8192_ToMedium",
+			from:         "claude",
+			to:           "antigravity",
+			model:        "gemini-4-argon-high",
+			inputJSON:    `{"model":"gemini-4-argon-high","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":8192}}`,
+			expectField:  "request.generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:  "medium",
+			expectAbsent: []string{"request.generationConfig.thinkingConfig.thinkingBudget"},
+		},
+		{
+			name:         "ArgonLow_Budget24576_ToHigh",
+			from:         "claude",
+			to:           "antigravity",
+			model:        "gemini-4-argon-low",
+			inputJSON:    `{"model":"gemini-4-argon-low","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":24576}}`,
+			expectField:  "request.generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:  "high",
+			expectAbsent: []string{"request.generationConfig.thinkingConfig.thinkingBudget"},
+		},
+		{
+			name:         "ArgonMedium_Budget512_ClampsToLow",
+			from:         "claude",
+			to:           "antigravity",
+			model:        "gemini-4-argon-medium",
+			inputJSON:    `{"model":"gemini-4-argon-medium","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":512}}`,
+			expectField:  "request.generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:  "low",
+			expectAbsent: []string{"request.generationConfig.thinkingConfig.thinkingBudget"},
+		},
+		{
+			name:         "NonArgonHybrid_Flash38High_PreservesNumericBudget",
+			from:         "claude",
+			to:           "antigravity",
+			model:        "gemini-3.8-flash-high",
+			inputJSON:    `{"model":"gemini-3.8-flash-high","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":4096}}`,
+			expectField:  "request.generationConfig.thinkingConfig.thinkingBudget",
+			expectValue:  "4096",
+			expectAbsent: []string{"request.generationConfig.thinkingConfig.thinkingLevel"},
+		},
+	}
+
+	runThinkingTests(t, cases)
+}

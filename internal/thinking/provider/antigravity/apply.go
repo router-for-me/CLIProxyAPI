@@ -56,12 +56,21 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	if config.Mode == thinking.ModeAuto {
 		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 	}
+	support := modelInfo.Thinking
 	if config.Mode == thinking.ModeBudget {
+		isArgon := strings.Contains(strings.ToLower(modelInfo.ID), "argon")
+		if isArgon && len(support.Levels) > 0 {
+			if level, ok := thinking.ConvertBudgetToSupportedLevel(config.Budget, modelInfo, "antigravity"); ok && level != "" {
+				config.Mode = thinking.ModeLevel
+				config.Level = level
+				config.Budget = 0
+				return a.applyLevelFormat(body, config)
+			}
+		}
 		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 	}
 
 	// For non-auto modes, choose format based on model capabilities
-	support := modelInfo.Thinking
 	if len(support.Levels) > 0 {
 		return a.applyLevelFormat(body, config)
 	}

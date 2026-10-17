@@ -51,7 +51,13 @@ func GetGeminiModels() []*ModelInfo {
 
 // GetGeminiVertexModels returns Gemini model definitions for Vertex AI.
 func GetGeminiVertexModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Vertex)
+	models := cloneModelInfos(getModels().Vertex)
+	for _, m := range models {
+		if m != nil && m.ID == "gemini-4-argon" && m.MaxCompletionTokens == 1048576 {
+			m.MaxCompletionTokens = 65536
+		}
+	}
+	return models
 }
 
 // GetAIStudioModels returns model definitions for AI Studio.
@@ -86,7 +92,7 @@ func GetKimiModels() []*ModelInfo {
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Antigravity)
+	return WithAntigravityBuiltins(cloneModelInfos(getModels().Antigravity))
 }
 
 var staticDevinModels = []*ModelInfo{
@@ -261,6 +267,43 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // that should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinSpeechModelInfo(), xaiBuiltinSpeechVoiceModelInfo())
+}
+
+// WithAntigravityBuiltins normalizes Gemini 4 Argon tier definitions so that
+// remote models.json refreshes do not drop medium/low tiers or revert output token limits.
+func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models,
+		antigravityBuiltinArgonModelInfo("gemini-4-argon-high", "Gemini 4 Argon (High)"),
+		antigravityBuiltinArgonModelInfo("gemini-4-argon-medium", "Gemini 4 Argon (Medium)"),
+		antigravityBuiltinArgonModelInfo("gemini-4-argon-low", "Gemini 4 Argon (Low)"),
+	)
+}
+
+func antigravityBuiltinArgonModelInfo(id, displayName string) *ModelInfo {
+	webSearch := true
+	return &ModelInfo{
+		ID:                  id,
+		Object:              "model",
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		SupportsWebSearch:   true,
+		DisplayName:         displayName,
+		Name:                id,
+		Description:         displayName,
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			Min:            32,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		SupportedInputModalities:  []string{"text", "image", "audio", "video"},
+		SupportedOutputModalities: []string{"text"},
+		NativeCapabilities: &NativeCapabilities{
+			WebSearch: &webSearch,
+		},
+	}
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -579,11 +622,11 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	allModels := [][]*ModelInfo{
 		data.Claude,
 		data.Gemini,
-		data.Vertex,
+		GetGeminiVertexModels(),
 		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,
-		data.Antigravity,
+		GetAntigravityModels(),
 		data.XAI,
 		GetDevinModels(),
 		GetMetaModels(),

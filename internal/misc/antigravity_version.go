@@ -20,7 +20,7 @@ const (
 	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
 	// newer models for clients below 2.23.0, so this floor must stay at or above
 	// that version.
-	antigravityFallbackVersion = "2.23.0"
+	antigravityFallbackVersion = "2.23.1"
 	antigravityHubPlatform     = "darwin/arm64"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
@@ -88,26 +88,26 @@ func refreshAntigravityVersion(ctx context.Context) {
 		return
 	}
 
-	if cachedAntigravityVersion == "" || now.After(antigravityVersionExpiry) {
+	if cachedAntigravityVersion == "" {
 		cachedAntigravityVersion = antigravityFallbackVersion
 		antigravityVersionExpiry = now.Add(antigravityVersionCacheTTL)
 		log.WithError(errFetch).Warn("failed to refresh antigravity version, using fallback version")
 		return
 	}
 
+	antigravityVersionExpiry = now.Add(antigravityVersionCacheTTL)
 	log.WithError(errFetch).Debug("failed to refresh antigravity version, keeping cached value")
 }
 
 // AntigravityLatestVersion returns the cached antigravity version refreshed by StartAntigravityVersionUpdater.
-// It falls back to antigravityFallbackVersion if the cache is empty or stale.
+// It falls back to antigravityFallbackVersion if the cache is empty.
 func AntigravityLatestVersion() string {
 	antigravityVersionMu.RLock()
-	if cachedAntigravityVersion != "" && time.Now().Before(antigravityVersionExpiry) {
-		v := cachedAntigravityVersion
-		antigravityVersionMu.RUnlock()
+	v := cachedAntigravityVersion
+	antigravityVersionMu.RUnlock()
+	if v != "" {
 		return v
 	}
-	antigravityVersionMu.RUnlock()
 
 	return antigravityFallbackVersion
 }

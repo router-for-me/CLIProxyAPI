@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -531,5 +533,116 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	}
 	if _, ok := mode["deprecated"]; ok {
 		t.Fatalf("deprecated should be removed from nested schema")
+	}
+}
+
+func TestAntigravityBuildRequest_Gemini4ArgonTierRouting(t *testing.T) {
+	const contents = `"contents":[{"role":"user","parts":[{"text":"hi"}]}]`
+	withThinking := func(cfg string) []byte {
+		return []byte(`{"request":{"generationConfig":{"thinkingConfig":` + cfg + `},` + contents + `}}`)
+	}
+	tests := []struct {
+		name        string
+		model       string
+		payload     []byte
+		wantModel   string
+		wantInclude any // nil: absent
+		wantNoThink bool
+	}{
+		{name: "bare alias defaults to high", model: "gemini-4-argon", payload: []byte(`{"request":{` + contents + `}}`), wantModel: "gemini-4-argon-high"},
+		{name: "high suffix", model: "gemini-4-argon-high", payload: []byte(`{"request":{` + contents + `}}`), wantModel: "gemini-4-argon-high"},
+		{name: "medium suffix", model: "gemini-4-argon-medium", payload: []byte(`{"request":{` + contents + `}}`), wantModel: "gemini-4-argon-medium"},
+		{name: "low suffix", model: "gemini-4-argon-low", payload: []byte(`{"request":{` + contents + `}}`), wantModel: "gemini-4-argon-low"},
+		{name: "level overrides suffix upward", model: "gemini-4-argon-low", payload: withThinking(`{"thinkingLevel":"high"}`), wantModel: "gemini-4-argon-high"},
+		{name: "level overrides suffix downward and keeps includeThoughts", model: "gemini-4-argon-high", payload: withThinking(`{"thinkingLevel":"low","includeThoughts":true}`), wantModel: "gemini-4-argon-low", wantInclude: true},
+		{name: "explicit includeThoughts false is kept", model: "gemini-4-argon-high", payload: withThinking(`{"thinkingLevel":"medium","includeThoughts":false}`), wantModel: "gemini-4-argon-medium", wantInclude: false},
+		{name: "numeric budget selects tier", model: "gemini-4-argon", payload: withThinking(`{"thinkingBudget":8192}`), wantModel: "gemini-4-argon-medium"},
+		{name: "level none clamps to the low tier", model: "gemini-4-argon-high", payload: withThinking(`{"thinkingLevel":"none"}`), wantModel: "gemini-4-argon-low"},
+		{name: "budget zero keeps the suffix tier", model: "gemini-4-argon-medium", payload: withThinking(`{"thinkingBudget":0}`), wantModel: "gemini-4-argon-medium"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := buildRequestBodyFromRawPayload(t, tc.model, tc.payload)
+			assertArgonTierRequest(t, body, tc.wantModel, tc.wantInclude)
+		})
+	}
+}
+
+func assertArgonTierRequest(t *testing.T, body map[string]any, wantModel string, wantInclude any) {
+	t.Helper()
+	if got := body["model"]; got != wantModel {
+		t.Fatalf("model = %v, want %s", got, wantModel)
+	}
+	genCfg, _ := body["request"].(map[string]any)["generationConfig"].(map[string]any)
+	thinkCfg, hasThink := genCfg["thinkingConfig"].(map[string]any)
+	if !hasThink {
+		t.Fatalf("thinkingConfig missing")
+	}
+	if wantModel == "gemini-4-argon-high" {
+		if got := thinkCfg["thinkingLevel"]; got != "high" {
+			t.Fatalf("thinkingLevel = %v, want high", got)
+		}
+		if _, ok := thinkCfg["thinkingBudget"]; ok {
+			t.Fatalf("thinkingBudget must not be sent to gemini-4-argon-high: %v", thinkCfg)
+		}
+	} else {
+		if got := thinkCfg["thinkingBudget"]; got != float64(-1) {
+			t.Fatalf("thinkingBudget = %v, want -1", got)
+		}
+		if _, ok := thinkCfg["thinkingLevel"]; ok {
+			t.Fatalf("thinkingLevel must not be sent to %s: %v", wantModel, thinkCfg)
+		}
+	}
+	if got, ok := thinkCfg["includeThoughts"]; wantInclude == nil && ok {
+		t.Fatalf("includeThoughts = %v, want absent", got)
+	} else if wantInclude != nil && got != wantInclude {
+		t.Fatalf("includeThoughts = %v, want %v", got, wantInclude)
+	}
+}
+
+// TestAntigravityBuildRequest_Gemini4ArgonThinkingPipeline runs the real
+// normalization step (thinking validation + Antigravity applier) ahead of
+// buildRequest, so the tier resolver is exercised with the payload shape it
+// receives in the executor rather than with hand-written thinkingConfig.
+func TestAntigravityBuildRequest_Gemini4ArgonThinkingPipeline(t *testing.T) {
+	const contents = `"contents":[{"role":"user","parts":[{"text":"hi"}]}]`
+	tests := []struct {
+		name      string
+		model     string
+		thinking  string
+		wantModel string
+	}{
+		{name: "explicit none clamps to low tier", model: "gemini-4-argon-high", thinking: `{"thinkingLevel":"none"}`, wantModel: "gemini-4-argon-low"},
+		{name: "budget zero clamps to low tier", model: "gemini-4-argon-medium", thinking: `{"thinkingBudget":0}`, wantModel: "gemini-4-argon-low"},
+		{name: "budget selects medium tier", model: "gemini-4-argon-high", thinking: `{"thinkingBudget":8192}`, wantModel: "gemini-4-argon-medium"},
+		{name: "high level keeps high tier", model: "gemini-4-argon-low", thinking: `{"thinkingLevel":"high"}`, wantModel: "gemini-4-argon-high"},
+		{name: "dynamic budget keeps suffix tier", model: "gemini-4-argon-medium", thinking: `{"thinkingBudget":-1}`, wantModel: "gemini-4-argon-medium"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			modelInfo := registry.LookupModelInfo(tc.model, "antigravity")
+			if modelInfo == nil {
+				t.Fatalf("model %s missing from antigravity registry", tc.model)
+			}
+			payload := []byte(`{"request":{"generationConfig":{"thinkingConfig":` + tc.thinking + `},` + contents + `}}`)
+			normalized, err := thinking.ApplyThinkingWithModelInfo(payload, payload, tc.model, "antigravity", "antigravity", "antigravity", modelInfo)
+			if err != nil {
+				t.Fatalf("ApplyThinkingWithModelInfo error: %v", err)
+			}
+			body := buildRequestBodyFromRawPayload(t, tc.model, normalized)
+			assertArgonTierRequest(t, body, tc.wantModel, nil)
+		})
+	}
+}
+
+func TestAntigravityBuildRequest_SanitizesToolSchemaForArgonAndFlash38(t *testing.T) {
+	for _, m := range []string{"gemini-4-argon-high", "gemini-3.8-flash-high"} {
+		body := buildRequestBodyFromPayload(t, m)
+		decl := extractFirstFunctionDeclaration(t, body)
+		params, ok := decl["parameters"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: parameters missing or invalid type", m)
+		}
+		assertSchemaSanitizedAndPropertyPreserved(t, params)
 	}
 }
