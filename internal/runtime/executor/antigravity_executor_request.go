@@ -472,20 +472,10 @@ func resolveLoadCodeAssistUserAgent(auth *cliproxyauth.Auth) string {
 }
 
 func antigravityConfiguredUserAgent(auth *cliproxyauth.Auth) string {
-	raw := ""
-	if auth != nil {
-		if auth.Attributes != nil {
-			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
-				raw = ua
-			}
-		}
-		if raw == "" && auth.Metadata != nil {
-			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
-				raw = strings.TrimSpace(ua)
-			}
-		}
+	if auth == nil {
+		return ""
 	}
-	return raw
+	return misc.AntigravityConfiguredUserAgent(auth.Attributes, auth.Metadata)
 }
 
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
