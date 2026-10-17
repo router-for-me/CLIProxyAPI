@@ -40,6 +40,8 @@ func (w *Watcher) start(ctx context.Context) error {
 	log.Debugf("watching auth directory: %s", w.authDir)
 
 	go w.processEvents(ctx)
+	w.seedConfigHash()
+	go w.pollConfig(ctx, configPollInterval)
 
 	w.reloadClients(true, nil, false)
 	return nil
@@ -66,7 +68,7 @@ func (w *Watcher) processEvents(ctx context.Context) {
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Filter only relevant events: config file or auth-dir JSON files.
-	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
+	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename | fsnotify.Remove
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
@@ -84,6 +86,14 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Handle config file changes
 	if isConfigEvent {
 		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
+		if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
+			// Replacing the file (renaming another file over it, as atomic writers
+			// and many editors do) drops the watch on the old one: watch the file
+			// now at the path. If none is there yet, the periodic check covers it.
+			if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
+				log.Debugf("config file not watched again yet: %v", errAddConfig)
+			}
+		}
 		w.scheduleConfigReload()
 		return
 	}
