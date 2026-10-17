@@ -1146,21 +1146,22 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	if primaryID == "" {
-		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
+		fallbackAuths, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 		if errAvailable != nil {
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
+		fallbackAuths = s.fallbackAvailableAuths(ctx, provider, fallbackAuths)
 		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
-	// every priority tier, while the fallback selector keeps seeing only the highest tier.
+	// every priority tier, while fallback selection retains its transport and priority rules.
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := s.fallbackAvailableAuths(ctx, provider, available)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1335,7 +1336,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 	}
 
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := s.fallbackAvailableAuths(ctx, provider, available)
 	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if errPick != nil {
 		return nil, true, errPick
@@ -1618,6 +1619,13 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 		return authID, "bound"
 	}
 	return "", "unbound"
+}
+
+func (s *SessionAffinitySelector) fallbackAvailableAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
+	if _, capacity := s.fallback.(*CapacitySelector); capacity {
+		return capacityEligibleAuths(ctx, provider, available)
+	}
+	return highestPriorityAuths(available)
 }
 
 // OnResult handles session affinity binding or release based on execution outcome.
