@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -230,6 +231,99 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChanged_WriteDuringReloadIsNotSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(port int) {
+		data, err := yaml.Marshal(&config.Config{
+			Port:               port,
+			AuthDir:            authDir,
+			CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		})
+		if err != nil {
+			t.Fatalf("failed to marshal config: %v", err)
+		}
+		if err = os.WriteFile(configPath, data, 0o644); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+	}
+
+	writeConfig(8080)
+
+	// A management save that lands while the first reload is applying its config
+	// must still be picked up by the next trigger instead of matching the hash.
+	var appliedPorts []int
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+	}
+	w.reloadCallback = func(cfg *config.Config) {
+		appliedPorts = append(appliedPorts, cfg.Port)
+		if len(appliedPorts) == 1 {
+			writeConfig(9090)
+		}
+	}
+
+	w.reloadConfigIfChanged()
+	w.reloadConfigIfChanged()
+	if len(appliedPorts) != 2 || appliedPorts[1] != 9090 {
+		t.Fatalf("expected the write made during reload to be applied next, applied ports %v", appliedPorts)
+	}
+
+	w.reloadConfigIfChanged()
+	if len(appliedPorts) != 2 {
+		t.Fatalf("expected unchanged config to be skipped after catching up, applied ports %v", appliedPorts)
+	}
+}
+
+func TestReloadConfigIfChanged_LoadsTheBytesItHashed(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte("port: 8317\nremote-management:\n  secret-key: \"$2a$10$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz01234\"\n")
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// A management save truncates the file right after the watcher reads it, as
+	// os.Create/os.WriteFile do. Loading must use the bytes that were read, or the
+	// reload applies an empty config and drops the management secret.
+	original := readConfigFile
+	t.Cleanup(func() { readConfigFile = original })
+	readConfigFile = func(path string) ([]byte, error) {
+		data, err := original(path)
+		if err == nil {
+			if errTruncate := os.WriteFile(path, nil, 0o600); errTruncate != nil {
+				t.Fatalf("failed to truncate config: %v", errTruncate)
+			}
+		}
+		return data, err
+	}
+
+	var applied *config.Config
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		reloadCallback: func(cfg *config.Config) { applied = cfg },
+	}
+	w.reloadConfigIfChanged()
+
+	if applied == nil {
+		t.Fatal("expected the reload to apply the config that was read")
+	}
+	if applied.Port != 8317 || applied.RemoteManagement.SecretKey == "" {
+		t.Fatalf("applied config port=%d secret empty=%v, want the read config with its secret", applied.Port, applied.RemoteManagement.SecretKey == "")
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -263,6 +357,174 @@ func TestStartAndStopSuccess(t *testing.T) {
 	if got := atomic.LoadInt32(&reloads); got != 1 {
 		t.Fatalf("expected one reload callback, got %d", got)
 	}
+}
+
+func TestConfigWatchSurvivesRenameReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\nauth-dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to create config file: %v", err)
+	}
+
+	reloadedPorts := make(chan int, 64)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) {
+		if cfg != nil {
+			reloadedPorts <- cfg.Port
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("expected Start to succeed: %v", err)
+	}
+	t.Cleanup(func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
+	})
+
+	// Atomic saves replace the file by rename, which drops a watch on the old
+	// inode. Every replace, not just the first, must still reload.
+	for _, port := range []int{8001, 8002, 8003} {
+		tmp := filepath.Join(tmpDir, ".config.yaml.tmp")
+		if err = os.WriteFile(tmp, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", port, authDir)), 0o644); err != nil {
+			t.Fatalf("failed to write temp config: %v", err)
+		}
+		if err = os.Rename(tmp, configPath); err != nil {
+			t.Fatalf("failed to replace config: %v", err)
+		}
+		waitForReloadedPort(t, reloadedPorts, port)
+	}
+}
+
+// waitForReloadedPort consumes reload callbacks until one carries port. The
+// timeout only guards against a hang; ordering comes from the callbacks.
+func waitForReloadedPort(t *testing.T, reloadedPorts <-chan int, port int) {
+	t.Helper()
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	for {
+		select {
+		case got := <-reloadedPorts:
+			if got == port {
+				return
+			}
+		case <-hangGuard.C:
+			t.Fatalf("no reload with port %d after replacing the config", port)
+		}
+	}
+}
+
+func TestHandleEventConfigRemoveRearmsWatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := fsWatcher.Close(); errClose != nil {
+			t.Errorf("close fsnotify watcher: %v", errClose)
+		}
+	})
+
+	reloadedPorts := make(chan int, 8)
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) { reloadedPorts <- cfg.Port },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	// inotify drops the watch when a rename replaces the file and reports Remove
+	// for it; the new file at the same path must be watched again and reloaded.
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	watched := false
+	for _, path := range fsWatcher.WatchList() {
+		if path == configPath {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Fatalf("expected %s to be watched again, watch list %v", configPath, fsWatcher.WatchList())
+	}
+	waitForReloadedPort(t, reloadedPorts, 8000)
+}
+
+// A second replace can remove the config between the existence check and the
+// add. The add fails with ENOENT and nothing else would retry it, so the re-arm
+// must retry until the watch is in place.
+func TestHandleEventConfigRemoveRetriesWatchLostToSecondReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := fsWatcher.Close(); errClose != nil {
+			t.Errorf("close fsnotify watcher: %v", errClose)
+		}
+	})
+	original := addConfigWatch
+	t.Cleanup(func() { addConfigWatch = original })
+	adds := 0
+	addConfigWatch = func(watcher *fsnotify.Watcher, path string) error {
+		adds++
+		if adds == 1 {
+			// The second save's rename lands here: the stat saw a file, the add does not.
+			return &os.PathError{Op: "inotify_add_watch", Path: path, Err: syscall.ENOENT}
+		}
+		return original(watcher, path)
+	}
+
+	reloadedPorts := make(chan int, 8)
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) { reloadedPorts <- cfg.Port },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	watched := false
+	for _, path := range fsWatcher.WatchList() {
+		if path == configPath {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Fatalf("expected %s to be watched after the retried add (adds=%d), watch list %v", configPath, adds, fsWatcher.WatchList())
+	}
+	waitForReloadedPort(t, reloadedPorts, 8000)
 }
 
 func TestStartFailsWhenConfigMissing(t *testing.T) {
@@ -1827,4 +2089,189 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
+}
+
+// The snapshot time must not be later than the file read: the core manager drops a
+// snapshot observed at or before the auth's latest save, and a timestamp taken after
+// the read would let a stale read look newer than a save that landed in between.
+func TestAddOrUpdateClientStampsSnapshotBeforeReading(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex.json")
+	if err := os.WriteFile(path, []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	var readAt time.Time
+	original := readAuthFile
+	t.Cleanup(func() { readAuthFile = original })
+	readAuthFile = func(name string) ([]byte, error) {
+		data, err := original(name)
+		readAt = time.Now()
+		return data, err
+	}
+
+	w := &Watcher{authDir: authDir, lastAuthHashes: make(map[string]string)}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.addOrUpdateClient(path)
+
+	if len(w.currentAuths) == 0 {
+		t.Fatal("expected the auth file to be synthesized")
+	}
+	for id, auth := range w.currentAuths {
+		if auth.UpdatedAt.After(readAt) {
+			t.Fatalf("auth %s snapshot stamped %v after the file read finished", id, auth.UpdatedAt.Sub(readAt))
+		}
+	}
+}
+
+// The core manager drops a snapshot observed before the auth's latest save. When
+// that read already held a later external edit, the watcher has cached the edit's
+// hash and auths, so the edit's own event is skipped as unchanged. RereadAuthFile
+// must dispatch the file's current state again, stamped after the call.
+func TestRereadAuthFileDispatchesContentCachedByDroppedSnapshot(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex.json")
+	write := func(prefix string) {
+		t.Helper()
+		data := fmt.Sprintf(`{"type":"codex","email":"user@example.com","prefix":%q}`, prefix)
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatalf("write auth file: %v", err)
+		}
+	}
+	queue := make(chan AuthUpdate, 16)
+	w := &Watcher{authDir: authDir, lastAuthHashes: make(map[string]string)}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.SetAuthUpdateQueue(queue)
+	t.Cleanup(w.stopDispatch)
+	next := func(what string) AuthUpdate {
+		t.Helper()
+		hangGuard := time.NewTimer(5 * time.Second)
+		defer hangGuard.Stop()
+		select {
+		case update := <-queue:
+			return update
+		case <-hangGuard.C:
+			t.Fatalf("no auth update dispatched for %s", what)
+		}
+		return AuthUpdate{}
+	}
+
+	write("pfx-1")
+	w.addOrUpdateClient(path)
+	next("the initial file")
+
+	// The read the manager drops: it already holds the external edit.
+	write("pfx-edited")
+	w.addOrUpdateClient(path)
+	if update := next("the dropped read"); update.Auth == nil || update.Auth.Prefix != "pfx-edited" {
+		t.Fatalf("dropped read update = %+v, want pfx-edited", update)
+	}
+	// The edit's own event finds the cached hash and dispatches nothing.
+	w.addOrUpdateClient(path)
+
+	beforeReread := time.Now()
+	w.RereadAuthFile(path)
+	update := next("the re-read")
+	if update.Auth == nil || update.Auth.Prefix != "pfx-edited" {
+		t.Fatalf("re-read update = %+v, want the file's pfx-edited state", update)
+	}
+	if update.Auth.UpdatedAt.Before(beforeReread) {
+		t.Fatalf("re-read stamped %v, before the re-read started at %v", update.Auth.UpdatedAt, beforeReread)
+	}
+	select {
+	case extra := <-queue:
+		t.Fatalf("unexpected extra update %+v (the unchanged event should have been skipped)", extra)
+	default:
+	}
+}
+
+// RereadAuthFile only reads auth files the watcher manages.
+func TestRereadAuthFileIgnoresPathsOutsideAuthDir(t *testing.T) {
+	authDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "codex.json")
+	if err := os.WriteFile(outside, []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	w := &Watcher{authDir: authDir, lastAuthHashes: make(map[string]string)}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.RereadAuthFile(outside)
+	if len(w.currentAuths) != 0 || len(w.lastAuthHashes) != 0 {
+		t.Fatalf("read a file outside the auth dir: auths=%v hashes=%v", w.currentAuths, w.lastAuthHashes)
+	}
+}
+
+type recordingConfigPersister struct {
+	path     string
+	mirrored chan []byte
+}
+
+func (p *recordingConfigPersister) PersistConfig(context.Context) error {
+	data, err := os.ReadFile(p.path)
+	if err != nil {
+		return err
+	}
+	p.mirrored <- data
+	return nil
+}
+
+func (p *recordingConfigPersister) PersistAuthFiles(context.Context, string, ...string) error {
+	return nil
+}
+
+// A reload that loaded a plaintext management secret hashes it into the file and
+// schedules a reload of that write, which mirrors it; remote stores (and git
+// history) never receive the plaintext, and the mirror does not depend on a file
+// event for the write-back.
+func TestReloadConfigMirrorsManagementSecretOnlyOnceHashed(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	data, errMarshal := yaml.Marshal(&config.Config{
+		AuthDir:            authDir,
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		RemoteManagement:   config.RemoteManagement{SecretKey: "plain-secret"},
+	})
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	runConfigPersist = func(persist func()) { persist() }
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	// Run the scheduled reload here, unless it already fired. Once it is stopped,
+	// any mirror so far came from the plaintext reload.
+	w.configReloadMu.Lock()
+	scheduled := w.configReloadTimer
+	stopped := scheduled != nil && scheduled.Stop()
+	w.configReloadTimer = nil
+	w.configReloadMu.Unlock()
+	if stopped {
+		select {
+		case mirrored := <-persister.mirrored:
+			t.Fatalf("mirrored the config loaded with a plaintext secret: %q", mirrored)
+		default:
+		}
+		w.reloadConfigIfChanged()
+	}
+	// The reload of the write-back mirrors the hashed config; without a scheduled
+	// reload nothing mirrors. The timer only guards against a hang.
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case mirrored := <-persister.mirrored:
+		if strings.Contains(string(mirrored), "plain-secret") || config.HasPlaintextSecretKey(mirrored) {
+			t.Fatalf("mirrored a plaintext secret: %q", mirrored)
+		}
+	case <-hangGuard.C:
+		t.Fatal("the hashed write-back was never reloaded and mirrored")
+	}
 }

@@ -114,6 +114,7 @@ type WatcherWrapper struct {
 	dispatchPersistedAuthWithRev func(update *watcher.AuthUpdate) (bool, uint64)
 	setPluginAuthParser          func(parser PluginAuthParser)
 	reloadConfigIfChanged        func()
+	rereadAuthFile               func(path string)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -147,6 +148,15 @@ func (w *WatcherWrapper) ReloadConfigIfChanged() bool {
 	}
 	w.reloadConfigIfChanged()
 	return true
+}
+
+// RereadAuthFile asks the underlying watcher to read an auth file again, even if
+// its content looks unchanged.
+func (w *WatcherWrapper) RereadAuthFile(path string) {
+	if w == nil || w.rereadAuthFile == nil {
+		return
+	}
+	w.rereadAuthFile(path)
 }
 
 // SetPluginAuthParser updates the plugin auth parser used by the watcher.

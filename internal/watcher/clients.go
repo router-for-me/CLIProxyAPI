@@ -171,7 +171,10 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
 	w.observeAuthFile(path)
-	data, errRead := os.ReadFile(path)
+	// Stamp the snapshot before reading: the core manager drops snapshots observed
+	// at or before an auth's latest save, so the time must not postdate the read.
+	observedAt := time.Now()
+	data, errRead := readAuthFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
 		return
@@ -251,7 +254,7 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	sctx := &synthesizer.SynthesisContext{
 		Config:           cfg,
 		AuthDir:          authDir,
-		Now:              time.Now(),
+		Now:              observedAt,
 		IDGenerator:      synthesizer.NewStableIDGenerator(),
 		PluginAuthParser: parser,
 	}
@@ -274,6 +277,57 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	}
 	w.dispatchAuthUpdates(updates)
 	redisqueue.NotifyUsageRefresh()
+}
+
+// RereadAuthFile reads an auth file again even if its content is unchanged. The
+// core manager drops a file snapshot observed before the auth's latest save, but
+// the read may already hold a newer edit, and caching its hash and auths would
+// suppress the event for that edit. Forgetting both makes this read dispatch the
+// file's current state, observed after the save.
+func (w *Watcher) RereadAuthFile(path string) {
+	if w == nil || strings.TrimSpace(path) == "" {
+		return
+	}
+	normalized := w.normalizeAuthPath(path)
+	// Match the full scan, which accepts any case of the .json extension.
+	if filepath.Dir(normalized) != w.normalizeAuthPath(w.authDir) || !strings.HasSuffix(strings.ToLower(normalized), ".json") {
+		return
+	}
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+	if _, errStat := os.Stat(path); errStat != nil {
+		// A removed file is handled by its remove event.
+		return
+	}
+	w.clientsMutex.Lock()
+	prevHash, hadHash := w.lastAuthHashes[normalized]
+	prevAuths := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
+	for id := range w.fileAuthsByPath[normalized] {
+		if auth, ok := w.currentAuths[id]; ok {
+			prevAuths[id] = auth
+		}
+		delete(w.currentAuths, id)
+	}
+	delete(w.lastAuthHashes, normalized)
+	w.clientsMutex.Unlock()
+
+	w.addOrUpdateClientLocked(path)
+
+	// A read that failed (the file was removed after the stat, or is mid-write)
+	// records no hash. Restore what was known, so the file's remove event still
+	// finds it and deletes its auths instead of being ignored as unknown.
+	w.clientsMutex.Lock()
+	if _, read := w.lastAuthHashes[normalized]; !read {
+		if hadHash {
+			w.lastAuthHashes[normalized] = prevHash
+		}
+		for id, auth := range prevAuths {
+			if _, ok := w.currentAuths[id]; !ok {
+				w.currentAuths[id] = auth
+			}
+		}
+	}
+	w.clientsMutex.Unlock()
 }
 
 func (w *Watcher) removeClient(path string) {
@@ -435,17 +489,20 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int, int) 
 	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, metaAPIKeyCount, openAICompatCount
 }
 
+// runConfigPersist runs a config mirror off the caller's goroutine; tests replace it.
+var runConfigPersist = func(persist func()) { go persist() }
+
 func (w *Watcher) persistConfigAsync() {
 	if w == nil || w.storePersister == nil {
 		return
 	}
-	go func() {
+	runConfigPersist(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := w.storePersister.PersistConfig(ctx); err != nil {
 			log.Errorf("failed to persist config change: %v", err)
 		}
-	}()
+	})
 }
 
 func (w *Watcher) persistAuthAsync(message string, paths ...string) {

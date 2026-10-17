@@ -6,15 +6,28 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
+
+// configWriteMu serializes the config file writes made through this package, so a
+// write-back that first checks the file's bytes cannot interleave with such a save.
+// Writes from other processes, and the remote stores' startup sync of the local
+// file, do not take it.
+var configWriteMu sync.Mutex
+
+// beforeConfigWriteBack runs inside a checked write-back, after the check; tests
+// replace it.
+var beforeConfigWriteBack = func() {}
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 // Existing v8 documents are saved in the latest layout. Successful migration
 // also synchronizes cfg's OAuth scope for runtime snapshots.
 func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...bool) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
 	persistCfg := cfg
 	migrating := len(migrateV8) > 0 && migrateV8[0]
 	// Load original YAML as a node tree to preserve comments and ordering.
@@ -127,9 +140,25 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
 // while preserving comments and positions.
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+	return updateNestedScalarLocked(configFile, nil, path, value)
+}
+
+// updateNestedScalarLocked implements SaveConfigPreserveCommentsUpdateNestedScalar
+// while configWriteMu is held. When expected is non-nil the file is left untouched
+// unless it still holds exactly those bytes; holding the lock across the check and
+// the write keeps a save from landing in between.
+func updateNestedScalarLocked(configFile string, expected []byte, path []string, value string) error {
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return err
+	}
+	if expected != nil {
+		if !bytes.Equal(data, expected) {
+			return nil
+		}
+		beforeConfigWriteBack()
 	}
 	data, err = updateNestedScalarYAML(data, path, value)
 	if err != nil {
