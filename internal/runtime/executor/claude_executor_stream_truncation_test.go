@@ -374,3 +374,78 @@ func TestGeminiVertexExecutorClaudeStreamTruncationReportsError(t *testing.T) {
 		t.Fatalf("truncated Vertex-to-Claude stream must not synthesize message_stop: %q", output.String())
 	}
 }
+
+// Upstream SSE error event after message_start must not be treated as a completed
+// message for continuity/usage accounting: claudeMessageIDFromSSE must return empty
+// and ExecuteStream must surface a terminal chunk error and failed usage record.
+func TestClaudeExecutorStreamErrorEventDoesNotCommitContinuityAndMarksFailed(t *testing.T) {
+	sseWithError := "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_err_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n" +
+		"event: error\n" +
+		"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"
+
+	if gotID := claudeMessageIDFromSSE([]byte(sseWithError)); gotID != "" {
+		t.Fatalf("claudeMessageIDFromSSE() on error stream = %q, want empty string so failed turn is not committed", gotID)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, sseWithError)
+	}))
+	defer server.Close()
+
+	pluginName := "test-claude-error-event-usage"
+	plugin := &captureClaudeUsagePlugin{
+		records: make(chan usage.Record, 4),
+	}
+	usage.RegisterNamedPlugin(pluginName, plugin)
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
+	})
+
+	exec := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var chunkErr error
+	var output bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			chunkErr = chunk.Err
+			continue
+		}
+		output.Write(chunk.Payload)
+	}
+
+	if !strings.Contains(output.String(), "overloaded_error") {
+		t.Fatalf("expected upstream error event payload to be forwarded, got: %q", output.String())
+	}
+	if chunkErr == nil {
+		t.Fatal("expected terminal chunk error when upstream emits SSE error event without message_stop, got nil")
+	}
+
+	select {
+	case record := <-plugin.records:
+		if !record.Failed {
+			t.Fatal("expected usage record to be marked failed when upstream stream ends with error event")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for failed usage record")
+	}
+}

@@ -375,6 +375,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			var event bytes.Buffer
 			var upstreamMessageID string
+			var upstreamStreamErr error
 			upstreamCompleted := false
 			flushEvent := func() bool {
 				if event.Len() == 0 {
@@ -392,6 +393,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
+				if upstreamStreamErr == nil {
+					upstreamStreamErr = observeClaudeStreamError(line)
+				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				reporter.ObserveResponseModel(line)
 				streamUsage.ObserveClaudeStream(line)
@@ -408,7 +412,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 						emitCancellation(ctx.Err())
 						return
 					}
-					if upstreamCompleted {
+					if upstreamCompleted || upstreamStreamErr != nil {
 						break
 					}
 				}
@@ -422,6 +426,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					return
 				}
 				errScan := scanner.Err()
+				if errScan == nil {
+					errScan = upstreamStreamErr
+				}
 				if errScan == nil && ctx.Err() == nil {
 					errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"}
 				}
@@ -449,10 +456,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), bodyForTranslation, &param)
 		var upstreamMessageID string
+		var upstreamStreamErr error
 		upstreamCompleted := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
+			if upstreamStreamErr == nil {
+				upstreamStreamErr = observeClaudeStreamError(line)
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)
@@ -489,7 +500,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 				return
 			}
-			if upstreamCompleted {
+			if upstreamCompleted || upstreamStreamErr != nil {
 				break
 			}
 		}
@@ -501,6 +512,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				return
 			}
 			errScan := scanner.Err()
+			if errScan == nil {
+				errScan = upstreamStreamErr
+			}
 			if errScan == nil && ctx.Err() == nil {
 				errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"}
 			}

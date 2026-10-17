@@ -110,7 +110,7 @@ func observeClaudeStreamLine(line []byte, messageID *string, completed *bool) {
 		if id := strings.TrimSpace(root.Get("message.id").String()); id != "" {
 			*messageID = id
 		}
-	case "message_stop", "error":
+	case "message_stop":
 		*completed = true
 	case "message":
 		if !hasDataPrefix && strings.TrimSpace(root.Get("stop_reason").String()) != "" {
@@ -120,6 +120,22 @@ func observeClaudeStreamLine(line []byte, messageID *string, completed *bool) {
 			*completed = true
 		}
 	}
+}
+
+func observeClaudeStreamError(line []byte) error {
+	line = bytes.TrimSpace(line)
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return nil
+	}
+	payload := bytes.TrimSpace(line[len("data:"):])
+	if !gjson.ValidBytes(payload) {
+		return nil
+	}
+	root := gjson.ParseBytes(payload)
+	if root.Get("type").String() != "error" {
+		return nil
+	}
+	return statusErr{code: 502, msg: string(payload)}
 }
 
 func claudeMessageIDFromSSE(data []byte) string {

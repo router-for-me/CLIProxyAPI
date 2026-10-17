@@ -561,3 +561,70 @@ func TestClaudeStreamCompleteWithMessageStopDoesNotEmitErrorOnClose(t *testing.T
 		t.Fatalf("unexpected error event on completed stream: %q", recorder.Body.String())
 	}
 }
+
+func TestClaudeStreamTerminalErrorAfterSingleNewlineInsertsBlankLine(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Header("Content-Type", "text/event-stream")
+
+	handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+	go func() {
+		// Ends with a single '\n' (complete line, but missing the blank-line SSE event separator).
+		data <- []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n")
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadGateway,
+			Error:      errors.New("stream cut before blank line"),
+		}
+		close(data)
+		close(errs)
+	}()
+
+	handler.forwardClaudeStream(c, c.Writer, func(error) {}, data, errs)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, "\n\nevent: error\ndata: ") {
+		t.Fatalf("expected blank-line SSE separator (\\n\\n) before event: error when prior chunk ended with a single newline; body=%q", body)
+	}
+}
+
+func TestClaudeStreamBareCompletedMessageJSONDoesNotEmitErrorOnClose(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	executor := &preFTKeepAliveClaudeExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "bare-json-stream-claude-model"
+	auth := &coreauth.Auth{ID: "bare-json-stream-claude-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n")}
+	close(chunks)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewClaudeCodeAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/messages", h.ClaudeMessages)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{\"model\":\""+model+"\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "event: error") {
+		t.Fatalf("unexpected error event after complete bare message JSON: %q", recorder.Body.String())
+	}
+}

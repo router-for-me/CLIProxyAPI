@@ -334,14 +334,14 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			// Write the first chunk
 			sawErrorEvent := claudeChunkHasErrorEvent(chunk)
 			sawMessageStop := claudeChunkHasMessageStop(chunk)
-			endsWithNewline := len(chunk) == 0 || chunk[len(chunk)-1] == '\n'
+			trailingNewlines := advanceClaudeSSENewlineCount(2, chunk)
 			if len(chunk) > 0 {
 				_, _ = c.Writer.Write(chunk)
 				flusher.Flush()
 			}
 
 			// Continue streaming the rest
-			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, sawErrorEvent, sawMessageStop, endsWithNewline)
+			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, sawErrorEvent, sawMessageStop, trailingNewlines >= 2, trailingNewlines == 1)
 			return
 		case <-keepAliveC:
 			writeKeepAlive()
@@ -354,16 +354,50 @@ func claudeChunkHasErrorEvent(chunk []byte) bool {
 }
 
 func claudeChunkHasMessageStop(chunk []byte) bool {
-	return bytes.Contains(chunk, []byte("event: message_stop\n")) ||
+	if bytes.Contains(chunk, []byte("event: message_stop\n")) ||
 		bytes.Contains(chunk, []byte("event: message_stop\r\n")) ||
 		bytes.Contains(chunk, []byte(`"type":"message_stop"`)) ||
-		bytes.Contains(chunk, []byte(`"type": "message_stop"`))
+		bytes.Contains(chunk, []byte(`"type": "message_stop"`)) {
+		return true
+	}
+	trimmed := bytes.TrimSpace(chunk)
+	if bytes.HasPrefix(trimmed, []byte("{")) && gjson.ValidBytes(trimmed) {
+		root := gjson.ParseBytes(trimmed)
+		if root.Get("type").String() == "message" && strings.TrimSpace(root.Get("stop_reason").String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func advanceClaudeSSENewlineCount(prev int, chunk []byte) int {
+	count := prev
+	for _, b := range chunk {
+		switch b {
+		case '\r':
+			continue
+		case '\n':
+			if count < 2 {
+				count++
+			}
+		default:
+			count = 0
+		}
+	}
+	return count
 }
 
 func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialFlags ...bool) {
 	sawErrorEvent := len(initialFlags) > 0 && initialFlags[0]
 	sawMessageStop := len(initialFlags) > 1 && initialFlags[1]
-	endsWithNewline := len(initialFlags) <= 2 || initialFlags[2]
+	trailingNewlines := 2
+	if len(initialFlags) > 2 && !initialFlags[2] {
+		if len(initialFlags) > 3 && initialFlags[3] {
+			trailingNewlines = 1
+		} else {
+			trailingNewlines = 0
+		}
+	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
@@ -375,17 +409,20 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			if claudeChunkHasMessageStop(chunk) {
 				sawMessageStop = true
 			}
-			endsWithNewline = chunk[len(chunk)-1] == '\n'
+			trailingNewlines = advanceClaudeSSENewlineCount(trailingNewlines, chunk)
 			_, _ = c.Writer.Write(chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil || sawErrorEvent {
 				return
 			}
-			if !endsWithNewline {
+			switch trailingNewlines {
+			case 0:
 				_, _ = c.Writer.Write([]byte("\n\n"))
-				endsWithNewline = true
+			case 1:
+				_, _ = c.Writer.Write([]byte("\n"))
 			}
+			trailingNewlines = 2
 
 			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
