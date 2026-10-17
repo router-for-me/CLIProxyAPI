@@ -348,9 +348,20 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
+		} else if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "error.status").String()), "RESOURCE_EXHAUSTED") {
+			retryAfter := antigravityDefaultRateLimitRetryAfter
+			err.retryAfter = &retryAfter
 		}
 	}
 	return err
+}
+
+func newAntigravityResponseError(statusCode int, body []byte) error {
+	err := newAntigravityStatusErr(statusCode, body)
+	if err.retryAfter == nil {
+		return err
+	}
+	return cliproxyauth.WithSafeRetryAfter(err, *err.retryAfter)
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {

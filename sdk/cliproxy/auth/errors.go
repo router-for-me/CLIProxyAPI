@@ -77,6 +77,53 @@ func NewTerminalAuthError(err *Error, cause error) error {
 	return &terminalAuthError{errorWithCause: &errorWithCause{base: err, cause: cause}}
 }
 
+type safeRetryAfterError struct {
+	cause      error
+	retryAfter time.Duration
+}
+
+// WithSafeRetryAfter carries a locally computed retry delay through the
+// handler's trusted response-header path. It never accepts arbitrary headers.
+func WithSafeRetryAfter(err error, retryAfter time.Duration) error {
+	if err == nil || retryAfter <= 0 {
+		return err
+	}
+	return &safeRetryAfterError{cause: err, retryAfter: retryAfter}
+}
+
+func (e *safeRetryAfterError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *safeRetryAfterError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *safeRetryAfterError) StatusCode() int {
+	if e == nil || e.cause == nil {
+		return 0
+	}
+	var status interface{ StatusCode() int }
+	if errors.As(e.cause, &status) && status != nil {
+		return status.StatusCode()
+	}
+	return 0
+}
+
+func (e *safeRetryAfterError) RetryAfter() *time.Duration {
+	if e == nil || e.retryAfter <= 0 {
+		return nil
+	}
+	retryAfter := e.retryAfter
+	return &retryAfter
+}
+
 // Error implements the error interface.
 func (e *Error) Error() string {
 	if e == nil {
