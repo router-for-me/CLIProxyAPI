@@ -442,6 +442,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		var streamUsage helps.StreamUsageBuffer
 		var seenDone bool
+		var sawFinishReason bool
+		var deferredClaudeUsagePayload []byte
 		var streamFailed bool
 		var streamAborted bool
 		var upstreamEvent string
@@ -498,10 +500,30 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					publishStreamError(streamErr, true)
 					return true
 				}
+				if !sawFinishReason && openAICompatChunkHasFinishReason(dataPayload) {
+					sawFinishReason = true
+				}
 			}
 
 			// Observe complete upstream frames before translation or downstream backpressure.
 			helps.ObserveChatTokenEvent(reporter, dataPayload)
+			if !isDone && responseFormat == sdktranslator.FormatClaude && !sawFinishReason && openAICompatIsUsageOnlyChunk(dataPayload) {
+				deferredClaudeUsagePayload = bytes.Clone(dataPayload)
+				return false
+			}
+			if len(deferredClaudeUsagePayload) > 0 && (sawFinishReason || isDone) {
+				deferredLine := append([]byte("data: "), deferredClaudeUsagePayload...)
+				deferredClaudeUsagePayload = nil
+				deferredChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, deferredLine, &param, claudeInputTokens)
+				for i := range deferredChunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: deferredChunks[i]}:
+					case <-ctx.Done():
+						streamAborted = true
+						return true
+					}
+				}
+			}
 			streamLine := append([]byte("data: "), dataPayload...)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, streamLine, &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
@@ -586,12 +608,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			case <-ctx.Done():
 			}
 		} else if !seenDone {
-			// Without a translator-confirmed terminal state, a clean Responses EOF
+			// Without a translator-confirmed terminal state, a clean Responses or Claude EOF
 			// without [DONE] remains a failed stream instead of completing it.
-			if responseFormat == sdktranslator.FormatOpenAIResponse {
+			if responseFormat == sdktranslator.FormatOpenAIResponse || (responseFormat == sdktranslator.FormatClaude && !sawFinishReason) {
 				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-				reporter.PublishFailure(ctx, streamErr)
+				if !helps.RecordApplyPatchStreamFailureWithUsage(ctx, param, reporter, &streamUsage, streamErr) {
+					streamUsage.PublishFailure(ctx, reporter, streamErr)
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 				case <-ctx.Done():
@@ -1069,6 +1093,23 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 
 func openAICompatErrorEvent(eventName string) bool {
 	return strings.EqualFold(eventName, "error") || strings.EqualFold(eventName, "response.error") || strings.EqualFold(eventName, "response.failed")
+}
+
+func openAICompatChunkHasFinishReason(payload []byte) bool {
+	for _, choice := range gjson.GetBytes(payload, "choices").Array() {
+		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != gjson.Null && strings.TrimSpace(reason.String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func openAICompatIsUsageOnlyChunk(payload []byte) bool {
+	if gjson.GetBytes(payload, "choices.0").Exists() {
+		return false
+	}
+	usage := gjson.GetBytes(payload, "usage")
+	return usage.Exists() && usage.Type != gjson.Null
 }
 
 func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, bool) {

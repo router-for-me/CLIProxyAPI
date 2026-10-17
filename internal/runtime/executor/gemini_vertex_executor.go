@@ -762,12 +762,16 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 		}()
 		var terminalDelivered bool
+		var sawFinishReason bool
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(line)) {
+				sawFinishReason = true
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				streamUsage.Observe(detail, true)
 			}
@@ -809,6 +813,16 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			return
 		}
 		if ctx.Err() != nil {
+			return
+		}
+		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+			streamUsage.PublishFailure(ctx, reporter, truncErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case <-ctx.Done():
+			}
 			return
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
@@ -954,12 +968,16 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 		}()
 		var terminalDelivered bool
+		var sawFinishReason bool
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(line)) {
+				sawFinishReason = true
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				streamUsage.Observe(detail, true)
 			}
@@ -1001,6 +1019,16 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			return
 		}
 		if ctx.Err() != nil {
+			return
+		}
+		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+			streamUsage.PublishFailure(ctx, reporter, truncErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case <-ctx.Done():
+			}
 			return
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
