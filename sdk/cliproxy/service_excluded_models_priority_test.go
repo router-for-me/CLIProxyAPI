@@ -77,6 +77,15 @@ func TestCodexExcludedModelsCredentialPriorityAfterPatchAndReload(t *testing.T) 
 	check("reloaded credential override", true, false)
 	patch(`[]`)
 	check("immediate empty fallback", false, true)
-	sync(load(`{"type":"codex","excluded_models":[]}`))
+	inherited := load(`{"type":"codex","excluded_models":[]}`)
+	if value, ok := inherited.Attributes["excluded_models"]; ok {
+		t.Fatalf("inherited credential stores excluded_models=%q, want global rules resolved at registration", value)
+	}
+	sync(inherited)
 	check("reloaded empty fallback", false, true)
+
+	// A later global config change applies to the same credential on the next registration.
+	cfg.OAuthExcludedModels = map[string][]string{"codex": {credentialModel}}
+	sync(inherited)
+	check("updated global fallback", true, false)
 }
