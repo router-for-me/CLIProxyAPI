@@ -68,7 +68,9 @@ func (h *Host) callHostAuthList(ctx context.Context, request []byte) ([]byte, er
 }
 
 func (h *Host) callHostAuthGet(ctx context.Context, request []byte) ([]byte, error) {
-	_ = ctx
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
 	var req rpcHostAuthGetRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode host auth get request: %w", errUnmarshal)
@@ -78,6 +80,9 @@ func (h *Host) callHostAuthGet(ctx context.Context, request []byte) ([]byte, err
 		return nil, fmt.Errorf("auth_index is required")
 	}
 	auth, rawJSON, errGet := h.authPhysicalJSONByIndex(authIndex)
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
 	if errGet != nil {
 		return nil, errGet
 	}
@@ -95,7 +100,9 @@ func (h *Host) callHostAuthGet(ctx context.Context, request []byte) ([]byte, err
 }
 
 func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]byte, error) {
-	_ = ctx
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
 	var req rpcHostAuthGetRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode host auth get runtime request: %w", errUnmarshal)
@@ -105,6 +112,9 @@ func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]by
 		return nil, fmt.Errorf("auth_index is required")
 	}
 	auth, errGet := h.authByIndex(authIndex)
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
 	if errGet != nil {
 		return nil, errGet
 	}
@@ -232,14 +242,8 @@ func (h *Host) authByIndex(authIndex string) (*coreauth.Auth, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("core auth manager unavailable")
 	}
-	for _, auth := range manager.List() {
-		if auth == nil {
-			continue
-		}
-		auth.EnsureIndex()
-		if auth.Index == authIndex {
-			return auth, nil
-		}
+	if auth, ok := manager.GetByIndex(authIndex); ok {
+		return auth, nil
 	}
 	return nil, fmt.Errorf("auth not found for auth_index %s", authIndex)
 }
