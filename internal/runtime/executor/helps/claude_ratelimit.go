@@ -2,6 +2,7 @@ package helps
 
 import (
 	cryptorand "crypto/rand"
+	"encoding/json"
 	"math"
 	"math/big"
 	"net/http"
@@ -116,6 +117,78 @@ func isClaudeUtilizationHealthy(raw string) bool {
 		return false
 	}
 	return u >= 0 && u < 1.0
+}
+
+// ParseClaudeRateLimitResetForError keeps an explicit short request-rate retry
+// separate from an otherwise unclassified subscription reset. Explicit window
+// statuses and ambiguous error bodies retain the conservative quota parser.
+func ParseClaudeRateLimitResetForError(headers http.Header, body []byte, now time.Time) *time.Duration {
+	for _, name := range []string{
+		"Anthropic-Ratelimit-Unified-Status",
+		"Anthropic-Ratelimit-Unified-5h-Status",
+		"Anthropic-Ratelimit-Unified-7d-Status",
+		"Anthropic-Ratelimit-Unified-7d_oi-Status",
+		"Anthropic-Ratelimit-Unified-Overage-Status",
+	} {
+		// A repeated header or differently cased alias can carry quota evidence
+		// after an empty first value. Inspect all values before narrowing resets.
+		for key, values := range headers {
+			if strings.EqualFold(key, name) {
+				for _, value := range values {
+					if strings.TrimSpace(value) != "" {
+						return ParseClaudeRateLimitReset(headers, now)
+					}
+				}
+			}
+		}
+	}
+	var envelope struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) == nil && envelope.Error.Type == "rate_limit_error" {
+		message := strings.ToLower(strings.TrimSpace(envelope.Error.Message))
+		// Match complete positive forms only. A mention of a per-minute limit
+		// may instead negate that diagnosis or accompany genuine quota exhaustion.
+		requestRate := false
+		switch message {
+		case "this request would exceed the requests per minute rate limit. please try again later.",
+			"this request would exceed the input tokens per minute rate limit. please try again later.",
+			"this request would exceed the output tokens per minute rate limit. please try again later.":
+			requestRate = true
+		}
+		if requestRate {
+			// Only a single key with a single value is unambiguous. Otherwise
+			// independent lookups could validate and consume different retries.
+			var rawRetryAfter string
+			retryAfterFound := false
+			for key, values := range headers {
+				if !strings.EqualFold(key, "Retry-After") {
+					continue
+				}
+				if retryAfterFound || len(values) != 1 {
+					return ParseClaudeRateLimitReset(headers, now)
+				}
+				retryAfterFound = true
+				rawRetryAfter = values[0]
+			}
+			// Keep the fallback reset unless Retry-After survives the downstream
+			// deadline filter, including its maximum recoverable window.
+			if retry, valid := parseRetryAfterHeader(rawRetryAfter, now); valid && retry.After(now) && retry.Sub(now) <= maxClaudeRateLimitWindow {
+				rateHeaders := headers.Clone()
+				// Header names can arrive non-canonical through intermediary transports.
+				for name := range rateHeaders {
+					if strings.EqualFold(name, "Anthropic-Ratelimit-Unified-Reset") {
+						delete(rateHeaders, name)
+					}
+				}
+				return ParseClaudeRateLimitReset(rateHeaders, now)
+			}
+		}
+	}
+	return ParseClaudeRateLimitReset(headers, now)
 }
 
 // ParseClaudeRateLimitReset inspects Anthropic response headers for shared and Fable-specific
