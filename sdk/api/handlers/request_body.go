@@ -37,7 +37,7 @@ func ReadRequestBody(c *gin.Context) ([]byte, error) {
 
 	encoding := ""
 	if c != nil && c.Request != nil {
-		encoding = strings.TrimSpace(c.Request.Header.Get("Content-Encoding"))
+		encoding = strings.TrimSpace(strings.Join(c.Request.Header.Values("Content-Encoding"), ","))
 	}
 	if encoding == "" || strings.EqualFold(encoding, "identity") {
 		return raw, nil

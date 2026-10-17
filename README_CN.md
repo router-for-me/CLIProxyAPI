@@ -8,6 +8,10 @@ CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API �
 
 您可以通过任何与 OpenAI（包括 Responses）、Gemini（包括 Interactions）或 Claude 兼容的客户端或 SDK，以本地方式或多 CLI 账户访问以下提供商。
 
+模型 API 的 JSON 请求（OpenAI、Claude、Gemini、Interactions，包括 token 计数）支持 `Content-Encoding: gzip`、`br`、`zstd`，也支持叠加编码和重复编码头。请求大小限制同时约束压缩后的传输正文及每一层解压后的正文。响应根据 `Accept-Encoding` 协商压缩，遵守权重、`identity`、`no-transform`、无正文响应及 WebSocket 升级限制；SSE 会立即刷新压缩器和网络，并保留刷新错误。HTTP 压缩不会压缩 WebSocket 应用帧。
+
+共享上游 HTTP 客户端能够解压 gzip、Brotli、Zstandard 响应，保留原有传输指纹及显式 `Accept-Encoding` 设置。发往上游的请求正文不强制压缩：上游支持压缩响应，并不代表支持压缩 POST 请求，因此不会进行猜测性探测或压缩重试。
+
 <table>
 <tbody>
     <tr>

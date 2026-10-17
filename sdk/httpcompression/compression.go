@@ -90,7 +90,7 @@ func (t Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		base = http.DefaultTransport
 	}
 	res, err := base.RoundTrip(req)
-	if err != nil || res == nil || res.Body == nil || req.Method == http.MethodHead || res.StatusCode == 101 {
+	if err != nil || res == nil || res.Body == nil || req.Method == http.MethodHead || res.StatusCode < 200 || res.StatusCode == http.StatusNoContent || res.StatusCode == http.StatusResetContent || res.StatusCode == http.StatusNotModified {
 		return res, err
 	}
 	enc := strings.Join(res.Header.Values("Content-Encoding"), ",")
