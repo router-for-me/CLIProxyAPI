@@ -98,6 +98,14 @@ Shared-library plugins can make `host.http.do` and `host.http.do_stream` cancela
 
 Each operation ID can be claimed by one HTTP callback. HTTP stream IDs are also scoped to the owning plugin. Cancel an opened operation if it will not be used, and close streams when finished. This API provides explicit cancellation, not a host-managed per-call timeout; a plugin that wants a deadline must arrange its own cancellation call.
 
+## NativeAPI routes
+
+Schema version 7 adds the generic `native_api` capability without changing C ABI v1. A plugin advertises `native_api: true`, then answers `native.register` with lowercase `routes` entries containing exact `method` and `path` values under `/v1`. Methods are limited to `GET`, `POST`, `PUT`, `PATCH` and `DELETE`, the methods the server's CORS response allows; `OPTIONS` is always answered by CORS. The host reserves built-in routes and resolves plugin conflicts by configured priority; route patterns and traversal paths are rejected. The request-body cap is installed before authentication, including frontend-auth providers that inspect the body. Ordinary client authentication runs before request logging and native-handler body reading. The native payload omits standard authorization/API-key headers, cookies, and the built-in `key`/`auth_token` query credentials. Dynamic registration follows plugin enable/reload/unload lifecycle; fused and obsolete registrations are unavailable.
+
+`native.handle` receives `Method`, `Path`, `Headers`, `Query`, and `Body`; it returns `StatusCode`, `Headers`, and `Body`. These request/response fields retain exported Go JSON names. JSON encodes byte slices as base64 strings. The host supplies a callback-scoped `host_callback_id`, allowing the native handler to invoke host callbacks with request cancellation.
+
+`host.http.do` supports optional `disable_redirects` and `max_response_bytes` request options. Omitted or zero response bounds preserve legacy behavior. Response caps apply to buffered `Do`; `DoStream` rejects response bounds explicitly. Negative or overflowing bounds are invalid. Redirect suppression is per request and does not mutate the shared client. Optional `suppress_logging: true` skips request, response metadata/body, and transport/read-error capture before those values enter host-managed request logging.
+
 ## Scheduler
 
 `scheduler` declares the scheduler capability. It can select a configured auth ID from the candidate list, delegate to the built-in `fill-first` or `round-robin` scheduler, or reject picks when `deny` is `true`.

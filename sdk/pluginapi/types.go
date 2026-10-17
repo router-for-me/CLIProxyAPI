@@ -128,6 +128,8 @@ type Capabilities struct {
 	CommandLinePlugin CommandLinePlugin
 	// ManagementAPI declares plugin-owned diagnostic Management API and resource routes.
 	ManagementAPI ManagementAPI
+	// NativeAPI registers exact authenticated routes under /v1.
+	NativeAPI NativeAPI
 	// QuotaProvider surfaces credential quota and billing information for management clients.
 	QuotaProvider QuotaProvider
 }
@@ -922,9 +924,12 @@ type HTTPRequest struct {
 	// Headers contains request headers.
 	Headers http.Header
 	// Body contains the raw request body.
-	Body []byte
-	// WireProfile specifies optional outbound HTTP wire profile settings.
-	WireProfile *HTTPWireProfile `json:"wire_profile,omitempty"`
+	Body             []byte
+	WireProfile      *HTTPWireProfile `json:"wire_profile,omitempty"`
+	DisableRedirects bool             `json:"disable_redirects,omitempty"`
+	MaxResponseBytes int64            `json:"max_response_bytes,omitempty"`
+	// SuppressLogging prevents sensitive request and upstream response details from reaching host logs.
+	SuppressLogging bool `json:"suppress_logging,omitempty"`
 }
 
 // HTTPResponse describes a non-streaming host HTTP response.
@@ -1405,6 +1410,51 @@ type CommandLineExecutionResponse struct {
 	Auths []AuthData
 	// ExitCode is used as the process exit code when non-zero.
 	ExitCode int
+}
+
+// NativeAPI registers exact client-facing HTTP routes under /v1.
+type NativeAPI interface {
+	RegisterNative(context.Context, NativeRegistrationRequest) (NativeRegistrationResponse, error)
+	HandleNative(context.Context, NativeRequest) (NativeResponse, error)
+}
+
+// NativeRegistrationRequest carries host context for native route registration.
+type NativeRegistrationRequest struct {
+	Plugin   Metadata
+	BasePath string
+}
+
+// NativeRegistrationResponse lists native routes to expose.
+type NativeRegistrationResponse struct {
+	Routes []NativeRoute
+}
+
+// NativeRoute describes one exact client-facing API route.
+type NativeRoute struct {
+	Method  string
+	Path    string
+	Handler NativeHandler
+}
+
+// NativeHandler handles an authenticated native API request.
+type NativeHandler interface {
+	HandleNative(context.Context, NativeRequest) (NativeResponse, error)
+}
+
+// NativeRequest carries a sanitized client request to a native route handler.
+type NativeRequest struct {
+	Method  string
+	Path    string
+	Headers http.Header
+	Query   url.Values
+	Body    []byte
+}
+
+// NativeResponse is the complete HTTP response from a native route handler.
+type NativeResponse struct {
+	StatusCode int
+	Headers    http.Header
+	Body       []byte
 }
 
 // ManagementAPI declares plugin-owned Management API and resource routes.

@@ -13,10 +13,89 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 )
+
+type nativeAuthCounterProvider struct{ calls atomic.Int64 }
+
+func (*nativeAuthCounterProvider) Identifier() string { return "native-auth-test" }
+func (p *nativeAuthCounterProvider) Authenticate(_ context.Context, req *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+	p.calls.Add(1)
+	if req.Header.Get("Authorization") != "Bearer valid-key" {
+		return nil, sdkaccess.NewInvalidCredentialError()
+	}
+	return &sdkaccess.Result{Provider: "native-auth-test", Principal: "valid-key"}, nil
+}
+
+func TestNativePreflightSkipsAuthenticationWithoutRouteOracle(t *testing.T) {
+	server := newTestServer(t)
+	provider := &nativeAuthCounterProvider{}
+	server.accessManager.SetProviders([]sdkaccess.Provider{provider})
+
+	for _, path := range []string{"/v1/registered-native", "/v1/unregistered"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodOptions, path, nil)
+			req.Header.Set("Origin", "https://example.com")
+			req.Header.Set("Access-Control-Request-Method", "POST")
+			response := httptest.NewRecorder()
+			server.engine.ServeHTTP(response, req)
+			if response.Code != http.StatusNoContent || response.Header().Get("Access-Control-Allow-Origin") != "*" {
+				t.Fatalf("preflight response = %d %#v, want normal CORS response", response.Code, response.Header())
+			}
+			if provider.calls.Load() != 0 {
+				t.Fatalf("preflight authentication calls = %d, want 0", provider.calls.Load())
+			}
+		})
+	}
+
+	reader := &countingBodyReader{reader: strings.NewReader("payload")}
+	req := httptest.NewRequest(http.MethodPost, "/v1/unregistered", io.NopCloser(reader))
+	req.ContentLength = -1
+	response := httptest.NewRecorder()
+	server.engine.ServeHTTP(response, req)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unauthenticated POST to unregistered native path status = %d, want 404", response.Code)
+	}
+	if reader.read.Load() != 0 {
+		t.Fatalf("unauthenticated POST body bytes read = %d, want 0", reader.read.Load())
+	}
+}
+
+func TestUnknownNativeNamespaceDoesNotReadBodyAndBuiltinAuthRunsOnce(t *testing.T) {
+	server := newTestServer(t)
+	provider := &nativeAuthCounterProvider{}
+	server.accessManager.SetProviders([]sdkaccess.Provider{provider})
+	var reader *countingBodyReader
+	server.engine.NoRoute(func(c *gin.Context) { c.Status(http.StatusNotFound) })
+	server.engine.POST("/v1/builtin-auth-test", AuthMiddleware(server.accessManager), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	reader = &countingBodyReader{reader: strings.NewReader("payload")}
+	unauthorized := httptest.NewRequest(http.MethodPost, "/v1/no-native-route", io.NopCloser(reader))
+	unauthorized.ContentLength = -1
+	response := httptest.NewRecorder()
+	server.engine.ServeHTTP(response, unauthorized)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown route status = %d, want 404", response.Code)
+	}
+	if reader.read.Load() != 0 {
+		t.Fatalf("body bytes read = %d", reader.read.Load())
+	}
+
+	provider.calls.Store(0)
+	builtin := httptest.NewRequest(http.MethodPost, "/v1/builtin-auth-test", strings.NewReader("{}"))
+	builtin.Header.Set("Authorization", "Bearer valid-key")
+	builtinResponse := httptest.NewRecorder()
+	server.engine.ServeHTTP(builtinResponse, builtin)
+	if builtinResponse.Code != http.StatusNoContent {
+		t.Fatalf("builtin status = %d", builtinResponse.Code)
+	}
+	if provider.calls.Load() != 1 {
+		t.Fatalf("builtin auth calls = %d, want one", provider.calls.Load())
+	}
+}
 
 type countingBodyReader struct {
 	reader io.Reader

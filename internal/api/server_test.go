@@ -3121,6 +3121,236 @@ func TestServerResponsesStreamingRequestLogCapturesUpstreamSections(t *testing.T
 	}
 }
 
+func TestNativeRoutesAuthenticatePreflightAndLogRequests(t *testing.T) {
+	logsDir := t.TempDir()
+	logger := internallogging.NewFileRequestLogger(true, logsDir, "", 10)
+	host := pluginhost.New()
+	native := &apiTestNativePlugin{}
+	host.RegisterPluginForTest("native-test", pluginapi.Plugin{SchemaVersion: 7, Capabilities: pluginapi.Capabilities{NativeAPI: native}})
+	host.RegisterNativeRoutes(context.Background(), nil)
+	server := newTestServerWithOptions(t,
+		WithPluginHost(host),
+		WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger { return logger }),
+	)
+	server.cfg.RequestLog = true
+	server.cfg.LoggingToFile = true
+
+	preflight := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodOptions, path, nil)
+		req.Header.Set("Origin", "https://example.com")
+		req.Header.Set("Access-Control-Request-Method", "POST")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, req)
+		return recorder
+	}
+	registered := preflight("/v1/native-auth-test")
+	unknown := preflight("/v1/not-registered")
+	if registered.Code != http.StatusNoContent || unknown.Code != registered.Code || registered.Header().Get("Access-Control-Allow-Origin") != unknown.Header().Get("Access-Control-Allow-Origin") {
+		t.Fatalf("registered/unregistered preflight responses differ: %d %#v vs %d %#v", registered.Code, registered.Header(), unknown.Code, unknown.Header())
+	}
+
+	unauthorizedBody := &countingBodyReader{reader: strings.NewReader("payload")}
+	unauthorized := httptest.NewRequest(http.MethodPost, "/v1/native-auth-test", io.NopCloser(unauthorizedBody))
+	unauthorized.ContentLength = -1
+	unauthorizedResponse := httptest.NewRecorder()
+	server.engine.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusUnauthorized || unauthorizedBody.read.Load() != 0 {
+		t.Fatalf("unauthenticated native request = %d, body read %d; want 401 and unread body", unauthorizedResponse.Code, unauthorizedBody.read.Load())
+	}
+
+	valid := httptest.NewRequest(http.MethodPost, "/v1/native-auth-test", strings.NewReader("payload"))
+	valid.Header.Set("Authorization", "Bearer test-key")
+	validResponse := httptest.NewRecorder()
+	server.engine.ServeHTTP(validResponse, valid)
+	if validResponse.Code != http.StatusOK {
+		t.Fatalf("authenticated native response = %d, want 200", validResponse.Code)
+	}
+
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if len(entries) != 1 || !strings.Contains(entries[0].Name(), "native-auth-test") {
+		t.Fatalf("native request log entries = %#v, want one registered native log", entries)
+	}
+	if native.calls != 1 {
+		t.Fatalf("native handler calls = %d, want 1", native.calls)
+	}
+}
+
+func TestNativeRouteAuthenticatesOnceAndExposesCORSOnFailure(t *testing.T) {
+	host := pluginhost.New()
+	native := &apiTestNativePlugin{}
+	host.RegisterPluginForTest("native-test", pluginapi.Plugin{SchemaVersion: 7, Capabilities: pluginapi.Capabilities{NativeAPI: native}})
+	host.RegisterNativeRoutes(context.Background(), nil)
+	server := newTestServerWithOptions(t, WithPluginHost(host))
+	provider := &nativeAuthCounterProvider{}
+	server.accessManager.SetProviders([]sdkaccess.Provider{provider})
+
+	// A stateful or metered access provider must see each native request once.
+	valid := httptest.NewRequest(http.MethodPost, "/v1/native-auth-test", strings.NewReader("{}"))
+	valid.Header.Set("Authorization", "Bearer valid-key")
+	validResponse := httptest.NewRecorder()
+	server.engine.ServeHTTP(validResponse, valid)
+	if validResponse.Code != http.StatusOK || native.calls != 1 {
+		t.Fatalf("authenticated native response = %d, handler calls = %d", validResponse.Code, native.calls)
+	}
+	if provider.calls.Load() != 1 {
+		t.Fatalf("native authentication calls = %d, want 1", provider.calls.Load())
+	}
+
+	// Browsers can only read the 401 when it carries CORS headers.
+	invalid := httptest.NewRequest(http.MethodPost, "/v1/native-auth-test", strings.NewReader("{}"))
+	invalid.Header.Set("Origin", "https://example.com")
+	invalidResponse := httptest.NewRecorder()
+	server.engine.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusUnauthorized || invalidResponse.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("unauthenticated native response = %d %#v, want 401 with CORS", invalidResponse.Code, invalidResponse.Header())
+	}
+}
+
+func TestNativeRouteReportsHomeOutageBeforeAuthentication(t *testing.T) {
+	host := pluginhost.New()
+	native := &apiTestNativePlugin{}
+	host.RegisterPluginForTest("native-test", pluginapi.Plugin{SchemaVersion: 7, Capabilities: pluginapi.Capabilities{NativeAPI: native}})
+	host.RegisterNativeRoutes(context.Background(), nil)
+	server := newTestServerWithOptions(t, WithPluginHost(host))
+	server.cfg.Home.Enabled = true
+	previous := home.Current()
+	home.SetCurrent(nil)
+	t.Cleanup(func() { home.SetCurrent(previous) })
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/native-auth-test", strings.NewReader("{}"))
+	response := httptest.NewRecorder()
+	server.engine.ServeHTTP(response, req)
+	if response.Code != http.StatusServiceUnavailable || native.calls != 0 {
+		t.Fatalf("native request during Home outage = %d, handler calls = %d; want 503 and none", response.Code, native.calls)
+	}
+}
+
+func TestNativeRouteDefersToExampleAPIKeySafeMode(t *testing.T) {
+	host := pluginhost.New()
+	native := &apiTestNativePlugin{}
+	host.RegisterPluginForTest("native-test", pluginapi.Plugin{SchemaVersion: 7, Capabilities: pluginapi.Capabilities{NativeAPI: native}})
+	host.RegisterNativeRoutes(context.Background(), nil)
+	server := newTestServerWithOptions(t, WithPluginHost(host), WithExampleAPIKeySafeMode())
+	cfg := *server.cfg
+	cfg.APIKeys = []string{"your-api-key-1"}
+	server.UpdateClients(&cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/native-auth-test", strings.NewReader("{}"))
+	response := httptest.NewRecorder()
+	server.engine.ServeHTTP(response, req)
+	if response.Code != http.StatusForbidden || response.Header().Get("X-CPA-SAFE-MODE") != "example-api-key" || native.calls != 0 {
+		t.Fatalf("native request in safe mode = %d %#v, handler calls = %d; want safe-mode 403", response.Code, response.Header(), native.calls)
+	}
+}
+
+func TestNativeRouteLetsEveryOptionsRequestReachCORS(t *testing.T) {
+	host := pluginhost.New()
+	native := &apiTestNativePlugin{}
+	host.RegisterPluginForTest("native-test", pluginapi.Plugin{SchemaVersion: 7, Capabilities: pluginapi.Capabilities{NativeAPI: native}})
+	host.RegisterNativeRoutes(context.Background(), nil)
+	server := newTestServerWithOptions(t, WithPluginHost(host))
+	provider := &nativeAuthCounterProvider{}
+	server.accessManager.SetProviders([]sdkaccess.Provider{provider})
+
+	// A plain OPTIONS (no Access-Control-Request-Method) must not reveal whether a native route exists.
+	for _, path := range []string{"/v1/native-auth-test", "/v1/not-registered"} {
+		response := httptest.NewRecorder()
+		server.engine.ServeHTTP(response, httptest.NewRequest(http.MethodOptions, path, nil))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("plain OPTIONS %s = %d, want 204 from CORS", path, response.Code)
+		}
+	}
+	if provider.calls.Load() != 0 || native.calls != 0 {
+		t.Fatalf("OPTIONS reached authentication (%d calls) or the handler (%d calls)", provider.calls.Load(), native.calls)
+	}
+}
+
+func TestCORSPreflightAllowsAuthenticationHeaders(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "authorization, content-type")
+	response := httptest.NewRecorder()
+	server.engine.ServeHTTP(response, req)
+	// CORS never lets the "*" wildcard cover Authorization, so it must be listed by name.
+	allowed := strings.ToLower(response.Header().Get("Access-Control-Allow-Headers"))
+	for _, header := range []string{"authorization", "x-api-key", "x-goog-api-key"} {
+		if !strings.Contains(allowed, header) {
+			t.Fatalf("Access-Control-Allow-Headers = %q, missing %s", allowed, header)
+		}
+	}
+}
+
+func TestNativeRouteRunsEmbedderMiddlewareBeforeAuthentication(t *testing.T) {
+	host := pluginhost.New()
+	native := &apiTestNativePlugin{}
+	host.RegisterPluginForTest("native-test", pluginapi.Plugin{SchemaVersion: 7, Capabilities: pluginapi.Capabilities{NativeAPI: native}})
+	host.RegisterNativeRoutes(context.Background(), nil)
+	// Embedder middleware may derive the credential an access provider checks, as it can for built-in routes.
+	deriveKey := func(c *gin.Context) {
+		if c.GetHeader("X-Embedder-Token") == "trusted" {
+			c.Request.Header.Set("Authorization", "Bearer valid-key")
+		}
+		c.Next()
+	}
+	server := newTestServerWithOptions(t, WithPluginHost(host), WithMiddleware(deriveKey))
+	server.accessManager.SetProviders([]sdkaccess.Provider{&nativeAuthCounterProvider{}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/native-auth-test", strings.NewReader("{}"))
+	req.Header.Set("X-Embedder-Token", "trusted")
+	response := httptest.NewRecorder()
+	server.engine.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || native.calls != 1 {
+		t.Fatalf("native request with embedder-derived credential = %d, handler calls = %d; want 200 and 1", response.Code, native.calls)
+	}
+}
+
+type ginContextCapturingNativePlugin struct{ sawGin bool }
+
+func (p *ginContextCapturingNativePlugin) RegisterNative(context.Context, pluginapi.NativeRegistrationRequest) (pluginapi.NativeRegistrationResponse, error) {
+	return pluginapi.NativeRegistrationResponse{Routes: []pluginapi.NativeRoute{{Method: http.MethodPost, Path: "/v1/native-gin-test", Handler: p}}}, nil
+}
+
+func (p *ginContextCapturingNativePlugin) HandleNative(ctx context.Context, _ pluginapi.NativeRequest) (pluginapi.NativeResponse, error) {
+	// Host callback logging helpers record upstream attempts only when they find the request's Gin context.
+	_, p.sawGin = ctx.Value("gin").(*gin.Context)
+	return pluginapi.NativeResponse{StatusCode: http.StatusOK}, nil
+}
+
+func TestNativeHandlerContextCarriesGinContextForCallbackLogging(t *testing.T) {
+	host := pluginhost.New()
+	native := &ginContextCapturingNativePlugin{}
+	host.RegisterPluginForTest("native-gin", pluginapi.Plugin{SchemaVersion: 7, Capabilities: pluginapi.Capabilities{NativeAPI: native}})
+	host.RegisterNativeRoutes(context.Background(), nil)
+	server := newTestServerWithOptions(t, WithPluginHost(host))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/native-gin-test", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer test-key")
+	response := httptest.NewRecorder()
+	server.engine.ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("native response = %d, want 200", response.Code)
+	}
+	if !native.sawGin {
+		t.Fatal("native handler context has no Gin context, so host callback upstream attempts are never logged")
+	}
+}
+
+type apiTestNativePlugin struct{ calls int }
+
+func (p *apiTestNativePlugin) RegisterNative(context.Context, pluginapi.NativeRegistrationRequest) (pluginapi.NativeRegistrationResponse, error) {
+	return pluginapi.NativeRegistrationResponse{Routes: []pluginapi.NativeRoute{{Method: http.MethodPost, Path: "/v1/native-auth-test", Handler: p}}}, nil
+}
+
+func (p *apiTestNativePlugin) HandleNative(context.Context, pluginapi.NativeRequest) (pluginapi.NativeResponse, error) {
+	p.calls++
+	return pluginapi.NativeResponse{StatusCode: http.StatusOK, Body: []byte("ok")}, nil
+}
+
 func TestServerCodexAPIKeyResponsesStreamingRequestLog(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

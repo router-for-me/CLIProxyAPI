@@ -45,6 +45,7 @@ type rpcCapabilities struct {
 	UsagePlugin                   bool                         `json:"usage_plugin"`
 	CommandLinePlugin             bool                         `json:"command_line_plugin"`
 	ManagementAPI                 bool                         `json:"management_api"`
+	NativeAPI                     bool                         `json:"native_api"`
 	QuotaProvider                 bool                         `json:"quota_provider"`
 }
 
@@ -133,6 +134,20 @@ type rpcManagementRegistrationResponse struct {
 	Resources []pluginapi.ResourceRoute   `json:"resources,omitempty"`
 }
 
+type rpcNativeRoute struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+type rpcNativeRegistrationResponse struct {
+	Routes []rpcNativeRoute `json:"routes,omitempty"`
+}
+
+type rpcNativeRequest struct {
+	pluginapi.NativeRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcQuotaFetchRequest struct {
 	pluginapi.QuotaFetchRequest
 	HostCallbackID string `json:"host_callback_id,omitempty"`
@@ -187,6 +202,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		UsagePlugin:                   caps.UsagePlugin != nil,
 		CommandLinePlugin:             caps.CommandLinePlugin != nil,
 		ManagementAPI:                 caps.ManagementAPI != nil,
+		NativeAPI:                     caps.NativeAPI != nil,
 		QuotaProvider:                 caps.QuotaProvider != nil,
 	}
 }
