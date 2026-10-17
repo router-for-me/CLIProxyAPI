@@ -160,9 +160,23 @@ func ParseClaudeRateLimitResetForError(headers http.Header, body []byte, now tim
 			requestRate = true
 		}
 		if requestRate {
+			// Only a single key with a single value is unambiguous. Otherwise
+			// independent lookups could validate and consume different retries.
+			var rawRetryAfter string
+			retryAfterFound := false
+			for key, values := range headers {
+				if !strings.EqualFold(key, "Retry-After") {
+					continue
+				}
+				if retryAfterFound || len(values) != 1 {
+					return ParseClaudeRateLimitReset(headers, now)
+				}
+				retryAfterFound = true
+				rawRetryAfter = values[0]
+			}
 			// Keep the fallback reset unless Retry-After survives the downstream
 			// deadline filter, including its maximum recoverable window.
-			if retry, valid := parseRetryAfterHeader(getHeaderCaseInsensitive(headers, "Retry-After"), now); valid && retry.After(now) && retry.Sub(now) <= maxClaudeRateLimitWindow {
+			if retry, valid := parseRetryAfterHeader(rawRetryAfter, now); valid && retry.After(now) && retry.Sub(now) <= maxClaudeRateLimitWindow {
 				rateHeaders := headers.Clone()
 				// Header names can arrive non-canonical through intermediary transports.
 				for name := range rateHeaders {

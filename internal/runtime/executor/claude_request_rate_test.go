@@ -188,6 +188,30 @@ func TestClaudeRequestRateConservativeHeaderAndRetryBoundaries(t *testing.T) {
 	}
 	// The longest supported deadline remains usable; do not tighten this boundary.
 	cases = append(cases, resetCase{"maximum_usable_retry", "608400", nil, false, 7*24*time.Hour + time.Hour})
+
+	// Any repeated value or case alias is ambiguous, even if values agree.
+	for _, tc := range []struct {
+		name    string
+		headers http.Header
+	}{
+		{"aliases_both_usable", http.Header{"retry-after": {"30"}, "RETRY-AFTER": {"60"}}},
+		{"aliases_short_long", http.Header{"retry-after": {"30"}, "RETRY-AFTER": {"691200"}}},
+		{"aliases_long_short", http.Header{"retry-after": {"691200"}, "RETRY-AFTER": {"30"}}},
+		{"canonical_short_alias_long", http.Header{"Retry-After": {"30"}, "retry-after": {"691200"}}},
+		{"canonical_long_alias_short", http.Header{"Retry-After": {"691200"}, "RETRY-AFTER": {"30"}}},
+		{"canonical_alias_same", http.Header{"Retry-After": {"30"}, "retry-after": {"30"}}},
+		{"canonical_alias_empty", http.Header{"Retry-After": {"30"}, "retry-after": {""}}},
+		{"canonical_alias_nil", http.Header{"Retry-After": {"30"}, "retry-after": nil}},
+		{"repeated_short_long", http.Header{"Retry-After": {"30", "691200"}}},
+		{"repeated_long_short", http.Header{"Retry-After": {"691200", "30"}}},
+		{"repeated_same", http.Header{"Retry-After": {"30", "30"}}},
+		{"lowercase_repeated_short_long", http.Header{"retry-after": {"30", "691200"}}},
+		{"lowercase_repeated_long_short", http.Header{"retry-after": {"691200", "30"}}},
+	} {
+		cases = append(cases, resetCase{"ambiguous_retry/" + tc.name, "", tc.headers, false, 4 * time.Hour})
+	}
+	cases = append(cases, resetCase{"ambiguous_retry/http_roundtrip", "", http.Header{"Retry-After": {"30", "691200"}}, true, 4 * time.Hour})
+
 	for _, tc := range cases {
 		for _, fast := range []bool{false, true} {
 			path := "standard"
@@ -200,7 +224,9 @@ func TestClaudeRequestRateConservativeHeaderAndRetryBoundaries(t *testing.T) {
 				if h == nil {
 					h = http.Header{}
 				}
-				h.Set("Retry-After", tc.retry)
+				if tc.retry != "" {
+					h.Set("Retry-After", tc.retry)
+				}
 				h.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(4*time.Hour).Unix(), 10))
 				if tc.roundtrip {
 					var wire bytes.Buffer
