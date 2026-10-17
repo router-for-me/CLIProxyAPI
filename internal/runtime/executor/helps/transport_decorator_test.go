@@ -39,8 +39,8 @@ func TestClientDecoratorsPreserveProtectedAndProxyTransports(t *testing.T) {
 				var plain *http.Client
 				switch factory {
 				case "utls":
-					c = NewUtlsHTTPClient(ctx, cfg, auth, 0)
-					plain = NewUtlsHTTPClient(context.Background(), cfg, auth, 0)
+					c = compressionTestClient(NewUtlsHTTPClient(ctx, cfg, auth, 0))
+					plain = compressionTestClient(NewUtlsHTTPClient(context.Background(), cfg, auth, 0))
 					rt, ok := selected.(*fallbackRoundTripper)
 					if !ok || rt.anthropic == nil || rt.chrome == nil || rt.fallback == nil {
 						t.Fatalf("lost TLS profiles: %#v", selected)
@@ -50,13 +50,13 @@ func TestClientDecoratorsPreserveProtectedAndProxyTransports(t *testing.T) {
 						t.Fatal("Anthropic cached transport identity changed under decoration")
 					}
 				case "devin":
-					c = NewDevinHTTPClient(ctx, cfg, auth, 0)
-					plain = NewDevinHTTPClient(context.Background(), cfg, auth, 0)
+					c = compressionTestClient(NewDevinHTTPClient(ctx, cfg, auth, 0))
+					plain = compressionTestClient(NewDevinHTTPClient(context.Background(), cfg, auth, 0))
 					if plain.Transport != selected {
 						t.Fatal("Devin pooled transport identity changed under decoration")
 					}
 				default:
-					c = NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+					c = compressionTestClient(NewProxyAwareHTTPClient(ctx, cfg, auth, 0))
 					if proxy == "" {
 						if selected != http.DefaultTransport {
 							t.Fatalf("expected DefaultTransport for direct client, got %T", selected)
@@ -94,12 +94,10 @@ func TestClientDecoratorsPreserveProtectedAndProxyTransports(t *testing.T) {
 			selected = next
 			return &observingTransport{RoundTripper: next}
 		})
-		c := NewProxyAwareHTTPClient(
-			ctx,
+		c := compressionTestClient(NewProxyAwareHTTPClient(ctx,
 			&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:18080"}},
 			&coreauth.Auth{ProxyURL: "http://127.0.0.1:18082"},
-			0,
-		)
+			0))
 		obs, ok := c.Transport.(*observingTransport)
 		if !ok || obs.RoundTripper != selected {
 			t.Fatalf("expected wrapped transport, got %T", c.Transport)
@@ -177,7 +175,7 @@ func TestClientDecoratorContextIsolationAndStreamLifecycle(t *testing.T) {
 				})
 			})
 
-			client := NewProxyAwareHTTPClient(ctx, &config.Config{}, nil, 0)
+			client := compressionTestClient(NewProxyAwareHTTPClient(ctx, &config.Config{}, nil, 0))
 			req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, bytes.NewBufferString(`{"model":"gpt-5","thinking":"high"}`))
 			if errReq != nil {
 				t.Errorf("NewRequestWithContext: %v", errReq)
@@ -203,7 +201,7 @@ func TestClientDecoratorContextIsolationAndStreamLifecycle(t *testing.T) {
 
 		go func() {
 			defer wg.Done()
-			client := NewProxyAwareHTTPClient(context.Background(), &config.Config{}, nil, 0)
+			client := compressionTestClient(NewProxyAwareHTTPClient(context.Background(), &config.Config{}, nil, 0))
 			if client.Transport != nil {
 				t.Errorf("undecorated default client Transport = %T, want nil", client.Transport)
 			}

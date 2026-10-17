@@ -152,7 +152,7 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 	}
 
 	method := action[1]
-	rawJSON, errRead := c.GetRawData()
+	rawJSON, errRead := handlers.ReadRequestBody(c)
 	if errRead != nil && c.Request != nil && c.Request.Body != nil {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{

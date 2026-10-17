@@ -173,6 +173,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	engine.Use(logging.GinLogrusRecovery())
 	engine.Use(logging.CPATraceIDMiddleware())
 	engine.Use(s.maxRequestBodyBytesMiddleware())
+	engine.Use(middleware.ResponseCompression())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}

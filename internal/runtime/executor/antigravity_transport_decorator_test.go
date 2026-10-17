@@ -37,8 +37,8 @@ func TestAntigravityDecoratorRunsAfterCredentialHTTP11PoolSelection(t *testing.T
 				return &auditTestTransport{RoundTripper: next}
 			})
 			auth := &coreauth.Auth{ID: "decorator-fixture", ProxyURL: proxy}
-			c := newAntigravityHTTPClient(ctx, &config.Config{}, auth, 0)
-			plain := newAntigravityHTTPClient(context.Background(), &config.Config{}, auth, 0)
+			c := compressionTestClient(newAntigravityHTTPClient(ctx, &config.Config{}, auth, 0))
+			plain := compressionTestClient(newAntigravityHTTPClient(context.Background(), &config.Config{}, auth, 0))
 			if calls != 1 {
 				t.Fatalf("decorator calls = %d, want 1", calls)
 			}
@@ -53,7 +53,7 @@ func TestAntigravityDecoratorRunsAfterCredentialHTTP11PoolSelection(t *testing.T
 func TestAntigravityDecoratorConcurrentIsolation(t *testing.T) {
 	auth := &coreauth.Auth{ID: "decorator-race-auth"}
 	cfg := &config.Config{}
-	baseClient := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+	baseClient := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, auth, 0))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -63,7 +63,7 @@ func TestAntigravityDecoratorConcurrentIsolation(t *testing.T) {
 			ctx := httptransport.WithDecorator(context.Background(), func(next http.RoundTripper) http.RoundTripper {
 				return &auditTestTransport{RoundTripper: next}
 			})
-			c := newAntigravityHTTPClient(ctx, cfg, auth, 0)
+			c := compressionTestClient(newAntigravityHTTPClient(ctx, cfg, auth, 0))
 			wrapped, ok := c.Transport.(*auditTestTransport)
 			if !ok || wrapped.RoundTripper != baseClient.Transport {
 				t.Errorf("expected wrapped transport around shared pool %T, got %T", baseClient.Transport, c.Transport)
@@ -71,7 +71,7 @@ func TestAntigravityDecoratorConcurrentIsolation(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			c := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+			c := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, auth, 0))
 			if c.Transport != baseClient.Transport {
 				t.Errorf("undecorated client transport = %p, want %p", c.Transport, baseClient.Transport)
 			}

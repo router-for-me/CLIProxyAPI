@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httpcompression"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -347,9 +347,9 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		maxBytes := c.GetInt64("maxRequestBodyBytes")
 		if maxBytes > 0 {
-			body = decodeCapturedRequestBodyForLogWithLimit(bodyBytes, c.Request.Header.Get("Content-Encoding"), maxBytes)
+			body = decodeCapturedRequestBodyForLogWithLimit(bodyBytes, strings.Join(c.Request.Header.Values("Content-Encoding"), ","), maxBytes)
 		} else {
-			body = decodeCapturedRequestBodyForLog(bodyBytes, c.Request.Header.Get("Content-Encoding"))
+			body = decodeCapturedRequestBodyForLog(bodyBytes, strings.Join(c.Request.Header.Values("Content-Encoding"), ","))
 		}
 	}
 
@@ -391,8 +391,8 @@ func decodeCapturedRequestBodyForLogWithLimit(raw []byte, encoding string, limit
 		switch enc {
 		case "", "identity":
 			continue
-		case "zstd":
-			decoded, truncated, errDecode := decodeCapturedZstdRequestBodyWithLimit(body, limit)
+		case "gzip", "br", "zstd":
+			decoded, truncated, errDecode := decodeCapturedCompressedRequestBodyWithLimit(body, enc, limit)
 			if errDecode != nil {
 				return raw
 			}
@@ -423,8 +423,8 @@ func decodeCapturedRequestBody(raw []byte, encoding string) ([]byte, error) {
 		switch enc {
 		case "", "identity":
 			continue
-		case "zstd":
-			decoded, errDecode := decodeCapturedZstdRequestBody(body)
+		case "gzip", "br", "zstd":
+			decoded, _, errDecode := decodeCapturedCompressedRequestBodyWithLimit(body, enc, 0)
 			if errDecode != nil {
 				return nil, errDecode
 			}
@@ -436,36 +436,21 @@ func decodeCapturedRequestBody(raw []byte, encoding string) ([]byte, error) {
 	return body, nil
 }
 
-func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
-	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
-	if errNewReader != nil {
-		return nil, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
+func decodeCapturedCompressedRequestBodyWithLimit(raw []byte, encoding string, limit int64) ([]byte, bool, error) {
+	decoder, err := httpcompression.Decode(io.NopCloser(bytes.NewReader(raw)), encoding)
+	if err != nil {
+		return nil, false, err
 	}
-	defer decoder.Close()
-
-	decoded, errRead := io.ReadAll(decoder)
-	if errRead != nil {
-		return nil, fmt.Errorf("failed to decode zstd request body: %w", errRead)
-	}
-	return decoded, nil
-}
-
-func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bool, error) {
-	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
-	if errNewReader != nil {
-		return nil, false, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
-	}
-	defer decoder.Close()
-
+	defer func() { _ = decoder.Close() }()
 	var reader io.Reader = decoder
 	if limit > 0 && limit < math.MaxInt64 {
 		reader = io.LimitReader(decoder, limit+1)
 	}
-	decoded, errRead := io.ReadAll(reader)
-	if errRead != nil {
-		return nil, false, fmt.Errorf("failed to decode zstd request body: %w", errRead)
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, false, err
 	}
-	if int64(len(decoded)) > limit {
+	if limit > 0 && int64(len(decoded)) > limit {
 		return decoded[:limit], true, nil
 	}
 	return decoded, false, nil
