@@ -470,6 +470,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			streamUsage.ObserveClaudeStream(line)
 			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
 				if streamErr := claudeStreamingEventError(line, httpResp.Header); streamErr != nil {
+					// An unfinished apply_patch call ends as it does when the stream stops:
+					// a sanitized response.failed and the gateway error, not the raw event.
+					if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+						return
+					}
 					emitResponseError(streamErr)
 					return
 				}
