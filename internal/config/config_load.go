@@ -41,7 +41,7 @@ func ComputeSourceHash(data []byte) string {
 // copies stay identical. When the plaintext cannot be removed it returns an error and
 // leaves configFile untouched, so every later attempt refuses the file again.
 func PrepareConfigFileForUpload(configFile string) error {
-	data, errRead := os.ReadFile(configFile)
+	data, errRead := ReadConfigFile(configFile)
 	if errRead != nil {
 		return errRead
 	}
@@ -52,7 +52,7 @@ func PrepareConfigFileForUpload(configFile string) error {
 	if bytes.Equal(prepared, data) {
 		return nil
 	}
-	if errWrite := os.WriteFile(configFile, prepared, 0600); errWrite != nil {
+	if errWrite := WriteConfigFile(configFile, prepared, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write prepared config file: %w", errWrite)
 	}
 	return nil
@@ -156,7 +156,7 @@ func managementSecretKeyPath(data []byte) []string {
 // If optional is true and the file is empty or invalid, it returns an empty Config.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Read the entire configuration file into memory.
-	data, err := os.ReadFile(configFile)
+	data, err := ReadConfigFile(configFile)
 	if err != nil {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
@@ -336,7 +336,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Only conflicting legacy fields are removed on load. A legacy-only document
 	// stays legacy until a v8 configuration write explicitly migrates it.
-	current, errRead := os.ReadFile(configFile)
+	current, errRead := ReadConfigFile(configFile)
 	if errRead != nil {
 		return nil, errRead
 	}
@@ -345,7 +345,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, errLayout
 	}
 	if changed {
-		if errWrite := os.WriteFile(configFile, cleaned, 0600); errWrite != nil {
+		if errWrite := WriteConfigFile(configFile, cleaned, 0o600); errWrite != nil {
 			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
 		}
 	}
