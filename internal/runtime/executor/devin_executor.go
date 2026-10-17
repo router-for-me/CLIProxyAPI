@@ -139,6 +139,51 @@ func (e *DevinExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	return httpClient.Do(httpReq)
 }
 
+// FetchModels queries GetCliModelConfigs and returns the models available to the account.
+func (e *DevinExecutor) FetchModels(ctx context.Context, auth *cliproxyauth.Auth) ([]*registry.ModelInfo, error) {
+	apiKey, baseURL, deviceSeed := devinAuthCredentials(auth)
+	if apiKey == "" {
+		return nil, fmt.Errorf("devin credentials missing: api_key or session_token required")
+	}
+	endpoint := strings.TrimRight(baseURL, "/") + helps.DevinGetCliModelConfigsPath
+	body := helps.BuildDevinGetCliModelConfigsRequest(apiKey, deviceSeed)
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if errReq != nil {
+		return nil, fmt.Errorf("devin model configs: create request: %w", errReq)
+	}
+	if errPrepare := e.PrepareRequest(httpReq, auth); errPrepare != nil {
+		return nil, errPrepare
+	}
+	// Unary Connect-RPC calls use the plain proto content type rather than the streaming envelope.
+	httpReq.Header.Set("Content-Type", "application/proto")
+
+	resp, errDo := helps.NewDevinHTTPClient(ctx, e.cfg, auth, 0).Do(httpReq)
+	if errDo != nil {
+		return nil, fmt.Errorf("devin model configs: %w", errDo)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("devin executor: close model configs body error: %v", errClose)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("devin model configs: upstream returned status %d", resp.StatusCode)
+	}
+	data, errRead := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if errRead != nil {
+		return nil, fmt.Errorf("devin model configs: read body: %w", errRead)
+	}
+	raw, errParse := helps.ParseDevinCliModelConfigs(data)
+	if errParse != nil {
+		return nil, fmt.Errorf("devin model configs: %w", errParse)
+	}
+	models := registry.BuildDevinModelsFromUpstream(raw)
+	if len(models) == 0 {
+		return nil, fmt.Errorf("devin model configs: upstream returned no models")
+	}
+	return models, nil
+}
+
 // Refresh updates Devin user status, plan, and quota signals.
 func (e *DevinExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if auth == nil {

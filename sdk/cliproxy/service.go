@@ -132,7 +132,8 @@ type Service struct {
 	homePluginSyncFetch          func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
 	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
 	antigravityProbeWg           sync.WaitGroup
-	// antigravityContext is protected by cfgMu and owns background model probes.
+	// antigravityContext is protected by cfgMu and owns background model probes
+	// (Antigravity capability probes and Devin model list fetches).
 	antigravityContext       context.Context
 	antigravityProbeMu       sync.Mutex
 	antigravityAccountProbes map[string]map[*antigravityAccountProbe]struct{}
@@ -143,6 +144,12 @@ type Service struct {
 	antigravityRefreshPending map[string]*antigravityModelRefreshRequest
 	antigravityPersistPending map[string]*antigravityHintPersistRequest
 	antigravityPersistActive  map[string]*antigravityHintPersistRequest
+	// devinModelMu guards devinModelCache and devinModelSlots, which hold
+	// per-auth Devin model lists fetched from upstream.
+	devinModelMu    sync.Mutex
+	devinModelCache map[string]*devinModelCacheEntry
+	devinModelSlots chan struct{}
+	devinModelWg    sync.WaitGroup
 }
 
 // SetResultPolicy sets an execution result policy on the underlying core auth manager.
