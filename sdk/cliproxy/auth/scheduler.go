@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategyGreedy             schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -166,6 +167,8 @@ func newAuthScheduler(selector Selector) *authScheduler {
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
 func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
+	case *GreedySelector:
+		return schedulerStrategyGreedy
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
@@ -517,6 +520,23 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
+	if strategy == schedulerStrategyGreedy {
+		var best *Auth
+		var provider string
+		for i, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
+			if picked != nil && (best == nil || greedyAuthLess(picked, best, now)) {
+				best, provider = picked, normalized[i]
+			}
+		}
+		if best != nil {
+			return best, provider, nil
+		}
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
 	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
@@ -972,10 +992,17 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	}
 	isBlocked := isCredentialBlocked(auth, modelCount, now)
 	credentialAvailabilityChanged := wasBlocked != isBlocked
+	greedyResetChanged := false
+	if s.strategy == schedulerStrategyGreedy && existingMeta != nil {
+		previous := EffectiveQuotaResetSchedule(existingMeta.auth)
+		current := EffectiveQuotaResetSchedule(auth)
+		greedyResetChanged = !previous.WeeklyResetAt.Equal(current.WeeklyResetAt) ||
+			!previous.FiveHourResetAt.Equal(current.FiveHourResetAt)
+	}
 
-	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 {
+	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || greedyResetChanged || len(targetModels) == 0 {
 		// Synchronize all shards when model sets change, when failures are credential-scoped,
-		// or when credential-level availability transitioned.
+		// when credential-level availability transitioned, or when greedy reset ranks changed.
 		providerState.upsertAuthForModelsLocked(meta, nil, true, now)
 	} else {
 		providerState.upsertAuthForModelsLocked(meta, targetModels, credentialScoped, now)
@@ -1374,6 +1401,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	}
 	var picked *scheduledAuth
 	switch strategy {
+	case schedulerStrategyGreedy:
+		picked = view.pickGreedy(predicate)
 	case schedulerStrategyFillFirst:
 		picked = view.pickFirst(predicate)
 	case schedulerStrategyWeightedRoundRobin:
