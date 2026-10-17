@@ -93,6 +93,7 @@ type antigravityFetchAvailableModelsResponse struct {
 
 type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
+	// Retain raw wire IDs; public-ID normalization must not invent entitlements.
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
 	ModelIDs map[string]struct{}
 	revision uint64
@@ -305,22 +306,24 @@ func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 func parsePersistedAntigravityModelSet(raw any) (map[string]struct{}, bool) {
 	switch items := raw.(type) {
 	case []any:
-		set := make(map[string]struct{}, len(items))
+		set := make(map[string]struct{}, len(items)*2)
 		for _, item := range items {
 			s, ok := item.(string)
 			if !ok {
 				return nil, false
 			}
-			if normalized := normalizeAntigravityFetchedModelID(s); normalized != "" {
-				set[normalized] = struct{}{}
+			rawID := normalizeAntigravityFetchedModelID(s)
+			if rawID != "" {
+				set[rawID] = struct{}{}
 			}
 		}
 		return set, true
 	case []string:
-		set := make(map[string]struct{}, len(items))
+		set := make(map[string]struct{}, len(items)*2)
 		for _, s := range items {
-			if normalized := normalizeAntigravityFetchedModelID(s); normalized != "" {
-				set[normalized] = struct{}{}
+			rawID := normalizeAntigravityFetchedModelID(s)
+			if rawID != "" {
+				set[rawID] = struct{}{}
 			}
 		}
 		return set, true
@@ -559,23 +562,47 @@ func parseAntigravityModelCapabilityHints(body []byte) (antigravityModelCapabili
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return antigravityModelCapabilityHints{}, false
 	}
-	webSearchModels := make(map[string]struct{}, len(parsed.WebSearchModelIDs))
+	webSearchModels := make(map[string]struct{}, len(parsed.WebSearchModelIDs)*2)
 	for _, modelID := range parsed.WebSearchModelIDs {
-		modelID = normalizeAntigravityFetchedModelID(modelID)
-		if modelID != "" {
-			webSearchModels[modelID] = struct{}{}
+		rawID := normalizeAntigravityFetchedModelID(modelID)
+		if rawID != "" {
+			webSearchModels[rawID] = struct{}{}
+		}
+		if norm := registry.NormalizeAntigravityModelID(rawID); norm != "" {
+			webSearchModels[norm] = struct{}{}
 		}
 	}
 	var modelIDs map[string]struct{}
 	if parsed.Models != nil {
-		modelIDs = make(map[string]struct{}, len(parsed.Models))
+		modelIDs = make(map[string]struct{}, len(parsed.Models)*2)
 		for id := range parsed.Models {
-			if normalized := normalizeAntigravityFetchedModelID(id); normalized != "" {
-				modelIDs[normalized] = struct{}{}
+			rawID := normalizeAntigravityFetchedModelID(id)
+			if rawID != "" {
+				modelIDs[rawID] = struct{}{}
 			}
 		}
 	}
 	return antigravityModelCapabilityHints{WebSearchModelIDs: webSearchModels, ModelIDs: modelIDs}, true
+}
+
+func hasAntigravityWebSearchCapability(hints antigravityModelCapabilityHints, modelID string) bool {
+	if len(hints.WebSearchModelIDs) == 0 {
+		return false
+	}
+	raw := normalizeAntigravityFetchedModelID(modelID)
+	if _, ok := hints.WebSearchModelIDs[raw]; ok {
+		return true
+	}
+	norm := registry.NormalizeAntigravityModelID(raw)
+	if _, ok := hints.WebSearchModelIDs[norm]; ok {
+		return true
+	}
+	for wsID := range hints.WebSearchModelIDs {
+		if registry.NormalizeAntigravityModelID(wsID) == norm {
+			return true
+		}
+	}
+	return false
 }
 
 func applyAntigravityFetchedModelCapabilities(models []*ModelInfo, hints antigravityModelCapabilityHints) []*ModelInfo {
@@ -587,8 +614,7 @@ func applyAntigravityFetchedModelCapabilities(models []*ModelInfo, hints antigra
 		if model == nil {
 			continue
 		}
-		modelID := normalizeAntigravityFetchedModelID(model.ID)
-		if _, ok := hints.WebSearchModelIDs[modelID]; ok {
+		if hasAntigravityWebSearchCapability(hints, model.ID) {
 			model.SupportsWebSearch = true
 		}
 	}
@@ -628,13 +654,44 @@ func (s *Service) antigravityHomeEnabled() bool {
 	return s.cfg != nil && s.cfg.Home.Enabled
 }
 
+func hasAntigravityModelEntitlement(hints antigravityModelCapabilityHints, modelID string) bool {
+	if hints.ModelIDs == nil {
+		return true
+	}
+	raw := normalizeAntigravityFetchedModelID(modelID)
+	if _, ok := hints.ModelIDs[raw]; ok {
+		return true
+	}
+	norm := registry.NormalizeAntigravityModelID(raw)
+	if _, ok := hints.ModelIDs[norm]; ok {
+		return true
+	}
+	for hintID := range hints.ModelIDs {
+		if registry.NormalizeAntigravityModelID(hintID) == norm {
+			return true
+		}
+	}
+	if norm == "claude-opus-5-5-high" || norm == "claude-opus-5-5" {
+		if _, ok := hints.ModelIDs["claude-opus-4-6-thinking"]; ok {
+			return true
+		}
+	}
+	if norm == "claude-sonnet-5-5-high" || norm == "claude-sonnet-5-5" {
+		if _, ok := hints.ModelIDs["claude-sonnet-4-6"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func filterAntigravityModels(models []*ModelInfo, hints antigravityModelCapabilityHints) []*ModelInfo {
+	if hints.ModelIDs == nil {
+		return models
+	}
 	filtered := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
-		if model != nil {
-			if _, ok := hints.ModelIDs[normalizeAntigravityFetchedModelID(model.ID)]; ok {
-				filtered = append(filtered, model)
-			}
+		if model != nil && hasAntigravityModelEntitlement(hints, model.ID) {
+			filtered = append(filtered, model)
 		}
 	}
 	return filtered
@@ -652,6 +709,9 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
 		cfg = &config.Config{}
 	}
 	models := filterAntigravityModels(registry.GetAntigravityModels(), hints)
+	for _, model := range models {
+		model.UpstreamModelID = registry.ResolveAntigravityUpstreamModel(model.ID, hints.ModelIDs)
+	}
 	models = applyAntigravityFetchedModelCapabilities(models, hints)
 	excluded := cfg.OAuthExcludedModels[coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())]
 	if value := strings.TrimSpace(auth.Attributes["excluded_models"]); value != "" {
@@ -726,7 +786,7 @@ func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth
 		// Older capability-only responses cannot revoke model entitlements.
 		aliasMap := s.buildAntigravityReverseAliasMap(auth)
 		updated = GlobalModelRegistry().ApplyClientModelCapabilities(auth.ID, expectedRegEpoch, func(id string, info *ModelInfo) {
-			if _, ok := hints.WebSearchModelIDs[resolveAntigravityUpstreamModelID(id, auth.Prefix, aliasMap)]; ok {
+			if hasAntigravityWebSearchCapability(hints, resolveAntigravityUpstreamModelID(id, auth.Prefix, aliasMap)) {
 				info.SupportsWebSearch = true
 			}
 		})

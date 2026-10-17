@@ -1467,15 +1467,17 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   false,
 		},
-		// Case 31B: Antigravity keeps the same fully disabled representation.
+		// Case 31B: Antigravity keeps explicit disabled representation with budget 0 and includeThoughts=false.
 		{
-			name:        "31B",
-			from:        "openai",
-			to:          "antigravity",
-			model:       "gemini-toggle-mixed-model",
-			inputJSON:   `{"model":"gemini-toggle-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
-			expectField: "",
-			expectErr:   false,
+			name:            "31B",
+			from:            "openai",
+			to:              "antigravity",
+			model:           "gemini-toggle-mixed-model",
+			inputJSON:       `{"model":"gemini-toggle-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
+			expectValue:     "0",
+			includeThoughts: "false",
+			expectErr:       false,
 		},
 		// Case 31C: reasoning.effort=none with zero allowed → delete thinkingConfig
 		{
@@ -1487,15 +1489,17 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   false,
 		},
-		// Case 31D: reasoning.effort=none with zero allowed to Antigravity → delete thinkingConfig
+		// Case 31D: reasoning.effort=none with zero allowed to Antigravity → explicit disabled with budget 0 and includeThoughts=false
 		{
-			name:        "31D",
-			from:        "openai-response",
-			to:          "antigravity",
-			model:       "gemini-toggle-mixed-model",
-			inputJSON:   `{"model":"gemini-toggle-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
-			expectField: "",
-			expectErr:   false,
+			name:            "31D",
+			from:            "openai-response",
+			to:              "antigravity",
+			model:           "gemini-toggle-mixed-model",
+			inputJSON:       `{"model":"gemini-toggle-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
+			expectValue:     "0",
+			includeThoughts: "false",
+			expectErr:       false,
 		},
 		// Case 32: reasoning_effort=auto → -1 (DynamicAllowed=true)
 		{

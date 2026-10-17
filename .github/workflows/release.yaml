@@ -1,6 +1,7 @@
 name: release
 
 on:
+  workflow_dispatch:
   push:
     # run only against tags
     tags:
@@ -15,6 +16,7 @@ env:
 
 jobs:
   prepare-release:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -88,7 +90,7 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
           fi
 
   build-hosted:
@@ -426,9 +428,14 @@ jobs:
           rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
-          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -buildvcs=false \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "$archive_dir/cli-proxy-api" ./cmd/server/
+          make release \
+            GOOS=linux \
+            GOARCH="$GOARCH" \
+            CGO_ENABLED=0 \
+            VERSION="${RELEASE_VERSION}" \
+            COMMIT="${COMMIT}" \
+            BUILD_DATE="${BUILD_DATE}" \
+            OUTPUT="$archive_dir/cli-proxy-api"
 
           if readelf -l "$archive_dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
             readelf -l "$archive_dir/cli-proxy-api" >&2
@@ -690,7 +697,7 @@ jobs:
 
   publish-checksums:
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && github.ref_type == 'tag'
     needs:
       - build-hosted
       - build-linux-glibc

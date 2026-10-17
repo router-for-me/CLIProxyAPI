@@ -4072,14 +4072,14 @@
       ]
     },
     {
-      "id": "gemini-4-argon-high",
+      "id": "gemini-4-argon",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
       "supports_web_search": true,
       "display_name": "Gemini 4 Argon",
-      "name": "gemini-4-argon-high",
-      "description": "Gemini 4 Argon (High)",
+      "name": "gemini-4-argon",
+      "description": "Gemini 4 Argon",
       "context_length": 1048576,
       "max_completion_tokens": 1048576,
       "thinking": {
@@ -4106,14 +4106,14 @@
       }
     },
     {
-      "id": "gemini-3.8-flash-high",
+      "id": "gemini-3.8-flash",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
       "supports_web_search": true,
       "display_name": "Gemini 3.8 Flash",
-      "name": "gemini-3.8-flash-high",
-      "description": "Gemini 3.8 Flash (High)",
+      "name": "gemini-3.8-flash",
+      "description": "Gemini 3.8 Flash",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
