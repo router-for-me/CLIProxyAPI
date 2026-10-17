@@ -130,8 +130,16 @@ func ParseClaudeRateLimitResetForError(headers http.Header, body []byte, now tim
 		"Anthropic-Ratelimit-Unified-7d_oi-Status",
 		"Anthropic-Ratelimit-Unified-Overage-Status",
 	} {
-		if strings.TrimSpace(getHeaderCaseInsensitive(headers, name)) != "" {
-			return ParseClaudeRateLimitReset(headers, now)
+		// A repeated header or differently cased alias can carry quota evidence
+		// after an empty first value. Inspect all values before narrowing resets.
+		for key, values := range headers {
+			if strings.EqualFold(key, name) {
+				for _, value := range values {
+					if strings.TrimSpace(value) != "" {
+						return ParseClaudeRateLimitReset(headers, now)
+					}
+				}
+			}
 		}
 	}
 	var envelope struct {
@@ -152,7 +160,9 @@ func ParseClaudeRateLimitResetForError(headers http.Header, body []byte, now tim
 			requestRate = true
 		}
 		if requestRate {
-			if retry, valid := parseRetryAfterHeader(getHeaderCaseInsensitive(headers, "Retry-After"), now); valid && retry.After(now) {
+			// Keep the fallback reset unless Retry-After survives the downstream
+			// deadline filter, including its maximum recoverable window.
+			if retry, valid := parseRetryAfterHeader(getHeaderCaseInsensitive(headers, "Retry-After"), now); valid && retry.After(now) && retry.Sub(now) <= maxClaudeRateLimitWindow {
 				rateHeaders := headers.Clone()
 				// Header names can arrive non-canonical through intermediary transports.
 				for name := range rateHeaders {

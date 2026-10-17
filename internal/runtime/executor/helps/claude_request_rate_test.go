@@ -1,6 +1,8 @@
 package helps
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"reflect"
@@ -110,6 +112,71 @@ func TestClaudeRequestRateRetryKeepsQuotaEvidence(t *testing.T) {
 			}
 			if got == nil || *got < want+time.Second || *got > want+30*time.Second {
 				t.Fatalf("want %v plus 1–30s grace, got %v", want, got)
+			}
+		})
+	}
+}
+
+func TestClaudeRequestRateConservativeHeaderAndRetryBoundaries(t *testing.T) {
+	now := time.Date(2026, 10, 17, 14, 0, 0, 0, time.UTC)
+	body := []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed the requests per minute rate limit. Please try again later."}}`)
+
+	type resetCase struct {
+		name, retry string
+		headers     http.Header
+		roundtrip   bool
+		want        time.Duration
+	}
+	cases := []resetCase{}
+	for _, name := range []string{"Anthropic-Ratelimit-Unified-Status", "Anthropic-Ratelimit-Unified-5h-Status", "Anthropic-Ratelimit-Unified-7d-Status", "Anthropic-Ratelimit-Unified-7d_oi-Status", "Anthropic-Ratelimit-Unified-Overage-Status"} {
+		for _, variant := range []string{"canonical", "lowercase", "case_aliases", "http_roundtrip"} {
+			key := name
+			if variant == "lowercase" {
+				key = strings.ToLower(name)
+			}
+			h := http.Header{key: {"", "rejected"}}
+			if variant == "case_aliases" {
+				h = http.Header{name: {""}, strings.ToLower(name): {"", "rejected"}}
+			}
+			cases = append(cases, resetCase{name + "/" + variant, "30", h, variant == "http_roundtrip", 4 * time.Hour})
+		}
+	}
+	for _, retry := range []string{"691200", "608401", now.Add(8 * 24 * time.Hour).UTC().Format(http.TimeFormat), now.Add(8 * 24 * time.Hour).UTC().Format(time.RFC3339)} {
+		cases = append(cases, resetCase{"unusable_retry/" + retry, retry, nil, false, 4 * time.Hour})
+	}
+	// The longest supported deadline remains usable; do not tighten this boundary.
+	cases = append(cases, resetCase{"maximum_usable_retry", "608400", nil, false, 7*24*time.Hour + time.Hour})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+
+			h := tc.headers.Clone()
+			if h == nil {
+				h = http.Header{}
+			}
+			h.Set("Retry-After", tc.retry)
+			h.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(4*time.Hour).Unix(), 10))
+			if tc.roundtrip {
+				var wire bytes.Buffer
+				resp := &http.Response{StatusCode: 429, ProtoMajor: 1, ProtoMinor: 1, Header: h, Body: http.NoBody}
+				if err := resp.Write(&wire); err != nil {
+					t.Fatal(err)
+				}
+				parsed, err := http.ReadResponse(bufio.NewReader(&wire), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				h = parsed.Header
+				if err := parsed.Body.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := h.Clone()
+			got := ParseClaudeRateLimitResetForError(h, body, now)
+			if !reflect.DeepEqual(h, before) {
+				t.Fatal("mutated upstream headers")
+			}
+			if got == nil || *got < tc.want+time.Second || *got > tc.want+30*time.Second {
+				t.Fatalf("want %v plus 1–30s grace, got %v", tc.want, got)
 			}
 		})
 	}
