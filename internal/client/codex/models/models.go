@@ -892,6 +892,31 @@ func normalizeCodexClientReasoningLevel(rawLevel string, clientVersion string) s
 	return level
 }
 
+// ResolveClientVersion normalizes the client_version query parameter using
+// the request User-Agent. EasyCLIProxyAPI passes its own desktop application
+// version (e.g. "0.3.37") as client_version, which must be treated as the CPA
+// management catalog ("cpa") rather than a legacy Codex CLI version (< 0.144.0).
+// When client_version is empty and User-Agent carries a Codex client version,
+// that version is extracted so version-gated catalog fields are preserved.
+func ResolveClientVersion(clientVersion, userAgent string) string {
+	trimmedUA := strings.TrimSpace(userAgent)
+	if len(trimmedUA) >= len("EasyCLIProxyAPI/") && strings.EqualFold(trimmedUA[:len("EasyCLIProxyAPI/")], "EasyCLIProxyAPI/") {
+		return "cpa"
+	}
+	if strings.TrimSpace(clientVersion) != "" {
+		return clientVersion
+	}
+	for _, prefix := range []string{"codex_cli_rs/", "codex_exec/", "Codex Desktop/", "codex/"} {
+		if len(trimmedUA) > len(prefix) && strings.EqualFold(trimmedUA[:len(prefix)], prefix) {
+			rest := strings.TrimSpace(trimmedUA[len(prefix):])
+			if fields := strings.Fields(rest); len(fields) > 0 {
+				return strings.Trim(fields[0], "(),;")
+			}
+		}
+	}
+	return clientVersion
+}
+
 // supportsExtendedReasoningLevels reports whether the given clientVersion supports
 // extended reasoning effort levels ("max" and "ultra"), which require Codex CLI >= 0.144.0.
 // If the version is empty or unparseable, it returns true to preserve modern features.
