@@ -592,10 +592,15 @@ func rewriteCallRequestModel(body []byte, contentType, model string) ([]byte, st
 		if errUnmarshal := json.Unmarshal(sessionJSON, &session); errUnmarshal != nil {
 			return nil, "", fmt.Errorf("failed to decode Realtime session: %w", errUnmarshal)
 		}
+		encodedType, errMarshal := json.Marshal("quicksilver")
+		if errMarshal != nil {
+			return nil, "", fmt.Errorf("failed to encode Realtime session type: %w", errMarshal)
+		}
 		encodedModel, errMarshal := json.Marshal(upstreamModel)
 		if errMarshal != nil {
 			return nil, "", fmt.Errorf("failed to encode Realtime model: %w", errMarshal)
 		}
+		session["type"] = encodedType
 		session["model"] = encodedModel
 		encodedSession, errMarshal := json.Marshal(session)
 		if errMarshal != nil {
