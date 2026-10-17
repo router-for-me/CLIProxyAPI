@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -152,5 +153,154 @@ func TestCodexWebsocketLiteHeaderWithoutSessionHeaders(t *testing.T) {
 				t.Errorf("native=%t disableCloaking=%t: Lite header = %q, want %q", native, disableCloaking, value, want)
 			}
 		}
+	}
+}
+
+func TestApplyCodexCloakingHeadersPreservesNativeIdentity(t *testing.T) {
+	const nativeUA = "codex-tui/0.154.0 (Mac OS 15.7.9; arm64) Apple_Terminal (codex-tui; 0.154.0)"
+	disabled := false
+	cases := []struct {
+		name           string
+		cfg            *config.Config
+		userAgent      string
+		originator     string
+		wantUserAgent  string
+		wantOriginator string
+	}{
+		{
+			name:           "coherent identity preserved by default",
+			cfg:            &config.Config{},
+			userAgent:      nativeUA,
+			originator:     "codex-tui",
+			wantUserAgent:  nativeUA,
+			wantOriginator: "codex-tui",
+		},
+		{
+			name:           "preservation disabled falls back to cloaking",
+			cfg:            &config.Config{Codex: config.CodexConfig{PreserveNativeClientIdentity: &disabled}},
+			userAgent:      nativeUA,
+			originator:     "codex-tui",
+			wantUserAgent:  codexUserAgent,
+			wantOriginator: codexOriginator,
+		},
+		{
+			name:           "incoherent pair still cloaked",
+			cfg:            &config.Config{},
+			userAgent:      nativeUA,
+			originator:     "my-proxy",
+			wantUserAgent:  codexUserAgent,
+			wantOriginator: codexOriginator,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set("User-Agent", tc.userAgent)
+			headers.Set("Originator", tc.originator)
+			applyCodexCloakingHeaders(headers, tc.cfg, nil)
+			if got := headers.Get("User-Agent"); got != tc.wantUserAgent {
+				t.Errorf("User-Agent = %q, want %q", got, tc.wantUserAgent)
+			}
+			if got := headers.Get("Originator"); got != tc.wantOriginator {
+				t.Errorf("Originator = %q, want %q", got, tc.wantOriginator)
+			}
+		})
+	}
+}
+
+func TestCodexHeadersPreserveNativeIdentityAcrossTransports(t *testing.T) {
+	const nativeUA = "codex_cli_rs/0.155.1 (Mac OS 15.7.9; arm64)"
+	disabled := false
+	for _, transport := range []string{"http", "sse", "websocket"} {
+		for _, tc := range []struct {
+			name       string
+			preserve   *bool
+			originator string
+			wantUA     string
+			wantOrigin string
+		}{
+			{"default preserves client over configured user agent", nil, "codex_cli_rs", nativeUA, "codex_cli_rs"},
+			{"explicit false restores cloaking", &disabled, "codex_cli_rs", codexUserAgent, codexOriginator},
+			{"mismatched identity uses cloaking", nil, "third-party", codexUserAgent, codexOriginator},
+		} {
+			t.Run(transport+"/"+tc.name, func(t *testing.T) {
+				cfg := &config.Config{
+					Codex:               config.CodexConfig{PreserveNativeClientIdentity: tc.preserve},
+					CodexHeaderDefaults: config.CodexHeaderDefaults{UserAgent: "configured-ua"},
+				}
+				headers := http.Header{}
+				headers.Set("User-Agent", nativeUA)
+				headers.Set("Originator", tc.originator)
+				headers.Set("X-Codex-Turn-Metadata", "client-metadata")
+				auth := &cliproxyauth.Auth{Provider: "codex"}
+				var got http.Header
+				if transport == "websocket" {
+					got = applyCodexWebsocketHeaders(context.Background(), nil, auth, "fixture-token", cfg, true, headers)
+				} else {
+					req := httptest.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+					applyCodexHeaders(req, auth, "fixture-token", transport == "sse", cfg, headers)
+					got = req.Header
+				}
+				if got.Get("User-Agent") != tc.wantUA || got.Get("Originator") != tc.wantOrigin {
+					t.Fatalf("identity = (%q, %q), want (%q, %q)", got.Get("User-Agent"), got.Get("Originator"), tc.wantUA, tc.wantOrigin)
+				}
+				if got.Get("X-Codex-Turn-Metadata") != "client-metadata" {
+					t.Fatal("client turn metadata was not preserved")
+				}
+			})
+		}
+	}
+}
+
+func TestCodexWebsocketHeadersMirrorNativeSessionHeaders(t *testing.T) {
+	const nativeUA = "codex-tui/0.160.0 (Mac OS 15.7.9; arm64) Apple_Terminal (codex-tui; 0.160.0)"
+	const threadID = "01a13fb6-8653-7b32-8359-6c989bddff45"
+	disabled := false
+	for _, tc := range []struct {
+		name       string
+		preserve   *bool
+		userAgent  string
+		originator string
+		mirrored   bool
+	}{
+		{"native identity mirrors client session headers", nil, nativeUA, "codex-tui", true},
+		{"preservation disabled keeps proxy session headers", &disabled, nativeUA, "codex-tui", false},
+		{"third-party identity keeps proxy session headers", nil, "my-proxy/1.0.0", "my-proxy", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Codex: config.CodexConfig{PreserveNativeClientIdentity: tc.preserve}}
+			client := http.Header{}
+			client.Set("User-Agent", tc.userAgent)
+			client.Set("Originator", tc.originator)
+			client.Set("Session-Id", threadID)
+			client.Set("Thread-Id", threadID)
+			client.Set("X-Codex-Window-Id", threadID+":0")
+			// Mirrors prepareCodexWebsocketRequest, which seeds the proxy-derived session headers first.
+			seeded := http.Header{}
+			setHeaderCasePreserved(seeded, "session_id", threadID)
+			seeded.Set("Conversation_id", threadID)
+			auth := &cliproxyauth.Auth{Provider: "codex"}
+			got := applyCodexWebsocketHeaders(context.Background(), seeded, auth, "fixture-token", cfg, false, client)
+
+			if tc.mirrored {
+				for key, want := range map[string]string{"Session-Id": threadID, "Thread-Id": threadID, "X-Codex-Window-Id": threadID + ":0"} {
+					if values, ok := got[key]; !ok || len(values) != 1 || values[0] != want {
+						t.Errorf("%s = %q, want %q sent verbatim", key, values, want)
+					}
+				}
+				for _, key := range []string{"session_id", "Conversation_id"} {
+					if _, ok := got[key]; ok {
+						t.Errorf("proxy-derived %s should not be sent alongside native session headers: %v", key, got)
+					}
+				}
+				return
+			}
+			if headerValueCaseInsensitive(got, "session_id") != threadID || got.Get("Conversation_id") != threadID {
+				t.Errorf("proxy session headers lost: %v", got)
+			}
+			if got.Get("Thread-Id") != "" || got.Get("X-Codex-Window-Id") != "" {
+				t.Errorf("client thread headers unexpectedly forwarded: %v", got)
+			}
+		})
 	}
 }

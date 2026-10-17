@@ -230,6 +230,9 @@ type AntigravityConnectionPoolConfig struct {
 type CodexConfig struct {
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
+	// PreserveNativeClientIdentity preserves a coherent downstream Codex User-Agent and Originator.
+	// Unset configuration defaults to true; false restores the built-in cloaking identity.
+	PreserveNativeClientIdentity *bool `yaml:"preserve-native-client-identity,omitempty" json:"preserve-native-client-identity,omitempty"`
 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
 	// which the client has seen anything from - the handshake (response.created, response.in_progress,
 	// the websocket metadata frames), keepalive heartbeats, and the *.added announcements of an item

@@ -1058,6 +1058,8 @@ oauth:
 
     # Codex provider behavior.
     codex:
+      # Preserve coherent native Codex client identity and session headers (default: true).
+      preserve-native-client-identity: true
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
       live-media-relay:
