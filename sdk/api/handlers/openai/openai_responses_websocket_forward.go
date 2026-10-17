@@ -161,6 +161,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
 				if gjson.GetBytes(payloads[i], "type").String() == "response.created" {
+					// A new response on the same stream can be interrupted locally again.
+					if opts.localInterrupt != nil && completed {
+						opts.localInterrupt.begin()
+						localFrames = opts.localInterrupt.framesChan()
+					}
 					responseStarted = true
 					completed = false
 					outputItemsByIndex = make(map[int64][]byte)
@@ -199,6 +204,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
+					// The turn is over before the client can see it end: an interrupt the
+					// client sends after this event must not be taken for this turn.
+					opts.localInterrupt.end()
+					localFrames = nil
 				}
 				markAPIResponseTimestamp(c)
 				if payloadErrMsg != nil {
