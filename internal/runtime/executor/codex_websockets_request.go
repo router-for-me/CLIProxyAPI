@@ -120,6 +120,8 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	if isAPIKey {
 		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
+	} else if nativeUserAgent := helps.NativeCodexUserAgent(cfg, ginHeaders); nativeUserAgent != "" {
+		headers.Set("User-Agent", nativeUserAgent)
 	} else {
 		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 	}
@@ -137,7 +139,10 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		sessionFallback = uuid.NewString()
 	}
 	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
-	if nativeRequest && isCodexCloakingDisabled(cfg, auth) {
+	// A genuine Codex client already sends its own session headers (Session-Id, Thread-Id,
+	// X-Codex-Window-Id). Mirror them verbatim instead of the proxy-derived session_id/Conversation_id
+	// so the handshake matches what the client would send upstream directly.
+	if (nativeRequest && isCodexCloakingDisabled(cfg, auth)) || helps.NativeCodexUserAgent(cfg, ginHeaders) != "" {
 		deleteHeaderCaseInsensitive(headers, "session_id")
 		deleteHeaderCaseInsensitive(headers, "conversation_id")
 		for key, values := range ginHeaders {

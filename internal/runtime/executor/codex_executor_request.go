@@ -281,7 +281,11 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Openai-Internal-Codex-Responses-Lite", "")
 
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	if nativeUserAgent := helps.NativeCodexUserAgent(cfg, ginHeaders); nativeUserAgent != "" {
+		r.Header.Set("User-Agent", nativeUserAgent)
+	} else {
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	}
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -385,6 +389,9 @@ func isCodexCloakingDisabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
 
 func applyCodexCloakingHeaders(headers http.Header, cfg *config.Config, auth *cliproxyauth.Auth) {
 	if headers == nil || cfg == nil || isCodexCloakingDisabled(cfg, auth) {
+		return
+	}
+	if helps.PreserveNativeCodexIdentity(cfg) && helps.IsFirstPartyCodexIdentity(headers.Get("User-Agent"), headers.Get("Originator")) {
 		return
 	}
 	headers.Set("User-Agent", codexUserAgent)
