@@ -38,6 +38,38 @@ func (e schedulerProviderTestExecutor) HttpRequest(ctx context.Context, auth *Au
 	return nil, nil
 }
 
+type scheduledRefreshTestExecutor struct {
+	schedulerProviderTestExecutor
+	nextRefresh time.Time
+}
+
+func (e scheduledRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	auth.NextRefreshAfter = e.nextRefresh
+	return auth, nil
+}
+
+func TestManager_RefreshAuthPreservesPluginSchedule(t *testing.T) {
+	ctx := context.Background()
+	nextRefresh := time.Now().Add(time.Hour).Truncate(time.Second)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(scheduledRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "factory"},
+		nextRefresh:                   nextRefresh,
+	})
+	auth := &Auth{ID: "scheduled-plugin-refresh", Provider: "factory", Status: StatusActive}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshed, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, "")
+	if errRefresh != nil {
+		t.Fatalf("refresh auth: %v", errRefresh)
+	}
+	if !refreshed.NextRefreshAfter.Equal(nextRefresh) {
+		t.Fatalf("NextRefreshAfter = %s, want plugin schedule %s", refreshed.NextRefreshAfter, nextRefresh)
+	}
+}
+
 type unauthorizedRefreshTestExecutor struct {
 	schedulerProviderTestExecutor
 }
