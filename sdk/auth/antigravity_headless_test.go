@@ -67,8 +67,8 @@ func TestAntigravityConstantsAndURLBuilder(t *testing.T) {
 
 func TestAntigravityUserAgent(t *testing.T) {
 	ua := auth.AntigravityUserAgent()
-	if !strings.HasPrefix(ua, "antigravity/hub/") {
-		t.Fatalf("expected AntigravityUserAgent to start with antigravity/hub/, got %q", ua)
+	if !strings.HasPrefix(ua, "antigravity/cli/") {
+		t.Fatalf("expected AntigravityUserAgent to start with antigravity/cli/, got %q", ua)
 	}
 }
 

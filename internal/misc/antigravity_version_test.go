@@ -62,13 +62,19 @@ func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
 	}
 }
 
-func TestAntigravityUserAgentUsesHubFamily(t *testing.T) {
+func TestAntigravityUserAgentUsesCliFamily(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/hub/2.2.1 darwin/arm64"
+	want := "antigravity/cli/2.2.1 darwin/arm64"
 	if got := AntigravityUserAgent(); got != want {
 		t.Fatalf("AntigravityUserAgent() = %q, want %q", got, want)
+	}
+}
+
+func TestAntigravityVersionFromUserAgentParsesCliFamily(t *testing.T) {
+	if got := AntigravityVersionFromUserAgent("antigravity/cli/2.2.1 darwin/arm64"); got != "2.2.1" {
+		t.Fatalf("AntigravityVersionFromUserAgent() = %q, want %q", got, "2.2.1")
 	}
 }
 
@@ -88,7 +94,7 @@ func TestAntigravityLoadCodeAssistUserAgentUsesShortUA(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/hub/2.2.1 darwin/arm64"
+	want := "antigravity/cli/2.2.1 darwin/arm64"
 	if got := AntigravityLoadCodeAssistUserAgent(""); got != want {
 		t.Fatalf("AntigravityLoadCodeAssistUserAgent() = %q, want %q", got, want)
 	}
@@ -101,7 +107,7 @@ func TestAntigravityOnboardUserUserAgentUsesLongUA(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/hub/2.2.1 darwin/arm64 google-api-nodejs-client/10.3.0"
+	want := "antigravity/cli/2.2.1 darwin/arm64 google-api-nodejs-client/10.3.0"
 	if got := AntigravityOnboardUserUserAgent(""); got != want {
 		t.Fatalf("AntigravityOnboardUserUserAgent() = %q, want %q", got, want)
 	}
