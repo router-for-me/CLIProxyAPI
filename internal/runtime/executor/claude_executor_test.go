@@ -9007,6 +9007,27 @@ func TestReconcileClaudeCodeContextManagement(t *testing.T) {
 	}
 }
 
+// Anthropic rejects an on-demand compaction request (compact-2026-09-04) that
+// also carries context_management, so cloaking must not supply its object there.
+func TestClaudeExecutorCompactionRequestGetsNoContextManagement(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		compaction := []byte(`{"model":"claude-opus-5","max_tokens":4096,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"hi"}],"compaction":{"type":"summarize"}}`)
+		upstreamBody := executeClaudeContextManagementRequest(t, &config.Config{}, compaction, stream)
+		if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+			t.Fatalf("stream=%v: compaction request carried context_management = %s", stream, got.Raw)
+		}
+		if got := gjson.GetBytes(upstreamBody, "compaction.type").String(); got != "summarize" {
+			t.Fatalf("stream=%v: compaction.type = %q, want summarize; body=%s", stream, got, upstreamBody)
+		}
+
+		turn := []byte(`{"model":"claude-opus-5","max_tokens":4096,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"hi"}]}`)
+		upstreamBody = executeClaudeContextManagementRequest(t, &config.Config{}, turn, stream)
+		if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
+			t.Fatalf("stream=%v: ordinary turn context_management = %s, want %s", stream, got, claudeCodeContextManagement)
+		}
+	}
+}
+
 func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 	const model = "claude-opus-5"
 	modelRules := []config.PayloadModelRule{{Name: model, Protocol: "claude"}}
