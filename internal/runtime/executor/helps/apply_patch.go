@@ -158,8 +158,13 @@ func StopApplyPatchStreamWithUsage(ctx context.Context, param any, reporter *Usa
 
 // EndApplyPatchStream checks EOF before any synthetic success or usage publication.
 func EndApplyPatchStream(ctx context.Context, param any, reporter *UsageReporter, out chan<- cliproxyexecutor.StreamChunk, gatewayErr error) bool {
+	return EndApplyPatchStreamWithUsage(ctx, param, reporter, nil, out, gatewayErr)
+}
+
+// EndApplyPatchStreamWithUsage checks EOF with buffered upstream usage.
+func EndApplyPatchStreamWithUsage(ctx context.Context, param any, reporter *UsageReporter, streamUsage *StreamUsageBuffer, out chan<- cliproxyexecutor.StreamChunk, gatewayErr error) bool {
 	chunks := FinalizeApplyPatchStream(param)
-	RecordApplyPatchStreamFailure(ctx, param, reporter, gatewayErr)
+	RecordApplyPatchStreamFailureWithUsage(ctx, param, reporter, streamUsage, gatewayErr)
 	for _, chunk := range chunks {
 		select {
 		case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
@@ -167,7 +172,7 @@ func EndApplyPatchStream(ctx context.Context, param any, reporter *UsageReporter
 			return true
 		}
 	}
-	return StopApplyPatchStream(ctx, param, reporter, out, gatewayErr)
+	return StopApplyPatchStreamWithUsage(ctx, param, reporter, streamUsage, out, gatewayErr)
 }
 
 // ApplyPatchRequested resolves only original winning custom declarations.
