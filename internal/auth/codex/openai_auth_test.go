@@ -304,3 +304,61 @@ func TestCreateAndUpdateTokenStorage_PlanType(t *testing.T) {
 		t.Fatalf("updated storage.PlanType = %q, want free", storage.PlanType)
 	}
 }
+
+func TestCodexAuth_TokenRequestsIncludeUserAgent(t *testing.T) {
+	for _, flow := range []string{"authorization_code", "refresh_token"} {
+		t.Run(flow, func(t *testing.T) {
+			resetCodexRefreshGroupForTest()
+			t.Cleanup(resetCodexRefreshGroupForTest)
+
+			called := false
+			auth := &CodexAuth{
+				httpClient: &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						called = true
+						if req.Method != http.MethodPost || req.URL.String() != TokenURL {
+							t.Errorf("request = %s %s, want POST %s", req.Method, req.URL, TokenURL)
+						}
+						if got := req.Header.Get("User-Agent"); got != defaultCodexUserAgent {
+							t.Errorf("User-Agent = %q, want %q", got, defaultCodexUserAgent)
+						}
+						if got := req.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
+							t.Errorf("Content-Type = %q, want application/x-www-form-urlencoded", got)
+						}
+						if got := req.Header.Get("Accept"); got != "application/json" {
+							t.Errorf("Accept = %q, want application/json", got)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)),
+							Header:     make(http.Header),
+							Request:    req,
+						}, nil
+					}),
+				},
+			}
+
+			if flow == "authorization_code" {
+				bundle, err := auth.ExchangeCodeForTokensWithRedirect(context.Background(), "test-code", RedirectURI, &PKCECodes{CodeVerifier: "test-verifier"})
+				if err != nil {
+					t.Fatalf("ExchangeCodeForTokensWithRedirect failed: %v", err)
+				}
+				if bundle == nil || bundle.TokenData.AccessToken != "new-access" {
+					t.Fatalf("unexpected exchange bundle: %+v", bundle)
+				}
+			} else {
+				tokenData, err := auth.RefreshTokens(context.Background(), "test-refresh")
+				if err != nil {
+					t.Fatalf("RefreshTokens failed: %v", err)
+				}
+				if tokenData == nil || tokenData.AccessToken != "new-access" {
+					t.Fatalf("unexpected tokenData: %+v", tokenData)
+				}
+			}
+
+			if !called {
+				t.Fatal("transport was not called")
+			}
+		})
+	}
+}
