@@ -51,7 +51,12 @@ func (a *GeminiAppAuthenticator) Login(ctx context.Context, cfg *config.Config, 
 	for key, value := range cookies {
 		storedCookies[key] = value
 	}
-	metadata := map[string]any{"type": geminiapp.Provider, "cookies": storedCookies}
+	metadata := map[string]any{
+		"type":      geminiapp.Provider,
+		"auth_kind": coreauth.AuthKindOAuth,
+		"label":     "Gemini App",
+		"cookies":   storedCookies,
+	}
 	now := time.Now()
 	return &coreauth.Auth{ID: name, FileName: name, Provider: geminiapp.Provider, Label: "Gemini App", Status: coreauth.StatusActive, Metadata: metadata, CreatedAt: now, UpdatedAt: now}, nil
 }

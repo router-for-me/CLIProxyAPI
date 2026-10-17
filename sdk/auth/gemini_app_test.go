@@ -37,7 +37,7 @@ func TestGeminiAppImportPersistsAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Provider != "gemini-app" || strings.Contains(record.FileName, "private") || authenticator.RefreshLead() != nil {
+	if record.Provider != "gemini-app" || record.AuthKind() != "oauth" || strings.Contains(record.FileName, "private") || authenticator.RefreshLead() != nil {
 		t.Fatalf("unexpected auth: %s", record.FileName)
 	}
 	data, err := os.ReadFile(saved)
@@ -53,6 +53,9 @@ func TestGeminiAppImportPersistsAuth(t *testing.T) {
 	}
 	if metadata["type"] != "gemini-app" || metadata["cookies"].(map[string]any)["__Secure-1PSID"] != "private-session-cookie" {
 		t.Fatal("session did not survive persistence")
+	}
+	if metadata["auth_kind"] != "oauth" || metadata["label"] != "Gemini App" {
+		t.Fatal("credential classification or label was lost")
 	}
 	info, err := os.Stat(saved)
 	if err != nil {
