@@ -18,6 +18,7 @@ import (
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -1671,5 +1672,163 @@ func TestMetaExecutor_Execute_PreservesMuseReasoningEncryptedContent_Issue6450(t
 	}
 	if gjson.GetBytes(gotBody, "input.1.id").Exists() {
 		t.Fatalf("stream Claude reasoning id should be dropped: %s", gotBody)
+	}
+}
+
+func TestMetaExecutor_ClaudeRequestReplaysMuseReasoning(t *testing.T) {
+	const museEncryptedContent = "Q-PaDg-mock-muse-spark-encrypted-reasoning-payload"
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+	// Turn 2 of a tool round trip, then a thinking-only turn, then a turn with
+	// a thinking block another provider signed and one with no signature.
+	payload := []byte(`{"model":"muse-spark-1.3","max_tokens":1024,"messages":[` +
+		`{"role":"user","content":"list the files"},` +
+		`{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"","signature":"` + museEncryptedContent + `"},` +
+		`{"type":"text","text":"Let me check."},` +
+		`{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.txt"}]},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"` + museEncryptedContent + `-only"}]},` +
+		`{"role":"user","content":"and now?"},` +
+		`{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"","signature":"` + testClaudeCAISSample + `"},` +
+		`{"type":"thinking","thinking":"","signature":""},` +
+		`{"type":"text","text":"Done."}]},` +
+		`{"role":"user","content":"thanks"}]}`)
+
+	assertReplay := func(t *testing.T, body []byte) {
+		t.Helper()
+		var reasoning []gjson.Result
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			if item.Get("type").String() == "reasoning" {
+				reasoning = append(reasoning, item)
+			}
+		}
+		if len(reasoning) != 1 {
+			t.Fatalf("reasoning items = %d, want 1; body=%s", len(reasoning), body)
+		}
+		if got := reasoning[0].Get("encrypted_content").String(); got != museEncryptedContent {
+			t.Fatalf("encrypted_content = %q, want %q; body=%s", got, museEncryptedContent, body)
+		}
+		// The reasoning item stays ahead of the preamble and tool call it produced.
+		input := gjson.GetBytes(body, "input")
+		if got := input.Get("1.type").String(); got != "reasoning" {
+			t.Fatalf("input.1.type = %q, want reasoning; body=%s", got, body)
+		}
+		if got := input.Get("2.role").String(); got != "assistant" {
+			t.Fatalf("input.2.role = %q, want assistant; body=%s", got, body)
+		}
+		if got := input.Get("3.type").String(); got != "function_call" {
+			t.Fatalf("input.3.type = %q, want function_call; body=%s", got, body)
+		}
+		// The preamble before the tool call is commentary; the last answer is not.
+		if got := input.Get("2.phase").String(); got != "commentary" {
+			t.Fatalf("input.2.phase = %q, want commentary; body=%s", got, body)
+		}
+		for _, item := range input.Array()[3:] {
+			if item.Get("phase").Exists() {
+				t.Fatalf("unexpected phase on %s; body=%s", item.Raw, body)
+			}
+		}
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertReplay(t, gotBody)
+
+	gotBody = nil
+	result, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for range result.Chunks {
+	}
+	assertReplay(t, gotBody)
+}
+
+func TestMetaExecutor_ClaudeCodeRequestSendsPromptCacheKey(t *testing.T) {
+	var gotBodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		gotBodies = append(gotBodies, body)
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+	send := func(sessionID, agentID string) string {
+		t.Helper()
+		headers := http.Header{}
+		if sessionID != "" {
+			headers.Set(helps.ClaudeCodeSessionHeader, sessionID)
+		}
+		if agentID != "" {
+			headers.Set(helps.ClaudeCodeAgentHeader, agentID)
+		}
+		_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "muse-spark-1.3",
+			Payload: []byte(`{"model":"muse-spark-1.3","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Headers:      headers,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		return gjson.GetBytes(gotBodies[len(gotBodies)-1], "prompt_cache_key").String()
+	}
+
+	first := send("session-1", "")
+	if first == "" {
+		t.Fatalf("prompt_cache_key missing; body=%s", gotBodies[0])
+	}
+	if again := send("session-1", ""); again != first {
+		t.Fatalf("prompt_cache_key = %q on the same session, want %q", again, first)
+	}
+	if subagent := send("session-1", "agent-2"); subagent == "" || subagent == first {
+		t.Fatalf("subagent prompt_cache_key = %q, want a distinct key", subagent)
+	}
+	if none := send("", ""); none != "" {
+		t.Fatalf("prompt_cache_key = %q without a Claude Code session, want none", none)
 	}
 }
