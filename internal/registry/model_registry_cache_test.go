@@ -98,3 +98,86 @@ func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 		t.Fatalf("expected model to reappear after resume, got %d", len(models))
 	}
 }
+
+func TestGetAvailableModelsPublishesSmallestLimitAcrossClients(t *testing.T) {
+	r := newTestModelRegistry()
+	// Same model ID served by two credentials with different plan limits.
+	r.RegisterClient("codex-pro", "Codex", []*ModelInfo{
+		{ID: "gpt-5.6-terra", OwnedBy: "openai", Type: "openai", ContextLength: 921000, MaxCompletionTokens: 128000},
+	})
+	r.RegisterClient("codex-free", "Codex", []*ModelInfo{
+		{ID: "gpt-5.6-terra", OwnedBy: "openai", Type: "openai", ContextLength: 372000, MaxCompletionTokens: 128000},
+	})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d: %v", len(models), models)
+	}
+	if got := models[0]["context_length"]; got != 372000 {
+		t.Fatalf("context_length = %v, want the smallest advertised limit 372000", got)
+	}
+	if got := models[0]["max_completion_tokens"]; got != 128000 {
+		t.Fatalf("max_completion_tokens = %v, want 128000", got)
+	}
+
+	// Once the smaller plan is gone the larger limit becomes routable again.
+	r.UnregisterClient("codex-free")
+	models = r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model after unregister, got %d: %v", len(models), models)
+	}
+	if got := models[0]["context_length"]; got != 921000 {
+		t.Fatalf("context_length = %v, want 921000 after the smaller plan is unregistered", got)
+	}
+}
+
+func TestGetAvailableModelsFoldsGeminiAliasesIntoConservativeLimits(t *testing.T) {
+	r := newTestModelRegistry()
+	// Same model ID registered through catalogs that use different field names
+	// for the same limit.
+	r.RegisterClient("openai-shaped", "Antigravity", []*ModelInfo{
+		{ID: "gemini-3.1-flash-lite", OwnedBy: "google", Type: "gemini", ContextLength: 921000, MaxCompletionTokens: 65536},
+	})
+	r.RegisterClient("gemini-shaped", "Vertex", []*ModelInfo{
+		{ID: "gemini-3.1-flash-lite", OwnedBy: "google", Type: "gemini", InputTokenLimit: 372000, OutputTokenLimit: 8192},
+	})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d: %v", len(models), models)
+	}
+	if got := models[0]["context_length"]; got != 372000 {
+		t.Fatalf("context_length = %v, want 372000 folded from inputTokenLimit", got)
+	}
+	if got := models[0]["max_completion_tokens"]; got != 8192 {
+		t.Fatalf("max_completion_tokens = %v, want 8192 folded from outputTokenLimit", got)
+	}
+}
+
+func TestGetAvailableModelsIgnoresSuspendedClientLimits(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("plus", "Codex", []*ModelInfo{
+		{ID: "gpt-5.6-sol", OwnedBy: "openai", Type: "openai", ContextLength: 921000, MaxCompletionTokens: 128000},
+	})
+	r.RegisterClient("free", "Codex", []*ModelInfo{
+		{ID: "gpt-5.6-sol", OwnedBy: "openai", Type: "openai", ContextLength: 372000, MaxCompletionTokens: 128000},
+	})
+
+	// A quota cooldown is temporary: the client returns, so it still constrains.
+	r.SuspendClientModel("free", "gpt-5.6-sol", "quota")
+	models := r.GetAvailableModels("openai")
+	if got := models[0]["context_length"]; got != 372000 {
+		t.Fatalf("context_length = %v, want 372000 while the smaller plan is only in quota cooldown", got)
+	}
+
+	// A non-quota suspension takes the client out of routing entirely.
+	r.ResumeClientModel("free", "gpt-5.6-sol")
+	r.SuspendClientModel("free", "gpt-5.6-sol", "disabled")
+	models = r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d: %v", len(models), models)
+	}
+	if got := models[0]["context_length"]; got != 921000 {
+		t.Fatalf("context_length = %v, want 921000 once the smaller plan is not routable", got)
+	}
+}
