@@ -1340,12 +1340,29 @@ func vertexAPIKeyModelsURL(baseURL, model, action string) string {
 }
 
 // vertexAPIVersionSuffix reports whether the trimmed base URL already ends
-// with a Google API version segment like "/v1" or "/v1beta1".
+// with a Google API version segment like "/v1" or "/v1beta1". Only the URL
+// path portion is inspected, so a bare host such as "vertex1" or
+// "v1-gateway" is not mistaken for a version segment.
 func vertexAPIVersionSuffix(base string) bool {
 	if base == "" {
 		return false
 	}
-	seg := base[strings.LastIndexByte(base, '/')+1:]
+	// Skip the scheme if present.
+	s := base
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	// The first "/" after any authority (host[:port]) starts the path; a
+	// bare host with no path cannot carry a version segment.
+	pathStart := strings.IndexByte(s, '/')
+	if pathStart < 0 {
+		return false
+	}
+	path := s[pathStart+1:]
+	if path == "" {
+		return false
+	}
+	seg := path[strings.LastIndexByte(path, '/')+1:]
 	if len(seg) < 2 || seg[0] != 'v' {
 		return false
 	}
