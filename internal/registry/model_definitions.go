@@ -49,6 +49,23 @@ func GetGeminiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Gemini)
 }
 
+// GetGeminiAppModels exposes the account's default model without claiming a
+// particular API model or subscription tier that the web session may not offer.
+func GetGeminiAppModels() []*ModelInfo {
+	return []*ModelInfo{{
+		ID:                         "gemini-app",
+		Object:                     "model",
+		OwnedBy:                    "google",
+		Type:                       "gemini-app",
+		DisplayName:                "Gemini App",
+		Description:                "Gemini App account default (text chat)",
+		SupportedInputModalities:   []string{"TEXT"},
+		SupportedOutputModalities:  []string{"TEXT"},
+		ExplicitInputModalities:    true,
+		SupportedGenerationMethods: []string{"generateContent", "streamGenerateContent"},
+	}}
+}
+
 // GetGeminiVertexModels returns Gemini model definitions for Vertex AI.
 func GetGeminiVertexModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Vertex)
@@ -517,6 +534,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetGeminiModels()
 	case "gemini-interactions":
 		return GetGeminiModels()
+	case "gemini-app":
+		return GetGeminiAppModels()
 	case "vertex":
 		return GetGeminiVertexModels()
 	case "aistudio":
@@ -569,6 +588,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	allModels := [][]*ModelInfo{
 		data.Claude,
 		data.Gemini,
+		GetGeminiAppModels(),
 		data.Vertex,
 		data.AIStudio,
 		data.CodexPro,
