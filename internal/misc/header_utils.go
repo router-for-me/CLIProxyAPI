@@ -29,14 +29,17 @@ func ScrubProxyAndFingerprintHeaders(req *http.Request) {
 
 	// --- Client identity headers ---
 	req.Header.Del("X-Title")
-	req.Header.Del("X-Stainless-Lang")
-	req.Header.Del("X-Stainless-Package-Version")
-	req.Header.Del("X-Stainless-Os")
-	req.Header.Del("X-Stainless-Arch")
-	req.Header.Del("X-Stainless-Runtime")
-	req.Header.Del("X-Stainless-Runtime-Version")
+	req.Header.Del("X-Fingerprint")
+	req.Header.Del("X-Goog-Safety-Level")
+	req.Header.Del("X-Client-Trace-Id")
 	req.Header.Del("Http-Referer")
 	req.Header.Del("Referer")
+
+	for k := range req.Header {
+		if strings.HasPrefix(strings.ToLower(k), "x-stainless-") {
+			req.Header.Del(k)
+		}
+	}
 
 	// --- Browser / Chromium fingerprint headers ---
 	// These are sent by Electron-based clients (e.g. CherryStudio) using the
