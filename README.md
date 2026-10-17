@@ -138,6 +138,49 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
+### HTTP, SSE, and WebSocket semantics
+
+`POST /v1/responses` supports ordinary HTTP responses and incremental SSE output
+with `stream: true`; `GET /v1/responses` upgrades to an RFC 6455 WebSocket.
+The WebSocket application protocol supports multiple turns with `response.create`
+and `response.append`, including provider-dependent incremental input. Realtime
+has separate `/v1/realtime` routes; it is not the Responses application protocol.
+
+HTTP Responses also supports cross-request continuation: send a completed response's
+`id` as `previous_response_id` with only the new `input`. Both JSON and SSE responses
+can participate in the same chain, and an older stored response can be used to fork
+a conversation. A missing model inherits the earlier request's model; instructions,
+tools, and other options remain those of the current request.
+
+The proxy saves canonical input/output snapshots and reconstructs full history for
+stateless upstreams such as Codex HTTP and Chat Completions. This makes the
+client-to-proxy request incremental; it does not claim native upstream continuation
+or reduced upstream request size. Existing provider translation and final payload
+rules still apply. The reconstructed request also respects `server.max-request-body-bytes`.
+
+- Storage defaults to enabled when `store` is omitted. `store: false` may consume a
+  previous stored response but does not retain the new response. Only successfully
+  completed responses are retained, and the final response's `store` field reports
+  whether storage succeeded. Oversized responses and plugin routes without a
+  selected credential are not retained.
+- Snapshots are scoped to the authenticated caller and bind continuation to the
+  original upstream credential. A disabled/unavailable credential cannot silently
+  fall back to another account; a plugin route unable to honor the pin fails with 503.
+  With client authentication disabled, callers share one anonymous scope.
+- Storage is process-local: 30-minute absolute validity, at most 1,024 responses,
+  64 MiB total payload/metadata, and 8 MiB per snapshot. Eviction, expiry, or restart
+  requires resending full input. Multi-instance deployments need instance affinity.
+  Unknown or foreign IDs return HTTP 400 with `previous_response_not_found` before
+  upstream execution; no truncated or guessed history is sent.
+
+WebSocket continuation remains connection-scoped, including HTTP fallback replay;
+HTTP snapshots do not migrate WebSocket sessions. Neither mechanism implements SSE
+`Last-Event-ID` replay or persistent history across proxy restarts.
+
+Codex upstream SSE accepts LF, CRLF, and CR line endings, including terminators split
+across network reads. Empty event separators survive translation and validation, so
+a data-only SSE event is delivered without waiting for the next upstream event.
+
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)

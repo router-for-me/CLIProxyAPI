@@ -331,7 +331,7 @@ type responsesWebsocketInputItem struct {
 
 type responsesWebsocketMergeInputItem struct {
 	// raw may reference a caller-owned request buffer. Merge items must remain
-	// local to mergeResponsesWebsocketInput, which copies every item into the
+	// local to mergeResponsesInputArrays, which copies every item into the
 	// owned output buffer before returning.
 	raw      string
 	itemType string
@@ -344,6 +344,10 @@ func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte,
 	if errPrevious != nil {
 		return nil, fmt.Errorf("invalid previous request input: %w", errPrevious)
 	}
+	return mergeResponsesInputArrays(previousInput, lastResponseOutput, appendRaw)
+}
+
+func mergeResponsesInputArrays(previousInput gjson.Result, lastResponseOutput []byte, appendRaw string) ([]byte, error) {
 	items, errExisting := appendResponsesWebsocketMergeInputResult(nil, previousInput)
 	if errExisting != nil {
 		return nil, fmt.Errorf("invalid previous request input: %w", errExisting)

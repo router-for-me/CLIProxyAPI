@@ -167,3 +167,19 @@ func TestSSEJSONValidationStateSplitCRLFVariants(t *testing.T) {
 		})
 	}
 }
+
+func TestSSEJSONValidationPreservesSeparateEventDelimiter(t *testing.T) {
+	const data = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}\n"
+	var state sseJSONValidationState
+	first, errFirst := state.AddChunk([]byte(data))
+	if errFirst != nil {
+		t.Fatal(errFirst)
+	}
+	delimiter, errDelimiter := state.AddChunk([]byte("\n"))
+	if errDelimiter != nil {
+		t.Fatal(errDelimiter)
+	}
+	if got := string(first) + string(delimiter); got != data+"\n" {
+		t.Fatalf("event delimiter lost before the next upstream event: %q", got)
+	}
+}
