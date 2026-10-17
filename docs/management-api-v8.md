@@ -130,6 +130,43 @@ Keep any provider-specific login parameters in the query string. The login
 response includes the authorization URL and a session `state`. Use that state
 for status queries and cancellation.
 
+Codex keeps its browser callback flow by default. To start Codex device login,
+add `flow=device`; the response returns the verification `url`, `user_code`,
+`expires_in`, and `state` before polling begins:
+
+```sh
+start=$(curl -fsS -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  "$BASE_URL/v8/management/oauth/auth-url?provider=codex&flow=device")
+printf '%s\n' "$start" | jq '{url, user_code, expires_in}'
+state=$(printf '%s\n' "$start" | jq -r '.state')
+```
+
+Open the returned URL and enter the user code. This polls the existing status
+route until it returns `ok` or `error`:
+
+```sh
+while :; do
+  status=$(curl -fsS -G -H "Authorization: Bearer $MANAGEMENT_KEY" \
+    --data-urlencode "state=$state" "$BASE_URL/v8/management/oauth/status")
+  printf '%s\n' "$status"
+  case "$(printf '%s\n' "$status" | jq -r '.status')" in
+    ok|error) break ;;
+  esac
+  sleep 1
+done
+```
+
+To cancel instead, call the existing session route:
+
+```sh
+curl -fsS -X DELETE -G -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  --data-urlencode "state=$state" "$BASE_URL/v8/management/oauth/session"
+```
+
+For Codex device login, `cancelled: true` means credentials will not be saved.
+Once credential persistence has started, cancellation returns `cancelled: false`;
+continue polling the status route for the result.
+
 Callbacks accept `provider`, `state`, `code`, and `error` as GET query parameters
 or POST JSON fields. POST also accepts `redirect_url` containing the complete
 callback URL. If `provider` is omitted, it is inferred from the pending state;
