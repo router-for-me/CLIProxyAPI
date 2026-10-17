@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -220,5 +221,46 @@ func TestConvertAntigravityResponseToOpenAIResponsesNonStream_WebSearch(t *testi
 
 	if parsed.Get("tool_usage.web_search.num_requests").Int() != 1 {
 		t.Fatalf("expected tool_usage.web_search.num_requests = 1, got %d", parsed.Get("tool_usage.web_search.num_requests").Int())
+	}
+}
+
+func TestAntigravityApplyPatchReuse(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}],"input":"patch"}`)
+	translated, _ := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.1-pro-preview", request, false)
+	declaration := gjson.GetBytes(translated, "request.tools.0.functionDeclarations.0")
+	if declaration.Get("name").String() != "functions__apply_patch" || !strings.Contains(declaration.Get("description").String(), "*** Begin Patch") || declaration.Get("parametersJsonSchema.properties.input.type").String() != "string" || !declaration.Get("parametersJsonSchema.additionalProperties").Exists() || declaration.Get("parametersJsonSchema.additionalProperties").Bool() {
+		t.Fatalf("missing declaration: %s", translated)
+	}
+	raw := []byte(`{"response":{"responseId":"patch","candidates":[{"content":{"parts":[{"functionCall":{"name":"functions__apply_patch","args":{"input":"  *** Begin Patch\n*** End Patch\n "}}}]},"finishReason":"STOP"}]}}`)
+	want := "  *** Begin Patch\n*** End Patch\n "
+	nonStream := ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini", request, translated, raw, nil)
+	if gjson.GetBytes(nonStream, "output.0.input").String() != want || gjson.GetBytes(nonStream, "output.0.namespace").String() != "functions" {
+		t.Fatalf("wrong input: %s", nonStream)
+	}
+	var param any
+	var delta strings.Builder
+	var done, item, final string
+	chunks := ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini", request, translated, raw, &param)
+	chunks = append(chunks, ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini", request, translated, []byte("[DONE]"), &param)...)
+	for _, chunk := range chunks {
+		for _, line := range strings.Split(string(chunk), "\n") {
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			ev := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			switch ev.Get("type").String() {
+			case "response.custom_tool_call_input.delta":
+				delta.WriteString(ev.Get("delta").String())
+			case "response.custom_tool_call_input.done":
+				done = ev.Get("input").String()
+			case "response.output_item.done":
+				item = ev.Get("item.input").String()
+			case "response.completed":
+				final = ev.Get("response.output.0.input").String()
+			}
+		}
+	}
+	if delta.String() != want || done != want || item != want || final != want {
+		t.Fatalf("inconsistent input: delta=%q done=%q item=%q final=%q", delta.String(), done, item, final)
 	}
 }

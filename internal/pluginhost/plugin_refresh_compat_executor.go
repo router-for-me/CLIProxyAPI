@@ -159,3 +159,12 @@ func authHasRefreshToken(auth *coreauth.Auth) bool {
 	}
 	return false
 }
+
+// SupportsApplyPatch delegates only the inner executor's optional contract.
+func (e *pluginRefreshCompatExecutor) SupportsApplyPatch() bool {
+	if e == nil || e.inner == nil {
+		return false
+	}
+	support, okSupport := e.inner.(coreauth.ApplyPatchSupport)
+	return okSupport && support.SupportsApplyPatch()
+}

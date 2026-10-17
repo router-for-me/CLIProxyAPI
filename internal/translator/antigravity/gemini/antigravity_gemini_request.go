@@ -35,7 +35,7 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Gemini API format
-func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
 	rawJSON := inputRawJSON
 	functionNameMap := util.SanitizedFunctionNameMap(inputRawJSON)
 	// Keep the envelope in []byte form. Round-tripping through string copies the
@@ -49,7 +49,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 	fixedJSON, errFixCLIToolResponse := fixCLIToolResponse(rawJSON)
 	if errFixCLIToolResponse != nil {
-		return []byte{}
+		return []byte{}, nil
 	}
 	rawJSON = fixedJSON
 
@@ -155,7 +155,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		rawJSON = signature.SanitizeGeminiRequestThoughtSignatures(rawJSON, "request.contents")
 	}
 
-	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
+	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings"), nil
 }
 
 // normalizeGeminiGenerationConfigResponseSchema converts generationConfig.responseJsonSchema

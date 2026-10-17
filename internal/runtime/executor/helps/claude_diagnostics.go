@@ -63,7 +63,11 @@ type ClaudeContinuityContext struct {
 	PreviousMessageID string
 	PreviousRequestID string
 	PromptID          string
-	Initialized       bool
+	// PinnedDate is the calendar date this session was first seen on. The
+	// cloaked currentDate reminder reuses it so the reminder text stays
+	// byte-stable within a session even when the local date flips mid-session.
+	PinnedDate  string
+	Initialized bool
 }
 
 // WithClaudeSessionID attaches a known Claude session ID to ctx.
@@ -108,19 +112,59 @@ type claudeDiagnosticsEntry struct {
 	previousMessageID string
 	previousRequestID string
 	promptID          string
+	pinnedDate        string
 	minimumSequence   uint64
 	committedSequence uint64
 	lastAccess        uint64
 	expiresAt         time.Time
 }
 
+// claudeSessionDatePin retains a session date independently of continuity
+// state when the operator configures a retention window.
+type claudeSessionDatePin struct {
+	date      string
+	expiresAt time.Time
+}
+
 var claudeDiagnosticsState = struct {
 	sync.Mutex
 	entries      map[string]claudeDiagnosticsEntry
+	datePins     map[string]claudeSessionDatePin
 	lastCleanup  time.Time
 	nextSequence uint64
 	nextAccess   uint64
-}{entries: make(map[string]claudeDiagnosticsEntry)}
+}{entries: make(map[string]claudeDiagnosticsEntry), datePins: make(map[string]claudeSessionDatePin)}
+
+// ClaudeSessionDatePinKey returns the credential-independent store key
+// for a session date pin, or "" for an empty session ID.
+func ClaudeSessionDatePinKey(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(digest[:])
+}
+
+// LookupClaudeSessionDatePin returns the retained pinned date for a session
+// without creating or refreshing it. Non-positive retention returns "".
+func LookupClaudeSessionDatePin(sessionID string, retention time.Duration) string {
+	if retention <= 0 {
+		return ""
+	}
+	pinKey := ClaudeSessionDatePinKey(sessionID)
+	if pinKey == "" {
+		return ""
+	}
+	now := time.Now()
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	pin, okPin := claudeDiagnosticsState.datePins[pinKey]
+	if !okPin || now.After(pin.expiresAt) {
+		return ""
+	}
+	return pin.date
+}
 
 // IsValidClaudePromptID verifies whether an explicit prompt ID adheres to strict RFC 4122 UUIDv4 semantics.
 func IsValidClaudePromptID(id string) bool {
@@ -192,6 +236,49 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 	return key, sequence, entry.previousMessageID, entry.previousRequestID, activePromptID
 }
 
+// PinClaudeSessionDate returns the calendar date pinned for a session,
+// recording date on the first call and returning the pinned value on later
+// calls. A non-positive retention keeps the legacy continuity-scoped pin,
+// whose lifetime follows claudeDiagnosticsTTL. A positive retention stores
+// the pin separately under a session-only key, so continuity expiry or a
+// credential switch cannot re-anchor it before the retention expires. An
+// unknown continuity key returns date unchanged, matching per-request dates.
+func PinClaudeSessionDate(key, sessionID, date string, retention time.Duration) string {
+	key = strings.TrimSpace(key)
+	sessionID = strings.TrimSpace(sessionID)
+	date = strings.TrimSpace(date)
+	if key == "" || date == "" {
+		return date
+	}
+	now := time.Now()
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	entry, okEntry := claudeDiagnosticsState.entries[key]
+	if !okEntry {
+		return date
+	}
+	if retention <= 0 || sessionID == "" {
+		if entry.pinnedDate == "" {
+			entry.pinnedDate = date
+			claudeDiagnosticsState.entries[key] = entry
+			return date
+		}
+		return entry.pinnedDate
+	}
+	cleanupClaudeDiagnosticsLocked(now)
+	pinKey := ClaudeSessionDatePinKey(sessionID)
+	pin, okPin := claudeDiagnosticsState.datePins[pinKey]
+	if !okPin {
+		evictClaudeSessionDatePinsLocked()
+	}
+	if !okPin || now.After(pin.expiresAt) {
+		pin.date = date
+	}
+	pin.expiresAt = now.Add(retention)
+	claudeDiagnosticsState.datePins[pinKey] = pin
+	return pin.date
+}
+
 // BeginClaudeDiagnostics starts one request generation for a stable credential
 // identity and Claude conversation. It returns the last successfully completed
 // upstream message ID, if any. Only a SHA-256 digest of the credential identity
@@ -254,7 +341,35 @@ func cleanupClaudeDiagnosticsLocked(now time.Time) {
 			delete(claudeDiagnosticsState.entries, key)
 		}
 	}
+	for key, pin := range claudeDiagnosticsState.datePins {
+		if now.After(pin.expiresAt) {
+			delete(claudeDiagnosticsState.datePins, key)
+		}
+	}
 	claudeDiagnosticsState.lastCleanup = now
+}
+
+// evictClaudeSessionDatePinsLocked drops the pins closest to expiry once
+// the store is full. Sliding expiry makes those the least recently used.
+func evictClaudeSessionDatePinsLocked() {
+	if len(claudeDiagnosticsState.datePins) < claudeDiagnosticsMaxEntries {
+		return
+	}
+	type candidate struct {
+		key       string
+		expiresAt time.Time
+	}
+	candidates := make([]candidate, 0, len(claudeDiagnosticsState.datePins))
+	for key, pin := range claudeDiagnosticsState.datePins {
+		candidates = append(candidates, candidate{key: key, expiresAt: pin.expiresAt})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].expiresAt.Before(candidates[j].expiresAt)
+	})
+	count := min(claudeDiagnosticsEvictBatchSize, len(candidates))
+	for _, candidate := range candidates[:count] {
+		delete(claudeDiagnosticsState.datePins, candidate.key)
+	}
 }
 
 func evictClaudeDiagnosticsLocked() {
@@ -283,10 +398,49 @@ func ResetClaudeDiagnosticsForTest() {
 	resetClaudeDiagnosticsForTest()
 }
 
+// ClaudeSessionDatePinExpiryForTest returns the expiry of the retained date
+// pin for a session, or the zero time when no pin exists.
+func ClaudeSessionDatePinExpiryForTest(sessionID string) time.Time {
+	pinKey := ClaudeSessionDatePinKey(sessionID)
+	if pinKey == "" {
+		return time.Time{}
+	}
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	pin, okPin := claudeDiagnosticsState.datePins[pinKey]
+	if !okPin {
+		return time.Time{}
+	}
+	return pin.expiresAt
+}
+
+// ExpireClaudeDiagnosticsForTest expires continuity entries and retained date
+// pins without waiting for wall-clock TTLs. Pin expiry is relative to now.
+func ExpireClaudeDiagnosticsForTest(expireContinuity bool, pinExpiryOffset *time.Duration) {
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	if expireContinuity {
+		past := time.Now().Add(-time.Second)
+		for key, entry := range claudeDiagnosticsState.entries {
+			entry.expiresAt = past
+			claudeDiagnosticsState.entries[key] = entry
+		}
+	}
+	if pinExpiryOffset != nil {
+		expiresAt := time.Now().Add(*pinExpiryOffset)
+		for key, pin := range claudeDiagnosticsState.datePins {
+			pin.expiresAt = expiresAt
+			claudeDiagnosticsState.datePins[key] = pin
+		}
+	}
+	claudeDiagnosticsState.lastCleanup = time.Time{}
+}
+
 func resetClaudeDiagnosticsForTest() {
 	claudeDiagnosticsState.Lock()
 	defer claudeDiagnosticsState.Unlock()
 	claudeDiagnosticsState.entries = make(map[string]claudeDiagnosticsEntry)
+	claudeDiagnosticsState.datePins = make(map[string]claudeSessionDatePin)
 	claudeDiagnosticsState.lastCleanup = time.Time{}
 	claudeDiagnosticsState.nextSequence = 0
 	claudeDiagnosticsState.nextAccess = 0
@@ -408,6 +562,12 @@ func isClaudeTitleHelperInstruction(body []byte) bool {
 }
 
 func isClaudeTitleHelperRequest(body []byte) bool {
+	// Without an output_config key the request is a helper only if one of the
+	// system title instructions below appears, so skip the walks when none can.
+	if !jsonMayContainASCII(body, "output_config", "naming a coding session", "Return a short title",
+		"Write the title in the predominant language") {
+		return false
+	}
 	props := gjson.GetBytes(body, "output_config.format.schema.properties")
 	if props.Exists() {
 		if props.Get("title").Exists() && len(props.Map()) == 1 {
@@ -494,7 +654,9 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 // ClaudePayloadHas1hTTL reports whether the request payload contains any cache_control
 // block with ttl set to "1h".
 func ClaudePayloadHas1hTTL(payload []byte) bool {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	// A ttl of "1h" is the JSON string "1h"; its quotes are structural and never
+	// escaped, so a payload without that token cannot match.
+	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !gjson.ValidBytes(payload) {
 		return false
 	}
 	has1h := false

@@ -50,7 +50,7 @@ const (
 // transformation logic between OpenAI format and your provider's format.
 func init() {
 	sdktr.Register(fOpenAI, fMyProv,
-		func(model string, raw []byte, stream bool) []byte { return raw },
+		func(model string, raw []byte, stream bool) ([]byte, error) { return raw, nil },
 		sdktr.ResponseTransform{
 			Stream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) [][]byte {
 				return [][]byte{raw}

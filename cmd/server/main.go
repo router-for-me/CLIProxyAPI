@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
@@ -123,6 +124,7 @@ func main() {
 	var discoverExclude []string
 	var vertexImport string
 	var vertexImportPrefix string
+	var siwcBind string
 	var configPath string
 	var password string
 	var homeJWT string
@@ -153,13 +155,14 @@ func main() {
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
+	flag.StringVar(&siwcBind, "siwc-bind", "", "Bind Sign in with ChatGPT (SIWC) credentials to a Codex credential file")
 	flag.StringVar(&password, "password", "", "")
 	flag.StringVar(&homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
 	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.StringVar(&managementBaseURL, "management-base-url", "", "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)")
-	flag.BoolVar(&localModel, "local-model", false, "Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching")
+	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -567,7 +570,7 @@ func main() {
 				log.Errorf("failed to bootstrap git-backed config: %v", errCopy)
 				return
 			}
-			if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {
+			if errCommit := persistSeededConfig(context.Background(), configFilePath, gitStoreInst.PersistConfig); errCommit != nil {
 				log.Errorf("failed to commit initial git-backed config: %v", errCommit)
 				return
 			}
@@ -646,6 +649,7 @@ func main() {
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
+	githubauth.SetToken(cfg.GitHubToken)
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.
@@ -654,7 +658,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
+	commandMode := vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -712,6 +716,9 @@ func main() {
 	if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)
+	} else if siwcBind != "" {
+		// Handle Sign in with ChatGPT (SIWC) credential binding
+		cmd.DoSIWCBind(cfg, siwcBind, options)
 	} else if antigravityLogin {
 		// Handle Antigravity login
 		cmd.DoAntigravityLogin(cfg, options)
@@ -742,14 +749,14 @@ func main() {
 			return
 		}
 		if localModel && (!tuiMode || standalone) {
-			log.Info("Local model mode: using embedded model catalogs, remote model updates disabled")
+			log.Info("Local model mode: using embedded catalogs unless an explicit catalog source is configured")
 		}
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+				registry.SetLocalModelCatalogs(localModel)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -824,7 +831,7 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+			registry.SetLocalModelCatalogs(localModel)
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
@@ -850,29 +857,18 @@ func resolveManagementBaseURL(flagURL string, cfg *config.Config) string {
 	return fmt.Sprintf("http://127.0.0.1:%d", port)
 }
 
-// modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
-// Codex client and Devin catalogs still refresh under Home mode because
-// template metadata and Devin models stay edge-local.
-func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient, startDevin bool) {
-	if localModel {
-		return false, false, false
+// persistSeededConfig persists a config file freshly copied from the template. The file
+// is first rewritten as the startup load would, so a plaintext management secret never
+// reaches the remote store. When that fails, the copy is removed and an error returned,
+// so every start refuses the template instead of running from an unpersisted config.
+func persistSeededConfig(ctx context.Context, configFilePath string, persist func(context.Context) error) error {
+	if errPrepare := config.PrepareConfigFileForUpload(configFilePath); errPrepare != nil {
+		if errRemove := os.Remove(configFilePath); errRemove != nil {
+			log.WithError(errRemove).Warn("failed to remove the config copied from the template")
+		}
+		return fmt.Errorf("prepare config for upload: %w", errPrepare)
 	}
-	return !homeEnabled, true, true
-}
-
-func startModelCatalogUpdaters(localModel, homeEnabled bool) {
-	startModels, startCodexClient, startDevin := modelCatalogUpdaterPlan(localModel, homeEnabled)
-	if startCodexClient {
-		registry.StartCodexClientModelsUpdater(context.Background())
-	}
-	if startDevin {
-		registry.StartDevinModelsUpdater(context.Background())
-	}
-	if startModels {
-		registry.StartModelsUpdater(context.Background())
-	} else if homeEnabled {
-		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
-	}
+	return persist(ctx)
 }
 
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {

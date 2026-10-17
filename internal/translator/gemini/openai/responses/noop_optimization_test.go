@@ -9,7 +9,7 @@ import (
 func TestConvertOpenAIResponsesRequestToGeminiBuildsGenerationConfigWithoutIntermediateObject(t *testing.T) {
 	input := []byte(`{"input":"hello","temperature":0.5,"top_p":0.9,"stop_sequences":["done"],"text":{"format":{"type":"json_schema","schema":{"type":"object"}}}}`)
 
-	output := ConvertOpenAIResponsesRequestToGemini("gemini-test", input, false)
+	output, _ := ConvertOpenAIResponsesRequestToGemini("gemini-test", input, false)
 
 	if got := gjson.GetBytes(output, "generationConfig.temperature").Float(); got != 0.5 {
 		t.Fatalf("temperature = %v, want 0.5", got)

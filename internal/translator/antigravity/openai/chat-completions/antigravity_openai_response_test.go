@@ -128,17 +128,44 @@ func TestNoFinishReasonOnIntermediateChunks(t *testing.T) {
 	}
 }
 
-func TestConvertAntigravityResponseToOpenAIIncludesZeroCompletionTokensWhenMissing(t *testing.T) {
-	var param any
-	chunk := []byte(`{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`)
-
-	result := ConvertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, chunk, &param)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(result))
+func TestConvertAntigravityResponseToOpenAICompletionTokensIncludeThoughts(t *testing.T) {
+	tests := []struct {
+		name       string
+		chunk      string
+		wantOutput int64
+	}{
+		{
+			name:       "candidates and thoughts",
+			chunk:      `{"response":{"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63}}}`,
+			wantOutput: 47,
+		},
+		{
+			name:       "thoughts without candidates",
+			chunk:      `{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`,
+			wantOutput: 42,
+		},
 	}
-	completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
-	if !completionTokens.Exists() || completionTokens.Int() != 0 {
-		t.Fatalf("completion_tokens = %s, want present with value 0. Output: %s", completionTokens.Raw, result[0])
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			result := ConvertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, []byte(tt.chunk), &param)
+			if len(result) != 1 {
+				t.Fatalf("expected 1 result, got %d", len(result))
+			}
+			completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
+			if !completionTokens.Exists() || completionTokens.Int() != tt.wantOutput {
+				t.Fatalf("completion_tokens = %s, want present with value %d. Output: %s", completionTokens.Raw, tt.wantOutput, result[0])
+			}
+			if got := gjson.GetBytes(result[0], "usage.completion_tokens_details.reasoning_tokens").Int(); got != 42 {
+				t.Fatalf("reasoning_tokens = %d, want 42. Output: %s", got, result[0])
+			}
+			promptTokens := gjson.GetBytes(result[0], "usage.prompt_tokens").Int()
+			totalTokens := gjson.GetBytes(result[0], "usage.total_tokens").Int()
+			if promptTokens+completionTokens.Int() != totalTokens {
+				t.Fatalf("prompt_tokens + completion_tokens = %d, total_tokens = %d", promptTokens+completionTokens.Int(), totalTokens)
+			}
+		})
 	}
 }
 
@@ -315,5 +342,67 @@ func TestConvertAntigravityResponseToOpenAINonStreamIncludesReasoningContent(t *
 	}
 	if got := gjson.GetBytes(output, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 42 {
 		t.Fatalf("reasoning_tokens = %d, want 42. Output: %s", got, output)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDelta(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// 1. Text chunk: delta must omit tool_calls entirely instead of emitting "tool_calls": null.
+	textChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Hello world"}]}}]}}`)
+	textResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, textChunk, &param)
+	if len(textResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(textResults))
+	}
+	if tc := gjson.GetBytes(textResults[0], "choices.0.delta.tool_calls"); tc.Exists() {
+		t.Fatalf("choices.0.delta.tool_calls must not exist in text-only chunk, got: %s (type: %s)", tc.Raw, tc.Type)
+	}
+
+	// 2. Reasoning chunk: delta must omit tool_calls entirely.
+	thoughtChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}}`)
+	thoughtResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, thoughtChunk, &param)
+	if len(thoughtResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(thoughtResults))
+	}
+	if tc := gjson.GetBytes(thoughtResults[0], "choices.0.delta.tool_calls"); tc.Exists() {
+		t.Fatalf("choices.0.delta.tool_calls must not exist in reasoning chunk, got: %s (type: %s)", tc.Raw, tc.Type)
+	}
+
+	// 3. Tool call chunk: delta must emit tool_calls as an array.
+	toolChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Beijing"}}}]}}]}}`)
+	toolResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, toolChunk, &param)
+	if len(toolResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(toolResults))
+	}
+	tc := gjson.GetBytes(toolResults[0], "choices.0.delta.tool_calls")
+	if !tc.Exists() || !tc.IsArray() || len(tc.Array()) != 1 {
+		t.Fatalf("choices.0.delta.tool_calls must be an array with 1 call, got: %s", tc.Raw)
+	}
+	if gotName := tc.Array()[0].Get("function.name").String(); gotName != "get_weather" {
+		t.Fatalf("function.name = %q, want get_weather", gotName)
+	}
+	if gotArgs := tc.Array()[0].Get("function.arguments").String(); gotArgs != `{"city":"Beijing"}` {
+		t.Fatalf("function.arguments = %q, want {\"city\":\"Beijing\"}", gotArgs)
+	}
+
+	// 4. Final chunk with finishReason and usage: delta must omit tool_calls.
+	finalChunk := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+	finalResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, finalChunk, &param)
+	if len(finalResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(finalResults))
+	}
+	if tcFinal := gjson.GetBytes(finalResults[0], "choices.0.delta.tool_calls"); tcFinal.Exists() {
+		t.Fatalf("choices.0.delta.tool_calls must not exist in final chunk, got: %s (type: %s)", tcFinal.Raw, tcFinal.Type)
+	}
+
+	// 5. Synthesized DONE terminal chunk: delta must omit tool_calls.
+	var doneParam any
+	ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, textChunk, &doneParam)
+	doneResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, []byte("[DONE]"), &doneParam)
+	if len(doneResults) == 1 {
+		if tcDone := gjson.GetBytes(doneResults[0], "choices.0.delta.tool_calls"); tcDone.Exists() {
+			t.Fatalf("choices.0.delta.tool_calls must not exist in synthesized DONE chunk, got: %s (type: %s)", tcDone.Raw, tcDone.Type)
+		}
 	}
 }

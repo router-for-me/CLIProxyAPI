@@ -99,6 +99,12 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 	authIsOAuth := isClaudeOAuthToken(apiKey)
 	profile := claudeFingerprintProfileFromConfig(cfg, auth)
 	profileClaudeCodeCLI := authIsOAuth || profile == claudeFingerprintProfileClaudeCodeCLI
+	// header-defaults.inject-diagnostics=false opts out of the injected
+	// diagnostics field, and with it the body-derived cache-diagnosis beta.
+	injectDiagnostics := profileClaudeCodeCLI
+	if cfg != nil && cfg.ClaudeHeaderDefaults.InjectDiagnostics != nil && !*cfg.ClaudeHeaderDefaults.InjectDiagnostics {
+		injectDiagnostics = false
+	}
 
 	return claudeFingerprintPolicy{
 		AuthIsOAuthToken:     authIsOAuth,
@@ -107,7 +113,7 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 		ApplyCLIIdentity:     profileClaudeCodeCLI,
 		SynthesizeIdentity:   profileClaudeCodeCLI && !authIsOAuth,
 		MCPAlias:             profileClaudeCodeCLI,
-		InjectDiagnostics:    profileClaudeCodeCLI,
+		InjectDiagnostics:    injectDiagnostics,
 		OAuthCancellation:    authIsOAuth,
 	}
 }

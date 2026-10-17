@@ -13,6 +13,81 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestClaudeOAuthToolAliasRestoresContinuationWithoutDeclarations(t *testing.T) {
+	secret := "continuation-alias-caller"
+	createBody := []byte(`{"thread":{"type":"create"},"tools":[{"name":"Read","input_schema":{"type":"object"}}]}`)
+	executor := &ClaudeExecutor{}
+	_, reverseMap, errPrepare := executor.prepareClaudeOAuthToolNamesForRequest(createBody, claudeMCPAliasOptions{secret: secret})
+	if errPrepare != nil {
+		t.Fatalf("prepare create request: %v", errPrepare)
+	}
+	alias := ""
+	for upstreamName := range reverseMap {
+		alias = upstreamName
+		break
+	}
+	if alias == "" {
+		t.Fatal("create request did not allocate an OAuth MCP alias")
+	}
+
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"msg-one"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}]}]}`)
+	executor.rememberClaudeOAuthToolAliases(createBody, reverseMap, "msg-one")
+	_, continuationReverseMap, errPrepareContinuation := executor.prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: secret})
+	if errPrepareContinuation != nil {
+		t.Fatalf("prepare continuation request: %v", errPrepareContinuation)
+	}
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"tool-two","name":%q,"input":{}}]}`, alias))
+	restored, errRestore := restoreClaudeOAuthToolNamesFromResponse(response, continuationReverseMap)
+	if errRestore != nil {
+		t.Fatalf("restore continuation tool name: %v", errRestore)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Read" {
+		t.Fatalf("continuation tool name = %q, want Read; response=%s", got, restored)
+	}
+}
+
+func TestClaudeOAuthToolAliasMissingContinuationStateIsRequestScopedNotFound(t *testing.T) {
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"missing-message"}}`)
+	_, _, errPrepare := (&ClaudeExecutor{}).prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "missing-state-caller"})
+	if errPrepare == nil {
+		t.Fatal("prepare continuation request returned nil error")
+	}
+	statusErr, okStatus := errPrepare.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != 404 {
+		t.Fatalf("continuation error status = %v, want 404", errPrepare)
+	}
+	requestErr, okRequest := errPrepare.(cliproxyexecutor.RequestScopedError)
+	if !okRequest || !requestErr.IsRequestScoped() {
+		t.Fatalf("continuation error is not request-scoped: %T", errPrepare)
+	}
+	responseErr, okResponse := errPrepare.(interface{ ResponseBody() []byte })
+	if !okResponse || len(responseErr.ResponseBody()) == 0 {
+		t.Fatalf("continuation error does not provide ResponseBody: %T", errPrepare)
+	}
+	if got := gjson.GetBytes(responseErr.ResponseBody(), "error.type").String(); got != "not_found_error" {
+		t.Fatalf("continuation error.type = %q, want not_found_error; body=%s", got, responseErr.ResponseBody())
+	}
+}
+
+func TestClaudeOAuthToolAliasEvictionReturnsThreadNotFound(t *testing.T) {
+	executor := &ClaudeExecutor{}
+	createBody := []byte(`{"thread":{"type":"create"}}`)
+	executor.rememberClaudeOAuthToolAliases(createBody, map[string]string{"alias": "Read"}, "first-message")
+	for i := 0; i < claudeOAuthToolAliasStateLimit; i++ {
+		executor.rememberClaudeOAuthToolAliases(createBody, nil, fmt.Sprintf("message-%d", i))
+	}
+
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"first-message"}}`)
+	_, _, errPrepare := executor.prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "evicted-state-caller"})
+	if errPrepare == nil {
+		t.Fatal("evicted continuation returned nil error")
+	}
+	statusErr, okStatus := errPrepare.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != 404 {
+		t.Fatalf("evicted continuation error status = %v, want 404", errPrepare)
+	}
+}
+
 func TestRemapOAuthToolNamesWithBatchedEditsMatchesLegacyBytes(t *testing.T) {
 	secret := "differential-caller"
 	collision := helps.ClaudeMCPToolAlias(secret, "fetch_url", 0)
@@ -1028,5 +1103,61 @@ func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
 	}
 	if !bytes.Equal(restoredLine, line) {
 		t.Fatalf("restoredLine = %s, want %s forwarded unchanged", string(restoredLine), string(line))
+	}
+}
+
+// The model sometimes wraps a caller-owned MCP tool in the request's virtual
+// server, either by tool name (mcp__<virtual>__<tool>) or by its full name
+// (mcp__<virtual>__mcp__<server>__<tool>). Both must restore to the declared tool.
+func TestReverseRemapRestoresCallerMCPToolWrappedInVirtualServer(t *testing.T) {
+	const recall = "mcp__docs-search__search-pages"
+	body := []byte(`{"tools":[{"name":"Bash"},{"name":"` + recall + `"},{"name":"mcp__docs-search__search-issues"}]}`)
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "wrapped-passthrough-caller"})
+	var server string
+	for alias, original := range reverseMap {
+		if original == "Bash" {
+			server = claudeMCPAliasServer(alias)
+		}
+	}
+	if server == "" {
+		t.Fatalf("no virtual server allocated: %v", reverseMap)
+	}
+	for _, wrapped := range []string{
+		"mcp__" + server + "__search-pages",
+		"mcp__" + server + "__" + recall,
+	} {
+		t.Run(wrapped, func(t *testing.T) {
+			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, wrapped))
+			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			if errReverse != nil {
+				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+			}
+			if got := gjson.GetBytes(restored, "content.0.name").String(); got != recall {
+				t.Fatalf("wrapped caller MCP tool restored to %q, want %q", got, recall)
+			}
+			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, wrapped))
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream != nil {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
+			}
+			if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != recall {
+				t.Fatalf("stream wrapped caller MCP tool restored to %q, want %q", got, recall)
+			}
+		})
+	}
+}
+
+func TestReverseRemapWrappedCallerMCPToolStaysAnErrorWhenAmbiguous(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"Bash"},{"name":"mcp__a__query"},{"name":"mcp__b__query"}]}`)
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "wrapped-ambiguous-caller"})
+	var server string
+	for alias, original := range reverseMap {
+		if original == "Bash" {
+			server = claudeMCPAliasServer(alias)
+		}
+	}
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, "mcp__"+server+"__query"))
+	if _, errReverse := reverseRemapOAuthToolNames(response, reverseMap); errReverse == nil || !strings.Contains(errReverse.Error(), "matches multiple declared tools") {
+		t.Fatalf("ambiguous wrapped tool error = %v, want matches multiple declared tools", errReverse)
 	}
 }

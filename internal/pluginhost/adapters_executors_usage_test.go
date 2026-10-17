@@ -886,3 +886,110 @@ func TestUsageAdapterRecoversSessionHierarchyFromContext(t *testing.T) {
 		t.Fatalf("loop protection = (%q, %q), want (loop-sess, empty)", recLoop.SessionID, recLoop.ParentSessionID)
 	}
 }
+
+func TestUsageAdapterPropagatesNativeKeyAndAccessProvider(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 1)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-native-key",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-native-key",
+	}
+
+	// 1. Direct record propagation
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:       "test-provider",
+		Model:          "test-model",
+		APIKey:         "sk-native-key",
+		IsNativeKey:    true,
+		AccessProvider: "config-inline",
+	})
+	rec := <-plugin.captured
+	if !rec.IsNativeKey {
+		t.Fatalf("rec.IsNativeKey = false, want true")
+	}
+	if rec.AccessProvider != "config-inline" {
+		t.Fatalf("rec.AccessProvider = %q, want %q", rec.AccessProvider, "config-inline")
+	}
+
+	// 2. Fallback to context values when record fields are omitted
+	ctx := coreusage.WithAPIKey(context.Background(), "sk-ctx-native")
+	ctx = coreusage.WithAccessProvider(ctx, "config-inline")
+	adapter.HandleUsage(ctx, coreusage.Record{
+		Provider: "test-provider",
+		Model:    "test-model",
+	})
+	recCtx := <-plugin.captured
+	if recCtx.APIKey != "sk-ctx-native" {
+		t.Fatalf("recCtx.APIKey = %q, want sk-ctx-native", recCtx.APIKey)
+	}
+	if !recCtx.IsNativeKey {
+		t.Fatalf("recCtx.IsNativeKey = false, want true")
+	}
+	if recCtx.AccessProvider != "config-inline" {
+		t.Fatalf("recCtx.AccessProvider = %q, want config-inline", recCtx.AccessProvider)
+	}
+}
+
+func TestExecutorAdapterExecuteAttributesResponsesUsageToSelectedAuth(t *testing.T) {
+	plugin := newTestUsageCapturePlugin("plugin-provider-responses")
+	registerTestUsagePlugin(t, "test-executor-adapter-responses-auth-usage", plugin)
+
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin-responses"})
+	host := newHostWithRecords(executorRecord)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider-responses",
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{
+				Payload: []byte(`{"id":"resp_1","object":"response","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`),
+			}, nil
+		},
+	}
+
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+	)
+	adapter.provider = "plugin-provider-responses"
+
+	auth := &coreauth.Auth{
+		ID:         "auth-responses-1",
+		Provider:   "plugin-provider-responses",
+		FileName:   "auth-responses-1.json",
+		Attributes: map[string]string{"type": "oauth"},
+	}
+	req := coreexecutor.Request{
+		Model:   "deepseek/deepseek-v4.1-flash",
+		Payload: []byte(`{"model":"deepseek/deepseek-v4.1-flash","input":"Write me a poem"}`),
+	}
+	opts := coreexecutor.Options{
+		Stream:         false,
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	ctx := coreusage.WithStream(context.Background(), false)
+	resp, errExecute := adapter.Execute(ctx, auth, req, opts)
+	if errExecute != nil {
+		t.Fatalf("adapter.Execute returned unexpected error: %v", errExecute)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("adapter.Execute returned empty payload")
+	}
+
+	rec := plugin.waitRecord(t, 200*time.Millisecond)
+	if rec.AuthID != auth.ID {
+		t.Errorf("AuthID = %q, want %q", rec.AuthID, auth.ID)
+	}
+	if rec.Stream {
+		t.Errorf("Stream = true, want false")
+	}
+	if rec.Detail.InputTokens != 34 || rec.Detail.OutputTokens != 499 || rec.Detail.TotalTokens != 533 {
+		t.Errorf("usage = %+v, want input=34 output=499 total=533", rec.Detail)
+	}
+}

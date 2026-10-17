@@ -175,7 +175,8 @@ func (e *concurrencyTrackingRefreshExecutor) Refresh(_ context.Context, auth *Au
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	auth.Metadata["access_token"] = "refreshed-token"
+	auth.Metadata["access_token"] = "rotated-access-" + auth.ID
+	auth.Metadata["refresh_token"] = "rotated-refresh-" + auth.ID
 	return auth, nil
 }
 
@@ -269,10 +270,34 @@ func TestManager_ForceRefreshAll_CanceledContextSkipsExecutors(t *testing.T) {
 	}
 }
 
-func TestManager_ForceRefreshAll_DynamicCancellationSkipsRemaining(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+// refreshCommitStore observes the commit context without writing credential files.
+type refreshCommitStore struct {
+	*memoryAuthTestStore
+	checkContext func(context.Context)
+}
 
-	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+func (s *refreshCommitStore) Save(ctx context.Context, auth *Auth) (string, error) {
+	s.checkContext(ctx)
+	return s.memoryAuthTestStore.Save(ctx, auth)
+}
+
+func TestManager_ForceRefreshAll_DynamicCancellationSkipsRemaining(t *testing.T) {
+	type contextKey struct{}
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "refresh-value"))
+	defer cancel()
+
+	store := &refreshCommitStore{
+		memoryAuthTestStore: newMemoryAuthTestStore(),
+		checkContext: func(ctx context.Context) {
+			if ctx.Err() != nil || ctx.Done() != nil {
+				t.Error("successful refresh commit must not inherit cancellation")
+			}
+			if ctx.Value(contextKey{}) != "refresh-value" {
+				t.Error("refresh commit lost context value")
+			}
+		},
+	}
+	manager := NewManager(store, &RoundRobinSelector{}, nil)
 	manager.runtimeConfig.Store(&internalconfig.Config{AuthAutoRefreshWorkers: 2})
 
 	executor := &concurrencyTrackingRefreshExecutor{
@@ -286,9 +311,9 @@ func TestManager_ForceRefreshAll_DynamicCancellationSkipsRemaining(t *testing.T)
 		auth := &Auth{
 			ID:       fmt.Sprintf("ag-%d", i),
 			Provider: "antigravity",
-			Metadata: map[string]any{"refresh_token": fmt.Sprintf("ref-%d", i)},
+			Metadata: map[string]any{"access_token": "old-access", "refresh_token": "old-refresh"},
 		}
-		if _, err := manager.Register(context.Background(), auth); err != nil {
+		if _, err := manager.Register(WithSkipPersist(context.Background()), auth); err != nil {
 			t.Fatalf("register auth: %v", err)
 		}
 	}
@@ -315,7 +340,8 @@ func TestManager_ForceRefreshAll_DynamicCancellationSkipsRemaining(t *testing.T)
 		t.Fatalf("expected 6 results, got %d", len(results))
 	}
 
-	// Exactly 2 workers entered Refresh; remaining 4 were canceled in queue
+	// Exactly 2 workers entered Refresh; remaining 4 were canceled in queue.
+	// Successful rotations must be saved and published despite cancellation.
 	if entered := executor.totalEntered.Load(); entered != 2 {
 		t.Fatalf("expected exactly 2 entered calls, got %d", entered)
 	}
@@ -323,10 +349,25 @@ func TestManager_ForceRefreshAll_DynamicCancellationSkipsRemaining(t *testing.T)
 	successCount := 0
 	cancelCount := 0
 	for _, res := range results {
+		current, exists := manager.GetByID(res.ID)
+		if !exists {
+			t.Fatalf("auth %s disappeared", res.ID)
+		}
+		store.mu.Lock()
+		persisted := store.auths[res.ID].Clone()
+		store.mu.Unlock()
 		if res.Success {
 			successCount++
+			for name, auth := range map[string]*Auth{"manager": current, "store": persisted} {
+				if auth == nil || auth.Metadata["access_token"] != "rotated-access-"+res.ID || auth.Metadata["refresh_token"] != "rotated-refresh-"+res.ID {
+					t.Errorf("%s missing rotated tokens for %s", name, res.ID)
+				}
+			}
 		} else if res.Error == context.Canceled.Error() {
 			cancelCount++
+			if persisted != nil || current.Metadata["access_token"] != "old-access" || current.Metadata["refresh_token"] != "old-refresh" {
+				t.Errorf("unstarted auth %s was modified or persisted", res.ID)
+			}
 		}
 	}
 	if successCount != 2 {

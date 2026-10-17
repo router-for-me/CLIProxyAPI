@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
@@ -80,7 +82,10 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
-	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+	handshakeCtx, cancelHandshake := handshakeContext(ctx)
+	defer cancelHandshake()
+	if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
+		errHandshake = classifyHandshakeError(ctx, handshakeCtx, errHandshake)
 		if errors.Is(errHandshake, context.Canceled) || errors.Is(errHandshake, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 		}
@@ -178,8 +183,13 @@ const claudeCodeSessionCacheCapacity = 32
 // native handshake. PreferSkipResumptionOnNilExtension turns uTLS's HelloCustom
 // "resume without the matching extension" panic into a skipped resumption.
 func newClaudeCodeTLSConfig(host string, sessionCache tls.ClientSessionCache) *tls.Config {
+	return newClaudeCodeTLSConfigWithRoots(host, sessionCache, nil)
+}
+
+func newClaudeCodeTLSConfigWithRoots(host string, sessionCache tls.ClientSessionCache, roots *x509.CertPool) *tls.Config {
 	return &tls.Config{
 		ServerName:                         host,
+		RootCAs:                            roots,
 		ClientSessionCache:                 sessionCache,
 		OmitEmptyPsk:                       true,
 		PreferSkipResumptionOnNilExtension: true,
@@ -322,28 +332,35 @@ func claudeCodeRequestHeaderOrder(_, requestTarget string) []string {
 
 func cachedClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	return claudeCodeRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
-		return newClaudeCodeRoundTripperWithCompression(proxyURL, false)
+		return newClaudeCodeRoundTripper(proxyURL)
 	})
-}
-
-func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
-	return newClaudeCodeRoundTripperWithCompression(proxyURL, false)
 }
 
 func cachedRawClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	return rawClaudeCodeRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
-		return newClaudeCodeRoundTripperWithCompression(proxyURL, true)
+		return newRawClaudeCodeRoundTripper(proxyURL)
 	})
 }
 
+// newRawClaudeCodeRoundTripper is newClaudeCodeRoundTripper with Go's implicit gzip
+// negotiation and decoding turned off, so response bytes and Content-Encoding stay intact.
 func newRawClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
-	return newClaudeCodeRoundTripperWithCompression(proxyURL, true)
+	roundTripper := newClaudeCodeRoundTripper(proxyURL)
+	if transport, ok := roundTripper.(*http.Transport); ok {
+		return rawClaudeCodeTransport(transport)
+	}
+	return roundTripper
 }
 
-func newClaudeCodeRoundTripperWithCompression(proxyURL string, disableCompression bool) http.RoundTripper {
-	// The cache is scoped to this round tripper, which is already keyed by proxy,
-	// so resumption never crosses proxy boundaries.
-	sessionCache := tls.NewLRUClientSessionCache(claudeCodeSessionCacheCapacity)
+// rawClaudeCodeTransport stops the transport from asking for gzip itself and from decoding it:
+// the request keeps exactly the client's Accept-Encoding (or none), and the response keeps the
+// bytes and Content-Encoding Anthropic sent.
+func rawClaudeCodeTransport(transport *http.Transport) *http.Transport {
+	transport.DisableCompression = true
+	return transport
+}
+
+func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
@@ -353,10 +370,23 @@ func newClaudeCodeRoundTripperWithCompression(proxyURL string, disableCompressio
 			dialer = proxyDialer
 		}
 	}
+	return newClaudeCodeRoundTripperForDialer(dialer)
+}
+
+// newClaudeCodeRoundTripperForDialer builds the Claude Code transport on top
+// of an already-resolved dialer. It is split out from
+// newClaudeCodeRoundTripper so tests can inject in-memory connections.
+func newClaudeCodeRoundTripperForDialer(dialer proxy.Dialer) *http.Transport {
+	return newClaudeCodeRoundTripperForDialerAndRoots(dialer, nil)
+}
+
+func newClaudeCodeRoundTripperForDialerAndRoots(dialer proxy.Dialer, roots *x509.CertPool) *http.Transport {
+	// The cache is scoped to this round tripper, which is already keyed by proxy,
+	// so resumption never crosses proxy boundaries.
+	sessionCache := tls.NewLRUClientSessionCache(claudeCodeSessionCacheCapacity)
 
 	transport := &http.Transport{
-		ForceAttemptHTTP2:  false,
-		DisableCompression: disableCompression,
+		ForceAttemptHTTP2: false,
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var (
 				conn net.Conn
@@ -378,14 +408,17 @@ func newClaudeCodeRoundTripperWithCompression(proxyURL string, disableCompressio
 				}
 				return nil, fmt.Errorf("claude tls: split upstream address: %w", errSplit)
 			}
-			tlsConn := tls.UClient(conn, newClaudeCodeTLSConfig(host, sessionCache), tls.HelloCustom)
+			tlsConn := tls.UClient(conn, newClaudeCodeTLSConfigWithRoots(host, sessionCache, roots), tls.HelloCustom)
 			if errPreset := tlsConn.ApplyPreset(claudeCodeTLSClientHelloSpec()); errPreset != nil {
 				if errClose := tlsConn.Close(); errClose != nil {
 					log.Debugf("claude tls: close connection after preset failure: %v", errClose)
 				}
 				return nil, fmt.Errorf("claude tls: apply Claude Code ClientHello: %w", errPreset)
 			}
-			if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+			handshakeCtx, cancelHandshake := handshakeContext(ctx)
+			defer cancelHandshake()
+			if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
+				errHandshake = classifyHandshakeError(ctx, handshakeCtx, errHandshake)
 				if errClose := tlsConn.Close(); errClose != nil {
 					log.Debugf("claude tls: close connection after handshake failure: %v", errClose)
 				}
@@ -430,7 +463,24 @@ func NewRawUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliprox
 	return newUtlsHTTPClient(ctx, cfg, auth, timeout, true)
 }
 
-func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration, rawAnthropic bool) *http.Client {
+func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration, rawAnthropic bool) (clientOut *http.Client) {
+	// Carry the opt-in TLS establishment bound (requests
+	// tls-handshake-timeout-seconds) on a request-scoped wrapper. This
+	// client is shared, so the bound intentionally reaches both the Claude
+	// Code Anthropic dial path and the Chrome ChatGPT/Codex dial path; the
+	// standard fallback transport ignores the context value. The uTLS dial
+	// paths read it per dial, so cached per-proxy transports need no rebuild
+	// when the value changes. A disabled bound (0) leaves requests untouched.
+	var handshakeTimeout time.Duration
+	if cfg != nil {
+		handshakeTimeout = cfg.TLSHandshakeTimeout()
+	}
+	defer func() {
+		clientOut = httptransport.Decorate(ctx, clientOut)
+		if clientOut != nil && handshakeTimeout > 0 {
+			clientOut.Transport = &tlsHandshakeTimeoutRoundTripper{base: clientOut.Transport, timeout: handshakeTimeout}
+		}
+	}()
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	var ctxRoundTripper http.RoundTripper

@@ -37,6 +37,8 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -46,6 +48,8 @@ const (
 	defaultCodexUserAgent    = "codex_cli_rs/0.159.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	defaultCodexOriginator   = "codex_cli_rs"
 	accessTokenRefreshLeeway = 30 * time.Second
+	baselineModelSlug        = "gpt-5.5"
+	baselineModelVisibility  = "list"
 )
 
 func init() {
@@ -289,11 +293,70 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 		return nil, 0, fmt.Errorf("models request failed with status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
-	count, errCount := countModels(bodyBytes)
-	if errCount != nil {
-		return nil, 0, errCount
+	bodyBytes, count, errEnsure := ensureBaselineModel(bodyBytes)
+	if errEnsure != nil {
+		return nil, 0, errEnsure
 	}
 	return bodyBytes, count, nil
+}
+
+func ensureBaselineModel(raw []byte) ([]byte, int, error) {
+	var payload struct {
+		Models []json.RawMessage `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		return nil, 0, fmt.Errorf("failed to parse response JSON: %w", errUnmarshal)
+	}
+	// Keep this check intentionally loose: fetch_codex_models dumps the upstream
+	// Codex API payload. Strict CPA catalog validation belongs in
+	// cmd/validate_codex_models and registry.ValidateCodexClientModelsJSON.
+	if payload.Models == nil {
+		return nil, 0, fmt.Errorf("response JSON does not contain models array")
+	}
+	if len(payload.Models) == 0 {
+		return raw, 0, nil
+	}
+
+	foundBaseline := false
+	for i, modelRaw := range payload.Models {
+		slugResult := gjson.GetBytes(modelRaw, "slug")
+		if slugResult.Type != gjson.String || strings.TrimSpace(slugResult.Str) != baselineModelSlug {
+			continue
+		}
+		foundBaseline = true
+		visResult := gjson.GetBytes(modelRaw, "visibility")
+		if visResult.Type != gjson.String || visResult.Str != baselineModelVisibility {
+			updated, errSet := sjson.SetBytes(raw, fmt.Sprintf("models.%d.visibility", i), baselineModelVisibility)
+			if errSet != nil {
+				return nil, 0, fmt.Errorf("failed to update %s visibility: %w", baselineModelSlug, errSet)
+			}
+			raw = updated
+		}
+	}
+
+	count := len(payload.Models)
+	if !foundBaseline {
+		cloned := append([]byte(nil), payload.Models[0]...)
+		var errSet error
+		cloned, errSet = sjson.SetBytes(cloned, "slug", baselineModelSlug)
+		if errSet != nil {
+			return nil, 0, fmt.Errorf("failed to set %s slug on cloned model: %w", baselineModelSlug, errSet)
+		}
+		visResult := gjson.GetBytes(cloned, "visibility")
+		if visResult.Type != gjson.String || visResult.Str != baselineModelVisibility {
+			cloned, errSet = sjson.SetBytes(cloned, "visibility", baselineModelVisibility)
+			if errSet != nil {
+				return nil, 0, fmt.Errorf("failed to set %s visibility on cloned model: %w", baselineModelSlug, errSet)
+			}
+		}
+		raw, errSet = sjson.SetRawBytes(raw, "models.-1", cloned)
+		if errSet != nil {
+			return nil, 0, fmt.Errorf("failed to append %s model: %w", baselineModelSlug, errSet)
+		}
+		count++
+	}
+
+	return raw, count, nil
 }
 
 func codexModelsURL(clientVersion string) (string, error) {

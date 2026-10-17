@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -187,6 +188,44 @@ func TestSanitizeAntigravityGeminiRequestSignaturesFinalizesParallelCalls(t *tes
 				t.Fatalf("functionResponse role = %q, want native Antigravity model role; output=%s", got, output)
 			}
 		})
+	}
+}
+
+func TestAntigravityGeminiSignatureNormalizationDoesNotRepeatLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	payload := []byte(`{"contents":[{"role":"model","parts":[` +
+		`{"functionCall":{"name":"first","args":{}},"thoughtSignature":"` + issue4959GeminiThoughtSignature() + `"},` +
+		`{"functionCall":{"name":"second","args":{}},"thoughtSignature":"skip_thought_signature_validator"},` +
+		`{"functionCall":{"name":"third","args":{}},"thoughtSignature":"google#skip_thought_signature_validator"}]}]}`)
+	translationReq := sdktranslator.RequestEnvelope{Model: "gemini-3.8-flash-high", Stream: true}
+	original, working, errTranslate := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(t.Context(), nil, &config.Config{},
+		sdktranslator.FormatGemini, sdktranslator.FormatAntigravity, translationReq, payload, payload)
+	if errTranslate != nil {
+		t.Fatalf("translate request pair: %v", errTranslate)
+	}
+	working = sanitizeAntigravityGeminiRequestSignatures(translationReq.Model, working)
+
+	if got := gjson.GetBytes(working, "request.contents.0.parts.0.thoughtSignature").String(); got != issue4959GeminiThoughtSignature() {
+		t.Fatalf("native signature changed: %s", working)
+	}
+	for _, body := range [][]byte{original, working} {
+		for _, index := range []int{1, 2} {
+			if gjson.GetBytes(body, fmt.Sprintf("request.contents.0.parts.%d.thoughtSignature", index)).Exists() {
+				t.Fatalf("sibling bypass was not removed: %s", body)
+			}
+		}
+	}
+	sanitizeLogs := 0
+	for _, entry := range hook.AllEntries() {
+		if strings.HasPrefix(entry.Message, "gemini request: suppressed repeated thoughtSignature sanitizations") {
+			t.Fatalf("suppressed repeated log should no longer be emitted: %q", entry.Message)
+		}
+		if strings.HasPrefix(entry.Message, "gemini request: sanitized ") {
+			sanitizeLogs++
+		}
+	}
+	if sanitizeLogs != 1 {
+		t.Fatalf("expected exactly 1 aggregate log entry, got %d", sanitizeLogs)
 	}
 }
 
@@ -512,6 +551,81 @@ func TestAntigravityStreamAppendsTrailingUserForGeminiTrailingModelTurn(t *testi
 	}
 	if got := lastContent.Get("parts.0.text").String(); got != "" {
 		t.Fatalf("trailing turn text = %q, want empty string; body=%s", got, body)
+	}
+}
+
+func issue6524ResponsesTrailingToolOutputPayload(output string) []byte {
+	return []byte(`{"model":"gemini-3-flash","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"look at a.png"}]},` +
+		`{"type":"function_call","call_id":"call_1","name":"view_image","arguments":"{\"path\":\"a.png\"}"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":` + output + `}` +
+		`],"tools":[{"type":"function","name":"view_image","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}]}`)
+}
+
+func issue6524CaptureStreamContents(t *testing.T, payload []byte) []gjson.Result {
+	t.Helper()
+	captured := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	auth := testAntigravityAuth(server.URL)
+	auth.Metadata["project_id"] = "project-1"
+	result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	body := <-captured
+	contents := gjson.GetBytes(body, "request.contents").Array()
+	if len(contents) < 2 {
+		t.Fatalf("request.contents too short; body=%s", body)
+	}
+	return contents
+}
+
+func TestAntigravityStreamAppendsTrailingUserAfterImageOnlyFunctionResponse(t *testing.T) {
+	contents := issue6524CaptureStreamContents(t, issue6524ResponsesTrailingToolOutputPayload(
+		`[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}]`,
+	))
+	lastContent := contents[len(contents)-1]
+	if got := lastContent.Get("role").String(); got != "user" {
+		t.Fatalf("trailing turn role = %q, want user; contents=%v", got, contents)
+	}
+	if lastContent.Get("parts.0.functionResponse").Exists() {
+		t.Fatalf("trailing turn should not be the function response turn; contents=%v", contents)
+	}
+	responseContent := contents[len(contents)-2]
+	if !responseContent.Get("parts.0.functionResponse.parts.0.inlineData").Exists() {
+		t.Fatalf("expected function response with inline image before trailing user turn; contents=%v", contents)
+	}
+}
+
+func TestAntigravityStreamKeepsTrailingTextFunctionResponse(t *testing.T) {
+	contents := issue6524CaptureStreamContents(t, issue6524ResponsesTrailingToolOutputPayload(`"ok"`))
+	lastContent := contents[len(contents)-1]
+	if !lastContent.Get("parts.0.functionResponse").Exists() {
+		t.Fatalf("trailing text function response turn should stay last; contents=%v", contents)
 	}
 }
 

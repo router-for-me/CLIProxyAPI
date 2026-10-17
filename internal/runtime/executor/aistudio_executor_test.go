@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -42,10 +44,10 @@ func TestAIStudioTranslateRequestPreservesSummaryFromOriginalRequest(t *testing.
 func TestAIStudioTranslateRequestNormalizesThinkingLevel(t *testing.T) {
 	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
 	req := cliproxyexecutor.Request{
-		Model: "gemini-3.7-flash",
+		Model: "gemini-3.8-flash",
 		Payload: []byte(`{
 			"contents":[{"role":"user","parts":[{"text":"Human: Hi"}]}],
-			"model":"gemini-3.7-flash",
+			"model":"gemini-3.8-flash",
 			"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}}
 		}`),
 	}
@@ -63,7 +65,7 @@ func TestAIStudioTranslateRequestNormalizesThinkingLevel(t *testing.T) {
 	}
 }
 
-func TestAIStudioTranslateRequestNormalizesThinkingLevelAfterPayloadOverride(t *testing.T) {
+func TestAIStudioTranslateRequestPayloadOverrideWinsThinkingNormalization(t *testing.T) {
 	executor := NewAIStudioExecutor(&config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
 		Models: []config.PayloadModelRule{{Name: "gemini-3.7-flash", Protocol: "gemini"}},
 		Params: map[string]any{"generationConfig.thinkingConfig.thinkingLevel": "medium"},
@@ -78,8 +80,8 @@ func TestAIStudioTranslateRequestNormalizesThinkingLevelAfterPayloadOverride(t *
 	if err != nil {
 		t.Fatalf("translateRequest() error = %v", err)
 	}
-	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "MEDIUM" {
-		t.Fatalf("thinkingLevel = %q, want MEDIUM; payload=%s", got, payload)
+	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "medium" {
+		t.Fatalf("thinkingLevel = %q, want medium; payload=%s", got, payload)
 	}
 }
 
@@ -351,5 +353,459 @@ func waitForAIStudioUsageRecord(t *testing.T, records <-chan usage.Record, model
 		case <-timeout:
 			t.Fatalf("timed out waiting for AI Studio usage record")
 		}
+	}
+}
+
+func TestAIStudioApplyPatchExecutorReuse(t *testing.T) {
+	const authID = "aistudio-patch"
+	connected := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	relay := wsrelay.NewManager(wsrelay.Options{ProviderFactory: func(*http.Request) (string, error) { return authID, nil }, OnConnected: func(string) { close(connected) }})
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	defer func() {
+		if errStop := relay.Stop(context.Background()); errStop != nil {
+			t.Error(errStop)
+		}
+	}()
+	conn, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+relay.Path(), nil)
+	if errDial != nil {
+		t.Fatal(errDial)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
+	<-connected
+	defer unblock()
+	requests := make(chan []byte, 2)
+	clientDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 2; i++ {
+			var msg wsrelay.Message
+			if errReadJSON := conn.ReadJSON(&msg); errReadJSON != nil {
+				clientDone <- errReadJSON
+				return
+			}
+			body, _ := msg.Payload["body"].(string)
+			requests <- []byte(body)
+			var responses []wsrelay.Message
+			if i == 0 {
+				responses = []wsrelay.Message{{ID: msg.ID, Type: wsrelay.MessageTypeHTTPResp, Payload: map[string]any{"status": 200, "body": executorPatchResponse}}}
+			} else {
+				// A snapshot-only upstream can stream text, but not patch generation progress.
+				for _, response := range []wsrelay.Message{
+					{ID: msg.ID, Type: wsrelay.MessageTypeStreamStart, Payload: map[string]any{"status": 200}},
+					{ID: msg.ID, Type: wsrelay.MessageTypeStreamChunk, Payload: map[string]any{"data": "data: {\"responseId\":\"patch\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"preparing\"}]}}]}\n\n"}},
+				} {
+					if errWriteJSON := conn.WriteJSON(response); errWriteJSON != nil {
+						clientDone <- errWriteJSON
+						return
+					}
+				}
+				select {
+				case <-release:
+				case <-t.Context().Done():
+					return
+				}
+				responses = []wsrelay.Message{{ID: msg.ID, Type: wsrelay.MessageTypeStreamChunk, Payload: map[string]any{"data": "data: " + executorPatchResponse}}, {ID: msg.ID, Type: wsrelay.MessageTypeStreamEnd}}
+			}
+			for _, response := range responses {
+				if errWriteJSON := conn.WriteJSON(response); errWriteJSON != nil {
+					clientDone <- errWriteJSON
+					return
+				}
+			}
+		}
+		clientDone <- nil
+	}()
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}
+	req := cliproxyexecutor.Request{Model: "gemini-3.1-pro-preview", Payload: []byte(executorPatchRequest)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: req.Payload}
+	response, errExecute := exec.Execute(context.Background(), auth, req, opts)
+	if errExecute != nil {
+		t.Fatal(errExecute)
+	}
+	assertExecutorPatchDeclaration(t, <-requests)
+	assertExecutorPatchOutput(t, response.Payload)
+	stream, errExecuteStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errExecuteStream != nil {
+		t.Fatal(errExecuteStream)
+	}
+	assertExecutorPatchDeclaration(t, <-requests)
+	assertExecutorPatchStream(t, stream.Chunks, unblock)
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatal(errClient)
+	}
+}
+
+func TestApplyPatchAIStudioErrorsAndEOF(t *testing.T) {
+	for _, mode := range []string{"invalid", "eof"} {
+		t.Run(mode, func(t *testing.T) { task6AIStudioFailure(t, mode) })
+	}
+}
+func task6AIStudioFailure(t *testing.T, mode string, gateway ...bool) {
+	responseBody := strings.ReplaceAll(executorPatchResponse, `"input":"  *** Begin Patch\n*** End Patch\n "`, `"input":7,"secret":"RAW_SECRET"`)
+	if mode == "eof" {
+		responseBody = strings.ReplaceAll(executorPatchResponse, `,"finishReason":"STOP"`, "")
+	}
+	if len(gateway) > 0 && gateway[0] {
+		responseBody = strings.ReplaceAll(responseBody, "functions__apply_patch", "apply_patch")
+	}
+	authID := "aistudio-" + t.Name()
+	connected := make(chan struct{})
+	relay := wsrelay.NewManager(wsrelay.Options{ProviderFactory: func(*http.Request) (string, error) { return authID, nil }, OnConnected: func(string) { close(connected) }})
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	defer func() {
+		if errStop := relay.Stop(context.Background()); errStop != nil {
+			t.Error(errStop)
+		}
+	}()
+	conn, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+relay.Path(), nil)
+	if errDial != nil {
+		t.Fatal(errDial)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
+	<-connected
+	requests := make(chan []byte, 2)
+	clientDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 2; i++ {
+			var msg wsrelay.Message
+			if errReadJSON := conn.ReadJSON(&msg); errReadJSON != nil {
+				clientDone <- errReadJSON
+				return
+			}
+			body, _ := msg.Payload["body"].(string)
+			requests <- []byte(body)
+			var responses []wsrelay.Message
+			if i == 0 {
+				responses = []wsrelay.Message{{ID: msg.ID, Type: wsrelay.MessageTypeHTTPResp, Payload: map[string]any{"status": 200, "body": responseBody}}}
+			} else {
+				responses = []wsrelay.Message{{ID: msg.ID, Type: wsrelay.MessageTypeStreamStart, Payload: map[string]any{"status": 200}}, {ID: msg.ID, Type: wsrelay.MessageTypeStreamChunk, Payload: map[string]any{"data": "data: " + responseBody}}, {ID: msg.ID, Type: wsrelay.MessageTypeStreamEnd}}
+			}
+			for _, response := range responses {
+				if errWriteJSON := conn.WriteJSON(response); errWriteJSON != nil {
+					clientDone <- errWriteJSON
+					return
+				}
+			}
+		}
+		clientDone <- nil
+	}()
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}
+	req := cliproxyexecutor.Request{Model: "gemini-3.1-pro-preview", Payload: []byte(executorPatchRequest)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: req.Payload}
+	if len(gateway) > 0 && gateway[0] {
+		nonstream := task6Gateway(t, exec, auth, false)
+		if mode != "eof" && (nonstream.Code != http.StatusBadGateway || strings.Contains(nonstream.Body.String(), "RAW_SECRET")) {
+			t.Fatalf("relay HTTP nonstream error: %d %s", nonstream.Code, nonstream.Body.String())
+		}
+		<-requests
+		task6DrainUsage(t)
+		checkUsage := task6CaptureFailureUsage(t, auth.ID)
+		streamResponse := task6Gateway(t, exec, auth, true)
+		checkUsage()
+		<-requests
+		body := streamResponse.Body.String()
+		if streamResponse.Code != http.StatusOK || strings.Count(body, "event: response.failed") != 1 || strings.Contains(body, "event: response.completed") || strings.Contains(body, "data: [DONE]") || strings.Contains(body, "RAW_SECRET") {
+			t.Fatalf("relay HTTP stream error: %d %s", streamResponse.Code, body)
+		}
+	} else {
+		if mode != "eof" {
+			checkUsage := task6CaptureFailureUsage(t, auth.ID)
+			response, errExecute := exec.Execute(context.Background(), auth, req, opts)
+			checkUsage()
+			assertTask6PatchError(t, errExecute)
+			if len(response.Payload) != 0 {
+				t.Fatal("failed nonstream payload")
+			}
+		} else {
+			if _, errExecute := exec.Execute(context.Background(), auth, req, opts); errExecute != nil {
+				t.Fatal(errExecute)
+			}
+		}
+		assertExecutorPatchDeclaration(t, <-requests)
+		task6DrainUsage(t)
+		checkUsage := task6CaptureFailureUsage(t, auth.ID)
+		stream, errExecuteStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errExecuteStream != nil {
+			t.Fatal(errExecuteStream)
+		}
+		assertExecutorPatchDeclaration(t, <-requests)
+		assertTask6FailedStream(t, stream.Chunks)
+		checkUsage()
+	}
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatal(errClient)
+	}
+}
+
+func TestApplyPatchAIStudioHTTPGatewayErrorMatrix(t *testing.T) {
+	for _, mode := range []string{"invalid", "eof"} {
+		t.Run(mode, func(t *testing.T) { task6AIStudioFailure(t, mode, true) })
+	}
+}
+
+func TestAIStudioExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *testing.T) {
+	malformedBody := `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":10,"thoughtsTokenCount":313,"totalTokenCount":443},"modelVersion":"gemini-4-argon"}`
+	authID := "aistudio-" + t.Name()
+	connected := make(chan struct{})
+	relay := wsrelay.NewManager(wsrelay.Options{
+		ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
+		OnConnected:     func(string) { close(connected) },
+	})
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	defer func() {
+		if errStop := relay.Stop(context.Background()); errStop != nil {
+			t.Error(errStop)
+		}
+	}()
+	conn, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+relay.Path(), nil)
+	if errDial != nil {
+		t.Fatal(errDial)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
+	<-connected
+
+	clientDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 3; i++ {
+			var msg wsrelay.Message
+			if errReadJSON := conn.ReadJSON(&msg); errReadJSON != nil {
+				clientDone <- errReadJSON
+				return
+			}
+			var responses []wsrelay.Message
+			switch i {
+			case 0, 2:
+				responses = []wsrelay.Message{{
+					ID:   msg.ID,
+					Type: wsrelay.MessageTypeHTTPResp,
+					Payload: map[string]any{
+						"status":  float64(http.StatusOK),
+						"headers": map[string]any{"Content-Type": "application/json"},
+						"body":    malformedBody,
+					},
+				}}
+			case 1:
+				responses = []wsrelay.Message{
+					{ID: msg.ID, Type: wsrelay.MessageTypeStreamStart, Payload: map[string]any{"status": 200}},
+					{ID: msg.ID, Type: wsrelay.MessageTypeStreamChunk, Payload: map[string]any{"data": "data: " + malformedBody + "\n\n"}},
+					{ID: msg.ID, Type: wsrelay.MessageTypeStreamEnd},
+				}
+			}
+			for _, response := range responses {
+				if errWriteJSON := conn.WriteJSON(response); errWriteJSON != nil {
+					clientDone <- errWriteJSON
+					return
+				}
+			}
+		}
+		clientDone <- nil
+	}()
+
+	capture := &malformedFunctionCallUsageCapture{authID: authID, records: make(chan usage.Record, 3)}
+	usage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
+	})
+
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-4-argon",
+		Payload: []byte(`{"model":"gemini-4-argon","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+	}
+
+	_, errExec := exec.Execute(context.Background(), auth, req, opts)
+	if errExec == nil {
+		t.Fatal("Execute() error = nil, want retryable 502 error for MALFORMED_FUNCTION_CALL")
+	}
+	status, okStatus := errExec.(interface{ StatusCode() int })
+	if !okStatus || status.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("Execute() error = %T %v, want status 502", errExec, errExec)
+	}
+	if got := gjson.Get(errExec.Error(), "error.type").String(); got != "api_error" {
+		t.Fatalf("Execute() error.type = %q, want api_error. Error: %s", got, errExec.Error())
+	}
+	assertMalformedFunctionCallFailedUsage(t, capture.records)
+
+	for _, mode := range []string{"stream_chunk", "http_resp"} {
+		streamRes, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errStream != nil {
+			t.Fatalf("%s ExecuteStream() error = %v", mode, errStream)
+		}
+		var combined bytes.Buffer
+		var streamErr error
+		for chunk := range streamRes.Chunks {
+			if chunk.Err != nil {
+				streamErr = chunk.Err
+				continue
+			}
+			combined.Write(chunk.Payload)
+		}
+		if streamErr == nil {
+			t.Fatalf("%s ExecuteStream() chunk.Err = nil, want 502 error propagated", mode)
+		}
+		streamText := combined.String()
+		if strings.Contains(streamText, `"stop_reason":"refusal"`) {
+			t.Fatalf("%s stream unexpectedly emitted stop_reason refusal:\n%s", mode, streamText)
+		}
+		if !strings.Contains(streamText, "event: error\n") || !strings.Contains(streamText, `"type": "api_error"`) && !strings.Contains(streamText, `"type":"api_error"`) {
+			t.Fatalf("%s stream missing retryable api_error event:\n%s", mode, streamText)
+		}
+		assertMalformedFunctionCallFailedUsage(t, capture.records)
+	}
+
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatal(errClient)
+	}
+}
+
+func TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsConductorFailure(t *testing.T) {
+	malformedBody := `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":10,"thoughtsTokenCount":313,"totalTokenCount":443},"modelVersion":"gemini-4-argon"}`
+	for _, mode := range []string{"stream_end", "http_resp"} {
+		t.Run(mode, func(t *testing.T) {
+			authID := "aistudio-cancel-" + mode
+			connected := make(chan struct{})
+			canceled := make(chan struct{})
+			relay := wsrelay.NewManager(wsrelay.Options{
+				ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
+				OnConnected:     func(string) { close(connected) },
+			})
+			server := httptest.NewServer(relay.Handler())
+			defer server.Close()
+			defer func() {
+				if errStop := relay.Stop(context.Background()); errStop != nil {
+					t.Error(errStop)
+				}
+			}()
+			conn, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+relay.Path(), nil)
+			if errDial != nil {
+				t.Fatal(errDial)
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Error(errClose)
+				}
+			}()
+			<-connected
+
+			clientDone := make(chan error, 1)
+			go func() {
+				var msg wsrelay.Message
+				if errReadJSON := conn.ReadJSON(&msg); errReadJSON != nil {
+					clientDone <- errReadJSON
+					return
+				}
+				if mode == "http_resp" {
+					if errWriteJSON := conn.WriteJSON(wsrelay.Message{
+						ID:   msg.ID,
+						Type: wsrelay.MessageTypeHTTPResp,
+						Payload: map[string]any{
+							"status":  float64(http.StatusOK),
+							"headers": map[string]any{"Content-Type": "application/json"},
+							"body":    malformedBody,
+						},
+					}); errWriteJSON != nil {
+						clientDone <- errWriteJSON
+						return
+					}
+					clientDone <- nil
+					return
+				}
+				for _, response := range []wsrelay.Message{
+					{ID: msg.ID, Type: wsrelay.MessageTypeStreamStart, Payload: map[string]any{"status": 200}},
+					{ID: msg.ID, Type: wsrelay.MessageTypeStreamChunk, Payload: map[string]any{"data": "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"planning\"}]}}],\"modelVersion\":\"gemini-4-argon\"}\n\n"}},
+					{ID: msg.ID, Type: wsrelay.MessageTypeStreamChunk, Payload: map[string]any{"data": "data: " + malformedBody + "\n\n"}},
+				} {
+					if errWriteJSON := conn.WriteJSON(response); errWriteJSON != nil {
+						clientDone <- errWriteJSON
+						return
+					}
+				}
+				<-canceled
+				if errWriteJSON := conn.WriteJSON(wsrelay.Message{ID: msg.ID, Type: wsrelay.MessageTypeStreamEnd}); errWriteJSON != nil {
+					clientDone <- errWriteJSON
+					return
+				}
+				clientDone <- nil
+			}()
+
+			capture := &malformedFunctionCallUsageCapture{authID: authID, records: make(chan usage.Record, 1)}
+			usage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
+			})
+
+			exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+			auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio", Status: cliproxyauth.StatusActive}
+			manager := cliproxyauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(exec)
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gemini-4-argon"}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := cliproxyexecutor.Request{
+				Model:   "gemini-4-argon",
+				Payload: []byte(`{"model":"gemini-4-argon","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatClaude,
+				ResponseFormat: sdktranslator.FormatClaude,
+				Stream:         true,
+			}
+
+			streamRes, errStream := manager.ExecuteStream(ctx, []string{"aistudio"}, req, opts)
+			if errStream != nil {
+				t.Fatalf("manager.ExecuteStream() error = %v", errStream)
+			}
+			var cancelOnce sync.Once
+			for chunk := range streamRes.Chunks {
+				if strings.Contains(string(chunk.Payload), "event: error") {
+					cancelOnce.Do(func() {
+						cancel()
+						close(canceled)
+					})
+				}
+			}
+			assertMalformedFunctionCallFailedUsage(t, capture.records)
+			updated, okAuth := manager.GetByID(auth.ID)
+			if !okAuth || updated.ModelStates["gemini-4-argon"] == nil || updated.ModelStates["gemini-4-argon"].LastError == nil {
+				t.Fatalf("expected conductor to record failure on model state after client cancel on error event, got %+v", updated)
+			}
+			if updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus != http.StatusBadGateway {
+				t.Fatalf("LastError.HTTPStatus = %d, want 502; err=%+v", updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus, updated.ModelStates["gemini-4-argon"].LastError)
+			}
+			if errClient := <-clientDone; errClient != nil {
+				t.Fatal(errClient)
+			}
+		})
 	}
 }

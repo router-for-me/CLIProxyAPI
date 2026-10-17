@@ -2,6 +2,7 @@ package translator
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -149,8 +150,8 @@ func TestTranslateRequest_RegisteredTransformTakesPrecedence(t *testing.T) {
 	from := Format("openai-response")
 	to := Format("openai-response")
 
-	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return []byte(`{"model":"from-transform"}`)
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return []byte(`{"model":"from-transform"}`), nil
 	}, ResponseTransform{})
 
 	input := []byte(`{"model":"copilot/gpt-5-mini","input":"ping"}`)
@@ -171,8 +172,8 @@ func TestHasRequestTransformer(t *testing.T) {
 		t.Fatal("request transformer exists before registration")
 	}
 
-	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return rawJSON
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return rawJSON, nil
 	}, ResponseTransform{})
 
 	if !r.HasRequestTransformer(from, to) {
@@ -185,8 +186,8 @@ func TestHasResponseTransformerIgnoresEmptyRegistration(t *testing.T) {
 	from := Format("from")
 	to := Format("to")
 
-	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return rawJSON
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return rawJSON, nil
 	}, ResponseTransform{})
 
 	if r.HasResponseTransformer(from, to) {
@@ -269,8 +270,8 @@ func TestTranslateRequest_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) {
 		requestTranslateOK:   true,
 	}
 	withNative.SetPluginHooks(nativeHooks)
-	withNative.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return []byte(`{"model":"native-request"}`)
+	withNative.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return []byte(`{"model":"native-request"}`), nil
 	}, ResponseTransform{})
 
 	gotNative := withNative.TranslateRequest(from, to, "resolved", []byte(`{"model":"prefixed/resolved"}`), false)
@@ -400,8 +401,8 @@ func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
 	}
 
 	// A custom registration replaces the envelope-aware native route.
-	r.Register(from, to, func(string, []byte, bool) []byte {
-		return []byte(`{"source":"custom"}`)
+	r.Register(from, to, func(string, []byte, bool) ([]byte, error) {
+		return []byte(`{"source":"custom"}`), nil
 	}, ResponseTransform{})
 	for _, payload := range [][]byte{
 		[]byte(`{"input":"hello"}`),
@@ -442,8 +443,8 @@ func TestPluginNormalizersChainAfterNative(t *testing.T) {
 		},
 	}
 	r.SetPluginHooks(hooks)
-	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return []byte(`{"stage":"native-request"}`)
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return []byte(`{"stage":"native-request"}`), nil
 	}, ResponseTransform{})
 	r.Register(to, from, nil, ResponseTransform{
 		NonStream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
@@ -475,8 +476,8 @@ func TestUnregisterRestoresFormatPair(t *testing.T) {
 	if HasRequestTransformer(from, to) || HasRequestTransformer(from, other) {
 		t.Fatal("test formats are already registered")
 	}
-	identity := func(_ string, rawJSON []byte, _ bool) []byte {
-		return append([]byte(nil), rawJSON...)
+	identity := func(_ string, rawJSON []byte, _ bool) ([]byte, error) {
+		return append([]byte(nil), rawJSON...), nil
 	}
 	Register(from, to, identity, ResponseTransform{
 		NonStream: func(context.Context, string, []byte, []byte, []byte, *any) []byte {
@@ -498,5 +499,54 @@ func TestUnregisterRestoresFormatPair(t *testing.T) {
 	}
 	if !HasRequestTransformer(from, other) {
 		t.Fatal("unregister removed a different format pair")
+	}
+}
+
+type patchRegistryError struct{ err error }
+
+func (s *patchRegistryError) ToolInputError() error { return s.err }
+
+func TestApplyPatchRegistryNilAndRetainedFailure(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		r := NewRegistry()
+		r.SetPluginHooks(&fakePluginHooks{normalizeAfter: func([]byte) []byte { return []byte(`{"success":true}`) }})
+		if native {
+			r.Register(FormatOpenAI, FormatOpenAIResponse, nil, ResponseTransform{
+				Stream: func(_ context.Context, _ string, _, _, _ []byte, param *any) [][]byte {
+					*param = &patchRegistryError{errors.New("invalid")}
+					return nil
+				},
+				NonStream: func(_ context.Context, _ string, _, _, _ []byte, param *any) []byte {
+					*param = &patchRegistryError{errors.New("invalid")}
+					return nil
+				},
+			})
+		}
+		var param any = &patchRegistryError{errors.New("invalid")}
+		if got := r.TranslateStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param); got != nil {
+			t.Errorf("native=%v: stream failure recovered as %s", native, got)
+		}
+		if got := r.TranslateNonStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param); got != nil {
+			t.Errorf("native=%v: nonstream failure recovered as %s", native, got)
+		}
+	}
+}
+
+func TestApplyPatchRegistryNativeNilDoesNotInvokeRecovery(t *testing.T) {
+	r := NewRegistry()
+	r.SetPluginHooks(&fakePluginHooks{normalizeAfter: func([]byte) []byte {
+		t.Error("nil native output passed through plugin recovery")
+		return []byte(`{"success":true}`)
+	}})
+	r.Register(FormatOpenAI, FormatOpenAIResponse, nil, ResponseTransform{
+		Stream:    func(context.Context, string, []byte, []byte, []byte, *any) [][]byte { return nil },
+		NonStream: func(context.Context, string, []byte, []byte, []byte, *any) []byte { return nil },
+	})
+	var param any
+	if r.TranslateStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param) != nil {
+		t.Fatal("native stream nil became raw success")
+	}
+	if r.TranslateNonStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param) != nil {
+		t.Fatal("native nonstream nil became raw success")
 	}
 }

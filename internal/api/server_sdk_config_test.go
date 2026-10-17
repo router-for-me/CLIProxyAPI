@@ -7,12 +7,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestEffectiveSDKConfigCopiesCodexOptimizeMultiAgentV2(t *testing.T) {
-	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+func TestEffectiveSDKConfigCopiesClientCodexEnableApplyPatch(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := &config.Config{}
+		cfg.Client.Codex.EnableApplyPatch = enabled
+		sdkCfg := effectiveSDKConfig(cfg)
+		if sdkCfg == nil || sdkCfg.Client.Codex.EnableApplyPatch != enabled {
+			t.Fatalf("SDK client EnableApplyPatch does not match %t", enabled)
+		}
+		cfg.Client.Codex.EnableApplyPatch = !enabled
+		if sdkCfg.Client.Codex.EnableApplyPatch != enabled {
+			t.Fatal("effective SDK config shares client configuration state")
+		}
+	}
+}
 
-	sdkCfg := effectiveSDKConfig(cfg)
-	if sdkCfg == nil || !sdkCfg.CodexOptimizeMultiAgentV2 {
-		t.Fatalf("CodexOptimizeMultiAgentV2 = false, want true")
+func TestEffectiveSDKConfigCopiesClientCodexOptimizeMultiAgentV2(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := &config.Config{}
+		cfg.Client.Codex.OptimizeMultiAgentV2 = enabled
+		sdkCfg := effectiveSDKConfig(cfg)
+		if sdkCfg == nil || sdkCfg.Client.Codex.OptimizeMultiAgentV2 != enabled {
+			t.Fatalf("SDK client OptimizeMultiAgentV2 does not match %t", enabled)
+		}
+		cfg.Client.Codex.OptimizeMultiAgentV2 = !enabled
+		if sdkCfg.Client.Codex.OptimizeMultiAgentV2 != enabled {
+			t.Fatal("effective SDK config shares client configuration state")
+		}
 	}
 }
 

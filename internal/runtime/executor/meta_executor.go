@@ -383,3 +383,6 @@ func isMetaSubscriptionQuota(statusCode int, body []byte) bool {
 	}
 	return false
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *MetaExecutor) SupportsApplyPatch() bool { return e != nil }

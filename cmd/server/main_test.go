@@ -1,9 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 )
 
 func TestArgvEnablesBoolFlag(t *testing.T) {
@@ -113,59 +121,6 @@ func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	}
 }
 
-func TestModelCatalogUpdaterPlan(t *testing.T) {
-	tests := []struct {
-		name            string
-		localModel      bool
-		homeEnabled     bool
-		wantModels      bool
-		wantCodexClient bool
-		wantDevin       bool
-	}{
-		{
-			name:            "normal CPA refreshes all catalogs",
-			localModel:      false,
-			homeEnabled:     false,
-			wantModels:      true,
-			wantCodexClient: true,
-			wantDevin:       true,
-		},
-		{
-			name:            "home mode keeps models.json local and refreshes codex templates and devin",
-			localModel:      false,
-			homeEnabled:     true,
-			wantModels:      false,
-			wantCodexClient: true,
-			wantDevin:       true,
-		},
-		{
-			name:            "local-model disables all remote catalogs",
-			localModel:      true,
-			homeEnabled:     false,
-			wantModels:      false,
-			wantCodexClient: false,
-			wantDevin:       false,
-		},
-		{
-			name:            "local-model disables all remote catalogs even under home",
-			localModel:      true,
-			homeEnabled:     true,
-			wantModels:      false,
-			wantCodexClient: false,
-			wantDevin:       false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotModels, gotCodex, gotDevin := modelCatalogUpdaterPlan(tt.localModel, tt.homeEnabled)
-			if gotModels != tt.wantModels || gotCodex != tt.wantCodexClient || gotDevin != tt.wantDevin {
-				t.Fatalf("modelCatalogUpdaterPlan(%v, %v) = (%v, %v, %v), want (%v, %v, %v)",
-					tt.localModel, tt.homeEnabled, gotModels, gotCodex, gotDevin, tt.wantModels, tt.wantCodexClient, tt.wantDevin)
-			}
-		})
-	}
-}
-
 func TestHomeConfigPayloadPortApplication(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -269,6 +224,78 @@ func TestResolveManagementBaseURL(t *testing.T) {
 			got := resolveManagementBaseURL(tt.flagURL, tt.cfg)
 			if got != tt.want {
 				t.Fatalf("resolveManagementBaseURL(%q, %v) = %q, want %q", tt.flagURL, tt.cfg, got, tt.want)
+			}
+		})
+	}
+}
+
+const seededConfigTestSecret = "git-seed-plaintext-secret"
+
+// persistSeededConfigForTest seeds content into configFilePath and returns what each
+// persist call found in that file.
+func persistSeededConfigForTest(t *testing.T, configFilePath, content string) ([]string, error) {
+	t.Helper()
+	if errMkdir := os.MkdirAll(filepath.Dir(configFilePath), 0o700); errMkdir != nil {
+		t.Fatalf("create config directory: %v", errMkdir)
+	}
+	if errWrite := os.WriteFile(configFilePath, []byte(content), 0o600); errWrite != nil {
+		t.Fatalf("write config: %v", errWrite)
+	}
+	var persisted []string
+	errPersist := persistSeededConfig(context.Background(), configFilePath, func(context.Context) error {
+		data, errRead := os.ReadFile(configFilePath)
+		if errRead != nil {
+			return errRead
+		}
+		persisted = append(persisted, string(data))
+		return nil
+	})
+	return persisted, errPersist
+}
+
+func TestPersistSeededConfigHashesSecretBeforePersisting(t *testing.T) {
+	configFilePath := filepath.Join(t.TempDir(), "config", "config.yaml")
+	persisted, errPersist := persistSeededConfigForTest(t, configFilePath, "port: 8317\nremote-management:\n  secret-key: "+seededConfigTestSecret+"\n")
+	if errPersist != nil {
+		t.Fatalf("persistSeededConfig() error = %v", errPersist)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("persist calls = %d, want 1", len(persisted))
+	}
+	if strings.Contains(persisted[0], seededConfigTestSecret) {
+		t.Fatalf("persisted the plaintext management secret:\n%s", persisted[0])
+	}
+	var doc struct {
+		RemoteManagement struct {
+			SecretKey string `yaml:"secret-key"`
+		} `yaml:"remote-management"`
+	}
+	if errParse := yaml.Unmarshal([]byte(persisted[0]), &doc); errParse != nil {
+		t.Fatalf("parse persisted config: %v", errParse)
+	}
+	if errCompare := bcrypt.CompareHashAndPassword([]byte(doc.RemoteManagement.SecretKey), []byte(seededConfigTestSecret)); errCompare != nil {
+		t.Fatalf("persisted secret %q is not the bcrypt hash of the plaintext secret", doc.RemoteManagement.SecretKey)
+	}
+}
+
+// The template copy is removed when refused, so the next start seeds again and fails
+// again instead of running from a config the repository never received.
+func TestPersistSeededConfigRefusesConfigThatKeepsPlaintextSecret(t *testing.T) {
+	for name, content := range map[string]string{
+		"unparsable":      "remote-management:\n  secret-key: " + seededConfigTestSecret + "\nport: [8317\n",
+		"anchored secret": "defaults: &management\n  secret-key: " + seededConfigTestSecret + "\nmanagement: *management\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			configFilePath := filepath.Join(t.TempDir(), "config", "config.yaml")
+			persisted, errPersist := persistSeededConfigForTest(t, configFilePath, content)
+			if errPersist == nil {
+				t.Fatal("persistSeededConfig() succeeded, want the seed refused")
+			}
+			if len(persisted) != 0 {
+				t.Fatalf("persisted a config that still holds the plaintext secret:\n%s", persisted[0])
+			}
+			if _, errStat := os.Stat(configFilePath); !errors.Is(errStat, fs.ErrNotExist) {
+				t.Fatalf("refused template copy left in place (stat error = %v)", errStat)
 			}
 		})
 	}

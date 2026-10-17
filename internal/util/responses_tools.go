@@ -7,16 +7,41 @@ import (
 	"sort"
 	"strings"
 
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 // ResponsesToolIdentity represents the resolved identity of a tool in OpenAI Responses format.
 type ResponsesToolIdentity struct {
-	Name      string
-	Namespace string
-	Custom    bool
+	Name       string
+	Namespace  string
+	Custom     bool
+	ApplyPatch bool // Resolved from the winning original declaration, never from the upstream name.
+	ToolSearch bool // Marks the function shim standing in for a client-executed tool_search declaration.
 }
+
+const (
+	// ResponsesToolSearchType is the Responses tool type for deferred tool discovery.
+	ResponsesToolSearchType = "tool_search"
+	// ResponsesToolSearchExecutionClient marks a tool_search that the client executes itself.
+	ResponsesToolSearchExecutionClient = "client"
+	// ResponsesToolSearchFunctionName is the function name exposed to providers
+	// that have no native tool_search support.
+	ResponsesToolSearchFunctionName = "tool_search"
+	// ResponsesClientToolSearchKey is the internal forwardMap key for the
+	// client-executed tool_search shim. The leading NUL byte cannot appear in a
+	// JSON identifier, preventing collisions with user-declared tool names.
+	ResponsesClientToolSearchKey = "\x00client_tool_search"
+	// ResponsesToolSearchCallType is the Responses item type for a tool_search invocation.
+	ResponsesToolSearchCallType = "tool_search_call"
+	// ResponsesToolSearchOutputType is the Responses input item carrying discovered tools.
+	ResponsesToolSearchOutputType = "tool_search_output"
+	// ResponsesDiscoveredToolPriority ranks tools loaded by tool_search_output after declared tools.
+	ResponsesDiscoveredToolPriority = 2
+
+	responsesToolSearchDefaultParameters = `{"type":"object","properties":{"query":{"type":"string","description":"Search query for deferred tools."},"limit":{"type":"number","description":"Maximum number of tools to return."}},"required":["query"],"additionalProperties":false}`
+)
 
 // ResponsesToolDescriptor is an internal representation of a tool declaration in a Responses request.
 type ResponsesToolDescriptor struct {
@@ -25,9 +50,10 @@ type ResponsesToolDescriptor struct {
 	Namespace      string // Namespace if any (e.g. "functions")
 	ToolType       string // "function", "custom", etc.
 	Tool           gjson.Result
-	SourcePriority int  // 0 for top-level tools, 1 for additional_tools
+	SourcePriority int  // 0 for top-level tools, 1 for additional_tools, 2 for tool_search_output
 	Direct         bool // true if declared directly, false if declared as namespace child
 	Order          int  // original discovery order
+	ClientSearch   bool // true for a client-executed tool_search declaration
 }
 
 // QualifyResponsesNamespaceToolName qualifies a child tool name with its namespace.
@@ -46,7 +72,7 @@ func QualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 	return namespaceName + "__" + childName
 }
 
-func responsesToolSources(root gjson.Result) []struct {
+func responsesToolSources(root gjson.Result, includeClientToolSearch bool) []struct {
 	tools    gjson.Result
 	priority int
 } {
@@ -70,8 +96,31 @@ func responsesToolSources(root gjson.Result) []struct {
 			}
 			return true
 		})
+		if includeClientToolSearch {
+			input.ForEach(func(_, item gjson.Result) bool {
+				if item.Get("type").String() == ResponsesToolSearchOutputType && IsResponsesClientToolSearchItem(item) {
+					appendSource(item.Get("tools"), ResponsesDiscoveredToolPriority)
+				}
+				return true
+			})
+		}
 	}
 	return sources
+}
+
+// IsResponsesClientToolSearchDeclaration reports whether a tool declaration is
+// a client-executed Responses tool_search.
+func IsResponsesClientToolSearchDeclaration(tool gjson.Result) bool {
+	return strings.TrimSpace(tool.Get("type").String()) == ResponsesToolSearchType &&
+		strings.TrimSpace(tool.Get("execution").String()) == ResponsesToolSearchExecutionClient
+}
+
+// IsResponsesClientToolSearchItem reports whether a tool_search_call or
+// tool_search_output input item belongs to client-executed tool search.
+// Hosted server search explicitly sets execution to "server".
+func IsResponsesClientToolSearchItem(item gjson.Result) bool {
+	execution := strings.TrimSpace(item.Get("execution").String())
+	return execution == "" || execution == ResponsesToolSearchExecutionClient
 }
 
 func responsesToolName(tool gjson.Result) string {
@@ -115,8 +164,12 @@ func responsesToolParameters(tool gjson.Result) gjson.Result {
 
 // CollectResponsesToolDescriptors extracts all tool descriptors from a Responses request root.
 func CollectResponsesToolDescriptors(root gjson.Result) []ResponsesToolDescriptor {
+	return collectResponsesToolDescriptors(root, false)
+}
+
+func collectResponsesToolDescriptors(root gjson.Result, includeClientToolSearch bool) []ResponsesToolDescriptor {
 	var descriptors []ResponsesToolDescriptor
-	appendDescriptor := func(tool gjson.Result, name, localName, namespace string, toolType string, sourcePriority int, direct bool) {
+	appendDescriptor := func(tool gjson.Result, name, localName, namespace string, toolType string, sourcePriority int, direct bool, clientSearch bool) {
 		if name == "" {
 			return
 		}
@@ -129,6 +182,7 @@ func CollectResponsesToolDescriptors(root gjson.Result) []ResponsesToolDescripto
 			SourcePriority: sourcePriority,
 			Direct:         direct,
 			Order:          len(descriptors),
+			ClientSearch:   clientSearch,
 		})
 	}
 	appendNamespaceChildren := func(namespaceTool gjson.Result, sourcePriority int) {
@@ -148,30 +202,55 @@ func CollectResponsesToolDescriptors(root gjson.Result) []ResponsesToolDescripto
 			qualifiedName := QualifyResponsesNamespaceToolName(namespaceName, childName)
 			switch strings.TrimSpace(child.Get("type").String()) {
 			case "", "function":
-				appendDescriptor(child, qualifiedName, childName, namespaceName, "function", sourcePriority, false)
+				appendDescriptor(child, qualifiedName, childName, namespaceName, "function", sourcePriority, false, false)
 			case "custom":
-				appendDescriptor(child, qualifiedName, childName, namespaceName, "custom", sourcePriority, false)
+				appendDescriptor(child, qualifiedName, childName, namespaceName, "custom", sourcePriority, false, false)
 			}
 			return true
 		})
 	}
-	for _, source := range responsesToolSources(root) {
+	for _, source := range responsesToolSources(root, includeClientToolSearch) {
 		source.tools.ForEach(func(_, tool gjson.Result) bool {
 			toolType := strings.TrimSpace(tool.Get("type").String())
 			switch toolType {
 			case "", "function":
 				name := responsesToolName(tool)
-				appendDescriptor(tool, name, name, "", "function", source.priority, true)
+				appendDescriptor(tool, name, name, "", "function", source.priority, true, false)
 			case "custom":
 				name := responsesToolName(tool)
-				appendDescriptor(tool, name, name, "", "custom", source.priority, true)
+				appendDescriptor(tool, name, name, "", "custom", source.priority, true, false)
 			case "namespace":
 				appendNamespaceChildren(tool, source.priority)
+			case ResponsesToolSearchType:
+				if includeClientToolSearch && source.priority < ResponsesDiscoveredToolPriority && IsResponsesClientToolSearchDeclaration(tool) {
+					appendDescriptor(tool, ResponsesToolSearchFunctionName, ResponsesToolSearchFunctionName, "", ResponsesToolSearchType, source.priority, true, true)
+				}
 			}
 			return true
 		})
 	}
-	return descriptors
+
+	if !includeClientToolSearch || !responsesHasClientToolSearch(descriptors) {
+		return descriptors
+	}
+	kept := make([]ResponsesToolDescriptor, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		if !descriptor.ClientSearch && descriptor.SourcePriority != ResponsesDiscoveredToolPriority && descriptor.Tool.Get("defer_loading").Bool() {
+			continue
+		}
+		descriptor.Order = len(kept)
+		kept = append(kept, descriptor)
+	}
+	return kept
+}
+
+func responsesHasClientToolSearch(descriptors []ResponsesToolDescriptor) bool {
+	for i := range descriptors {
+		if descriptors[i].ClientSearch {
+			return true
+		}
+	}
+	return false
 }
 
 func responsesToolDescriptorPrecedes(left, right ResponsesToolDescriptor) bool {
@@ -186,8 +265,12 @@ func responsesToolDescriptorPrecedes(left, right ResponsesToolDescriptor) bool {
 
 // CollectResponsesToolWinners collects deduplicated winning descriptors for each qualified tool name.
 func CollectResponsesToolWinners(root gjson.Result) map[string]ResponsesToolDescriptor {
+	return collectResponsesToolWinnersFromDescriptors(CollectResponsesToolDescriptors(root))
+}
+
+func collectResponsesToolWinnersFromDescriptors(descriptors []ResponsesToolDescriptor) map[string]ResponsesToolDescriptor {
 	winners := map[string]ResponsesToolDescriptor{}
-	for _, descriptor := range CollectResponsesToolDescriptors(root) {
+	for _, descriptor := range descriptors {
 		current, exists := winners[descriptor.Name]
 		if !exists || responsesToolDescriptorPrecedes(descriptor, current) {
 			winners[descriptor.Name] = descriptor
@@ -249,61 +332,148 @@ func disambiguateResponsesSanitizedName(base, original string, used map[string]s
 	}
 }
 
+type responsesToolWinnerKey struct {
+	name         string
+	clientSearch bool
+}
+
 // BuildGeminiFunctionDeclarations builds Gemini function declarations, forward name mapping, and reverse identity mapping.
 func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]string, map[string]ResponsesToolIdentity) {
-	descriptors := CollectResponsesToolDescriptors(root)
-	winners := CollectResponsesToolWinners(root)
+	descriptors := collectResponsesToolDescriptors(root, true)
+	winners := make(map[responsesToolWinnerKey]ResponsesToolDescriptor, len(descriptors))
+	for _, descriptor := range descriptors {
+		key := responsesToolWinnerKey{name: descriptor.Name, clientSearch: descriptor.ClientSearch}
+		current, exists := winners[key]
+		if !exists || responsesToolDescriptorPrecedes(descriptor, current) {
+			winners[key] = descriptor
+		}
+	}
 
-	seenNames := make(map[string]struct{})
+	seenKeys := make(map[responsesToolWinnerKey]struct{}, len(winners))
 	var winningList []ResponsesToolDescriptor
 	for _, descriptor := range descriptors {
-		winner, ok := winners[descriptor.Name]
+		key := responsesToolWinnerKey{name: descriptor.Name, clientSearch: descriptor.ClientSearch}
+		winner, ok := winners[key]
 		if !ok || winner.Order != descriptor.Order {
 			continue
 		}
-		if _, seen := seenNames[descriptor.Name]; seen {
+		if _, seen := seenKeys[key]; seen {
 			continue
 		}
-		seenNames[descriptor.Name] = struct{}{}
+		seenKeys[key] = struct{}{}
 		winningList = append(winningList, descriptor)
 	}
 
-	if len(winningList) == 0 {
-		return nil, nil, nil
+	hasClientSearchHistory := false
+	if include := root.Get("input"); include.Exists() && include.IsArray() {
+		include.ForEach(func(_, item gjson.Result) bool {
+			typ := item.Get("type").String()
+			if (typ == ResponsesToolSearchCallType || typ == ResponsesToolSearchOutputType) && IsResponsesClientToolSearchItem(item) {
+				hasClientSearchHistory = true
+				return false
+			}
+			return true
+		})
 	}
 
+	if len(winningList) == 0 {
+		if !hasClientSearchHistory {
+			return nil, nil, nil
+		}
+		forwardMap := map[string]string{
+			ResponsesClientToolSearchKey:    ResponsesToolSearchFunctionName,
+			ResponsesToolSearchFunctionName: ResponsesToolSearchFunctionName,
+		}
+		reverseMap := map[string]ResponsesToolIdentity{
+			ResponsesToolSearchFunctionName: {
+				Name:       ResponsesToolSearchFunctionName,
+				ToolSearch: true,
+			},
+		}
+		return nil, forwardMap, reverseMap
+	}
+
+	hasClientSearch := false
+	userOwnsExactToolSearch := false
 	qualifiedNames := make([]string, 0, len(winningList))
 	for _, desc := range winningList {
+		if desc.ClientSearch {
+			hasClientSearch = true
+			continue
+		}
+		if desc.Name == ResponsesToolSearchFunctionName {
+			userOwnsExactToolSearch = true
+		}
 		qualifiedNames = append(qualifiedNames, desc.Name)
 	}
 	sanitizedMap := sanitizeResponsesToolNames(qualifiedNames)
+	if sanitizedMap == nil {
+		sanitizedMap = make(map[string]string, len(winningList))
+	}
 
-	forwardMap := make(map[string]string, len(winningList)*2)
-	reverseMap := make(map[string]ResponsesToolIdentity, len(winningList)*2)
+	clientSearchGeminiName := ""
+	if hasClientSearch || hasClientSearchHistory {
+		used := make(map[string]string, len(sanitizedMap)+1)
+		for origName, mappedName := range sanitizedMap {
+			used[mappedName] = origName
+		}
+		if !userOwnsExactToolSearch {
+			// Reserve "tool_search" for the client tool_search shim and
+			// disambiguate any non-exact tool (e.g. "tool.search") that sanitized to it.
+			if collidingOrig, taken := used[ResponsesToolSearchFunctionName]; taken && collidingOrig != ResponsesToolSearchFunctionName {
+				used[ResponsesToolSearchFunctionName] = ResponsesClientToolSearchKey
+				newMapped := disambiguateResponsesSanitizedName(ResponsesToolSearchFunctionName, collidingOrig, used)
+				sanitizedMap[collidingOrig] = newMapped
+				used[newMapped] = collidingOrig
+			} else {
+				used[ResponsesToolSearchFunctionName] = ResponsesClientToolSearchKey
+			}
+			clientSearchGeminiName = ResponsesToolSearchFunctionName
+		} else {
+			clientSearchGeminiName = disambiguateResponsesSanitizedName(ResponsesToolSearchFunctionName, ResponsesClientToolSearchKey, used)
+			used[clientSearchGeminiName] = ResponsesClientToolSearchKey
+		}
+	}
+
+	forwardMap := make(map[string]string, len(winningList)*2+1)
+	reverseMap := make(map[string]ResponsesToolIdentity, len(winningList)*2+1)
+	if clientSearchGeminiName != "" {
+		forwardMap[ResponsesClientToolSearchKey] = clientSearchGeminiName
+		forwardMap[clientSearchGeminiName] = clientSearchGeminiName
+		if !userOwnsExactToolSearch {
+			forwardMap[ResponsesToolSearchFunctionName] = clientSearchGeminiName
+		}
+		reverseMap[clientSearchGeminiName] = ResponsesToolIdentity{
+			Name:       ResponsesToolSearchFunctionName,
+			ToolSearch: true,
+		}
+	}
 	var declarations [][]byte
 
 	for _, desc := range winningList {
 		geminiName := desc.Name
-		if mapped, ok := sanitizedMap[desc.Name]; ok && mapped != "" {
+		if desc.ClientSearch {
+			geminiName = clientSearchGeminiName
+		} else if mapped, ok := sanitizedMap[desc.Name]; ok && mapped != "" {
 			geminiName = mapped
 		} else {
 			geminiName = SanitizeFunctionName(desc.Name)
 		}
 
-		forwardMap[desc.Name] = geminiName
-		if desc.LocalName != "" && desc.LocalName != desc.Name {
-			if _, exists := forwardMap[desc.LocalName]; !exists {
-				forwardMap[desc.LocalName] = geminiName
-			}
+		if !desc.ClientSearch {
+			forwardMap[desc.Name] = geminiName
 		}
+		forwardMap[geminiName] = geminiName
 
 		identity := ResponsesToolIdentity{
-			Name:      desc.LocalName,
-			Namespace: desc.Namespace,
-			Custom:    desc.ToolType == "custom",
+			Name:       desc.LocalName,
+			Namespace:  desc.Namespace,
+			Custom:     desc.ToolType == "custom",
+			ApplyPatch: applypatch.IsCustomTool(desc.Tool),
+			ToolSearch: desc.ClientSearch,
 		}
 		reverseMap[geminiName] = identity
-		if desc.Name != geminiName {
+		if !desc.ClientSearch && desc.Name != geminiName {
 			reverseMap[desc.Name] = identity
 		}
 
@@ -313,8 +483,13 @@ func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]st
 			funcDecl, _ = sjson.SetBytes(funcDecl, "description", descStr)
 		}
 
-		if desc.ToolType == "custom" {
+		if applypatch.IsCustomTool(desc.Tool) {
+			funcDecl, _ = sjson.SetBytes(funcDecl, "description", applypatch.Description(desc.Tool))
+			funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", applypatch.Parameters())
+		} else if desc.ToolType == "custom" {
 			funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`))
+		} else if desc.ClientSearch {
+			funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", buildGeminiToolSearchParametersSchema(desc.Tool))
 		} else {
 			params := responsesToolParameters(desc.Tool)
 			if params.Exists() {
@@ -324,7 +499,27 @@ func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]st
 		declarations = append(declarations, funcDecl)
 	}
 
+	// Populate local-name aliases after all direct/qualified names are registered
+	// so a namespace child's local name never shadows a direct tool or the search shim.
+	for _, desc := range winningList {
+		if !desc.ClientSearch && desc.LocalName != "" && desc.LocalName != desc.Name {
+			if _, exists := forwardMap[desc.LocalName]; !exists {
+				forwardMap[desc.LocalName] = forwardMap[desc.Name]
+			}
+		}
+	}
+
 	return declarations, forwardMap, reverseMap
+}
+
+func buildGeminiToolSearchParametersSchema(tool gjson.Result) []byte {
+	if params := responsesToolParameters(tool); params.Exists() && params.IsObject() {
+		cleaned := CleanJSONSchemaForGeminiJSONSchema(params.Raw)
+		if gjson.Valid(cleaned) && gjson.Parse(cleaned).IsObject() {
+			return []byte(cleaned)
+		}
+	}
+	return []byte(responsesToolSearchDefaultParameters)
 }
 
 // ResponsesToolReverseIdentityMap builds a Gemini function name -> ResponsesToolIdentity map from a Responses request raw JSON.
@@ -346,6 +541,15 @@ func MapResponsesToolName(forwardMap map[string]string, name string) string {
 		return mapped
 	}
 	return SanitizeFunctionName(name)
+}
+
+// MapResponsesClientToolSearchName returns the mapped Gemini function name for
+// the client-executed tool_search shim.
+func MapResponsesClientToolSearchName(forwardMap map[string]string) string {
+	if mapped, ok := forwardMap[ResponsesClientToolSearchKey]; ok && mapped != "" {
+		return mapped
+	}
+	return ResponsesToolSearchFunctionName
 }
 
 // ConvertResponsesToolChoiceToGemini translates Responses tool_choice into Gemini functionCallingConfig JSON.
@@ -373,6 +577,9 @@ func ConvertResponsesToolChoiceToGemini(toolChoice gjson.Result, forwardMap map[
 			mode = "AUTO"
 		case "required", "any":
 			mode = "ANY"
+		case ResponsesToolSearchType:
+			mode = "ANY"
+			allowedNames = append(allowedNames, MapResponsesClientToolSearchName(forwardMap))
 		case "function", "custom", "tool", "":
 			mode = "ANY"
 			name := strings.TrimSpace(toolChoice.Get("name").String())

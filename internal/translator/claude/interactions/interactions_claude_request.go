@@ -11,7 +11,15 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func ConvertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertInteractionsRequestToClaude(modelName, inputRawJSON, stream)
+
+}
+
+// convertInteractionsRequestToClaude also reports a user turn that was left empty
+// because its only media part has no Claude equivalent.
+func convertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	var run interactionsClaudeUserRun
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -21,10 +29,34 @@ func ConvertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, s
 	out = copyInteractionsSystemToClaude(out, root)
 	out = copyInteractionsGenerationConfigToClaude(out, root)
 	messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(int(root.Get("input.#").Int()))
-	appendInteractionsInputToClaudeMessages(messageAccumulator, root.Get("input"))
+	appendInteractionsInputToClaudeMessages(messageAccumulator, root.Get("input"), &run)
+	run.end()
 	out = translatorcommon.SetRawArrayItems(out, "messages", messageAccumulator.Messages())
 	out = copyInteractionsToolsToClaude(out, root)
-	return out
+	return out, run.drops.Err()
+}
+
+// interactionsClaudeUserRun follows the consecutive user content that the message
+// accumulator merges into one Claude user message. A media part Claude cannot
+// carry is refused only when that whole turn is left with nothing to send, so
+// text or a tool result in a neighbouring step still keeps the turn alive.
+type interactionsClaudeUserRun struct {
+	drops    translatorcommon.UserTurnDrops
+	sendable int
+}
+
+func (r *interactionsClaudeUserRun) add() {
+	r.sendable++
+}
+
+func (r *interactionsClaudeUserRun) drop(partType string) {
+	r.drops.Drop(partType)
+}
+
+// end closes the current user turn; call it when a non-user message starts or the input ends.
+func (r *interactionsClaudeUserRun) end() {
+	r.drops.EndTurn(r.sendable)
+	r.sendable = 0
 }
 
 func copyInteractionsSystemToClaude(out []byte, root gjson.Result) []byte {
@@ -125,34 +157,35 @@ func setClaudeThinkingFromLevel(out []byte, level string) []byte {
 	return out
 }
 
-func appendInteractionsInputToClaudeMessages(accumulator *translatorcommon.ClaudeMessageAccumulator, input gjson.Result) {
+func appendInteractionsInputToClaudeMessages(accumulator *translatorcommon.ClaudeMessageAccumulator, input gjson.Result, run *interactionsClaudeUserRun) {
 	if !input.Exists() {
 		return
 	}
 	if input.Type == gjson.String {
 		step := []byte(`{"type":"user_input","content":[{"type":"text","text":""}]}`)
 		step, _ = sjson.SetBytes(step, "content.0.text", input.String())
-		appendInteractionsStepToClaude(accumulator, gjson.ParseBytes(step), "user")
+		appendInteractionsStepToClaude(accumulator, gjson.ParseBytes(step), "user", false, run)
 		return
 	}
 	if input.IsObject() {
-		appendInteractionsInputItemToClaude(accumulator, input)
+		appendInteractionsInputItemToClaude(accumulator, input, run)
 		return
 	}
 	input.ForEach(func(_, step gjson.Result) bool {
-		appendInteractionsInputItemToClaude(accumulator, step)
+		appendInteractionsInputItemToClaude(accumulator, step, run)
 		return true
 	})
 }
 
-func appendInteractionsInputItemToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
+func appendInteractionsInputItemToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result, run *interactionsClaudeUserRun) {
 	if step.Get("steps").IsArray() {
 		defaultRole := "user"
 		if role := step.Get("role").String(); role == "model" || role == "assistant" {
 			defaultRole = "assistant"
 		}
+		instruction := translatorcommon.IsInteractionsInstructionStep(step, false)
 		step.Get("steps").ForEach(func(_, nestedStep gjson.Result) bool {
-			appendInteractionsStepToClaude(accumulator, nestedStep, defaultRole)
+			appendInteractionsStepToClaude(accumulator, nestedStep, defaultRole, instruction, run)
 			return true
 		})
 		return
@@ -163,47 +196,71 @@ func appendInteractionsInputItemToClaude(accumulator *translatorcommon.ClaudeMes
 			wrapped, _ = sjson.SetBytes(wrapped, "type", "model_output")
 		}
 		wrapped, _ = sjson.SetRawBytes(wrapped, "content", []byte(step.Get("parts").Raw))
-		appendInteractionsStepToClaude(accumulator, gjson.ParseBytes(wrapped), "user")
+		appendInteractionsStepToClaude(accumulator, gjson.ParseBytes(wrapped), "user", translatorcommon.IsInteractionsInstructionStep(step, false), run)
 		return
 	}
 	stepType := step.Get("type").String()
 	switch stepType {
 	case "function_call":
-		appendInteractionsFunctionCallToClaude(accumulator, step)
+		appendInteractionsFunctionCallToClaude(accumulator, step, run)
 	case "function_result":
-		appendInteractionsFunctionResultToClaude(accumulator, step)
+		appendInteractionsFunctionResultToClaude(accumulator, step, run)
 	case "model_output", "thought":
-		appendInteractionsStepToClaude(accumulator, step, "assistant")
+		appendInteractionsStepToClaude(accumulator, step, "assistant", false, run)
 	default:
-		appendInteractionsStepToClaude(accumulator, step, "user")
+		appendInteractionsStepToClaude(accumulator, step, "user", false, run)
 	}
 }
 
-func appendInteractionsStepToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result, defaultRole string) {
+// appendInteractionsStepToClaude adds one step. instruction says the step sits in
+// a developer or system wrapper. Developer and system content is sent as user
+// content, but it is not the user's own turn: it closes the open user turn and
+// never counts toward keeping an emptied one alive.
+func appendInteractionsStepToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result, defaultRole string, instruction bool, run *interactionsClaudeUserRun) {
 	role := defaultRole
 	if stepRole := step.Get("role").String(); stepRole == "user" || stepRole == "assistant" {
 		role = stepRole
 	}
+	userContent := role == "user" && !translatorcommon.IsInteractionsInstructionStep(step, instruction)
 	contentItems := make([][]byte, 0, 4)
+	appendPart := func(part gjson.Result) {
+		converted := interactionsContentToClaude(part, role)
+		if len(converted) == 0 {
+			if userContent {
+				if droppedType := interactionsClaudeDroppedPart(part); droppedType != "" {
+					run.drop(droppedType)
+				}
+			}
+			return
+		}
+		contentItems = append(contentItems, converted)
+		if userContent && interactionsClaudePartIsSendable(converted) {
+			run.add()
+		}
+	}
 	stepContent := step.Get("content")
 	if stepContent.Type == gjson.String {
 		part := []byte(`{"type":"text","text":""}`)
 		part, _ = sjson.SetBytes(part, "text", stepContent.String())
-		contentItems = append(contentItems, part)
+		appendPart(gjson.ParseBytes(part))
 	} else if stepContent.IsArray() {
 		stepContent.ForEach(func(_, part gjson.Result) bool {
-			if converted := interactionsContentToClaude(part, role); len(converted) > 0 {
-				contentItems = append(contentItems, converted)
-			}
+			appendPart(part)
 			return true
 		})
 	} else if text := step.Get("text"); text.Exists() {
 		part := []byte(`{"type":"text","text":""}`)
 		part, _ = sjson.SetBytes(part, "text", text.String())
-		contentItems = append(contentItems, part)
+		appendPart(gjson.ParseBytes(part))
+	} else if interactionsClaudeDroppedMedia(step) != "" {
+		// A bare media content object stands for a step of its own.
+		appendPart(step)
 	}
 	if len(contentItems) == 0 {
 		return
+	}
+	if !userContent {
+		run.end()
 	}
 	msg := []byte(`{"role":"","content":[]}`)
 	msg, _ = sjson.SetBytes(msg, "role", role)
@@ -240,7 +297,10 @@ func interactionsContentToClaude(part gjson.Result, role string) []byte {
 			textPart, _ = sjson.SetBytes(textPart, "text", text)
 			return textPart
 		}
-		if part.Get("data").String() != "" || part.Get("file_data").String() != "" {
+		// A user attachment Claude cannot carry is never replaced by placeholder text;
+		// the caller records it as dropped. Assistant and tool result content only
+		// echoes earlier output, so it keeps the placeholder.
+		if role != "user" && (part.Get("data").String() != "" || part.Get("file_data").String() != "") {
 			textPart := []byte(`{"type":"text","text":""}`)
 			textPart, _ = sjson.SetBytes(textPart, "text", fmt.Sprintf("[%s content omitted]", partType))
 			return textPart
@@ -249,7 +309,7 @@ func interactionsContentToClaude(part gjson.Result, role string) []byte {
 	return nil
 }
 
-func appendInteractionsFunctionCallToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
+func appendInteractionsFunctionCallToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result, run *interactionsClaudeUserRun) {
 	toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 	toolUse, _ = sjson.SetBytes(toolUse, "id", interactionsClaudeToolID(step))
 	toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(step.Get("name").String()))
@@ -262,10 +322,11 @@ func appendInteractionsFunctionCallToClaude(accumulator *translatorcommon.Claude
 	}
 	msg := []byte(`{"role":"assistant","content":[]}`)
 	msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray([][]byte{toolUse}))
+	run.end()
 	accumulator.Append(msg)
 }
 
-func appendInteractionsFunctionResultToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
+func appendInteractionsFunctionResultToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result, run *interactionsClaudeUserRun) {
 	toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 	toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", interactionsClaudeToolID(step))
 	if isError := step.Get("is_error"); isError.Exists() && isError.Bool() {
@@ -279,7 +340,7 @@ func appendInteractionsFunctionResultToClaude(accumulator *translatorcommon.Clau
 	case result.IsArray():
 		contentItems := make([][]byte, 0, 4)
 		result.ForEach(func(_, part gjson.Result) bool {
-			if converted := interactionsContentToClaude(part, "user"); len(converted) > 0 {
+			if converted := interactionsContentToClaude(part, "tool_result"); len(converted) > 0 {
 				contentItems = append(contentItems, converted)
 			}
 			return true
@@ -292,6 +353,8 @@ func appendInteractionsFunctionResultToClaude(accumulator *translatorcommon.Clau
 	}
 	msg := []byte(`{"role":"user","content":[]}`)
 	msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray([][]byte{toolResult}))
+	// A tool result is content the model reads, so it keeps the surrounding user turn.
+	run.add()
 	accumulator.Append(msg)
 }
 
@@ -433,6 +496,9 @@ func interactionsClaudeText(value gjson.Result) string {
 	return ""
 }
 
+// interactionsClaudeMediaPart maps an Interactions image or document onto a Claude
+// block. Inline bytes become a base64 source and an http(s) uri becomes a url
+// source. It reports false when the part carries neither.
 func interactionsClaudeMediaPart(part gjson.Result, claudeType string) ([]byte, bool) {
 	mimeType := firstClaudeInteractionsExisting(part, "mime_type", "mimeType", "media_type", "mediaType").String()
 	data := firstClaudeInteractionsExisting(part, "data", "file_data", "fileData").String()
@@ -444,14 +510,54 @@ func interactionsClaudeMediaPart(part gjson.Result, claudeType string) ([]byte, 
 			data = source.Get("data").String()
 		}
 	}
-	if mimeType == "" || data == "" {
-		return nil, false
+	if mimeType != "" && data != "" {
+		out := []byte(`{"type":"","source":{"type":"base64","media_type":"","data":""}}`)
+		out, _ = sjson.SetBytes(out, "type", claudeType)
+		out, _ = sjson.SetBytes(out, "source.media_type", mimeType)
+		out, _ = sjson.SetBytes(out, "source.data", data)
+		return out, true
 	}
-	out := []byte(`{"type":"","source":{"type":"base64","media_type":"","data":""}}`)
-	out, _ = sjson.SetBytes(out, "type", claudeType)
-	out, _ = sjson.SetBytes(out, "source.media_type", mimeType)
-	out, _ = sjson.SetBytes(out, "source.data", data)
-	return out, true
+	for _, path := range []string{"uri", "file_uri", "fileUri", "url"} {
+		if uri := strings.TrimSpace(part.Get(path).String()); translatorcommon.IsHTTPURL(uri) {
+			out := []byte(`{"type":"","source":{"type":"url","url":""}}`)
+			out, _ = sjson.SetBytes(out, "type", claudeType)
+			out, _ = sjson.SetBytes(out, "source.url", uri)
+			return out, true
+		}
+	}
+	return nil, false
+}
+
+// interactionsClaudeDroppedMedia names the media type of a part that
+// interactionsContentToClaude left out, or returns "" when the part is not media.
+func interactionsClaudeDroppedMedia(part gjson.Result) string {
+	switch partType := part.Get("type").String(); partType {
+	case "image", "audio", "video", "document":
+		return partType
+	case "file":
+		return "document"
+	}
+	return ""
+}
+
+// interactionsClaudeDroppedPart names the type of a user part that
+// interactionsContentToClaude left out: media, or any other part that carries
+// bytes. It returns "" when the part holds nothing to report.
+func interactionsClaudeDroppedPart(part gjson.Result) string {
+	if mediaType := interactionsClaudeDroppedMedia(part); mediaType != "" {
+		return mediaType
+	}
+	if part.Get("data").String() != "" || part.Get("file_data").String() != "" {
+		return translatorcommon.InteractionsAttachmentType(part)
+	}
+	return ""
+}
+
+// interactionsClaudePartIsSendable reports whether a converted Claude block gives
+// the model something to read. Blank text does not.
+func interactionsClaudePartIsSendable(converted []byte) bool {
+	block := gjson.ParseBytes(converted)
+	return block.Get("type").String() != "text" || strings.TrimSpace(block.Get("text").String()) != ""
 }
 
 func firstClaudeInteractionsExisting(root gjson.Result, paths ...string) gjson.Result {

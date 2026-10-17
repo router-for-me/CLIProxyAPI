@@ -13,14 +13,14 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
-func TestCodexV8OAuthCloakingDoesNotAffectAPIKeys(t *testing.T) {
+func TestCodexV8HistoricalCloakingAliasAffectsBothAuthKinds(t *testing.T) {
 	for _, tc := range []struct {
 		name, settings, keyOption string
 		wantAPI                   bool
 	}{
 		{"legacy global", "codex: {disable-codex-cloaking: true}\n", "", true},
-		{"oauth only", "oauth: {providers: {codex: {disable-codex-cloaking: true}}}\n", "", false},
-		{"explicit key override", "oauth: {providers: {codex: {disable-codex-cloaking: true}}}\n", ", disable-codex-cloaking: true", true},
+		{"historical alias", "oauth: {providers: {codex: {disable-codex-cloaking: true}}}\n", "", true},
+		{"explicit key override", "oauth: {providers: {codex: {disable-codex-cloaking: true}}}\n", ", disable-codex-cloaking: false", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := tc.settings + "api-keys: {codex: [{name: independent, base-url: 'https://example.invalid/v1', keys: [{api-key: test-key" + tc.keyOption + "}]}]}\n"

@@ -62,6 +62,8 @@ type ConfigField struct {
 	Name string
 	// Type classifies the field value for management clients.
 	Type ConfigFieldType
+	// Default is the value used when the configuration key is omitted.
+	Default any
 	// EnumValues lists allowed values when Type is ConfigFieldTypeEnum.
 	EnumValues []string
 	// Description explains how the plugin uses the field.
@@ -884,6 +886,20 @@ type HostAffinityLookupResponse struct {
 	Unavailable bool `json:"unavailable,omitempty"`
 }
 
+// HostRoutingResetCooldownRequest asks the host to clear quota and cooldown routing state for one credential.
+type HostRoutingResetCooldownRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+}
+
+// HostRoutingResetCooldownResponse reports the credential whose quota and cooldown state was cleared.
+type HostRoutingResetCooldownResponse struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// Models lists the model keys whose routing state was reset.
+	Models []string `json:"models,omitempty"`
+}
+
 // HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.
 type HTTPWireProfile struct {
 	// HTTP1Only forces the transport to use HTTP/1.1 and disables HTTP/2 negotiation.
@@ -1486,6 +1502,10 @@ type UsageRecord struct {
 	Alias string
 	// APIKey is the client API key identifier when available.
 	APIKey string
+	// IsNativeKey reports whether the client API key was authenticated by CPA's native config provider.
+	IsNativeKey bool
+	// AccessProvider identifies the client request authentication provider (e.g. "config-inline" or plugin ID).
+	AccessProvider string
 	// SessionID identifies the session when present.
 	SessionID string
 	// ParentSessionID identifies the parent session in a hierarchy or fork.

@@ -2381,7 +2381,7 @@ func TestDevinExecutor_ClaudeToolResultEndToEnd(t *testing.T) {
 	}`)
 
 	// Real conversion from Claude request to Interactions format
-	interactionsJSON := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, true)
+	interactionsJSON, _ := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, true)
 
 	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, _, _ := parseInteractionsPayload(interactionsJSON, claudeReq)
 
@@ -2715,7 +2715,7 @@ func TestDevinExecutor_ClaudeToolResultMixedBusinessJSONEndToEnd(t *testing.T) {
 		]
 	}`)
 
-	interactionsJSON := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, false)
+	interactionsJSON, _ := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, false)
 	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, claudeReq)
 
 	if len(prompts) != 2 {
@@ -3800,7 +3800,8 @@ func TestDevinExecutor_WarnsWhenUpstreamServesUnexpectedModel(t *testing.T) {
 
 	exec := NewDevinExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
-		ID:         "devin-auth-unexpected",
+		// Isolate this run from the process-wide model warning throttle.
+		ID:         "devin-auth-unexpected-" + uuid.NewString(),
 		Provider:   "devin",
 		Attributes: map[string]string{"api_key": "test-key"},
 	}
@@ -4778,4 +4779,198 @@ func TestStreamDevinFrames_MidStreamTrailerError_EmitsTranslatedFailedEventBefor
 	if !strings.Contains(allPayload, "permission_denied") {
 		t.Fatalf("expected error message in stream payloads, got:\n%s", allPayload)
 	}
+}
+
+func TestDevinApplyPatchExecutorReuse(t *testing.T) {
+	wireField := func(data []byte, target protowire.Number) []byte {
+		for len(data) > 0 {
+			number, kind, n := protowire.ConsumeTag(data)
+			if n < 0 {
+				return nil
+			}
+			data = data[n:]
+			if kind == protowire.BytesType {
+				value, m := protowire.ConsumeBytes(data)
+				if m < 0 {
+					return nil
+				}
+				if number == target {
+					return value
+				}
+				data = data[m:]
+			} else {
+				m := protowire.ConsumeFieldValue(number, kind, data)
+				if m < 0 {
+					return nil
+				}
+				data = data[m:]
+			}
+		}
+		return nil
+	}
+	args := `{"input":"  *** Begin Patch\n*** End Patch\n "}`
+	var frames bytes.Buffer
+	for i, fragment := range []string{args[:22], args[22:]} {
+		var tool []byte
+		tool = protowire.AppendTag(tool, 1, protowire.BytesType)
+		tool = protowire.AppendString(tool, "call_patch")
+		if i == 0 {
+			tool = protowire.AppendTag(tool, 2, protowire.BytesType)
+			tool = protowire.AppendString(tool, "functions__apply_patch")
+		}
+		tool = protowire.AppendTag(tool, 3, protowire.BytesType)
+		tool = protowire.AppendString(tool, fragment)
+		var frame []byte
+		frame = protowire.AppendTag(frame, 6, protowire.BytesType)
+		frame = protowire.AppendBytes(frame, tool)
+		frames.Write(helps.WrapConnectEnvelope(frame))
+	}
+	frames.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+	requests := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errReadAll := io.ReadAll(r.Body)
+		if errReadAll != nil {
+			t.Error(errReadAll)
+			w.WriteHeader(500)
+			return
+		}
+		requests <- body
+		w.Header().Set("Content-Type", "application/connect+proto")
+		_, _ = w.Write(frames.Bytes())
+	}))
+	defer server.Close()
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{ID: "devin-patch", Provider: "devin", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{Model: "devin/swe-2", Payload: []byte(executorPatchRequest)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: req.Payload}
+	assertWire := func(body []byte) {
+		if len(body) < 5 {
+			t.Fatal("missing envelope")
+		}
+		tool := wireField(body[5:], 10)
+		name, desc, params := wireField(tool, 1), wireField(tool, 2), wireField(tool, 3)
+		if string(name) != "functions__apply_patch" || !strings.Contains(string(desc), "*** Begin Patch") || !strings.Contains(string(desc), "@@") || !strings.Contains(string(desc), "start: patch") || gjson.GetBytes(params, "properties.input.type").String() != "string" || !gjson.GetBytes(params, "additionalProperties").Exists() || gjson.GetBytes(params, "additionalProperties").Bool() {
+			t.Fatalf("wire contract: name=%s desc=%s params=%s", name, desc, params)
+		}
+	}
+	response, errExecute := exec.Execute(context.Background(), auth, req, opts)
+	if errExecute != nil {
+		t.Fatal(errExecute)
+	}
+	assertWire(<-requests)
+	assertExecutorPatchOutput(t, response.Payload)
+	stream, errExecuteStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errExecuteStream != nil {
+		t.Fatal(errExecuteStream)
+	}
+	assertWire(<-requests)
+	assertExecutorPatchStream(t, stream.Chunks)
+}
+
+func TestRegressionIssue6505_DevinClaudeStreamingNoFullInputEstimate(t *testing.T) {
+	runTest := func(t *testing.T, promptTokens, cacheWriteTokens int64) {
+		// Frame with Usage Field 7:
+		// Field 2: prompt tokens
+		// Field 3: completion tokens = 4
+		// Field 4: cache_write_tokens
+		// Field 5: cached tokens = 50000
+		var f7Bytes []byte
+		f7Bytes = protowire.AppendTag(f7Bytes, 2, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, uint64(promptTokens))
+		f7Bytes = protowire.AppendTag(f7Bytes, 3, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, 4)
+		if cacheWriteTokens > 0 {
+			f7Bytes = protowire.AppendTag(f7Bytes, 4, protowire.VarintType)
+			f7Bytes = protowire.AppendVarint(f7Bytes, uint64(cacheWriteTokens))
+		}
+		f7Bytes = protowire.AppendTag(f7Bytes, 5, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, 50000)
+
+		var frame []byte
+		frame = protowire.AppendTag(frame, 7, protowire.BytesType)
+		frame = protowire.AppendBytes(frame, f7Bytes)
+
+		var buf bytes.Buffer
+		buf.Write(helps.WrapConnectEnvelope(frame))
+		buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+		exec := NewDevinExecutor(&config.Config{})
+		out := make(chan cliproxyexecutor.StreamChunk, 50)
+		originalPayload := []byte(`{"model":"devin/claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"hello cache test prompt with enough words to produce non-zero tokens"}]}`)
+		opts := cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatClaude,
+			OriginalRequest: originalPayload,
+		}
+
+		go func() {
+			defer close(out)
+			exec.streamDevinFrames(
+				context.Background(),
+				&buf,
+				cliproxyexecutor.Request{Model: "devin/claude-opus-5-5", Payload: originalPayload},
+				opts,
+				"claude-opus-5-5",
+				sdktranslator.FormatClaude,
+				nil,
+				out,
+			)
+		}()
+
+		var messageStartEvent []byte
+		var messageDeltaEvent []byte
+		for chunk := range out {
+			if chunk.Err != nil {
+				t.Fatalf("unexpected chunk error: %v", chunk.Err)
+			}
+			lines := strings.Split(string(chunk.Payload), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "data: ") {
+					data := []byte(strings.TrimPrefix(line, "data: "))
+					eventType := gjson.GetBytes(data, "type").String()
+					if eventType == "message_start" {
+						messageStartEvent = data
+					} else if eventType == "message_delta" {
+						messageDeltaEvent = data
+					}
+				}
+			}
+		}
+
+		if len(messageStartEvent) == 0 {
+			t.Fatal("expected message_start event in Claude stream")
+		}
+		startRoot := gjson.ParseBytes(messageStartEvent)
+		inputTokensNode := startRoot.Get("message.usage.input_tokens")
+		if !inputTokensNode.Exists() || inputTokensNode.Int() != 0 {
+			t.Fatalf("message_start message.usage.input_tokens = %v (exists=%v), want 0 (must not seed full-input estimate)", inputTokensNode.Value(), inputTokensNode.Exists())
+		}
+
+		if len(messageDeltaEvent) == 0 {
+			t.Fatal("expected message_delta event in Claude stream")
+		}
+		deltaRoot := gjson.ParseBytes(messageDeltaEvent)
+		deltaInputNode := deltaRoot.Get("usage.input_tokens")
+		if !deltaInputNode.Exists() || deltaInputNode.Int() != promptTokens {
+			t.Errorf("message_delta usage.input_tokens = %v (exists=%v), want %d", deltaInputNode.Value(), deltaInputNode.Exists(), promptTokens)
+		}
+		if cachedTokens := deltaRoot.Get("usage.cache_read_input_tokens").Int(); cachedTokens != 50000 {
+			t.Errorf("message_delta usage.cache_read_input_tokens = %d, want 50000", cachedTokens)
+		}
+		if cacheWriteTokens > 0 {
+			if gotWrite := deltaRoot.Get("usage.cache_creation_input_tokens").Int(); gotWrite != cacheWriteTokens {
+				t.Errorf("message_delta usage.cache_creation_input_tokens = %d, want %d", gotWrite, cacheWriteTokens)
+			}
+		}
+		if outputTokens := deltaRoot.Get("usage.output_tokens").Int(); outputTokens != 4 {
+			t.Errorf("message_delta usage.output_tokens = %d, want 4", outputTokens)
+		}
+	}
+
+	t.Run("fully cached prompt (input_tokens 0)", func(t *testing.T) {
+		runTest(t, 0, 7)
+	})
+	t.Run("partially cached prompt (input_tokens positive)", func(t *testing.T) {
+		runTest(t, 10, 0)
+	})
 }

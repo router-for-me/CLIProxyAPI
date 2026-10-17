@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -54,11 +55,30 @@ func TestStopAutoRefreshAndWaitJoinsCredentialPersistence(t *testing.T) {
 		manager.StopAutoRefreshAndWait()
 		close(stopped)
 	}()
-	<-persistContext.Done()
+	// Stop detaches the loop before it cancels and joins it. The save itself runs on a
+	// context stop does not cancel (a rotated token must still be written).
+	deadline := time.After(5 * time.Second)
+	for detached := false; !detached; {
+		manager.mu.RLock()
+		detached = manager.refreshLoop == nil
+		manager.mu.RUnlock()
+		if detached {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("stop did not detach the refresh loop")
+		default:
+			runtime.Gosched()
+		}
+	}
 	select {
 	case <-stopped:
 		t.Fatal("stop returned while credential persistence was still blocked")
 	default:
+	}
+	if errPersist := persistContext.Err(); errPersist != nil {
+		t.Fatalf("credential persistence context was cancelled by stop: %v", errPersist)
 	}
 	releaseOnce.Do(func() { close(store.release) })
 	<-stopped

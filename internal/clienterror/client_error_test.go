@@ -17,6 +17,15 @@ type statusError struct {
 func (e statusError) Error() string   { return e.body }
 func (e statusError) StatusCode() int { return e.status }
 
+type responseBodyError struct {
+	status int
+	body   string
+}
+
+func (e responseBodyError) Error() string        { return "upstream request failed" }
+func (e responseBodyError) StatusCode() int      { return e.status }
+func (e responseBodyError) ResponseBody() []byte { return []byte(e.body) }
+
 func TestHTTPStatusFromError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -183,6 +192,26 @@ func TestIsRequestFault(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "Claude missing thread state",
+			status: http.StatusNotFound,
+			err:    errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."}}`),
+			want:   true,
+		},
+		{
+			name:   "Claude missing thread state plain text",
+			status: http.StatusNotFound,
+			err:    errors.New("No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."),
+			want:   true,
+		},
+		{
+			name: "Claude missing thread state in response body",
+			err: responseBodyError{
+				status: http.StatusNotFound,
+				body:   `{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}`,
+			},
+			want: true,
+		},
+		{
 			// An upstream internal error is not a request fault: it must stay eligible
 			// for credential rotation and (credential, model) cooldown.
 			name:   "upstream unknown internal error",
@@ -190,6 +219,8 @@ func TestIsRequestFault(t *testing.T) {
 			err:    errors.New(`{"error":{"code":500,"message":"Internal error encountered.","status":"UNKNOWN"}}`),
 		},
 		{name: "plain not found", status: http.StatusNotFound, err: errors.New("model not found")},
+		{name: "generic Claude not found", status: http.StatusNotFound, err: errors.New(`{"error":{"type":"not_found_error","message":"Not Found"}}`)},
+		{name: "Claude missing thread on server error", status: http.StatusInternalServerError, err: errors.New(`{"error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}`)},
 		{name: "unauthorized", status: http.StatusUnauthorized, err: errors.New("invalid token")},
 		{
 			name:   "deepseek authentication failure is credential failure",

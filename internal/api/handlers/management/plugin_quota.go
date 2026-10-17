@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -252,7 +253,7 @@ func (h *Handler) FetchPluginQuota(c *gin.Context) {
 	pluginID := strings.TrimSpace(c.Param("id"))
 	var body credentialQuotaRequest
 	if errBind := c.ShouldBindJSON(&body); errBind != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errBind, http.StatusBadRequest), gin.H{"error": "invalid request body"})
 		return
 	}
 	authIndex := body.resolveAuthIndex()
@@ -306,7 +307,12 @@ func (h *Handler) ResetPluginQuota(c *gin.Context) {
 	}
 	if authIndex == "" {
 		var body credentialQuotaRequest
-		_ = c.ShouldBindJSON(&body)
+		if errBind := c.ShouldBindJSON(&body); errBind != nil {
+			if status := clienterror.HTTPStatusFromError(errBind); status == http.StatusRequestEntityTooLarge {
+				c.JSON(status, gin.H{"error": errBind.Error()})
+				return
+			}
+		}
 		authIndex = body.resolveAuthIndex()
 	}
 	if authIndex == "" {

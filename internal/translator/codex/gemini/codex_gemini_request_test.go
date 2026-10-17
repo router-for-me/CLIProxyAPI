@@ -47,7 +47,7 @@ func TestConvertGeminiRequestToCodex_PreservesCustomCallIDs(t *testing.T) {
 				]
 			}`, tt.callField, tt.responseField))
 
-			out := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+			out, _ := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
 
 			gotCallID := gjson.GetBytes(out, "input.0.call_id").String()
 			if gotCallID != tt.want {
@@ -63,7 +63,7 @@ func TestConvertGeminiRequestToCodex_PreservesCustomCallIDs(t *testing.T) {
 }
 
 func TestConvertGeminiRequestToCodex_AcceptsInlineData(t *testing.T) {
-	out := ConvertGeminiRequestToCodex("gpt-5.1-codex", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}]}`), false)
+	out, _ := ConvertGeminiRequestToCodex("gpt-5.1-codex", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}]}`), false)
 	if got := gjson.GetBytes(out, "input.0.content.0.type").String(); got != "input_image" {
 		t.Fatalf("content type = %q, want input_image. Output: %s", got, string(out))
 	}
@@ -73,7 +73,7 @@ func TestConvertGeminiRequestToCodex_AcceptsInlineData(t *testing.T) {
 }
 
 func TestConvertGeminiRequestToCodex_SplitsNonImageInlineDataByMIME(t *testing.T) {
-	out := ConvertGeminiRequestToCodex("gpt-5.1-codex", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`), false)
+	out, _ := ConvertGeminiRequestToCodex("gpt-5.1-codex", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`), false)
 
 	if got := gjson.GetBytes(out, "input.0.content.0.type").String(); got != "input_audio" {
 		t.Fatalf("audio content type = %q, want input_audio. Output: %s", got, string(out))
@@ -88,7 +88,7 @@ func TestConvertGeminiRequestToCodex_SplitsNonImageInlineDataByMIME(t *testing.T
 
 func TestConvertGeminiRequestToCodex_DropsHiddenThoughtParts(t *testing.T) {
 	t.Run("thought-only turn", func(t *testing.T) {
-		out := ConvertGeminiRequestToCodex("codex-test", []byte(`{
+		out, _ := ConvertGeminiRequestToCodex("codex-test", []byte(`{
 			"contents":[
 				{"role":"model","parts":[{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"}]},
 				{"role":"user","parts":[{"text":"continue"}]}
@@ -102,7 +102,7 @@ func TestConvertGeminiRequestToCodex_DropsHiddenThoughtParts(t *testing.T) {
 	})
 
 	t.Run("mixed turn", func(t *testing.T) {
-		out := ConvertGeminiRequestToCodex("codex-test", []byte(`{
+		out, _ := ConvertGeminiRequestToCodex("codex-test", []byte(`{
 			"contents":[{"role":"model","parts":[
 				{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"},
 				{"text":"visible answer"}
@@ -146,8 +146,8 @@ func TestConvertGeminiRequestToCodex_DeterministicCallIDs(t *testing.T) {
 		]
 	}`)
 
-	out1 := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
-	out2 := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	out1, _ := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	out2, _ := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
 
 	if string(out1) != string(out2) {
 		t.Fatalf("expected deterministic output across multiple conversions, got different outputs:\nout1=%s\nout2=%s", string(out1), string(out2))

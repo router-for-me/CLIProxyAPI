@@ -74,7 +74,7 @@ func TestConvertOpenAIResponsesRequestToGemini_WebSearchCapabilityGate(t *testin
 	}`)
 
 	// Capable model should receive googleSearch tool
-	capableOut := ConvertOpenAIResponsesRequestToGemini(capableModel, req, false)
+	capableOut, _ := ConvertOpenAIResponsesRequestToGemini(capableModel, req, false)
 	toolsCapable := gjson.GetBytes(capableOut, "tools").Array()
 	foundGoogleSearch := false
 	for _, tool := range toolsCapable {
@@ -88,7 +88,7 @@ func TestConvertOpenAIResponsesRequestToGemini_WebSearchCapabilityGate(t *testin
 	}
 
 	// Incapable model must NOT receive googleSearch tool
-	incapableOut := ConvertOpenAIResponsesRequestToGemini(incapableModel, req, false)
+	incapableOut, _ := ConvertOpenAIResponsesRequestToGemini(incapableModel, req, false)
 	toolsIncapable := gjson.GetBytes(incapableOut, "tools")
 	if toolsIncapable.Exists() {
 		for _, tool := range toolsIncapable.Array() {
@@ -114,7 +114,7 @@ func TestConvertOpenAIResponsesRequestToGemini_WebSearchAllowedDomains(t *testin
 		}]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
+	out, _ := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
 	domains := gjson.GetBytes(out, "tools.0.googleSearch.includedDomains").Array()
 	if len(domains) != 2 {
 		t.Fatalf("expected 2 includedDomains, got %d: %s", len(domains), out)
@@ -135,7 +135,7 @@ func TestConvertOpenAIResponsesRequestToGemini_WebSearchToolChoiceNoneSuppresses
 		"tool_choice": "none"
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
+	out, _ := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
 	if tools := gjson.GetBytes(out, "tools"); tools.Exists() {
 		for _, tool := range tools.Array() {
 			if tool.Get("googleSearch").Exists() {
@@ -400,7 +400,7 @@ func TestConvertOpenAIResponsesRequestToGemini_WebSearchOnlyToolChoiceRequiredNo
 		"tool_choice": "required"
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
+	out, _ := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
 	parsed := gjson.ParseBytes(out)
 
 	// googleSearch should be present
@@ -712,7 +712,7 @@ func TestConvertOpenAIResponsesRequestToGemini_WebSearchPreview20250311(t *testi
 		"tool_choice": {"type": "web_search_preview_2025_03_11"}
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
+	out, _ := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
 	if !gjson.GetBytes(out, "tools.0.googleSearch").Exists() {
 		t.Fatalf("expected googleSearch tool for web_search_preview_2025_03_11 declaration and tool_choice, got: %s", out)
 	}
@@ -801,6 +801,7 @@ func TestConvertGeminiResponseToOpenAIResponsesStream_ModelAliasUsesEffectiveReq
 	events2 := ConvertGeminiResponseToOpenAIResponses(context.Background(), resolvedModel, originalReq, effectiveReq, chunk2, &param)
 
 	allEvents := append(events1, events2...)
+	allEvents = append(allEvents, ConvertGeminiResponseToOpenAIResponses(context.Background(), resolvedModel, originalReq, effectiveReq, []byte("[DONE]"), &param)...)
 	var completedJSON gjson.Result
 	for _, ev := range allEvents {
 		lines := strings.Split(string(ev), "\n")
@@ -4999,7 +5000,7 @@ func TestConvertGeminiResponseToOpenAIResponsesStream_WebSearchBufferingSignatur
 	// Translate the completed response outputs back to Gemini request to verify signature binding.
 	replayReq := []byte(`{"model":"gemini-search-sig-boundary-buffering","input":[]}`)
 	replayReq, _ = sjson.SetRawBytes(replayReq, "input", []byte(completedJSON.Get("response.output").Raw))
-	translated := ConvertOpenAIResponsesRequestToGemini("gemini-search-sig-boundary-buffering", replayReq, false)
+	translated, _ := ConvertOpenAIResponsesRequestToGemini("gemini-search-sig-boundary-buffering", replayReq, false)
 
 	var visibleParts []gjson.Result
 	for _, part := range gjson.GetBytes(translated, "contents.0.parts").Array() {

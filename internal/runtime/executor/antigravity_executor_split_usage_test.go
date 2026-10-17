@@ -11,9 +11,29 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+type antigravityUsageCapture struct {
+	authID  string
+	records chan usage.Record
+}
+
+func (c *antigravityUsageCapture) HandleUsage(_ context.Context, record usage.Record) {
+	if c == nil || record.Provider != antigravityAuthType || record.AuthID != c.authID {
+		return
+	}
+	select {
+	case c.records <- record:
+	default:
+	}
+}
+
+type antigravityUsageNoop struct{}
+
+func (antigravityUsageNoop) HandleUsage(context.Context, usage.Record) {}
 
 // antigravitySplitTerminalSSE reproduces the only upstream shape that makes
 // FilterSSEUsageMetadata forward real usageMetadata on a chunk without
@@ -94,5 +114,66 @@ func TestAntigravityStreamFinalizesSplitTerminalUsageOnce(t *testing.T) {
 	}
 	if got := gjson.GetBytes(terminal, "usage.prompt_tokens").Int(); got != 11 {
 		t.Fatalf("terminal prompt_tokens = %d, want 11", got)
+	}
+}
+
+// TestAntigravityStreamReportsSplitTerminalUsage checks that a usage-only tail
+// is recorded. EnsurePublished must not emit an empty detail first.
+func TestAntigravityStreamReportsSplitTerminalUsage(t *testing.T) {
+	const authID = "antigravity-split-usage"
+	capture := &antigravityUsageCapture{authID: authID, records: make(chan usage.Record, 4)}
+	usage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(t.Name(), antigravityUsageNoop{})
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, antigravitySplitTerminalSSE)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{
+		Antigravity:  config.AntigravityConfig{},
+		RequestRetry: 1,
+	})
+	result, errExecute := executor.ExecuteStream(context.Background(), &cliproxyauth.Auth{
+		ID: authID,
+		Metadata: map[string]any{
+			"access_token": "token-123",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "project-1",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}, cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash",
+		Payload: []byte(`{"model":"gemini-3.7-flash","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+		Stream:         true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+	}
+
+	select {
+	case record := <-capture.records:
+		if record.Failed {
+			t.Fatal("usage record marked failed")
+		}
+		if record.Detail.InputTokens != 11 || record.Detail.OutputTokens != 22 || record.Detail.TotalTokens != 33 {
+			t.Fatalf("reported usage = %+v, want input 11 output 22 total 33", record.Detail)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the usage record")
 	}
 }

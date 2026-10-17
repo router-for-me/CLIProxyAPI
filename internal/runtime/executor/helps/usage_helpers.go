@@ -39,6 +39,8 @@ type UsageReporter struct {
 	accessTokenHash     string
 	authType            string
 	apiKey              string
+	accessProvider      string
+	isNativeKey         bool
 	sessionID           string
 	parentSessionID     string
 	source              string
@@ -84,6 +86,13 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	accessProvider := AccessProviderFromContext(ctx)
+	isNativeKey := false
+	if nativeExplicit, ok := usage.IsNativeKeyFromContext(ctx); ok {
+		isNativeKey = nativeExplicit
+	} else if accessProvider != "" {
+		isNativeKey = usage.IsNativeAccessProvider(accessProvider)
+	}
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
@@ -122,6 +131,8 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias:           strings.TrimSpace(alias),
 		requestedAt:     time.Now(),
 		apiKey:          apiKey,
+		accessProvider:  accessProvider,
+		isNativeKey:     isNativeKey,
 		sessionID:       sessionID,
 		parentSessionID: parentSessionID,
 		source:          resolveUsageSource(auth, apiKey),
@@ -222,12 +233,6 @@ func (r *UsageReporter) ObserveResponseModel(payload []byte) {
 	}
 }
 
-// ObserveCodexResponseModel stores the model reported by a codex upstream event and
-// ignores payloads without one; the substitution warning is emitted at publish time.
-func (r *UsageReporter) ObserveCodexResponseModel(payload []byte) {
-	r.ObserveResponseModel(payload)
-}
-
 // SetResponseModel sets the reported model directly if valid and not already marked final.
 func (r *UsageReporter) SetResponseModel(model string) {
 	if r == nil || r.responseModelFinal.Load() {
@@ -270,8 +275,8 @@ func (r *UsageReporter) IsResponseModelFinal() bool {
 	return r != nil && r.responseModelFinal.Load()
 }
 
-// warnModelSubstitution warns about a silent upstream model swap, throttled per
-// credential and model pair, and labels the credential by index only, never by account.
+// warnModelSubstitution warns about a silent upstream model swap, and labels the
+// credential by index only, never by account.
 func (r *UsageReporter) warnModelSubstitution(ctx context.Context) {
 	if r == nil {
 		return
@@ -287,29 +292,11 @@ func (r *UsageReporter) warnModelSubstitution(ctx context.Context) {
 	if r.model != "" && !IsModelSubstituted(r.model, served) {
 		return
 	}
-	// The throttle key uses the same normalized names as the substitution check, so
-	// aliases of one pair share a window instead of each warning on its own.
-	requested := normalizeModelName(expectedModel)
-	servedNormalized := normalizeModelName(served)
-	providerName := r.provider
+	providerName := strings.TrimSpace(r.provider)
 	if providerName == "" {
-		providerName = "codex"
-	}
-	if !codexModelSubstitutionWarns.allow(codexModelSubstitutionKey{
-		provider:  providerName,
-		authID:    r.authID,
-		requested: requested,
-		served:    servedNormalized,
-	}) {
-		return
+		providerName = "unknown"
 	}
 	LogWithRequestID(ctx).Warnf("%s executor: upstream served model %q for requested model %q (auth_index=%s)", providerName, served, r.model, r.authIndexForLog())
-}
-
-// warnCodexModelSubstitution warns about a silent upstream model swap, throttled per
-// credential and model pair, and labels the credential by index only, never by account.
-func (r *UsageReporter) warnCodexModelSubstitution(ctx context.Context) {
-	r.warnModelSubstitution(ctx)
 }
 
 // authIndexForLog labels the credential without exposing its file name or account.
@@ -612,6 +599,22 @@ func (r *UsageReporter) TraceID() string {
 	return r.traceID
 }
 
+// IsNativeKey reports whether the client API key was authenticated by CPA's native config provider.
+func (r *UsageReporter) IsNativeKey() bool {
+	if r == nil {
+		return false
+	}
+	return r.isNativeKey
+}
+
+// AccessProvider identifies the client request authentication provider.
+func (r *UsageReporter) AccessProvider() string {
+	if r == nil {
+		return ""
+	}
+	return r.accessProvider
+}
+
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
 	var fail usage.Failure
 	if len(failures) > 0 {
@@ -643,6 +646,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Alias:               r.alias,
 		Source:              r.source,
 		APIKey:              r.apiKey,
+		IsNativeKey:         r.isNativeKey,
+		AccessProvider:      r.accessProvider,
 		SessionID:           r.sessionID,
 		ParentSessionID:     r.parentSessionID,
 		AuthID:              r.authID,
@@ -785,6 +790,31 @@ func APIKeyFromContext(ctx context.Context) string {
 			return value.String()
 		default:
 			return fmt.Sprintf("%v", value)
+		}
+	}
+	return ""
+}
+
+// AccessProviderFromContext extracts the client authentication provider identifier from the context.
+func AccessProviderFromContext(ctx context.Context) string {
+	if provider := usage.AccessProviderFromContext(ctx); provider != "" {
+		return provider
+	}
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	if v, exists := ginCtx.Get("accessProvider"); exists {
+		switch value := v.(type) {
+		case string:
+			return strings.TrimSpace(value)
+		case fmt.Stringer:
+			return strings.TrimSpace(value.String())
+		default:
+			return strings.TrimSpace(fmt.Sprintf("%v", value))
 		}
 	}
 	return ""

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -35,6 +36,172 @@ func codexOpenAIImageTestOptions(path string, stream bool) cliproxyexecutor.Opti
 		Metadata: map[string]any{
 			cliproxyexecutor.RequestPathMetadataKey: path,
 		},
+	}
+}
+
+func TestCodexImagePayloadPreservesResolvedAlias(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			req := cliproxyexecutor.Request{
+				Model:   "openai/gpt-image-2-cpr",
+				Payload: []byte(`{"model":"gpt-image-2","prompt":"diagnostic"}`),
+			}
+			body, _, _, errPrepare := NewCodexExecutor(&config.Config{}).prepareDirectOpenAIImageBody(nil, req, codexOpenAIImageTestOptions(codexImagesGenerationsPath, stream), stream)
+			if errPrepare != nil {
+				t.Fatal(errPrepare)
+			}
+			if got := gjson.GetBytes(body, "model").String(); got != "openai/gpt-image-2-cpr" {
+				t.Fatalf("upstream model = %q, want %q", got, "openai/gpt-image-2-cpr")
+			}
+		})
+	}
+}
+
+func TestCodexImageResolvedModelOnWire(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		requested   string
+		resolved    string
+		configured  string
+		want        string
+		payloadRule string
+	}{
+		{"custom upstream", "gpt-image-2", "openai/gpt-image-2-cpr", "openai/gpt-image-2-cpr", "openai/gpt-image-2-cpr", ""},
+		{"prefixed builtin upstream", "gpt-image-2", "openai/gpt-image-2", "openai/gpt-image-2", "openai/gpt-image-2", ""},
+		{"case sensitive upstream", "gpt-image-2", "OpenAI/GPT-Image-2", "OpenAI/GPT-Image-2", "OpenAI/GPT-Image-2", ""},
+		{"other builtin upstream", "gpt-image-2", "gpt-image-1.5", "gpt-image-1.5", "gpt-image-1.5", ""},
+		{"configured routing-like prefix", "gpt-image-2", "codex/gpt-image-2", "codex/gpt-image-2", "codex/gpt-image-2", ""},
+		{"configured name requested directly", "openai/gpt-image-2", "openai/gpt-image-2", "openai/gpt-image-2", "openai/gpt-image-2", ""},
+		{"routing and thinking suffix", "tenant/gpt-image-2(high)", "OpenAI/GPT-Image-2(high)", "OpenAI/GPT-Image-2", "OpenAI/GPT-Image-2", ""},
+		{"legacy builtin prefix", "codex/gpt-image-1.5(high)", "codex/gpt-image-1.5(high)", "", "gpt-image-1.5", ""},
+		{"legacy builtin case", "CODEX/GPT-Image-2(high)", "CODEX/GPT-Image-2(high)", "", "gpt-image-2", ""},
+		{"final payload override", "gpt-image-2", "openai/gpt-image-2-cpr", "openai/gpt-image-2-cpr", "policy/image-model", "override"},
+		{"final payload filter", "gpt-image-2", "openai/gpt-image-2-cpr", "openai/gpt-image-2-cpr", "", "filter"},
+	} {
+		for _, format := range []string{"generation JSON", "edit JSON", "edit multipart"} {
+			for _, stream := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/stream=%v", tc.name, format, stream), func(t *testing.T) {
+					var gotBody []byte
+					var gotPath, gotContentType string
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						gotPath, gotContentType = r.URL.Path, r.Header.Get("Content-Type")
+						var errRead error
+						gotBody, errRead = io.ReadAll(r.Body)
+						if errRead != nil {
+							t.Errorf("read upstream body: %v", errRead)
+							w.WriteHeader(http.StatusBadRequest)
+							return
+						}
+						if stream {
+							w.Header().Set("Content-Type", "text/event-stream")
+							_, _ = io.WriteString(w, "event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"AA==\"}\n\n")
+						} else {
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = io.WriteString(w, `{"created":1713833628,"data":[{"b64_json":"AA=="}]}`)
+						}
+					}))
+					defer server.Close()
+
+					cfg := &config.Config{}
+					if tc.configured != "" {
+						cfg.CodexKey = []config.CodexKey{{
+							APIKey: "codex-token", BaseURL: server.URL, Prefix: "tenant",
+							Models: []config.CodexModel{{Name: tc.configured, Alias: "gpt-image-2"}},
+						}}
+					}
+					models := []config.PayloadModelRule{{
+						Name: "openai/gpt-image-2-cpr", Protocol: "openai",
+						Match: []map[string]any{{"model": "openai/gpt-image-2-cpr"}},
+					}}
+					if tc.payloadRule == "override" {
+						cfg.Payload.Override = []config.PayloadRule{
+							{Models: models, Params: map[string]any{"model": "policy/image-model"}},
+							{Models: []config.PayloadModelRule{{Name: "*"}}, Params: map[string]any{"audit.-1": "once"}},
+						}
+					} else if tc.payloadRule == "filter" {
+						cfg.Payload.Filter = []config.PayloadFilterRule{{Models: models, Params: []string{"model"}}}
+					}
+					path, wantPath := codexImagesGenerationsPath, "/images/generations"
+					if format != "generation JSON" {
+						path, wantPath = codexImagesEditsPath, "/images/edits"
+					}
+					opts := codexOpenAIImageTestOptions(path, stream)
+					opts.Metadata[cliproxyexecutor.RequestedModelMetadataKey] = tc.requested
+					payload, errMarshal := json.Marshal(map[string]any{
+						"model": tc.requested, "prompt": "diagnostic", "stream": !stream,
+						"images": []map[string]string{{"file_id": "source-image"}},
+					})
+					if errMarshal != nil {
+						t.Fatal(errMarshal)
+					}
+					if format == "edit multipart" {
+						var form bytes.Buffer
+						writer := multipart.NewWriter(&form)
+						for key, value := range map[string]string{"model": tc.requested, "prompt": "diagnostic", "stream": "true"} {
+							if errWrite := writer.WriteField(key, value); errWrite != nil {
+								t.Fatal(errWrite)
+							}
+						}
+						part, errCreate := writer.CreateFormFile("image", "source.png")
+						if errCreate != nil {
+							t.Fatal(errCreate)
+						}
+						if _, errWrite := part.Write([]byte("png-data")); errWrite != nil {
+							t.Fatal(errWrite)
+						}
+						if errClose := writer.Close(); errClose != nil {
+							t.Fatal(errClose)
+						}
+						payload = form.Bytes()
+						opts.Headers = http.Header{"Content-Type": []string{writer.FormDataContentType()}}
+					}
+					req := cliproxyexecutor.Request{Model: tc.resolved, Payload: payload}
+					executor := NewCodexExecutor(cfg)
+					auth := newCodexOpenAIImageTestAuth(server.URL)
+					if stream {
+						result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+						if errStream != nil {
+							t.Fatal(errStream)
+						}
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								t.Fatal(chunk.Err)
+							}
+						}
+					} else if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					if gotPath != wantPath {
+						t.Fatalf("upstream path = %q, want %q", gotPath, wantPath)
+					}
+					if gotContentType != "application/json" || !json.Valid(gotBody) {
+						t.Fatalf("invalid upstream JSON: Content-Type=%q body=%s", gotContentType, gotBody)
+					}
+					if got := gjson.GetBytes(gotBody, "model").String(); got != tc.want {
+						t.Errorf("upstream model = %q, want %q; body=%s", got, tc.want, gotBody)
+					}
+					if tc.payloadRule == "override" && gjson.GetBytes(gotBody, "audit").Raw != `["once"]` {
+						t.Errorf("payload override must run exactly once: %s", gotBody)
+					}
+					if tc.payloadRule == "filter" && gjson.GetBytes(gotBody, "model").Exists() {
+						t.Errorf("filtered model must not be restored: %s", gotBody)
+					}
+					if got := gjson.GetBytes(gotBody, "prompt").String(); got != "diagnostic" {
+						t.Errorf("prompt = %q, want diagnostic", got)
+					}
+					if flag := gjson.GetBytes(gotBody, "stream"); flag.Exists() != stream || flag.Bool() != stream {
+						t.Errorf("unexpected stream flag: %s", gotBody)
+					}
+					if format == "edit multipart" {
+						if got := gjson.GetBytes(gotBody, "images.0.image_url").String(); got != "data:application/octet-stream;base64,cG5nLWRhdGE=" {
+							t.Errorf("image URL = %q, want original file data URL", got)
+						}
+					} else if format == "edit JSON" && gjson.GetBytes(gotBody, "images.0.file_id").String() != "source-image" {
+						t.Errorf("original image missing: %s", gotBody)
+					}
+				})
+			}
+		}
 	}
 }
 

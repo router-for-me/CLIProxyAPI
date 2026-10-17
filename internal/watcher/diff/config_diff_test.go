@@ -8,6 +8,46 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+func TestBuildConfigChangeDetailsClientCodexEnableApplyPatch(t *testing.T) {
+	oldCfg, newCfg := &config.Config{}, &config.Config{}
+	newCfg.Client.Codex.EnableApplyPatch = true
+	for _, tc := range []struct {
+		old, new *config.Config
+		want     string
+	}{
+		{oldCfg, newCfg, "client.codex.enable-apply-patch: false -> true"},
+		{newCfg, oldCfg, "client.codex.enable-apply-patch: true -> false"},
+	} {
+		changes := BuildConfigChangeDetails(tc.old, tc.new)
+		if len(changes) != 1 || changes[0] != tc.want {
+			t.Fatalf("changes = %v, want [%s]", changes, tc.want)
+		}
+	}
+	if changes := BuildConfigChangeDetails(newCfg, newCfg); len(changes) != 0 {
+		t.Fatalf("unchanged client setting produced changes: %v", changes)
+	}
+}
+
+func TestBuildConfigChangeDetailsClientCodexOptimizeMultiAgentV2(t *testing.T) {
+	oldCfg, newCfg := &config.Config{}, &config.Config{}
+	newCfg.Client.Codex.OptimizeMultiAgentV2 = true
+	for _, tc := range []struct {
+		old, new *config.Config
+		want     string
+	}{
+		{oldCfg, newCfg, "client.codex.optimize-multi-agent-v2: false -> true"},
+		{newCfg, oldCfg, "client.codex.optimize-multi-agent-v2: true -> false"},
+	} {
+		changes := BuildConfigChangeDetails(tc.old, tc.new)
+		if len(changes) != 1 || changes[0] != tc.want {
+			t.Fatalf("changes = %v, want [%s]", changes, tc.want)
+		}
+	}
+	if changes := BuildConfigChangeDetails(newCfg, newCfg); len(changes) != 0 {
+		t.Fatalf("unchanged client setting produced changes: %v", changes)
+	}
+}
+
 func TestBuildConfigChangeDetails(t *testing.T) {
 	oldCfg := &config.Config{
 		Port:    8080,
@@ -402,7 +442,8 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 				IdleConnTimeout: "10s",
 			},
 		},
-		XAI: config.XAIConfig{InjectXSearch: true},
+		XAI:    config.XAIConfig{InjectXSearch: true},
+		Claude: config.ClaudeConfig{ToolSearch: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -454,6 +495,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "antigravity.connection-pool.enabled: false -> true")
 	expectContains(t, details, `antigravity.connection-pool.idle-conn-timeout: "30s" -> "10s"`)
 	expectContains(t, details, "xai.inject-x-search: false -> true")
+	expectContains(t, details, "claude.tool-search: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")
 	expectContains(t, details, "claude-api-key count: 1 -> 2")
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
@@ -699,4 +741,10 @@ func TestTrimStrings(t *testing.T) {
 	if len(out) != 3 || out[0] != "a" || out[1] != "b" || out[2] != "c" {
 		t.Fatalf("unexpected trimmed strings: %v", out)
 	}
+}
+
+func TestBuildConfigChangeDetails_ClaudeNativeToolSearch(t *testing.T) {
+	oldCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", BaseURL: "https://gateway.example.com"}}}
+	newCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", BaseURL: "https://gateway.example.com", NativeToolSearch: true}}}
+	expectContains(t, BuildConfigChangeDetails(oldCfg, newCfg), "claude[0].native-tool-search: false -> true")
 }
