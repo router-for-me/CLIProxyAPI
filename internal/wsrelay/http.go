@@ -35,6 +35,19 @@ type StreamEvent struct {
 	Err     error
 }
 
+type statusError struct {
+	message string
+	status  int
+}
+
+func (e statusError) Error() string {
+	return fmt.Sprintf("%s (status=%d)", e.message, e.status)
+}
+
+func (e statusError) StatusCode() int {
+	return e.status
+}
+
 // NonStream executes a non-streaming HTTP request using the websocket provider.
 func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPRequest) (*HTTPResponse, error) {
 	if req == nil {
@@ -45,6 +58,10 @@ func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPReque
 	if err != nil {
 		return nil, err
 	}
+	return receiveNonStream(ctx, respCh)
+}
+
+func receiveNonStream(ctx context.Context, respCh <-chan Message) (*HTTPResponse, error) {
 	var (
 		streamMode bool
 		streamResp *HTTPResponse
@@ -56,14 +73,8 @@ func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPReque
 			return nil, ctx.Err()
 		case msg, ok := <-respCh:
 			if !ok {
-				if streamMode {
-					if streamResp == nil {
-						streamResp = &HTTPResponse{Status: http.StatusOK, Headers: make(http.Header)}
-					} else if streamResp.Headers == nil {
-						streamResp.Headers = make(http.Header)
-					}
-					streamResp.Body = append(streamResp.Body[:0], streamBody.Bytes()...)
-					return streamResp, nil
+				if err := ctx.Err(); err != nil {
+					return nil, err
 				}
 				return nil, errors.New("wsrelay: connection closed during response")
 			}
@@ -237,12 +248,11 @@ func decodeError(payload map[string]any) error {
 		return errors.New("wsrelay: unknown error")
 	}
 	message, _ := payload["error"].(string)
-	status := 0
-	if v, ok := payload["status"].(float64); ok {
-		status = int(v)
-	}
 	if message == "" {
 		message = "wsrelay: upstream error"
 	}
-	return fmt.Errorf("%s (status=%d)", message, status)
+	if v, ok := payload["status"].(float64); ok && v >= http.StatusBadRequest && v <= 599 && v == float64(int(v)) {
+		return statusError{message: message, status: int(v)}
+	}
+	return errors.New(message)
 }
