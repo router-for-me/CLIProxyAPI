@@ -239,8 +239,17 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 // standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
 var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax}
 
+// highIntentClampOrder lists the preferred fallbacks for the two top levels,
+// matching mapConfiguredHighIntent: a request for more than high should keep
+// as much of that intent as the model allows before degrading to high.
+var highIntentClampOrder = map[ThinkingLevel][]ThinkingLevel{
+	LevelXHigh: {LevelXHigh, LevelMax, LevelHigh},
+	LevelMax:   {LevelMax, LevelXHigh, LevelHigh},
+}
+
 // clampLevel clamps the given level to the nearest supported level.
-// On tie, prefers the lower level.
+// xhigh and max follow highIntentClampOrder; other levels pick the nearest
+// supported level and prefer the lower one on tie.
 func clampLevel(level ThinkingLevel, modelInfo *registry.ModelInfo, provider string) ThinkingLevel {
 	model := "unknown"
 	var supported []string
@@ -255,6 +264,13 @@ func clampLevel(level ThinkingLevel, modelInfo *registry.ModelInfo, provider str
 
 	if len(supported) == 0 || isLevelSupported(string(level), supported) {
 		return level
+	}
+
+	for _, candidate := range highIntentClampOrder[ThinkingLevel(strings.ToLower(strings.TrimSpace(string(level))))] {
+		if isLevelSupported(string(candidate), supported) {
+			logLevelClamp(provider, model, level, candidate)
+			return candidate
+		}
 	}
 
 	pos := levelIndex(string(level))
@@ -273,15 +289,19 @@ func clampLevel(level ThinkingLevel, modelInfo *registry.ModelInfo, provider str
 
 	if bestIdx >= 0 {
 		clamped := standardLevelOrder[bestIdx]
-		log.WithFields(log.Fields{
-			"provider":       provider,
-			"model":          model,
-			"original_value": string(level),
-			"clamped_to":     string(clamped),
-		}).Debug("thinking: level clamped |")
+		logLevelClamp(provider, model, level, clamped)
 		return clamped
 	}
 	return level
+}
+
+func logLevelClamp(provider, model string, original, clamped ThinkingLevel) {
+	log.WithFields(log.Fields{
+		"provider":       provider,
+		"model":          model,
+		"original_value": string(original),
+		"clamped_to":     string(clamped),
+	}).Debug("thinking: level clamped |")
 }
 
 // clampBudget clamps a budget value to the model's supported range.
