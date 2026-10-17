@@ -159,6 +159,32 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	}
 }
 
+func TestProcessStreamingChunksDrainsCapturedChannelAfterWrapperCleanup(t *testing.T) {
+	chunkChannel := make(chan []byte, 2)
+	streamWriter := &testStreamingLogWriter{}
+	wrapper := &ResponseWriterWrapper{chunkChannel: chunkChannel, streamWriter: streamWriter}
+	done := make(chan struct{})
+	started := make(chan struct{})
+	startProcessor := make(chan struct{})
+	go func() {
+		close(started)
+		<-startProcessor
+		processStreamingChunks(done, chunkChannel, streamWriter)
+	}()
+	<-started
+	chunkChannel <- []byte("first chunk")
+	chunkChannel <- []byte("second chunk")
+	close(chunkChannel)
+	wrapper.chunkChannel = nil
+	wrapper.streamWriter = nil
+	close(startProcessor)
+	<-done
+
+	if len(streamWriter.chunks) != 2 || string(streamWriter.chunks[0]) != "first chunk" || string(streamWriter.chunks[1]) != "second chunk" {
+		t.Fatalf("streamed chunks = %q, want both queued chunks in order", streamWriter.chunks)
+	}
+}
+
 type testRequestLogger struct {
 	enabled bool
 }
@@ -178,9 +204,12 @@ func (l *testRequestLogger) IsEnabled() bool {
 type testStreamingLogWriter struct {
 	apiWebsocketTimeline []byte
 	closed               bool
+	chunks               [][]byte
 }
 
-func (w *testStreamingLogWriter) WriteChunkAsync([]byte) {}
+func (w *testStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.chunks = append(w.chunks, bytes.Clone(chunk))
+}
 
 func (w *testStreamingLogWriter) WriteStatus(int, map[string][]string) error {
 	return nil
