@@ -282,15 +282,19 @@ func (*blockingHTTPInterruptExecutor) Execute(context.Context, *coreauth.Auth, c
 
 func (e *blockingHTTPInterruptExecutor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	call := e.calls.Add(1)
+	responseID := fmt.Sprintf("r-http-%d", call)
+	if call == 1 {
+		responseID = "r-http"
+	}
 	chunks := make(chan coreexecutor.StreamChunk, 2)
 	go func() {
 		defer close(chunks)
-		if call > 1 {
-			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.created","response":{"id":"r-http-2"}}`)}
-			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"r-http-2","status":"completed","output":[]}}`)}
+		if call > 1 && call != 3 {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.created","response":{"id":%q}}`, responseID))}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","output":[]}}`, responseID))}
 			return
 		}
-		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.created","response":{"id":"r-http"}}`)}
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.created","response":{"id":%q}}`, responseID))}
 		<-ctx.Done()
 		e.canceled.Store(true)
 	}()
@@ -356,6 +360,16 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if got := gjson.GetBytes(created, "type").String(); got != "response.created" {
 		t.Fatalf("expected response.created, got %s", created)
 	}
+	if errSend := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"another-response"}`)); errSend != nil {
+		t.Fatal(errSend)
+	}
+	_, rejected, errRejected := client.ReadMessage()
+	if errRejected != nil {
+		t.Fatal(errRejected)
+	}
+	if got := gjson.GetBytes(rejected, "type").String(); got != "error" || gjson.GetBytes(rejected, "status").Int() != http.StatusBadRequest {
+		t.Fatalf("interrupt for a different response = %s, want a 400 error", rejected)
+	}
 	if errSend := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"r-http","mode":"discard_partial_items"}`)); errSend != nil {
 		t.Fatal(errSend)
 	}
@@ -385,12 +399,61 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if got := gjson.GetBytes(followCreated, "type").String(); got != "response.created" {
 		t.Fatalf("expected follow-up response.created, got %s", followCreated)
 	}
+	if got := gjson.GetBytes(followCreated, "response.id").String(); got != "r-http-2" {
+		t.Fatalf("follow-up response id = %q", got)
+	}
 	_, followDone, errDone := client.ReadMessage()
 	if errDone != nil {
 		t.Fatal(errDone)
 	}
 	if got := gjson.GetBytes(followDone, "type").String(); got != "response.completed" {
 		t.Fatalf("expected follow-up response.completed, got %s", followDone)
+	}
+	if errSend := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"r-http"}`)); errSend != nil {
+		t.Fatal(errSend)
+	}
+	if errSend := client.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[]}`, model))); errSend != nil {
+		t.Fatal(errSend)
+	}
+	_, nextCreated, errNext := client.ReadMessage()
+	if errNext != nil {
+		t.Fatal(errNext)
+	}
+	if got := gjson.GetBytes(nextCreated, "type").String(); got != "response.created" || gjson.GetBytes(nextCreated, "response.id").String() != "r-http-3" {
+		t.Fatalf("stale interrupt affected next response: %s", nextCreated)
+	}
+	if errSend := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"r-http"}`)); errSend != nil {
+		t.Fatal(errSend)
+	}
+	if errSend := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"r-http-3"}`)); errSend != nil {
+		t.Fatal(errSend)
+	}
+	_, nextInterrupted, errNextInterrupted := client.ReadMessage()
+	if errNextInterrupted != nil {
+		t.Fatal(errNextInterrupted)
+	}
+	if got := gjson.GetBytes(nextInterrupted, "type").String(); got != "response.incomplete" || gjson.GetBytes(nextInterrupted, "response.id").String() != "r-http-3" {
+		t.Fatalf("current interrupt was contaminated by stale response ID: %s", nextInterrupted)
+	}
+	if errSend := client.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[]}`, model))); errSend != nil {
+		t.Fatal(errSend)
+	}
+	_, finalCreated, errFinal := client.ReadMessage()
+	if errFinal != nil {
+		t.Fatal(errFinal)
+	}
+	if got := gjson.GetBytes(finalCreated, "type").String(); got != "response.created" || gjson.GetBytes(finalCreated, "response.id").String() != "r-http-4" {
+		t.Fatalf("expected final response after stale interrupts, got %s", finalCreated)
+	}
+	_, finalDone, errFinalDone := client.ReadMessage()
+	if errFinalDone != nil {
+		t.Fatal(errFinalDone)
+	}
+	if got := gjson.GetBytes(finalDone, "type").String(); got != "response.completed" {
+		t.Fatalf("expected final response.completed, got %s", finalDone)
+	}
+	if got := executor.calls.Load(); got != 4 {
+		t.Fatalf("upstream dispatches = %d, want 4", got)
 	}
 }
 

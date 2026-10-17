@@ -73,6 +73,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodHostHTTPDoStream != "host.http.do_stream" {
 		t.Fatalf("MethodHostHTTPDoStream = %q", MethodHostHTTPDoStream)
 	}
+	if MethodHostPayloadFinalize != "host.payload.finalize" {
+		t.Fatalf("MethodHostPayloadFinalize = %q", MethodHostPayloadFinalize)
+	}
 	if MethodHostHTTPOperationOpen != "host.http.operation_open" {
 		t.Fatalf("MethodHostHTTPOperationOpen = %q", MethodHostHTTPOperationOpen)
 	}
