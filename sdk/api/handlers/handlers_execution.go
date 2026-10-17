@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -388,9 +389,24 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 		}
 	}
 	var addon http.Header
-	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-		if hdr := he.Headers(); hdr != nil {
-			addon = hdr.Clone()
+	// Execution layers wrap upstream errors (retries, Home rounds, fast mode), so
+	// look through every wrapper for the headers the upstream error carries. They
+	// are filtered here, as on success responses, because every consumer of the
+	// error message (HTTP, WebSocket, plugin callbacks) may expose them.
+	var he interface{ Headers() http.Header }
+	if errors.As(err, &he) && he != nil {
+		addon = FilterUpstreamHeaders(he.Headers())
+	}
+	if addon != nil {
+		if own := coreauth.SafeResponseHeaders(err).Values("Retry-After"); len(own) > 0 {
+			// CPA's own retry timing (a Home round delay or a local cooldown) is
+			// authoritative over the upstream's, for every consumer as well.
+			for key := range addon {
+				if IsRetryTimingHeader(key) {
+					delete(addon, key)
+				}
+			}
+			addon["Retry-After"] = append([]string(nil), own...)
 		}
 	}
 	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}

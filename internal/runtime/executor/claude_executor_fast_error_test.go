@@ -5,8 +5,10 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -279,5 +281,55 @@ func TestClaudeExecutorNonFastErrorKeepsCredentialScopedBehavior(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Fatalf("upstream attempts = %d, want 1", got)
+	}
+}
+
+func TestClaudeExecutorFastHTTPDecodeErrorKeepsRetryHeaders(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header: http.Header{
+						"Content-Type":                       []string{"application/json"},
+						"Content-Encoding":                   []string{"gzip"},
+						"Retry-After":                        []string{"30"},
+						"Anthropic-Ratelimit-Unified-Status": []string{"rejected"},
+						"Anthropic-Organization-Id":          []string{"org-1"},
+					},
+					Body:    io.NopCloser(strings.NewReader("not-a-gzip-stream")),
+					Request: req,
+				}, nil
+			})
+			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+			auth := &cliproxyauth.Auth{
+				ID:         "fast-decode-error-headers",
+				Attributes: map[string]string{"api_key": "sk-ant-oat-fast-decode-error-headers"},
+				Metadata:   claudeOAuthTestMetadata(),
+			}
+			request := cliproxyexecutor.Request{
+				Model:   "claude-opus-5",
+				Payload: []byte(`{"model":"claude-opus-5","max_tokens":16,"speed":"fast","messages":[{"role":"user","content":"reply OK"}]}`),
+			}
+			opts := cliproxyexecutor.Options{Stream: stream, SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude}
+			executor := NewClaudeExecutor(&config.Config{})
+			var errRun error
+			if stream {
+				_, errRun = executor.ExecuteStream(ctx, auth, request, opts)
+			} else {
+				_, errRun = executor.Execute(ctx, auth, request, opts)
+			}
+			var carrier interface{ Headers() http.Header }
+			if !errors.As(errRun, &carrier) {
+				t.Fatalf("Fast decode error %T does not carry headers", errRun)
+			}
+			want := http.Header{
+				"Retry-After":                        {"30"},
+				"Anthropic-Ratelimit-Unified-Status": {"rejected"},
+			}
+			if got := carrier.Headers(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("Headers() = %v, want %v", got, want)
+			}
+		})
 	}
 }
