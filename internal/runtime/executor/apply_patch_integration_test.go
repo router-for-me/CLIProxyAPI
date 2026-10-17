@@ -435,6 +435,61 @@ data: {"type":"response.completed","response":{"output":[{"type":"function_call"
 	}
 }
 
+func TestApplyPatchFailurePreservesClaudeUsage(t *testing.T) {
+	for _, provider := range []string{"claude", "claude-oauth"} {
+		for _, tc := range []struct {
+			mode    string
+			fixture string
+			stream  bool
+			output  int64
+		}{
+			{mode: "buffered-sse", fixture: "stream", output: 3},
+			{mode: "sse", fixture: "stream", stream: true},
+			{mode: "eof", fixture: "eof", stream: true},
+		} {
+			t.Run(provider+"/"+tc.mode, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, errReadAll := io.ReadAll(r.Body)
+					if errReadAll != nil {
+						t.Error(errReadAll)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, task6ProviderFixture(provider, tc.fixture, gjson.GetBytes(body, "tools.0.name").String()))
+				}))
+				defer server.Close()
+				exec := task6Executor(provider)
+				auth := &cliproxyauth.Auth{ID: "task6-claude-usage-" + provider + "-" + tc.mode, Provider: exec.Identifier(), Attributes: map[string]string{"api_key": "test", "base_url": server.URL}}
+				if provider == "claude-oauth" {
+					auth.Attributes["api_key"] = "sk-ant-oat-test"
+					auth.Metadata = map[string]any{"account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+				}
+				checkUsage := task6CaptureFailureUsageWithCheck(t, auth.ID, func(record usage.Record) {
+					if record.Detail.InputTokens != 5 || record.Detail.OutputTokens != tc.output {
+						t.Errorf("failure usage = %+v, want input/output 5/%d", record.Detail, tc.output)
+					}
+				})
+				req := cliproxyexecutor.Request{Model: "claude-sonnet-4-6", Payload: []byte(task6PatchRequest)}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: req.Payload}
+				if tc.stream {
+					result, errExecuteStream := exec.ExecuteStream(t.Context(), auth, req, opts)
+					if errExecuteStream != nil {
+						t.Fatal(errExecuteStream)
+					}
+					assertTask6FailedStream(t, result.Chunks)
+				} else {
+					result, errExecute := exec.Execute(t.Context(), auth, req, opts)
+					if len(result.Payload) != 0 {
+						t.Errorf("failed response returned payload %s", result.Payload)
+					}
+					assertTask6PatchError(t, errExecute)
+				}
+				checkUsage()
+			})
+		}
+	}
+}
+
 func TestApplyPatchHTTPGatewayErrorMatrix(t *testing.T) {
 	for _, provider := range []string{"custom-compat", "claude", "claude-oauth", "gemini", "gemini-interactions", "vertex", "antigravity", "devin", "xai", "meta", "kimi"} {
 		for _, mode := range []string{"nonstream", "stream", "eof"} {
