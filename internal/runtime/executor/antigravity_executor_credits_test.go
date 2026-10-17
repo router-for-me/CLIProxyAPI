@@ -223,6 +223,90 @@ func TestClassifyAntigravity429(t *testing.T) {
 			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429SoftRateLimit)
 		}
 	})
+
+	t.Run("weekly rate-limit hint is capped and stays model-scoped", func(t *testing.T) {
+		body := antigravityWeeklyReset429Body("RATE_LIMIT_EXCEEDED", "166h9m16s")
+		if got := classifyAntigravity429(body); got != antigravity429RateLimited {
+			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429RateLimited)
+		}
+		decision := decideAntigravity429(body)
+		if decision.kind != antigravity429DecisionShortCooldownSwitchAuth {
+			t.Fatalf("decideAntigravity429().kind = %q, want %q", decision.kind, antigravity429DecisionShortCooldownSwitchAuth)
+		}
+		if decision.retryAfter == nil {
+			t.Fatal("decideAntigravity429().retryAfter = nil")
+		}
+		if *decision.retryAfter != antigravityQuotaCooldownCeiling {
+			t.Fatalf("decideAntigravity429().retryAfter = %v, want capped %v", *decision.retryAfter, antigravityQuotaCooldownCeiling)
+		}
+	})
+
+	t.Run("short rate-limit rotate-account delay is unchanged", func(t *testing.T) {
+		body := antigravityWeeklyReset429Body("RATE_LIMIT_EXCEEDED", "90s")
+		decision := decideAntigravity429(body)
+		if decision.kind != antigravity429DecisionShortCooldownSwitchAuth {
+			t.Fatalf("decideAntigravity429().kind = %q, want %q", decision.kind, antigravity429DecisionShortCooldownSwitchAuth)
+		}
+		if decision.retryAfter == nil || *decision.retryAfter != 90*time.Second {
+			t.Fatalf("decideAntigravity429().retryAfter = %v, want 90s", decision.retryAfter)
+		}
+	})
+
+	t.Run("true full quota stays exhausted and is still capped", func(t *testing.T) {
+		body := antigravityWeeklyReset429Body("QUOTA_EXHAUSTED", "166h27m18s")
+		if got := classifyAntigravity429(body); got != antigravity429QuotaExhausted {
+			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429QuotaExhausted)
+		}
+		decision := decideAntigravity429(body)
+		if decision.kind != antigravity429DecisionFullQuotaExhausted {
+			t.Fatalf("decideAntigravity429().kind = %q, want %q", decision.kind, antigravity429DecisionFullQuotaExhausted)
+		}
+		if decision.retryAfter == nil {
+			t.Fatal("decideAntigravity429().retryAfter = nil")
+		}
+		if *decision.retryAfter != antigravityQuotaCooldownCeiling {
+			t.Fatalf("decideAntigravity429().retryAfter = %v, want capped %v", *decision.retryAfter, antigravityQuotaCooldownCeiling)
+		}
+	})
+}
+
+func TestNewAntigravityStatusErr_WeeklyResetHintIsCapped(t *testing.T) {
+	body := antigravityWeeklyReset429Body("RATE_LIMIT_EXCEEDED", "166h9m16s")
+	err := newAntigravityStatusErr(http.StatusTooManyRequests, body)
+	if err.retryAfter == nil {
+		t.Fatal("retryAfter = nil")
+	}
+	if *err.retryAfter != antigravityQuotaCooldownCeiling {
+		t.Fatalf("retryAfter = %v, want capped %v", *err.retryAfter, antigravityQuotaCooldownCeiling)
+	}
+	if err.IsCredentialScoped() {
+		t.Fatal("weekly model reset was credential-scoped")
+	}
+}
+
+func antigravityWeeklyReset429Body(reason, delay string) []byte {
+	return []byte(`{
+		"error": {
+			"code": 429,
+			"message": "You have exhausted your capacity on this model. Your quota will reset after ` + delay + `.",
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{
+					"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+					"reason": "` + reason + `",
+					"domain": "cloudcode-pa.googleapis.com",
+					"metadata": {
+						"model": "claude-opus-4-6",
+						"quotaResetDelay": "` + delay + `"
+					}
+				},
+				{
+					"@type": "type.googleapis.com/google.rpc.RetryInfo",
+					"retryDelay": "` + delay + `"
+				}
+			]
+		}
+	}`)
 }
 
 func TestInjectEnabledCreditTypes(t *testing.T) {
