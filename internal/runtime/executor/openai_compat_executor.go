@@ -443,6 +443,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var streamUsage helps.StreamUsageBuffer
 		var seenDone bool
 		var sawFinishReason bool
+		var deferredClaudeUsagePayload []byte
 		var streamFailed bool
 		var streamAborted bool
 		var upstreamEvent string
@@ -506,6 +507,23 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 			// Observe complete upstream frames before translation or downstream backpressure.
 			helps.ObserveChatTokenEvent(reporter, dataPayload)
+			if !isDone && responseFormat == sdktranslator.FormatClaude && !sawFinishReason && openAICompatIsUsageOnlyChunk(dataPayload) {
+				deferredClaudeUsagePayload = bytes.Clone(dataPayload)
+				return false
+			}
+			if len(deferredClaudeUsagePayload) > 0 && (sawFinishReason || isDone) {
+				deferredLine := append([]byte("data: "), deferredClaudeUsagePayload...)
+				deferredClaudeUsagePayload = nil
+				deferredChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, deferredLine, &param, claudeInputTokens)
+				for i := range deferredChunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: deferredChunks[i]}:
+					case <-ctx.Done():
+						streamAborted = true
+						return true
+					}
+				}
+			}
 			streamLine := append([]byte("data: "), dataPayload...)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, streamLine, &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
@@ -595,8 +613,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if responseFormat == sdktranslator.FormatOpenAIResponse || (responseFormat == sdktranslator.FormatClaude && !sawFinishReason) {
 				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-				if !helps.RecordApplyPatchStreamFailure(ctx, param, reporter, streamErr) {
-					reporter.PublishFailure(ctx, streamErr)
+				if !helps.RecordApplyPatchStreamFailureWithUsage(ctx, param, reporter, &streamUsage, streamErr) {
+					streamUsage.PublishFailure(ctx, reporter, streamErr)
 				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
@@ -1084,6 +1102,14 @@ func openAICompatChunkHasFinishReason(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+func openAICompatIsUsageOnlyChunk(payload []byte) bool {
+	if gjson.GetBytes(payload, "choices.0").Exists() {
+		return false
+	}
+	usage := gjson.GetBytes(payload, "usage")
+	return usage.Exists() && usage.Type != gjson.Null
 }
 
 func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, bool) {

@@ -818,7 +818,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
 			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
 			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
-			reporter.PublishFailure(ctx, truncErr)
+			streamUsage.PublishFailure(ctx, reporter, truncErr)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
 			case <-ctx.Done():
@@ -1024,7 +1024,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
 			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
 			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
-			reporter.PublishFailure(ctx, truncErr)
+			streamUsage.PublishFailure(ctx, reporter, truncErr)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
 			case <-ctx.Done():

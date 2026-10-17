@@ -280,13 +280,28 @@ func TestOpenAICompatExecutorClaudeEOFAfterFinishReasonCompletesStream(t *testin
 }
 
 // GeminiExecutor with ResponseFormat: FormatClaude must fail the stream on clean EOF
-// when no chunk carried a finishReason, instead of synthesizing [DONE] and emitting a fake message_stop.
+// when no chunk carried a finishReason, instead of synthesizing [DONE] and emitting a fake message_stop,
+// while preserving any buffered usage metadata in the failure record.
 func TestGeminiExecutorClaudeStreamTruncationReportsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"partial gemini\"}]}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"partial gemini\"}]}}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4,\"totalTokenCount\":15}}\n\n")
 	}))
 	defer server.Close()
+
+	pluginName := "test-gemini-claude-truncation-usage"
+	records := make(chan usage.Record, 4)
+	usage.RegisterNamedPlugin(pluginName, usagePluginFunc(func(_ context.Context, record usage.Record) {
+		if record.Provider == "gemini" {
+			select {
+			case records <- record:
+			default:
+			}
+		}
+	}))
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
+	})
 
 	exec := NewGeminiExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
@@ -324,6 +339,91 @@ func TestGeminiExecutorClaudeStreamTruncationReportsError(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "message_stop") {
 		t.Fatalf("truncated Gemini-to-Claude stream must not synthesize message_stop: %q", output.String())
+	}
+
+	select {
+	case record := <-records:
+		if !record.Failed {
+			t.Fatal("expected Gemini truncation usage record to be marked failed")
+		}
+		if record.Detail.InputTokens != 11 || record.Detail.OutputTokens != 4 {
+			t.Fatalf("expected buffered Gemini usage (11, 4) to be preserved on truncation, got (%d, %d)", record.Detail.InputTokens, record.Detail.OutputTokens)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for Gemini truncation usage record")
+	}
+}
+
+type usagePluginFunc func(context.Context, usage.Record)
+
+func (fn usagePluginFunc) HandleUsage(ctx context.Context, record usage.Record) {
+	fn(ctx, record)
+}
+
+// OpenAICompatExecutor with ResponseFormat: FormatClaude must not emit message_stop when a
+// usage-only chunk arrives before clean EOF without finish_reason or [DONE], and must preserve
+// buffered usage on the failure record.
+func TestOpenAICompatExecutorClaudeEOFWithUsageOnlyChunkBeforeFinishReasonFailsWithoutMessageStop(t *testing.T) {
+	reply := strings.Join([]string{
+		`data: {"id":"chatcmpl-truncated-usage","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl-truncated-usage","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`,
+		"",
+	}, "\n")
+
+	pluginName := "test-openai-compat-claude-truncation-usage"
+	records := make(chan usage.Record, 4)
+	usage.RegisterNamedPlugin(pluginName, usagePluginFunc(func(_ context.Context, record usage.Record) {
+		if record.Model == "test" {
+			select {
+			case records <- record:
+			default:
+			}
+		}
+	}))
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
+	})
+
+	exec, auth, _ := newApplyPatchCompatTestExecutor(t, reply)
+	request := []byte(`{"model":"test","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+
+	result, errExecuteStream := exec.ExecuteStream(t.Context(), auth, cliproxyexecutor.Request{Model: "test", Payload: request}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		ResponseFormat:  sdktranslator.FormatClaude,
+		OriginalRequest: request,
+		Stream:          true,
+	})
+	if errExecuteStream != nil {
+		t.Fatal(errExecuteStream)
+	}
+
+	var output bytes.Buffer
+	var streamErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			continue
+		}
+		output.Write(chunk.Payload)
+	}
+	if streamErr == nil {
+		t.Fatalf("expected error chunk on truncated OpenAI-to-Claude stream with usage-only chunk but no finish_reason, got nil; output=%q", output.String())
+	}
+	if strings.Contains(output.String(), "message_stop") {
+		t.Fatalf("usage-only chunk without finish_reason or [DONE] must not emit message_stop before truncation error: %q", output.String())
+	}
+
+	select {
+	case record := <-records:
+		if !record.Failed {
+			t.Fatal("expected OpenAICompat truncation usage record to be marked failed")
+		}
+		if record.Detail.InputTokens != 12 || record.Detail.OutputTokens != 7 {
+			t.Fatalf("expected buffered OpenAICompat usage (12, 7) to be preserved on truncation, got (%d, %d)", record.Detail.InputTokens, record.Detail.OutputTokens)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for OpenAICompat truncation usage record")
 	}
 }
 
