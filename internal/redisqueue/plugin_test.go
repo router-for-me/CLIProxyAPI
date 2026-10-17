@@ -25,6 +25,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			UserAgent:        "test-client/1.0",
 		})
 		ctx = internallogging.WithResponseStatusHolder(ctx)
+		ctx = coreusage.WithPromptCacheKey(ctx, coreusage.PromptCacheKeyInfo{Source: "derived", ID: "0123456789abcdef"})
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
 		responseHeaders := http.Header{}
 		responseHeaders.Add("X-Upstream-Request-Id", "upstream-req-1")
@@ -75,6 +76,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "service_tier", "auto")
 		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
+		requireStringField(t, payload, "cache_key_source", "derived")
+		requireStringField(t, payload, "cache_key_id", "0123456789abcdef")
 		requireStringField(t, payload, "response_model", "gpt-5.6-luna")
 		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30)
