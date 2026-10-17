@@ -19,6 +19,9 @@ type LoginOptions struct {
 	CallbackPort int
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
+	// ManualCode makes a Claude login the traditional paste-a-code flow: no local callback server
+	// and no browser; the user opens the URL anywhere and pastes back the code Claude shows.
+	ManualCode bool
 }
 
 // Authenticator manages login and optional refresh flows for a provider.

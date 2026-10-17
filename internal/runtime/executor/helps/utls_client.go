@@ -265,6 +265,15 @@ var claudeCodeRoundTripperCache = internalcache.NewBoundedLRU[string, http.Round
 	},
 )
 
+var rawClaudeCodeRoundTripperCache = internalcache.NewBoundedLRU[string, http.RoundTripper](
+	claudeCodeRoundTripperCacheCapacity,
+	func(_ string, roundTripper http.RoundTripper) {
+		if transport, ok := roundTripper.(interface{ CloseIdleConnections() }); ok {
+			transport.CloseIdleConnections()
+		}
+	},
+)
+
 var claudeCodeMessagesHeaderOrder = []string{
 	"Accept",
 	"Authorization",
@@ -325,6 +334,30 @@ func cachedClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	return claudeCodeRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
 		return newClaudeCodeRoundTripper(proxyURL)
 	})
+}
+
+func cachedRawClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
+	return rawClaudeCodeRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
+		return newRawClaudeCodeRoundTripper(proxyURL)
+	})
+}
+
+// newRawClaudeCodeRoundTripper is newClaudeCodeRoundTripper with Go's implicit gzip
+// negotiation and decoding turned off, so response bytes and Content-Encoding stay intact.
+func newRawClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
+	roundTripper := newClaudeCodeRoundTripper(proxyURL)
+	if transport, ok := roundTripper.(*http.Transport); ok {
+		return rawClaudeCodeTransport(transport)
+	}
+	return roundTripper
+}
+
+// rawClaudeCodeTransport stops the transport from asking for gzip itself and from decoding it:
+// the request keeps exactly the client's Accept-Encoding (or none), and the response keeps the
+// bytes and Content-Encoding Anthropic sent.
+func rawClaudeCodeTransport(transport *http.Transport) *http.Transport {
+	transport.DisableCompression = true
+	return transport
 }
 
 func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
@@ -419,7 +452,18 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // fingerprints for protected hosts. It uses Claude Code's Node/OpenSSL profile
 // for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
 // fallback for other hosts.
-func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	return newUtlsHTTPClient(ctx, cfg, auth, timeout, false)
+}
+
+// NewRawUtlsHTTPClient creates the same provider-specific client while disabling
+// Go's implicit gzip negotiation and decoding on Anthropic requests. Callers use
+// it when response representation bytes and Content-Encoding must stay intact.
+func NewRawUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	return newUtlsHTTPClient(ctx, cfg, auth, timeout, true)
+}
+
+func newUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration, rawAnthropic bool) (clientOut *http.Client) {
 	// Carry the opt-in TLS establishment bound (requests
 	// tls-handshake-timeout-seconds) on a request-scoped wrapper. This
 	// client is shared, so the bound intentionally reaches both the Claude
@@ -446,6 +490,9 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 
 	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
+	if rawAnthropic {
+		anthropicRT = cachedRawClaudeCodeRoundTripper(proxyURL)
+	}
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {

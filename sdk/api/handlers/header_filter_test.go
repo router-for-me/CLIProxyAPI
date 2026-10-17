@@ -1,8 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
+	"reflect"
 	"testing"
+
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestFilterUpstreamHeaders_RemovesConnectionScopedHeaders(t *testing.T) {
@@ -42,6 +46,33 @@ func TestFilterUpstreamHeaders_RemovesConnectionScopedHeaders(t *testing.T) {
 		value := filtered.Get(key)
 		if value != "" {
 			t.Fatalf("expected %s to be removed, got %q", key, value)
+		}
+	}
+}
+
+func TestNativeClaudeDownstreamHeadersBypassGenericFilter(t *testing.T) {
+	ctx := coreexecutor.WithNativeClaudeProtocolHeaders(context.Background(), http.Header{"Anthropic-Version": {"2023-06-01"}})
+	src := http.Header{
+		"Content-Encoding":          {"gzip"},
+		"Content-Length":            {"123"},
+		"Set-Cookie":                {"cookie-a", "cookie-b"},
+		"Authorization":             {"upstream-response-value"},
+		"X-Litellm-Future":          {"preserved"},
+		"X-Anthropic-Future-Header": {"one", "two"},
+		"Connection":                {"X-Hop"},
+		"X-Hop":                     {"preserve-until-final-boundary"},
+	}
+
+	for name, got := range map[string]http.Header{
+		"executor":    downstreamHeadersFromExecutor(ctx, src, false),
+		"interceptor": downstreamHeadersAfterInterceptors(ctx, src, src, false),
+	} {
+		if !reflect.DeepEqual(got, src) {
+			t.Errorf("%s headers = %v, want %v", name, got, src)
+		}
+		got.Set("X-Anthropic-Future-Header", "changed")
+		if src.Values("X-Anthropic-Future-Header")[0] != "one" {
+			t.Errorf("%s result aliases source", name)
 		}
 	}
 }

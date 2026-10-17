@@ -73,13 +73,29 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 // StopAutoRefresh cancels the background refresh loop, if running.
 // It also stops the selector if it implements StoppableSelector.
 func (m *Manager) StopAutoRefresh() {
+	m.stopAutoRefresh(false)
+}
+
+// StopAutoRefreshAndWait cancels and joins the current background refresh loop,
+// including in-flight token persistence. Call this before releasing an external
+// credential-store lock. Start/stop operations must be serialized by the caller;
+// it does not join unrelated explicit ForceRefreshAuth calls.
+func (m *Manager) StopAutoRefreshAndWait() {
+	m.stopAutoRefresh(true)
+}
+
+func (m *Manager) stopAutoRefresh(wait bool) {
 	m.mu.Lock()
 	cancel := m.refreshCancel
+	loop := m.refreshLoop
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if wait && loop != nil {
+		<-loop.done
 	}
 	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
 	sel := m.Selector()

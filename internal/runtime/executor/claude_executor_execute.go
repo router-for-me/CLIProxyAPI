@@ -17,6 +17,9 @@ import (
 )
 
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if _, native := cliproxyexecutor.NativeClaudeProtocolHeadersFromContext(ctx); native {
+		return e.executeNativeClaude(ctx, auth, req)
+	}
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if errExpand := expandClaudeResponsesCompaction(&req, &opts); errExpand != nil {
 		return resp, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}

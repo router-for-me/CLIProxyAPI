@@ -2043,37 +2043,48 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
 func TestSessionCache_GetAndRefresh(t *testing.T) {
 	t.Parallel()
 
-	cache := NewSessionCache(100 * time.Millisecond)
+	const ttl = time.Hour
+	cache := NewSessionCache(ttl)
 	defer cache.Stop()
 
 	cache.Set("session1", "auth1")
 
-	// Verify initial value
+	for attempt := 0; attempt < 2; attempt++ {
+		// Age the binding explicitly instead of relying on a scheduler to wake
+		// within a millisecond TTL. Keep every alias/group index consistent.
+		initialExpiry := time.Now().Add(ttl / 2)
+		cache.mu.Lock()
+		entry := cache.entries["session1"]
+		cache.replaceAliasGroupsLocked(entry.authID, initialExpiry, entry.aliases, entry)
+		cache.mu.Unlock()
+
+		before := time.Now()
+		got, ok := cache.GetAndRefresh("session1")
+		after := time.Now()
+		if !ok || got != "auth1" {
+			t.Fatalf("GetAndRefresh() attempt %d = %q, %v, want auth1, true", attempt, got, ok)
+		}
+		cache.mu.RLock()
+		refreshed := cache.entries["session1"]
+		cache.mu.RUnlock()
+		if !refreshed.expiresAt.After(initialExpiry) || refreshed.expiresAt.Before(before.Add(ttl)) || refreshed.expiresAt.After(after.Add(ttl)) {
+			t.Fatalf("GetAndRefresh() attempt %d did not set a fresh full TTL: expires %v, want between %v and %v", attempt, refreshed.expiresAt, before.Add(ttl), after.Add(ttl))
+		}
+	}
+
+	cache.mu.Lock()
+	entry := cache.entries["session1"]
+	cache.replaceAliasGroupsLocked(entry.authID, time.Unix(1, 0), entry.aliases, entry)
+	cache.mu.Unlock()
 	got, ok := cache.GetAndRefresh("session1")
-	if !ok || got != "auth1" {
-		t.Fatalf("GetAndRefresh() = %q, %v, want auth1, true", got, ok)
-	}
-
-	// Wait half TTL and access again (should refresh)
-	time.Sleep(60 * time.Millisecond)
-	got, ok = cache.GetAndRefresh("session1")
-	if !ok || got != "auth1" {
-		t.Fatalf("GetAndRefresh() after 60ms = %q, %v, want auth1, true", got, ok)
-	}
-
-	// Wait another 60ms (total 120ms from original, but TTL refreshed at 60ms)
-	// Entry should still be valid because TTL was refreshed
-	time.Sleep(60 * time.Millisecond)
-	got, ok = cache.GetAndRefresh("session1")
-	if !ok || got != "auth1" {
-		t.Fatalf("GetAndRefresh() after refresh = %q, %v, want auth1, true (TTL should have been refreshed)", got, ok)
-	}
-
-	// Now wait full TTL without access
-	time.Sleep(110 * time.Millisecond)
-	got, ok = cache.GetAndRefresh("session1")
-	if ok {
+	if ok || got != "" {
 		t.Fatalf("GetAndRefresh() after expiry = %q, %v, want '', false", got, ok)
+	}
+	cache.mu.RLock()
+	aliases, groups := len(cache.entries), len(cache.groups)
+	cache.mu.RUnlock()
+	if aliases != 0 || groups != 0 {
+		t.Fatalf("GetAndRefresh() retained expired binding: aliases=%d, groups=%d", aliases, groups)
 	}
 }
 

@@ -113,7 +113,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	passthroughHeaders := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
+	responseHeaders := downstreamHeadersFromExecutor(ctx, rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
@@ -183,7 +183,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	passthroughHeaders := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
+	responseHeaders := downstreamHeadersFromExecutor(ctx, rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
@@ -233,7 +233,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	}
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	passthroughHeaders := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
+	responseHeaders := downstreamHeadersFromExecutor(ctx, rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(execCtx, lifecycle.requestID(), responseProtocol, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
@@ -269,7 +269,7 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 	}
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	passthroughHeaders := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
+	responseHeaders := downstreamHeadersFromExecutor(ctx, rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
@@ -372,7 +372,14 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	if errors.As(err, &direct) && direct != nil && direct.DirectResponse() {
 		body := direct.ResponseBody()
 		var headers http.Header
-		if len(body) > 0 {
+		headersSupplied := false
+		type responseHeadersProvider interface{ ResponseHeaders() http.Header }
+		var headerProvider responseHeadersProvider
+		if errors.As(err, &headerProvider) && headerProvider != nil {
+			headers = cloneHeader(headerProvider.ResponseHeaders())
+			headersSupplied = true
+		}
+		if !headersSupplied && len(body) > 0 {
 			contentType := http.DetectContentType(body)
 			if json.Valid(body) {
 				contentType = "application/json"

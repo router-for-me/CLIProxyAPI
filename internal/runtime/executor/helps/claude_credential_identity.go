@@ -262,6 +262,24 @@ func newClaudeCredentialMetadataRequestError(err error) error {
 	return &claudeCredentialMetadataRequestError{cause: err}
 }
 
+// ValidateClaudeCredentialMetadataContainers rejects ambiguous identity members
+// before an API-key request removes them without rebuilding its JSON payload.
+func ValidateClaudeCredentialMetadataContainers(payload []byte) error {
+	metadata, metadataPresent, errMetadata := uniqueClaudeJSONObjectMember(payload, "metadata")
+	if errMetadata != nil {
+		return newClaudeCredentialMetadataRequestError(fmt.Errorf("validate Claude credential metadata: %w", errMetadata))
+	}
+	if metadataPresent {
+		trimmedMetadata := bytes.TrimSpace(metadata)
+		if len(trimmedMetadata) >= 2 && trimmedMetadata[0] == '{' {
+			if _, _, errUserID := uniqueClaudeJSONObjectMember(trimmedMetadata, "user_id"); errUserID != nil {
+				return newClaudeCredentialMetadataRequestError(fmt.Errorf("validate Claude credential metadata: metadata: %w", errUserID))
+			}
+		}
+	}
+	return nil
+}
+
 // ApplyClaudeCredentialMetadata rewrites the identity exception shared by native and cloaked OAuth requests.
 func ApplyClaudeCredentialMetadata(payload []byte, auth *cliproxyauth.Auth, sessionID string) ([]byte, string, error) {
 	if auth == nil {
