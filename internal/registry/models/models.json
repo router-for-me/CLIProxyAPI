@@ -330,6 +330,7 @@
       "thinking": {
         "zero_allowed": true,
         "dynamic_allowed": true,
+        "disable_type": "between_tools",
         "levels": [
           "low",
           "medium",

@@ -668,6 +668,12 @@ func extractThinkingConfigForUsage(body []byte, provider string) ThinkingConfig 
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex", "xai", "openai-response":
 		return extractCodexUsageConfig(body)
+	case "claude":
+		// between_tools is how claude-sonnet-5-5 turns thinking off.
+		if gjson.GetBytes(body, "thinking.type").String() == "between_tools" {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		}
+		return extractThinkingConfig(body, provider)
 	default:
 		return extractThinkingConfig(body, provider)
 	}
