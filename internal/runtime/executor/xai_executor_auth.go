@@ -31,6 +31,9 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	if err != nil {
 		return nil, err
 	}
+	if td == nil || strings.TrimSpace(td.AccessToken) == "" {
+		return nil, statusErr{code: http.StatusInternalServerError, msg: "xai executor: refresh returned an empty access token"}
+	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
