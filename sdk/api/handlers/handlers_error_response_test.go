@@ -961,32 +961,38 @@ func TestExecutionErrorMessageFindsUpstreamHeadersThroughWrappers(t *testing.T) 
 	}
 }
 
-func TestWriteErrorResponseKeepsCPARetryTimingOverUpstream(t *testing.T) {
+func TestExecutionErrorMessageKeepsCPARetryTimingForEveryConsumer(t *testing.T) {
+	// A CPA error with its own retry timing around an upstream error with its own.
+	upstream := upstreamHeaderError{headers: http.Header{
+		"Retry-After":                        {"30"},
+		"Retry-After-Ms":                     {"30000"},
+		"Anthropic-Ratelimit-Unified-Status": {"rejected"},
+	}}
+	msg := executionErrorMessage(errors.Join(coreauth.NewHomeConcurrencyBusyError("busy", 750*time.Millisecond), upstream))
+	msg.StatusCode = http.StatusTooManyRequests
+
+	check := func(consumer string, headers http.Header) {
+		t.Helper()
+		if got := headers.Values("Retry-After"); !reflect.DeepEqual(got, []string{"1"}) {
+			t.Fatalf("%s Retry-After = %#v, want CPA's own [1]", consumer, got)
+		}
+		if got := headers.Get("Retry-After-Ms"); got != "" {
+			t.Fatalf("%s Retry-After-Ms = %q, want none next to CPA's own Retry-After", consumer, got)
+		}
+		if got := headers.Get("Anthropic-Ratelimit-Unified-Status"); got != "rejected" {
+			t.Fatalf("%s Anthropic-Ratelimit-Unified-Status = %q, want rejected", consumer, got)
+		}
+	}
+	// The Responses WebSocket error event serializes Addon as is.
+	check("Addon", msg.Addon)
+	check("plugin stream error", modelExecutionStreamErrorFromMessage(msg).Headers)
+
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil)
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error:      coreauth.NewHomeConcurrencyBusyError("busy", 750*time.Millisecond),
-		Addon: http.Header{
-			"Retry-After":                        {"30"},
-			"Retry-After-Ms":                     {"30000"},
-			"Anthropic-Ratelimit-Unified-Status": {"rejected"},
-		},
-	})
-
-	if got := recorder.Header().Values("Retry-After"); !reflect.DeepEqual(got, []string{"1"}) {
-		t.Fatalf("Retry-After = %#v, want CPA's own [1]", got)
-	}
-	if got := recorder.Header().Get("Retry-After-Ms"); got != "" {
-		t.Fatalf("Retry-After-Ms = %q, want none next to CPA's own Retry-After", got)
-	}
-	if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-Status"); got != "rejected" {
-		t.Fatalf("Anthropic-Ratelimit-Unified-Status = %q, want rejected", got)
-	}
+	NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil).WriteErrorResponse(c, msg)
+	check("HTTP response", recorder.Header())
 }
 
 func TestExecutionErrorMessageFiltersUpstreamHeadersLikeSuccess(t *testing.T) {

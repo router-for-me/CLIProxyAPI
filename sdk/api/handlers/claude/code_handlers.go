@@ -456,16 +456,14 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		_, _ = c.Writer.Write(body)
 		return
 	}
-	ownRetryAfter := false
 	if msg != nil && msg.Error != nil {
 		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
-			ownRetryAfter = true
 		}
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.CurrentConfig()) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) || (ownRetryAfter && handlers.IsRetryTimingHeader(key)) {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
 				continue
 			}
 			c.Writer.Header().Del(key)

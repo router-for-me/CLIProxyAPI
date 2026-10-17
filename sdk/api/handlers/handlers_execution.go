@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -395,6 +396,18 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	var he interface{ Headers() http.Header }
 	if errors.As(err, &he) && he != nil {
 		addon = FilterUpstreamHeaders(he.Headers())
+	}
+	if addon != nil {
+		if own := coreauth.SafeResponseHeaders(err).Values("Retry-After"); len(own) > 0 {
+			// CPA's own retry timing (a Home round delay or a local cooldown) is
+			// authoritative over the upstream's, for every consumer as well.
+			for key := range addon {
+				if IsRetryTimingHeader(key) {
+					delete(addon, key)
+				}
+			}
+			addon["Retry-After"] = append([]string(nil), own...)
+		}
 	}
 	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 }
