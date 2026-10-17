@@ -3,16 +3,17 @@ package middleware
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httpcompression"
-	"strings"
 )
 
 func TestResponseCompressionSocketFlush(t *testing.T) {
@@ -46,14 +47,22 @@ func TestResponseCompressionSocketFlush(t *testing.T) {
 				var rd io.Reader = p.Body
 				if enc != "identity" {
 					d, err := httpcompression.Decode(p.Body, p.Header.Get("Content-Encoding"))
+					defer func() {
+						if d != nil {
+							_ = d.Close()
+						}
+					}()
 					if err != nil {
 						done <- err
 						return
 					}
 					rd = d
 				}
-				_, e = bufio.NewReader(rd).ReadString('\n')
-				done <- e
+				line, errRead := bufio.NewReader(rd).ReadString('\n')
+				if errRead == nil && line != "data: first\n" {
+					errRead = fmt.Errorf("first SSE line = %q", line)
+				}
+				done <- errRead
 			}()
 			select {
 			case err := <-done:
@@ -70,7 +79,7 @@ func TestResponseCompressionSocketFlush(t *testing.T) {
 }
 func TestResponseCompressionNegotiation(t *testing.T) {
 	for _, tc := range []struct{ input, want string }{{"gzip;q=0, br;q=0.5", "br"}, {"*;q=1,gzip;q=0", "zstd"}, {"gzip;q=0.5,identity;q=1", ""}, {"gzip;q=invalid", ""}} {
-		if got := negotiateEncoding(tc.input); got != tc.want {
+		if got, _ := negotiateEncoding(tc.input); got != tc.want {
 			t.Errorf("%q: %q != %q", tc.input, got, tc.want)
 		}
 	}

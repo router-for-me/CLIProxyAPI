@@ -504,82 +504,33 @@ func TestWriteVideoContentFromURL(t *testing.T) {
 	}
 }
 
-func TestWriteVideoContentFromURLUsesPinnedAuthProxy(t *testing.T) {
+func TestWriteVideoContentFromURLUsesGlobalProxy(t *testing.T) {
 	resetVideoAuthBindingsForTest(t)
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	const target = "http://video-source.invalid/video.mp4"
+	const content = "\x00\x00\x00\x18ftypmp42"
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.String() != target {
+			t.Errorf("unexpected proxy request: %s %s", r.Method, r.URL)
+			http.Error(w, "unexpected target", http.StatusBadGateway)
+			return
+		}
 		w.Header().Set("Content-Type", "video/mp4")
-		_, _ = w.Write([]byte("video-bytes"))
+		_, _ = w.Write([]byte(content))
 	}))
-	defer upstream.Close()
+	defer proxy.Close()
 
-	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
-	authID := "video-content-auth"
-	auth := &coreauth.Auth{
-		ID:       authID,
-		Provider: "xai",
-		Status:   coreauth.StatusActive,
-		ProxyURL: "direct",
-	}
-	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
-		t.Fatalf("manager.Register() error = %v", errRegister)
-	}
-
-	base := apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}, manager)
+	base := apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{ProxyURL: proxy.URL}, nil)
 	handler := NewOpenAIAPIHandler(base)
-	videoAuthBindings.set("video_123", authID, time.Hour)
-
 	gin.SetMode(gin.TestMode)
 	resp := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(resp)
-	ctx.Params = gin.Params{{Key: "video_id", Value: "video_123"}}
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_123/content", nil)
-
-	if err := handler.writeVideoContentFromURL(ctx, upstream.URL+"/video.mp4"); err != nil {
-		t.Fatalf("writeVideoContentFromURL() error = %v", err)
+	ctx.Params = gin.Params{{Key: "video_id", Value: "video_global_proxy"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_global_proxy/content", nil)
+	if err := handler.writeVideoContentFromURL(ctx, target); err != nil {
+		t.Fatal(err)
 	}
-
-	client := handler.videoContentHTTPClient(ctx)
-	transport, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
-	}
-	if transport.Proxy != nil {
-		t.Fatal("expected pinned auth direct proxy to bypass global proxy")
-	}
-	if resp.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
-	}
-}
-
-func TestWriteVideoContentFromURLFallsBackToGlobalProxy(t *testing.T) {
-	resetVideoAuthBindingsForTest(t)
-
-	base := apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}, nil)
-	handler := NewOpenAIAPIHandler(base)
-
-	gin.SetMode(gin.TestMode)
-	resp := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(resp)
-	ctx.Params = gin.Params{{Key: "video_id", Value: "video_456"}}
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_456/content", nil)
-
-	client := handler.videoContentHTTPClient(ctx)
-	transport, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
-	}
-
-	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com/video.mp4", nil)
-	if errRequest != nil {
-		t.Fatalf("http.NewRequest() error = %v", errRequest)
-	}
-	proxyURL, errProxy := transport.Proxy(req)
-	if errProxy != nil {
-		t.Fatalf("transport.Proxy() error = %v", errProxy)
-	}
-	if proxyURL == nil || proxyURL.String() != "http://global-proxy.example.com:8080" {
-		t.Fatalf("proxy URL = %v, want http://global-proxy.example.com:8080", proxyURL)
+	if resp.Code != http.StatusOK || resp.Header().Get("Content-Type") != "video/mp4" || resp.Body.String() != content {
+		t.Fatalf("status=%d content-type=%q body=%q", resp.Code, resp.Header().Get("Content-Type"), resp.Body.String())
 	}
 }
 

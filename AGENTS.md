@@ -64,3 +64,4 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 
 ## Lessons
 - HTTP response negotiation is not evidence of compressed POST support. Preserve fingerprint transports and explicit identity headers; decode upstream content before protocol scanners, and flush both content encoders and the network at every SSE boundary. Apply request limits before and after decoding, including captured logs.
+- Keep model JSON handlers on `handlers.ReadRequestBody`; direct `GetRawData` bypasses content decoding and decoded-size limits. Compression wrappers must implement `FlushError` so `httpwire.FlushResponse` can propagate downstream disconnects through logging middleware.

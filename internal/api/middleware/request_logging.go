@@ -347,9 +347,9 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		maxBytes := c.GetInt64("maxRequestBodyBytes")
 		if maxBytes > 0 {
-			body = decodeCapturedRequestBodyForLogWithLimit(bodyBytes, c.Request.Header.Get("Content-Encoding"), maxBytes)
+			body = decodeCapturedRequestBodyForLogWithLimit(bodyBytes, strings.Join(c.Request.Header.Values("Content-Encoding"), ","), maxBytes)
 		} else {
-			body = decodeCapturedRequestBodyForLog(bodyBytes, c.Request.Header.Get("Content-Encoding"))
+			body = decodeCapturedRequestBodyForLog(bodyBytes, strings.Join(c.Request.Header.Values("Content-Encoding"), ","))
 		}
 	}
 
