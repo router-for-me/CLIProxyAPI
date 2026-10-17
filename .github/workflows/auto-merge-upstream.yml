@@ -1,0 +1,26 @@
+name: Auto Merge Upstream Release
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # кажд 6ч
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream ref (main/dev/tag)'
+        default: 'main'
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: \${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+    - name: Merge upstream
+      run: |
+        git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+        git fetch upstream --tags
+        REF=\${{ github.event.inputs.ref || 'main' }}
+        git merge upstream/\$REF --no-ff -m "auto-merge upstream/\$REF @ \$(date)"
+        git push origin main
+    - name: Trigger docker-build-patched
+      run: gh workflow run docker-build-patched.yml

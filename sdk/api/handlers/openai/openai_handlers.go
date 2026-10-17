@@ -99,6 +99,13 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
+		// Surface context metadata when the underlying ModelInfo carries it.
+		for _, key := range []string{"context_length", "max_context_length", "max_completion_tokens"} {
+			if v, exists := model[key]; exists {
+				filteredModel[key] = v
+			}
+		}
+
 		filteredModels[i] = filteredModel
 	}
 
