@@ -54,9 +54,12 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return nil, nil, errMsg
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		if errMsg := h.scopePluginExecutor(ctx, originalRequestedModel, routeDecision.ExecutorPluginID); errMsg != nil {
+			return nil, nil, errMsg
+		}
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.scopedProvidersForExecution(ctx, modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -129,9 +132,12 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
+		if errMsg := h.scopePluginExecutor(ctx, originalRequestedModel, routeDecision.ExecutorPluginID); errMsg != nil {
+			return nil, nil, errMsg
+		}
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.scopedProvidersForExecution(ctx, modelName, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
