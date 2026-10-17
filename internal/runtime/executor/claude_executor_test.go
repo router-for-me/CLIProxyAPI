@@ -4436,6 +4436,124 @@ func TestCheckSystemInstructionsWithMode_FutureModelDefaultsToMidSystem(t *testi
 	assertClaudeMidConversationSystemMessage(t, out, 1, "future instructions", "")
 }
 
+func TestCheckSystemInstructionsWithMode_OAuthReminderModelUsesSystemReminder(t *testing.T) {
+	tests := []struct {
+		name         string
+		messages     string
+		wantMessages int64
+	}{
+		{
+			name:         "single terminal user",
+			messages:     `[{"role":"user","content":"request"}]`,
+			wantMessages: 1,
+		},
+		{
+			name:         "after an assistant turn",
+			messages:     `[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"request"}]`,
+			wantMessages: 3,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := []byte(`{"model":"claude-haiku-5-5","system":[{"type":"text","text":"caller guidance"}],"messages":` + test.messages + `}`)
+
+			out := checkSystemInstructionsWithMode(payload, false)
+			if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+				t.Fatalf("top-level system block count = %d, want billing and identity only: %s", got, out)
+			}
+			if got := gjson.GetBytes(out, "messages.#").Int(); got != test.wantMessages {
+				t.Fatalf("message count = %d, want %d with no role=system insertion: %s", got, test.wantMessages, out)
+			}
+			if got := gjson.GetBytes(out, `messages.#(role=="system")#`).Array(); len(got) != 0 {
+				t.Fatalf("caller system prompt must not become a role=system turn: %s", out)
+			}
+			if !claudeFirstUserHasCallerReminder(out, "caller guidance") {
+				t.Fatalf("first user message lacks the caller system reminder: %s", out)
+			}
+		})
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_OAuthReminderModelKeepsTopLevelPolicy(t *testing.T) {
+	payload := []byte(`{"model":"claude-haiku-5-5","system":[{"type":"text","text":"caller guidance"}],"messages":[{"role":"user","content":"request"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false, true)
+	if got := gjson.GetBytes(out, "system.2.text").String(); got != "caller guidance" {
+		t.Fatalf("system.2.text = %q, want caller guidance kept top-level: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 1 {
+		t.Fatalf("message count = %d, want 1: %s", got, out)
+	}
+	if strings.Contains(gjson.GetBytes(out, "messages.0.content").Raw, "caller guidance") {
+		t.Fatalf("top-level policy must not also add a reminder: %s", out)
+	}
+}
+
+func TestRelocateClaudeSystemPromptForCountTokensWithPolicy_OAuthReminderModelUsesSystemReminder(t *testing.T) {
+	payload := []byte(`{"model":"claude-haiku-5-5","system":[{"type":"text","text":"caller guidance"}],"messages":[{"role":"user","content":"request"}]}`)
+
+	out := relocateClaudeSystemPromptForCountTokensWithPolicy(payload, false, false, false)
+	if gjson.GetBytes(out, "system").Exists() {
+		t.Fatalf("top-level system field should be removed: %s", out)
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 1 {
+		t.Fatalf("message count = %d, want no role=system insertion: %s", got, out)
+	}
+	if !claudeFirstUserHasCallerReminder(out, "caller guidance") {
+		t.Fatalf("first user message lacks the caller system reminder: %s", out)
+	}
+}
+
+func TestClaudeExecutor_OAuthReminderModelSendsCallerSystemAsReminder(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_haiku","type":"message","model":"claude-haiku-5-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		ID: "oauth-haiku-reminder",
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-haiku-reminder",
+			"base_url": server.URL,
+		},
+		Metadata: claudeOAuthTestMetadata(),
+	}
+	payload := []byte(`{"model":"claude-haiku-5-5","system":"caller guidance","messages":[{"role":"user","content":"request"}]}`)
+	executor := NewClaudeExecutor(&config.Config{})
+	if _, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "claude-haiku-5-5", Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+
+	if strings.Contains(gjson.GetBytes(seenBody, "system").Raw, "caller guidance") {
+		t.Fatalf("OAuth caller system prompt must not remain top-level: %s", seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, `messages.#(role=="system")#`).Array(); len(got) != 0 {
+		t.Fatalf("caller system prompt must not trail the user turn as role=system: %s", seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
+		t.Fatalf("message count = %d, want 1: %s", got, seenBody)
+	}
+	if !claudeFirstUserHasCallerReminder(seenBody, "caller guidance") {
+		t.Fatalf("first user message lacks the caller system reminder: %s", seenBody)
+	}
+}
+
+func claudeFirstUserHasCallerReminder(payload []byte, text string) bool {
+	for _, block := range gjson.GetBytes(payload, "messages.0.content").Array() {
+		if block.Get("text").String() == claudeCallerSystemReminder(text) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-4-6","system":"legacy instructions","messages":[{"role":"user","content":"hi"}]}`)
 
