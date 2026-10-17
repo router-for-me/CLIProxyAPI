@@ -841,9 +841,8 @@ func TestClaudeExecutor_ErrorCarriesRetryHeaders(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 
-			// The handler reads headers from the returned error by direct assertion.
-			carrier, ok := err.(interface{ Headers() http.Header })
-			if !ok {
+			var carrier interface{ Headers() http.Header }
+			if !errors.As(err, &carrier) {
 				t.Fatalf("error %T does not carry headers", err)
 			}
 			want := http.Header{

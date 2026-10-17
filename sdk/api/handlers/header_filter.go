@@ -52,6 +52,17 @@ func IsCPAReservedResponseHeader(name string) bool {
 	return reserved
 }
 
+// IsRetryTimingHeader reports whether a response header tells the client when to retry.
+// CPA's own retry timing (a Home round delay or a local cooldown) takes precedence over
+// the upstream's.
+func IsRetryTimingHeader(name string) bool {
+	switch http.CanonicalHeaderKey(name) {
+	case "Retry-After", "Retry-After-Ms":
+		return true
+	}
+	return false
+}
+
 // FilterUpstreamHeaders returns a copy of src with hop-by-hop and security-sensitive
 // headers removed. Returns nil if src is nil or empty after filtering.
 func FilterUpstreamHeaders(src http.Header) http.Header {

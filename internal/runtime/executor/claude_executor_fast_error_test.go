@@ -319,9 +319,8 @@ func TestClaudeExecutorFastHTTPDecodeErrorKeepsRetryHeaders(t *testing.T) {
 			} else {
 				_, errRun = executor.Execute(ctx, auth, request, opts)
 			}
-			// The handler reads headers from the returned error by direct assertion.
-			carrier, ok := errRun.(interface{ Headers() http.Header })
-			if !ok {
+			var carrier interface{ Headers() http.Header }
+			if !errors.As(errRun, &carrier) {
 				t.Fatalf("Fast decode error %T does not carry headers", errRun)
 			}
 			want := http.Header{

@@ -75,17 +75,6 @@ func (e *claudeFastRequestError) RetryAfter() *time.Duration {
 	return e.retryAfter
 }
 
-// Headers forwards the upstream headers carried by the wrapped error.
-func (e *claudeFastRequestError) Headers() http.Header {
-	if e == nil {
-		return nil
-	}
-	if carrier, ok := e.cause.(interface{ Headers() http.Header }); ok {
-		return carrier.Headers()
-	}
-	return nil
-}
-
 // claudeFastDirectResponseError carries an upstream HTTP error response through
 // the auth manager and protocol handlers without retrying or rebuilding its
 // status and JSON body.

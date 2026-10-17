@@ -424,3 +424,30 @@ func TestClaudeMessagesHandlerDeduplicatesTranslatedSSEErrorAndTerminalChunkErro
 		t.Fatalf("SSE error event count = %d, want 1; body=%q", got, body)
 	}
 }
+
+func TestWriteClaudeErrorResponseKeepsCPARetryTimingOverUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := NewClaudeCodeAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil))
+
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      coreauth.NewModelCooldownError("claude-sonnet-4-6", "claude", 20*time.Second),
+		Addon: http.Header{
+			"Retry-After":                        {"30"},
+			"Retry-After-Ms":                     {"30000"},
+			"Anthropic-Ratelimit-Unified-Status": {"rejected"},
+		},
+	})
+
+	if got := recorder.Header().Values("Retry-After"); len(got) != 1 || got[0] != "20" {
+		t.Fatalf("Retry-After = %#v, want CPA's own [20]", got)
+	}
+	if got := recorder.Header().Get("Retry-After-Ms"); got != "" {
+		t.Fatalf("Retry-After-Ms = %q, want none next to CPA's own Retry-After", got)
+	}
+	if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-Status"); got != "rejected" {
+		t.Fatalf("Anthropic-Ratelimit-Unified-Status = %q, want rejected", got)
+	}
+}

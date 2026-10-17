@@ -388,7 +388,10 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 		}
 	}
 	var addon http.Header
-	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+	// Execution layers wrap upstream errors (retries, Home rounds, fast mode), so
+	// look through every wrapper for the headers the upstream error carries.
+	var he interface{ Headers() http.Header }
+	if errors.As(err, &he) && he != nil {
 		if hdr := he.Headers(); hdr != nil {
 			addon = hdr.Clone()
 		}

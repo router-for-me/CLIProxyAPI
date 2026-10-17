@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -944,5 +945,46 @@ func TestWriteErrorResponse_ContextCanceledUses499(t *testing.T) {
 
 	if recorder.Code != clienterror.StatusClientClosedRequest {
 		t.Fatalf("status = %d, want %d", recorder.Code, clienterror.StatusClientClosedRequest)
+	}
+}
+
+type upstreamHeaderError struct{ headers http.Header }
+
+func (e upstreamHeaderError) Error() string        { return "upstream rate limit" }
+func (e upstreamHeaderError) Headers() http.Header { return e.headers }
+
+func TestExecutionErrorMessageFindsUpstreamHeadersThroughWrappers(t *testing.T) {
+	upstream := upstreamHeaderError{headers: http.Header{"Retry-After": {"30"}}}
+	msg := executionErrorMessage(fmt.Errorf("retry round exhausted: %w", upstream))
+	if got := msg.Addon.Get("Retry-After"); got != "30" {
+		t.Fatalf("Addon Retry-After = %q, want 30 from the wrapped upstream error", got)
+	}
+}
+
+func TestWriteErrorResponseKeepsCPARetryTimingOverUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      coreauth.NewHomeConcurrencyBusyError("busy", 750*time.Millisecond),
+		Addon: http.Header{
+			"Retry-After":                        {"30"},
+			"Retry-After-Ms":                     {"30000"},
+			"Anthropic-Ratelimit-Unified-Status": {"rejected"},
+		},
+	})
+
+	if got := recorder.Header().Values("Retry-After"); !reflect.DeepEqual(got, []string{"1"}) {
+		t.Fatalf("Retry-After = %#v, want CPA's own [1]", got)
+	}
+	if got := recorder.Header().Get("Retry-After-Ms"); got != "" {
+		t.Fatalf("Retry-After-Ms = %q, want none next to CPA's own Retry-After", got)
+	}
+	if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-Status"); got != "rejected" {
+		t.Fatalf("Anthropic-Ratelimit-Unified-Status = %q, want rejected", got)
 	}
 }
