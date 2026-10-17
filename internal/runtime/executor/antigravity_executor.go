@@ -239,6 +239,27 @@ func defaultAntigravityBaseTransport() *http.Transport {
 	return &http.Transport{}
 }
 
+// NewAntigravityProbeTransport returns a standalone HTTP/1.1 round tripper for
+// one-off Antigravity catalog probes that honors the provided proxy setting. It
+// applies the same protocol settings as the executor transports so probes and
+// generation calls share one wire profile. A non-*http.Transport default round
+// tripper is returned unchanged so embedders and tests keep their override.
+// Callers own the result and should close idle connections when it is a Transport.
+func NewAntigravityProbeTransport(proxyURL string) (http.RoundTripper, error) {
+	base, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+	if errBuild != nil {
+		return nil, errBuild
+	}
+	if base == nil {
+		defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok || defaultTransport == nil {
+			return http.DefaultTransport, nil
+		}
+		base = defaultTransport.Clone()
+	}
+	return cloneTransportWithHTTP11(base), nil
+}
+
 func cloneTransportWithHTTP11(base *http.Transport, cfgs ...*config.Config) *http.Transport {
 	if base == nil {
 		return nil
