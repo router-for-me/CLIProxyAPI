@@ -421,7 +421,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if emitCancellation(scanner.Err()) {
 					return
 				}
-				if errScan := scanner.Err(); errScan != nil {
+				errScan := scanner.Err()
+				if errScan == nil && ctx.Err() == nil {
+					errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"}
+				}
+				if errScan != nil {
 					errScan = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errScan)
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 					streamUsage.PublishFailure(ctx, reporter, errScan)
@@ -496,7 +500,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if emitCancellation(scanner.Err()) {
 				return
 			}
-			if errScan := scanner.Err(); errScan != nil {
+			errScan := scanner.Err()
+			if errScan == nil && ctx.Err() == nil {
+				errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"}
+			}
+			if errScan != nil {
 				errScan = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errScan)
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				streamUsage.PublishFailure(ctx, reporter, errScan)

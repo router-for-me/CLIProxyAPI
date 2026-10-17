@@ -27,9 +27,11 @@ func TestClaudeErrorTypeFromStatus(t *testing.T) {
 	}{
 		{http.StatusBadRequest, "invalid_request_error"},
 		{http.StatusRequestTimeout, "timeout_error"},
+		{http.StatusConflict, "conflict_error"},
 		{http.StatusTooManyRequests, "rate_limit_error"},
 		{http.StatusInternalServerError, "api_error"},
 		{http.StatusGatewayTimeout, "timeout_error"},
+		{529, "overloaded_error"},
 	} {
 		t.Run(http.StatusText(tt.status), func(t *testing.T) {
 			if got := claudeErrorTypeFromStatus(tt.status); got != tt.want {
@@ -422,5 +424,140 @@ func TestClaudeMessagesHandlerDeduplicatesTranslatedSSEErrorAndTerminalChunkErro
 	body := recorder.Body.String()
 	if got := strings.Count(body, "event: error\n"); got != 1 {
 		t.Fatalf("SSE error event count = %d, want 1; body=%q", got, body)
+	}
+}
+
+func TestClaudeStreamTruncatedWithoutMessageStopEmitsSSEErrorWith200(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	chunks := make(chan coreexecutor.StreamChunk, 2)
+	executor := &preFTKeepAliveClaudeExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "truncated-stream-claude-model"
+	auth := &coreauth.Auth{ID: "truncated-stream-claude-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"m\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n")}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")}
+	close(chunks)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewClaudeCodeAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/messages", h.ClaudeMessages)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{\"model\":\""+model+"\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: error\ndata: ") {
+		t.Fatalf("expected terminal SSE error event on truncated stream; body=%q", body)
+	}
+	if !strings.Contains(body, "message_stop") {
+		t.Fatalf("expected terminal error message to mention missing message_stop; body=%q", body)
+	}
+}
+
+func TestClaudeStreamTerminalErrorDoesNotOverwriteSSEStatusWhenUnwritten(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Header("Content-Type", "text/event-stream")
+
+	handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadGateway,
+		Error:      errors.New("upstream failed after SSE commit"),
+	}
+	close(errs)
+
+	handler.forwardClaudeStream(c, c.Writer, func(error) {}, nil, errs)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for committed SSE stream; body=%q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.HasPrefix(recorder.Body.String(), "event: error\ndata: ") {
+		t.Fatalf("unexpected SSE error body: %q", recorder.Body.String())
+	}
+}
+
+func TestClaudeStreamTerminalErrorAfterPartialLineStartsOnNewLine(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Header("Content-Type", "text/event-stream")
+
+	handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+	go func() {
+		data <- []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\"")
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadGateway,
+			Error:      errors.New("stream cut mid-line"),
+		}
+		close(data)
+		close(errs)
+	}()
+
+	handler.forwardClaudeStream(c, c.Writer, func(error) {}, data, errs)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, "\nevent: error\ndata: ") {
+		t.Fatalf("expected event: error to start on a fresh line after partial chunk; body=%q", body)
+	}
+}
+
+func TestClaudeStreamCompleteWithMessageStopDoesNotEmitErrorOnClose(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	chunks := make(chan coreexecutor.StreamChunk, 2)
+	executor := &preFTKeepAliveClaudeExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "complete-stream-claude-model"
+	auth := &coreauth.Auth{ID: "complete-stream-claude-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"m\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n")}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")}
+	close(chunks)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewClaudeCodeAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/messages", h.ClaudeMessages)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{\"model\":\""+model+"\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "event: error") {
+		t.Fatalf("unexpected error event on completed stream: %q", recorder.Body.String())
 	}
 }

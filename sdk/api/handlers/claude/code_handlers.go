@@ -333,13 +333,15 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 
 			// Write the first chunk
 			sawErrorEvent := claudeChunkHasErrorEvent(chunk)
+			sawMessageStop := claudeChunkHasMessageStop(chunk)
+			endsWithNewline := len(chunk) == 0 || chunk[len(chunk)-1] == '\n'
 			if len(chunk) > 0 {
 				_, _ = c.Writer.Write(chunk)
 				flusher.Flush()
 			}
 
 			// Continue streaming the rest
-			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, sawErrorEvent)
+			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, sawErrorEvent, sawMessageStop, endsWithNewline)
 			return
 		case <-keepAliveC:
 			writeKeepAlive()
@@ -351,8 +353,17 @@ func claudeChunkHasErrorEvent(chunk []byte) bool {
 	return bytes.Contains(chunk, []byte("event: error\n")) || bytes.Contains(chunk, []byte("event: error\r\n"))
 }
 
-func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialErrorWritten ...bool) {
-	sawErrorEvent := len(initialErrorWritten) > 0 && initialErrorWritten[0]
+func claudeChunkHasMessageStop(chunk []byte) bool {
+	return bytes.Contains(chunk, []byte("event: message_stop\n")) ||
+		bytes.Contains(chunk, []byte("event: message_stop\r\n")) ||
+		bytes.Contains(chunk, []byte(`"type":"message_stop"`)) ||
+		bytes.Contains(chunk, []byte(`"type": "message_stop"`))
+}
+
+func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialFlags ...bool) {
+	sawErrorEvent := len(initialFlags) > 0 && initialFlags[0]
+	sawMessageStop := len(initialFlags) > 1 && initialFlags[1]
+	endsWithNewline := len(initialFlags) <= 2 || initialFlags[2]
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
@@ -361,22 +372,32 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			if claudeChunkHasErrorEvent(chunk) {
 				sawErrorEvent = true
 			}
+			if claudeChunkHasMessageStop(chunk) {
+				sawMessageStop = true
+			}
+			endsWithNewline = chunk[len(chunk)-1] == '\n'
 			_, _ = c.Writer.Write(chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil || sawErrorEvent {
 				return
 			}
-			if !c.Writer.Written() {
-				status := http.StatusInternalServerError
-				if errMsg.StatusCode > 0 {
-					status = errMsg.StatusCode
-				}
-				c.Status(status)
+			if !endsWithNewline {
+				_, _ = c.Writer.Write([]byte("\n\n"))
+				endsWithNewline = true
 			}
 
 			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
+		},
+		CloseError: func() *interfaces.ErrorMessage {
+			if sawMessageStop || sawErrorEvent {
+				return nil
+			}
+			return &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Error:      fmt.Errorf("upstream stream closed before message_stop"),
+			}
 		},
 	})
 }
@@ -542,6 +563,8 @@ func claudeErrorTypeFromStatus(status int) string {
 		return "permission_error"
 	case http.StatusNotFound:
 		return "not_found_error"
+	case http.StatusConflict:
+		return "conflict_error"
 	case http.StatusRequestEntityTooLarge:
 		return "request_too_large"
 	case http.StatusTooManyRequests:
