@@ -53,7 +53,7 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			SetOAuthSessionError(state, "Authentication failed")
 			return
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
+		if !oauthSessions.BeginSave(state, "codex") {
 			return
 		}
 		if _, errSave := h.saveTokenRecord(ctx, record); errSave != nil {
@@ -93,7 +93,7 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		return
 	}
 
-	CancelOAuthSession(state)
+	oauthSessions.Discard(state)
 	c.JSON(http.StatusBadGateway, gin.H{"error": "failed to start device authorization flow"})
 }
 

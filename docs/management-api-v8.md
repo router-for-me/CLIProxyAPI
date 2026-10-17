@@ -163,6 +163,10 @@ curl -fsS -X DELETE -G -H "Authorization: Bearer $MANAGEMENT_KEY" \
   --data-urlencode "state=$state" "$BASE_URL/v8/management/oauth/session"
 ```
 
+For Codex device login, `cancelled: true` means credentials will not be saved.
+Once credential persistence has started, cancellation returns `cancelled: false`;
+continue polling the status route for the result.
+
 Callbacks accept `provider`, `state`, `code`, and `error` as GET query parameters
 or POST JSON fields. POST also accepts `redirect_url` containing the complete
 callback URL. If `provider` is omitted, it is inferred from the pending state;

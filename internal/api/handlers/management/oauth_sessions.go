@@ -38,6 +38,7 @@ type oauthSession struct {
 	Source    string
 	Metadata  map[string]any
 	Completed bool
+	Saving    bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
@@ -243,11 +244,37 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Status != "" {
+	if !ok || session.Completed || session.Saving || session.Status != "" {
 		return false
 	}
 	delete(s.sessions, state)
 	return true
+}
+
+// BeginSave atomically claims a pending session before persistence begins.
+// Once claimed, Cancel returns false because persistence may have side effects.
+func (s *oauthSessionStore) BeginSave(state, provider string) bool {
+	state = strings.TrimSpace(state)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(time.Now())
+	session, ok := s.sessions[state]
+	if !ok || session.Completed || session.Saving || session.Status != "" || !strings.EqualFold(session.Provider, provider) {
+		return false
+	}
+	session.Saving = true
+	s.sessions[state] = session
+	return true
+}
+
+// Discard removes a startup session whose state was never returned to the caller,
+// including a session that the login worker has already marked as failed.
+func (s *oauthSessionStore) Discard(state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, strings.TrimSpace(state))
 }
 
 func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
