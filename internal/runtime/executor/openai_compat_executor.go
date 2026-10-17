@@ -698,7 +698,12 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+		return nil, statusErr{
+			code:             httpResp.StatusCode,
+			msg:              string(body),
+			retryAfter:       openAICompatRetryAfter(httpResp.StatusCode, httpResp.Header, body, time.Now()),
+			credentialScoped: cliproxyauth.IsCredentialUsageLimit(httpResp.StatusCode, string(body)),
+		}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1099,8 +1104,25 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 	}
 	if status < http.StatusBadRequest || status > 599 {
 		status = http.StatusBadGateway
+		// A stream error event may omit the status entirely
+		// (BuildOpenAIResponsesStreamErrorChunk emits that shape). An account-wide usage
+		// window is still a 429 for cooldown purposes: leaving it at 502 would keep the
+		// credential model-scoped and let affinity keep pinning workloads on a spent key.
+		if cliproxyauth.IsCredentialUsageLimit(http.StatusTooManyRequests, string(payload)) {
+			status = http.StatusTooManyRequests
+		}
 	}
-	return statusErr{code: status, msg: string(payload)}, true
+	err := statusErr{
+		code:             status,
+		msg:              string(payload),
+		credentialScoped: cliproxyauth.IsCredentialUsageLimit(status, string(payload)),
+	}
+	if err.credentialScoped {
+		// The window advertises its own reset (resets_at / resets_in_seconds); without it the
+		// credential would only be backed off by the initial one-second quota ramp.
+		err.retryAfter = parseCodexRetryAfter(status, payload, time.Now())
+	}
+	return err, true
 }
 
 type statusErr struct {
@@ -1123,10 +1145,22 @@ func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
 const openAICompatTPMFallbackRetryAfter = time.Minute
 
 func newOpenAICompatStatusError(status int, headers http.Header, body []byte) statusErr {
+	retryAfter := openAICompatRetryAfter(status, headers, body, time.Now())
+	// An account-wide usage window consumes every model this credential serves, so the
+	// cooldown must not be scoped to the requested model (a pinned session would otherwise
+	// keep failing on an exhausted key). Per-minute limits stay model-scoped.
+	credentialScoped := cliproxyauth.IsCredentialUsageLimit(status, string(body))
+	if credentialScoped && retryAfter == nil {
+		// Same reset hint as the Codex usage window: prefer the advertised reset over the
+		// initial one-second quota ramp, which would make the credential eligible again long
+		// before the account window actually resets.
+		retryAfter = parseCodexRetryAfter(status, body, time.Now())
+	}
 	return statusErr{
-		code:       status,
-		msg:        string(body),
-		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
+		code:             status,
+		msg:              string(body),
+		retryAfter:       retryAfter,
+		credentialScoped: credentialScoped,
 	}
 }
 
