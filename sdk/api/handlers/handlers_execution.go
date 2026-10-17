@@ -389,12 +389,12 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	}
 	var addon http.Header
 	// Execution layers wrap upstream errors (retries, Home rounds, fast mode), so
-	// look through every wrapper for the headers the upstream error carries.
+	// look through every wrapper for the headers the upstream error carries. They
+	// are filtered here, as on success responses, because every consumer of the
+	// error message (HTTP, WebSocket, plugin callbacks) may expose them.
 	var he interface{ Headers() http.Header }
 	if errors.As(err, &he) && he != nil {
-		if hdr := he.Headers(); hdr != nil {
-			addon = hdr.Clone()
-		}
+		addon = FilterUpstreamHeaders(he.Headers())
 	}
 	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 }

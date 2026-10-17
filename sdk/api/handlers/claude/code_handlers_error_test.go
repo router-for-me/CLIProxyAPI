@@ -451,29 +451,3 @@ func TestWriteClaudeErrorResponseKeepsCPARetryTimingOverUpstream(t *testing.T) {
 		t.Fatalf("Anthropic-Ratelimit-Unified-Status = %q, want rejected", got)
 	}
 }
-
-func TestWriteClaudeErrorResponseFiltersUpstreamHeadersLikeSuccess(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	handler := NewClaudeCodeAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil))
-
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error:      errors.New("rate limit"),
-		Addon: http.Header{
-			"Retry-After":       {"30"},
-			"Set-Cookie":        {"session=1"},
-			"Transfer-Encoding": {"chunked"},
-		},
-	})
-
-	if got := recorder.Header().Get("Retry-After"); got != "30" {
-		t.Fatalf("Retry-After = %q, want 30", got)
-	}
-	for _, name := range []string{"Set-Cookie", "Transfer-Encoding"} {
-		if got := recorder.Header().Get(name); got != "" {
-			t.Fatalf("%s = %q, want it filtered as on success responses", name, got)
-		}
-	}
-}

@@ -989,31 +989,22 @@ func TestWriteErrorResponseKeepsCPARetryTimingOverUpstream(t *testing.T) {
 	}
 }
 
-func TestWriteErrorResponseFiltersUpstreamHeadersLikeSuccess(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil)
+func TestExecutionErrorMessageFiltersUpstreamHeadersLikeSuccess(t *testing.T) {
 	// A stream that fails before its first payload carries the upstream's raw headers.
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error:      errors.New("rate limit"),
-		Addon: http.Header{
-			"Retry-After":       {"30"},
-			"Set-Cookie":        {"session=1"},
-			"Transfer-Encoding": {"chunked"},
-			"Content-Encoding":  {"gzip"},
-		},
-	})
+	upstream := upstreamHeaderError{headers: http.Header{
+		"Retry-After":       {"30"},
+		"Set-Cookie":        {"session=1"},
+		"Transfer-Encoding": {"chunked"},
+		"Content-Encoding":  {"gzip"},
+	}}
+	msg := executionErrorMessage(fmt.Errorf("retry round exhausted: %w", upstream))
 
-	if got := recorder.Header().Get("Retry-After"); got != "30" {
-		t.Fatalf("Retry-After = %q, want 30", got)
+	if got := msg.Addon.Get("Retry-After"); got != "30" {
+		t.Fatalf("Addon Retry-After = %q, want 30", got)
 	}
 	for _, name := range []string{"Set-Cookie", "Transfer-Encoding", "Content-Encoding"} {
-		if got := recorder.Header().Get(name); got != "" {
-			t.Fatalf("%s = %q, want it filtered as on success responses", name, got)
+		if got := msg.Addon.Get(name); got != "" {
+			t.Fatalf("Addon %s = %q, want it filtered as on success responses", name, got)
 		}
 	}
 }

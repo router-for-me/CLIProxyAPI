@@ -131,7 +131,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		}
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.CurrentConfig()) {
-		for key, values := range FilterUpstreamHeaders(msg.Addon) {
+		for key, values := range msg.Addon {
 			if len(values) == 0 || IsCPAReservedResponseHeader(key) || (ownRetryAfter && IsRetryTimingHeader(key)) {
 				continue
 			}
