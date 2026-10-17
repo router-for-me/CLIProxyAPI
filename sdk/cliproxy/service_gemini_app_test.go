@@ -13,9 +13,11 @@ import (
 func TestGeminiAppServiceRegistration(t *testing.T) {
 	svc := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
 	auth := &coreauth.Auth{ID: "gemini-app-service-test", Provider: "gemini-app", Status: coreauth.StatusActive}
-	if _, err := svc.coreManager.Register(context.Background(), auth); err != nil {
-		t.Fatal(err)
+	registeredAuth, errRegister := svc.coreManager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatal(errRegister)
 	}
+	auth = registeredAuth
 	models := GlobalModelRegistry()
 	t.Cleanup(func() { models.UnregisterClient(auth.ID) })
 	svc.ensureExecutorsForAuth(auth)
@@ -30,7 +32,13 @@ func TestGeminiAppServiceRegistration(t *testing.T) {
 	if !models.ClientSupportsModel(auth.ID, "gemini-app") {
 		t.Fatal("Gemini App model was not published")
 	}
+	auth = auth.Clone()
 	auth.Attributes = map[string]string{"excluded_models": "gemini-app"}
+	updatedAuth, errUpdate := svc.coreManager.Update(context.Background(), auth)
+	if errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	auth = updatedAuth
 	svc.registerModelsForAuth(context.Background(), auth)
 	if models.ClientSupportsModel(auth.ID, "gemini-app") {
 		t.Fatal("excluded Gemini App model is still published")
