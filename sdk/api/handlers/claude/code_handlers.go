@@ -464,7 +464,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.CurrentConfig()) {
-		for key, values := range msg.Addon {
+		for key, values := range handlers.FilterUpstreamHeaders(msg.Addon) {
 			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) || (ownRetryAfter && handlers.IsRetryTimingHeader(key)) {
 				continue
 			}
