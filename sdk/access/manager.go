@@ -41,6 +41,28 @@ func (m *Manager) Providers() []Provider {
 	return snapshot
 }
 
+// MergeProviders appends providers whose identifiers are not already present.
+func MergeProviders(base, additional []Provider) []Provider {
+	merged := append([]Provider(nil), base...)
+	providerIDs := make(map[string]struct{}, len(base)+len(additional))
+	for _, provider := range base {
+		if provider != nil {
+			providerIDs[provider.Identifier()] = struct{}{}
+		}
+	}
+	for _, provider := range additional {
+		if provider == nil {
+			continue
+		}
+		if _, exists := providerIDs[provider.Identifier()]; exists {
+			continue
+		}
+		merged = append(merged, provider)
+		providerIDs[provider.Identifier()] = struct{}{}
+	}
+	return merged
+}
+
 // Authenticate evaluates providers until one succeeds.
 func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *AuthError) {
 	if m == nil {

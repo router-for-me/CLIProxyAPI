@@ -93,6 +93,9 @@ type Service struct {
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
+	// runtimeAccessProviders contains process-memory credentials preserved across config reloads.
+	runtimeAccessProviders []sdkaccess.Provider
+
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
@@ -141,8 +144,6 @@ type Service struct {
 	// owns one worker and at most one queued snapshot shared by all probe entry
 	// points. A nil value means the worker is running without a queued successor.
 	antigravityRefreshPending map[string]*antigravityModelRefreshRequest
-	antigravityPersistPending map[string]*antigravityHintPersistRequest
-	antigravityPersistActive  map[string]*antigravityHintPersistRequest
 }
 
 // SetResultPolicy sets an execution result policy on the underlying core auth manager.
