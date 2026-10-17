@@ -61,8 +61,3 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Avoid wall-clock `time.Sleep` in TTL, expiration, ordering, or cache-eviction unit tests due to platform timer granularity (e.g. Windows default timer resolution of ~15.6ms) and CI jitter under load; prefer controllable clocks (`nowFunc` / mock clock), explicit timestamp manipulation, or deterministic synchronization primitives.
 - Note: if modifying features that involve CLIProxyAPIHome, check if corresponding updates are needed in the CLIProxyAPIHome repository.
 - Endpoints under the `/v0/management` base URL are deprecated and no longer maintained. For any feature changes, do not modify endpoints under `/v0/management` unless necessary to fix compilation errors.
-
-## Lessons
-- SSE physical lines may end in CR, LF, or CRLF; `bufio.ScanLines` alone does not implement SSE framing. Preserve empty event separators through native translation and JSON validation, or a data-only event can stall until another event arrives. Exercise the production handler and executor over sockets, not only the executor's chunk channel.
-- HTTP Responses continuation uses caller-scoped, immutable, bounded snapshots and strict selected-auth pinning. Publish repaired completed output before the terminal response is observable; never retain `store:false`, partial, failed, or unpinnable responses. Apply expanded-history size limits only to continuations so normalization does not reject otherwise valid first requests at the wire-size boundary.
-- Codex reasoning replay fixtures need structurally valid GPT encrypted-content envelopes. Arbitrary placeholder strings are removed by existing signature sanitation and cannot demonstrate encrypted reasoning preservation.
