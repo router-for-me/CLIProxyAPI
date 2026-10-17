@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -282,6 +283,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	ctx, errPool := h.accountPoolExecutionContext(ctx)
+	if errPool != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errPool
+		close(errChan)
+		return nil, nil, errChan
+	}
 	originalRequestedModel := modelName
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
@@ -297,9 +305,21 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		if errMsg := h.scopePluginExecutor(ctx, originalRequestedModel, routeDecision.ExecutorPluginID); errMsg != nil {
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- errMsg
+			close(errChan)
+			return nil, nil, errChan
+		}
+		if coreauth.HasAccountPools(ctx) {
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- accountPoolPluginExecutorError()
+			close(errChan)
+			return nil, nil, errChan
+		}
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.scopedProvidersForExecution(ctx, modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg

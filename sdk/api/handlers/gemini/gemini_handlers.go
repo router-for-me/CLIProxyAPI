@@ -107,6 +107,13 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 			break
 		}
 	}
+	// A model outside the client key's scope is answered like an unknown one.
+	if targetModel != nil {
+		name, _ := targetModel["name"].(string)
+		if !h.KeyAllowsModel(c, strings.TrimPrefix(name, "models/")) {
+			targetModel = nil
+		}
+	}
 
 	if targetModel != nil {
 		// Ensure the name has 'models/' prefix in the output if it's a Gemini model

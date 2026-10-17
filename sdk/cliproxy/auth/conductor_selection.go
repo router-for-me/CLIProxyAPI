@@ -77,6 +77,7 @@ type requiredAuthKindContextKey struct{}
 type credentialPolicyContextKey struct{}
 
 type authSelectionEligibility struct {
+	accountPools     *AccountPoolPolicy
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
@@ -100,6 +101,7 @@ func credentialPolicyFromContext(ctx context.Context) string {
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
 	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
+	eligibility.accountPools = accountPoolsFromContext(ctx)
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
@@ -109,6 +111,9 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 
 func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if auth == nil {
+		return false
+	}
+	if !e.accountPools.Allows(auth) {
 		return false
 	}
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
@@ -1018,6 +1023,12 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if !okStrategy {
 		return nil, false, nil
 	}
+	// The built-in scheduler picks from every eligible credential, not from the
+	// candidates of the first available account pool, so a pooled request falls
+	// back to the selector, which only sees those candidates.
+	if HasAccountPools(ctx) {
+		return nil, false, nil
+	}
 	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
 }
 
@@ -1874,7 +1885,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, now)
+	available, selectorAuths, errAvailable := m.availableAuthsForPoolSelector(ctx, selector, candidates, provider, model, now)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -2089,7 +2100,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	// The scheduler fast path does not know account pools, so pooled requests take the
+	// selector path, which orders candidates by pool.
+	if HasAccountPools(ctx) || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -2220,7 +2233,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, now)
+	available, selectorAuths, errAvailable := m.availableAuthsForPoolSelector(ctx, selector, candidates, "mixed", model, now)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
@@ -2274,7 +2287,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	if HasAccountPools(ctx) || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 

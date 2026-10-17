@@ -1102,6 +1102,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)
 	}
+	if policy := accountPoolsFromContext(ctx); policy != nil {
+		opts.Metadata[cliproxyexecutor.AccountPoolScopeMetadataKey] = policy.namespace
+	} else {
+		delete(opts.Metadata, cliproxyexecutor.AccountPoolScopeMetadataKey)
+	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
@@ -1163,7 +1168,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	fallbackAuths := highestPriorityAuths(available)
 
 	modelKey := canonicalModelKey(model)
-	cacheKey := provider + "::" + primaryID + "::" + modelKey
+	namespace := accountPoolAffinityNamespace(provider, opts.Metadata)
+	cacheKey := namespace + "::" + primaryID + "::" + modelKey
 	isFork := false
 	if opts.Metadata != nil {
 		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
@@ -1173,7 +1179,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
+		fallbackKey = namespace + "::" + fallbackID + "::" + modelKey
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
@@ -1414,6 +1420,7 @@ func canonicalLCPProvider(provider string) string {
 }
 
 func lcpAffinityNamespace(provider, model string, metadata map[string]any) string {
+	provider = accountPoolAffinityNamespace(provider, metadata)
 	provider = canonicalLCPProvider(provider)
 	model = canonicalModelKey(model)
 	callerScope := sessionMetadataString(metadata, cliproxyexecutor.CallerScopeMetadataKey)
@@ -1710,6 +1717,7 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackID = cliproxysession.BoundSessionIdentity(fallbackID)
 	}
 
+	ns = accountPoolAffinityNamespace(ns, res.Options.Metadata)
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
 	var fallbackKey string
 	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) {
