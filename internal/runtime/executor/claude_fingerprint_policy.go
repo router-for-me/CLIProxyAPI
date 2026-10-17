@@ -28,7 +28,7 @@ var claudeFingerprintProfileWarned sync.Map
 // claudeFingerprintPolicy is a single switch-driven view of Claude fingerprint
 // behavior for Anthropic Messages. The heavy algorithms stay shared:
 //   - betas: claudeCodeCLIBetas(..., useOAuthBetas)
-//   - CCH: claudeCCHSigningEnabled / finalizeAnthropicMessagesBodyCCH
+//   - billing metadata gate: claudeCCHSigningEnabled (CCH itself is omitted)
 //   - identity: EnsureClaudeCLIFingerprintIdentity + ApplyClaudeCredentialMetadata
 //
 // Goal: Anthropic Messages API keys, custom gateways, and delegated providers
@@ -91,8 +91,8 @@ func claudeFingerprintProfileFromConfig(cfg *config.Config, auth *cliproxyauth.A
 
 // resolveClaudeFingerprintPolicy resolves credential-scoped fingerprint
 // behavior. It is deliberately independent of the upstream origin: the wire
-// profile follows the credential, while the one origin-sensitive decision (CCH
-// signing) is resolved separately by claudeCCHSigningEnabled.
+// profile follows the credential, while the origin-sensitive billing metadata
+// gate is resolved separately by claudeCCHSigningEnabled.
 func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) claudeFingerprintPolicy {
 	// Keep actual Claude OAuth lifecycle authority separate from the broader
 	// request fingerprint policy used by API keys and delegated providers.

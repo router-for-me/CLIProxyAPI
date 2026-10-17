@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -36,8 +35,6 @@ const toolSearchExecutorGoldenPayload = `{"model":"claude-sonnet-4-5","input":[`
 	`{"type":"function","name":"lookup_order","description":"Look up an order.","strict":false,"defer_loading":true,"parameters":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}},` +
 	`{"type":"tool_search","execution":"client","description":"Search deferred tools.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}` +
 	`],"stream":false}`
-
-var toolSearchExecutorGoldenCCH = regexp.MustCompile(`cch=[0-9a-f]+;`)
 
 // toolSearchExecutorGoldenDate is the calendar day the dev golden was recorded
 // on. OAuth cloaking injects a currentDate reminder, so the render pins the
@@ -89,18 +86,17 @@ func renderToolSearchExecutorGolden(t *testing.T) map[string]string {
 			if errSend != nil {
 				t.Fatalf("%s %s: %v", authName, path, errSend)
 			}
-			// OAuth cloaking derives metadata.user_id from a random device id,
-			// and the billing header's cch hash covers it.
+			// OAuth cloaking derives metadata.user_id from a random device id.
 			body, _ := sjson.DeleteBytes(upstream.body, "metadata.user_id")
-			golden[authName+"/"+path] = toolSearchExecutorGoldenCCH.ReplaceAllString(string(body), "cch=0;")
+			golden[authName+"/"+path] = string(body)
 		}
 	}
 	return golden
 }
 
 // The dev golden was produced by running renderToolSearchExecutorGolden against
-// the executor at origin/dev d739485df, before Codex tool_search support. With
-// upstream.claude.tool-search off every request path must reproduce it, even
+// the executor at origin/dev d739485df, before Codex tool_search support, then
+// updated to omit CCH. With upstream.claude.tool-search off every path reproduces it, even
 // for credentials that would otherwise use native tool search.
 func TestClaudeExecutor_ToolSearchDisabledMatchesDevGolden(t *testing.T) {
 	enableClaudeToolSearchForTest(t, false)

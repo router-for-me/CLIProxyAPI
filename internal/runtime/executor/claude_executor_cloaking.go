@@ -148,7 +148,8 @@ func computeFingerprint(messageText, version string) string {
 }
 
 // generateBillingHeader creates the x-anthropic-billing-header text block that
-// Claude Code prepends to its system prompt. cch is present only on signed paths.
+// Claude Code prepends to its system prompt. Per-request cch is intentionally
+// omitted; the remaining continuity metadata is preserved on signed paths.
 func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string, isSubagent bool, prevReq, promptID string, turnOrigin ...string) string {
 	if entrypoint == "" {
 		entrypoint = "cli"
@@ -163,9 +164,6 @@ func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, wo
 	b.WriteString(entrypoint)
 	b.WriteByte(';')
 
-	if cchSigning {
-		b.WriteString(" cch=00000;")
-	}
 	if workload != "" {
 		b.WriteString(" cc_workload=")
 		b.WriteString(workload)

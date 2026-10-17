@@ -498,8 +498,8 @@ func TestClaudeExecutor_OfficialAPIKeyDefaultPreservesCallerCCH(t *testing.T) {
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != "x-anthropic-billing-header: cc_version=caller; cch=abcde;" {
-		t.Fatalf("caller billing/CCH = %q, want byte-preserved text", got)
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != "x-anthropic-billing-header: cc_version=caller;" {
+		t.Fatalf("caller billing = %q, want only CCH removed", got)
 	}
 	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != "Keep this rule." {
 		t.Fatalf("caller system text = %q, want preserved", got)
@@ -548,14 +548,11 @@ func TestClaudeExecutor_OfficialAPIKeyClaudeCodeCLIFingerprintIncludesDiagnostic
 	if diagnostics := gjson.GetBytes(seenBody, "diagnostics"); !diagnostics.IsObject() {
 		t.Fatalf("diagnostics = %s, want object after fingerprint-profile opt-in", diagnostics.Raw)
 	}
-	// api.anthropic.com is the one API-key origin where native emits cch, so the
-	// opt-in must produce a finalized signature here.
+	// The CLI profile keeps its billing metadata, but CPA omits the per-request
+	// CCH marker from the generated header.
 	billing := gjson.GetBytes(seenBody, "system.0.text").String()
-	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") || !strings.Contains(billing, "cch=") {
-		t.Fatalf("billing = %q, want signed cch on api.anthropic.com", billing)
-	}
-	if strings.Contains(billing, "cch=00000") {
-		t.Fatalf("billing = %q, want finalized cch signature", billing)
+	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") || strings.Contains(billing, "cch=") {
+		t.Fatalf("billing = %q, want no generated cch on api.anthropic.com", billing)
 	}
 	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) || gjson.Get(userID, "account_uuid").String() == "" {
@@ -1209,7 +1206,7 @@ func TestNormalizeClaudeFingerprintProfileWarnsOncePerValue(t *testing.T) {
 
 // The CLI profile is credential-scoped: the same credential resolves the same
 // policy regardless of which upstream URL the request is being built for. Origin
-// only decides CCH signing, through claudeCCHSigningEnabled.
+// only decides the historical billing metadata gate, through claudeCCHSigningEnabled.
 func TestResolveClaudeFingerprintPolicyIsOriginIndependent(t *testing.T) {
 	t.Parallel()
 

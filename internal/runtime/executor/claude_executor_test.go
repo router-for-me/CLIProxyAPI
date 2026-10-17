@@ -144,12 +144,8 @@ func assertClaudeCredentialIdentity(t *testing.T, body []byte, headers http.Head
 	if sessionID == "" || sessionID != headers.Get("X-Claude-Code-Session-Id") {
 		t.Fatalf("metadata session_id = %q, header session ID = %q", sessionID, headers.Get("X-Claude-Code-Session-Id"))
 	}
-	resigned, errResign := finalizeAnthropicMessagesBodyCCH(body, "")
-	if errResign != nil {
-		t.Fatalf("re-finalize Claude CCH: %v", errResign)
-	}
-	if !bytes.Equal(resigned, body) {
-		t.Fatal("Claude CCH was calculated before final credential metadata rewrite")
+	if strings.Contains(gjson.GetBytes(body, "system.0.text").String(), "cch=") {
+		t.Fatal("credential metadata rewrite must not restore billing CCH")
 	}
 }
 
@@ -165,12 +161,8 @@ func assertClaudeCountTokensIdentity(t *testing.T, body []byte, headers http.Hea
 	if got := headers.Get("X-Claude-Code-Session-Id"); got == "" {
 		t.Fatal("count_tokens is missing X-Claude-Code-Session-Id")
 	}
-	resigned, errResign := finalizeAnthropicMessagesBodyCCH(body, "")
-	if errResign != nil {
-		t.Fatalf("re-finalize Claude CCH: %v", errResign)
-	}
-	if !bytes.Equal(resigned, body) {
-		t.Fatal("count_tokens CCH was calculated before the final body rewrite")
+	if strings.Contains(gjson.GetBytes(body, "system.0.text").String(), "cch=") {
+		t.Fatal("count_tokens must not restore billing CCH")
 	}
 }
 
@@ -1036,9 +1028,8 @@ func TestClaudeExecutor_ConfirmedCLIForwardsNativeOpus55Shape(t *testing.T) {
 		t.Fatalf("native system blocks = %d, want 3", len(blocks))
 	}
 	first := blocks[0].Get("text").String()
-	idx := strings.Index(first, "cch=")
-	if idx < 0 || len(first) < idx+9 || first[:idx+4]+"00000"+first[idx+9:] != billing {
-		t.Error("native billing changed beyond its re-signed CCH digits")
+	if first != strings.Replace(billing, " cch=00000;", "", 1) {
+		t.Errorf("native billing changed beyond CCH removal: %q", first)
 	}
 	if blocks[1].Get("text").String() != "native identity" || blocks[2].Get("text").String() != "native model block" {
 		t.Error("native system prompt blocks were rebuilt")
@@ -2386,8 +2377,8 @@ func TestClaudeExecutor_LegacySystemReminderAcrossMessagesAndStream(t *testing.T
 			t.Fatalf("missing %s upstream capture", kind)
 		}
 		assertClaudeLegacySystemReminderLayout(t, body, "legacy-system-prompt", wantUser, "1h")
-		if _, ok := claudeBillingCCHDigitsOffset(body); !ok {
-			t.Fatalf("%s body is missing final CCH", kind)
+		if _, ok := claudeBillingCCHDigitsOffset(body); ok {
+			t.Fatalf("%s body unexpectedly contains CCH: %s", kind, body)
 		}
 	}
 }
@@ -5349,7 +5340,7 @@ func TestClaudeExecutor_CustomBaseURLAPIKeyDoesNotEnableCCHSigning(t *testing.T)
 	}
 }
 
-func TestClaudeExecutor_CustomBaseURLOAuthGeneratesMissingCCH(t *testing.T) {
+func TestClaudeExecutor_CustomBaseURLOAuthOmitsGeneratedCCH(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -5377,8 +5368,8 @@ func TestClaudeExecutor_CustomBaseURLOAuthGeneratesMissingCCH(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if _, ok := claudeBillingCCHDigitsOffset(seenBody); !ok {
-		t.Fatalf("Claude OAuth custom BaseURL body is missing generated CCH: %s", seenBody)
+	if _, ok := claudeBillingCCHDigitsOffset(seenBody); ok {
+		t.Fatalf("Claude OAuth custom BaseURL body unexpectedly contains generated CCH: %s", seenBody)
 	}
 	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != "keep original system" {
 		t.Fatalf("system.1.text = %q, want preserved system text", got)
@@ -8136,8 +8127,8 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 	if got := gjson.GetBytes(resp.Payload, "content.0.name").String(); got != "search_web" {
 		t.Fatalf("client response tool name = %q, want search_web; payload=%s", got, resp.Payload)
 	}
-	if _, ok := claudeBillingCCHDigitsOffset(upstreamBody); !ok {
-		t.Fatalf("Claude OAuth custom BaseURL body is missing CCH: %s", upstreamBody)
+	if _, ok := claudeBillingCCHDigitsOffset(upstreamBody); ok {
+		t.Fatalf("Claude OAuth custom BaseURL body unexpectedly contains CCH: %s", upstreamBody)
 	}
 	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.280 (external, cli)" {
 		t.Fatalf("Messages User-Agent = %q, want CLI identity", got)
@@ -8216,8 +8207,8 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 	if !helps.IsClaudeMCPToolName(upstreamAlias) || !strings.HasSuffix(upstreamAlias, "_fetch_url") {
 		t.Fatalf("upstream tool name = %q, want semantic mcp__ alias", upstreamAlias)
 	}
-	if _, ok := claudeBillingCCHDigitsOffset(upstreamBody); !ok {
-		t.Fatalf("streaming Claude OAuth custom BaseURL body is missing CCH: %s", upstreamBody)
+	if _, ok := claudeBillingCCHDigitsOffset(upstreamBody); ok {
+		t.Fatalf("streaming Claude OAuth custom BaseURL body unexpectedly contains CCH: %s", upstreamBody)
 	}
 	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.280 (external, cli)" {
 		t.Fatalf("streaming User-Agent = %q, want CLI identity", got)
@@ -10120,30 +10111,24 @@ func runClaudeExecutorCapture(t *testing.T, cfg *config.Config, cloakMode string
 	return seenBody, seenHeaders
 }
 
-func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlock(t *testing.T) {
+func TestClaudeExecutor_PreservedThinkingReplayDoesNotInjectDropBlock(t *testing.T) {
 	for _, model := range []string{"claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"} {
 		t.Run(model, func(t *testing.T) {
-			seenBody, seenHeaders := runClaudeExecutorCapture(t, nil, "", false, model, preservedThinkingReplayPayload(model))
-			if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
-				t.Fatalf("thinking.block_binding.prefix_mismatch_behavior = %q, want drop_block; body=%s", got, seenBody)
-			}
-			if betas := seenHeaders.Get("Anthropic-Beta"); !strings.Contains(betas, claudeThinkingBindingBeta) {
-				t.Fatalf("Anthropic-Beta = %q, want %s", betas, claudeThinkingBindingBeta)
+			seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, model, preservedThinkingReplayPayload(model))
+			if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+				t.Fatalf("thinking.block_binding must not be injected; body=%s", seenBody)
 			}
 			if !strings.Contains(string(seenBody), preservedThinkingTestSignature) {
-				t.Fatalf("replayed thinking signature must survive injection: %s", seenBody)
+				t.Fatalf("replayed thinking signature must survive cleanup: %s", seenBody)
 			}
 		})
 	}
 }
 
-func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlockOnStream(t *testing.T) {
-	seenBody, seenHeaders := runClaudeExecutorCapture(t, nil, "", true, "claude-haiku-5-5", preservedThinkingReplayPayload("claude-haiku-5-5"))
-	if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
-		t.Fatalf("stream thinking.block_binding.prefix_mismatch_behavior = %q, want drop_block; body=%s", got, seenBody)
-	}
-	if betas := seenHeaders.Get("Anthropic-Beta"); !strings.Contains(betas, claudeThinkingBindingBeta) {
-		t.Fatalf("stream Anthropic-Beta = %q, want %s", betas, claudeThinkingBindingBeta)
+func TestClaudeExecutor_PreservedThinkingReplayDoesNotInjectDropBlockOnStream(t *testing.T) {
+	seenBody, _ := runClaudeExecutorCapture(t, nil, "", true, "claude-haiku-5-5", preservedThinkingReplayPayload("claude-haiku-5-5"))
+	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+		t.Fatalf("stream thinking.block_binding must not be injected; body=%s", seenBody)
 	}
 }
 
@@ -10170,11 +10155,11 @@ func TestClaudeExecutor_PreservedThinkingInjectionRequiresThinkingType(t *testin
 	}
 }
 
-func TestClaudeExecutor_PreservedThinkingInjectionKeepsCallerError(t *testing.T) {
+func TestClaudeExecutor_PreservedThinkingRemovesCallerBinding(t *testing.T) {
 	payload := []byte(`{"model":"claude-haiku-5-5","thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"error"}},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"earlier","signature":"` + preservedThinkingTestSignature + `"}]},{"role":"user","content":"continue"}]}`)
 	seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-haiku-5-5", payload)
-	if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "error" {
-		t.Fatalf("caller prefix_mismatch_behavior = %q, want error preserved; body=%s", got, seenBody)
+	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+		t.Fatalf("caller block_binding must be removed; body=%s", seenBody)
 	}
 }
 

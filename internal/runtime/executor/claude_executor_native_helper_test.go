@@ -200,8 +200,8 @@ func TestClaudeExecutorStructuredNativeHelperPreservesStreamProfile(t *testing.T
 	if got := gjson.GetBytes(upstreamBody, "stream").Bool(); !got {
 		t.Fatalf("structured helper stream = false, want true: %s", upstreamBody)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.0.text").String(); strings.Contains(got, "cch=00000") || !strings.Contains(got, " cch=") {
-		t.Fatalf("structured helper billing CCH was not re-signed: %q", got)
+	if got := gjson.GetBytes(upstreamBody, "system.0.text").String(); strings.Contains(got, "cch=") {
+		t.Fatalf("structured helper billing CCH was not removed: %q", got)
 	}
 	assertClaudeNativeHelperHeaders(t, upstreamHeaders, headers)
 }

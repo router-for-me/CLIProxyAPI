@@ -33,9 +33,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
-	// Real Claude OAuth always signs CCH. An opted-in API key signs only where
-	// native does, so a third-party gateway keeps a cache-stable billing header.
-	// Default API-key and delegated-provider requests preserve the caller body.
+	// Preserve the native billing metadata, but omit the per-request CCH marker.
 	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI, url)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
@@ -231,16 +229,16 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if !claudeCodeDetection.HelperProfile || claudeBodyNeedsBillingFallback(bodyForUpstream) {
 			cchBilling = claudeCCHFallbackBillingHeader(ctx, e.cfg, bodyForUpstream, claudeCodeDetection.Entrypoint)
 		}
-		bodyForUpstream, err = ensureClaudeBillingHeaderCCHPlaceholder(bodyForUpstream, cchBilling)
+		bodyForUpstream, err = ensureClaudeBillingHeader(bodyForUpstream, cchBilling)
 		if err != nil {
-			return resp, fmt.Errorf("finalize Claude CCH: %w", err)
+			return resp, fmt.Errorf("finalize Claude billing header: %w", err)
 		}
 	}
 	bodyForUpstream = stripDefaultKimiClaudeCodeAttribution(auth, url, fp.ProfileClaudeCodeCLI, bodyForUpstream)
 	if claudeCompactionSummaryFromContext(ctx) {
 		bodyForUpstream = finalizeClaudeCompactionSummaryBody(bodyForUpstream)
 	}
-	bodyForUpstream = applyClaudePreservedThinkingBinding(bodyForUpstream)
+	bodyForUpstream = helps.StripClaudeRequestMarkers(bodyForUpstream)
 	// User rules match the fully prepared business body and are applied only once.
 	var touchedPayloadPaths map[string]bool
 	bodyForUpstream, touchedPayloadPaths = helps.ApplyPayloadConfigWithTrackedPaths(
@@ -253,12 +251,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	extraBetas, bodyForUpstream = extractAndRemoveBetas(bodyForUpstream)
 	bodyForUpstream = stripPromptCacheOptions(bodyForUpstream)
-	if cchSigning {
-		bodyForUpstream, err = signAnthropicMessagesBody(bodyForUpstream)
-		if err != nil {
-			return resp, fmt.Errorf("sign Claude CCH: %w", err)
-		}
-	}
 	// Read-only validation must observe the final configured model and messages.
 	if errMidSystem := validateClaudeMidSystemMessageModel(bodyForUpstream, confirmedClaudeCode, isAnthropicUpstreamBase(baseURL)); errMidSystem != nil {
 		return resp, errMidSystem
