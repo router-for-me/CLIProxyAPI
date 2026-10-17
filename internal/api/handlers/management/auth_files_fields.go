@@ -342,6 +342,25 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
 			return
 		}
+		if rootAuthFileField(fieldPath) == "excluded_models" {
+			if fieldPath != "excluded_models" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "excluded_models does not support nested fields"})
+				return
+			}
+			if value != nil {
+				models, valid := value.([]any)
+				for _, model := range models {
+					if _, okString := model.(string); !okString {
+						valid = false
+						break
+					}
+				}
+				if !valid {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "excluded_models must be a string array or null"})
+					return
+				}
+			}
+		}
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -388,6 +407,16 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 	if changed {
 		syncAuthFileMetadataFields(targetAuth, touchedRoots)
+		if _, touched := touchedRoots["excluded_models"]; touched {
+			excluded, errExcluded := synthesizer.ExtractExcludedModelsFromMetadata(targetAuth.Metadata)
+			if errExcluded != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errExcluded.Error()})
+				return
+			}
+			// Store only the credential's own rules; global rules are resolved at model registration.
+			// An empty authKind keeps the existing auth_kind attribute unchanged.
+			synthesizer.ApplyAuthExcludedModelsMeta(targetAuth, excluded, "")
+		}
 	}
 
 	if !changed {

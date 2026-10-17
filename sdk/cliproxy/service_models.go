@@ -35,7 +35,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 	// Capture the publication fence before any runtime read or model
 	// resolution: a registration superseded while it is being computed must
 	// not overwrite or remove the newer registration when it finishes last.
-	fence := newModelRegistrationFence(a)
+	fence := newModelRegistrationFence(a, cfg)
 	s.cancelStaleAntigravityProbes(a.ID)
 	if a.Disabled {
 		if s != nil && s.coreManager != nil {
@@ -66,8 +66,9 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 		provider = "openai-compatibility"
 	}
 	excluded := oauthExcludedModelsForConfig(cfg, provider, authKind)
-	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
-	// If this attribute is present, it represents the complete list of exclusions and overrides the global config.
+	// The "excluded_models" attribute holds only the credential's own exclusions.
+	// When present it takes priority over the global oauth-excluded-models config;
+	// otherwise the current global config applies, so global changes take effect without rewriting credentials.
 	if a.Attributes != nil {
 		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
 			excluded = strings.Split(val, ",")
@@ -375,7 +376,7 @@ func (s *Service) refreshModelRegistrationForAuthWithContext(ctx context.Context
 			// still belongs to the disabled snapshot just observed. A
 			// concurrent re-enable/re-register advances identity or
 			// epoch and must not lose its newer publication.
-			s.unregisterModelsForAuthFenced(latest, newModelRegistrationFence(latest))
+			s.unregisterModelsForAuthFenced(latest, newModelRegistrationFence(latest, s.currentConfig()))
 		}
 		// If the auth is absent, applyCoreAuthRemoval owns unregistration;
 		// a stale refresh must not delete a later re-registration.
