@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	geminicommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -396,7 +397,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		return [][]byte{output}
 	}
 
-	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) && !(*param).(*Params).HasFinalEvents {
+	if usageResult.Exists() && geminicommon.IsTerminalFinishReason((*param).(*Params).FinishReason) && !(*param).(*Params).HasFinalEvents {
 		if !(*param).(*Params).HasContent && (*param).(*Params).HasFirstResponse {
 			appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, (*param).(*Params).ResponseIndex))
 			(*param).(*Params).ResponseType = 1

@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 
+	geminicommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/tidwall/gjson"
 )
 
@@ -28,8 +29,10 @@ func IsGeminiTokenEvent(payload []byte) bool {
 	}
 
 	// Terminal error fallback
-	if gjson.GetBytes(payload, "error.message").Exists() || gjson.GetBytes(payload, "error").Exists() || gjson.GetBytes(payload, "response.error").Exists() {
-		return true
+	for _, path := range []string{"error", "response.error"} {
+		if upstreamError := gjson.GetBytes(payload, path); upstreamError.Exists() && upstreamError.Type != gjson.Null {
+			return true
+		}
 	}
 
 	candidatesNode := gjson.GetBytes(payload, "candidates")
@@ -63,7 +66,7 @@ func IsGeminiTokenEvent(payload []byte) bool {
 		}
 
 		// Terminal finishReason fallback (e.g., STOP, MAX_TOKENS, SAFETY)
-		if len(candidate.Get("finishReason").String()) > 0 {
+		if geminicommon.IsTerminalFinishReason(candidate.Get("finishReason").String()) {
 			return true
 		}
 	}
