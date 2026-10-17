@@ -1057,15 +1057,15 @@ func TestConvertOpenAIResponsesRequestToAntigravity_LocalWebSearchCapability(t *
 	for _, tc := range []struct {
 		name       string
 		capability *bool
-		probe      bool
+		legacy     bool
 		wantSearch bool
 	}{
-		{name: "unknown without probe"},
-		{name: "unknown with probe", probe: true, wantSearch: true},
-		{name: "false without probe", capability: &falseVal},
-		{name: "false vetoes probe", capability: &falseVal, probe: true},
-		{name: "true still requires probe", capability: &trueVal},
-		{name: "true with probe", capability: &trueVal, probe: true, wantSearch: true},
+		{name: "unknown without legacy flag"},
+		{name: "unknown with legacy flag", legacy: true, wantSearch: true},
+		{name: "false without legacy flag", capability: &falseVal},
+		{name: "false vetoes legacy flag", capability: &falseVal, legacy: true},
+		{name: "native true without legacy flag", capability: &trueVal, wantSearch: true},
+		{name: "native true with legacy flag", capability: &trueVal, legacy: true, wantSearch: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const modelID = "gemini-responses-local-search"
@@ -1073,14 +1073,10 @@ func TestConvertOpenAIResponsesRequestToAntigravity_LocalWebSearchCapability(t *
 			reg := registry.GetGlobalRegistry()
 			reg.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{{
 				ID:                 modelID,
+				SupportsWebSearch:  tc.legacy,
 				NativeCapabilities: &registry.NativeCapabilities{WebSearch: tc.capability},
 			}})
 			t.Cleanup(func() { reg.UnregisterClient(clientID) })
-			if tc.probe && !reg.ApplyClientModelCapabilities(clientID, reg.ClientRegistrationEpoch(clientID), func(_ string, info *registry.ModelInfo) {
-				info.SupportsWebSearch = true
-			}) {
-				t.Fatal("capability probe update was not applied")
-			}
 
 			input := []byte(`{"model":"` + modelID + `","input":"Search weather","tools":[{"type":"web_search"}]}`)
 			legacy, errLegacy := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)

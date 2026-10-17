@@ -66,7 +66,7 @@ func TestAntigravityDynamicRegistrationLifecycle(t *testing.T) {
 				t.Fatalf("unentitled model %s", m.ID)
 			}
 			if m.ContextLength <= 1 || !m.SupportsWebSearch {
-				t.Fatalf("lost static info or fetched capability: %+v", m)
+				t.Fatalf("lost static model metadata: %+v", m)
 			}
 		}
 	}
