@@ -589,7 +589,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// Without a translator-confirmed terminal state, a clean Responses EOF
 			// without [DONE] remains a failed stream instead of completing it.
 			if responseFormat == sdktranslator.FormatOpenAIResponse {
-				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
+				// A missing protocol terminator does not establish a credential failure.
+				// Keep the request failed without rotating or cooling otherwise valid keys.
+				streamErr := cliproxyauth.NewRequestScopedError("upstream stream closed before [DONE]", http.StatusBadGateway)
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				reporter.PublishFailure(ctx, streamErr)
 				select {
