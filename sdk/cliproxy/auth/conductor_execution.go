@@ -899,8 +899,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// Some Anthropic-compatible upstreams do not implement the
 				// count_tokens route and return a generic endpoint 404. Record
 				// the failure for hooks and metrics without suspending a model
-				// that remains usable through the messages endpoint.
-				if isCountTokensEndpointNotFoundError(errExec, executedUpstreamModel(execReq, execOpts)) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
+				// that remains usable through the messages endpoint. The count
+				// URL can still carry the pre-override model while the body was
+				// rewritten, so a structured 404 naming either attempted model
+				// is model-specific, not a missing endpoint (#5514 review).
+				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && isCountTokensEndpointNotFoundError(errExec, executedUpstreamModel(execReq, execOpts)) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					if isCredentialScopedError(errExec) {

@@ -493,6 +493,68 @@ func (e *wireModelRotationExecutor) HttpRequest(context.Context, *Auth, *http.Re
 	return nil, errors.New("not supported")
 }
 
+// The Gemini and Vertex count-token builders build /models/<B>:countTokens
+// before a payload override finalizes the body to X, so a structured 404 can
+// name the URL model while the executor reports the wire model. The count path
+// must treat a 404 naming either attempted model as model-specific instead of
+// a missing count endpoint (#5514 review).
+func TestManager_CountTokens_Structured404NamingRequestModelCoolsModel(t *testing.T) {
+	executor := &countRequestModelNotFoundExecutor{}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+	auth := &Auth{ID: "auth-count-url-404", Provider: executor.Identifier(), Status: StatusActive}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-6-astra"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	req := cliproxyexecutor.Request{Model: "gpt-6-astra", Payload: []byte(`{"input":"hi"}`)}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{}}
+	if _, errExec := m.ExecuteCount(context.Background(), []string{executor.Identifier()}, req, opts); errExec == nil {
+		t.Fatal("CountTokens expected the structured 404, got nil")
+	}
+	before := time.Now()
+	updated, _ := m.GetByID(auth.ID)
+	state := existingModelState(updated, canonicalModelKey("gpt-6-astra"))
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("count 404 naming the requested model was treated as a missing count endpoint: %v", state.NextRetryAfter.Sub(before))
+	}
+}
+
+type countRequestModelNotFoundExecutor struct{}
+
+func (e *countRequestModelNotFoundExecutor) Identifier() string { return "count-url-404-provider" }
+
+func (e *countRequestModelNotFoundExecutor) CountTokens(_ context.Context, _ *Auth, _ cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if opts.Metadata != nil {
+		opts.Metadata[cliproxyexecutor.WireModelMetadataKey] = "configured-wire"
+	}
+	return cliproxyexecutor.Response{}, &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"type":"not_found_error","message":"model gpt-6-astra was not found"}`,
+	}
+}
+
+func (e *countRequestModelNotFoundExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, errors.New("not supported")
+}
+
+func (e *countRequestModelNotFoundExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, errors.New("stream not supported")
+}
+
+func (e *countRequestModelNotFoundExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *countRequestModelNotFoundExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not supported")
+}
+
 func TestManager_Execute_WireModelMetadataResetBetweenAttempts(t *testing.T) {
 	executor := &wireModelRotationExecutor{}
 	previous := quotaCooldownDisabled.Load()
