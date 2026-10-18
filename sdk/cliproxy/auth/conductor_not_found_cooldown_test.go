@@ -213,6 +213,37 @@ func TestWrapStreamResult_TerminalErrorCarriesUpstreamModel(t *testing.T) {
 	}
 }
 
+// Alias-mapped or payload-rewritten streams also close cleanly; the success
+// result must carry the executed upstream model so Home streaming observers
+// see the same model the non-stream Home result reports (#5514 review).
+func TestWrapStreamResult_SuccessCarriesUpstreamModel(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-stream-success-upstream", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	hook := &recordingHook{}
+	m.hook = hook
+
+	remaining := make(chan cliproxyexecutor.StreamChunk, 1)
+	remaining <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"delta":"hi"}`)}
+	close(remaining)
+
+	streamResult := m.wrapStreamResult(context.Background(), auth.Clone(), "codex", "public-model", "public-model", "upstream-name", nil, nil, remaining, OAuthModelAliasResult{}, true, cliproxyexecutor.Options{}, 1)
+	for range streamResult.Chunks {
+	}
+	result := hook.lastResult.Load()
+	if result == nil {
+		t.Fatal("no result recorded")
+	}
+	if !result.Success {
+		t.Fatalf("expected a success result, got %+v", result)
+	}
+	if result.UpstreamModel != "upstream-name" {
+		t.Fatalf("success result UpstreamModel = %q, want the executed upstream model", result.UpstreamModel)
+	}
+}
+
 // Selection-override executions send a different model than the recorded route
 // candidate: when the auth-selection metadata names "tenant/public" while the
 // wire request executes "gpt-6-astra", the provider's structured 404 names the

@@ -913,5 +913,5 @@ func isolatedContinuationOptions(opts cliproxyexecutor.Options) cliproxyexecutor
 		clone[k] = v
 	}
 	opts.Metadata = clone
-	return opts}
+	return opts
 }
