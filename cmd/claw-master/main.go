@@ -168,13 +168,15 @@ func run(args []string) (int, error) {
 		return runIssue(args[1:])
 	case len(args) > 0 && args[0] == "connect":
 		return runConnect(ctx, args[1:])
+	case len(args) > 0 && args[0] == "agent":
+		return runAgent(ctx, args[1:])
 	}
 	if len(args) < 2 {
 		return 2, errors.New("usage: claw-master check; claw-master login PROFILE; claw-master probe PROFILE --model MODEL; claw-master run PROFILE [--next-profile PROFILE ...] [--backup-api-key FILE|env:VARIABLE] [--map INCOMING:TARGET ...] [--diagnostics] -- [Claude arguments]; claw-master serve PROFILE [--next-profile PROFILE ...] --listen ADDRESS:PORT --state-dir DIR; claw-master issue --state-dir DIR --request FILE [--days N] [--out FILE]; claw-master client-init --dir DIR --name NAME; claw-master connect --server ADDRESS:PORT --dir DIR -- [Claude arguments]")
 	}
 	command, name := args[0], args[1]
 	if command != "login" && command != "run" && command != "probe" && command != "serve" {
-		return 2, errors.New("expected login, run, serve, probe, issue, client-init or connect")
+		return 2, errors.New("expected login, run, serve, probe, issue, client-init, connect or agent")
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -472,6 +474,53 @@ func runConnect(ctx context.Context, args []string) (int, error) {
 		return 2, errors.New("usage: claw-master connect --server ADDRESS:PORT --dir DIR -- [Claude arguments]; or claw-master connect --open 127.0.0.1:PORT --ca FILE -- [Claude arguments] (defaults from CLAW_MASTER_SERVER, CLAW_MASTER_CLIENT_DIR, CLAW_MASTER_OPEN, CLAW_MASTER_CA)")
 	}
 	return clawmaster.Connect(ctx, clawmaster.ConnectOptions{Server: server, Dir: dir, Open: open, CAFile: caFile, Out: os.Stderr}, flags.Args())
+}
+
+const agentUsage = "usage: claw-master agent [env] --listen 127.0.0.1:PORT (--server ADDRESS:PORT --dir DIR | --open 127.0.0.1:PORT --ca FILE) [--token-file FILE] (defaults from CLAW_MASTER_AGENT_LISTEN, CLAW_MASTER_SERVER, CLAW_MASTER_CLIENT_DIR, CLAW_MASTER_OPEN, CLAW_MASTER_CA)"
+
+// runAgent serves a long-running forwarder for a Claude that no launcher starts (the desktop app's
+// Code tab); "agent env" prints the settings that Claude needs to use it.
+func runAgent(ctx context.Context, args []string) (int, error) {
+	printEnv := len(args) > 0 && args[0] == "env"
+	if printEnv {
+		args = args[1:]
+	}
+	flags := flag.NewFlagSet("agent", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var opts clawmaster.AgentOptions
+	var logLevel, logFile, logFormat string
+	flags.StringVar(&opts.Listen, "listen", clawmaster.Getenv("AGENT_LISTEN"), "loopback ADDRESS:PORT the agent serves Claude on")
+	flags.StringVar(&opts.Server, "server", clawmaster.Getenv("SERVER"), "the server's private ADDRESS:PORT")
+	flags.StringVar(&opts.Dir, "dir", clawmaster.Getenv("CLIENT_DIR"), "this box's client directory")
+	flags.StringVar(&opts.Open, "open", clawmaster.Getenv("OPEN"), "loopback ADDRESS:PORT of an authenticating tunnel to the server's open listener")
+	flags.StringVar(&opts.CAFile, "ca", clawmaster.Getenv("CA"), "the server's public ca.pem (with --open)")
+	flags.StringVar(&opts.TokenFile, "token-file", "", "the agent's private token, created on first use (default: agent.token beside the CA)")
+	flags.StringVar(&logLevel, "log-level", "info", "debug, info, warn, error or off")
+	flags.StringVar(&logFile, "log-file", "", "append logs to this file, rotated by size (default: standard error)")
+	flags.StringVar(&logFormat, "log-format", "text", "text or json")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || opts.Listen == "" {
+		return 2, errors.New(agentUsage)
+	}
+	if printEnv {
+		lines, err := clawmaster.AgentEnvironment(opts)
+		if err != nil {
+			return 1, err
+		}
+		for _, line := range lines {
+			fmt.Fprintln(os.Stdout, line)
+		}
+		return 0, nil
+	}
+	closeLog, err := clawmaster.ConfigureLogging(clawmaster.LogOptions{Level: logLevel, File: logFile, Format: logFormat, Out: os.Stderr})
+	if err != nil {
+		return 2, err
+	}
+	defer closeLog()
+	opts.Out = os.Stderr
+	if err := clawmaster.RunAgent(ctx, opts); err != nil {
+		return 1, err
+	}
+	return 0, nil
 }
 
 var accountIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{8,64}$`)

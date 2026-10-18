@@ -611,6 +611,56 @@ NO_PROXY=localhost,127.0.0.1,::1; no_proxy=$NO_PROXY; export NO_PROXY no_proxy
 exec "$HOME/.local/bin/claude" "$@"
 ```
 
+### The Claude desktop app (Code tab): `claw-master agent`
+
+The desktop app's Code tab runs its own copy of Claude Code, which the app downloads and starts itself, so
+no launcher can set its environment. `claw-master agent` is a long-running forwarder for it: the same
+forwarder a launch starts, on a fixed loopback address and with a token kept in a file (`agent.token`
+beside the CA, or in `--dir`; created with mode 0600 on first start and refused if others can read it), so
+the app is configured once.
+
+It fails closed, like `connect`. A CONNECT to `api.anthropic.com:443` goes to the claw-master server or
+nowhere: while the server or the tunnel is down it is answered `502`, and one without the agent's token
+(a stale or mistyped proxy URL) is answered `407` instead of being sent to Anthropic with the machine's own
+login. Both are logged. Other hosts (OAuth refresh, telemetry) are tunnelled directly, as in a launch.
+
+```sh
+# start it (at login, by launchd; see below), behind the tunnel above
+claw-master agent --listen 127.0.0.1:8445 --open 127.0.0.1:8444 --ca ~/.config/claw-master/ca.pem
+# print the three values for the app
+claw-master agent env --listen 127.0.0.1:8445 --open 127.0.0.1:8444 --ca ~/.config/claw-master/ca.pem
+```
+
+`agent env` prints `HTTPS_PROXY` (its URL carries the token; treat it as a secret), `NODE_EXTRA_CA_CERTS`
+and `NO_PROXY=localhost,127.0.0.1,::1` (Claude uses one proxy for every scheme, and the agent only tunnels
+CONNECT, so loopback MCP servers need the exemption). Enter them in the desktop app's environment settings
+for local sessions, not in `~/.claude/settings.json`: `connect` refuses a settings file whose `env` sets
+proxy or CA variables, and the CLI reads that file too. Cloud and SSH sessions do not use the local agent.
+A box with a client certificate uses `--server ADDRESS:PORT --dir DIR` instead of `--open` and `--ca`.
+
+On macOS, a launchd agent keeps it running (`~/Library/LaunchAgents/<label>.plist`, then
+`launchctl bootstrap gui/$(id -u) <that file>`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.claw-master-agent</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/USER/.local/bin/claw-master</string><string>agent</string>
+    <string>--listen</string><string>127.0.0.1:8445</string>
+    <string>--open</string><string>127.0.0.1:8444</string>
+    <string>--ca</string><string>/Users/USER/.config/claw-master/ca.pem</string>
+    <string>--log-file</string><string>/Users/USER/Library/Logs/claw-master-agent.log</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
+
+The server logs the agent's first tunnel as `client connected for the first time client=tunnel
+listener=open`, as for any tunnel client.
+
 Release assets: `checksums.txt` lists only the archives. The bare `claw-master-<os>-<arch>` binaries are
 not in it; check one against the digest GitHub records for the asset
 (`gh api repos/OWNER/CLIProxyAPI/releases/tags/TAG --jq '.assets[] | [.name, .digest]'`).
