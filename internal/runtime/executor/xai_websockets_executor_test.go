@@ -2256,13 +2256,7 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			return nil
 		})
 
-		go func() {
-			for {
-				if _, _, errReadLoop := conn.ReadMessage(); errReadLoop != nil {
-					return
-				}
-			}
-		}()
+		requestReceived := startKeepaliveTestReader(conn)
 
 		select {
 		case <-inWriteHook:
@@ -2281,6 +2275,15 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			close(pongDeliveredDuringWrite)
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
+			return
+		}
+
+		// The hook has returned and the client now writes its request. Wait for it
+		// before answering: closing the connection earlier races that write.
+		select {
+		case <-requestReceived:
+		case <-time.After(2 * time.Second):
+			t.Errorf("client request was not received after pong")
 			return
 		}
 
@@ -2352,13 +2355,7 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return nil
 		})
 
-		go func() {
-			for {
-				if _, _, errReadLoop := conn.ReadMessage(); errReadLoop != nil {
-					return
-				}
-			}
-		}()
+		requestReceived := startKeepaliveTestReader(conn)
 
 		select {
 		case <-inWriteHook:
@@ -2377,6 +2374,15 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			close(pongDeliveredDuringWrite)
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
+			return
+		}
+
+		// The hook has returned and the client now writes its request. Wait for it
+		// before answering: closing the connection earlier races that write.
+		select {
+		case <-requestReceived:
+		case <-time.After(2 * time.Second):
+			t.Errorf("client request was not received after pong")
 			return
 		}
 
