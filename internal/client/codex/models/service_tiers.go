@@ -1,7 +1,8 @@
 package models
 
 // ApplyUltrafastAvailability exposes Ultrafast for models served by an eligible account.
-func ApplyUltrafastAvailability(response map[string]any, available func(string) bool) {
+// Eligibility may supply a canonical metadata ID for aliases absent from the local registry.
+func ApplyUltrafastAvailability(response map[string]any, eligibility func(string) (string, bool)) {
 	models, _ := response["models"].([]map[string]any)
 	for _, model := range models {
 		tiers, _ := model["service_tiers"].([]any)
@@ -13,8 +14,12 @@ func ApplyUltrafastAvailability(response map[string]any, available func(string) 
 			}
 		}
 		// Empty tiers also cover models served by non-Codex providers.
-		if len(filtered) > 0 && available(stringModelValue(model, "slug")) {
-			switch codexClientMetadataModelID(stringModelValue(model, "slug")) {
+		metadataID, available := eligibility(stringModelValue(model, "slug"))
+		if len(filtered) > 0 && available {
+			if metadataID == "" {
+				metadataID = codexClientMetadataModelID(stringModelValue(model, "slug"))
+			}
+			switch metadataID {
 			case "gpt-6.1-sol", "gpt-6-astra":
 				filtered = append(filtered, map[string]any{
 					"id":          "ultrafast",

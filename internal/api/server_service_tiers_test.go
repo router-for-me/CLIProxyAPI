@@ -29,17 +29,22 @@ func TestModelsWithClientVersionHomeUltrafast(t *testing.T) {
 						{"id":"gpt-6.1-sol","supports_ultrafast":true},
 						{"id":"gpt-6-astra","supports_ultrafast":true},
 						{"id":"team/gpt-6-astra","supports_ultrafast":true},
+						{"id":"sol-fast","metadata_model_id":"gpt-6.1-sol","supports_ultrafast":true},
+						{"id":"team/sol-fast","metadata_model_id":"gpt-6.1-sol","supports_ultrafast":true},
+						{"id":"old-sol","metadata_model_id":"gpt-6-sol","supports_ultrafast":true},
 						{"id":"gpt-6-sol","supports_ultrafast":true}
 					],
 					"codex-plus":[
 						{"id":"gpt-6.1-sol","supports_ultrafast":false},
 						{"id":"gpt-6-astra"},
+						{"id":"sol-fast"},
 						{"id":"ordinary/gpt-6.1-sol"}
 					]
 				}`,
 				localPlan: "pro",
 				want: map[string]bool{
 					"gpt-6.1-sol": true, "gpt-6-astra": true, "team/gpt-6-astra": true,
+					"sol-fast": true, "team/sol-fast": true, "old-sol": false,
 					"gpt-6-sol": false, "ordinary/gpt-6.1-sol": false,
 				},
 			},
@@ -74,10 +79,15 @@ func TestModelsWithClientVersionHomeUltrafast(t *testing.T) {
 				if recorder.Code != http.StatusOK {
 					t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
 				}
+				if strings.Contains(recorder.Body.String(), "metadata_model_id") {
+					t.Fatal("Home metadata identity leaked into the client catalog")
+				}
 				var response struct {
 					Models []struct {
-						Slug         string                `json:"slug"`
-						ServiceTiers []struct{ ID string } `json:"service_tiers"`
+						Slug          string                `json:"slug"`
+						Priority      int                   `json:"priority"`
+						ContextWindow int                   `json:"context_window"`
+						ServiceTiers  []struct{ ID string } `json:"service_tiers"`
 					} `json:"models"`
 				}
 				if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
@@ -97,6 +107,13 @@ func TestModelsWithClientVersionHomeUltrafast(t *testing.T) {
 					}
 					if !reflect.DeepEqual(got, want) {
 						t.Errorf("%s tiers = %v, want %v", model.Slug, got, want)
+					}
+					if model.Slug == "sol-fast" || model.Slug == "team/sol-fast" {
+						for _, canonical := range response.Models {
+							if canonical.Slug == "gpt-6.1-sol" && (model.Priority != canonical.Priority || model.ContextWindow != canonical.ContextWindow) {
+								t.Errorf("%s lost canonical template metadata", model.Slug)
+							}
+						}
 					}
 				}
 

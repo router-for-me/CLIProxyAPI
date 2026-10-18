@@ -705,10 +705,10 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 
 	cfg := s.getConfig()
 	models := make([]map[string]any, 0, len(entries))
-	ultrafastModels := make(map[string]bool, len(entries))
+	ultrafastModels := make(map[string]homeModelEntry, len(entries))
 	for _, entry := range entries {
 		models = append(models, formatHomeCodexModelWithSettings(entry, cfg))
-		ultrafastModels[entry.id] = entry.supportsUltrafast
+		ultrafastModels[entry.id] = entry
 	}
 
 	var webSearchCapabilityForModel codexmodels.WebSearchCapabilityForModelFunc
@@ -732,7 +732,10 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 		// tool_search, which never consulted Home routes for search support.
 		payload = codexmodels.BuildResponseForClientWithToolCapabilities(models, nil, webSearchCapabilityForModel, applyPatchCapabilityForModel, nil, optimizeMultiAgentV2, clientVersion)
 	}
-	codexmodels.ApplyUltrafastAvailability(payload, func(id string) bool { return ultrafastModels[id] })
+	codexmodels.ApplyUltrafastAvailability(payload, func(id string) (string, bool) {
+		entry := ultrafastModels[id]
+		return entry.metadataModelID, entry.supportsUltrafast
+	})
 	body, errMarshal := codexmodels.MarshalCompact(payload)
 	if errMarshal != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
@@ -810,6 +813,9 @@ func formatHomeCodexModel(entry homeModelEntry) map[string]any {
 	model := map[string]any{
 		"id":     entry.id,
 		"object": "model",
+	}
+	if entry.metadataModelID != "" {
+		model["metadata_model_id"] = entry.metadataModelID
 	}
 	if entry.created > 0 {
 		model["created"] = entry.created
@@ -893,6 +899,7 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.Ha
 
 type homeModelEntry struct {
 	id                     string
+	metadataModelID        string
 	created                int64
 	ownedBy                string
 	displayName            string
@@ -1189,11 +1196,16 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 			}
 			nativeCapabilities := homeModelNativeCapabilities(model)
 			supportsUltrafast, _ := model["supports_ultrafast"].(bool)
+			metadataModelID, _ := model["metadata_model_id"].(string)
+			metadataModelID = strings.TrimSpace(metadataModelID)
 			route := registry.NativeCapabilityRoute{
 				Provider:           provider,
 				NativeCapabilities: nativeCapabilities,
 			}
 			if index, ok := indexByID[id]; ok {
+				if metadataModelID != "" && (out[index].metadataModelID == "" || supportsUltrafast) {
+					out[index].metadataModelID = metadataModelID
+				}
 				out[index].supportsUltrafast = out[index].supportsUltrafast || supportsUltrafast
 				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
 				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
@@ -1213,6 +1225,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 			indexByID[id] = len(out)
 			out = append(out, homeModelEntry{
 				id:                     id,
+				metadataModelID:        metadataModelID,
 				created:                homeModelInt64Value(model, "created"),
 				ownedBy:                ownedBy,
 				displayName:            displayName,

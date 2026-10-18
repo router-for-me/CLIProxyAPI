@@ -28,7 +28,7 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 	modelRegistry := registry.GetGlobalRegistry()
 	response := codexmodels.BuildResponseForClientWithToolCapabilities(h.Models(), modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
 	ultrafast := h != nil && h.BaseAPIHandler != nil && h.AuthManager.HasCodexUltrafast()
-	codexmodels.ApplyUltrafastAvailability(response, func(string) bool { return ultrafast })
+	codexmodels.ApplyUltrafastAvailability(response, func(string) (string, bool) { return "", ultrafast })
 	return response
 }
 
