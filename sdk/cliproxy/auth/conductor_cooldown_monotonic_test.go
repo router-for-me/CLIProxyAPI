@@ -452,3 +452,85 @@ func TestManager_MarkResult_CredentialScopeDoesNotInheritModelBackoffLevel(t *te
 		})
 	}
 }
+
+func newCodexCooldownManager(t *testing.T, models ...string) (*Manager, *Auth) {
+	t.Helper()
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-codex-recheck-" + models[0], Provider: "codex"}
+	reg := registry.GetGlobalRegistry()
+	infos := make([]*registry.ModelInfo, 0, len(models))
+	now := time.Now().Unix()
+	for _, model := range models {
+		infos = append(infos, &registry.ModelInfo{ID: model, Created: now})
+	}
+	reg.RegisterClient(auth.ID, auth.Provider, infos)
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	return m, auth
+}
+
+func TestCodexQuotaCapPreservesSiblingNonQuotaDeadline(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, auth := newCodexCooldownManager(t, "model-a", "model-b")
+	ctx := context.Background()
+	m.MarkResult(ctx, Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "model-b",
+		Success: false, Error: &Error{HTTPStatus: http.StatusUnauthorized, Message: "long 401"},
+	})
+	before := time.Now()
+	long := 48 * time.Hour
+	m.MarkResult(ctx, Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "model-a",
+		Success: false, RetryAfter: &long, CredentialScope: true,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	bState := existingModelState(updated, canonicalModelKey("model-b"))
+	if bState == nil || bState.NextRetryAfter.Before(before.Add(25*time.Minute)) || bState.NextRetryAfter.After(before.Add(35*time.Minute)) {
+		t.Fatalf("sibling 401 deadline = %v, want about 30m", bState)
+	}
+	if bState.Quota.NextRecoverAt.Before(before.Add(4*time.Minute)) || bState.Quota.NextRecoverAt.After(before.Add(6*time.Minute)) {
+		t.Fatalf("sibling quota clock = %v, want about 5m", bState.Quota.NextRecoverAt.Sub(before))
+	}
+	blockedA, _, _ := isAuthBlockedForModel(updated, "model-a", before.Add(6*time.Minute))
+	if blockedA {
+		t.Fatal("model-a should be selectable after the quota recheck interval")
+	}
+	blockedB, _, _ := isAuthBlockedForModel(updated, "model-b", before.Add(6*time.Minute))
+	if !blockedB {
+		t.Fatal("model-b should stay blocked on its 401 after the quota recheck interval")
+	}
+}
+
+func TestCodexQuotaCapPreservesSameModelNonQuotaDeadline(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, auth := newCodexCooldownManager(t, "model-a")
+	ctx := context.Background()
+	m.MarkResult(ctx, Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "model-a",
+		Success: false, Error: &Error{HTTPStatus: http.StatusNotFound, Message: "missing model"},
+	})
+	before := time.Now()
+	long := 48 * time.Hour
+	m.MarkResult(ctx, Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "model-a",
+		Success: false, RetryAfter: &long,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	state := existingModelState(updated, canonicalModelKey("model-a"))
+	if state == nil || state.NextRetryAfter.Before(before.Add(11*time.Hour)) {
+		t.Fatalf("404 deadline = %v, want about 12h", state)
+	}
+	if state.Quota.NextRecoverAt.Before(before.Add(4*time.Minute)) || state.Quota.NextRecoverAt.After(before.Add(6*time.Minute)) {
+		t.Fatalf("quota clock = %v, want about 5m", state.Quota.NextRecoverAt.Sub(before))
+	}
+	blockedSoon, _, _ := isAuthBlockedForModel(updated, "model-a", before.Add(6*time.Minute))
+	if !blockedSoon {
+		t.Fatal("model should stay blocked on the 404 after the quota recheck interval")
+	}
+}

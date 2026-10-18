@@ -1012,6 +1012,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.Status = StatusError
 					state.UpdatedAt = now
 					prevModelRetryAfter := state.NextRetryAfter
+					prevQuotaExceeded := state.Quota.Exceeded
+					prevQuotaRecoverAt := state.Quota.NextRecoverAt
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
 						state.StatusMessage = result.Error.Message
@@ -1170,14 +1172,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherQuotaNext) {
 											otherQuotaNext = otherState.Quota.NextRecoverAt
 										}
-										otherRetryAfter := otherQuotaNext
-										// Propagation only extends a sibling's still-live
-										// per-model deadline; it never shortens one.
-										if !otherState.NextRetryAfter.IsZero() && otherState.NextRetryAfter.After(otherRetryAfter) {
-											otherRetryAfter = otherState.NextRetryAfter
-										}
+										// Cap the quota clock before composing it with a sibling's
+										// own block. A 401 or 404 lives in NextRetryAfter (or the
+										// independent shadow); selector reads that outer time and
+										// never the shadow, so the cap must not shorten it.
 										otherQuotaNext = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, otherQuotaNext)
-										otherRetryAfter = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, otherRetryAfter)
+										otherRetryAfter := otherQuotaNext
+										if independent := siblingIndependentCooldown(otherState, now); independent.After(otherRetryAfter) {
+											otherRetryAfter = independent
+										}
 										otherState.NextRetryAfter = otherRetryAfter
 										applyCooldownFields(&otherState.Quota, QuotaState{
 											Exceeded:      true,
@@ -1230,8 +1233,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.NextRetryAfter = prevModelRetryAfter
 					}
 					if statusCode == http.StatusTooManyRequests {
-						state.NextRetryAfter = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, state.NextRetryAfter)
 						state.Quota.NextRecoverAt = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, state.Quota.NextRecoverAt)
+						preserved := independentCooldownDeadline(prevQuotaExceeded, prevQuotaRecoverAt, prevModelRetryAfter, now)
+						if preserved.IsZero() {
+							state.NextRetryAfter = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, state.NextRetryAfter)
+						} else if preserved.After(state.NextRetryAfter) {
+							state.NextRetryAfter = preserved
+						}
 						if auth.Quota.Reason == "quota" || auth.Quota.Reason == "credential_quota" {
 							auth.NextRetryAfter = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, auth.NextRetryAfter)
 							auth.Quota.NextRecoverAt = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, auth.Quota.NextRecoverAt)
@@ -2657,6 +2665,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		return
 	}
 	prevAuthRetryAfter := auth.NextRetryAfter
+	prevAuthQuotaExceeded := auth.Quota.Exceeded
+	prevAuthQuotaRecoverAt := auth.Quota.NextRecoverAt
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
@@ -2758,13 +2768,47 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = prevAuthRetryAfter
 	}
 	if statusCode == http.StatusTooManyRequests && (auth.Quota.Reason == "quota" || auth.Quota.Reason == "credential_quota") {
-		auth.NextRetryAfter = clampCodexQuotaDeadline("", auth.Provider, now, auth.NextRetryAfter)
 		auth.Quota.NextRecoverAt = clampCodexQuotaDeadline("", auth.Provider, now, auth.Quota.NextRecoverAt)
+		preserved := independentCooldownDeadline(prevAuthQuotaExceeded, prevAuthQuotaRecoverAt, prevAuthRetryAfter, now)
+		if preserved.IsZero() {
+			auth.NextRetryAfter = clampCodexQuotaDeadline("", auth.Provider, now, auth.NextRetryAfter)
+		} else if preserved.After(auth.NextRetryAfter) {
+			auth.NextRetryAfter = preserved
+		}
 	}
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
 		auth.Unavailable = true
 	}
+}
+
+// siblingIndependentCooldown returns a sibling's live non-quota block. The
+// shadow wins when the outer retry time has already been replaced by a quota
+// clock, because selection reads only the outer times.
+func siblingIndependentCooldown(state *ModelState, now time.Time) time.Time {
+	if state == nil {
+		return time.Time{}
+	}
+	if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
+		if independent := independentCooldownDeadline(shadow.Quota.Exceeded, shadow.Quota.NextRecoverAt, shadow.NextRetryAfter, now); !independent.IsZero() {
+			return independent
+		}
+	}
+	return independentCooldownDeadline(state.Quota.Exceeded, state.Quota.NextRecoverAt, state.NextRetryAfter, now)
+}
+
+// independentCooldownDeadline returns a live retry time that is not the quota
+// clock. A 401 or 404 stores its block only in NextRetryAfter. A quota block
+// stores the same instant in Quota.NextRecoverAt, so a retry time that is not
+// strictly later than that clock is the quota deadline and may be capped.
+func independentCooldownDeadline(quotaExceeded bool, quotaRecoverAt, retryAfter, now time.Time) time.Time {
+	if retryAfter.IsZero() || !retryAfter.After(now) {
+		return time.Time{}
+	}
+	if quotaExceeded && !quotaRecoverAt.IsZero() && !retryAfter.After(quotaRecoverAt) {
+		return time.Time{}
+	}
+	return retryAfter
 }
 
 // clampCodexQuotaDeadline caps a Codex quota recovery deadline. Codex resets_at
