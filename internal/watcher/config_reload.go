@@ -3,6 +3,7 @@
 package watcher
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -18,6 +19,14 @@ import (
 )
 
 var loadConfigFileFunc = config.LoadConfig
+
+// configPollInterval is how often the config file's bytes are re-checked as a
+// safety net for changes no filesystem event reports.
+var configPollInterval = 5 * time.Second
+
+// failedConfigRetryInterval is how long the periodic check waits before retrying
+// bytes whose reload failed.
+const failedConfigRetryInterval = time.Minute
 
 func (w *Watcher) stopConfigReloadTimer() {
 	w.configReloadMu.Lock()
@@ -40,6 +49,60 @@ func (w *Watcher) scheduleConfigReload() {
 		w.configReloadMu.Unlock()
 		w.reloadConfigIfChanged()
 	})
+}
+
+// pollConfig re-checks the config file every configPollInterval. Filesystem events
+// cannot follow every way the path can change (symlinks in ancestor directories,
+// a link target that appears later, directory bind mounts, network filesystems),
+// so this applies such a change within one interval. A check reads and hashes the
+// file and reloads only when its bytes differ from the last ones applied.
+func (w *Watcher) pollConfig(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if w.stopped.Load() {
+				return
+			}
+			if w.configBytesChanged() {
+				w.reloadConfigIfChanged()
+			}
+		}
+	}
+}
+
+// seedConfigHash records the hash of the bytes the applied config was parsed from,
+// so the first check does not reload an unchanged file. It never reads the file:
+// a write landing after the config was loaded must still count as a change. Without
+// an applied hash, the first check reloads once.
+func (w *Watcher) seedConfigHash() {
+	w.clientsMutex.Lock()
+	defer w.clientsMutex.Unlock()
+	if w.lastConfigHash == "" && w.config != nil {
+		w.lastConfigHash = w.config.SourceHash
+	}
+}
+
+// configBytesChanged reports whether the config file now holds bytes other than the
+// last ones applied. Bytes whose reload failed are retried only after
+// failedConfigRetryInterval: the load re-reads the file, so the failure may belong to
+// bytes written in between. Read failures are left to the event path, which logs them.
+func (w *Watcher) configBytesChanged() bool {
+	data, err := os.ReadFile(w.configPath)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if hash == w.failedConfigHash && time.Since(w.failedConfigAt) < failedConfigRetryInterval {
+		return false
+	}
+	return hash != w.lastConfigHash
 }
 
 // ReloadConfigIfChanged runs the same config reload path used by filesystem events.
@@ -87,9 +150,17 @@ func (w *Watcher) reloadConfigIfChanged() {
 			appliedHash = w.config.SourceHash
 		}
 		w.lastConfigHash = appliedHash
+		w.failedConfigHash = ""
 		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
+		return
 	}
+	// Remember the bytes that failed, so the periodic check does not retry them on
+	// every tick. A filesystem event still retries.
+	w.clientsMutex.Lock()
+	w.failedConfigHash = newHash
+	w.failedConfigAt = time.Now()
+	w.clientsMutex.Unlock()
 }
 
 func (w *Watcher) reloadConfig() bool {

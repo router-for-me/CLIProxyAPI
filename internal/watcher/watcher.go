@@ -51,6 +51,8 @@ type Watcher struct {
 	fileAuthsByPath   map[string]map[string]*coreauth.Auth
 	lastRemoveTimes   map[string]time.Time
 	lastConfigHash    string
+	failedConfigHash  string    // Bytes whose last reload failed; guarded by clientsMutex.
+	failedConfigAt    time.Time // When failedConfigHash was recorded; guarded by clientsMutex.
 	authQueue         chan<- AuthUpdate
 	currentAuths      map[string]*coreauth.Auth
 	authRevisions     map[string]uint64 // Includes deletion tombstones; guarded by clientsMutex.
