@@ -196,6 +196,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				execOpts.Metadata = meta
 			}
+			// A sessionless retry reuses the same metadata map across credentials:
+			// drop the previous attempt's wire-model report so a rewriting first
+			// attempt cannot masquerade as the second attempt's executed model.
+			execOpts.Metadata = ensureExecutionAttemptMetadata(execOpts.Metadata)
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
