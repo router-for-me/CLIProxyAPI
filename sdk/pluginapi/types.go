@@ -62,6 +62,8 @@ type ConfigField struct {
 	Name string
 	// Type classifies the field value for management clients.
 	Type ConfigFieldType
+	// Default is the value used when the configuration key is omitted.
+	Default any
 	// EnumValues lists allowed values when Type is ConfigFieldTypeEnum.
 	EnumValues []string
 	// Description explains how the plugin uses the field.
@@ -194,6 +196,9 @@ type ThinkingSupport struct {
 	ZeroAllowed bool
 	// DynamicAllowed reports whether automatic reasoning budget selection is supported.
 	DynamicAllowed bool
+	// DisableType is the Claude thinking.type that turns thinking off for this
+	// model. Empty means "disabled"; claude-sonnet-5-5 needs "between_tools".
+	DisableType string
 	// Levels lists supported named reasoning levels.
 	Levels []string
 }

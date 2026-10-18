@@ -175,11 +175,36 @@ type metaCompletedTranslation struct {
 func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxyexecutor.Request, prepared *metaPreparedRequest, data []byte, upstreamUsage *helps.StreamUsageBuffer) (metaCompletedTranslation, error) {
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
+	var filteringSubscriptionUsage bool
 	for _, line := range bytes.Split(data, []byte("\n")) {
-		if !bytes.HasPrefix(line, dataTag) {
+		trimmedLine := bytes.TrimSpace(line)
+		if len(trimmedLine) == 0 {
+			filteringSubscriptionUsage = false
 			continue
 		}
-		eventData := bytes.TrimSpace(line[len(dataTag):])
+		if bytes.HasPrefix(trimmedLine, metaEventTag) {
+			eventName := bytes.TrimSpace(trimmedLine[len(metaEventTag):])
+			filteringSubscriptionUsage = bytes.Equal(eventName, []byte(metaSubscriptionUsageEventType))
+			continue
+		}
+		if !bytes.HasPrefix(trimmedLine, dataTag) {
+			continue
+		}
+		eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
+		eventType := gjson.GetBytes(eventData, "type").String()
+		if isMetaSubscriptionUsageEvent(eventType, eventData) {
+			filteringSubscriptionUsage = false
+			continue
+		}
+		if filteringSubscriptionUsage {
+			if eventType == "" {
+				if gjson.ValidBytes(eventData) {
+					filteringSubscriptionUsage = false
+				}
+				continue
+			}
+			filteringSubscriptionUsage = false
+		}
 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
 			upstreamUsage.Observe(detail, true)
 		}
@@ -296,7 +321,22 @@ func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token strin
 	util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders)
 }
 
-const metaNotFoundCooldown = 5 * time.Minute
+const (
+	metaNotFoundCooldown           = 5 * time.Minute
+	metaSubscriptionUsageEventType = "response.subscription_usage"
+)
+
+var metaEventTag = []byte("event:")
+
+func isMetaSubscriptionUsageEvent(eventType string, eventData []byte) bool {
+	if eventType == metaSubscriptionUsageEventType {
+		return true
+	}
+	if eventType == "" && len(eventData) > 0 && gjson.GetBytes(eventData, "subscription").IsObject() {
+		return true
+	}
+	return false
+}
 
 func wrapMetaUpstreamError(statusCode int, body []byte) error {
 	se := statusErr{code: statusCode, msg: string(body)}

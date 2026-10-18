@@ -543,6 +543,9 @@ func TestResponsesSSEFramer_FiltersUpstreamPrivateEvents(t *testing.T) {
 	timingFrame := []byte("event: responsesapi.websocket_timing\ndata: {\"type\":\"responsesapi.websocket_timing\",\"timing\":{\"duration_ms\":100}}\n\n")
 	framer.WriteChunk(&output, timingFrame)
 
+	subscriptionUsageFrame := []byte("event: response.subscription_usage\ndata: {\"subscription\":{\"tier\":\"1234567890123456\",\"weekly\":{\"resets_at\":1792368000,\"used_percent\":80},\"window\":{\"resets_at\":1792272519,\"used_percent\":10,\"window_duration_mins\":300}},\"type\":\"response.subscription_usage\"}\n\n")
+	framer.WriteChunk(&output, subscriptionUsageFrame)
+
 	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
 	framer.WriteChunk(&output, completedFrame)
 
@@ -555,6 +558,9 @@ func TestResponsesSSEFramer_FiltersUpstreamPrivateEvents(t *testing.T) {
 	}
 	if strings.Contains(got, "responsesapi.websocket_timing") {
 		t.Fatalf("expected responsesapi.websocket_timing to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "response.subscription_usage") || strings.Contains(got, "1234567890123456") {
+		t.Fatalf("expected response.subscription_usage to be stripped, got: %q", got)
 	}
 	if !strings.Contains(got, "event: response.created") {
 		t.Fatalf("expected response.created in output, got: %q", got)
@@ -677,6 +683,9 @@ func TestResponsesSSEFramer_CodexClientFiltersRateLimitsAndTiming(t *testing.T) 
 	timingFrame := []byte("event: responsesapi.websocket_timing\ndata: {\"type\":\"responsesapi.websocket_timing\",\"timing\":{\"duration_ms\":100}}\n\n")
 	framer.WriteChunk(&output, timingFrame)
 
+	subscriptionUsageFrame := []byte("event: response.subscription_usage\ndata: {\"subscription\":{\"tier\":\"1234567890123456\",\"weekly\":{\"resets_at\":1792368000,\"used_percent\":80},\"window\":{\"resets_at\":1792272519,\"used_percent\":10,\"window_duration_mins\":300}},\"type\":\"response.subscription_usage\"}\n\n")
+	framer.WriteChunk(&output, subscriptionUsageFrame)
+
 	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
 	framer.WriteChunk(&output, createdFrame)
 
@@ -689,6 +698,9 @@ func TestResponsesSSEFramer_CodexClientFiltersRateLimitsAndTiming(t *testing.T) 
 	}
 	if strings.Contains(got, "responsesapi.websocket_timing") {
 		t.Fatalf("expected responsesapi.websocket_timing to be stripped for Codex client, got: %q", got)
+	}
+	if strings.Contains(got, "response.subscription_usage") || strings.Contains(got, "1234567890123456") {
+		t.Fatalf("expected response.subscription_usage to be stripped for Codex client, got: %q", got)
 	}
 	if !strings.Contains(got, "codex.response.metadata") {
 		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)

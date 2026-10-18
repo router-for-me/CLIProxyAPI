@@ -321,8 +321,8 @@ func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {
 			ID:     auth.ID,
 			Auth:   auth,
 		}
-		if s.watcher != nil {
-			_, rev := s.watcher.DispatchPersistedAuthUpdateWithRevision(&update)
+		if watcher := s.currentWatcher(); watcher != nil {
+			_, rev := watcher.DispatchPersistedAuthUpdateWithRevision(&update)
 			if rev > 0 {
 				update.SetRevision(rev)
 			}

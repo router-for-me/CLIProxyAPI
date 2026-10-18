@@ -21,6 +21,19 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+// waitForAntigravityClientModel polls until the registry publishes modelID
+// for clientID, bounded so a missing publication fails instead of hanging.
+func waitForAntigravityClientModel(t *testing.T, clientID, modelID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !GlobalModelRegistry().ClientSupportsModel(clientID, modelID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("client %s model %s was not published within 2s", clientID, modelID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestAntigravityDynamicRegistrationLifecycle(t *testing.T) {
 	resetAntigravityCapabilityCache()
 	t.Cleanup(resetAntigravityCapabilityCache)
@@ -648,6 +661,11 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 		if r.Header.Get("Authorization") == "Bearer token-slow-b" {
 			_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
 			authBProbed <- struct{}{}
+			// Hold the response briefly after the server-side signal so the client
+			// deterministically receives and publishes it well after authBProbed
+			// fires; waiting only on that signal would race the probe result
+			// against later authB updates.
+			time.Sleep(200 * time.Millisecond)
 			return
 		}
 		model := authAModel.Load().(string)
@@ -751,6 +769,11 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 		svc.WaitAntigravityProbes()
 		t.Fatal("stalled persistence on authA blocked subsequent probe for authA")
 	}
+	// authBProbed only proves the handler wrote the response; the probe may not
+	// have parsed it or published the catalog yet. Wait for actual registry
+	// publication before any authB update below, otherwise that update changes
+	// authB's model settings and correctly discards the late probe result.
+	waitForAntigravityClientModel(t, authB.ID, "gemini-3-flash")
 	// Wait for authA's refreshed persistence to preempt authA's first Save and enter Save
 	// (which happens after applyAntigravityModelHints published authA's updated catalog).
 	select {

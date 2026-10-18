@@ -3,10 +3,11 @@ package helps
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
-	"math"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -22,6 +23,15 @@ const (
 	// required before considering a pure constant union eligible for semantic enum normalization.
 	codexComplexUnionBranchThreshold = 8
 )
+
+// codexNumericBoundKeywords lists the JSON Schema numeric bound keywords that
+// the Codex backend rejects with HTTP 500 when set to an integer outside int64.
+var codexNumericBoundKeywords = [...]string{
+	"minimum",
+	"maximum",
+	"exclusiveMinimum",
+	"exclusiveMaximum",
+}
 
 // IsCodexUserAgent reports whether headers contain a User-Agent indicating a Codex client.
 func IsCodexUserAgent(headers http.Header) bool {
@@ -132,12 +142,6 @@ func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 		params = gjson.ParseBytes(rawParams)
 	}
 
-	if boundedParams, boundsChanged := stripOutOfBoundsNumericBoundsFromJSON(rawParams); boundsChanged {
-		rawParams = boundedParams
-		changed = true
-		params = gjson.ParseBytes(rawParams)
-	}
-
 	properties := params.Get("properties")
 	if properties.Exists() && properties.IsObject() {
 		for propName, propVal := range properties.Map() {
@@ -158,16 +162,18 @@ func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 
 // stripIncompatiblePatternsFromJSON recursively removes pattern attributes that strict
 // upstream validators reject: unsupported Unicode property escapes (\p{...} / \P{...})
-// and the octal NUL escape (\0). See util.HasUnsupportedUnicodePropertyEscape for the
-// predicate and the upstream errors behind each one.
+// and the octal NUL escape (\0), as well as integer numeric bounds (minimum, maximum,
+// exclusiveMinimum, exclusiveMaximum) outside the signed 64-bit integer range (#6579).
+// See util.HasUnsupportedUnicodePropertyEscape for the regex predicate and upstream errors.
 // It is schema-aware: only subschemas under known JSON Schema keyword locations are visited,
-// preventing accidental deletion of 'pattern' keys inside user data (e.g. description, default, enum).
+// preventing accidental deletion of keys inside user data (e.g. description, default, enum).
 func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
 	rawStr := string(raw)
-	// The fast path avoids parsing when no candidate escape is present. Patterns
-	// arrive JSON-escaped, so a literal backslash before '0' is `\\0` in the raw bytes.
+	// The fast path avoids parsing when no candidate escape or numeric bound is present.
+	// Patterns arrive JSON-escaped, so a literal backslash before '0' is `\\0` in the raw bytes.
+	// "inimum" and "aximum" match minimum, maximum, exclusiveMinimum, and exclusiveMaximum.
 	if !strings.Contains(rawStr, `\p{`) && !strings.Contains(rawStr, `\P{`) && !strings.Contains(rawStr, `\u`) &&
-		!strings.Contains(rawStr, `\\0`) {
+		!strings.Contains(rawStr, `\\0`) && !strings.Contains(rawStr, "inimum") && !strings.Contains(rawStr, "aximum") {
 		return raw, false
 	}
 	var root any
@@ -193,6 +199,92 @@ func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
 	return bytes.TrimSpace(buf.Bytes()), true
 }
 
+func isNumericBoundOutOfInt64(number json.Number) bool {
+	raw := strings.TrimSpace(number.String())
+	if raw == "" {
+		return false
+	}
+	if !strings.ContainsAny(raw, ".eE") {
+		_, errParse := strconv.ParseInt(raw, 10, 64)
+		return errors.Is(errParse, strconv.ErrRange)
+	}
+
+	s := raw
+	negative := false
+	if strings.HasPrefix(s, "-") {
+		negative = true
+		s = s[1:]
+	} else if strings.HasPrefix(s, "+") {
+		s = s[1:]
+	}
+
+	mantissa := s
+	var exp int64
+	if idx := strings.IndexAny(s, "eE"); idx >= 0 {
+		mantissa = s[:idx]
+		expStr := s[idx+1:]
+		parsedExp, errExp := strconv.ParseInt(expStr, 10, 64)
+		if errExp != nil {
+			if errors.Is(errExp, strconv.ErrRange) {
+				return !strings.HasPrefix(expStr, "-") && strings.Trim(mantissa, "0.") != ""
+			}
+			return false
+		}
+		exp = parsedExp
+	}
+
+	intPart := mantissa
+	fracPart := ""
+	if dotIdx := strings.IndexByte(mantissa, '.'); dotIdx >= 0 {
+		intPart = mantissa[:dotIdx]
+		fracPart = mantissa[dotIdx+1:]
+		if strings.IndexByte(fracPart, '.') >= 0 {
+			return false
+		}
+	}
+	if intPart == "" && fracPart == "" {
+		return false
+	}
+	for i := 0; i < len(intPart); i++ {
+		if intPart[i] < '0' || intPart[i] > '9' {
+			return false
+		}
+	}
+	for i := 0; i < len(fracPart); i++ {
+		if fracPart[i] < '0' || fracPart[i] > '9' {
+			return false
+		}
+	}
+
+	allDigits := intPart + fracPart
+	sig := strings.TrimLeft(allDigits, "0")
+	if sig == "" {
+		return false
+	}
+	if exp < -int64(len(raw)) {
+		return false
+	}
+	if exp > int64(len(raw))+20 {
+		return true
+	}
+	trimmed := strings.TrimRight(sig, "0")
+	trailingZeros := int64(len(sig) - len(trimmed))
+	effectiveExp := exp - int64(len(fracPart)) + trailingZeros
+	if effectiveExp < 0 {
+		return false
+	}
+	if effectiveExp > 19 || int64(len(trimmed))+effectiveExp > 19 {
+		return true
+	}
+
+	intStr := trimmed + strings.Repeat("0", int(effectiveExp))
+	if negative {
+		intStr = "-" + intStr
+	}
+	_, errParse := strconv.ParseInt(intStr, 10, 64)
+	return errors.Is(errParse, strconv.ErrRange)
+}
+
 func stripIncompatiblePatterns(v any) bool {
 	changed := false
 	switch schema := v.(type) {
@@ -200,6 +292,12 @@ func stripIncompatiblePatterns(v any) bool {
 		if patternVal, ok := schema["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(patternVal) {
 			delete(schema, "pattern")
 			changed = true
+		}
+		for _, boundKey := range codexNumericBoundKeywords {
+			if boundVal, ok := schema[boundKey].(json.Number); ok && isNumericBoundOutOfInt64(boundVal) {
+				delete(schema, boundKey)
+				changed = true
+			}
 		}
 
 		// Inspect regex keys under patternProperties
@@ -402,108 +500,4 @@ func escapeCodexSjsonKey(key string) string {
 	key = strings.ReplaceAll(key, `.`, `\.`)
 	key = strings.ReplaceAll(key, `:`, `\:`)
 	return key
-}
-
-// codexNumericBoundKeywords lists the JSON Schema numeric bound keywords the Codex
-// backend rejects with an opaque HTTP 500 when their value leaves the int64 range.
-var codexNumericBoundKeywords = [...]string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}
-
-var (
-	codexBoundMinInt64 = new(big.Rat).SetInt64(math.MinInt64)
-	codexBoundMaxInt64 = new(big.Rat).SetInt64(math.MaxInt64)
-)
-
-// numericBoundOutOfInt64 reports whether the numeric literal is an integer that
-// cannot be represented as int64. Non-integer values are left alone because they
-// carry no integer constraint the backend could choke on.
-func numericBoundOutOfInt64(number json.Number) bool {
-	value, ok := new(big.Rat).SetString(number.String())
-	if !ok {
-		return false
-	}
-	if !value.IsInt() {
-		return false
-	}
-	return value.Cmp(codexBoundMinInt64) < 0 || value.Cmp(codexBoundMaxInt64) > 0
-}
-
-// stripOutOfBoundsNumericBoundsFromJSON recursively removes numeric bound keywords
-// whose integer value leaves the int64 range: no int64 argument can ever violate
-// them, while the Codex backend answers such schemas with an opaque HTTP 500 that
-// cools the whole credential (#6579). The walk is schema-aware like
-// stripIncompatiblePatternsFromJSON so the same keys inside user data survive.
-func stripOutOfBoundsNumericBoundsFromJSON(raw []byte) ([]byte, bool) {
-	rawStr := string(raw)
-	// "inimum"/"aximum" match minimum/maximum and their exclusive variants.
-	if !strings.Contains(rawStr, "inimum") && !strings.Contains(rawStr, "aximum") {
-		return raw, false
-	}
-	var root any
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&root); err != nil || root == nil {
-		return raw, false
-	}
-	// Verify no trailing garbage
-	var dummy any
-	if err := dec.Decode(&dummy); err != io.EOF {
-		return raw, false
-	}
-	if !stripOutOfBoundsNumericBounds(root) {
-		return raw, false
-	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(root); err != nil {
-		return raw, false
-	}
-	return bytes.TrimSpace(buf.Bytes()), true
-}
-
-func stripOutOfBoundsNumericBounds(v any) bool {
-	changed := false
-	switch schema := v.(type) {
-	case map[string]any:
-		for _, boundKey := range codexNumericBoundKeywords {
-			if boundVal, ok := schema[boundKey].(json.Number); ok && numericBoundOutOfInt64(boundVal) {
-				delete(schema, boundKey)
-				changed = true
-			}
-		}
-
-		for _, mapKey := range util.SchemaMapKeywords {
-			if subMap, ok := schema[mapKey].(map[string]any); ok {
-				for _, subSchema := range subMap {
-					if stripOutOfBoundsNumericBounds(subSchema) {
-						changed = true
-					}
-				}
-			}
-		}
-
-		for _, valKey := range util.SchemaValueKeywords {
-			if val, exists := schema[valKey]; exists {
-				switch sub := val.(type) {
-				case map[string]any:
-					if stripOutOfBoundsNumericBounds(sub) {
-						changed = true
-					}
-				case []any:
-					for _, item := range sub {
-						if stripOutOfBoundsNumericBounds(item) {
-							changed = true
-						}
-					}
-				}
-			}
-		}
-	case []any:
-		for _, item := range schema {
-			if stripOutOfBoundsNumericBounds(item) {
-				changed = true
-			}
-		}
-	}
-	return changed
 }

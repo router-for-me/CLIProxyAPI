@@ -76,14 +76,22 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		return nil, nil
 	}
 	now := ctx.Now
-	cfg := ctx.Config
 	var metadata map[string]any
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+		if ctx.StrictFileParsing {
+			return nil, fmt.Errorf("parse auth file: %w", errUnmarshal)
+		}
 		return nil, nil
 	}
 	coreauth.NormalizeCredentialMetadata(metadata)
 	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, fmt.Errorf("invalid weight in %s: %w", filepath.Base(fullPath), errWeight)
+	}
+	// Invalid per-account rules must not drop an existing credential: keep the valid
+	// entries and warn. Write entry points (upload and PATCH) reject them before persisting.
+	perAccountExcluded, errExcluded := ExtractExcludedModelsFromMetadata(metadata)
+	if errExcluded != nil {
+		log.WithError(errExcluded).Warnf("ignoring invalid excluded models in auth file %s", filepath.Base(fullPath))
 	}
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
@@ -97,12 +105,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			FileName: filepath.Base(fullPath),
 			RawJSON:  data,
 		})
+		if errParse != nil && ctx.StrictFileParsing {
+			return nil, fmt.Errorf("parse plugin auth file: %w", errParse)
+		}
 		if errParse == nil && handled {
 			auths = compactPluginAuths(auths)
 			if len(auths) == 0 {
 				return nil, nil
 			}
-			perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
 			perAccountModelAliases := extractOAuthModelAliasesFromMetadata(metadata)
 			disabled, _ := metadata["disabled"].(bool)
 			for index, auth := range auths {
@@ -145,9 +155,10 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 					}
 				}
 				coreauth.SetOAuthModelAliasesAttribute(auth, perAccountModelAliases)
-				ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
+				ApplyAuthExcludedModelsMeta(auth, perAccountExcluded, "oauth")
 				coreauth.ApplyCustomHeadersFromMetadata(auth)
 				applyFingerprintProfileAttribute(auth, metadata)
+				auth.BindFileSnapshot(fullPath, data)
 			}
 			return auths, nil
 		}
@@ -190,8 +201,6 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		status = coreauth.StatusDisabled
 	}
 
-	// Read per-account excluded models from the OAuth JSON file.
-	perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
 	perAccountModelAliases := extractOAuthModelAliasesFromMetadata(metadata)
 
 	a := &coreauth.Auth{
@@ -227,7 +236,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
-	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	ApplyAuthExcludedModelsMeta(a, perAccountExcluded, "oauth")
 	applyFingerprintProfileAttribute(a, metadata)
 	// For Kimi auth files, preserve domain and base_url attributes.
 	if provider == "kimi" || provider == "kimi-ai" || provider == "kimi.ai" || provider == "kimi.com" {
@@ -259,6 +268,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			}
 		}
 	}
+	a.BindFileSnapshot(fullPath, data)
 	return []*coreauth.Auth{a}, nil
 }
 
@@ -323,32 +333,46 @@ func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAut
 	return cfg.OAuthModelAlias["auth"]
 }
 
-// extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.
-// "excluded_models" is canonical; "excluded-models" remains a legacy alias.
-func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
+// ExtractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.
+// "excluded_models" is canonical; "excluded-models" remains a legacy alias. The value must be a
+// string array; a single string is also accepted for older hand-written files and is split on
+// commas, because model IDs never contain commas. Any other type, or a non-string array element,
+// is an error. For non-string elements the valid string entries are still returned with the
+// error, so lenient readers can keep the usable rules while strict writers reject the value.
+func ExtractExcludedModelsFromMetadata(metadata map[string]any) ([]string, error) {
 	if metadata == nil {
-		return nil
+		return nil, nil
 	}
-	raw, ok := metadata["excluded_models"]
+	key := "excluded_models"
+	raw, ok := metadata[key]
 	if !ok {
-		raw, ok = metadata["excluded-models"]
+		key = "excluded-models"
+		raw, ok = metadata[key]
 	}
 	if !ok || raw == nil {
-		return nil
+		return nil, nil
 	}
 	var stringSlice []string
+	var errInvalid error
 	switch v := raw.(type) {
+	case string:
+		stringSlice = strings.Split(v, ",")
 	case []string:
 		stringSlice = v
 	case []interface{}:
 		stringSlice = make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				stringSlice = append(stringSlice, s)
+		for index, item := range v {
+			s, okString := item.(string)
+			if !okString {
+				if errInvalid == nil {
+					errInvalid = fmt.Errorf("metadata %s[%d] must be a string, got %T", key, index, item)
+				}
+				continue
 			}
+			stringSlice = append(stringSlice, s)
 		}
 	default:
-		return nil
+		return nil, fmt.Errorf("metadata %s must be a string array, got %T", key, raw)
 	}
 	result := make([]string, 0, len(stringSlice))
 	for _, s := range stringSlice {
@@ -356,5 +380,5 @@ func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 			result = append(result, trimmed)
 		}
 	}
-	return result
+	return result, errInvalid
 }

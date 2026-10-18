@@ -2136,6 +2136,11 @@ func TestConvertOpenAIResponsesRequestToClaude_UnsupportedPrefillModelsStripTrai
 		"claude-opus-5.1",
 		"claude-sonnet-4-6-20260217",
 		" ANTHROPIC/CLAUDE-OPUS-5-THINKING ",
+		"claude-haiku-5-5",
+		"claude-haiku-5",
+		"claude-haiku-5.5",
+		"haiku-5-5",
+		"anthropic/claude-haiku-5-5",
 	}
 	for _, model := range unsupportedModels {
 		t.Run(model, func(t *testing.T) {
@@ -2165,6 +2170,8 @@ func TestConvertOpenAIResponsesRequestToClaude_SupportedPrefillModelsPreserveAss
 	supportedModels := []string{
 		"claude-sonnet-4-5",
 		"claude-haiku-4-5",
+		"claude-haiku-5foo",
+		"claude-haiku-20260217",
 		"claude-3-opus-20240229",
 		"claude-opus-20240229",
 		"claude-sonnet-4-20260217",
@@ -2946,5 +2953,48 @@ func TestApplyPatchClaudeRequestContractAndHistory(t *testing.T) {
 	}
 	if call.Get("name").String() != "editor__apply_patch" || call.Get("input.input").String() != "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch" || call.Get("id").String() != "c1" || result.Get("messages.1.content.0.tool_use_id").String() != "c1" || result.Get("messages.1.content.0.content").String() != "done" {
 		t.Fatalf("history mismatch: %s", result.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_IncompleteToolOutputIsError(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4o",
+		"tools": [{"type":"function","name":"get_weather","description":"Get weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
+		"input": [
+			{"type":"message","role":"user","content":"Weather in Atlantis?"},
+			{"type":"function_call","call_id":"call_err1","name":"get_weather","arguments":"{\"city\":\"Atlantis\"}"},
+			{"type":"function_call_output","call_id":"call_err1","status":"incomplete","output":"City not found"},
+			{"type":"message","role":"user","content":"Did it fail?"}
+		],
+		"max_output_tokens": 128,
+		"stream": false
+	}`
+
+	result, err := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequestToClaude error: %v", err)
+	}
+	resultJSON := gjson.ParseBytes(result)
+	var toolResult gjson.Result
+	found := false
+	resultJSON.Get("messages").ForEach(func(_, message gjson.Result) bool {
+		message.Get("content").ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "tool_result" && block.Get("tool_use_id").String() == "call_err1" {
+				toolResult = block
+				found = true
+				return false
+			}
+			return true
+		})
+		return !found
+	})
+	if !found {
+		t.Fatalf("expected tool_result for call_err1. Output: %s", string(result))
+	}
+	if got := toolResult.Get("content").String(); got != "City not found" {
+		t.Fatalf("tool_result content = %q, want %q. Output: %s", got, "City not found", string(result))
+	}
+	if !toolResult.Get("is_error").Bool() {
+		t.Fatalf("tool_result is_error should be true for status incomplete. Output: %s", string(result))
 	}
 }

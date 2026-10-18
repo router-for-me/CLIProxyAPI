@@ -56,6 +56,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
+	body = applyClaudePreservedThinkingBinding(body)
 	body = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)(body)
 	body = stripPromptCacheOptions(body)
 	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
@@ -209,6 +210,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, mcpAliases)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
+	body = applyClaudePreservedThinkingBinding(body)
 	body = stripPromptCacheOptions(body)
 	// Two different reasons converge on the same deletions, and they must stay
 	// separable.

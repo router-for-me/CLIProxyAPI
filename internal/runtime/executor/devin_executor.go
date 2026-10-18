@@ -277,10 +277,10 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		errData, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 		helps.AppendAPIResponseChunk(ctx, e.cfg, errData)
-		return resp, newDevinStatusError(httpResp.StatusCode, httpResp.Header, errData)
+		return resp, newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth)
 	}
 
-	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractions(httpResp.Body, req.Model, chatModelUID, helps.ApplyPatchOriginalRequest(req, opts))
+	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractionsForAuth(httpResp.Body, req.Model, chatModelUID, auth, helps.ApplyPatchOriginalRequest(req, opts))
 	if respLog != nil || len(interactionsJSON) > 0 {
 		logRespBody := helps.BuildDevinUpstreamResponseLogBody(respLog, interactionsJSON)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, logRespBody)
@@ -356,7 +356,7 @@ func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		errData, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 		_ = httpResp.Body.Close()
 		helps.AppendAPIResponseChunk(ctx, e.cfg, errData)
-		return nil, newDevinStatusError(httpResp.StatusCode, httpResp.Header, errData)
+		return nil, newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -378,7 +378,7 @@ func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}()
 
-		e.streamDevinFrames(streamCtx, httpResp.Body, req, opts, chatModelUID, responseFormat, reporter, out)
+		e.streamDevinFramesForAuth(streamCtx, httpResp.Body, req, opts, chatModelUID, responseFormat, reporter, out, auth)
 	}()
 
 	return &cliproxyexecutor.StreamResult{
@@ -495,6 +495,22 @@ func (e *DevinExecutor) streamDevinFrames(
 	responseFormat sdktranslator.Format,
 	reporter *helps.UsageReporter,
 	out chan<- cliproxyexecutor.StreamChunk,
+) {
+	e.streamDevinFramesForAuth(ctx, body, req, opts, chatModelUID, responseFormat, reporter, out, nil)
+}
+
+// streamDevinFramesForAuth streams Devin frames for auth; auth may be nil in tests,
+// in which case quota errors carry credential scope without a reset-based delay.
+func (e *DevinExecutor) streamDevinFramesForAuth(
+	ctx context.Context,
+	body io.Reader,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	chatModelUID string,
+	responseFormat sdktranslator.Format,
+	reporter *helps.UsageReporter,
+	out chan<- cliproxyexecutor.StreamChunk,
+	auth *cliproxyauth.Auth,
 ) {
 	if reporter != nil {
 		if chatModelUID != "" {
@@ -852,7 +868,7 @@ func (e *DevinExecutor) streamDevinFrames(
 				failedEvent, _ := sjson.SetBytes([]byte(`{"event_type":"response.failed","error":{"message":"","code":""}}`), "error.message", errTrailer.Error())
 				failedEvent, _ = sjson.SetBytes(failedEvent, "error.code", fmt.Sprintf("%d", code))
 				_ = emitInteractionsEvent(failedEvent)
-				emitStreamError(statusErr{code: code, msg: errTrailer.Error()})
+				emitStreamError(devinTrailerStatusError(code, errTrailer.Error(), auth))
 				return
 			}
 			sawEOS = true
@@ -1149,6 +1165,10 @@ func (e *DevinExecutor) streamDevinFrames(
 }
 
 func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string, original ...[]byte) ([]byte, *helps.DevinUpstreamResponseLog, error) {
+	return consumeDevinFramesToInteractionsForAuth(body, model, chatModelUID, nil, original...)
+}
+
+func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID string, auth *cliproxyauth.Auth, original ...[]byte) ([]byte, *helps.DevinUpstreamResponseLog, error) {
 	interactionID := fmt.Sprintf("interaction_%s", uuid.New().String()[:12])
 	var preToolTextParts []string
 	var postToolTextParts []string
@@ -1242,7 +1262,7 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 					Usage:         finalUsage,
 					UnknownFields: unknownFields,
 				}
-				return nil, respLog, statusErr{code: code, msg: errTrailer.Error()}
+				return nil, respLog, devinTrailerStatusError(code, errTrailer.Error(), auth)
 			}
 			sawEOS = true
 			break
@@ -2513,7 +2533,46 @@ func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 	return e.cachedMatcher
 }
 
+// devinTrailerStatusError builds the scheduling view of a Connect trailer
+// error. Explicit account-wide daily/weekly usage quota exhaustion (issue
+// #6690) is credential-scoped and, when auth carries a valid observed reset
+// timestamp for that window, retries only after the reset. Transient
+// capacity and generic rate-limit 429s stay model-scoped.
+func devinTrailerStatusError(code int, msg string, auth *cliproxyauth.Auth) statusErr {
+	return devinQuotaScopedStatusError(statusErr{code: code, msg: msg}, auth, time.Now())
+}
+
+// devinQuotaScopedStatusError upgrades a 429 to credential scope when its
+// message reports daily/weekly usage quota exhaustion, deriving RetryAfter
+// from the matching observed reset signal. An explicit Retry-After already
+// carried by err is preserved and never overwritten by signal data.
+func devinQuotaScopedStatusError(err statusErr, auth *cliproxyauth.Auth, now time.Time) statusErr {
+	if err.code != http.StatusTooManyRequests {
+		return err
+	}
+	period := helps.DevinUsageQuotaExhaustionPeriod(err.msg)
+	if period == helps.DevinQuotaPeriodNone {
+		return err
+	}
+	err.credentialScoped = true
+	if err.retryAfter == nil && auth != nil {
+		key := "daily_quota_reset_at"
+		if period == helps.DevinQuotaPeriodWeekly {
+			key = "weekly_quota_reset_at"
+		}
+		err.retryAfter = helps.DevinQuotaRetryAfter(auth.Quota.Signals[key], now)
+	}
+	return err
+}
+
 func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {
+	return newDevinStatusErrorForAuth(code, headers, body, nil)
+}
+
+// newDevinStatusErrorForAuth builds the scheduling view of a direct HTTP
+// (non-trailer) upstream failure. Daily/weekly quota exhaustion becomes
+// credential-scoped and, when auth is known, retries at the observed reset.
+func newDevinStatusErrorForAuth(code int, headers http.Header, body []byte, auth *cliproxyauth.Auth) statusErr {
 	err := statusErr{code: code, msg: string(body)}
 	if code == http.StatusTooManyRequests && headers != nil {
 		if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {
@@ -2528,7 +2587,9 @@ func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {
 			}
 		}
 	}
-	return err
+	// An explicit Retry-After header parsed above keeps precedence inside
+	// devinQuotaScopedStatusError; signal data only fills the gap.
+	return devinQuotaScopedStatusError(err, auth, time.Now())
 }
 
 func devinAuthCredentials(auth *cliproxyauth.Auth) (apiKey string, baseURL string, deviceSeed string) {

@@ -150,6 +150,9 @@ type ThinkingSupport struct {
 	ZeroAllowed bool `json:"zero_allowed,omitempty" yaml:"zero-allowed,omitempty"`
 	// DynamicAllowed indicates whether -1 is a valid value (dynamic thinking budget).
 	DynamicAllowed bool `json:"dynamic_allowed,omitempty" yaml:"dynamic-allowed,omitempty"`
+	// DisableType is the Claude thinking.type sent when thinking is turned off.
+	// Empty means "disabled"; claude-sonnet-5-5 needs "between_tools".
+	DisableType string `json:"disable_type,omitempty" yaml:"disable-type,omitempty"`
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
 	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
@@ -439,6 +442,37 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.registerClientLocked(clientID, clientProvider, models, false)
+}
+
+// RegisterClientIfEpochCurrent registers a client's models only if its
+// registration epoch still equals expectedEpoch and publish is non-nil. The
+// fence evaluation and the registration runs atomically under the registry
+// mutex. publish must be fast and must not call back into the registry or
+// block. The returned value reports whether the registration was applied.
+func (r *ModelRegistry) RegisterClientIfEpochCurrent(clientID, clientProvider string, expectedEpoch uint64, models []*ModelInfo, publish func() bool) bool {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.clientEpochs[clientID] != expectedEpoch || publish == nil || !publish() {
+		return false
+	}
+	r.registerClientLocked(clientID, clientProvider, models, false)
+	return true
+}
+
+// UnregisterClientIfEpochCurrent removes a client only if its registration
+// epoch still equals expectedEpoch and publish is non-nil. The fence
+// evaluation and the removal runs atomically under the registry mutex.
+// publish must be fast and must not call back into the registry or block.
+// The returned value reports whether the removal was applied.
+func (r *ModelRegistry) UnregisterClientIfEpochCurrent(clientID string, expectedEpoch uint64, publish func() bool) bool {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.clientEpochs[clientID] != expectedEpoch || publish == nil || !publish() {
+		return false
+	}
+	r.unregisterClientInternal(clientID)
+	r.invalidateAvailableModelsCacheLocked()
+	return true
 }
 
 // ReplaceClientModels replaces a client's models only if its registration epoch matches.

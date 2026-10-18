@@ -151,7 +151,7 @@ func (h *GeminiAPIHandler) handleInteractionsStream(c *gin.Context, cliCtx conte
 		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 		committed = true
 	}
-	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.Cfg)
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
 	defer stopKeepAlive()
 
 	var stream handlers.ModelExecutionStream

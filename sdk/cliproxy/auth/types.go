@@ -1,13 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -111,8 +114,107 @@ type Auth struct {
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 
+	// cooldownRecordedSeq is the execution sequence watermark captured when
+	// the current auth-level cooldown was recorded. Successes from executions
+	// stamped at or below it were dispatched before the cooldown existed and
+	// must not clear it. Runtime only: zero after restart so restored
+	// cooldowns can still be cleared by any success.
+	cooldownRecordedSeq uint64 `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+	// fileSnapshotPath and fileSnapshotDigest bind an unversioned file-synthesized
+	// Auth snapshot to the source file path and SHA-256 byte digest it observed.
+	// Cleared when committed to a Manager so runtime clones are not treated as
+	// unversioned file snapshots.
+	fileSnapshotPath   string `json:"-"`
+	fileSnapshotDigest string `json:"-"`
+}
+
+var readAuthSnapshotFileFunc = os.ReadFile
+
+func canonicalAuthFileDigest(data []byte) string {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var parsed any
+	if errDecode := decoder.Decode(&parsed); errDecode == nil {
+		var trailing any
+		if errTrailing := decoder.Decode(&trailing); errTrailing == io.EOF {
+			if canonical, errMarshal := json.Marshal(parsed); errMarshal == nil {
+				sum := sha256.Sum256(canonical)
+				return hex.EncodeToString(sum[:])
+			}
+		}
+	}
+	sum := sha256.Sum256(trimmed)
+	return hex.EncodeToString(sum[:])
+}
+
+// BindFileSnapshot binds an unversioned file-synthesized Auth snapshot to the
+// source file path and canonical SHA-256 digest of the bytes from which it was parsed.
+func (a *Auth) BindFileSnapshot(path string, data []byte) {
+	if a == nil || len(data) == 0 {
+		return
+	}
+	digest := canonicalAuthFileDigest(data)
+	if digest == "" {
+		return
+	}
+	a.fileSnapshotPath = strings.TrimSpace(path)
+	a.fileSnapshotDigest = digest
+}
+
+// ClearFileSnapshot removes any unversioned file-observation binding once the
+// Auth is committed to runtime state or normalized for comparison.
+func (a *Auth) ClearFileSnapshot() {
+	if a == nil {
+		return
+	}
+	a.fileSnapshotPath = ""
+	a.fileSnapshotDigest = ""
+}
+
+// HasFileSnapshot reports whether this Auth is an unversioned file-synthesized
+// snapshot bound to a specific file observation digest.
+func (a *Auth) HasFileSnapshot() bool {
+	return a != nil && a.Generation == 0 && a.RegistrationEpoch == 0 && a.fileSnapshotDigest != ""
+}
+
+// SameFileSnapshot reports whether two unversioned file snapshots observed the
+// same canonical file content.
+func (a *Auth) SameFileSnapshot(other *Auth) bool {
+	if !a.HasFileSnapshot() || !other.HasFileSnapshot() {
+		return false
+	}
+	return a.fileSnapshotDigest == other.fileSnapshotDigest && a.fileSnapshotPath == other.fileSnapshotPath
+}
+
+// FileSnapshotMatchesDisk reports whether the backing file on disk still
+// exists, is readable, and matches the canonical digest observed when this
+// snapshot was synthesized.
+func (a *Auth) FileSnapshotMatchesDisk() bool {
+	if !a.HasFileSnapshot() {
+		return true
+	}
+	path := strings.TrimSpace(a.fileSnapshotPath)
+	if path == "" && a.Attributes != nil {
+		path = strings.TrimSpace(a.Attributes[AttributePath])
+		if path == "" {
+			path = strings.TrimSpace(a.Attributes[AttributeSource])
+		}
+	}
+	if path == "" {
+		return false
+	}
+	data, errRead := readAuthSnapshotFileFunc(path)
+	if errRead != nil || len(data) == 0 {
+		return false
+	}
+	return canonicalAuthFileDigest(data) == a.fileSnapshotDigest
 }
 
 const (
@@ -228,6 +330,28 @@ type ModelState struct {
 	Quota QuotaState `json:"quota"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
+	// cooldownRecordedSeq is the execution sequence watermark captured when
+	// the current model cooldown was recorded. Successes from executions
+	// stamped at or below it were dispatched before the cooldown existed and
+	// must not clear it. Runtime only: zero after restart so restored
+	// cooldowns can still be cleared by any success.
+	cooldownRecordedSeq uint64 `json:"-"`
+	// credentialQuotaShadow holds this model's independent (own-failure)
+	// cooldown layer while the outer fields present the auth-level
+	// credential quota propagated over it, so quota restoration can drop
+	// only the propagated layer and reinstate precisely what the model's
+	// own failures justify (issue #6690). It is nil when no independent
+	// live block exists beneath an outer credential_quota label. Persisted
+	// via CooldownStateRecord.IndependentState (unexported fields are
+	// invisible to JSON, so the record owns the serialized form).
+	credentialQuotaShadow *ModelState `toml:"credential_quota_shadow,omitempty"`
+	// credentialQuotaPropagated marks that credential-quota propagation has
+	// already wrapped this state, distinguishing "no independent block"
+	// from "not yet propagated" so repeated propagation never mistakes its
+	// own earlier layer for an independent block. Persisted via
+	// CooldownStateRecord.CredentialQuotaPropagated across restarts,
+	// including for shadow-less reporting models.
+	credentialQuotaPropagated bool `toml:"credential_quota_propagated,omitempty"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -467,6 +591,28 @@ func (m *ModelState) Clone() *ModelState {
 	}
 	copyState := *m
 	copyState.Quota = m.Quota.Clone()
+	if m.LastError != nil {
+		copyState.LastError = &Error{
+			Code:       m.LastError.Code,
+			Message:    m.LastError.Message,
+			Retryable:  m.LastError.Retryable,
+			HTTPStatus: m.LastError.HTTPStatus,
+		}
+	}
+	if m.credentialQuotaShadow != nil {
+		copyState.credentialQuotaShadow = m.credentialQuotaShadow.cloneShallow()
+	}
+	return &copyState
+}
+
+// cloneShallow copies a shadow state one level deep; shadows never nest.
+func (m *ModelState) cloneShallow() *ModelState {
+	if m == nil {
+		return nil
+	}
+	copyState := *m
+	copyState.Quota = m.Quota.Clone()
+	copyState.credentialQuotaShadow = nil
 	if m.LastError != nil {
 		copyState.LastError = &Error{
 			Code:       m.LastError.Code,

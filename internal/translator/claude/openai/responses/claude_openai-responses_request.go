@@ -97,8 +97,10 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
 					out, _ = sjson.DeleteBytes(out, "output_config.effort")
 				default:
-					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
-						effort = mapped
+					if !thinking.HasLevel(mi.Thinking.Levels, effort) {
+						if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
+							effort = mapped
+						}
 					}
 					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
@@ -529,12 +531,13 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 				emittedToolResults[rawID] = struct{}{}
 			}
-			output := item.Get("output")
+			outputItem := item
 			if rawID != "" {
 				if lastItem, exists := lastToolResult[rawID]; exists {
-					output = lastItem.Get("output")
+					outputItem = lastItem
 				}
 			}
+			output := outputItem.Get("output")
 			// Standalone outputs (no call_id, or one that never paired with a
 			// function_call in this input, e.g. the create_thread delegation seed)
 			// have no tool_use to attach to. Claude rejects orphan tool_result
@@ -548,6 +551,12 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			callID := util.SanitizeClaudeToolID(rawID)
 			toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 			toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
+			// Responses reports an unfinished tool output as status
+			// "incomplete"; Claude's only in-band equivalent is is_error
+			// on tool_result, so carry the signal over instead of dropping it.
+			if strings.EqualFold(strings.TrimSpace(outputItem.Get("status").String()), "incomplete") {
+				toolResult, _ = sjson.SetBytes(toolResult, "is_error", true)
+			}
 			toolResult = applyResponsesToolResultContent(toolResult, output)
 
 			appendParts("user", toolResult)
@@ -760,7 +769,7 @@ func isResponsesSystemLevelRole(role string) bool {
 
 // dropUnsupportedClaudeAssistantPrefill removes a trailing assistant message for
 // Claude model families that reject assistant message prefill (e.g., Fable,
-// Opus 5, Sonnet 4.6).
+// Opus 5, Sonnet 4.6, Haiku 5.5).
 func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) [][]byte {
 	if !claudeModelRejectsAssistantPrefill(modelName) || len(messages) == 0 {
 		return messages
@@ -837,7 +846,7 @@ func claudeModelRejectsAssistantPrefill(modelName string) bool {
 	if tokens[0] == "fable" {
 		return true
 	}
-	if len(tokens) < 2 || (tokens[0] != "opus" && tokens[0] != "sonnet") {
+	if len(tokens) < 2 || (tokens[0] != "opus" && tokens[0] != "sonnet" && tokens[0] != "haiku") {
 		return false
 	}
 	parseVersion := func(token string) int {

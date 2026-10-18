@@ -394,6 +394,20 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
 		}
+		if errScan := scanner.Err(); errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
+				reporter.PublishFailure(ctx, errScan)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
 		doneChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
 		helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 		for i := range doneChunks {
@@ -401,14 +415,6 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
 			case <-ctx.Done():
 				return
-			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
 			}
 		}
 	}()
@@ -1297,23 +1303,57 @@ func normalizeKimiTools(body []byte) []byte {
 	}
 	body = normalizeKimiToolList(body, "tools", true)
 	body = normalizeKimiToolList(body, "functions", false)
+	if input := gjson.GetBytes(body, "input"); input.Exists() && input.IsArray() {
+		for idx, item := range input.Array() {
+			switch strings.TrimSpace(item.Get("type").String()) {
+			case "additional_tools", "tool_search_output":
+				body = normalizeKimiToolList(body, fmt.Sprintf("input.%d.tools", idx), true)
+			}
+		}
+	}
 	return body
 }
 
 func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
 	items := gjson.GetBytes(body, arrayKey)
-	if !items.Exists() || !items.IsArray() {
-		return body
-	}
-	arr := items.Array()
-	if len(arr) == 0 {
+	normalized, changed := normalizeKimiToolArray(items, isTools)
+	if !changed {
 		return body
 	}
 
+	out, errSetRaw := sjson.SetRawBytes(body, arrayKey, normalized)
+	if errSetRaw != nil {
+		return body
+	}
+	return out
+}
+
+func normalizeKimiToolArray(items gjson.Result, isTools bool) ([]byte, bool) {
+	if !items.Exists() || !items.IsArray() {
+		return nil, false
+	}
+	arr := items.Array()
+	if len(arr) == 0 {
+		return nil, false
+	}
+
 	changed := false
-	var updatedItems []string
+	updatedItems := make([]string, 0, len(arr))
 	for _, item := range arr {
 		itemRaw := item.Raw
+		if isTools && strings.TrimSpace(item.Get("type").String()) == "namespace" {
+			for _, nestedKey := range []string{"tools", "children"} {
+				if nested := gjson.Get(itemRaw, nestedKey); nested.Exists() && nested.IsArray() {
+					if normalizedNested, nestedChanged := normalizeKimiToolArray(nested, true); nestedChanged {
+						if updated, errSet := sjson.SetRawBytes([]byte(itemRaw), nestedKey, normalizedNested); errSet == nil {
+							itemRaw = string(updated)
+							changed = true
+						}
+					}
+				}
+			}
+		}
+
 		var paramPath string
 		if isTools && item.Get("function.parameters").Exists() {
 			paramPath = "function.parameters"
@@ -1337,14 +1377,9 @@ func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
 	}
 
 	if !changed {
-		return body
+		return nil, false
 	}
-
-	out, errSetRaw := sjson.SetRawBytes(body, arrayKey, helps.JoinRawJSONStrings(updatedItems))
-	if errSetRaw != nil {
-		return body
-	}
-	return out
+	return helps.JoinRawJSONStrings(updatedItems), true
 }
 
 func normalizeKimiParametersSchema(paramsRaw string) string {

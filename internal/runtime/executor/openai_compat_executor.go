@@ -442,6 +442,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		var streamUsage helps.StreamUsageBuffer
 		var seenDone bool
+		var sawFinishReason bool
 		var streamFailed bool
 		var streamAborted bool
 		var upstreamEvent string
@@ -497,6 +498,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if streamErr, isError := openAICompatStreamDataError(dataPayload, eventName); isError {
 					publishStreamError(streamErr, true)
 					return true
+				}
+				if !sawFinishReason && openAICompatChunkHasFinishReason(dataPayload) {
+					sawFinishReason = true
 				}
 			}
 
@@ -586,12 +590,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			case <-ctx.Done():
 			}
 		} else if !seenDone {
-			// Without a translator-confirmed terminal state, a clean Responses EOF
+			// Without a translator-confirmed terminal state, a clean Responses or Claude EOF
 			// without [DONE] remains a failed stream instead of completing it.
-			if responseFormat == sdktranslator.FormatOpenAIResponse {
+			if responseFormat == sdktranslator.FormatOpenAIResponse || (responseFormat == sdktranslator.FormatClaude && !sawFinishReason) {
 				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-				reporter.PublishFailure(ctx, streamErr)
+				if !helps.RecordApplyPatchStreamFailureWithUsage(ctx, param, reporter, &streamUsage, streamErr) {
+					if !streamUsage.PublishFailure(ctx, reporter, streamErr) {
+						reporter.PublishFailure(ctx, streamErr)
+					}
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 				case <-ctx.Done():
@@ -1069,6 +1077,15 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 
 func openAICompatErrorEvent(eventName string) bool {
 	return strings.EqualFold(eventName, "error") || strings.EqualFold(eventName, "response.error") || strings.EqualFold(eventName, "response.failed")
+}
+
+func openAICompatChunkHasFinishReason(payload []byte) bool {
+	for _, choice := range gjson.GetBytes(payload, "choices").Array() {
+		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != gjson.Null && strings.TrimSpace(reason.String()) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, bool) {

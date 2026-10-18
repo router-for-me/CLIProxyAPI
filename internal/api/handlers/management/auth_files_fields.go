@@ -319,7 +319,8 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 	}
 
-	if targetAuth == nil {
+	// Config-sourced credentials are managed through config endpoints, not as auth files.
+	if targetAuth == nil || targetAuth.AuthSourceKind() == coreauth.AuthSourceConfig {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
@@ -341,6 +342,26 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		if errDecode != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
 			return
+		}
+		if rootAuthFileField(fieldPath) == "excluded_models" {
+			if fieldPath != "excluded_models" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "excluded_models does not support nested fields"})
+				return
+			}
+			if value != nil {
+				models, okModels := value.([]any)
+				validModels := okModels
+				for _, model := range models {
+					if _, okString := model.(string); !okString {
+						validModels = false
+						break
+					}
+				}
+				if !validModels {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "excluded_models must be a string array or null"})
+					return
+				}
+			}
 		}
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
@@ -388,6 +409,19 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 	if changed {
 		syncAuthFileMetadataFields(targetAuth, touchedRoots)
+		if _, touched := touchedRoots["excluded_models"]; touched {
+			excluded, errExcluded := synthesizer.ExtractExcludedModelsFromMetadata(targetAuth.Metadata)
+			if errExcluded != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errExcluded.Error()})
+				return
+			}
+			// ApplyAuthExcludedModelsMeta never clears attributes, so drop stale values first.
+			delete(targetAuth.Attributes, "excluded_models")
+			delete(targetAuth.Attributes, "excluded_models_hash")
+			// Store only the credential's own rules; global rules are resolved at model registration.
+			// An empty authKind keeps the existing auth_kind attribute unchanged.
+			synthesizer.ApplyAuthExcludedModelsMeta(targetAuth, excluded, "")
+		}
 	}
 
 	if !changed {

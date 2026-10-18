@@ -19,15 +19,26 @@ const ConfigV8ContextKey = "management.config-v8"
 
 // ConfigV8 serves the persisted configuration using v8 names. GET is a view;
 // only a successful configuration mutation migrates the stored document.
+//
+// Reads return an ETag holding the SHA-256 of the on-disk config bytes.
+// Writes honour an optional If-Match against that token, so a client can
+// detect that another writer saved after its read (412) instead of silently
+// overwriting the change. Without If-Match, writes stay unconditional.
 func (h *Handler) ConfigV8(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	data, err := os.ReadFile(h.configFilePath)
+	raw, err := os.ReadFile(h.configFilePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed"})
 		return
 	}
-	data, _, err = config.NormalizeConfigLayout(data, true)
+	diskHash := config.ComputeSourceHash(raw)
+	if c.Request.Method != http.MethodGet && !ifMatchSatisfied(c.Request.Header.Values("If-Match"), diskHash) {
+		c.Header("ETag", configV8ETag(diskHash))
+		c.JSON(http.StatusPreconditionFailed, gin.H{"error": "precondition_failed"})
+		return
+	}
+	data, _, err := config.NormalizeConfigLayout(raw, true)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
@@ -61,6 +72,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			return
 		}
 		c.Header("Cache-Control", "no-store")
+		c.Header("ETag", configV8ETag(diskHash))
 		if yamlRequest {
 			c.Data(http.StatusOK, "application/yaml; charset=utf-8", data)
 			return
@@ -188,10 +200,64 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	// Runtime-only ownership state is never sourced from an uploaded YAML document.
 	next.Home = h.cfg.Home
+	// WriteConfig may normalize the bytes, so report the version actually on
+	// disk. If it cannot be read back, omit the ETag instead of guessing one.
+	// Like Home, SourceHash keeps its runtime owner and is published by the
+	// reload, so it is not overwritten on next here.
+	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
+		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
+	}
 	h.cfg = next
 	snapshot := h.reloadSnapshotConfigLocked()
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), snapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": 8})
+}
+
+// configV8ETag renders a config source hash as a strong ETag.
+func configV8ETag(hash string) string {
+	return `"` + hash + `"`
+}
+
+// ifMatchSatisfied reports whether the optional If-Match header lines pass
+// the RFC 9110 strong comparison against currentHash. Repeated lines form
+// one list. An absent header always passes; a present but blank header
+// carries no tag and fails; the whole field "*" matches any current
+// version; weak and malformed entity tags never match.
+func ifMatchSatisfied(values []string, currentHash string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	field := strings.TrimSpace(strings.Join(values, ","))
+	if field == "*" {
+		return true
+	}
+	for _, tag := range splitEntityTagList(field) {
+		tag = strings.TrimSpace(tag)
+		if len(tag) >= 2 && tag[0] == '"' && tag[len(tag)-1] == '"' && !strings.Contains(tag[1:len(tag)-1], `"`) && tag[1:len(tag)-1] == currentHash {
+			return true
+		}
+	}
+	return false
+}
+
+// splitEntityTagList splits an If-Match field value on list commas. A comma
+// inside a quoted entity tag is tag content, not a separator.
+func splitEntityTagList(field string) []string {
+	parts := []string{}
+	start := 0
+	quoted := false
+	for i := 0; i < len(field); i++ {
+		switch field[i] {
+		case '"':
+			quoted = !quoted
+		case ',':
+			if !quoted {
+				parts = append(parts, field[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, field[start:])
 }
 
 var v8ICEServersPath = []string{"oauth", "providers", "codex", "live-media-relay", "ice-servers"}

@@ -4,15 +4,8 @@ package pluginhost
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -25,6 +18,11 @@ import (
 type windowsBuffer struct {
 	ptr uintptr
 	len uintptr
+}
+
+type windowsResidentHostBlocks struct {
+	hostCtx *uintptr
+	hostAPI *windowsHostAPI
 }
 
 type windowsHostAPI struct {
@@ -46,14 +44,13 @@ var (
 	windowsHostCallbackEntries sync.Map
 	windowsHostCallCallback    = syscall.NewCallback(windowsHostCall)
 	windowsHostFreeCallback    = syscall.NewCallback(windowsHostFree)
-	shadowPluginCleanupOnce    sync.Once
-)
-
-const (
-	shadowPluginPrefix           = "cliproxy-plugin-"
-	shadowPluginTempPrefix       = ".cliproxy-plugin-"
-	shadowPluginProcessDirPrefix = "pid-"
-	shadowPluginDigestLength     = 32
+	// windowsResidentHostState pins the host context and host API blocks of
+	// every loaded plugin for the lifetime of the process. A resident
+	// plugin runtime may pass the context back into windowsHostCall at any
+	// time, long after its client was detached, and native pointers are
+	// not GC roots. Only these small blocks are pinned, never the client
+	// or the host.
+	windowsResidentHostState sync.Map
 )
 
 type dynamicLibraryLoader struct{}
@@ -85,8 +82,8 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 	}
 	proc, errProc := dll.FindProc("cliproxy_plugin_init")
 	if errProc != nil {
-		_ = dll.Release()
-		removeShadowPlugin(loadPath)
+		// Do not release the module: loading it may already have started
+		// the plugin runtime, which cannot be unloaded safely.
 		return nil, errProc
 	}
 	id := windowsHostCallbackID.Add(1)
@@ -94,6 +91,13 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 	host.registerHostCallbackInstance(file.ID, instance)
 	hostCtx := new(uintptr)
 	*hostCtx = id
+	hostAPI := &windowsHostAPI{
+		abiVersion: pluginHostABIVersion,
+		hostCtx:    uintptr(unsafe.Pointer(hostCtx)),
+		call:       windowsHostCallCallback,
+		freeBuffer: windowsHostFreeCallback,
+	}
+	windowsResidentHostState.Store(id, windowsResidentHostBlocks{hostCtx: hostCtx, hostAPI: hostAPI})
 	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID, instance: instance})
 	client := &dynamicLibraryClient{
 		dll:      dll,
@@ -102,12 +106,7 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 		host:     host,
 		pluginID: file.ID,
 		instance: instance,
-		hostAPI: &windowsHostAPI{
-			abiVersion: pluginHostABIVersion,
-			hostCtx:    uintptr(unsafe.Pointer(hostCtx)),
-			call:       windowsHostCallCallback,
-			freeBuffer: windowsHostFreeCallback,
-		},
+		hostAPI:  hostAPI,
 	}
 	rc, _, errCall := proc.Call(uintptr(unsafe.Pointer(client.hostAPI)), uintptr(unsafe.Pointer(&client.api)))
 	if rc != 0 {
@@ -123,141 +122,6 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 		return nil, fmt.Errorf("plugin function table is incomplete")
 	}
 	return client, nil
-}
-
-func shadowCopyPlugin(file pluginFile) (string, error) {
-	dir, errDir := shadowPluginDir()
-	if errDir != nil {
-		return "", errDir
-	}
-	shadowPluginCleanupOnce.Do(func() {
-		removeStaleShadowPlugins(dir)
-	})
-	return shadowCopyPluginToDir(file, dir)
-}
-
-func shadowCopyPluginToDir(file pluginFile, dir string) (string, error) {
-	source := filepath.Clean(file.Path)
-	tmp, errTemp := os.CreateTemp(dir, shadowPluginTempPrefix+file.ID+"-*"+filepath.Ext(source))
-	if errTemp != nil {
-		return "", errTemp
-	}
-	tmpName := tmp.Name()
-	removeTemp := true
-	defer func() {
-		if removeTemp {
-			removeShadowPlugin(tmpName)
-		}
-	}()
-
-	in, errOpen := os.Open(source)
-	if errOpen != nil {
-		_ = tmp.Close()
-		return "", errOpen
-	}
-	defer func() {
-		_ = in.Close()
-	}()
-	hasher := sha256.New()
-	size, errCopy := io.Copy(io.MultiWriter(tmp, hasher), in)
-	if errCopy != nil {
-		_ = tmp.Close()
-		return "", errCopy
-	}
-	if errClose := tmp.Close(); errClose != nil {
-		return "", errClose
-	}
-	digest := hex.EncodeToString(hasher.Sum(nil))
-	target := shadowPluginPath(dir, file.ID, digest, filepath.Ext(source))
-	if shadowPluginMatches(target, size, digest) {
-		return target, nil
-	}
-	if errRemove := os.Remove(target); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
-		if shadowPluginMatches(target, size, digest) {
-			return target, nil
-		}
-		removeShadowPlugin(target)
-		return "", fmt.Errorf("remove stale shadow plugin: %w", errRemove)
-	}
-	if errRename := os.Rename(tmpName, target); errRename != nil {
-		if shadowPluginMatches(target, size, digest) {
-			return target, nil
-		}
-		return "", fmt.Errorf("move shadow plugin: %w", errRename)
-	}
-	removeTemp = false
-	return target, nil
-}
-
-func shadowPluginDir() (string, error) {
-	dir := filepath.Join(os.TempDir(), "cliproxy-pluginhost", shadowPluginProcessDirName(os.Getpid()))
-	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
-		return "", errMkdir
-	}
-	return dir, nil
-}
-
-func shadowPluginProcessDirName(pid int) string {
-	return fmt.Sprintf("%s%d", shadowPluginProcessDirPrefix, pid)
-}
-
-func removeShadowPlugin(path string) {
-	if path == "" {
-		return
-	}
-	if errRemove := os.Remove(path); errRemove == nil {
-		return
-	}
-	pathPtr, errPath := windows.UTF16PtrFromString(path)
-	if errPath != nil {
-		return
-	}
-	_ = windows.MoveFileEx(pathPtr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
-}
-
-func removeStaleShadowPlugins(dir string) {
-	entries, errRead := os.ReadDir(dir)
-	if errRead != nil {
-		return
-	}
-	for _, entry := range entries {
-		if entry == nil || entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasPrefix(name, shadowPluginPrefix) || strings.HasPrefix(name, shadowPluginTempPrefix) {
-			removeShadowPlugin(filepath.Join(dir, name))
-		}
-	}
-}
-
-func shadowPluginPath(dir string, id string, digest string, extension string) string {
-	if len(digest) > shadowPluginDigestLength {
-		digest = digest[:shadowPluginDigestLength]
-	}
-	return filepath.Join(dir, shadowPluginPrefix+id+"-"+digest+extension)
-}
-
-func shadowPluginMatches(path string, size int64, digest string) bool {
-	info, errStat := os.Stat(path)
-	if errStat != nil {
-		return false
-	}
-	if !info.Mode().IsRegular() || info.Size() != size {
-		return false
-	}
-	file, errOpen := os.Open(path)
-	if errOpen != nil {
-		return false
-	}
-	defer func() {
-		_ = file.Close()
-	}()
-	hasher := sha256.New()
-	if _, errCopy := io.Copy(hasher, file); errCopy != nil {
-		return false
-	}
-	return hex.EncodeToString(hasher.Sum(nil)) == digest
 }
 
 func (c *dynamicLibraryClient) callbackInstance() *hostCallbackInstance {
@@ -327,17 +191,21 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 }
 
 func (c *dynamicLibraryClient) Shutdown() {
-	// Windows Go DLLs are not safe to hot-unload from the host process.
-	// The plugin was loaded from a shadow copy, so keeping the module mapped
-	// does not block deleting or replacing the source artifact.
-	c.close(false)
+	c.close()
 }
 
 func (c *dynamicLibraryClient) closeAfterOpenFailure() {
-	c.close(true)
+	c.close()
 }
 
-func (c *dynamicLibraryClient) close(releaseDLL bool) {
+// close detaches the client logically without unloading the plugin module.
+// Go plugin DLLs are not safe to hot-unload from the host process: the
+// plugin runtime, its threads and its signal handlers stay resident after
+// FreeLibrary. This also applies when initialization failed, because
+// loading the module may already have started the runtime. The plugin was
+// loaded from a shadow copy, so keeping the module mapped does not block
+// deleting or replacing the source artifact.
+func (c *dynamicLibraryClient) close() {
 	if c == nil {
 		return
 	}
@@ -349,18 +217,15 @@ func (c *dynamicLibraryClient) close(releaseDLL bool) {
 		_, _, _ = syscall.SyscallN(c.api.shutdown)
 		c.api.shutdown = 0
 	}
+	c.api.call = 0
+	c.api.freeBuffer = 0
 	if c.hostCtx != nil {
+		// Drop the callback registration so repeated reloads do not pin
+		// the host forever. The context and host API blocks stay pinned in
+		// windowsResidentHostState because the resident plugin runtime may
+		// still dereference them on late callbacks.
 		windowsHostCallbackEntries.Delete(*c.hostCtx)
-		c.hostCtx = nil
 	}
-	if c.dll != nil {
-		if releaseDLL {
-			_ = c.dll.Release()
-		}
-		c.dll = nil
-	}
-	removeShadowPlugin(c.tempPath)
-	c.tempPath = ""
 }
 
 func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, requestLen uintptr, responsePtr uintptr) uintptr {

@@ -28,6 +28,9 @@ var corsExposedResponseHeaders = []string{
 	"X-SERVER-BUILD-DATE",
 	"Location",
 	"Retry-After",
+	// Cross-origin management clients must read the config version token to
+	// send it back as If-Match on writes.
+	"ETag",
 	"X-Request-Id",
 	"OpenAI-Request-Id",
 }

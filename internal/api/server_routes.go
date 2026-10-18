@@ -236,8 +236,10 @@ func (s *Server) codexAlphaSearchModelRouterHost() handlers.PluginModelRouterHos
 	if s.pluginHost != nil {
 		return s.pluginHost
 	}
-	if s.handlers != nil && s.handlers.ModelRouterHost != nil {
-		return s.handlers.ModelRouterHost
+	if s.handlers != nil {
+		if host := s.handlers.ModelRouterHostSnapshot(); host != nil {
+			return host
+		}
 	}
 	return nil
 }

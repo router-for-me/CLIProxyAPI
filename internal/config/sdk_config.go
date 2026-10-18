@@ -4,6 +4,11 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"math"
+	"time"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// MaxRequestBodyBytes limits the size (in bytes) of incoming HTTP request bodies.
@@ -23,6 +28,21 @@ type SDKConfig struct {
 
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+
+	// TLSHandshakeTimeoutSeconds bounds upstream TLS handshakes made by the
+	// shared uTLS client, in seconds. It applies to both the Claude Code
+	// Anthropic transport and the Chrome ChatGPT/Codex transport; the
+	// standard fallback transport is unaffected. It starts after TCP or
+	// proxy connection establishment returns and does not bound dialing or
+	// proxy CONNECT. Those uTLS paths use custom TLS dialing, for which Go
+	// ignores http.Transport.TLSHandshakeTimeout, so a peer that accepts the
+	// connection but never answers the ClientHello would otherwise block the
+	// request indefinitely and request-retry could never engage. The bound
+	// applies only during the TLS handshake and is removed once it succeeds,
+	// so inference and long-running streams are unaffected. The default 0
+	// disables the bound (previous behavior); negative values are treated as
+	// 0, and values beyond the representable duration range saturate.
+	TLSHandshakeTimeoutSeconds int `yaml:"tls-handshake-timeout-seconds" json:"tls-handshake-timeout-seconds"`
 
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
@@ -76,6 +96,20 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// TLSHandshakeTimeout returns the configured upstream TLS handshake bound
+// for requests using the shared uTLS client. A non-positive configured
+// value disables the bound and yields 0.
+func (c *SDKConfig) TLSHandshakeTimeout() time.Duration {
+	if c == nil || c.TLSHandshakeTimeoutSeconds <= 0 {
+		return 0
+	}
+	const maxTLSHandshakeTimeoutSeconds = math.MaxInt64 / int64(time.Second)
+	if int64(c.TLSHandshakeTimeoutSeconds) > maxTLSHandshakeTimeoutSeconds {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(c.TLSHandshakeTimeoutSeconds) * time.Second
 }
 
 // ClientConfig configures client-facing compatibility behavior.

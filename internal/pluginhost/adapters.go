@@ -150,6 +150,7 @@ func pluginThinkingSupportToRegistryThinkingSupport(thinking *pluginapi.Thinking
 		Max:            thinking.Max,
 		ZeroAllowed:    thinking.ZeroAllowed,
 		DynamicAllowed: thinking.DynamicAllowed,
+		DisableType:    thinking.DisableType,
 		Levels:         cloneStringSlice(thinking.Levels),
 	}
 }
@@ -190,6 +191,7 @@ func registryThinkingSupportToPluginThinkingSupport(thinking *registry.ThinkingS
 		Max:            thinking.Max,
 		ZeroAllowed:    thinking.ZeroAllowed,
 		DynamicAllowed: thinking.DynamicAllowed,
+		DisableType:    thinking.DisableType,
 		Levels:         cloneStringSlice(thinking.Levels),
 	}
 }

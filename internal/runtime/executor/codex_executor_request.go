@@ -200,26 +200,32 @@ func codexSIWCUserAgent(cfg *config.Config) string {
 	return fmt.Sprintf("%s (%s; %s)", agentName, runtime.GOOS, runtime.GOARCH)
 }
 
-func applyCodexSIWCRequestBodyRules(body []byte, hasExplicitInstructions bool) []byte {
+func applyCodexSIWCRequestBodyRules(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
 	body = helps.SetBoolIfDifferent(body, "store", false)
 	body = helps.SetBoolIfDifferent(body, "stream", true)
-	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions)
+	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions, opts...)
 }
 
-func applyCodexSIWCWebsocketBodyRules(body []byte, hasExplicitInstructions bool) []byte {
+func applyCodexSIWCWebsocketBodyRules(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
 	body = helps.SetBoolIfDifferent(body, "store", false)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body, _ = sjson.DeleteBytes(body, "background")
-	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions)
+	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions, opts...)
 }
 
-func applyCodexSIWCCompactBodyRules(body []byte, hasExplicitInstructions bool) []byte {
+func applyCodexSIWCCompactBodyRules(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body, _ = sjson.DeleteBytes(body, "store")
-	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions)
+	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions, opts...)
 }
 
-func stripCodexSIWCUnsupportedFields(body []byte, hasExplicitInstructions bool) []byte {
+func stripCodexSIWCUnsupportedFields(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
+	// SIWC subscriptions reject configuration_update input items, so degrade
+	// them to the classic top-level reasoning.effort and accept the cache loss.
+	// An explicit model thinking suffix is an operator override: the thinking
+	// layer has already resolved it into the top-level effort, so only the
+	// unsupported items are removed in that case.
+	body = thinking.CollapseConfigurationUpdates(body, len(opts) > 0 && opts[0].KeepTopLevelEffort)
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_options")
 	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
