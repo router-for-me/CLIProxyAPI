@@ -639,8 +639,9 @@ of `~/.claude/settings.json`, which the CLI, the desktop app's Code tab and the 
 `NODE_EXTRA_CA_CERTS`, and `NO_PROXY=localhost,127.0.0.1,::1` (Claude uses one proxy for every scheme, and
 the agent only tunnels CONNECT, so loopback MCP servers need the exemption). Other settings are kept; the
 file is rewritten with its keys in sorted order, and the file as it was before the first install is kept as
-`settings.json.before-claw-master`. It refuses to install while that `env` already sets `https_proxy`,
-`HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy` or `no_proxy`, which Claude would follow instead.
+`settings.json.before-claw-master`. It refuses to install while that `env` already sets another proxy setting
+(`https_proxy`, which Claude prefers over `HTTPS_PROXY`, or `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`,
+`all_proxy`, `no_proxy`).
 Restart the desktop app and running sessions afterwards. From then on every Claude Code on the Mac uses the
 pool, and none falls back to the Mac's login while the agent or the server is down. Project settings and
 `CLAUDE_CONFIG_DIR` can still override user settings, as for any setting. Cloud and SSH sessions of the

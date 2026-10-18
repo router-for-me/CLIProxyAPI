@@ -3,9 +3,12 @@ package clawmaster
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -154,13 +157,21 @@ const (
 	agentProbeHeader = "X-Claw-Master-Agent"
 )
 
+func agentProbeAnswer(token, nonce string) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte("claw-master agent probe\x00" + nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func (f *localForwarder) handle(w http.ResponseWriter, r *http.Request) {
 	if f.requireToken && r.Method == http.MethodGet && r.URL.Path == agentProbePath {
-		if !f.authorized(r) {
-			http.Error(w, "the claw-master agent needs its token", http.StatusProxyAuthRequired)
+		// Proof of the token without sending it: the answer is keyed by the token and the caller's nonce.
+		nonce := r.URL.Query().Get("nonce")
+		if len(nonce) < 16 || len(nonce) > 128 {
+			http.Error(w, "the probe needs a nonce", http.StatusBadRequest)
 			return
 		}
-		w.Header().Set(agentProbeHeader, "1")
+		w.Header().Set(agentProbeHeader, agentProbeAnswer(f.token, nonce))
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

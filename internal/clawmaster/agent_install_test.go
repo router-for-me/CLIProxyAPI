@@ -1,6 +1,7 @@
 package clawmaster
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,6 +80,9 @@ type agentInstallTest struct {
 	calls            [][]string
 	loaded           bool
 	failBootout      bool
+	failPrint        bool
+	mu               sync.Mutex
+	seen             []string // request lines another program on the port received
 	opts             AgentInstallOptions
 }
 
@@ -103,8 +108,11 @@ func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 			x.calls = append(x.calls, args)
 			switch args[0] {
 			case "print":
+				if x.failPrint {
+					return errors.New("launchctl: signal: interrupt")
+				}
 				if !x.loaded {
-					return errors.New("could not find service")
+					return errLaunchdNoService
 				}
 			case "bootstrap":
 				x.loaded = true
@@ -128,14 +136,31 @@ func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 		done := make(chan error, 1)
 		go func() { done <- serveAgent(ctx, listener, endpoint, nil) }()
 		t.Cleanup(func() { cancel(); <-done })
-	case "other":
+	case "other", "forged":
+		// Another program: a plain web server, or one that answers the probe without the token.
+		reply := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+		if serve == "forged" {
+			reply = "HTTP/1.1 204 No Content\r\n" + agentProbeHeader + ": 1\r\n\r\n"
+		}
 		go func() {
 			for {
 				conn, err := listener.Accept()
 				if err != nil {
 					return
 				}
-				_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+				var request strings.Builder
+				reader := bufio.NewReader(conn)
+				for {
+					line, err := reader.ReadString('\n')
+					request.WriteString(line)
+					if err != nil || line == "\r\n" {
+						break
+					}
+				}
+				x.mu.Lock()
+				x.seen = append(x.seen, request.String())
+				x.mu.Unlock()
+				_, _ = io.WriteString(conn, reply)
 				_ = conn.Close()
 			}
 		}()
@@ -280,7 +305,7 @@ func TestAgentInstallRunsTheJobAndPointsSettingsAtIt(t *testing.T) {
 }
 
 func TestAgentInstallWritesNoSettingsUnlessItsAgentAnswers(t *testing.T) {
-	for _, serve := range []string{"nothing", "other"} {
+	for _, serve := range []string{"nothing", "other", "forged"} {
 		t.Run(serve, func(t *testing.T) {
 			x := newAgentInstallTest(t, serve)
 			if err := InstallAgent(t.Context(), x.opts); err == nil {
@@ -289,7 +314,77 @@ func TestAgentInstallWritesNoSettingsUnlessItsAgentAnswers(t *testing.T) {
 			if _, err := os.Stat(x.settingsPath()); !os.IsNotExist(err) {
 				t.Fatalf("settings were written for an agent that is not running: %v", err)
 			}
+			token, err := agentToken(filepath.Join(filepath.Dir(x.ca), agentTokenName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			x.mu.Lock()
+			defer x.mu.Unlock()
+			for _, request := range x.seen {
+				if strings.Contains(request, token) {
+					t.Fatalf("the probe sent the token to another program: %q", request)
+				}
+			}
 		})
+	}
+}
+
+func TestAgentInstallRecordsBeforeItChangesSettings(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	x.writeSettings(t, `{"model":"claude-test-model"}`, 0o600)
+	// The record can be looked for but not written: its directory is read-only.
+	records := filepath.Join(x.home, "Library", "Application Support", "claw-master")
+	if err := os.MkdirAll(records, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(records, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(records, 0o700) })
+	if err := InstallAgent(t.Context(), x.opts); err == nil {
+		t.Fatal("install succeeded without its record")
+	}
+	if raw, _ := os.ReadFile(x.settingsPath()); string(raw) != `{"model":"claude-test-model"}` {
+		t.Fatalf("settings changed although nothing records how to undo it: %s", raw)
+	}
+}
+
+func TestAgentReinstallMakesTheSettingsPrivateAgain(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	x.writeSettings(t, `{"model":"claude-test-model"}`, 0o600)
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{x.settingsPath(), x.settingsPath() + agentSettingsBackupSuffix} {
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{x.settingsPath(), x.settingsPath() + agentSettingsBackupSuffix} {
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %v, %v after reinstall; want 0600", path, info.Mode().Perm(), err)
+		}
+	}
+}
+
+func TestAgentUninstallChangesNothingWhenLaunchdCannotSay(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := os.ReadFile(x.settingsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.failPrint = true
+	if err := UninstallAgent(t.Context(), x.opts); err == nil {
+		t.Fatal("uninstall succeeded although launchctl could not say whether the job runs")
+	}
+	if now, _ := os.ReadFile(x.settingsPath()); string(now) != string(installed) {
+		t.Fatal("uninstall changed the settings")
 	}
 }
 

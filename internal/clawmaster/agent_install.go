@@ -4,7 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
+	"crypto/hmac"
+	"crypto/rand"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -24,6 +25,9 @@ import (
 
 // agentLaunchLabel names the agent's launchd job and its plist.
 const agentLaunchLabel = "dev.claw-master.agent"
+
+// errLaunchdNoService is launchctl saying the job is not loaded (exit 113, "Could not find service").
+var errLaunchdNoService = errors.New("launchd has no such service")
 
 // AgentInstallOptions configures `agent install` and `agent uninstall`: the agent's own options, the
 // log file it writes, and, for tests, the home directory, the binary and how launchctl is run.
@@ -116,13 +120,24 @@ func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	changed, err := updateClaudeSettingsEnv(settingsPath, true, func(env map[string]json.RawMessage) error {
+	// The record is written before the settings, so whatever happens next, uninstall can undo it.
+	if _, err := updateClaudeSettingsEnv(settingsPath, false, func(env map[string]json.RawMessage) error {
 		for _, line := range lines {
 			key, value, _ := strings.Cut(line, "=")
 			if raw, ok := env[key]; ok && !reinstall {
 				record.Previous[key] = raw
 			}
 			record.Set[key] = value
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := writeAgentInstallRecord(opts.recordPath(), record); err != nil {
+		return err
+	}
+	changed, err := updateClaudeSettingsEnv(settingsPath, true, func(env map[string]json.RawMessage) error {
+		for key, value := range record.Set {
 			env[key], _ = json.Marshal(value)
 		}
 		return nil
@@ -130,8 +145,10 @@ func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := writeAgentInstallRecord(opts.recordPath(), record); err != nil {
-		return err
+	for _, path := range []string{settingsPath, settingsPath + agentSettingsBackupSuffix} {
+		if err := makePrivate(path); err != nil {
+			return err
+		}
 	}
 	if opts.Out != nil {
 		fmt.Fprintf(opts.Out, "claw-master agent: running as launchd job %s on %s, logging to %s\n", agentLaunchLabel, endpoint.listen, opts.LogFile)
@@ -208,10 +225,14 @@ func (opts *AgentInstallOptions) defaults() error {
 		}
 		opts.launchctl = func(ctx context.Context, args ...string) error {
 			out, err := exec.CommandContext(ctx, "launchctl", args...).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+			if err == nil {
+				return nil
 			}
-			return nil
+			var exited *exec.ExitError
+			if ctx.Err() == nil && errors.As(err, &exited) && (exited.ExitCode() == 113 || bytes.Contains(out, []byte("Could not find service"))) {
+				return errLaunchdNoService
+			}
+			return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
 		}
 	}
 	if opts.home == "" {
@@ -259,8 +280,10 @@ func (opts *AgentInstallOptions) recordPath() string {
 // an error, so nothing is changed around a running agent.
 func (opts *AgentInstallOptions) stopJob(ctx context.Context) error {
 	service := opts.domain() + "/" + agentLaunchLabel
-	if opts.launchctl(ctx, "print", service) != nil {
+	if err := opts.launchctl(ctx, "print", service); errors.Is(err, errLaunchdNoService) {
 		return nil // not loaded
+	} else if err != nil {
+		return fmt.Errorf("launchctl could not tell whether the agent is running: %w", err)
 	}
 	if err := opts.launchctl(ctx, "bootout", service); err != nil {
 		return fmt.Errorf("launchctl could not stop the running agent: %w", err)
@@ -303,7 +326,7 @@ func agentPlist(args []string, stderrPath string) ([]byte, error) {
 }
 
 // waitAgentReady waits, briefly, until this machine's agent (not just anything listening there)
-// answers its probe with the token.
+// proves it holds the token, which is never sent.
 func waitAgentReady(ctx context.Context, address, token string, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
 	for {
@@ -331,8 +354,8 @@ func probeAgent(ctx context.Context, address, token string) error {
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	auth := base64.StdEncoding.EncodeToString([]byte(forwarderUser + ":" + token))
-	if _, err := fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: claw-master\r\nProxy-Authorization: Basic %s\r\nConnection: close\r\n\r\n", agentProbePath, auth); err != nil {
+	nonce := rand.Text()
+	if _, err := fmt.Fprintf(conn, "GET %s?nonce=%s HTTP/1.1\r\nHost: claw-master\r\nConnection: close\r\n\r\n", agentProbePath, nonce); err != nil {
 		return err
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
@@ -340,7 +363,8 @@ func probeAgent(ctx context.Context, address, token string) error {
 		return err
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent || resp.Header.Get(agentProbeHeader) != "1" {
+	want := agentProbeAnswer(token, nonce)
+	if resp.StatusCode != http.StatusNoContent || !hmac.Equal([]byte(resp.Header.Get(agentProbeHeader)), []byte(want)) {
 		return fmt.Errorf("something else is listening there (answered %s)", resp.Status)
 	}
 	return nil
@@ -409,6 +433,18 @@ func updateClaudeSettingsEnv(path string, backup bool, update func(env map[strin
 		return false, err
 	}
 	return true, nil
+}
+
+// makePrivate makes an existing regular file readable by its owner only.
+func makePrivate(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && (!info.Mode().IsRegular() || info.Mode().Perm()&0o077 == 0)) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return os.Chmod(path, info.Mode().Perm()&0o700)
 }
 
 func readAgentInstallRecord(path string) (agentInstallRecord, error) {
