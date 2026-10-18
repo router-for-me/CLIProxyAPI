@@ -18,6 +18,9 @@ const RequestPathMetadataKey = "request_path"
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
+// AccountPoolScopeMetadataKey keeps session affinity of different account pool policies apart.
+const AccountPoolScopeMetadataKey = "account_pool_scope"
+
 // AuthSelectionModelMetadataKey overrides the model used only for auth selection.
 const AuthSelectionModelMetadataKey = "auth_selection_model"
 

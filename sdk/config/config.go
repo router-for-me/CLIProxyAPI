@@ -13,6 +13,8 @@ type Config = internalconfig.Config
 type ModelCatalogs = internalconfig.ModelCatalogs
 
 type ClientConfig = internalconfig.ClientConfig
+type ClientKeyScope = internalconfig.ClientKeyScope
+type ClientAccountPool = internalconfig.ClientAccountPool
 type CodexClientConfig = internalconfig.CodexClientConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig

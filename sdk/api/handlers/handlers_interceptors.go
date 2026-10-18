@@ -691,6 +691,13 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		}
 	}
 
+	// Key scopes apply to the final catalog, including one a response interceptor replaced.
+	scopedBody := h.scopeModelList(c, body)
+	if len(scopedBody) != len(body) {
+		c.Writer.Header().Del("Content-Length")
+	}
+	body = scopedBody
+
 	if modelID, detail := c.Get(ModelDetailIDContextKey); detail {
 		c.Writer.Header().Del("Content-Length")
 		var catalog struct {
