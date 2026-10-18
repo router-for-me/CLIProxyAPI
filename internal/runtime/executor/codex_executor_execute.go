@@ -26,6 +26,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if isCodexOpenAIImageRequest(opts) {
 		return e.executeOpenAIImage(ctx, auth, req, opts)
 	}
+	req, summaryCompaction, errPrepare := e.prepareV1Compaction(ctx, auth, req, opts)
+	if errPrepare != nil {
+		return resp, errPrepare
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
@@ -84,6 +88,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if errReplay != nil {
 		return resp, errReplay
 	}
+	if summaryCompaction {
+		body = helps.PrepareV1CompactionPayload(body)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, opts.Headers)
@@ -136,6 +143,27 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if summaryCompaction {
+		if errRead != nil {
+			return resp, errRead
+		}
+		var usage helps.StreamUsageBuffer
+		completed, errCompleted := helps.CompletedV1ResponsesBody(data, &usage)
+		if errCompleted != nil {
+			usage.PublishFailure(ctx, reporter, errCompleted)
+			return resp, errCompleted
+		}
+		scope, secrets := e.v1CompactionCredentials(auth)
+		reporter.SetResponseModel(gjson.GetBytes(completed, "model").String())
+		converted, errConvert := helps.ConvertResponsesCompactionResponse(completed, req.Model, scope, secrets)
+		if errConvert != nil {
+			usage.PublishFailure(ctx, reporter, errConvert)
+			return resp, errConvert
+		}
+		usage.Publish(ctx, reporter)
+		reporter.EnsurePublished(ctx)
+		return cliproxyexecutor.Response{Payload: helps.EnsureResponsesUsageDetails(converted), Headers: helps.ResponsesHeaders(httpResp.Header, false)}, nil
+	}
 
 	events := helps.NewCodexSSEScanner(ctx, bytes.NewReader(data), len(data)+1)
 	outputItemsByIndex := make(map[int64][]byte)
