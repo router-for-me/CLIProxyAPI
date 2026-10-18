@@ -1101,6 +1101,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
 								}
+								next = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, next)
+								credentialNext = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, credentialNext)
 							}
 							state.NextRetryAfter = next
 							applyCooldownFields(&state.Quota, QuotaState{
@@ -1174,6 +1176,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										if !otherState.NextRetryAfter.IsZero() && otherState.NextRetryAfter.After(otherRetryAfter) {
 											otherRetryAfter = otherState.NextRetryAfter
 										}
+										otherQuotaNext = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, otherQuotaNext)
+										otherRetryAfter = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, otherRetryAfter)
 										otherState.NextRetryAfter = otherRetryAfter
 										applyCooldownFields(&otherState.Quota, QuotaState{
 											Exceeded:      true,
@@ -1190,6 +1194,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										auth.Quota.NextRecoverAt.After(authNext) {
 										authNext = auth.Quota.NextRecoverAt
 									}
+									authNext = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, authNext)
 									auth.Quota.Exceeded = true
 									auth.Quota.Reason = "credential_quota"
 									auth.Quota.NextRecoverAt = authNext
@@ -1223,6 +1228,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// clears the deadline.
 					if !state.NextRetryAfter.IsZero() && prevModelRetryAfter.After(state.NextRetryAfter) && prevModelRetryAfter.After(now) {
 						state.NextRetryAfter = prevModelRetryAfter
+					}
+					if statusCode == http.StatusTooManyRequests {
+						state.NextRetryAfter = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, state.NextRetryAfter)
+						state.Quota.NextRecoverAt = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, state.Quota.NextRecoverAt)
+						if auth.Quota.Reason == "quota" || auth.Quota.Reason == "credential_quota" {
+							auth.NextRetryAfter = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, auth.NextRetryAfter)
+							auth.Quota.NextRecoverAt = clampCodexQuotaDeadline(result.Provider, auth.Provider, now, auth.Quota.NextRecoverAt)
+						}
 					}
 					// Capture the dispatch watermark before composing layers so the
 					// independent shadow carries this failure's stale-success
@@ -2723,6 +2736,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
 				}
+				next = clampCodexQuotaDeadline("", auth.Provider, now, next)
 			}
 			auth.Quota.NextRecoverAt = next
 			auth.NextRetryAfter = next
@@ -2743,10 +2757,32 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if !auth.NextRetryAfter.IsZero() && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
 		auth.NextRetryAfter = prevAuthRetryAfter
 	}
+	if statusCode == http.StatusTooManyRequests && (auth.Quota.Reason == "quota" || auth.Quota.Reason == "credential_quota") {
+		auth.NextRetryAfter = clampCodexQuotaDeadline("", auth.Provider, now, auth.NextRetryAfter)
+		auth.Quota.NextRecoverAt = clampCodexQuotaDeadline("", auth.Provider, now, auth.Quota.NextRecoverAt)
+	}
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
 		auth.Unavailable = true
 	}
+}
+
+// clampCodexQuotaDeadline caps a Codex quota recovery deadline. Codex resets_at
+// moves irregularly, so a longer hint must not keep the credential out until
+// then. The next request after quotaRecheckInterval is the release check.
+// Other providers, zero deadlines, and shorter hints are left unchanged.
+func clampCodexQuotaDeadline(resultProvider, authProvider string, now, candidate time.Time) time.Time {
+	if !strings.EqualFold(strings.TrimSpace(resultProvider), "codex") && !strings.EqualFold(strings.TrimSpace(authProvider), "codex") {
+		return candidate
+	}
+	if candidate.IsZero() || !candidate.After(now) {
+		return candidate
+	}
+	limit := now.Add(quotaRecheckInterval).Round(0)
+	if candidate.After(limit) {
+		return limit
+	}
+	return candidate
 }
 
 // quotaCooldownAfterFailure returns the recovery deadline and backoff level for
