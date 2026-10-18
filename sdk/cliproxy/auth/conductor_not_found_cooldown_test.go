@@ -198,7 +198,7 @@ func TestWrapStreamResult_TerminalErrorCarriesUpstreamModel(t *testing.T) {
 	}}
 	close(remaining)
 
-	streamResult := m.wrapStreamResult(context.Background(), auth.Clone(), "codex", "public-model", "public-model", "upstream-name", nil, nil, remaining, OAuthModelAliasResult{}, false, cliproxyexecutor.Options{})
+	streamResult := m.wrapStreamResult(context.Background(), auth.Clone(), "codex", "public-model", "public-model", "upstream-name", nil, nil, remaining, OAuthModelAliasResult{}, false, cliproxyexecutor.Options{}, 1)
 	for range streamResult.Chunks {
 	}
 
