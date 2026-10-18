@@ -179,6 +179,9 @@ func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, mode
 	}
 	h.executorModelClientIDs = nextModelClients
 
+	h.mu.Unlock()
+
+	// The manager takes its own lock, so it is entered only after h.mu is released.
 	for _, registration := range registrations {
 		if registration.adapter == nil || registration.provider == "" {
 			continue
@@ -192,7 +195,6 @@ func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, mode
 		}
 		manager.UnregisterExecutor(provider)
 	}
-	h.mu.Unlock()
 
 	if modelRegistry == nil {
 		return
