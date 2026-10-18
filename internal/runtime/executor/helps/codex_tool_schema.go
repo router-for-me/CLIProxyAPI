@@ -26,6 +26,7 @@ const (
 
 // codexNumericBoundKeywords lists the JSON Schema numeric bound keywords that
 // the Codex backend rejects with HTTP 500 when set to an integer outside int64.
+// sanitizeCodexNumericBounds decides how each one is rewritten.
 var codexNumericBoundKeywords = [...]string{
 	"minimum",
 	"maximum",
@@ -162,9 +163,11 @@ func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 
 // stripIncompatiblePatternsFromJSON recursively removes pattern attributes that strict
 // upstream validators reject: unsupported Unicode property escapes (\p{...} / \P{...})
-// and the octal NUL escape (\0), as well as integer numeric bounds (minimum, maximum,
-// exclusiveMinimum, exclusiveMaximum) outside the signed 64-bit integer range (#6579).
-// See util.HasUnsupportedUnicodePropertyEscape for the regex predicate and upstream errors.
+// and the octal NUL escape (\0), and rewrites numeric bounds (minimum, maximum,
+// exclusiveMinimum, exclusiveMaximum) outside the signed 64-bit integer range
+// (#6579) so they keep the tool contract's strength without tripping the backend.
+// See util.HasUnsupportedUnicodePropertyEscape for the regex predicate and upstream
+// errors, sanitizeCodexNumericBounds for the bound semantics.
 // It is schema-aware: only subschemas under known JSON Schema keyword locations are visited,
 // preventing accidental deletion of keys inside user data (e.g. description, default, enum).
 func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
@@ -199,14 +202,45 @@ func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
 	return bytes.TrimSpace(buf.Bytes()), true
 }
 
-func isNumericBoundOutOfInt64(number json.Number) bool {
+// codexNumericBoundClass describes how a numeric bound literal relates to the
+// int64 range.
+type codexNumericBoundClass uint8
+
+const (
+	// codexBoundUnrestricted covers fractional values and literals that do not
+	// describe a finite integer: the backend accepts them, so they stay as written.
+	codexBoundUnrestricted codexNumericBoundClass = iota
+	codexBoundInRange
+	codexBoundAboveInt64
+	codexBoundBelowInt64
+)
+
+// int64 edge literals used when an out-of-range bound has to be rewritten
+// instead of dropped.
+const (
+	codexMinInt64Literal = "-9223372036854775808"
+	codexMaxInt64Literal = "9223372036854775807"
+)
+
+// classifyCodexNumericBound inspects a JSON number literal with bounded work —
+// mantissa digit count and exponent decide the int64-range relation, nothing is
+// materialized — and reports whether the value is an integer outside int64 and
+// in which direction it leaves the range.
+func classifyCodexNumericBound(number json.Number) codexNumericBoundClass {
 	raw := strings.TrimSpace(number.String())
 	if raw == "" {
-		return false
+		return codexBoundUnrestricted
 	}
 	if !strings.ContainsAny(raw, ".eE") {
-		_, errParse := strconv.ParseInt(raw, 10, 64)
-		return errors.Is(errParse, strconv.ErrRange)
+		if _, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
+			return codexBoundInRange
+		} else if errors.Is(errParse, strconv.ErrRange) {
+			if strings.HasPrefix(raw, "-") {
+				return codexBoundBelowInt64
+			}
+			return codexBoundAboveInt64
+		}
+		return codexBoundUnrestricted
 	}
 
 	s := raw
@@ -226,9 +260,17 @@ func isNumericBoundOutOfInt64(number json.Number) bool {
 		parsedExp, errExp := strconv.ParseInt(expStr, 10, 64)
 		if errExp != nil {
 			if errors.Is(errExp, strconv.ErrRange) {
-				return !strings.HasPrefix(expStr, "-") && strings.Trim(mantissa, "0.") != ""
+				// Magnitude far beyond int64 unless the exponent is negative
+				// (tiny value) or the mantissa is zero.
+				if strings.HasPrefix(expStr, "-") || strings.Trim(mantissa, "0.") == "" {
+					return codexBoundUnrestricted
+				}
+				if negative {
+					return codexBoundBelowInt64
+				}
+				return codexBoundAboveInt64
 			}
-			return false
+			return codexBoundUnrestricted
 		}
 		exp = parsedExp
 	}
@@ -239,50 +281,168 @@ func isNumericBoundOutOfInt64(number json.Number) bool {
 		intPart = mantissa[:dotIdx]
 		fracPart = mantissa[dotIdx+1:]
 		if strings.IndexByte(fracPart, '.') >= 0 {
-			return false
+			return codexBoundUnrestricted
 		}
 	}
 	if intPart == "" && fracPart == "" {
-		return false
+		return codexBoundUnrestricted
 	}
 	for i := 0; i < len(intPart); i++ {
 		if intPart[i] < '0' || intPart[i] > '9' {
-			return false
+			return codexBoundUnrestricted
 		}
 	}
 	for i := 0; i < len(fracPart); i++ {
 		if fracPart[i] < '0' || fracPart[i] > '9' {
-			return false
+			return codexBoundUnrestricted
 		}
 	}
 
 	allDigits := intPart + fracPart
 	sig := strings.TrimLeft(allDigits, "0")
 	if sig == "" {
-		return false
+		return codexBoundUnrestricted
 	}
 	if exp < -int64(len(raw)) {
-		return false
+		return codexBoundUnrestricted
 	}
 	if exp > int64(len(raw))+20 {
-		return true
+		if negative {
+			return codexBoundBelowInt64
+		}
+		return codexBoundAboveInt64
 	}
 	trimmed := strings.TrimRight(sig, "0")
 	trailingZeros := int64(len(sig) - len(trimmed))
 	effectiveExp := exp - int64(len(fracPart)) + trailingZeros
 	if effectiveExp < 0 {
-		return false
+		return codexBoundUnrestricted
 	}
-	if effectiveExp > 19 || int64(len(trimmed))+effectiveExp > 19 {
-		return true
+	if int64(len(trimmed))+effectiveExp > 19 {
+		if negative {
+			return codexBoundBelowInt64
+		}
+		return codexBoundAboveInt64
 	}
 
 	intStr := trimmed + strings.Repeat("0", int(effectiveExp))
 	if negative {
 		intStr = "-" + intStr
 	}
-	_, errParse := strconv.ParseInt(intStr, 10, 64)
-	return errors.Is(errParse, strconv.ErrRange)
+	if _, errParse := strconv.ParseInt(intStr, 10, 64); errParse != nil {
+		if errors.Is(errParse, strconv.ErrRange) {
+			if negative {
+				return codexBoundBelowInt64
+			}
+			return codexBoundAboveInt64
+		}
+		return codexBoundUnrestricted
+	}
+	return codexBoundInRange
+}
+
+// codexNumericBoundDomainKind mirrors the instance types numeric bounds can bind.
+type codexNumericBoundDomainKind uint8
+
+const (
+	codexDomainInteger codexNumericBoundDomainKind = iota
+	codexDomainNumber
+	codexDomainOther
+)
+
+// codexNumericBoundDomain reports which instance types a schema's numeric bounds
+// can constrain. Schemas without a usable type are treated as numeric because
+// JSON Schema bounds bind whatever numeric instances appear, while explicitly
+// non-numeric types make any numeric bound a dead constraint.
+func codexNumericBoundDomain(typeVal any) codexNumericBoundDomainKind {
+	switch t := typeVal.(type) {
+	case string:
+		switch t {
+		case "integer":
+			return codexDomainInteger
+		case "number":
+			return codexDomainNumber
+		}
+		return codexDomainOther
+	case []any:
+		integer, number := false, false
+		for _, item := range t {
+			if name, ok := item.(string); ok {
+				switch name {
+				case "integer":
+					integer = true
+				case "number":
+					number = true
+				}
+			}
+		}
+		if number {
+			return codexDomainNumber
+		}
+		if integer {
+			return codexDomainInteger
+		}
+		return codexDomainOther
+	}
+	return codexDomainNumber
+}
+
+// sanitizeCodexNumericBounds rewrites the schema's out-of-int64 bound keywords so
+// the Codex backend no longer answers with an opaque HTTP 500 that cools the
+// whole credential (#6579) while the tool contract keeps its strength (review on
+// #6591):
+//   - a bound no int64 can violate (upper bound above MaxInt64, lower bound below
+//     MinInt64) is a tautology over integer schemas and is dropped; on numeric
+//     schemas bigger JSON numbers still exist, so the bound clamps to the nearest
+//     int64 edge instead;
+//   - opposite-side bounds (upper bound below MinInt64, lower bound above
+//     MaxInt64) admit no int64 at all; clamping or dropping would widen the
+//     contract, so the schema collapses to an in-range unsatisfiable pair;
+//   - explicitly non-numeric schemas cannot bind numeric instances, so dead
+//     out-of-range bounds are simply removed.
+func sanitizeCodexNumericBounds(schema map[string]any) bool {
+	domain := codexNumericBoundDomain(schema["type"])
+	oppositeSide := false
+	changed := false
+	for _, boundKey := range codexNumericBoundKeywords {
+		boundVal, ok := schema[boundKey].(json.Number)
+		if !ok {
+			continue
+		}
+		class := classifyCodexNumericBound(boundVal)
+		if class != codexBoundAboveInt64 && class != codexBoundBelowInt64 {
+			continue
+		}
+		upper := boundKey == "maximum" || boundKey == "exclusiveMaximum"
+		switch {
+		case domain == codexDomainOther:
+			delete(schema, boundKey)
+		case (upper && class == codexBoundAboveInt64) || (!upper && class == codexBoundBelowInt64):
+			// Tautology direction: no int64 value can violate the bound.
+			if domain == codexDomainInteger {
+				delete(schema, boundKey)
+			} else if upper {
+				schema[boundKey] = json.Number(codexMaxInt64Literal)
+			} else {
+				schema[boundKey] = json.Number(codexMinInt64Literal)
+			}
+		default:
+			// Opposite side: clamp the bound to its own edge; the contradicting
+			// pair below keeps the schema unsatisfiable.
+			if upper {
+				schema[boundKey] = json.Number(codexMinInt64Literal)
+			} else {
+				schema[boundKey] = json.Number(codexMaxInt64Literal)
+			}
+			oppositeSide = true
+		}
+		changed = true
+	}
+	if oppositeSide && domain != codexDomainOther {
+		schema["minimum"] = json.Number(codexMaxInt64Literal)
+		schema["maximum"] = json.Number(codexMinInt64Literal)
+	}
+	return changed
 }
 
 func stripIncompatiblePatterns(v any) bool {
@@ -293,11 +453,8 @@ func stripIncompatiblePatterns(v any) bool {
 			delete(schema, "pattern")
 			changed = true
 		}
-		for _, boundKey := range codexNumericBoundKeywords {
-			if boundVal, ok := schema[boundKey].(json.Number); ok && isNumericBoundOutOfInt64(boundVal) {
-				delete(schema, boundKey)
-				changed = true
-			}
+		if sanitizeCodexNumericBounds(schema) {
+			changed = true
 		}
 
 		// Inspect regex keys under patternProperties
