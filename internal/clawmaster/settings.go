@@ -254,7 +254,8 @@ func nativeProjectRootsWithEnvironment(ctx context.Context, cwd string, environ 
 		}
 		return roots, nil
 	}
-	root = strings.TrimSpace(root)
+	// Git on Windows prints C:/Users/...; the roots are compared and joined as native paths.
+	root = filepath.Clean(filepath.FromSlash(strings.TrimSpace(root)))
 	if !filepath.IsAbs(root) {
 		return nil, errors.New("Git returned an invalid settings root")
 	}
@@ -268,6 +269,7 @@ func nativeProjectRootsWithEnvironment(ctx context.Context, cwd string, environ 
 	}
 	first, _, _ := strings.Cut(worktrees, "\x00")
 	mainRoot, found := strings.CutPrefix(first, "worktree ")
+	mainRoot = filepath.Clean(filepath.FromSlash(mainRoot))
 	if !found || !filepath.IsAbs(mainRoot) {
 		return nil, errors.New("Git returned an invalid main checkout")
 	}
