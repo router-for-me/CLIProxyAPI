@@ -9,12 +9,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"golang.org/x/sys/unix"
 )
 
 var profileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
@@ -45,6 +43,9 @@ type ProfileLock struct {
 }
 
 func OpenProfile(name string, create bool) (*ProfileLock, error) {
+	if err := profilesSupported(); err != nil {
+		return nil, err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, errors.New("cannot locate your home directory")
@@ -72,20 +73,15 @@ func openProfileAt(root, name string, create bool) (*ProfileLock, error) {
 	if err := ownedDirectory(dir, create, true); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Open(filepath.Join(dir, "profile.lock"), unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
+	f, err := openNoFollow(filepath.Join(dir, "profile.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, errors.New("cannot open profile lock")
 	}
-	f := os.NewFile(uintptr(fd), "profile.lock")
 	if err := privateFile(f); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
-	how := unix.LOCK_SH
-	if create {
-		how = unix.LOCK_EX
-	}
-	if err := unix.Flock(fd, how|unix.LOCK_NB); err != nil {
+	if err := tryLockFile(f, create); err != nil {
 		_ = f.Close()
 		return nil, errors.New("profile is busy: it is being logged in, or a login is waiting on its runs; wait for it to finish")
 	}
@@ -136,7 +132,7 @@ func (l *ProfileLock) Profile() (Profile, error) {
 	if meta.Provider != "claude" {
 		// Only the Claude credential has the cross-process refresh protocol. Any other provider
 		// keeps the old rule: one process per profile.
-		if err := unix.Flock(int(l.file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if err := tryLockFile(l.file, true); err != nil {
 			return Profile{}, errors.New("this provider's profile cannot be shared; it is in use by another claw-master")
 		}
 	}
@@ -306,7 +302,11 @@ func ownedDirectory(path string, create, private bool) error {
 		}
 	}
 	if create {
-		if err := os.Mkdir(abs, 0o700); err != nil && !os.IsExist(err) {
+		if err := os.Mkdir(abs, 0o700); err == nil && private {
+			if err := restrictToOwner(abs); err != nil {
+				return errors.New("cannot make the new directory private")
+			}
+		} else if err != nil && !os.IsExist(err) {
 			return errors.New("cannot create profile directory")
 		}
 	}
@@ -314,31 +314,14 @@ func ownedDirectory(path string, create, private bool) error {
 	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return errors.New("profile directory is missing or unsafe")
 	}
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok || int(sys.Uid) != os.Getuid() || st.Mode().Perm()&0o022 != 0 || (private && st.Mode().Perm() != 0o700) {
-		return errors.New("profile directories must be owned by you with safe permissions (private directories: 0700)")
-	}
-	return nil
-}
-
-func privateFile(f *os.File) error {
-	st, err := f.Stat()
-	if err != nil {
-		return errors.New("cannot inspect private file")
-	}
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok || !st.Mode().IsRegular() || st.Mode().Perm() != 0o600 || int(sys.Uid) != os.Getuid() || sys.Nlink != 1 {
-		return errors.New("private files must be owned by you, regular, unlinked, and mode 0600")
-	}
-	return nil
+	return checkOwnedDirectory(abs, st, private)
 }
 
 func openPrivateFile(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	f, err := openNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, errors.New("cannot safely open private file")
 	}
-	f := os.NewFile(uintptr(fd), "private file")
 	if err := privateFile(f); err != nil {
 		_ = f.Close()
 		return nil, err
@@ -352,6 +335,9 @@ func writePrivateFile(path string, data []byte) error {
 		return errors.New("cannot create private file")
 	}
 	defer func() { _ = f.Close() }()
+	if err := restrictToOwner(path); err != nil {
+		return errors.New("cannot make private file private")
+	}
 	if _, err := f.Write(data); err != nil {
 		return errors.New("cannot write private file")
 	}
@@ -362,6 +348,9 @@ func writePrivateFile(path string, data []byte) error {
 }
 
 func syncDirectory(path string) error {
+	if !directorySyncSupported {
+		return nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return errors.New("cannot open profile directory for durability")

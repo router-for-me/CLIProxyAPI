@@ -448,13 +448,18 @@ func updateClaudeSettingsEnv(path string, backup bool, update func(env map[strin
 // makePrivate makes an existing regular file readable by its owner only.
 func makePrivate(path string) error {
 	info, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && (!info.Mode().IsRegular() || info.Mode().Perm()&0o077 == 0)) {
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	return os.Chmod(path, info.Mode().Perm()&0o700)
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(path, info.Mode().Perm()&0o700); err != nil {
+			return err
+		}
+	}
+	return restrictToOwner(path)
 }
 
 func readAgentInstallRecord(path string) (agentInstallRecord, error) {
@@ -487,6 +492,12 @@ func writeFileAtomic(path string, data []byte, mode fs.FileMode) error {
 		return fmt.Errorf("cannot write %s: %w", path, err)
 	}
 	defer func() { _ = os.Remove(temp.Name()) }()
+	if mode&0o077 == 0 {
+		if err := restrictToOwner(temp.Name()); err != nil {
+			_ = temp.Close()
+			return fmt.Errorf("cannot write %s: %w", path, err)
+		}
+	}
 	_, errWrite := temp.Write(data)
 	errChmod := temp.Chmod(mode)
 	errSync := temp.Sync()

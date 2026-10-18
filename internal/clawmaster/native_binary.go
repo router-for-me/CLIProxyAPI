@@ -35,7 +35,7 @@ func installedNativeBinary(ctx context.Context, candidate string) (string, error
 		return "", errors.New("cannot resolve installed native Claude executable")
 	}
 	info, err := os.Stat(resolved)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if err != nil || !info.Mode().IsRegular() || !executable(info) {
 		return "", errors.New("installed native Claude is not an executable file")
 	}
 	if err := ctx.Err(); err != nil {

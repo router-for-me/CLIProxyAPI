@@ -6,13 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 const settingsByteLimit = 1024 * 1024
@@ -46,8 +45,15 @@ func validateNativeSettings(ctx context.Context, environ []string, allow setting
 		return err
 	}
 	managed := "/etc/claude-code"
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		managed = "/Library/Application Support/ClaudeCode"
+	case "windows":
+		programFiles := os.Getenv("ProgramFiles")
+		if programFiles == "" {
+			programFiles = `C:\Program Files`
+		}
+		managed = filepath.Join(programFiles, "ClaudeCode")
 	}
 	return validateSettingsAt(home, roots, managed, allow)
 }
@@ -107,14 +113,13 @@ func validateSettingsFile(path string, allow settingsEnvAllowance) error {
 	if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 {
 		return errors.New("native settings directory is unreadable or linked; inspect it before launching")
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
-	if errors.Is(err, unix.ENOENT) {
+	f, err := openNoFollow(path, os.O_RDONLY, 0)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return errors.New("native settings file is unreadable or linked; inspect it before launching")
 	}
-	f := os.NewFile(uintptr(fd), "native settings")
 	defer func() { _ = f.Close() }()
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() || st.Size() > settingsByteLimit {

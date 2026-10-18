@@ -254,9 +254,7 @@ func TestAgentInstallRunsTheJobAndPointsSettingsAtIt(t *testing.T) {
 		}
 	}
 	for _, path := range []string{x.settingsPath(), x.settingsPath() + agentSettingsBackupSuffix} {
-		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode = %v, %v; want 0600, since it holds the token", path, info.Mode().Perm(), err)
-		}
+		requirePrivateFile(t, path) // it holds the token
 	}
 	if backup, err := os.ReadFile(x.settingsPath() + agentSettingsBackupSuffix); err != nil || string(backup) != original {
 		t.Fatalf("backup = %q, %v; want the original file", backup, err)
@@ -337,10 +335,7 @@ func TestAgentInstallRecordsBeforeItChangesSettings(t *testing.T) {
 	if err := os.MkdirAll(records, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(records, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(records, 0o700) })
+	t.Cleanup(makeReadOnlyForTest(t, records))
 	if err := InstallAgent(t.Context(), x.opts); err == nil {
 		t.Fatal("install succeeded without its record")
 	}
@@ -379,17 +374,13 @@ func TestAgentUninstallRemovesValuesAnInterruptedReinstallLeft(t *testing.T) {
 	t.Cleanup(func() { cancel(); <-done })
 
 	claude := filepath.Dir(x.settingsPath())
-	if err := os.Chmod(claude, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(claude, 0o700) })
+	writable := makeReadOnlyForTest(t, claude)
+	t.Cleanup(writable)
 	err = InstallAgent(t.Context(), x.opts)
 	if err == nil || !strings.Contains(err.Error(), "settings.json") {
 		t.Fatalf("reinstall with ~/.claude read-only = %v; want the settings write to fail", err)
 	}
-	if err := os.Chmod(claude, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writable()
 	if now, _ := os.ReadFile(x.settingsPath()); string(now) != string(first) {
 		t.Fatal("the failed reinstall changed the settings")
 	}
@@ -410,17 +401,13 @@ func TestAgentReinstallMakesTheSettingsPrivateAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{x.settingsPath(), x.settingsPath() + agentSettingsBackupSuffix} {
-		if err := os.Chmod(path, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		loosenForTest(t, path)
 	}
 	if err := InstallAgent(t.Context(), x.opts); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{x.settingsPath(), x.settingsPath() + agentSettingsBackupSuffix} {
-		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode = %v, %v after reinstall; want 0600", path, info.Mode().Perm(), err)
-		}
+		requirePrivateFile(t, path)
 	}
 }
 
@@ -548,9 +535,7 @@ func TestConnectAcceptsSettingsThatPointAtThisMachinesAgent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeClaude(t, bin)
 	lines, err := AgentEnvironment(AgentOptions{Listen: "127.0.0.1:8445", Open: proxy.OpenAddr(), CAFile: certs.caPath})
 	if err != nil {
 		t.Fatal(err)
@@ -563,8 +548,8 @@ func TestConnectAcceptsSettingsThatPointAtThisMachinesAgent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), agentSettingsJSON(t, env), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", home)
-	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	setHomeForTest(t, home)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+systemPathForTest())
 	t.Chdir(work)
 
 	opts := ConnectOptions{Open: proxy.OpenAddr(), CAFile: certs.caPath}

@@ -15,6 +15,19 @@ import (
 	"time"
 )
 
+// requirePrivateFile fails unless only this user can read path (mode 0600 on Unix; on Windows, its
+// owner and DACL).
+func requirePrivateFile(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readableByOthers(path, info) {
+		t.Fatalf("%s can be read by others", path)
+	}
+}
+
 func agentTestCA(t *testing.T, dir string) string {
 	t.Helper()
 	_, caPEM := forwarderGymCA(t, "claw-master agent test")
@@ -31,13 +44,7 @@ func TestAgentTokenIsCreatedPrivateAndKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("token file mode = %v, want 0600", info.Mode().Perm())
-	}
+	requirePrivateFile(t, path)
 	second, err := agentToken(path)
 	if err != nil {
 		t.Fatal(err)

@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -213,7 +212,7 @@ func newInferenceBackend(ctx context.Context, profiles []Profile, opts LaunchOpt
 func runNativeChild(ctx context.Context, bin string, args, env []string) (int, error) {
 	lg().Info("native Claude starting")
 	child := exec.CommandContext(ctx, bin, args...)
-	child.Cancel = func() error { return child.Process.Signal(syscall.SIGTERM) }
+	child.Cancel = func() error { return stopChild(child.Process) }
 	// This bounds process shutdown only; inference streams have no post-connect wall-clock timeout.
 	child.WaitDelay = 5 * time.Second
 	child.Env = env

@@ -18,7 +18,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clawmaster"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
 )
 
 type stringListFlag []string
@@ -81,11 +80,10 @@ func readBackupAPIKey(source string, explicit bool) (string, string, error) {
 	if path == "" {
 		return "", "", errors.New("backup API key requires a file path or env:VARIABLE")
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	file, err := openWithoutBlocking(path)
 	if err != nil {
 		return "", "", errors.New("cannot read backup API key file")
 	}
-	file := os.NewFile(uintptr(fd), "backup-api-key")
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > backupAPIKeyByteLimit {

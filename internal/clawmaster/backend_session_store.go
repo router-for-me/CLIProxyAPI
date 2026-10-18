@@ -230,13 +230,7 @@ func writeBackendSessionRoute(dir, name string, raw []byte) error {
 	if errRename := os.Rename(tempPath, filepath.Join(dir, name)); errRename != nil {
 		return errors.New("cannot commit conversation routing record")
 	}
-	directory, errOpen := os.Open(dir)
-	if errOpen != nil {
-		return errors.New("cannot open conversation routing directory for sync")
-	}
-	errSync := directory.Sync()
-	errClose := directory.Close()
-	if errSync != nil || errClose != nil {
+	if err := syncDirectory(dir); err != nil {
 		return errors.New("cannot sync conversation routing directory")
 	}
 	return nil

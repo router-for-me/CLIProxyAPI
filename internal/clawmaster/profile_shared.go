@@ -9,7 +9,6 @@ import (
 	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"golang.org/x/sys/unix"
 )
 
 // Several claw-master processes (one per Claude Code window) share one profile. A subscription
@@ -37,11 +36,10 @@ func lockRefresh(ctx context.Context, authDir string) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	fd, err := unix.Open(filepath.Clean(authDir)+".refresh.lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
+	f, err := openNoFollow(filepath.Clean(authDir)+".refresh.lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, errors.New("cannot open the credential refresh lock")
 	}
-	f := os.NewFile(uintptr(fd), "refresh.lock")
 	if err := privateFile(f); err != nil {
 		_ = f.Close()
 		return nil, err
@@ -49,11 +47,11 @@ func lockRefresh(ctx context.Context, authDir string) (func(), error) {
 	timeout := time.NewTimer(refreshLockWait)
 	defer timeout.Stop()
 	for {
-		errLock := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		errLock := tryLockFile(f, true)
 		if errLock == nil {
 			return func() { _ = f.Close() }, nil
 		}
-		if !errors.Is(errLock, unix.EWOULDBLOCK) && !errors.Is(errLock, unix.EINTR) {
+		if !errors.Is(errLock, errLockBusy) {
 			_ = f.Close()
 			return nil, errors.New("cannot take the credential refresh lock")
 		}

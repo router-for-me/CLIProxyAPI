@@ -226,6 +226,10 @@ func agentToken(path string) (string, error) {
 		return "", fmt.Errorf("cannot create the agent token %s: %w", path, err)
 	}
 	defer func() { _ = os.Remove(temp.Name()) }()
+	if err := restrictToOwner(temp.Name()); err != nil {
+		_ = temp.Close()
+		return "", fmt.Errorf("cannot make the agent token %s private: %w", path, err)
+	}
 	_, errWrite := temp.WriteString(rand.Text() + "\n")
 	errSync := temp.Sync()
 	errClose := temp.Close()
@@ -246,7 +250,7 @@ func readAgentToken(path string) (string, error) {
 	if !info.Mode().IsRegular() || info.Size() > 256 {
 		return "", fmt.Errorf("the agent token %s is not a small regular file", path)
 	}
-	if agentTokenTooOpen(info) {
+	if readableByOthers(path, info) {
 		return "", fmt.Errorf("the agent token %s can be read by others; make it private (chmod 600)", path)
 	}
 	raw, err := os.ReadFile(path)
@@ -258,10 +262,4 @@ func readAgentToken(path string) (string, error) {
 		return "", fmt.Errorf("the agent token %s is malformed (16 or more letters, digits, - or _); delete it and start the agent again", path)
 	}
 	return token, nil
-}
-
-// agentTokenTooOpen reports permission bits that let others read the token. Windows has no such
-// bits (os reports 0666 or 0444); there the file's ACL, inherited from the user's profile, decides.
-func agentTokenTooOpen(info fs.FileInfo) bool {
-	return os.PathSeparator == '/' && info.Mode().Perm()&0o077 != 0
 }

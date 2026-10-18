@@ -140,7 +140,7 @@ func TestBackendSessionRoutesAPIBackupSameKeyRestoresDifferentKeyRefuses(t *test
 				t.Fatal("private routing record leaked credentials or raw session identity")
 			}
 			info, errStat := entry.Info()
-			if errStat != nil || info.Mode().Perm() != 0o600 {
+			if errStat != nil || readableByOthers(filepath.Join(dir, entry.Name()), info) {
 				t.Fatal("routing file was not private")
 			}
 		}

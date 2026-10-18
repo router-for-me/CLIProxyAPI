@@ -203,8 +203,8 @@ func TestLoadBackendCredentialAndConstrainedRefreshStore(t *testing.T) {
 		t.Fatal("successful credential refresh left extra authentication files")
 	}
 	info, err := os.Stat(filepath.Join(opts.AuthDir, opts.AuthID))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatal("refreshed credential is not mode 0600")
+	if err != nil || readableByOthers(filepath.Join(opts.AuthDir, opts.AuthID), info) {
+		t.Fatal("refreshed credential is not private")
 	}
 }
 
@@ -455,13 +455,9 @@ func TestLoadBackendCredentialRejectsExtraOrUnsafeFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "public-file":
-				if err := os.Chmod(path, 0o644); err != nil {
-					t.Fatal(err)
-				}
+				loosenForTest(t, path)
 			case "public-dir":
-				if err := os.Chmod(opts.AuthDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
+				loosenForTest(t, opts.AuthDir)
 			case "wrong-id":
 				opts.AuthID = "other.json"
 			case "traversal":

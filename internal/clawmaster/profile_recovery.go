@@ -141,7 +141,7 @@ func readRefreshSnapshot(path string) (map[string]any, error) {
 		return nil, errors.New("credential refresh snapshot is not an object")
 	}
 	// Ensure a recovered complete stage is durable before replacing the old file.
-	if err := f.Sync(); err != nil {
+	if err := syncReadOnlyFile(f); err != nil {
 		return nil, errors.New("cannot sync credential refresh snapshot")
 	}
 	return snapshot, nil

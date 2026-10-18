@@ -16,7 +16,6 @@ import (
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"golang.org/x/sys/unix"
 )
 
 // sharedClaudeExecutor is the Claude executor for a profile several claw-master processes use at
@@ -225,10 +224,7 @@ func (s *backendStore) diskSnapshot() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ino uint64
-	if stat, ok := info.Sys().(*unix.Stat_t); ok {
-		ino = stat.Ino
-	}
+	ino := fileInode(info)
 	s.view.mu.Lock()
 	defer s.view.mu.Unlock()
 	if s.view.snapshot != nil && s.view.ino == ino && s.view.size == info.Size() && s.view.mtime.Equal(info.ModTime()) {

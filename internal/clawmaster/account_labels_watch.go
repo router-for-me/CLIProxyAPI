@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"syscall"
 	"time"
 )
 
@@ -48,9 +47,5 @@ func accountLabelsFingerprint(file string) string {
 	if err != nil {
 		return ""
 	}
-	var ino uint64
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		ino = st.Ino
-	}
-	return fmt.Sprintf("%d/%d/%d", ino, info.Size(), info.ModTime().UnixNano())
+	return fmt.Sprintf("%d/%d/%d", fileInode(info), info.Size(), info.ModTime().UnixNano())
 }

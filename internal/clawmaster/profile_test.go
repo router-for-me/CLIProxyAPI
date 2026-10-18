@@ -93,9 +93,7 @@ func TestProfileMetadataAndPrivatePermissions(t *testing.T) {
 	if profile.Provider != "claude" || profile.AuthID != "synthetic.json" || profile.Name != "test-user" {
 		t.Fatalf("wrong non-secret profile: %#v", profile)
 	}
-	if err := os.Chmod(filepath.Join(profile.AuthDir, profile.AuthID), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	loosenForTest(t, filepath.Join(profile.AuthDir, profile.AuthID))
 	if _, err := lock.Profile(); err == nil {
 		t.Fatal("accepted world-readable credential")
 	}
@@ -146,9 +144,7 @@ func TestProfileRejectsLinkedOrPublicDirectories(t *testing.T) {
 		_ = lock.Close()
 		t.Fatal("accepted symlink root")
 	}
-	if err := os.Chmod(actual, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	loosenForTest(t, actual)
 	if lock, err := openProfileAt(actual, "test", true); err == nil {
 		_ = lock.Close()
 		t.Fatal("accepted nonprivate root")
