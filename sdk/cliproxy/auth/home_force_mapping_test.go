@@ -632,3 +632,37 @@ func TestHomeForceMappingAliasResultRequiresExplicitFlag(t *testing.T) {
 		t.Fatalf("homeForceMappingAliasResult() = %+v, want no force mapping", result)
 	}
 }
+
+// Auth-selection metadata replaces execReq.Model with the execution model after
+// the alias candidates are built, so the Home result reported to hooks must
+// carry the model actually sent upstream — not the unrelated alias candidate
+// from the dispatch selection (#5514 review).
+func TestHomeAuthSelectionResultReportsExecutedUpstreamModel(t *testing.T) {
+	registry := executionregistry.New()
+	dispatcher := &authSelectionAliasDispatcher{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(dispatcher, registry, 1)
+	manager.RegisterExecutor(authSelectionAliasExecutor{})
+	t.Cleanup(func() { manager.CloseExecutionSession("auth-selection-upstream-model") })
+
+	hook := &recordingHook{}
+	manager.hook = hook
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.AuthSelectionModelMetadataKey: "route-model",
+		cliproxyexecutor.ExecutionSessionMetadataKey:   "auth-selection-upstream-model",
+		cliproxyexecutor.PinnedAuthMetadataKey:         "auth-selection-route-auth",
+	}}
+	if _, errExecute := manager.Execute(ctx, []string{"force-mapping"}, cliproxyexecutor.Request{Model: "execution-model"}, opts); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	result := hook.lastResult.Load()
+	if result == nil {
+		t.Fatal("no home result reported")
+	}
+	if got := result.UpstreamModel; got != "execution-model" {
+		t.Fatalf("reported UpstreamModel = %q, want the executed model sent upstream", got)
+	}
+}
