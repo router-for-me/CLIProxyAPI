@@ -115,6 +115,24 @@ func (c *SDKConfig) TLSHandshakeTimeout() time.Duration {
 // ClientConfig configures client-facing compatibility behavior.
 type ClientConfig struct {
 	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+
+	// KeyScopes limits client API keys to the credentials of the providers they list.
+	// A scoped key only sees those providers' models and can only send requests to them.
+	// Keys that match no entry are unrestricted. The list sits behind a pointer so that
+	// ClientConfig stays comparable with ==.
+	KeyScopes *[]ClientKeyScope `yaml:"key-scopes,omitempty" json:"key-scopes,omitempty"`
+}
+
+// ClientKeyScope limits the client API keys starting with KeyPrefix to Providers.
+type ClientKeyScope struct {
+	// KeyPrefix selects the client API keys the scope applies to: every key that starts
+	// with it. A full key is also a valid prefix. The longest matching prefix wins.
+	KeyPrefix string `yaml:"key-prefix" json:"key-prefix"`
+	// Providers lists the provider keys the matching keys may use, for example claude,
+	// codex, gemini, xai or the name of an openai-compatibility entry, and the IDs of
+	// executor plugins a model router may hand their requests to. anthropic, openai,
+	// chatgpt, muse and grok are accepted aliases.
+	Providers []string `yaml:"providers" json:"providers"`
 }
 
 // CodexClientConfig configures Codex client compatibility and the model catalog.

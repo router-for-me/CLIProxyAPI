@@ -297,9 +297,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		if errMsg := h.scopePluginExecutor(ctx, originalRequestedModel, routeDecision.ExecutorPluginID); errMsg != nil {
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- errMsg
+			close(errChan)
+			return nil, nil, errChan
+		}
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.scopedProvidersForExecution(ctx, modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
