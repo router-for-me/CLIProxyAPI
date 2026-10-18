@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,9 @@ type agentInstallRecord struct {
 	Plist    string                     `json:"plist"`
 	Set      map[string]string          `json:"set"`
 	Previous map[string]json.RawMessage `json:"previous,omitempty"`
+	// Earlier are values earlier installs set, so uninstall still recognizes one a reinstall did not
+	// get to replace.
+	Earlier map[string][]string `json:"earlier,omitempty"`
 }
 
 // agentConflictingEnv are proxy settings that Claude would take over the ones the agent sets
@@ -112,11 +116,17 @@ func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	if err != nil {
 		return err
 	}
-	record := agentInstallRecord{Settings: settingsPath, Plist: plistPath, Set: map[string]string{}, Previous: map[string]json.RawMessage{}}
+	record := agentInstallRecord{Settings: settingsPath, Plist: plistPath, Set: map[string]string{}, Previous: map[string]json.RawMessage{}, Earlier: map[string][]string{}}
 	old, err := readAgentInstallRecord(opts.recordPath())
 	reinstall := err == nil && old.Settings == settingsPath
 	if reinstall {
 		record.Previous = old.Previous // what the first install replaced
+		for key, values := range old.Earlier {
+			record.Earlier[key] = append(record.Earlier[key], values...)
+		}
+		for key, value := range old.Set {
+			record.Earlier[key] = append(record.Earlier[key], value)
+		}
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -180,7 +190,7 @@ func UninstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	if _, err := updateClaudeSettingsEnv(record.Settings, false, func(env map[string]json.RawMessage) error {
 		for key, value := range record.Set {
 			var current string
-			if raw, ok := env[key]; !ok || json.Unmarshal(raw, &current) != nil || current != value {
+			if raw, ok := env[key]; !ok || json.Unmarshal(raw, &current) != nil || (current != value && !slices.Contains(record.Earlier[key], current)) {
 				continue // changed since the install: leave it
 			}
 			if previous, ok := record.Previous[key]; ok {

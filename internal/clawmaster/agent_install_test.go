@@ -321,7 +321,7 @@ func TestAgentInstallWritesNoSettingsUnlessItsAgentAnswers(t *testing.T) {
 			x.mu.Lock()
 			defer x.mu.Unlock()
 			for _, request := range x.seen {
-				if strings.Contains(request, token) {
+				if strings.Contains(request, token) || strings.Contains(strings.ToLower(request), "proxy-authorization") {
 					t.Fatalf("the probe sent the token to another program: %q", request)
 				}
 			}
@@ -346,6 +346,60 @@ func TestAgentInstallRecordsBeforeItChangesSettings(t *testing.T) {
 	}
 	if raw, _ := os.ReadFile(x.settingsPath()); string(raw) != `{"model":"claude-test-model"}` {
 		t.Fatalf("settings changed although nothing records how to undo it: %s", raw)
+	}
+}
+
+// A reinstall on another port whose settings write fails leaves the earlier install's values in the
+// settings; uninstall must still take them out.
+func TestAgentUninstallRemovesValuesAnInterruptedReinstallLeft(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	x.writeSettings(t, `{"model":"claude-test-model"}`, 0o600)
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(x.settingsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The same agent (same token) on another port, as launchd would run it after the reinstall.
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.opts.Agent.Listen = listener.Addr().String()
+	endpoint, err := resolveAgent(x.opts.Agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint.check = func(context.Context) error { return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveAgent(ctx, listener, endpoint, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	claude := filepath.Dir(x.settingsPath())
+	if err := os.Chmod(claude, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(claude, 0o700) })
+	err = InstallAgent(t.Context(), x.opts)
+	if err == nil || !strings.Contains(err.Error(), "settings.json") {
+		t.Fatalf("reinstall with ~/.claude read-only = %v; want the settings write to fail", err)
+	}
+	if err := os.Chmod(claude, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if now, _ := os.ReadFile(x.settingsPath()); string(now) != string(first) {
+		t.Fatal("the failed reinstall changed the settings")
+	}
+
+	if err := UninstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	after := readSettingsForTest(t, x.settingsPath())
+	if _, ok := after["env"]; ok || after["model"] != "claude-test-model" {
+		t.Fatalf("after uninstall settings = %v; want the first install's entries gone", after)
 	}
 }
 
