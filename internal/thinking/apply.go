@@ -732,6 +732,9 @@ func reasoningEffortFromConfig(config ThinkingConfig) string {
 // When type="enabled", budget_tokens takes precedence over output_config.effort.
 // When type="enabled" without budget_tokens, output_config.effort is preserved if present;
 // otherwise returns ModeAuto to indicate the user wants thinking enabled with default budget.
+// When type="adaptive", output_config.effort takes precedence; a budget_tokens value
+// without an effort is read as a budget so the applier can rewrite it into a shape
+// the target accepts (adaptive thinking itself rejects budget_tokens).
 func extractClaudeConfig(body []byte) ThinkingConfig {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
@@ -739,14 +742,13 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	}
 	if thinkingType == "adaptive" || thinkingType == "auto" {
 		// Claude adaptive thinking uses output_config.effort (low/medium/high/max).
-		// We only treat it as a thinking config when effort is explicitly present;
-		// otherwise we passthrough and let upstream defaults apply.
+		// We treat it as a thinking config when effort is explicitly present, or
+		// when a budget_tokens field must be rewritten; otherwise we passthrough
+		// and let upstream defaults apply.
 		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {
-			value := strings.ToLower(strings.TrimSpace(effort.String()))
-			if value == "" {
-				return ThinkingConfig{}
-			}
-			switch value {
+			switch value := strings.ToLower(strings.TrimSpace(effort.String())); value {
+			case "":
+				// An empty effort carries no level; budget_tokens below may still apply.
 			case "none":
 				return ThinkingConfig{Mode: ModeNone, Budget: 0}
 			case "auto":
@@ -755,7 +757,9 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 			}
 		}
-		return ThinkingConfig{}
+		if !gjson.GetBytes(body, "thinking.budget_tokens").Exists() {
+			return ThinkingConfig{}
+		}
 	}
 
 	// Check budget_tokens
