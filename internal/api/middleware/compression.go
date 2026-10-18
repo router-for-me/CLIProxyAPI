@@ -15,7 +15,9 @@ import (
 // WebSocket upgrades and management endpoints retain their existing wire representation.
 func ResponseCompression() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.Method == http.MethodHead || strings.HasPrefix(c.Request.URL.Path, "/v0/management") || strings.Contains(strings.ToLower(c.GetHeader("Connection")), "upgrade") || c.GetHeader("Upgrade") != "" {
+		if c.Request.Method == http.MethodHead ||
+			strings.HasPrefix(c.Request.URL.Path, "/v0/management") || strings.HasPrefix(c.Request.URL.Path, "/v8/management") ||
+			strings.Contains(strings.ToLower(c.GetHeader("Connection")), "upgrade") || c.GetHeader("Upgrade") != "" {
 			c.Next()
 			return
 		}

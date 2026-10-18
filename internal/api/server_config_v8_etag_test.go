@@ -33,6 +33,7 @@ func TestConfigV8ETagExposedForCORS(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest(method, "/v8/management/config.yaml", strings.NewReader(body))
 		req.Header.Set("Origin", "http://127.0.0.1:5173")
+		req.Header.Set("Accept-Encoding", "gzip, br, zstd")
 		req.Header.Set("Authorization", "Bearer test-management-key")
 		if ifMatch != "" {
 			req.Header.Set("If-Match", ifMatch)
@@ -67,4 +68,7 @@ func TestConfigV8ETagExposedForCORS(t *testing.T) {
 	wantETagExposed(do(http.MethodPut, "config-version: 8\n", `"stale"`), http.StatusPreconditionFailed)
 	// A successful conditional write chains through its exposed new ETag.
 	wantETagExposed(do(http.MethodPut, "config-version: 8\nserver: {port: 8318}\n", etag), http.StatusOK)
+	if strings.HasPrefix(etag, "W/") {
+		t.Fatalf("ETag = %q, want a strong validator for If-Match", etag)
+	}
 }
