@@ -1,7 +1,7 @@
 package models
 
-// ApplyUltrafastAvailability exposes Ultrafast when the account pool supports it.
-func ApplyUltrafastAvailability(response map[string]any, available bool) {
+// ApplyUltrafastAvailability exposes Ultrafast for models served by an eligible account.
+func ApplyUltrafastAvailability(response map[string]any, available func(string) bool) {
 	models, _ := response["models"].([]map[string]any)
 	for _, model := range models {
 		tiers, _ := model["service_tiers"].([]any)
@@ -13,7 +13,7 @@ func ApplyUltrafastAvailability(response map[string]any, available bool) {
 			}
 		}
 		// Empty tiers also cover models served by non-Codex providers.
-		if available && len(filtered) > 0 {
+		if len(filtered) > 0 && available(stringModelValue(model, "slug")) {
 			switch codexClientMetadataModelID(stringModelValue(model, "slug")) {
 			case "gpt-6.1-sol", "gpt-6-astra":
 				filtered = append(filtered, map[string]any{

@@ -705,8 +705,10 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 
 	cfg := s.getConfig()
 	models := make([]map[string]any, 0, len(entries))
+	ultrafastModels := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		models = append(models, formatHomeCodexModelWithSettings(entry, cfg))
+		ultrafastModels[entry.id] = entry.supportsUltrafast
 	}
 
 	var webSearchCapabilityForModel codexmodels.WebSearchCapabilityForModelFunc
@@ -730,6 +732,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 		// tool_search, which never consulted Home routes for search support.
 		payload = codexmodels.BuildResponseForClientWithToolCapabilities(models, nil, webSearchCapabilityForModel, applyPatchCapabilityForModel, nil, optimizeMultiAgentV2, clientVersion)
 	}
+	codexmodels.ApplyUltrafastAvailability(payload, func(id string) bool { return ultrafastModels[id] })
 	body, errMarshal := codexmodels.MarshalCompact(payload)
 	if errMarshal != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
@@ -897,6 +900,7 @@ type homeModelEntry struct {
 	maxContextLength       int
 	maxCompletionTokens    int
 	thinking               *registry.ThinkingSupport
+	supportsUltrafast      bool
 	providers              []string
 	nativeCapabilityRoutes []registry.NativeCapabilityRoute
 }
@@ -1184,11 +1188,13 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				continue
 			}
 			nativeCapabilities := homeModelNativeCapabilities(model)
+			supportsUltrafast, _ := model["supports_ultrafast"].(bool)
 			route := registry.NativeCapabilityRoute{
 				Provider:           provider,
 				NativeCapabilities: nativeCapabilities,
 			}
 			if index, ok := indexByID[id]; ok {
+				out[index].supportsUltrafast = out[index].supportsUltrafast || supportsUltrafast
 				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
 				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
 				continue
@@ -1214,6 +1220,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				maxContextLength:       int(homeModelInt64Value(model, "max_context_length", "maxContextLength")),
 				maxCompletionTokens:    int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens")),
 				thinking:               thinking,
+				supportsUltrafast:      supportsUltrafast,
 				providers:              appendUniqueHomeProvider(nil, provider),
 				nativeCapabilityRoutes: []registry.NativeCapabilityRoute{route},
 			})
