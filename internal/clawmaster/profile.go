@@ -302,11 +302,11 @@ func ownedDirectory(path string, create, private bool) error {
 		}
 	}
 	if create {
-		if err := os.Mkdir(abs, 0o700); err == nil && private {
-			if err := restrictToOwner(abs); err != nil {
-				return errors.New("cannot make the new directory private")
-			}
-		} else if err != nil && !os.IsExist(err) {
+		mkdir := func(path string) error { return os.Mkdir(path, 0o700) }
+		if private {
+			mkdir = mkdirPrivate
+		}
+		if err := mkdir(abs); err != nil && !os.IsExist(err) {
 			return errors.New("cannot create profile directory")
 		}
 	}
@@ -330,14 +330,11 @@ func openPrivateFile(path string) (*os.File, error) {
 }
 
 func writePrivateFile(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := createPrivateFile(path)
 	if err != nil {
 		return errors.New("cannot create private file")
 	}
 	defer func() { _ = f.Close() }()
-	if err := restrictToOwner(path); err != nil {
-		return errors.New("cannot make private file private")
-	}
 	if _, err := f.Write(data); err != nil {
 		return errors.New("cannot write private file")
 	}

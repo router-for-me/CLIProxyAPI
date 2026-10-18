@@ -308,9 +308,7 @@ func TestTheLogFileRotatesBySizeAndKeepsAFixedNumberOfFiles(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 		info, _ := e.Info()
-		if readableByOthers(filepath.Join(dir, e.Name()), info) {
-			t.Errorf("%s can be read by others", e.Name())
-		}
+		requirePrivateFile(t, filepath.Join(dir, e.Name()))
 		if info.Size() > 400+200 {
 			t.Errorf("%s is %d bytes, far over its 400 byte limit", e.Name(), info.Size())
 		}

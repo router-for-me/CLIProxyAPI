@@ -487,17 +487,15 @@ func writeAgentInstallRecord(path string, record agentInstallRecord) error {
 
 // writeFileAtomic replaces path with data: a reader sees the old file or the new one, never a part.
 func writeFileAtomic(path string, data []byte, mode fs.FileMode) error {
-	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	create := func() (*os.File, error) { return os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*") }
+	if mode&0o077 == 0 {
+		create = func() (*os.File, error) { return createPrivateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-") }
+	}
+	temp, err := create()
 	if err != nil {
 		return fmt.Errorf("cannot write %s: %w", path, err)
 	}
 	defer func() { _ = os.Remove(temp.Name()) }()
-	if mode&0o077 == 0 {
-		if err := restrictToOwner(temp.Name()); err != nil {
-			_ = temp.Close()
-			return fmt.Errorf("cannot write %s: %w", path, err)
-		}
-	}
 	_, errWrite := temp.Write(data)
 	errChmod := temp.Chmod(mode)
 	errSync := temp.Sync()

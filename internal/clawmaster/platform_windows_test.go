@@ -205,3 +205,64 @@ func setHomeForTest(t *testing.T, home string) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 }
+
+// requirePrivateFile fails unless only this user (and SYSTEM and Administrators) can open path.
+func requirePrivateFile(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || readableByOthers(path, info) {
+		t.Fatalf("%s can be read by others", path)
+	}
+}
+
+// The parent here passes read access for Everyone to new files; a private file must not get it,
+// not even for the instant before its permissions are replaced.
+func TestWindowsPrivateFilesArePrivateFromCreation(t *testing.T) {
+	dir := privateTestDir(t)
+	if out, err := exec.Command("icacls", dir, "/grant", "*S-1-1-0:(OI)(CI)(R)").CombinedOutput(); err != nil {
+		t.Fatalf("icacls: %v: %s", err, out)
+	}
+	f, err := createPrivateFile(filepath.Join(dir, "client.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkOwnedSecurity(sd, true); err != nil {
+		t.Fatalf("a file just created is not private (%s): %v", sd, err)
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := mkdirPrivate(sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownedDirectory(sub, false, true); err != nil {
+		t.Fatalf("a directory just created is not private: %v", err)
+	}
+}
+
+// A private directory that passes access for others on to what is created in it is not private.
+func TestWindowsPrivateDirectoryRefusesInheritableGrants(t *testing.T) {
+	dir := privateTestDir(t)
+	if err := ownedDirectory(dir, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("icacls", dir, "/grant", "*S-1-1-0:(OI)(CI)(IO)(R)").CombinedOutput(); err != nil {
+		t.Fatalf("icacls: %v: %s", err, out)
+	}
+	if err := ownedDirectory(dir, false, true); err == nil {
+		t.Fatal("a directory whose new files Everyone may read was accepted as private")
+	}
+}
+
+func TestWindowsManagedSettingsAreReadFromClaudeCodesFixedPath(t *testing.T) {
+	t.Setenv("ProgramFiles", `D:\elsewhere`)
+	if got := managedSettingsDir(); got != `C:\Program Files\ClaudeCode` {
+		t.Fatalf("managed settings directory = %s, want C:\\Program Files\\ClaudeCode", got)
+	}
+}

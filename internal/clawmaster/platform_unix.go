@@ -73,6 +73,14 @@ func readableByOthers(_ string, info fs.FileInfo) bool {
 	return info.Mode().Perm()&0o077 != 0
 }
 
+// createPrivateFile creates path, which must not exist, for reading and writing, mode 0600.
+func createPrivateFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+}
+
+// mkdirPrivate creates the directory path, mode 0700.
+func mkdirPrivate(path string) error { return os.Mkdir(path, 0o700) }
+
 // restrictToOwner is the Windows half of creating a private file or directory; on Unix the mode
 // given at creation (0600, 0700) already does it.
 func restrictToOwner(string) error { return nil }

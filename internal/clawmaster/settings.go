@@ -44,18 +44,19 @@ func validateNativeSettings(ctx context.Context, environ []string, allow setting
 	if err != nil {
 		return err
 	}
-	managed := "/etc/claude-code"
+	return validateSettingsAt(home, roots, managedSettingsDir(), allow)
+}
+
+// managedSettingsDir is where Claude Code reads managed settings. On Windows the path is fixed, as
+// Claude Code has it, whatever %ProgramFiles% says.
+func managedSettingsDir() string {
 	switch runtime.GOOS {
 	case "darwin":
-		managed = "/Library/Application Support/ClaudeCode"
+		return "/Library/Application Support/ClaudeCode"
 	case "windows":
-		programFiles := os.Getenv("ProgramFiles")
-		if programFiles == "" {
-			programFiles = `C:\Program Files`
-		}
-		managed = filepath.Join(programFiles, "ClaudeCode")
+		return `C:\Program Files\ClaudeCode`
 	}
-	return validateSettingsAt(home, roots, managed, allow)
+	return "/etc/claude-code"
 }
 
 func validateSettingsAt(home string, roots []string, managed string, allow settingsEnvAllowance) error {

@@ -50,3 +50,15 @@ func writeGymShim(t *testing.T, bin, binaryEnv string) {
 
 // setHomeForTest makes home the user's home directory for this test.
 func setHomeForTest(t *testing.T, home string) { t.Setenv("HOME", home) }
+
+// requirePrivateFile fails unless path is a regular file with mode exactly 0600.
+func requirePrivateFile(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("%s is %v, want a regular file with mode 0600", path, info.Mode())
+	}
+}

@@ -221,15 +221,11 @@ func agentToken(path string) (string, error) {
 	if token, err := readAgentToken(path); !errors.Is(err, fs.ErrNotExist) {
 		return token, err
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".agent.token-*") // created 0600
+	temp, err := createPrivateTemp(filepath.Dir(path), ".agent.token-")
 	if err != nil {
 		return "", fmt.Errorf("cannot create the agent token %s: %w", path, err)
 	}
 	defer func() { _ = os.Remove(temp.Name()) }()
-	if err := restrictToOwner(temp.Name()); err != nil {
-		_ = temp.Close()
-		return "", fmt.Errorf("cannot make the agent token %s private: %w", path, err)
-	}
 	_, errWrite := temp.WriteString(rand.Text() + "\n")
 	errSync := temp.Sync()
 	errClose := temp.Close()

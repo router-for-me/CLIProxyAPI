@@ -202,10 +202,7 @@ func TestLoadBackendCredentialAndConstrainedRefreshStore(t *testing.T) {
 	if err != nil || len(entries) != 1 || entries[0].Name() != opts.AuthID {
 		t.Fatal("successful credential refresh left extra authentication files")
 	}
-	info, err := os.Stat(filepath.Join(opts.AuthDir, opts.AuthID))
-	if err != nil || readableByOthers(filepath.Join(opts.AuthDir, opts.AuthID), info) {
-		t.Fatal("refreshed credential is not private")
-	}
+	requirePrivateFile(t, filepath.Join(opts.AuthDir, opts.AuthID))
 }
 
 func TestLoadBackendCredentialAsKeepsRuntimeIDOutOfPersistence(t *testing.T) {

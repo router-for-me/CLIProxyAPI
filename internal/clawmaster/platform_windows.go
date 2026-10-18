@@ -116,19 +116,64 @@ func readableByOthers(path string, _ fs.FileInfo) bool {
 	return err != nil || checkOwnedSecurity(sd, true) != nil
 }
 
+// privateSecurityAttributes is the owner-only descriptor restrictToOwner applies, for creating a
+// file or directory that is private from its first instant: no handle can be opened on it under
+// the parent's inherited permissions before they are replaced.
+func privateSecurityAttributes() (*windows.SecurityAttributes, error) {
+	user, err := currentUserSID()
+	if err != nil {
+		return nil, err
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.String() + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		return nil, err
+	}
+	return &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}, nil
+}
+
+// createPrivateFile creates path, which must not exist, for reading and writing, private to this user.
+func createPrivateFile(path string) (*os.File, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, &fs.PathError{Op: "create", Path: path, Err: err}
+	}
+	sa, err := privateSecurityAttributes()
+	if err != nil {
+		return nil, &fs.PathError{Op: "create", Path: path, Err: err}
+	}
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, share, sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, &fs.PathError{Op: "create", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
+// mkdirPrivate creates the directory path private to this user.
+func mkdirPrivate(path string) error {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return &fs.PathError{Op: "mkdir", Path: path, Err: err}
+	}
+	sa, err := privateSecurityAttributes()
+	if err != nil {
+		return &fs.PathError{Op: "mkdir", Path: path, Err: err}
+	}
+	if err := windows.CreateDirectory(name, sa); err != nil {
+		return &fs.PathError{Op: "mkdir", Path: path, Err: err}
+	}
+	return nil
+}
+
 // restrictToOwner gives path a protected DACL, as mode 0600 or 0700 does on Unix: full control for
 // this user, SYSTEM and Administrators (who hold it on every user's profile anyway), nothing
 // inherited from the parent, and the same for anything later created inside.
 func restrictToOwner(path string) error {
-	user, err := currentUserSID()
+	sa, err := privateSecurityAttributes()
 	if err != nil {
 		return err
 	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.String() + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
-	if err != nil {
-		return err
-	}
-	dacl, _, err := sd.DACL()
+	dacl, _, err := sa.SecurityDescriptor.DACL()
 	if err != nil {
 		return err
 	}
@@ -186,6 +231,10 @@ func checkOwnedSecurity(sd *windows.SECURITY_DESCRIPTOR, private bool) error {
 	if err != nil {
 		return err
 	}
+	creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
+	if err != nil {
+		return err
+	}
 	if !owner.Equals(user) {
 		member, err := windows.Token(0).IsMember(admins)
 		if err != nil || !owner.Equals(admins) || !member {
@@ -201,9 +250,6 @@ func checkOwnedSecurity(sd *windows.SECURITY_DESCRIPTOR, private bool) error {
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
 			return err
 		}
-		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
-			continue // applies only to what is created inside
-		}
 		switch ace.Header.AceType {
 		case windows.ACCESS_DENIED_ACE_TYPE, systemAuditACEType:
 			continue
@@ -212,7 +258,9 @@ func checkOwnedSecurity(sd *windows.SECURITY_DESCRIPTOR, private bool) error {
 			return fmt.Errorf("an access entry of type %d this check does not understand", ace.Header.AceType)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if sid.Equals(user) || sid.Equals(owner) || sid.Equals(system) || sid.Equals(admins) {
+		// Inheritable entries count too: what is created inside gets them. CREATOR OWNER becomes
+		// whoever creates the child.
+		if sid.Equals(user) || sid.Equals(owner) || sid.Equals(system) || sid.Equals(admins) || sid.Equals(creatorOwner) {
 			continue
 		}
 		if private || ace.Mask&windowsWriteRights != 0 {
