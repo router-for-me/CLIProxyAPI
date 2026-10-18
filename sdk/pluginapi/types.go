@@ -62,6 +62,8 @@ type ConfigField struct {
 	Name string
 	// Type classifies the field value for management clients.
 	Type ConfigFieldType
+	// Default is the value used when the configuration key is omitted.
+	Default any
 	// EnumValues lists allowed values when Type is ConfigFieldTypeEnum.
 	EnumValues []string
 	// Description explains how the plugin uses the field.
@@ -194,6 +196,9 @@ type ThinkingSupport struct {
 	ZeroAllowed bool
 	// DynamicAllowed reports whether automatic reasoning budget selection is supported.
 	DynamicAllowed bool
+	// DisableType is the Claude thinking.type that turns thinking off for this
+	// model. Empty means "disabled"; claude-sonnet-5-5 needs "between_tools".
+	DisableType string
 	// Levels lists supported named reasoning levels.
 	Levels []string
 }
@@ -1500,6 +1505,10 @@ type UsageRecord struct {
 	Alias string
 	// APIKey is the client API key identifier when available.
 	APIKey string
+	// IsNativeKey reports whether the client API key was authenticated by CPA's native config provider.
+	IsNativeKey bool
+	// AccessProvider identifies the client request authentication provider (e.g. "config-inline" or plugin ID).
+	AccessProvider string
 	// SessionID identifies the session when present.
 	SessionID string
 	// ParentSessionID identifies the parent session in a hierarchy or fork.

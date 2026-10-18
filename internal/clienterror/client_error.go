@@ -50,6 +50,10 @@ func HTTPStatusFromError(err error) int {
 			return code
 		}
 	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return http.StatusRequestEntityTooLarge
+	}
 	if errors.Is(err, context.Canceled) {
 		return StatusClientClosedRequest
 	}

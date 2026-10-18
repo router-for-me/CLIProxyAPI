@@ -139,6 +139,7 @@ type geminiToResponsesState struct {
 	FuncArgsBuf      map[int]*strings.Builder
 	FuncInputBuf     map[int]string
 	FuncCustom       map[int]bool
+	FuncToolSearch   map[int]bool
 	FuncNames        map[int]string
 	FuncNamespaces   map[int]string
 	FuncCallIDs      map[int]string
@@ -290,6 +291,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			FuncArgsBuf:             make(map[int]*strings.Builder),
 			FuncInputBuf:            make(map[int]string),
 			FuncCustom:              make(map[int]bool),
+			FuncToolSearch:          make(map[int]bool),
 			FuncNames:               make(map[int]string),
 			FuncNamespaces:          make(map[int]string),
 			FuncCallIDs:             make(map[int]string),
@@ -312,6 +314,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	}
 	if st.FuncCustom == nil {
 		st.FuncCustom = make(map[int]bool)
+	}
+	if st.FuncToolSearch == nil {
+		st.FuncToolSearch = make(map[int]bool)
 	}
 	if st.FuncNames == nil {
 		st.FuncNames = make(map[int]string)
@@ -1141,6 +1146,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				name := identity.Name
 				namespace := identity.Namespace
 				isCustom := identity.Custom
+				isToolSearch := identity.ToolSearch
 				if evidence.ApplyPatch && evidence.PatchCall != nil {
 					if _, _, errFinishArguments := evidence.PatchCall.FinishArguments(fc.Get("args").Raw); errFinishArguments != nil {
 						st.SetToolInputError(errFinishArguments)
@@ -1157,7 +1163,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				if st.FuncArgsBuf[idx] == nil {
 					st.FuncArgsBuf[idx] = &strings.Builder{}
 				}
-				if identity.ApplyPatch {
+				if identity.ApplyPatch || isToolSearch {
 					st.FuncCallIDs[idx] = evidence.UpstreamID
 				}
 				if st.FuncCallIDs[idx] == "" {
@@ -1166,6 +1172,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				st.FuncNames[idx] = name
 				st.FuncNamespaces[idx] = namespace
 				st.FuncCustom[idx] = isCustom
+				st.FuncToolSearch[idx] = isToolSearch
 
 				argsJSON := "{}"
 				if args := fc.Get("args"); args.Exists() {
@@ -1175,7 +1182,30 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					st.FuncArgsBuf[idx].WriteString(argsJSON)
 				}
 
-				if isCustom {
+				if isToolSearch {
+					itemStatus := "completed"
+					if fr := root.Get("candidates.0.finishReason").String(); fr != "" {
+						_, itemStatus, _ = geminiResponsesTerminalState(fr)
+					} else if st.FinishReason != "" {
+						_, itemStatus, _ = geminiResponsesTerminalState(st.FinishReason)
+					}
+					itemID := openAIResponsesToolSearchCallItemID(st.FuncCallIDs[idx])
+					item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{}}`)
+					item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+					item, _ = sjson.SetBytes(item, "output_index", idx)
+					item, _ = sjson.SetRawBytes(item, "item", buildOpenAIResponsesToolSearchCallItem(itemID, st.FuncCallIDs[idx], "in_progress", argsJSON))
+					out = append(out, emitEvent("response.output_item.added", item))
+
+					if !st.FuncDone[idx] {
+						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
+						itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+						itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
+						itemDone, _ = sjson.SetRawBytes(itemDone, "item", buildOpenAIResponsesToolSearchCallItem(itemID, st.FuncCallIDs[idx], itemStatus, argsJSON))
+						out = append(out, emitEvent("response.output_item.done", itemDone))
+
+						st.FuncDone[idx] = true
+					}
+				} else if isCustom {
 					inputStr := util.UnwrapResponsesCustomToolInput(argsJSON)
 					var patchCall *translatorcommon.ApplyPatchCallState
 					if identity.ApplyPatch {
@@ -1328,7 +1358,17 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				if st.FuncDone[idx] {
 					continue
 				}
-				if st.FuncCustom[idx] {
+				if st.FuncToolSearch[idx] {
+					args := "{}"
+					if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
+						args = b.String()
+					}
+					itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
+					itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+					itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
+					itemDone, _ = sjson.SetRawBytes(itemDone, "item", buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(st.FuncCallIDs[idx]), st.FuncCallIDs[idx], status, args))
+					out = append(out, emitEvent("response.output_item.done", itemDone))
+				} else if st.FuncCustom[idx] {
 					inputStr := st.FuncInputBuf[idx]
 					inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
 					inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
@@ -1484,7 +1524,13 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			}
 
 			if callID, ok := st.FuncCallIDs[idx]; ok && callID != "" {
-				if st.FuncCustom[idx] {
+				if st.FuncToolSearch[idx] {
+					args := "{}"
+					if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
+						args = b.String()
+					}
+					outputs = append(outputs, buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(callID), callID, status, args))
+				} else if st.FuncCustom[idx] {
 					inputStr := st.FuncInputBuf[idx]
 					item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
@@ -1828,11 +1874,13 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 					argsStr = args.Raw
 				}
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
-				if identity.ApplyPatch && evidence.UpstreamID != "" {
+				if (identity.ApplyPatch || identity.ToolSearch) && evidence.UpstreamID != "" {
 					callID = evidence.UpstreamID
 				}
 				var itemJSON []byte
-				if isCustom {
+				if identity.ToolSearch {
+					itemJSON = buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(callID), callID, status, argsStr)
+				} else if isCustom {
 					inputStr := util.UnwrapResponsesCustomToolInput(argsStr)
 					if identity.ApplyPatch {
 						var patchCall translatorcommon.ApplyPatchCallState

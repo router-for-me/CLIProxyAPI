@@ -204,6 +204,8 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: auth.Clone()})
 		}
 	}
+	// A missing ID in a full scan does not imply its source file was removed.
+	// Leave these deletes unmarked so content/config changes still remove auths.
 	for id := range w.currentAuths {
 		if _, ok := newState[id]; !ok {
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})
@@ -346,6 +348,9 @@ func (w *Watcher) stopDispatch() {
 }
 
 func authEqual(a, b *coreauth.Auth) bool {
+	if a != nil && b != nil && a.HasFileSnapshot() && b.HasFileSnapshot() && !a.SameFileSnapshot(b) {
+		return false
+	}
 	return reflect.DeepEqual(normalizeAuth(a), normalizeAuth(b))
 }
 
@@ -354,12 +359,16 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 		return nil
 	}
 	clone := a.Clone()
+	clone.ClearFileSnapshot()
 	clone.CreatedAt = time.Time{}
 	clone.UpdatedAt = time.Time{}
 	clone.LastRefreshedAt = time.Time{}
 	clone.NextRefreshAfter = time.Time{}
 	clone.Runtime = nil
 	clone.Quota.NextRecoverAt = time.Time{}
+	if clone.Metadata != nil {
+		delete(clone.Metadata, "antigravity_capability_hints")
+	}
 	return clone
 }
 

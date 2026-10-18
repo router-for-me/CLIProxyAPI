@@ -81,6 +81,32 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
+	if codexUseSIWC(auth) {
+		deleteHeaderCaseInsensitive(headers, "conversation_id")
+		ensureCodexWebsocketSessionHeader(headers, ginHeaders, "")
+		if sessionID := codexSessionHeaderValue(headers); sessionID != "" {
+			headers.Set("X-Client-Request-Id", sessionID)
+		} else {
+			misc.EnsureHeader(headers, ginHeaders, "X-Client-Request-Id", "")
+		}
+		headers.Set("User-Agent", codexSIWCUserAgent(cfg))
+		betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
+		if betaHeader == "" && ginHeaders != nil {
+			betaHeader = strings.TrimSpace(ginHeaders.Get("OpenAI-Beta"))
+		}
+		if betaHeader == "" || !strings.Contains(betaHeader, "responses_websockets=") {
+			betaHeader = codexResponsesWebsocketBetaHeaderValue
+		}
+		headers.Set("OpenAI-Beta", betaHeader)
+		var attrs map[string]string
+		if auth != nil {
+			attrs = auth.Attributes
+		}
+		req := (&http.Request{Header: headers}).WithContext(ctx)
+		util.ApplyCustomHeadersFromAttrs(req, attrs, ginHeaders)
+		return headers
+	}
+
 	isAPIKey := codexAuthUsesAPIKey(auth)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")

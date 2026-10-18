@@ -61,7 +61,7 @@ func TestCodexCatalogApplyPatchCapability(t *testing.T) {
 						available := []map[string]any{{"id": " " + model.id + " "}}
 						webSearch := func(string) *bool { supported := false; return &supported }
 						baseline := BuildResponseForClientWithCPACapabilities(available, providerLookup.get, webSearch, true, version)
-						response := BuildResponseForClientWithToolCapabilities(available, providerLookup.get, webSearch, capability.get, true, version)
+						response := BuildResponseForClientWithToolCapabilities(available, providerLookup.get, webSearch, capability.get, nil, true, version)
 						entries := response["models"].([]map[string]any)
 						if len(entries) != 1 {
 							t.Fatalf("models count = %d, want 1", len(entries))
@@ -172,7 +172,7 @@ func TestCodexCatalogApplyPatch_TemplateModelsRetainFreeformByDefault_Issue6286(
 			available := []map[string]any{{"id": modelID}}
 			// capability is nil (simulates client.codex.enable-apply-patch: false)
 			// providersForModel is nil (pure Codex default)
-			resp := BuildResponseForClientWithToolCapabilities(available, nil, nil, nil, false, "0.153.4")
+			resp := BuildResponseForClientWithToolCapabilities(available, nil, nil, nil, nil, false, "0.153.4")
 			entries, ok := resp["models"].([]map[string]any)
 			if !ok || len(entries) != 1 {
 				t.Fatalf("expected 1 model entry, got %v", resp["models"])
@@ -187,7 +187,7 @@ func TestCodexCatalogApplyPatch_TemplateModelsRetainFreeformByDefault_Issue6286(
 	// Non-template models without freeform in template must still default to null when capability is nil.
 	t.Run("non-template model defaults to null", func(t *testing.T) {
 		available := []map[string]any{{"id": "non-template-custom-model"}}
-		resp := BuildResponseForClientWithToolCapabilities(available, nil, nil, nil, false, "0.153.4")
+		resp := BuildResponseForClientWithToolCapabilities(available, nil, nil, nil, nil, false, "0.153.4")
 		entries, ok := resp["models"].([]map[string]any)
 		if !ok || len(entries) != 1 {
 			t.Fatalf("expected 1 model entry, got %v", resp["models"])

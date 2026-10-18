@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // pauseAuthSnapshot suspends a real scan after reading files, before publishing them.
@@ -422,4 +423,119 @@ func TestRefreshAuthStatePreservesConcurrentProxyUpdate(t *testing.T) {
 			}
 		})
 	}
+}
+
+type snapshotTestPluginParser func(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
+
+func (f snapshotTestPluginParser) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
+	return f(ctx, req)
+}
+
+func TestWatcherFileSnapshotReformatAndUnmappedChangeDoNotDropUpdate(t *testing.T) {
+	t.Run("reformatted_before_consume", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "account.json")
+		if errWrite := os.WriteFile(path, []byte(`{"type":"codex","prefix":"pfx-initial"}`), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		w := &Watcher{authDir: dir, config: &config.Config{AuthDir: dir}, authQueue: make(chan AuthUpdate, 10)}
+		w.addOrUpdateClient(path)
+		initBatch, okInit := w.nextPendingBatch(context.Background())
+		if !okInit || len(initBatch) != 1 {
+			t.Fatalf("expected 1 initial update, got %v", initBatch)
+		}
+		ctx := coreauth.WithSkipPersist(context.Background())
+		manager := coreauth.NewManager(nil, nil, nil)
+		if _, errRegister := manager.Register(ctx, initBatch[0].Auth); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+
+		// Step 1: Edit file to B; Watcher queues snapshot B.
+		if errWrite := os.WriteFile(path, []byte(`{"type":"codex","prefix":"pfx-edited"}`), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		w.addOrUpdateClient(path)
+		batchB, okB := w.nextPendingBatch(context.Background())
+		if !okB || len(batchB) != 1 {
+			t.Fatalf("expected 1 update for B, got %v", batchB)
+		}
+
+		// Step 2: Before B is consumed by manager.Update, reformat file on disk with
+		// whitespace and reversed key order (B'). Watcher deduplicates B'.
+		if errWrite := os.WriteFile(path, []byte("{\n  \"prefix\": \"pfx-edited\",\n  \"type\": \"codex\"\n}\n"), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		w.addOrUpdateClient(path)
+		if len(w.pendingOrder) != 0 {
+			t.Fatalf("expected reformatted B' to be deduplicated, got pending=%v", w.pendingOrder)
+		}
+
+		// Step 3: Consume B into manager.Update; canonical digest matches B' on disk.
+		if _, errUpdate := manager.Update(ctx, batchB[0].Auth); errUpdate != nil {
+			t.Fatal(errUpdate)
+		}
+		current, _ := manager.GetByID("account.json")
+		if current == nil || current.Prefix != "pfx-edited" {
+			t.Fatalf("reformatted file caused edit to be dropped: got=%#v, want prefix=pfx-edited", current)
+		}
+	})
+
+	t.Run("plugin_unmapped_field_change_before_consume", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "plugin.json")
+		parser := snapshotTestPluginParser(func(_ context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
+			return &coreauth.Auth{
+				ID:       req.FileName,
+				Provider: "gemini-cli",
+				Metadata: map[string]any{"type": "gemini-cli"},
+			}, true, nil
+		})
+		if errWrite := os.WriteFile(path, []byte(`{"type":"gemini-cli","prefix":"pfx-initial","ignored":"v0"}`), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		w := &Watcher{authDir: dir, config: &config.Config{AuthDir: dir}, pluginAuthParser: parser, authQueue: make(chan AuthUpdate, 10)}
+		w.addOrUpdateClient(path)
+		initBatch, okInit := w.nextPendingBatch(context.Background())
+		if !okInit || len(initBatch) != 1 {
+			t.Fatalf("expected 1 initial update, got %v", initBatch)
+		}
+		ctx := coreauth.WithSkipPersist(context.Background())
+		manager := coreauth.NewManager(nil, nil, nil)
+		if _, errRegister := manager.Register(ctx, initBatch[0].Auth); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+
+		// Step 1: Edit file to B (prefix=pfx-edited, ignored=v1) and pop batchB.
+		if errWrite := os.WriteFile(path, []byte(`{"type":"gemini-cli","prefix":"pfx-edited","ignored":"v1"}`), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		w.addOrUpdateClient(path)
+		batchB, okB := w.nextPendingBatch(context.Background())
+		if !okB || len(batchB) != 1 {
+			t.Fatalf("expected 1 update for B, got %v", batchB)
+		}
+
+		// Step 2: Before batchB is consumed, change only the unmapped JSON field (ignored=v2).
+		// Because the file snapshot digest changed, Watcher must emit a follow-up update.
+		if errWrite := os.WriteFile(path, []byte(`{"type":"gemini-cli","prefix":"pfx-edited","ignored":"v2"}`), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		w.addOrUpdateClient(path)
+		batchB2, okB2 := w.nextPendingBatch(context.Background())
+		if !okB2 || len(batchB2) != 1 {
+			t.Fatalf("expected follow-up update when file snapshot digest changed, got %v", batchB2)
+		}
+
+		// Step 3: Applying batchB (superseded on disk) followed by batchB2 commits pfx-edited.
+		if _, errUpdate := manager.Update(ctx, batchB[0].Auth); errUpdate != nil {
+			t.Fatal(errUpdate)
+		}
+		if _, errUpdate := manager.Update(ctx, batchB2[0].Auth); errUpdate != nil {
+			t.Fatal(errUpdate)
+		}
+		current, _ := manager.GetByID("plugin.json")
+		if current == nil || current.Prefix != "pfx-edited" {
+			t.Fatalf("unmapped field change caused edit to be dropped: got=%#v, want prefix=pfx-edited", current)
+		}
+	})
 }

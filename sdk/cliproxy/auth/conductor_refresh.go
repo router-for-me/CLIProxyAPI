@@ -137,6 +137,19 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		return evaluator.ShouldRefresh(now, a)
 	}
+	if next, due := devinQuotaRevalidateAt(a, now); due {
+		return !next.After(now)
+	}
+
+	if _, hasSIWC, needSIWC := CodexSIWCNeedsRefresh(a, now); hasSIWC {
+		if needSIWC {
+			return true
+		}
+		if _, hasOuter, needOuter := CodexOuterNeedsRefresh(a, now); hasOuter {
+			return needOuter
+		}
+		return false
+	}
 
 	lastRefresh := a.LastRefreshedAt
 	if lastRefresh.IsZero() {
@@ -395,11 +408,18 @@ type authRefreshLock struct {
 	mu sync.Mutex
 }
 
-func authAccessToken(auth *Auth) string {
+func authOuterAccessToken(auth *Auth) string {
 	if token := authMetadataString(auth, "access_token"); token != "" {
 		return token
 	}
 	return authMetadataString(auth, "accessToken")
+}
+
+func authAccessToken(auth *Auth) string {
+	if IsCodexUseSIWC(auth) {
+		return authSIWCTokenField(auth, "access_token")
+	}
+	return authOuterAccessToken(auth)
 }
 
 func authRefreshToken(auth *Auth) string {
@@ -416,6 +436,9 @@ func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refreshToken") != "" {
 		return true
 	}
+	if _, hasSIWC, _ := CodexSIWCNeedsRefresh(auth, time.Now()); hasSIWC {
+		return true
+	}
 	// Meta exchanges its device token for a replacement API key after a 401.
 	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") &&
 		(authMetadataString(auth, "dca_token") != "" || strings.TrimSpace(auth.Attributes["dca_token"]) != "")
@@ -427,7 +450,7 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existing == nil || incoming == nil {
 		return false
 	}
-	if authAccessToken(existing) != authAccessToken(incoming) {
+	if authAccessToken(existing) != authAccessToken(incoming) || authOuterAccessToken(existing) != authOuterAccessToken(incoming) {
 		return true
 	}
 	if authRefreshToken(existing) != authRefreshToken(incoming) {
@@ -461,12 +484,178 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingKey != incomingKey {
 		return true
 	}
+	if authSIWCTokenField(existing, "access_token") != authSIWCTokenField(incoming, "access_token") ||
+		authSIWCTokenField(existing, "refresh_token") != authSIWCTokenField(incoming, "refresh_token") ||
+		authSIWCTokenField(existing, "id_token") != authSIWCTokenField(incoming, "id_token") ||
+		authSIWCTokenField(existing, "client_id") != authSIWCTokenField(incoming, "client_id") {
+		return true
+	}
+	existingUseSIWC, existingHasUseSIWC := parseBoolAny(existing.Metadata["use_siwc"])
+	incomingUseSIWC, incomingHasUseSIWC := parseBoolAny(incoming.Metadata["use_siwc"])
+	if existingHasUseSIWC != incomingHasUseSIWC || existingUseSIWC != incomingUseSIWC {
+		return true
+	}
 	return false
+}
+
+func authSIWCTokenField(auth *Auth, key string) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	siwcMap, ok := auth.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return ""
+	}
+	val, _ := siwcMap[key].(string)
+	return strings.TrimSpace(val)
 }
 
 // ClearUnauthorizedModelStates resets model states whose last error was an unauthorized failure.
 func ClearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	return clearUnauthorizedModelStates(auth, now)
+}
+
+// devinQuotaRevalidateInterval bounds how often a quota-exhausted Devin
+// credential re-queries upstream status for early restoration (issue #6690).
+const devinQuotaRevalidateInterval = time.Hour
+
+// devinQuotaRevalidateAt returns the next quota revalidation instant for a
+// Devin auth under an active credential quota. Devin session tokens never
+// expire, so without this the auto-refresh loop would never re-observe quota
+// and early restoration could never be detected. It is scoped strictly to
+// the exhausted state; healthy credentials are unaffected.
+func devinQuotaRevalidateAt(a *Auth, now time.Time) (time.Time, bool) {
+	if a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "devin") {
+		return time.Time{}, false
+	}
+	if !a.Quota.Exceeded || a.Quota.Reason != "credential_quota" || !a.Quota.NextRecoverAt.After(now) {
+		return time.Time{}, false
+	}
+	since := a.LastRefreshedAt
+	if since.IsZero() {
+		since = a.Quota.ObservedAt
+	}
+	if since.IsZero() {
+		return now, true
+	}
+	next := since.Add(devinQuotaRevalidateInterval)
+	if next.After(a.Quota.NextRecoverAt) {
+		next = a.Quota.NextRecoverAt
+	}
+	return next, true
+}
+
+// devinQuotaObservationRestored reports whether the refreshed auth carries a
+// newer Devin quota observation confirming daily and weekly quota are
+// available again while existing is under an active credential quota. The
+// observation must be strictly newer than both the stored snapshot and the
+// moment the exhausted state was last written, so a stale or replayed
+// refresh can never resurrect an exhausted credential.
+func devinQuotaObservationRestored(auth, existing *Auth, now time.Time) bool {
+	if auth == nil || existing == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(existing.Provider), "devin") {
+		return false
+	}
+	if !existing.Quota.Exceeded || existing.Quota.Reason != "credential_quota" || !existing.Quota.NextRecoverAt.After(now) {
+		return false
+	}
+	observedAt := auth.Quota.ObservedAt
+	if observedAt.IsZero() || observedAt.After(now) {
+		return false
+	}
+	if !observedAt.After(existing.Quota.ObservedAt) || !existing.UpdatedAt.IsZero() && observedAt.Before(existing.UpdatedAt) {
+		return false
+	}
+	daily, okDaily := devinRemainingPercent(auth.Quota.Signals["daily_quota_remaining_percent"])
+	weekly, okWeekly := devinRemainingPercent(auth.Quota.Signals["weekly_quota_remaining_percent"])
+	return okDaily && okWeekly && daily > 0 && weekly > 0
+}
+
+// applyDevinQuotaRestoration releases a Devin credential-wide quota cooldown
+// early when the refreshed auth carries an authoritative, newer observation
+// showing both usage quotas available again (issue #6690). It never touches
+// unauthorized failures, non-quota failure states, or model states whose
+// block is not the auth-level credential quota propagation; unrelated
+// cooldowns survive via aggregated availability recomputation.
+func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
+	if !devinQuotaObservationRestored(auth, existing, now) {
+		return false
+	}
+	if hasUnauthorizedAuthFailure(existing) {
+		return false
+	}
+
+	applyCooldownFields(&auth.Quota, QuotaState{})
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		reason := strings.TrimSpace(state.Quota.Reason)
+		wrapped := state.credentialQuotaPropagated || reason == "credential_quota"
+		if !state.Quota.Exceeded || (reason != "quota" && !wrapped) {
+			continue
+		}
+		// A wrapped sibling carries its independent layer in the shadow.
+		// Reinstate that exact block (if still live) instead of erasing it;
+		// the reporting model ("quota" unwrapped) and pure propagation
+		// targets (no shadow) fully release. Deadline or status heuristics
+		// cannot recover this provenance reliably.
+		if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
+			*state = *shadow.cloneShallow()
+			state.UpdatedAt = now
+			continue
+		}
+		resetModelState(state, now)
+	}
+	auth.Status = StatusActive
+	auth.StatusMessage = ""
+	auth.LastError = nil
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	if len(auth.ModelStates) > 0 {
+		updateAggregatedAvailability(auth, now)
+	}
+	return true
+}
+
+// isDevinQuotaExhaustionMessage reports whether text is Devin's explicit
+// daily/weekly usage-quota exhaustion message. It mirrors the executor's
+// narrow classifier and is used only to tell credential-derived legacy
+// "quota" states apart from genuine model-scoped rate limits.
+func isDevinQuotaExhaustionMessage(text string) bool {
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "quota") || !strings.Contains(lower, "exhausted") {
+		return false
+	}
+	return strings.Contains(lower, "weekly") || strings.Contains(lower, "daily")
+}
+
+func devinRecordErrorText(record CooldownStateRecord) string {
+	if record.LastError != nil && strings.TrimSpace(record.LastError.Message) != "" {
+		return record.LastError.Message
+	}
+	return ""
+}
+
+func devinStateErrorText(state *ModelState) string {
+	if state == nil {
+		return ""
+	}
+	if state.LastError != nil && strings.TrimSpace(state.LastError.Message) != "" {
+		return state.LastError.Message
+	}
+	return state.StatusMessage
+}
+
+// devinRemainingPercent parses a Devin quota signal such as "55%".
+func devinRemainingPercent(raw string) (int64, bool) {
+	value, errParse := strconv.ParseInt(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(raw), "%")), 10, 64)
+	if errParse != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
@@ -583,19 +772,29 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 
 type forceRefreshContextKey struct{}
 
-func withForceRefresh(ctx context.Context) context.Context {
+// WithForceRefresh marks ctx as an explicit forced credential refresh.
+func WithForceRefresh(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, forceRefreshContextKey{}, true)
 }
 
-func isForceRefreshContext(ctx context.Context) bool {
+// IsForceRefreshContext reports whether ctx carries an explicit forced credential refresh marker.
+func IsForceRefreshContext(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
 	v, ok := ctx.Value(forceRefreshContextKey{}).(bool)
 	return ok && v
+}
+
+func withForceRefresh(ctx context.Context) context.Context {
+	return WithForceRefresh(ctx)
+}
+
+func isForceRefreshContext(ctx context.Context) bool {
+	return IsForceRefreshContext(ctx)
 }
 
 func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {

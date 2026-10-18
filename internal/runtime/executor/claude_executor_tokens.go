@@ -33,6 +33,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
+	ctx, req, opts = e.applyNativeToolSearchFallback(ctx, auth, from, e.upstreamModel(baseModel), req, opts)
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
 
@@ -55,6 +56,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
+	body = applyClaudePreservedThinkingBinding(body)
 	body = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)(body)
 	body = stripPromptCacheOptions(body)
 	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
@@ -138,6 +140,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 
 	from := opts.SourceFormat
+	ctx, req, opts = e.applyNativeToolSearchFallback(ctx, auth, from, upstreamModel, req, opts)
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
 	originalPayload := req.Payload
@@ -207,6 +210,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, mcpAliases)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
+	body = applyClaudePreservedThinkingBinding(body)
 	body = stripPromptCacheOptions(body)
 	// Two different reasons converge on the same deletions, and they must stay
 	// separable.

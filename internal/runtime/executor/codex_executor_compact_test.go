@@ -78,3 +78,77 @@ func TestCodexExecutorCompactAddsDefaultInstructionsWithoutInjectingImageTool(t 
 		})
 	}
 }
+
+func TestCodexExecutorCompactUseSIWCAppliesSIWCRulesBeforePayloadFinalizer(t *testing.T) {
+	var gotPath string
+	var gotHeaders http.Header
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHeaders = r.Header.Clone()
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_siwc_compact","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gpt-5.4", Protocol: "openai-response"}},
+					Params: map[string]any{"temperature": 0.25},
+				},
+			},
+		},
+	}
+	executor := NewCodexExecutor(cfg)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-siwc-compact",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "outer-tok",
+			"account_id":   "acct-1",
+			"use_siwc":     true,
+			"siwc": map[string]any{
+				"access_token": "siwc-compact-tok",
+				"client_id":    "oaiapp_compact",
+			},
+		},
+	}
+
+	payload := `{"model":"gpt-5.4","instructions":null,"temperature":0.9,"max_output_tokens":512,"prompt_cache_retention":"in_memory","prompt_cache_options":{"ttl":60},"input":[{"type":"message","role":"user","content":"history"},{"type":"compaction_trigger"}]}`
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+	})
+	if err != nil {
+		t.Fatalf("Execute compact error: %v", err)
+	}
+	if gotPath != "/v1/responses/compact" {
+		t.Fatalf("path = %q, want /v1/responses/compact", gotPath)
+	}
+	if gotHeaders.Get("Authorization") != "Bearer siwc-compact-tok" {
+		t.Fatalf("Authorization = %q, want Bearer siwc-compact-tok", gotHeaders.Get("Authorization"))
+	}
+	if gotHeaders.Get("Chatgpt-Account-Id") != "" || gotHeaders.Get("Originator") != "" {
+		t.Fatalf("unexpected Codex headers on SIWC compact request: %v", gotHeaders)
+	}
+	for _, omitted := range []string{"instructions", "max_output_tokens", "prompt_cache_retention", "prompt_cache_options", "stream", "store"} {
+		if gjson.GetBytes(gotBody, omitted).Exists() {
+			t.Fatalf("field %q should be omitted in SIWC compact body: %s", omitted, gotBody)
+		}
+	}
+	// PayloadFinalizer runs last and can override temperature after built-in SIWC stripping.
+	if gotTemp := gjson.GetBytes(gotBody, "temperature").Float(); gotTemp != 0.25 {
+		t.Fatalf("PayloadFinalizer temperature override = %v, want 0.25; body=%s", gotTemp, gotBody)
+	}
+}

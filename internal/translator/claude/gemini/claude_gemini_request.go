@@ -114,6 +114,7 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			mi := registry.LookupModelInfo(modelName, "claude")
 			supportsAdaptive := mi != nil && mi.Thinking != nil && len(mi.Thinking.Levels) > 0
 			supportsMax := supportsAdaptive && thinking.HasLevel(mi.Thinking.Levels, string(thinking.LevelMax))
+			supportsDynamic := supportsAdaptive && mi.Thinking.DynamicAllowed
 
 			// MapToClaudeEffort normalizes levels (e.g. minimal→low, xhigh→high) to avoid
 			// validation errors since validate treats same-provider unsupported levels as errors.
@@ -124,15 +125,21 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			if thinkingLevel.Exists() {
 				level := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
 				if supportsAdaptive {
-					switch level {
-					case "":
-					case "none":
+					switch {
+					case level == "":
+					case level == "none":
 						out, _ = sjson.SetBytes(out, "thinking.type", "disabled")
 						out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
 						out, _ = sjson.DeleteBytes(out, "output_config.effort")
+					case level == "auto" && supportsDynamic:
+						out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
+						out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
+						out, _ = sjson.DeleteBytes(out, "output_config.effort")
 					default:
-						if mapped, ok := thinking.MapToClaudeEffort(level, supportsMax); ok {
-							level = mapped
+						if !thinking.HasLevel(mi.Thinking.Levels, level) {
+							if mapped, ok := thinking.MapToClaudeEffort(level, supportsMax); ok {
+								level = mapped
+							}
 						}
 						out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
 						out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
@@ -162,16 +169,22 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				if thinkingBudget.Exists() {
 					budget := int(thinkingBudget.Int())
 					if supportsAdaptive {
-						switch budget {
-						case 0:
+						switch {
+						case budget == 0:
 							out, _ = sjson.SetBytes(out, "thinking.type", "disabled")
+							out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
+							out, _ = sjson.DeleteBytes(out, "output_config.effort")
+						case budget == -1 && supportsDynamic:
+							out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
 							out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
 							out, _ = sjson.DeleteBytes(out, "output_config.effort")
 						default:
 							level, ok := thinking.ConvertBudgetToLevel(budget)
 							if ok {
-								if mapped, okM := thinking.MapToClaudeEffort(level, supportsMax); okM {
-									level = mapped
+								if !thinking.HasLevel(mi.Thinking.Levels, level) {
+									if mapped, okM := thinking.MapToClaudeEffort(level, supportsMax); okM {
+										level = mapped
+									}
 								}
 								out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
 								out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")

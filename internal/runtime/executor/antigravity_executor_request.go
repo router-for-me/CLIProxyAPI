@@ -67,13 +67,14 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 
-	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	isClaudeModel := strings.Contains(modelName, "claude")
+	useAntigravitySchema := isClaudeModel || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
 	var (
 		bodyReader io.Reader
 		payloadLog []byte
 	)
 	if antigravityRequestNeedsSchemaSanitization(payload) {
-		payloadStr := sanitizeAntigravityRequestSchemas(string(payload), useAntigravitySchema)
+		payloadStr := sanitizeAntigravityRequestSchemasForModel(string(payload), useAntigravitySchema, isClaudeModel)
 
 		if strings.Contains(modelName, "claude") {
 			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
@@ -164,8 +165,19 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 // data keys inside functionCall arguments replayed from conversation history. Running it over the
 // whole document silently mutated that history, so tools lost required argument fields and the
 // model imitated the corrupted examples on later turns.
+// sanitizeAntigravityRequestSchemas cleans with union-preserving (Gemini) tool semantics.
+// Claude tool unions are flattened only when the caller supplies the model flag via
+// sanitizeAntigravityRequestSchemasForModel; the placeholder group alone must not decide it,
+// because gemini-3-pro models share that group and accept preserved unions.
 func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema bool) string {
-	payloadStr = sanitizeAntigravityToolSchemas(payloadStr, useAntigravitySchema)
+	return sanitizeAntigravityRequestSchemasForModel(payloadStr, useAntigravitySchema, false)
+}
+
+// sanitizeAntigravityRequestSchemasForModel applies sanitizeAntigravityRequestSchemas with an
+// explicit Antigravity Claude flag. Antigravity Claude tool schemas additionally flatten
+// multi-branch anyOf/oneOf unions, which the Claude-side upstream rejects (Issue 3662).
+func sanitizeAntigravityRequestSchemasForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
+	payloadStr = sanitizeAntigravityToolSchemasForModel(payloadStr, useAntigravitySchema, isClaudeModel)
 	return sanitizeAntigravityGenerationSchemas(payloadStr)
 }
 
@@ -174,13 +186,17 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 // once. This preserves rewrite order and bytes without copying the full request
 // for every declaration schema.
 func sanitizeAntigravityToolSchemas(payloadStr string, useAntigravitySchema bool) string {
+	return sanitizeAntigravityToolSchemasForModel(payloadStr, useAntigravitySchema, false)
+}
+
+func sanitizeAntigravityToolSchemasForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
 	tools := gjson.Get(payloadStr, "request.tools")
 	if !tools.IsArray() {
 		return payloadStr
 	}
 
 	toolDocument := `{"request":{"tools":` + tools.Raw + `}}`
-	toolDocument = sanitizeAntigravityToolSchemaDocument(toolDocument, useAntigravitySchema)
+	toolDocument = sanitizeAntigravityToolSchemaDocumentForModel(toolDocument, useAntigravitySchema, isClaudeModel)
 	cleanedTools := gjson.Get(toolDocument, "request.tools")
 	if !cleanedTools.IsArray() || cleanedTools.Raw == tools.Raw {
 		return payloadStr
@@ -194,30 +210,194 @@ func sanitizeAntigravityToolSchemas(payloadStr string, useAntigravitySchema bool
 }
 
 func sanitizeAntigravityToolSchemaDocument(payloadStr string, useAntigravitySchema bool) string {
-	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
-		oldPath := base + ".parametersJsonSchema"
-		if !gjson.Get(payloadStr, oldPath).Exists() {
-			continue
-		}
-		renamed, errRename := util.RenameKey(payloadStr, oldPath, base+".parameters")
-		if errRename != nil {
-			log.Debugf("antigravity: failed to rename %s: %v", oldPath, errRename)
-			continue
-		}
-		payloadStr = renamed
-	}
+	return sanitizeAntigravityToolSchemaDocumentForModel(payloadStr, useAntigravitySchema, false)
+}
 
-	toolSchemaCleaner := func(schema string) string {
+// antigravityDeclarationContainers lists both spellings of the declarations
+// array a tool may carry.
+var antigravityDeclarationContainers = []string{"functionDeclarations", "function_declarations"}
+
+// sanitizeAntigravityToolSchemaDocumentForModel renames and cleans every
+// declaration schema in the tools-only document. Each declaration is edited
+// on its own raw bytes and the results are spliced back into the tools array
+// in a single pass, so the cost stays linear in the document size instead of
+// scaling with declarations x document size (Issue 6714). The emitted bytes
+// match the previous whole-document edits: changed elements are spliced at
+// their original offsets, so untouched bytes (including whitespace around
+// array elements) survive verbatim, and changed nodes go through the same
+// sjson edits, scoped to one declaration.
+func sanitizeAntigravityToolSchemaDocumentForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
+	toolSchemaCleaner := func(schema string, isParameterSchema bool) string {
+		// Only declaration parameter schemas become Claude custom.input_schema upstream,
+		// so only they need Claude union flattening. Function return schemas keep the
+		// union-preserving cleaning like every other response-side schema.
+		if isClaudeModel && isParameterSchema {
+			return util.CleanJSONSchemaForAntigravityClaudeTool(schema, useAntigravitySchema)
+		}
 		return util.CleanJSONSchemaForAntigravityTool(schema, useAntigravitySchema)
 	}
-	cleanNestedToolSchema := func(schemaRaw string) string {
-		return cleanNestedSchema(toolSchemaCleaner, schemaRaw)
+	cleanNestedToolSchema := func(schemaRaw string, isParameterSchema bool) string {
+		return cleanNestedSchema(func(schema string) string {
+			return toolSchemaCleaner(schema, isParameterSchema)
+		}, schemaRaw)
 	}
-	return cleanAntigravitySchemasAtPaths(
-		payloadStr,
-		antigravityDeclarationSchemaPaths(payloadStr),
-		cleanNestedToolSchema,
-	)
+
+	tools := gjson.Parse(payloadStr).Get("request.tools")
+	if !tools.IsArray() {
+		return payloadStr
+	}
+	elements := make([]gjson.Result, 0)
+	edits := make([]antigravityElementEdit, 0)
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		elements = append(elements, tool)
+		if !tool.IsObject() {
+			return true
+		}
+		toolRaw := tool.Raw
+		for _, declKey := range antigravityDeclarationContainers {
+			decls := tool.Get(declKey)
+			if !decls.IsArray() {
+				continue
+			}
+			cleanedDecls, declsChanged := sanitizeAntigravityDeclarations(decls, cleanNestedToolSchema)
+			if !declsChanged {
+				continue
+			}
+			updated, errSet := sjson.SetRawBytes([]byte(toolRaw), declKey, []byte(cleanedDecls))
+			if errSet != nil {
+				log.Debugf("antigravity: failed to write cleaned %s: %v", declKey, errSet)
+				continue
+			}
+			toolRaw = string(updated)
+		}
+		if toolRaw != tool.Raw {
+			edits = append(edits, antigravityElementEdit{offset: tool.Index - tools.Index, raw: tool.Raw, replacement: toolRaw})
+		}
+		return true
+	})
+	if len(edits) == 0 {
+		return payloadStr
+	}
+	updated, errSet := sjson.SetRawBytes([]byte(payloadStr), "request.tools", []byte(applyAntigravityElementEdits(tools.Raw, tools.Index, elements, edits)))
+	if errSet != nil {
+		log.Debugf("antigravity: failed to write cleaned request.tools: %v", errSet)
+		return payloadStr
+	}
+	return string(updated)
+}
+
+// antigravityElementEdit replaces one array element (raw, at offset within
+// the array's raw bytes) with replacement.
+type antigravityElementEdit struct {
+	offset      int
+	raw         string
+	replacement string
+}
+
+// applyAntigravityElementEdits splices element replacements into an array's
+// raw bytes in offset order, keeping every other byte (commas, whitespace,
+// unchanged elements) verbatim. Edits whose offsets do not line up with the
+// array bytes fall back to joining the elements with commas: still valid
+// and semantically identical, just without the original separators. gjson
+// reports element offsets into the parsed document, so offsets here are
+// relative to the array start.
+func applyAntigravityElementEdits(arrayRaw string, arrayIndex int, elements []gjson.Result, edits []antigravityElementEdit) string {
+	var rebuilt strings.Builder
+	rebuilt.Grow(len(arrayRaw))
+	cursor := 0
+	for _, edit := range edits {
+		if edit.offset < cursor || edit.offset+len(edit.raw) > len(arrayRaw) || arrayRaw[edit.offset:edit.offset+len(edit.raw)] != edit.raw {
+			return joinAntigravityElements(arrayIndex, elements, edits)
+		}
+		rebuilt.WriteString(arrayRaw[cursor:edit.offset])
+		rebuilt.WriteString(edit.replacement)
+		cursor = edit.offset + len(edit.raw)
+	}
+	rebuilt.WriteString(arrayRaw[cursor:])
+	return rebuilt.String()
+}
+
+// joinAntigravityElements rebuilds an array by joining element bytes with
+// commas, substituting replacements where recorded. It is the fallback for
+// applyAntigravityElementEdits when splice offsets cannot be trusted.
+func joinAntigravityElements(arrayIndex int, elements []gjson.Result, edits []antigravityElementEdit) string {
+	replacements := make(map[int]string, len(edits))
+	for _, edit := range edits {
+		replacements[edit.offset] = edit.replacement
+	}
+	var rebuilt strings.Builder
+	rebuilt.WriteByte('[')
+	for i, element := range elements {
+		if i > 0 {
+			rebuilt.WriteByte(',')
+		}
+		if replacement, ok := replacements[element.Index-arrayIndex]; ok {
+			rebuilt.WriteString(replacement)
+		} else {
+			rebuilt.WriteString(element.Raw)
+		}
+	}
+	rebuilt.WriteByte(']')
+	return rebuilt.String()
+}
+
+// sanitizeAntigravityDeclarations rebuilds one declarations array, applying
+// the rename and schema cleaning to each declaration in isolation. It
+// reports whether any declaration actually changed so callers can keep the
+// original bytes when the array is already clean.
+func sanitizeAntigravityDeclarations(decls gjson.Result, clean func(schemaRaw string, isParameterSchema bool) string) (string, bool) {
+	elements := make([]gjson.Result, 0)
+	edits := make([]antigravityElementEdit, 0)
+	decls.ForEach(func(_, decl gjson.Result) bool {
+		elements = append(elements, decl)
+		if !decl.IsObject() {
+			return true
+		}
+		cleanedDecl := sanitizeAntigravityDeclaration(decl, clean)
+		if cleanedDecl != decl.Raw {
+			edits = append(edits, antigravityElementEdit{offset: decl.Index - decls.Index, raw: decl.Raw, replacement: cleanedDecl})
+		}
+		return true
+	})
+	if len(edits) == 0 {
+		return "", false
+	}
+	return applyAntigravityElementEdits(decls.Raw, decls.Index, elements, edits), true
+}
+
+// sanitizeAntigravityDeclaration applies the declaration-level edits that
+// used to run against the whole tools document: parametersJsonSchema is
+// renamed onto parameters first, then every object schema is cleaned in
+// place. Failed edits keep the declaration as-is and are only logged.
+func sanitizeAntigravityDeclaration(decl gjson.Result, clean func(schemaRaw string, isParameterSchema bool) string) string {
+	declRaw := decl.Raw
+	if decl.Get("parametersJsonSchema").Exists() {
+		renamed, errRename := util.RenameKey(declRaw, "parametersJsonSchema", "parameters")
+		if errRename != nil {
+			log.Debugf("antigravity: failed to rename parametersJsonSchema: %v", errRename)
+		} else {
+			declRaw = renamed
+			decl = gjson.Parse(declRaw)
+		}
+	}
+	for _, key := range antigravityDeclarationSchemaKeys {
+		schema := decl.Get(key)
+		if !schema.IsObject() {
+			continue
+		}
+		cleanedSchema := clean(schema.Raw, isParameterSchemaPath(key))
+		if cleanedSchema == schema.Raw {
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes([]byte(declRaw), key, []byte(cleanedSchema))
+		if errSet != nil {
+			log.Debugf("antigravity: failed to write cleaned schema at %s: %v", key, errSet)
+			continue
+		}
+		declRaw = string(updated)
+		decl = gjson.Parse(declRaw)
+	}
+	return declRaw
 }
 
 // sanitizeAntigravityGenerationSchemas batches every schema edit within one
@@ -256,6 +436,16 @@ func sanitizeAntigravityGenerationSchemas(payloadStr string) string {
 		payloadStr = string(updated)
 	}
 	return payloadStr
+}
+
+// isParameterSchemaPath reports whether a declaration schema path holds tool input
+// parameters rather than a function return schema.
+func isParameterSchemaPath(schemaPath string) bool {
+	key := schemaPath
+	if idx := strings.LastIndex(schemaPath, "."); idx >= 0 {
+		key = schemaPath[idx+1:]
+	}
+	return strings.HasPrefix(key, "parameters")
 }
 
 func cleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, clean func(string) string) string {

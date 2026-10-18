@@ -790,7 +790,7 @@ func TestFileSynthesizer_Synthesize_WeightParsing(t *testing.T) {
 	}
 }
 
-func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
+func TestFileSynthesizer_Synthesize_OAuthExcludedModelsCredentialPriority(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{
 		"type":            "claude",
@@ -823,13 +823,13 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 
 	got := auths[0].Attributes["excluded_models"]
-	want := "custom-model,model-b,shared"
+	want := "custom-model,model-b"
 	if got != want {
 		t.Fatalf("expected excluded_models %q, got %q", want, got)
 	}
 }
 
-func TestFileSynthesizer_Synthesize_MetaOAuthExcludedModelsMerged(t *testing.T) {
+func TestFileSynthesizer_Synthesize_MetaOAuthExcludedModelsCredentialPriority(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{
 		"type":            "meta",
@@ -867,7 +867,7 @@ func TestFileSynthesizer_Synthesize_MetaOAuthExcludedModelsMerged(t *testing.T) 
 	}
 
 	got := auths[0].Attributes["excluded_models"]
-	want := "muse-spark-1.1,muse-spark-1.2"
+	want := "muse-spark-1.2"
 	if got != want {
 		t.Fatalf("expected excluded_models %q, got %q", want, got)
 	}

@@ -48,10 +48,10 @@ func TestAntigravityLatestVersionUsesCurrentHubFallback(t *testing.T) {
 	}
 }
 
-// Cloud Code resolves newer models only for clients reporting at least 2.9.0;
+// Cloud Code resolves newer models only for clients reporting at least 2.23.0;
 // older versions get 404 Requested entity was not found.
 func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
-	const floorMajor, floorMinor = 2, 9
+	const floorMajor, floorMinor = 2, 23
 
 	var major, minor, patch int
 	if _, err := fmt.Sscanf(antigravityFallbackVersion, "%d.%d.%d", &major, &minor, &patch); err != nil {

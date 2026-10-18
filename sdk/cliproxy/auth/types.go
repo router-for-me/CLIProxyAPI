@@ -1,13 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	"time"
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -64,6 +68,8 @@ type Auth struct {
 	FileName string `json:"-"`
 	// Storage holds the token persistence implementation used during login flows.
 	Storage baseauth.TokenStorage `json:"-"`
+	// CodexRefreshPatch carries an immutable pending credential update, never configuration.
+	CodexRefreshPatch *codex.CredentialRefreshPatch `json:"-"`
 	// Label is an optional human readable label for logging.
 	Label string `json:"label,omitempty"`
 	// Status is the lifecycle status managed by the AuthManager.
@@ -108,8 +114,107 @@ type Auth struct {
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 
+	// cooldownRecordedSeq is the execution sequence watermark captured when
+	// the current auth-level cooldown was recorded. Successes from executions
+	// stamped at or below it were dispatched before the cooldown existed and
+	// must not clear it. Runtime only: zero after restart so restored
+	// cooldowns can still be cleared by any success.
+	cooldownRecordedSeq uint64 `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+	// fileSnapshotPath and fileSnapshotDigest bind an unversioned file-synthesized
+	// Auth snapshot to the source file path and SHA-256 byte digest it observed.
+	// Cleared when committed to a Manager so runtime clones are not treated as
+	// unversioned file snapshots.
+	fileSnapshotPath   string `json:"-"`
+	fileSnapshotDigest string `json:"-"`
+}
+
+var readAuthSnapshotFileFunc = os.ReadFile
+
+func canonicalAuthFileDigest(data []byte) string {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var parsed any
+	if errDecode := decoder.Decode(&parsed); errDecode == nil {
+		var trailing any
+		if errTrailing := decoder.Decode(&trailing); errTrailing == io.EOF {
+			if canonical, errMarshal := json.Marshal(parsed); errMarshal == nil {
+				sum := sha256.Sum256(canonical)
+				return hex.EncodeToString(sum[:])
+			}
+		}
+	}
+	sum := sha256.Sum256(trimmed)
+	return hex.EncodeToString(sum[:])
+}
+
+// BindFileSnapshot binds an unversioned file-synthesized Auth snapshot to the
+// source file path and canonical SHA-256 digest of the bytes from which it was parsed.
+func (a *Auth) BindFileSnapshot(path string, data []byte) {
+	if a == nil || len(data) == 0 {
+		return
+	}
+	digest := canonicalAuthFileDigest(data)
+	if digest == "" {
+		return
+	}
+	a.fileSnapshotPath = strings.TrimSpace(path)
+	a.fileSnapshotDigest = digest
+}
+
+// ClearFileSnapshot removes any unversioned file-observation binding once the
+// Auth is committed to runtime state or normalized for comparison.
+func (a *Auth) ClearFileSnapshot() {
+	if a == nil {
+		return
+	}
+	a.fileSnapshotPath = ""
+	a.fileSnapshotDigest = ""
+}
+
+// HasFileSnapshot reports whether this Auth is an unversioned file-synthesized
+// snapshot bound to a specific file observation digest.
+func (a *Auth) HasFileSnapshot() bool {
+	return a != nil && a.Generation == 0 && a.RegistrationEpoch == 0 && a.fileSnapshotDigest != ""
+}
+
+// SameFileSnapshot reports whether two unversioned file snapshots observed the
+// same canonical file content.
+func (a *Auth) SameFileSnapshot(other *Auth) bool {
+	if !a.HasFileSnapshot() || !other.HasFileSnapshot() {
+		return false
+	}
+	return a.fileSnapshotDigest == other.fileSnapshotDigest && a.fileSnapshotPath == other.fileSnapshotPath
+}
+
+// FileSnapshotMatchesDisk reports whether the backing file on disk still
+// exists, is readable, and matches the canonical digest observed when this
+// snapshot was synthesized.
+func (a *Auth) FileSnapshotMatchesDisk() bool {
+	if !a.HasFileSnapshot() {
+		return true
+	}
+	path := strings.TrimSpace(a.fileSnapshotPath)
+	if path == "" && a.Attributes != nil {
+		path = strings.TrimSpace(a.Attributes[AttributePath])
+		if path == "" {
+			path = strings.TrimSpace(a.Attributes[AttributeSource])
+		}
+	}
+	if path == "" {
+		return false
+	}
+	data, errRead := readAuthSnapshotFileFunc(path)
+	if errRead != nil || len(data) == 0 {
+		return false
+	}
+	return canonicalAuthFileDigest(data) == a.fileSnapshotDigest
 }
 
 const (
@@ -225,6 +330,28 @@ type ModelState struct {
 	Quota QuotaState `json:"quota"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
+	// cooldownRecordedSeq is the execution sequence watermark captured when
+	// the current model cooldown was recorded. Successes from executions
+	// stamped at or below it were dispatched before the cooldown existed and
+	// must not clear it. Runtime only: zero after restart so restored
+	// cooldowns can still be cleared by any success.
+	cooldownRecordedSeq uint64 `json:"-"`
+	// credentialQuotaShadow holds this model's independent (own-failure)
+	// cooldown layer while the outer fields present the auth-level
+	// credential quota propagated over it, so quota restoration can drop
+	// only the propagated layer and reinstate precisely what the model's
+	// own failures justify (issue #6690). It is nil when no independent
+	// live block exists beneath an outer credential_quota label. Persisted
+	// via CooldownStateRecord.IndependentState (unexported fields are
+	// invisible to JSON, so the record owns the serialized form).
+	credentialQuotaShadow *ModelState `toml:"credential_quota_shadow,omitempty"`
+	// credentialQuotaPropagated marks that credential-quota propagation has
+	// already wrapped this state, distinguishing "no independent block"
+	// from "not yet propagated" so repeated propagation never mistakes its
+	// own earlier layer for an independent block. Persisted via
+	// CooldownStateRecord.CredentialQuotaPropagated across restarts,
+	// including for shadow-less reporting models.
+	credentialQuotaPropagated bool `toml:"credential_quota_propagated,omitempty"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -305,10 +432,7 @@ func (a *Auth) Clone() *Auth {
 		}
 	}
 	if a.Metadata != nil {
-		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
-		}
+		copyAuth.Metadata = cloneMetadataMap(a.Metadata)
 	}
 	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
@@ -318,6 +442,30 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
+}
+
+func cloneMetadataMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		switch typed := value.(type) {
+		case map[string]any:
+			dst[key] = cloneMetadataMap(typed)
+		case []string:
+			s := make([]string, len(typed))
+			copy(s, typed)
+			dst[key] = s
+		case []any:
+			s := make([]any, len(typed))
+			copy(s, typed)
+			dst[key] = s
+		default:
+			dst[key] = value
+		}
+	}
+	return dst
 }
 
 func stableAuthIndex(seed string) string {
@@ -443,6 +591,28 @@ func (m *ModelState) Clone() *ModelState {
 	}
 	copyState := *m
 	copyState.Quota = m.Quota.Clone()
+	if m.LastError != nil {
+		copyState.LastError = &Error{
+			Code:       m.LastError.Code,
+			Message:    m.LastError.Message,
+			Retryable:  m.LastError.Retryable,
+			HTTPStatus: m.LastError.HTTPStatus,
+		}
+	}
+	if m.credentialQuotaShadow != nil {
+		copyState.credentialQuotaShadow = m.credentialQuotaShadow.cloneShallow()
+	}
+	return &copyState
+}
+
+// cloneShallow copies a shadow state one level deep; shadows never nest.
+func (m *ModelState) cloneShallow() *ModelState {
+	if m == nil {
+		return nil
+	}
+	copyState := *m
+	copyState.Quota = m.Quota.Clone()
+	copyState.credentialQuotaShadow = nil
 	if m.LastError != nil {
 		copyState.LastError = &Error{
 			Code:       m.LastError.Code,
@@ -614,15 +784,33 @@ func (a *Auth) AccountInfo() (string, string) {
 	}
 }
 
-// ExpirationTime attempts to extract the credential expiration timestamp from metadata.
-// It inspects common absolute expiry keys, expires_in plus timestamp, and nested
-// token objects to remain compatible with legacy auth file formats.
-// If the access_token contains a valid JWT exp claim, it is given priority.
-func (a *Auth) ExpirationTime() (time.Time, bool) {
+// IsCodexUseSIWC reports whether a Codex auth record is configured to use its nested "siwc" section.
+func IsCodexUseSIWC(a *Auth) bool {
+	if a == nil {
+		return false
+	}
+	enabled := false
+	if len(a.Attributes) > 0 {
+		if raw := strings.TrimSpace(a.Attributes["use_siwc"]); raw != "" {
+			if parsed, ok := parseBoolAny(raw); ok {
+				enabled = parsed
+			}
+		}
+	}
+	if !enabled && a.Metadata != nil {
+		if parsed, ok := parseBoolAny(a.Metadata["use_siwc"]); ok {
+			enabled = parsed
+		}
+	}
+	return enabled
+}
+
+// OuterExpirationTime extracts the outer credential expiration timestamp, ignoring the nested "siwc" section.
+func (a *Auth) OuterExpirationTime() (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
 	}
-	tokenStr := authAccessToken(a)
+	tokenStr := authOuterAccessToken(a)
 	if tokenStr != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
 		return time.Unix(0, 0), true
 	}
@@ -635,6 +823,165 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 		return ts, true
 	}
 	return time.Time{}, false
+}
+
+// ExpirationTime attempts to extract the active credential expiration timestamp from metadata.
+// When use_siwc is enabled on a Codex credential, the active SIWC section expiration is returned.
+func (a *Auth) ExpirationTime() (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	if IsCodexUseSIWC(a) {
+		siwcToken := authSIWCTokenField(a, "access_token")
+		if siwcToken != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken {
+			return time.Unix(0, 0), true
+		}
+		return a.SIWCExpirationTime()
+	}
+	return a.OuterExpirationTime()
+}
+
+// CodexSIWCRefreshLead is the minimum remaining validity required before refreshing
+// a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
+const CodexSIWCRefreshLead = 5 * time.Minute
+
+// SIWCExpirationTime extracts the expiration timestamp from the nested "siwc" metadata section.
+func (a *Auth) SIWCExpirationTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false
+	}
+	if ts, okExp := expirationFromMap(siwcMap); okExp && !ts.IsZero() {
+		return ts, true
+	}
+	if rawToken, okTok := siwcMap["access_token"].(string); okTok && strings.TrimSpace(rawToken) != "" {
+		if jwtExp, okJWT := parseJWTExp(rawToken); okJWT && !jwtExp.IsZero() {
+			return jwtExp, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// CodexOuterNeedsRefresh evaluates the outer credential refresh due time and whether it needs refresh at now.
+func CodexOuterNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh bool, needsRefresh bool) {
+	if a == nil {
+		return time.Time{}, false, false
+	}
+	if authRefreshToken(a) == "" {
+		return time.Time{}, false, false
+	}
+	hasRefresh = true
+
+	var lastRefresh time.Time
+	if ts, ok := authLastRefreshTimestamp(a); ok && !ts.IsZero() {
+		lastRefresh = ts
+	} else {
+		lastRefresh = a.LastRefreshedAt
+	}
+	expiry, hasExpiry := a.OuterExpirationTime()
+
+	if pref := authPreferredInterval(a); pref > 0 {
+		candidates := make([]time.Time, 0, 2)
+		if hasExpiry && !expiry.IsZero() {
+			candidates = append(candidates, expiry.Add(-pref))
+		}
+		if lastRefresh.IsZero() {
+			return now, true, true
+		}
+		candidates = append(candidates, lastRefresh.Add(pref))
+		next := candidates[0]
+		for _, candidate := range candidates[1:] {
+			if candidate.Before(next) {
+				next = candidate
+			}
+		}
+		if !next.After(now) {
+			return now, true, true
+		}
+		return next, true, false
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	if provider == "" {
+		provider = strings.ToLower(authMetadataString(a, "type"))
+	}
+	lead := ProviderRefreshLead(provider, a.Runtime)
+	if lead == nil && provider == "codex" {
+		d := 24 * time.Hour
+		lead = &d
+	}
+	if lead == nil {
+		return time.Time{}, false, false
+	}
+	if *lead <= 0 {
+		if hasExpiry && !expiry.IsZero() {
+			if !expiry.After(now) {
+				return now, true, true
+			}
+			return expiry, true, false
+		}
+		return time.Time{}, false, false
+	}
+	if hasExpiry && !expiry.IsZero() {
+		due := expiry.Add(-*lead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	if !lastRefresh.IsZero() {
+		due := lastRefresh.Add(*lead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	return now, true, true
+}
+
+// CodexSIWCNeedsRefresh evaluates the nested "siwc" credential section refresh due time and whether it needs refresh at now.
+func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh bool, needsRefresh bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false, false
+	}
+	refreshToken, _ := siwcMap["refresh_token"].(string)
+	clientID, _ := siwcMap["client_id"].(string)
+	if strings.TrimSpace(refreshToken) == "" || strings.TrimSpace(clientID) == "" {
+		return time.Time{}, false, false
+	}
+	hasRefresh = true
+
+	siwcToken, _ := siwcMap["access_token"].(string)
+	siwcToken = strings.TrimSpace(siwcToken)
+	if siwcToken == "" {
+		return now, true, true
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken {
+		return now, true, true
+	}
+	expiry, hasExpiry := a.SIWCExpirationTime()
+	if hasExpiry && !expiry.IsZero() {
+		due := expiry.Add(-CodexSIWCRefreshLead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
+		due := lastRefresh.Add(CodexSIWCRefreshLead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	return now, true, true
 }
 
 // AccessTokenExpirationTime returns the expiration time of the specific access_token.

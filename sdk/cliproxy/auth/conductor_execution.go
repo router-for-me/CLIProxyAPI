@@ -592,6 +592,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
@@ -609,6 +610,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					didRefreshOnUnauthorized = true
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
@@ -632,7 +634,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			// Record the model actually sent upstream: a selection override
 			// replaces execReq.Model after the alias expansion, and structured
 			// 404s name that executed model (#5514 review).
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: executedUpstreamModel(execReq, execOpts), RouteModel: routeModel, Success: errExec == nil, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: executedUpstreamModel(execReq, execOpts), RouteModel: routeModel, Success: errExec == nil, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -808,6 +810,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
@@ -825,6 +828,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					didRefreshOnUnauthorized = true
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
@@ -848,7 +852,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			// Record the model actually sent upstream: a selection override
 			// replaces execReq.Model after the alias expansion, and structured
 			// 404s name that executed model (#5514 review).
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: executedUpstreamModel(execReq, execOpts), RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: executedUpstreamModel(execReq, execOpts), RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {

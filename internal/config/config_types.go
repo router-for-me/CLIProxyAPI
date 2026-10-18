@@ -116,6 +116,39 @@ type ClaudeConfig struct {
 	// ModelLevelCooling scopes Claude quota cooldowns to the requested model
 	// rather than cooling down the entire credential across all sibling models.
 	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
+	// ToolSearch enables Codex client tool_search on Claude Responses routes:
+	// Anthropic native tool search where the credential supports it, a pre-tool_search
+	// translation elsewhere, and per-credential search advertising in the Codex
+	// catalog. Default false keeps the translation that predates tool_search support.
+	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
+	// SessionDatePinDays retains the cloaked currentDate pin per session for
+	// this many days, independently of continuity expiry and credential
+	// switches. A nil value (unset) defaults to 7 days; an explicit 0 keeps
+	// the continuity-scoped pin (1h lifetime).
+	SessionDatePinDays *int `yaml:"session-date-pin-days" json:"session-date-pin-days"`
+}
+
+// DefaultClaudeSessionDatePinDays is the session date pin retention applied
+// when session-date-pin-days is not configured.
+const DefaultClaudeSessionDatePinDays = 7
+
+// SessionDatePinRetention returns the configured session date pin retention.
+// An unset value defaults to 7 days; an explicit zero keeps the legacy
+// continuity-scoped behavior. Days are clamped so the duration cannot
+// overflow.
+func (c ClaudeConfig) SessionDatePinRetention() time.Duration {
+	days := DefaultClaudeSessionDatePinDays
+	if c.SessionDatePinDays != nil {
+		days = *c.SessionDatePinDays
+	}
+	if days <= 0 {
+		return 0
+	}
+	maxDays := int((time.Duration(math.MaxInt64) / (24 * time.Hour)))
+	if days > maxDays {
+		days = maxDays
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 // ClaudeHeaderDefaults configures the measured Claude Code software baseline.
@@ -123,16 +156,31 @@ type ClaudeConfig struct {
 // Claude Code, package, and runtime versions exactly match this baseline; unmeasured
 // versions use the configured values. Timeout remains a fallback. Stabilized profiles
 // also pin OS and Arch and never learn newer software versions automatically.
+// AnthropicBetaStrip and AnthropicBetaAppend are exact-name operator overrides applied
+// to the final Anthropic-Beta set; InjectDiagnostics and ClientRequestID tune the
+// first-party Claude Code CLI request shape.
 type ClaudeHeaderDefaults struct {
-	UserAgent              string `yaml:"user-agent" json:"user-agent"`
-	PackageVersion         string `yaml:"package-version" json:"package-version"`
-	RuntimeVersion         string `yaml:"runtime-version" json:"runtime-version"`
-	OS                     string `yaml:"os" json:"os"`
-	Arch                   string `yaml:"arch" json:"arch"`
-	Timeout                string `yaml:"timeout" json:"timeout"`
-	Timezone               string `yaml:"timezone" json:"timezone"`
-	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+	UserAgent              string   `yaml:"user-agent" json:"user-agent"`
+	PackageVersion         string   `yaml:"package-version" json:"package-version"`
+	RuntimeVersion         string   `yaml:"runtime-version" json:"runtime-version"`
+	OS                     string   `yaml:"os" json:"os"`
+	Arch                   string   `yaml:"arch" json:"arch"`
+	Timeout                string   `yaml:"timeout" json:"timeout"`
+	Timezone               string   `yaml:"timezone" json:"timezone"`
+	StabilizeDeviceProfile *bool    `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+	AnthropicBetaStrip     []string `yaml:"anthropic-beta-strip,omitempty" json:"anthropic-beta-strip,omitempty"`
+	AnthropicBetaAppend    []string `yaml:"anthropic-beta-append,omitempty" json:"anthropic-beta-append,omitempty"`
+	InjectDiagnostics      *bool    `yaml:"inject-diagnostics,omitempty" json:"inject-diagnostics,omitempty"`
+	ClientRequestID        string   `yaml:"client-request-id,omitempty" json:"client-request-id,omitempty"`
 }
+
+// Supported ClaudeHeaderDefaults.ClientRequestID values. An empty value means
+// ClaudeClientRequestIDOn.
+const (
+	ClaudeClientRequestIDOn          = "on"
+	ClaudeClientRequestIDOff         = "off"
+	ClaudeClientRequestIDPassthrough = "passthrough"
+)
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
 // model requests for OAuth/file-backed auth when the client omits them.
@@ -217,6 +265,23 @@ type CodexConfig struct {
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
 	// upstream model/account/socket for their entire lifetime. Default is false.
 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
+	// SignInWithChatGPTIdentifier configures the identifier (agent_name_hint and User-Agent prefix)
+	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
+	// Defaults to "CLIProxyAPI".
+	SignInWithChatGPTIdentifier string `yaml:"signin-with-chatgpt-identifier,omitempty" json:"signin-with-chatgpt-identifier,omitempty"`
+}
+
+// DefaultSignInWithChatGPTIdentifier is the default identifier (agent_name_hint and User-Agent prefix)
+// used for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
+const DefaultSignInWithChatGPTIdentifier = "CLIProxyAPI"
+
+// EffectiveSignInWithChatGPTIdentifier returns the configured Sign in with ChatGPT
+// identifier, or DefaultSignInWithChatGPTIdentifier when unset or blank.
+func (c CodexConfig) EffectiveSignInWithChatGPTIdentifier() string {
+	if v := strings.TrimSpace(c.SignInWithChatGPTIdentifier); v != "" {
+		return v
+	}
+	return DefaultSignInWithChatGPTIdentifier
 }
 
 // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.
@@ -371,6 +436,16 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+
+	// SessionAffinityRebindOn controls which credential failures rebind an established session
+	// to the failover credential.
+	// Supported values:
+	//   - "any" (default): any credential-attributed failure unbinds and rebinds on failover.
+	//   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
+	//     request only while keeping the session bound to its original credential; quota and
+	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+	// Ignored when SessionAffinity is false.
+	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -545,6 +620,11 @@ type ClaudeKey struct {
 
 	// RebuildMidSystemMessage moves Claude messages with role "system" into the top-level system field.
 	RebuildMidSystemMessage bool `yaml:"rebuild-mid-system-message,omitempty" json:"rebuild-mid-system-message,omitempty"`
+
+	// NativeToolSearch trusts a custom base URL with Anthropic native tool search
+	// (defer_loading tools and tool_reference results) for Codex tool_search.
+	// Official api.anthropic.com credentials use native tool search without it.
+	NativeToolSearch bool `yaml:"native-tool-search,omitempty" json:"native-tool-search,omitempty"`
 
 	// DisableCooling overrides the global cooling policy for this credential when set.
 	// True disables auth/model cooldowns; false explicitly enables them.

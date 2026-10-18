@@ -344,3 +344,65 @@ func TestConvertAntigravityResponseToOpenAINonStreamIncludesReasoningContent(t *
 		t.Fatalf("reasoning_tokens = %d, want 42. Output: %s", got, output)
 	}
 }
+
+func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDelta(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// 1. Text chunk: delta must omit tool_calls entirely instead of emitting "tool_calls": null.
+	textChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Hello world"}]}}]}}`)
+	textResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, textChunk, &param)
+	if len(textResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(textResults))
+	}
+	if tc := gjson.GetBytes(textResults[0], "choices.0.delta.tool_calls"); tc.Exists() {
+		t.Fatalf("choices.0.delta.tool_calls must not exist in text-only chunk, got: %s (type: %s)", tc.Raw, tc.Type)
+	}
+
+	// 2. Reasoning chunk: delta must omit tool_calls entirely.
+	thoughtChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}}`)
+	thoughtResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, thoughtChunk, &param)
+	if len(thoughtResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(thoughtResults))
+	}
+	if tc := gjson.GetBytes(thoughtResults[0], "choices.0.delta.tool_calls"); tc.Exists() {
+		t.Fatalf("choices.0.delta.tool_calls must not exist in reasoning chunk, got: %s (type: %s)", tc.Raw, tc.Type)
+	}
+
+	// 3. Tool call chunk: delta must emit tool_calls as an array.
+	toolChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Beijing"}}}]}}]}}`)
+	toolResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, toolChunk, &param)
+	if len(toolResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(toolResults))
+	}
+	tc := gjson.GetBytes(toolResults[0], "choices.0.delta.tool_calls")
+	if !tc.Exists() || !tc.IsArray() || len(tc.Array()) != 1 {
+		t.Fatalf("choices.0.delta.tool_calls must be an array with 1 call, got: %s", tc.Raw)
+	}
+	if gotName := tc.Array()[0].Get("function.name").String(); gotName != "get_weather" {
+		t.Fatalf("function.name = %q, want get_weather", gotName)
+	}
+	if gotArgs := tc.Array()[0].Get("function.arguments").String(); gotArgs != `{"city":"Beijing"}` {
+		t.Fatalf("function.arguments = %q, want {\"city\":\"Beijing\"}", gotArgs)
+	}
+
+	// 4. Final chunk with finishReason and usage: delta must omit tool_calls.
+	finalChunk := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+	finalResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, finalChunk, &param)
+	if len(finalResults) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(finalResults))
+	}
+	if tcFinal := gjson.GetBytes(finalResults[0], "choices.0.delta.tool_calls"); tcFinal.Exists() {
+		t.Fatalf("choices.0.delta.tool_calls must not exist in final chunk, got: %s (type: %s)", tcFinal.Raw, tcFinal.Type)
+	}
+
+	// 5. Synthesized DONE terminal chunk: delta must omit tool_calls.
+	var doneParam any
+	ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, textChunk, &doneParam)
+	doneResults := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.5-flash-lite", nil, nil, []byte("[DONE]"), &doneParam)
+	if len(doneResults) == 1 {
+		if tcDone := gjson.GetBytes(doneResults[0], "choices.0.delta.tool_calls"); tcDone.Exists() {
+			t.Fatalf("choices.0.delta.tool_calls must not exist in synthesized DONE chunk, got: %s (type: %s)", tcDone.Raw, tcDone.Type)
+		}
+	}
+}

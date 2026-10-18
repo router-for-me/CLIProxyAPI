@@ -175,6 +175,115 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 	}
 }
 
+func TestCodexDuplexSIWCSteerStripsConfigurationUpdates(t *testing.T) {
+	captured := make(chan []byte, 1)
+	serverDone := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(serverDone)
+		conn, errUpgrade := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// This deadline bounds test failures only.
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		_, first, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("read initial create: %v", errRead)
+			return
+		}
+		if gjson.GetBytes(first, "type").String() != "response.create" {
+			t.Errorf("initial create: %s", first)
+		}
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`)); errWrite != nil {
+			t.Errorf("write response.created: %v", errWrite)
+			return
+		}
+		_, steer, errSteer := conn.ReadMessage()
+		if errSteer != nil {
+			t.Errorf("read steer: %v", errSteer)
+			return
+		}
+		captured <- steer
+		for _, event := range []string{
+			`{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}`,
+			`{"type":"response.completed","response":{"id":"r1","output":[]}}`,
+		} {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
+				t.Errorf("write event: %v", errWrite)
+				return
+			}
+		}
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	input := make(chan core.WebsocketInput, 1)
+	ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
+	exec := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ResponseSteering: true}})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	req := core.Request{
+		Model:   "gpt-6-astra",
+		Payload: []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"instructions":"Initial settings"}`),
+	}
+	opts := core.Options{SourceFormat: sdktranslator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: "duplex-siwc-steer"}}
+	result, err := exec.ExecuteStream(ctx, codexSIWCAuthForUpdateTest(server.URL), req, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	completed := false
+	for !completed {
+		select {
+		case chunk, ok := <-result.Chunks:
+			if !ok {
+				t.Fatal("stream ended before response.completed")
+			}
+			if chunk.Err != nil {
+				t.Fatal(chunk.Err)
+			}
+			event := gjson.GetBytes(chunk.Payload, "type").String()
+			id := gjson.GetBytes(chunk.Payload, "response.id").String()
+			if event == "response.created" && id == "r1" {
+				input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","previous_response_id":"r1","input":[{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"user","content":[{"type":"input_text","text":"STEER_OK"}]}]}`)}
+			}
+			completed = event == "response.completed" && id == "r1"
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	cancel()
+	for range result.Chunks {
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream did not close")
+	}
+
+	select {
+	case got := <-captured:
+		if gjson.GetBytes(got, "type").String() != "response.steer" || gjson.GetBytes(got, "previous_response_id").String() != "r1" {
+			t.Fatalf("steer routing changed: %s", got)
+		}
+		items := gjson.GetBytes(got, "input").Array()
+		if len(items) != 1 || items[0].Get("role").String() != "user" || items[0].Get("content.0.text").String() != "STEER_OK" {
+			t.Fatalf("steer input must contain only the user message: %s", got)
+		}
+		if gjson.GetBytes(got, "reasoning").Exists() {
+			t.Fatalf("steer must not promote reasoning: %s", got)
+		}
+		if gjson.GetBytes(got, "store").Exists() || gjson.GetBytes(got, "stream").Exists() {
+			t.Fatalf("steer must not inherit response.create defaults: %s", got)
+		}
+	default:
+		t.Fatal("upstream steer was not captured")
+	}
+}
+
 func TestCodexDuplexAppendInheritsContextAndInstructions(t *testing.T) {
 	serverDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
