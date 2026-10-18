@@ -68,6 +68,10 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	UsageOutputTokens     int64
 	UsageCachedTokens     int64
 	UsageCacheWriteTokens int64
+	// Whether the original request asked for streaming, resolved once per stream.
+	// The original request can be hundreds of KB, so it must not be re-parsed per chunk.
+	streamResolved  bool
+	streamRequested bool
 }
 
 // InterleavedContentChunk stores a buffered chunk of text or thinking arriving while a tool call is open
@@ -140,12 +144,16 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 		return convertOpenAIDoneToAnthropic((*param).(*ConvertOpenAIResponseToAnthropicParams))
 	}
 
-	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
-	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
-		return convertOpenAINonStreamingToAnthropic(rawJSON)
-	} else {
-		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
+	state := (*param).(*ConvertOpenAIResponseToAnthropicParams)
+	if !state.streamResolved {
+		streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
+		state.streamRequested = streamResult.Exists() && streamResult.Type != gjson.False
+		state.streamResolved = true
 	}
+	if !state.streamRequested {
+		return convertOpenAINonStreamingToAnthropic(rawJSON)
+	}
+	return convertOpenAIStreamingChunkToAnthropic(rawJSON, state)
 }
 
 func hasValidToolCallArguments(param *ConvertOpenAIResponseToAnthropicParams) bool {
