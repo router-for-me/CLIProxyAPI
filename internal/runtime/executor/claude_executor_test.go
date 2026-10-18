@@ -10308,3 +10308,133 @@ func TestClaudeExecutor_PayloadFilterRemovesPreservedThinkingInjection(t *testin
 		t.Fatalf("payload filter must remove injected block_binding: %s", seenBody)
 	}
 }
+
+func TestClaudeExecutor_PayloadForcedToolThinkingValidation(t *testing.T) {
+	const model = "claude-haiku-5-5"
+	models := []config.PayloadModelRule{{Name: model, Protocol: "claude"}}
+	forceAny := config.PayloadRule{Models: models, Params: map[string]any{"tool_choice.type": "any"}}
+	for _, tc := range []struct {
+		name         string
+		payload      config.PayloadConfig
+		wantError    bool
+		wantThinking string
+		wantChoice   string
+	}{
+		{
+			name:      "default forces any",
+			payload:   config.PayloadConfig{Default: []config.PayloadRule{forceAny}},
+			wantError: true,
+		},
+		{
+			name: "override forces named tool",
+			payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: models, Params: map[string]any{"tool_choice": map[string]any{"type": "tool", "name": "lookup"}},
+			}}},
+			wantError: true,
+		},
+		{
+			name: "raw override forces any with enabled thinking",
+			payload: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{
+				Models: models, Params: map[string]any{"tool_choice": `{"type":"any"}`, "thinking": `{"type":"enabled","budget_tokens":1024}`},
+			}}},
+			wantError: true,
+		},
+		{
+			name: "override disables thinking",
+			payload: config.PayloadConfig{Override: []config.PayloadRule{forceAny, {
+				Models: models, Params: map[string]any{"thinking": map[string]any{"type": "disabled"}},
+			}}},
+			wantThinking: "disabled",
+			wantChoice:   "any",
+		},
+		{
+			name: "filter removes synthesized thinking",
+			payload: config.PayloadConfig{
+				Override: []config.PayloadRule{forceAny},
+				Filter:   []config.PayloadFilterRule{{Models: models, Params: []string{"thinking"}}},
+			},
+			wantChoice: "any",
+		},
+		{
+			name: "later override restores auto",
+			payload: config.PayloadConfig{Override: []config.PayloadRule{forceAny, {
+				Models: models, Params: map[string]any{"tool_choice.type": "auto"},
+			}}},
+			wantThinking: "adaptive",
+			wantChoice:   "auto",
+		},
+	} {
+		for _, mode := range []string{"execute", "stream", "count upstream", "count local"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				payload, err := sjson.DeleteBytes(preservedThinkingReplayPayload(model), "thinking")
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload, err = sjson.SetRawBytes(payload, "tools", []byte(`[{"name":"lookup","input_schema":{"type":"object"}}]`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				executor := NewClaudeExecutor(&config.Config{Payload: tc.payload})
+				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-preserved-thinking"}}
+				if mode == "count local" {
+					auth.Attributes["base_url"] = "https://example.invalid"
+				}
+				upstream := &midSystemUpstream{}
+				ctx := upstream.context(t, nil)
+				req := cliproxyexecutor.Request{Model: model, Payload: payload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload}
+				switch mode {
+				case "execute":
+					_, err = executor.Execute(ctx, auth, req, opts)
+				case "stream":
+					var result *cliproxyexecutor.StreamResult
+					result, err = executor.ExecuteStream(ctx, auth, req, opts)
+					if err == nil {
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								err = chunk.Err
+							}
+						}
+					}
+				default:
+					_, err = executor.CountTokens(ctx, auth, req, opts)
+				}
+				if tc.wantError {
+					var status cliproxyexecutor.StatusError
+					if !errors.As(err, &status) || status.StatusCode() != http.StatusBadRequest {
+						t.Fatalf("error = %v, want HTTP 400; upstream body=%s", err, upstream.body)
+					}
+					var scoped cliproxyexecutor.RequestScopedError
+					if !errors.As(err, &scoped) || !scoped.IsRequestScoped() {
+						t.Fatalf("error = %v, want request-scoped rejection", err)
+					}
+					if upstream.called {
+						t.Fatalf("invalid thinking/tool_choice reached upstream: %s", upstream.body)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode == "count local" {
+					if upstream.called {
+						t.Fatal("local count unexpectedly reached upstream")
+					}
+					return
+				}
+				if got := gjson.GetBytes(upstream.body, "tool_choice.type").String(); got != tc.wantChoice {
+					t.Fatalf("tool_choice.type = %q, want %q; body=%s", got, tc.wantChoice, upstream.body)
+				}
+				if got := gjson.GetBytes(upstream.body, "thinking.type").String(); got != tc.wantThinking {
+					t.Fatalf("thinking.type = %q, want %q; body=%s", got, tc.wantThinking, upstream.body)
+				}
+				if tc.wantThinking == "" && gjson.GetBytes(upstream.body, "thinking").Exists() {
+					t.Fatalf("filtered thinking was restored: %s", upstream.body)
+				}
+				if tc.wantThinking == "adaptive" && gjson.GetBytes(upstream.body, "thinking.block_binding.prefix_mismatch_behavior").String() != "drop_block" {
+					t.Fatalf("valid adaptive thinking lost block binding: %s", upstream.body)
+				}
+			})
+		}
+	}
+}

@@ -59,6 +59,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body = applyClaudePreservedThinkingBinding(body)
 	body = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)(body)
 	body = stripPromptCacheOptions(body)
+	if errToolChoice := validateClaudeToolChoiceThinking(body); errToolChoice != nil {
+		return cliproxyexecutor.Response{}, errToolChoice
+	}
 	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
@@ -243,6 +246,9 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 	body = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)(body)
 	body = stripPromptCacheOptions(body)
+	if errToolChoice := validateClaudeToolChoiceThinking(body); errToolChoice != nil {
+		return cliproxyexecutor.Response{}, errToolChoice
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err

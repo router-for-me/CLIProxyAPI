@@ -906,6 +906,31 @@ func claudeToolChoiceForcesToolUse(body []byte) bool {
 	return toolChoiceType == "any" || toolChoiceType == "tool"
 }
 
+type claudeToolChoiceThinkingError struct {
+	statusErr
+}
+
+func (claudeToolChoiceThinkingError) IsRequestScoped() bool {
+	return true
+}
+
+// validateClaudeToolChoiceThinking checks the final configured body without
+// undoing payload rules or running them again to predict the tool choice.
+func validateClaudeToolChoiceThinking(body []byte) error {
+	if !claudeToolChoiceForcesToolUse(body) {
+		return nil
+	}
+	switch gjson.GetBytes(body, "thinking.type").String() {
+	case "enabled", "adaptive":
+		return claudeToolChoiceThinkingError{statusErr{
+			code: http.StatusBadRequest,
+			msg:  "invalid_request_error: tool_choice.type any or tool cannot be combined with thinking.type enabled or adaptive; disable or filter thinking in payload rules, or use tool_choice.type auto",
+		}}
+	default:
+		return nil
+	}
+}
+
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
 // Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
