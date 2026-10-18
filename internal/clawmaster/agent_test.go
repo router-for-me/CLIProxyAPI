@@ -25,17 +25,6 @@ func agentTestCA(t *testing.T, dir string) string {
 	return path
 }
 
-func agentTestFreeAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	return address
-}
-
 func TestAgentTokenIsCreatedPrivateAndKept(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.token")
 	first, err := agentToken(path)
@@ -65,6 +54,11 @@ func TestAgentTokenRefusesAFileOthersCanReadOrThatIsNotAToken(t *testing.T) {
 		"separator": func(path string) error { return os.WriteFile(path, []byte("abcdefghijklmnop:qrstuvwxyz\n"), 0o600) },
 		"directory": func(path string) error { return os.Mkdir(path, 0o700) },
 		"oversized": func(path string) error { return os.WriteFile(path, []byte(strings.Repeat("a", 300)), 0o600) },
+		"empty":     func(path string) error { return os.WriteFile(path, nil, 0o600) },
+		// Characters a URL's userinfo would decode or end at.
+		"percent":  func(path string) error { return os.WriteFile(path, []byte("abcdefghijklmnop%41\n"), 0o600) },
+		"fragment": func(path string) error { return os.WriteFile(path, []byte("abcdefghijklmnop#\n"), 0o600) },
+		"query":    func(path string) error { return os.WriteFile(path, []byte("abcdefghijklmnop?\n"), 0o600) },
 	}
 	if runtime.GOOS != "windows" {
 		cases["readable by others"] = func(path string) error {
@@ -91,6 +85,39 @@ func TestAgentTokenRefusesAFileOthersCanReadOrThatIsNotAToken(t *testing.T) {
 	}
 }
 
+func TestAgentTokenCreatedConcurrentlyIsOneCompleteToken(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		path := filepath.Join(t.TempDir(), "agent.token")
+		const starters = 8
+		tokens := make(chan string, starters)
+		errs := make(chan error, starters)
+		start := make(chan struct{})
+		for i := 0; i < starters; i++ {
+			go func() {
+				<-start
+				token, err := agentToken(path)
+				tokens <- token
+				errs <- err
+			}()
+		}
+		close(start)
+		seen := map[string]bool{}
+		for i := 0; i < starters; i++ {
+			if err := <-errs; err != nil {
+				t.Fatalf("round %d: a concurrent start failed: %v", round, err)
+			}
+			seen[<-tokens] = true
+		}
+		if len(seen) != 1 {
+			t.Fatalf("round %d: concurrent starts got %d different tokens", round, len(seen))
+		}
+		entries, err := os.ReadDir(filepath.Dir(path))
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("round %d: the directory holds %d entries (%v), want only the token", round, len(entries), err)
+		}
+	}
+}
+
 func TestAgentListensOnLoopbackOnlyAndNeedsAServer(t *testing.T) {
 	dir := t.TempDir()
 	ca := agentTestCA(t, dir)
@@ -99,6 +126,10 @@ func TestAgentListensOnLoopbackOnlyAndNeedsAServer(t *testing.T) {
 		{Listen: "localhost:41000", Open: "127.0.0.1:41001", CAFile: ca},
 		{Listen: "127.0.0.1:41000", Open: "192.0.2.1:41001", CAFile: ca},
 		{Listen: "127.0.0.1:41000", Open: "127.0.0.1:41000", CAFile: ca},
+		{Listen: "127.0.0.1:41000", Open: "127.0.0.1:041000", CAFile: ca},
+		{Listen: "127.0.0.1:0", Open: "127.0.0.1:41001", CAFile: ca},
+		{Listen: "127.0.0.1:65536", Open: "127.0.0.1:41001", CAFile: ca},
+		{Listen: "127.0.0.1:http", Open: "127.0.0.1:41001", CAFile: ca},
 		{Listen: "127.0.0.1:41000", Open: "127.0.0.1:41001"},
 		{Listen: "127.0.0.1:41000", Open: "127.0.0.1:41001", CAFile: filepath.Join(dir, "missing.pem")},
 		{Listen: "127.0.0.1:41000"},
@@ -167,32 +198,30 @@ func TestAgentSendsAnthropicTrafficOnlyToTheServerAndFailsClosed(t *testing.T) {
 	ca := agentTestCA(t, dir)
 	server := startForwarderTestEcho(t, true)
 	direct := startForwarderTestEcho(t, false)
-	listen := agentTestFreeAddress(t)
-	opts := AgentOptions{Listen: listen, Open: server.addr(), CAFile: ca}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := listener.Addr().String()
+	endpoint, err := resolveAgent(AgentOptions{Listen: listen, Open: server.addr(), CAFile: ca})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- RunAgent(ctx, opts) }()
+	go func() { done <- serveAgent(ctx, listener, endpoint, nil) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serveAgent: %v", err)
+			}
 		case <-time.After(10 * time.Second):
-			t.Error("RunAgent did not return after its context ended")
+			t.Error("serveAgent did not return after its context ended")
 		}
 	})
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		conn, err := net.Dial("tcp", listen)
-		if err == nil {
-			_ = conn.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the agent is not listening on %s: %v", listen, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	token, err := agentToken(filepath.Join(dir, "agent.token"))
 	if err != nil {
 		t.Fatal(err)

@@ -8,8 +8,10 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -48,14 +50,19 @@ func RunAgent(ctx context.Context, opts AgentOptions) error {
 	if err != nil {
 		return fmt.Errorf("cannot listen on %s: %w", endpoint.listen, err)
 	}
+	return serveAgent(ctx, listener, endpoint, opts.Out)
+}
+
+// serveAgent serves on listener, which it owns, until ctx ends.
+func serveAgent(ctx context.Context, listener net.Listener, endpoint agentEndpoint, out io.Writer) error {
 	if err := endpoint.check(ctx); err != nil {
 		lg().Warn("agent: the claw-master server is not reachable now; requests fail until it is", "error", err)
 	} else {
 		lg().Info("agent: the claw-master server is reachable")
 	}
 	forwarder := serveLocalForwarderWithToken(listener, endpoint.upstream, "", endpoint.token, true)
-	if opts.Out != nil {
-		fmt.Fprintf(opts.Out, "claw-master agent: listening on %s (claw-master agent env prints the settings for Claude)\n", listener.Addr())
+	if out != nil {
+		fmt.Fprintf(out, "claw-master agent: listening on %s (claw-master agent env prints the settings for Claude)\n", listener.Addr())
 	}
 	<-ctx.Done()
 	return forwarder.Close()
@@ -69,7 +76,7 @@ func AgentEnvironment(opts AgentOptions) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	proxyURL := "http://" + forwarderUser + ":" + endpoint.token + "@" + endpoint.listen
+	proxyURL := (&url.URL{Scheme: "http", User: url.UserPassword(forwarderUser, endpoint.token), Host: endpoint.listen}).String()
 	return []string{
 		"HTTPS_PROXY=" + proxyURL,
 		"NODE_EXTRA_CA_CERTS=" + endpoint.caPath,
@@ -77,15 +84,29 @@ func AgentEnvironment(opts AgentOptions) ([]string, error) {
 	}, nil
 }
 
+// agentAddress is a loopback ADDRESS:PORT in one spelling, so equal sockets compare equal and the
+// address Claude is given is the one the agent listens on.
+func agentAddress(value string) (string, error) {
+	ip, port, err := loopbackEndpoint(value)
+	if err != nil {
+		return "", err
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return "", errors.New("the port must be a number from 1 to 65535")
+	}
+	return net.JoinHostPort(ip.String(), strconv.FormatUint(n, 10)), nil
+}
+
 func resolveAgent(opts AgentOptions) (agentEndpoint, error) {
-	ip, port, err := loopbackEndpoint(opts.Listen)
+	listen, err := agentAddress(opts.Listen)
 	if err != nil {
 		return agentEndpoint{}, fmt.Errorf("--listen: %w", err)
 	}
-	endpoint := agentEndpoint{listen: net.JoinHostPort(ip.String(), port)}
+	endpoint := agentEndpoint{listen: listen}
 	tokenFile := opts.TokenFile
 	if opts.Open != "" {
-		openIP, openPort, err := loopbackEndpoint(opts.Open)
+		address, err := agentAddress(opts.Open)
 		if err != nil {
 			return agentEndpoint{}, fmt.Errorf("--open: %w", err)
 		}
@@ -95,7 +116,6 @@ func resolveAgent(opts AgentOptions) (agentEndpoint, error) {
 		if pemData, err := os.ReadFile(opts.CAFile); err != nil || len(x509CertPool(pemData).Subjects()) == 0 { //nolint:staticcheck
 			return agentEndpoint{}, errors.New("cannot read a CA certificate from --ca")
 		}
-		address := net.JoinHostPort(openIP.String(), openPort)
 		if address == endpoint.listen {
 			return agentEndpoint{}, errors.New("--listen and --open must differ")
 		}
@@ -138,25 +158,33 @@ func resolveAgent(opts AgentOptions) (agentEndpoint, error) {
 }
 
 // agentToken reads the agent's token, creating it on first use. The file must be a regular file only
-// its owner can read: the token lets anything that holds it use the pool.
+// its owner can read: the token lets anything that holds it use the pool. A new token is written to a
+// temporary file and linked into place, so no reader sees a partial one and concurrent starts agree.
 func agentToken(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("no token file")
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err == nil {
-		token := rand.Text()
-		_, errWrite := file.WriteString(token + "\n")
-		errClose := file.Close()
-		if errWrite != nil || errClose != nil {
-			_ = os.Remove(path)
-			return "", fmt.Errorf("cannot write the agent token %s", path)
-		}
-		return token, nil
+	if token, err := readAgentToken(path); !errors.Is(err, fs.ErrNotExist) {
+		return token, err
 	}
-	if !errors.Is(err, fs.ErrExist) {
+	temp, err := os.CreateTemp(filepath.Dir(path), ".agent.token-*") // created 0600
+	if err != nil {
 		return "", fmt.Errorf("cannot create the agent token %s: %w", path, err)
 	}
+	defer func() { _ = os.Remove(temp.Name()) }()
+	_, errWrite := temp.WriteString(rand.Text() + "\n")
+	errSync := temp.Sync()
+	errClose := temp.Close()
+	if err := errors.Join(errWrite, errSync, errClose); err != nil {
+		return "", fmt.Errorf("cannot write the agent token %s: %w", path, err)
+	}
+	if err := os.Link(temp.Name(), path); err != nil && !errors.Is(err, fs.ErrExist) {
+		return "", fmt.Errorf("cannot create the agent token %s: %w", path, err)
+	}
+	return readAgentToken(path) // this start's token, or the one a concurrent start linked first
+}
+
+func readAgentToken(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", fmt.Errorf("cannot read the agent token %s: %w", path, err)
@@ -172,8 +200,8 @@ func agentToken(path string) (string, error) {
 		return "", fmt.Errorf("cannot read the agent token %s: %w", path, err)
 	}
 	token := strings.TrimSpace(string(raw))
-	if len(token) < 16 || strings.ContainsAny(token, ":@/ \t\r\n") {
-		return "", fmt.Errorf("the agent token %s is malformed; delete it and start the agent again", path)
+	if len(token) < 16 || strings.Trim(token, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != "" {
+		return "", fmt.Errorf("the agent token %s is malformed (16 or more letters, digits, - or _); delete it and start the agent again", path)
 	}
 	return token, nil
 }
