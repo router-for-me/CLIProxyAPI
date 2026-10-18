@@ -90,6 +90,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	// Responses clients such as Codex send web_search_call items back without
+	// their results; restore them per session, like the thinking replay scope.
+	webSearchSessionKey := ""
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		webSearchSessionKey = xaiReasoningReplayIsolateSessionKey(ctx, codexReasoningReplaySessionKey(ctx, from, req, opts, req.Payload))
+	}
+	body = helps.RestoreClaudeWebSearchResults(body, webSearchSessionKey)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
@@ -394,6 +401,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}
 	data = e.restoreResponseModel(data, req.Model)
+	helps.RecordClaudeWebSearchResults(webSearchSessionKey, data)
 	cacheClaudeThinkingReplayResponse(ctx, replayScope, data)
 	var param any
 	out := sdktranslator.TranslateNonStream(
