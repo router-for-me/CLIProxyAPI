@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type endpointKey struct{}
@@ -30,8 +31,9 @@ type responseStatusHolder struct {
 }
 
 type responseHeadersHolder struct {
-	mu      sync.RWMutex
-	headers http.Header
+	mu         sync.RWMutex
+	headers    http.Header
+	capturedAt map[string]time.Time
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -113,6 +115,10 @@ func SetResponseStatus(ctx context.Context, status int) {
 }
 
 func SetResponseHeaders(ctx context.Context, headers http.Header) {
+	setResponseHeadersAt(ctx, headers, time.Now())
+}
+
+func setResponseHeadersAt(ctx context.Context, headers http.Header, capturedAt time.Time) {
 	if ctx == nil {
 		return
 	}
@@ -123,11 +129,19 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneHTTPHeader(headers)
+	holder.capturedAt = make(map[string]time.Time, len(headers))
+	for name := range headers {
+		holder.capturedAt[http.CanonicalHeaderKey(name)] = capturedAt
+	}
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
 // such as quota metadata delivered in a websocket event.
 func MergeResponseHeaders(ctx context.Context, headers http.Header) {
+	mergeResponseHeadersAt(ctx, headers, time.Now())
+}
+
+func mergeResponseHeadersAt(ctx context.Context, headers http.Header, capturedAt time.Time) {
 	if ctx == nil || len(headers) == 0 {
 		return
 	}
@@ -140,12 +154,16 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 	if holder.headers == nil {
 		holder.headers = make(http.Header, len(headers))
 	}
+	if holder.capturedAt == nil {
+		holder.capturedAt = make(map[string]time.Time)
+	}
 	for key, values := range headers {
 		canonicalKey := http.CanonicalHeaderKey(key)
 		if canonicalKey == "" {
 			continue
 		}
 		holder.headers[canonicalKey] = append([]string(nil), values...)
+		holder.capturedAt[canonicalKey] = capturedAt
 	}
 }
 
@@ -171,6 +189,25 @@ func GetResponseHeaders(ctx context.Context) http.Header {
 	holder.mu.RLock()
 	defer holder.mu.RUnlock()
 	return cloneHTTPHeader(holder.headers)
+}
+
+// GetResponseHeadersWithCaptureTimes atomically snapshots headers and the time
+// each value was received. Later websocket events only refresh fields they carry.
+func GetResponseHeadersWithCaptureTimes(ctx context.Context) (http.Header, map[string]time.Time) {
+	if ctx == nil {
+		return nil, nil
+	}
+	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
+	if !ok || holder == nil {
+		return nil, nil
+	}
+	holder.mu.RLock()
+	defer holder.mu.RUnlock()
+	times := make(map[string]time.Time, len(holder.capturedAt))
+	for key, captured := range holder.capturedAt {
+		times[key] = captured
+	}
+	return cloneHTTPHeader(holder.headers), times
 }
 
 func cloneHTTPHeader(src http.Header) http.Header {
