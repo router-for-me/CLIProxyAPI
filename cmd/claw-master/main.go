@@ -476,14 +476,14 @@ func runConnect(ctx context.Context, args []string) (int, error) {
 	return clawmaster.Connect(ctx, clawmaster.ConnectOptions{Server: server, Dir: dir, Open: open, CAFile: caFile, Out: os.Stderr}, flags.Args())
 }
 
-const agentUsage = "usage: claw-master agent [env] --listen 127.0.0.1:PORT (--server ADDRESS:PORT --dir DIR | --open 127.0.0.1:PORT --ca FILE) [--token-file FILE] (defaults from CLAW_MASTER_AGENT_LISTEN, CLAW_MASTER_SERVER, CLAW_MASTER_CLIENT_DIR, CLAW_MASTER_OPEN, CLAW_MASTER_CA)"
+const agentUsage = "usage: claw-master agent [env|install|uninstall] --listen 127.0.0.1:PORT (--server ADDRESS:PORT --dir DIR | --open 127.0.0.1:PORT --ca FILE) [--token-file FILE] (defaults from CLAW_MASTER_AGENT_LISTEN, CLAW_MASTER_SERVER, CLAW_MASTER_CLIENT_DIR, CLAW_MASTER_OPEN, CLAW_MASTER_CA)"
 
 // runAgent serves a long-running forwarder for a Claude that no launcher starts (the desktop app's
 // Code tab); "agent env" prints the settings that Claude needs to use it.
 func runAgent(ctx context.Context, args []string) (int, error) {
-	printEnv := len(args) > 0 && args[0] == "env"
-	if printEnv {
-		args = args[1:]
+	action := ""
+	if len(args) > 0 && (args[0] == "env" || args[0] == "install" || args[0] == "uninstall") {
+		action, args = args[0], args[1:]
 	}
 	flags := flag.NewFlagSet("agent", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -501,7 +501,18 @@ func runAgent(ctx context.Context, args []string) (int, error) {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || opts.Listen == "" {
 		return 2, errors.New(agentUsage)
 	}
-	if printEnv {
+	switch action {
+	case "install", "uninstall":
+		install := clawmaster.AgentInstallOptions{Agent: opts, LogFile: logFile, Out: os.Stdout}
+		run := clawmaster.InstallAgent
+		if action == "uninstall" {
+			run = clawmaster.UninstallAgent
+		}
+		if err := run(ctx, install); err != nil {
+			return 1, err
+		}
+		return 0, nil
+	case "env":
 		lines, err := clawmaster.AgentEnvironment(opts)
 		if err != nil {
 			return 1, err

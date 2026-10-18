@@ -28,14 +28,21 @@ type AgentOptions struct {
 	Out       io.Writer
 }
 
+// agentTokenName is the agent's token file, beside the CA (--open) or in the client directory.
+const agentTokenName = "agent.token"
+
+// agentNoProxy exempts loopback: Claude uses one proxy for every scheme, and the agent only tunnels CONNECT.
+const agentNoProxy = "localhost,127.0.0.1,::1"
+
 // agentEndpoint is what an agent needs: how to reach the server, the CA Claude must trust, and its
 // own address and token.
 type agentEndpoint struct {
-	upstream upstreamDialer
-	check    func(context.Context) error
-	caPath   string
-	listen   string
-	token    string
+	upstream  upstreamDialer
+	check     func(context.Context) error
+	caPath    string
+	listen    string
+	token     string
+	tokenPath string
 }
 
 // RunAgent serves until ctx ends. Like Connect it never falls back to this box's own login: while
@@ -80,8 +87,43 @@ func AgentEnvironment(opts AgentOptions) ([]string, error) {
 	return []string{
 		"HTTPS_PROXY=" + proxyURL,
 		"NODE_EXTRA_CA_CERTS=" + endpoint.caPath,
-		"NO_PROXY=localhost,127.0.0.1,::1",
+		"NO_PROXY=" + agentNoProxy,
 	}, nil
+}
+
+// agentSettingsAllowance accepts, in a settings file's env, exactly what `agent install` writes
+// there for this machine's agent: HTTPS_PROXY to a loopback address with the token in tokenPath,
+// NODE_EXTRA_CA_CERTS naming caPath, and NO_PROXY for loopback only. A launch whose Claude follows
+// those still reaches only the pool. With no readable token, it accepts nothing.
+func agentSettingsAllowance(tokenPath, caPath string) settingsEnvAllowance {
+	token, err := readAgentToken(tokenPath)
+	if err != nil {
+		return nil
+	}
+	ca, err := filepath.Abs(caPath)
+	if err != nil {
+		return nil
+	}
+	return func(key, value string) bool {
+		switch key {
+		case "HTTPS_PROXY":
+			u, err := url.Parse(value)
+			if err != nil || u.Scheme != "http" || u.User == nil || u.User.Username() != forwarderUser ||
+				(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+				return false
+			}
+			if password, ok := u.User.Password(); !ok || password != token {
+				return false
+			}
+			_, err = agentAddress(u.Host)
+			return err == nil
+		case "NODE_EXTRA_CA_CERTS":
+			return filepath.IsAbs(value) && filepath.Clean(value) == ca
+		case "NO_PROXY":
+			return value == agentNoProxy
+		}
+		return false
+	}
 }
 
 // agentAddress is a loopback ADDRESS:PORT in one spelling, so equal sockets compare equal and the
@@ -99,6 +141,18 @@ func agentAddress(value string) (string, error) {
 }
 
 func resolveAgent(opts AgentOptions) (agentEndpoint, error) {
+	endpoint, err := resolveAgentPaths(opts)
+	if err != nil {
+		return agentEndpoint{}, err
+	}
+	if endpoint.token, err = agentToken(endpoint.tokenPath); err != nil {
+		return agentEndpoint{}, err
+	}
+	return endpoint, nil
+}
+
+// resolveAgentPaths is resolveAgent without reading or creating the token.
+func resolveAgentPaths(opts AgentOptions) (agentEndpoint, error) {
 	listen, err := agentAddress(opts.Listen)
 	if err != nil {
 		return agentEndpoint{}, fmt.Errorf("--listen: %w", err)
@@ -123,7 +177,7 @@ func resolveAgent(opts AgentOptions) (agentEndpoint, error) {
 		endpoint.check = func(ctx context.Context) error { return checkOpen(ctx, address) }
 		endpoint.caPath = opts.CAFile
 		if tokenFile == "" {
-			tokenFile = filepath.Join(filepath.Dir(opts.CAFile), "agent.token")
+			tokenFile = filepath.Join(filepath.Dir(opts.CAFile), agentTokenName)
 		}
 	} else {
 		if opts.Server == "" || opts.Dir == "" {
@@ -145,13 +199,13 @@ func resolveAgent(opts AgentOptions) (agentEndpoint, error) {
 		endpoint.check = func(ctx context.Context) error { return checkServer(ctx, serverIP, serverPort, identity) }
 		endpoint.caPath = identity.CAPath
 		if tokenFile == "" {
-			tokenFile = filepath.Join(opts.Dir, "agent.token")
+			tokenFile = filepath.Join(opts.Dir, agentTokenName)
 		}
 	}
 	if endpoint.caPath, err = filepath.Abs(endpoint.caPath); err != nil {
 		return agentEndpoint{}, err
 	}
-	if endpoint.token, err = agentToken(tokenFile); err != nil {
+	if endpoint.tokenPath, err = filepath.Abs(tokenFile); err != nil {
 		return agentEndpoint{}, err
 	}
 	return endpoint, nil
