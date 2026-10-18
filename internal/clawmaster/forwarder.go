@@ -3,9 +3,12 @@ package clawmaster
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +55,9 @@ type localForwarder struct {
 	// project names the launch's project (projectLabel) on each tunnel to the claw-master proxy,
 	// so its token counts can be split by project; empty sends none.
 	project string
+	// requireToken answers 407 to a CONNECT to api.anthropic.com:443 without the token, instead of
+	// tunnelling it directly: the agent's Claude must never reach Anthropic with its own login.
+	requireToken bool
 }
 
 // startLocalForwarder binds an ephemeral IPv4 loopback port. Whatever else on this box can reach the
@@ -65,13 +71,19 @@ func startLocalForwarder(upstream upstreamDialer, project string) (*localForward
 	return serveLocalForwarder(listener, upstream, project), nil
 }
 
-// serveLocalForwarder serves on listener, which it owns from here on.
+// serveLocalForwarder serves on listener, which it owns from here on, with a fresh token.
 func serveLocalForwarder(listener net.Listener, upstream upstreamDialer, project string) *localForwarder {
+	return serveLocalForwarderWithToken(listener, upstream, project, rand.Text(), false)
+}
+
+// serveLocalForwarderWithToken is serveLocalForwarder with a given token: the agent keeps one across
+// restarts, because the desktop app is configured with its URL once.
+func serveLocalForwarderWithToken(listener net.Listener, upstream upstreamDialer, project, token string, requireToken bool) *localForwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &localForwarder{
-		listener: listener, token: rand.Text(), upstream: upstream,
+		listener: listener, token: token, upstream: upstream,
 		dial: forwarderDial, ctx: ctx, cancel: cancel, conns: make(map[net.Conn]struct{}),
-		project: sanitizeProject(project),
+		project: sanitizeProject(project), requireToken: requireToken,
 	}
 	f.server = &http.Server{
 		Handler: http.HandlerFunc(f.handle), BaseContext: func(net.Listener) context.Context { return ctx },
@@ -138,7 +150,31 @@ func (f *localForwarder) untrack(conn net.Conn) {
 	_ = conn.Close()
 }
 
+// agentProbePath and agentProbeHeader let `agent install` tell this machine's agent, holding its
+// token, from anything else that happens to listen on the address.
+const (
+	agentProbePath   = "/claw-master-agent"
+	agentProbeHeader = "X-Claw-Master-Agent"
+)
+
+func agentProbeAnswer(token, nonce string) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte("claw-master agent probe\x00" + nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func (f *localForwarder) handle(w http.ResponseWriter, r *http.Request) {
+	if f.requireToken && r.Method == http.MethodGet && r.URL.Path == agentProbePath {
+		// Proof of the token without sending it: the answer is keyed by the token and the caller's nonce.
+		nonce := r.URL.Query().Get("nonce")
+		if len(nonce) < 16 || len(nonce) > 128 {
+			http.Error(w, "the probe needs a nonce", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set(agentProbeHeader, agentProbeAnswer(f.token, nonce))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodConnect {
 		http.Error(w, "this proxy only tunnels CONNECT", http.StatusMethodNotAllowed)
 		return
@@ -150,7 +186,14 @@ func (f *localForwarder) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The port is compared as a number, so 0443 is 443 too; anything else on api.anthropic.com goes direct.
-	toMaster := n == 443 && strings.TrimSuffix(strings.ToLower(host), ".") == masterAPIHost && f.authorized(r)
+	anthropic := n == 443 && strings.TrimSuffix(strings.ToLower(host), ".") == masterAPIHost
+	toMaster := anthropic && f.authorized(r)
+	if anthropic && !toMaster && f.requireToken {
+		lg().Warn("forwarder refused a CONNECT to api.anthropic.com without the agent token; check the proxy URL Claude uses")
+		w.Header().Set("Proxy-Authenticate", `Basic realm="claw-master"`)
+		http.Error(w, "the claw-master agent needs its token in the proxy URL", http.StatusProxyAuthRequired)
+		return
+	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
@@ -171,7 +214,11 @@ func (f *localForwarder) handle(w http.ResponseWriter, r *http.Request) {
 	defer f.untrack(raw)
 	remote, tracked, err := f.open(toMaster, net.JoinHostPort(host, port))
 	if err != nil {
-		lg().Debug("forwarder tunnel failed", "to_master", toMaster, "error", err)
+		if toMaster {
+			lg().Warn("forwarder could not reach the claw-master server", "error", err)
+		} else {
+			lg().Debug("forwarder tunnel failed", "to_master", toMaster, "error", err)
+		}
 		_, _ = buffered.WriteString("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 		_ = buffered.Flush()
 		return

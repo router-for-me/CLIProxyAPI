@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -153,7 +154,7 @@ func Connect(ctx context.Context, opts ConnectOptions, args []string) (int, erro
 	if err != nil {
 		return 1, err
 	}
-	bin, err := preflight(ctx, args, environ)
+	bin, err := preflight(ctx, args, environ, agentSettingsAllowance(filepath.Join(opts.Dir, agentTokenName), identity.CAPath))
 	if err != nil {
 		return 1, err
 	}
@@ -263,7 +264,7 @@ func connectOpen(ctx context.Context, opts ConnectOptions, args []string) (int, 
 	if err != nil {
 		return 1, err
 	}
-	bin, err := preflight(ctx, args, environ)
+	bin, err := preflight(ctx, args, environ, agentSettingsAllowance(filepath.Join(filepath.Dir(opts.CAFile), agentTokenName), opts.CAFile))
 	if err != nil {
 		return 1, err
 	}

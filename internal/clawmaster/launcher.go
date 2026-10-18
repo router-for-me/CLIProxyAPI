@@ -115,7 +115,7 @@ func LaunchProfilesWithOptions(ctx context.Context, profiles []Profile, args []s
 	if err != nil {
 		return 1, err
 	}
-	bin, err := preflight(ctx, args, environ)
+	bin, err := preflight(ctx, args, environ, nil)
 	if err != nil {
 		return 1, err
 	}
@@ -241,14 +241,14 @@ func Preflight(ctx context.Context, args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return preflight(ctx, args, environ)
+	return preflight(ctx, args, environ, nil)
 }
 
-func preflight(ctx context.Context, args, environ []string) (string, error) {
+func preflight(ctx context.Context, args, environ []string, allow settingsEnvAllowance) (string, error) {
 	if _, err := ChildEnvironment(environ, args, "http://127.0.0.1:1", "/unused"); err != nil {
 		return "", err
 	}
-	if err := validateNativeSettings(ctx, environ); err != nil {
+	if err := validateNativeSettings(ctx, environ, allow); err != nil {
 		return "", err
 	}
 	return resolveNativeBinary(ctx)

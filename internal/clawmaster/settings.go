@@ -22,10 +22,14 @@ const settingsByteLimit = 1024 * 1024
 // We preserve its settings/permissions/hooks instead of disabling their sources. Native MDM policies
 // are not JSON files and cannot be covered by this bounded file validator.
 func ValidateNativeSettings(ctx context.Context) error {
-	return validateNativeSettings(ctx, os.Environ())
+	return validateNativeSettings(ctx, os.Environ(), nil)
 }
 
-func validateNativeSettings(ctx context.Context, environ []string) error {
+// settingsEnvAllowance accepts a settings env entry that would otherwise be refused, because it
+// leads to the pool anyway (this machine's claw-master agent). nil accepts none.
+type settingsEnvAllowance func(key, value string) bool
+
+func validateNativeSettings(ctx context.Context, environ []string, allow settingsEnvAllowance) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -45,10 +49,10 @@ func validateNativeSettings(ctx context.Context, environ []string) error {
 	if runtime.GOOS == "darwin" {
 		managed = "/Library/Application Support/ClaudeCode"
 	}
-	return validateSettingsAt(home, roots, managed)
+	return validateSettingsAt(home, roots, managed, allow)
 }
 
-func validateSettingsAt(home string, roots []string, managed string) error {
+func validateSettingsAt(home string, roots []string, managed string, allow settingsEnvAllowance) error {
 	paths := []string{
 		filepath.Join(home, ".claude", "settings.json"),
 		// The last fetched policy is also a native settings source. Fresh policies still arrive later.
@@ -86,14 +90,14 @@ func validateSettingsAt(home string, roots []string, managed string) error {
 			continue
 		}
 		seen[path] = true
-		if err := validateSettingsFile(path); err != nil {
+		if err := validateSettingsFile(path, allow); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateSettingsFile(path string) error {
+func validateSettingsFile(path string, allow settingsEnvAllowance) error {
 	// Refuse links in the relevant settings directory itself; do not follow a different source than
 	// the path inspected here. Ordinary symlinked working directories are resolved before discovery.
 	parent, err := os.Lstat(filepath.Dir(path))
@@ -120,10 +124,10 @@ func validateSettingsFile(path string) error {
 	if err != nil || len(raw) > settingsByteLimit {
 		return errors.New("cannot safely read native settings")
 	}
-	return validateSettingsJSON(raw)
+	return validateSettingsJSON(raw, allow)
 }
 
-func validateSettingsJSON(raw []byte) error {
+func validateSettingsJSON(raw []byte, allow settingsEnvAllowance) error {
 	var settings map[string]json.RawMessage
 	if json.Unmarshal(raw, &settings) != nil || settings == nil {
 		return errors.New("native settings must be valid JSON objects before launching")
@@ -144,7 +148,7 @@ func validateSettingsJSON(raw []byte) error {
 			var text string
 			isString := json.Unmarshal(value, &text) == nil
 			// Even an empty proxy value can undo the wrapper. Presence is rejected, not just truthiness.
-			if forbiddenSettingsEnv(key) && !(isString && allowedNodeOptions(key, text)) {
+			if forbiddenSettingsEnv(key) && !(isString && (allowedNodeOptions(key, text) || (allow != nil && allow(key, text)))) {
 				return errors.New("native settings override provider, credential, proxy, or process routing; remove that override before launching")
 			}
 			if !isString {

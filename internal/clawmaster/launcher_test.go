@@ -118,7 +118,7 @@ func TestPreflightConsumesBackupKeyBeforeSettingsDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := preflight(t.Context(), nil, environ); err != nil {
+	if _, err := preflight(t.Context(), nil, environ, nil); err != nil {
 		t.Fatalf("selected backup key reached preflight discovery: %v", err)
 	}
 	if os.Getenv("ANTHROPIC_API_KEY") != "selected-canary" {

@@ -30,7 +30,7 @@ func TestSettingsPreflightPreservesOrdinarySettings(t *testing.T) {
 	path := filepath.Join(home, ".claude", "settings.json")
 	const original = `{"permissions":{"allow":["Bash(git status)"]},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo synthetic"}]}]},"env":{"EDITOR":"vim","ANTHROPIC_MODEL":"claude-opus-4-8"}}`
 	writeSettingsFixture(t, path, original)
-	if err := validateSettingsAt(home, []string{root}, managed); err != nil {
+	if err := validateSettingsAt(home, []string{root}, managed, nil); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(path)
@@ -55,7 +55,7 @@ func TestSettingsRejectsRoutingAtEverySource(t *testing.T) {
 				"drop-in":       filepath.Join(managed, "managed-settings.d", "50-routing.json"),
 			}
 			writeSettingsFixture(t, paths[source], `{"env":{"HTTPS_PROXY":"sensitive-routing-canary"}}`)
-			err := validateSettingsAt(home, []string{cwd, repo, main}, managed)
+			err := validateSettingsAt(home, []string{cwd, repo, main}, managed, nil)
 			if err == nil {
 				t.Fatal("routing override accepted")
 			}
@@ -79,7 +79,7 @@ func TestSettingsBlocksEmptyProxyAndCredentialHelpers(t *testing.T) {
 		`{"env":{"NODE_OPTIONS":"--max-old-space-size=big"}}`, `{"env":{"NODE_OPTIONS":""}}`, `{"env":{"NODE_OPTIONS":3}}`,
 		`null`, `[]`, `{bad json`,
 	} {
-		if err := validateSettingsJSON([]byte(raw)); err == nil {
+		if err := validateSettingsJSON([]byte(raw), nil); err == nil {
 			t.Errorf("accepted incompatible settings %s", raw)
 		}
 	}
@@ -108,7 +108,7 @@ func TestSettingsRejectsLinkedMalformedAndOversizedFiles(t *testing.T) {
 			case "malformed":
 				writeSettingsFixture(t, path, `{"env":`)
 			}
-			if err := validateSettingsFile(path); err == nil {
+			if err := validateSettingsFile(path, nil); err == nil {
 				t.Fatal("unsafe settings accepted")
 			}
 		})
@@ -121,7 +121,7 @@ func TestSettingsDropInsFollowNativeDocumentedNames(t *testing.T) {
 	for _, name := range []string{".hidden.json", "settings.txt"} {
 		writeSettingsFixture(t, filepath.Join(managed, "managed-settings.d", name), `{"env":{"NO_PROXY":"*"}}`)
 	}
-	if err := validateSettingsAt(filepath.Join(base, "home"), []string{filepath.Join(base, "project")}, managed); err != nil {
+	if err := validateSettingsAt(filepath.Join(base, "home"), []string{filepath.Join(base, "project")}, managed, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -261,7 +261,7 @@ func TestSettingsAllowHeapSizeNodeOptions(t *testing.T) {
 		`{"env":{"NODE_OPTIONS":"--max-old-space-size=3072"}}`,
 		`{"env":{"NODE_OPTIONS":"--max_old_space_size=4096 --max-semi-space-size=64"}}`,
 	} {
-		if err := validateSettingsJSON([]byte(raw)); err != nil {
+		if err := validateSettingsJSON([]byte(raw), nil); err != nil {
 			t.Errorf("refused a heap-size-only NODE_OPTIONS %s: %v", raw, err)
 		}
 	}

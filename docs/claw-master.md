@@ -611,6 +611,59 @@ NO_PROXY=localhost,127.0.0.1,::1; no_proxy=$NO_PROXY; export NO_PROXY no_proxy
 exec "$HOME/.local/bin/claude" "$@"
 ```
 
+### Every Claude Code on a Mac, the desktop app included: `claw-master agent`
+
+The desktop app's Code tab runs its own copy of Claude Code, which the app downloads and starts itself, so
+no launcher can set its environment. `claw-master agent` is a long-running forwarder for it, and for every
+other Claude Code on the machine: the same forwarder a launch starts, on a fixed loopback address and
+with a token kept in a file (`agent.token` beside the CA, or in `--dir`; created with mode 0600 on first
+start and refused if others can read it).
+
+It fails closed, like `connect`. A CONNECT to `api.anthropic.com:443` goes to the claw-master server or
+nowhere: while the server or the tunnel is down it is answered `502`, and one without the agent's token
+(a stale or mistyped proxy URL) is answered `407` instead of being sent to Anthropic with the machine's own
+login. Both are logged. Other hosts (OAuth refresh, telemetry) are tunnelled directly, as in a launch.
+
+On macOS, one command sets it up, behind the tunnel above:
+
+```sh
+claw-master agent install --listen 127.0.0.1:8445 --open 127.0.0.1:8444 --ca ~/.config/claw-master/ca.pem
+```
+
+It writes a launchd job (`~/Library/LaunchAgents/dev.claw-master.agent.plist`: started at login, restarted
+if it exits, logging to `~/Library/Logs/claw-master-agent.log`, and anything it prints before logging starts
+to `claw-master-agent.stderr.log` beside it), starts it, and waits until that agent answers a probe with its
+token (an unrelated program on the port does not count). Only then does it set three entries in the `env`
+of `~/.claude/settings.json`, which the CLI, the desktop app's Code tab and the IDE extensions all read:
+`HTTPS_PROXY` (its URL carries the token, so the file is made private, mode 0600),
+`NODE_EXTRA_CA_CERTS`, and `NO_PROXY=localhost,127.0.0.1,::1` (Claude uses one proxy for every scheme, and
+the agent only tunnels CONNECT, so loopback MCP servers need the exemption). Other settings are kept; the
+file is rewritten with its keys in sorted order, and the file as it was before the first install is kept as
+`settings.json.before-claw-master`. It refuses to install while that `env` already sets another proxy setting
+(`https_proxy`, which Claude prefers over `HTTPS_PROXY`, or `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`,
+`all_proxy`, `no_proxy`).
+Restart the desktop app and running sessions afterwards. From then on every Claude Code on the Mac uses the
+pool, and none falls back to the Mac's login while the agent or the server is down. Project settings and
+`CLAUDE_CONFIG_DIR` can still override user settings, as for any setting. Cloud and SSH sessions of the
+desktop app do not use the local agent.
+
+`claw-master agent uninstall` (no flags) undoes what the install recorded in
+`~/Library/Application Support/claw-master/agent-install.json`: it stops the job (and changes nothing if the
+job will not stop), puts back the entries the install replaced, removes those it added (unless they were
+changed since), and removes the plist.
+
+`connect` refuses settings files whose `env` sets proxy or CA variables, with one exception: the entries
+`agent install` writes, while they name a loopback address with the token in `agent.token` beside
+`connect`'s own CA (or in its `--dir`) and that same CA. A launch through `connect` also sets the lowercase
+`https_proxy`, which Claude prefers, so it keeps using its own forwarder and its tokens are still counted by
+project.
+
+Elsewhere, run `claw-master agent` under the system's service manager and put the lines
+`claw-master agent env` prints (same flags) into the settings `env` yourself. A box with a client
+certificate uses `--server ADDRESS:PORT --dir DIR` instead of `--open` and `--ca`. The server logs the
+agent's first tunnel as `client connected for the first time client=tunnel listener=open`, as for any
+tunnel client.
+
 Release assets: `checksums.txt` lists only the archives. The bare `claw-master-<os>-<arch>` binaries are
 not in it; check one against the digest GitHub records for the asset
 (`gh api repos/OWNER/CLIProxyAPI/releases/tags/TAG --jq '.assets[] | [.name, .digest]'`).
