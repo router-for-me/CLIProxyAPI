@@ -147,7 +147,23 @@ func (f *localForwarder) untrack(conn net.Conn) {
 	_ = conn.Close()
 }
 
+// agentProbePath and agentProbeHeader let `agent install` tell this machine's agent, holding its
+// token, from anything else that happens to listen on the address.
+const (
+	agentProbePath   = "/claw-master-agent"
+	agentProbeHeader = "X-Claw-Master-Agent"
+)
+
 func (f *localForwarder) handle(w http.ResponseWriter, r *http.Request) {
+	if f.requireToken && r.Method == http.MethodGet && r.URL.Path == agentProbePath {
+		if !f.authorized(r) {
+			http.Error(w, "the claw-master agent needs its token", http.StatusProxyAuthRequired)
+			return
+		}
+		w.Header().Set(agentProbeHeader, "1")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodConnect {
 		http.Error(w, "this proxy only tunnels CONNECT", http.StatusMethodNotAllowed)
 		return

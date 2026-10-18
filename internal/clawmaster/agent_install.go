@@ -1,8 +1,10 @@
 package clawmaster
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -10,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,20 +35,40 @@ type AgentInstallOptions struct {
 	home      string
 	binary    string
 	launchctl func(ctx context.Context, args ...string) error
-	wait      time.Duration // how long the new job has to start listening (default 15s)
+	wait      time.Duration // how long the new job has to answer (default 15s)
 }
 
+// agentInstallRecord is what InstallAgent changed, so UninstallAgent can undo exactly that without
+// the agent's credentials: the entries it set in the settings env and what they replaced.
+type agentInstallRecord struct {
+	Settings string                     `json:"settings"`
+	Plist    string                     `json:"plist"`
+	Set      map[string]string          `json:"set"`
+	Previous map[string]json.RawMessage `json:"previous,omitempty"`
+}
+
+// agentConflictingEnv are proxy settings that Claude would take over the ones the agent sets
+// (Claude prefers the lowercase spelling) or that would exempt Anthropic from the proxy.
+var agentConflictingEnv = []string{"https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "no_proxy"}
+
 // InstallAgent makes every Claude Code on this Mac use the pool: it runs the agent as a launchd job
-// that starts at login and is restarted if it exits, waits until it listens, and then sets the
-// agent's proxy, CA and loopback exemption in ~/.claude/settings.json, which the CLI, the desktop
-// app's Code tab and the IDE extensions all read. There is no fallback: while the agent or the
-// server is down, Claude's requests fail.
+// that starts at login and is restarted if it exits, waits until that agent answers with its token,
+// and then sets the agent's proxy, CA and loopback exemption in ~/.claude/settings.json, which the
+// CLI, the desktop app's Code tab and the IDE extensions all read. There is no fallback: while the
+// agent or the server is down, Claude's requests fail.
 func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	if err := opts.defaults(); err != nil {
 		return err
 	}
+	if opts.Agent.TokenFile != "" {
+		return errors.New("agent install keeps the token in its default place (agent.token beside --ca, or in --dir), where connect looks for it; leave out --token-file")
+	}
 	endpoint, err := resolveAgent(opts.Agent)
 	if err != nil {
+		return err
+	}
+	settingsPath := filepath.Join(opts.home, ".claude", "settings.json")
+	if err := refuseConflictingSettings(settingsPath); err != nil {
 		return err
 	}
 	args := []string{opts.binary, "agent", "--listen", endpoint.listen}
@@ -58,85 +81,124 @@ func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 		}
 		args = append(args, "--server", opts.Agent.Server, "--dir", dir)
 	}
-	args = append(args, "--token-file", endpoint.tokenPath, "--log-file", opts.LogFile)
-	plist, err := agentPlist(args)
+	args = append(args, "--log-file", opts.LogFile)
+	plist, err := agentPlist(args, strings.TrimSuffix(opts.LogFile, ".log")+".stderr.log")
 	if err != nil {
 		return err
 	}
 	plistPath := opts.plistPath()
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
-		return fmt.Errorf("cannot create %s: %w", filepath.Dir(plistPath), err)
-	}
-	if err := os.MkdirAll(filepath.Dir(opts.LogFile), 0o755); err != nil {
-		return fmt.Errorf("cannot create %s: %w", filepath.Dir(opts.LogFile), err)
+	for _, dir := range []string{filepath.Dir(plistPath), filepath.Dir(opts.LogFile)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("cannot create %s: %w", dir, err)
+		}
 	}
 	if err := writeFileAtomic(plistPath, plist, 0o644); err != nil {
 		return err
 	}
-	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_ = opts.launchctl(ctx, "bootout", domain+"/"+agentLaunchLabel) // not loaded yet is fine
-	if err := opts.launchctl(ctx, "bootstrap", domain, plistPath); err != nil {
+	if err := opts.stopJob(ctx); err != nil {
+		return err
+	}
+	if err := opts.launchctl(ctx, "bootstrap", opts.domain(), plistPath); err != nil {
 		return fmt.Errorf("launchctl could not start the agent: %w", err)
 	}
-	if err := waitAgentListening(ctx, endpoint.listen, opts.wait); err != nil {
-		return fmt.Errorf("the agent did not start listening on %s (see %s): %w", endpoint.listen, opts.LogFile, err)
+	if err := waitAgentReady(ctx, endpoint.listen, endpoint.token, opts.wait); err != nil {
+		return fmt.Errorf("the agent did not answer on %s (see %s): %w", endpoint.listen, opts.LogFile, err)
 	}
 	lines, err := AgentEnvironment(opts.Agent)
 	if err != nil {
 		return err
 	}
-	settingsPath := filepath.Join(opts.home, ".claude", "settings.json")
-	changed, err := updateClaudeSettingsEnv(settingsPath, func(env map[string]json.RawMessage) {
+	record := agentInstallRecord{Settings: settingsPath, Plist: plistPath, Set: map[string]string{}, Previous: map[string]json.RawMessage{}}
+	old, err := readAgentInstallRecord(opts.recordPath())
+	reinstall := err == nil && old.Settings == settingsPath
+	if reinstall {
+		record.Previous = old.Previous // what the first install replaced
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	changed, err := updateClaudeSettingsEnv(settingsPath, true, func(env map[string]json.RawMessage) error {
 		for _, line := range lines {
 			key, value, _ := strings.Cut(line, "=")
+			if raw, ok := env[key]; ok && !reinstall {
+				record.Previous[key] = raw
+			}
+			record.Set[key] = value
 			env[key], _ = json.Marshal(value)
 		}
+		return nil
 	})
 	if err != nil {
+		return err
+	}
+	if err := writeAgentInstallRecord(opts.recordPath(), record); err != nil {
 		return err
 	}
 	if opts.Out != nil {
 		fmt.Fprintf(opts.Out, "claw-master agent: running as launchd job %s on %s, logging to %s\n", agentLaunchLabel, endpoint.listen, opts.LogFile)
 		if changed {
-			fmt.Fprintf(opts.Out, "claw-master agent: every Claude Code on this Mac now uses the pool (%s env; previous file kept as %s)\n", settingsPath, settingsPath+agentSettingsBackupSuffix)
+			fmt.Fprintf(opts.Out, "claw-master agent: every Claude Code on this Mac now uses the pool (%s env)\n", settingsPath)
 		}
 		fmt.Fprintln(opts.Out, "claw-master agent: restart the Claude desktop app and running Claude sessions to pick it up")
 	}
 	return nil
 }
 
-// UninstallAgent stops the launchd job, removes its plist, and removes from ~/.claude/settings.json
-// the entries InstallAgent set, leaving everything else as it is.
+// UninstallAgent undoes what InstallAgent recorded: it stops the launchd job, puts back the settings
+// entries the install replaced (removing those it added, if they still hold its values), and removes
+// the plist. It needs none of the agent's flags or credentials.
 func UninstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	if err := opts.defaults(); err != nil {
 		return err
 	}
-	endpoint, err := resolveAgentPaths(opts.Agent)
+	record, err := readAgentInstallRecord(opts.recordPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return errors.New("no agent installation is recorded for this user")
+	}
 	if err != nil {
 		return err
 	}
-	settingsPath := filepath.Join(opts.home, ".claude", "settings.json")
-	allow := agentSettingsAllowance(endpoint.tokenPath, endpoint.caPath)
-	if allow != nil {
-		if _, err := updateClaudeSettingsEnv(settingsPath, func(env map[string]json.RawMessage) {
-			for key, raw := range env {
-				var value string
-				if json.Unmarshal(raw, &value) == nil && allow(key, value) {
-					delete(env, key)
-				}
-			}
-		}); err != nil {
-			return err
-		}
+	if err := opts.stopJob(ctx); err != nil {
+		return err
 	}
-	_ = opts.launchctl(ctx, "bootout", "gui/"+strconv.Itoa(os.Getuid())+"/"+agentLaunchLabel)
-	if err := os.Remove(opts.plistPath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if _, err := updateClaudeSettingsEnv(record.Settings, false, func(env map[string]json.RawMessage) error {
+		for key, value := range record.Set {
+			var current string
+			if raw, ok := env[key]; !ok || json.Unmarshal(raw, &current) != nil || current != value {
+				continue // changed since the install: leave it
+			}
+			if previous, ok := record.Previous[key]; ok {
+				env[key] = previous
+			} else {
+				delete(env, key)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := os.Remove(record.Plist); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(opts.recordPath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	if opts.Out != nil {
 		fmt.Fprintln(opts.Out, "claw-master agent: stopped and removed; Claude Code on this Mac uses its own login again")
 	}
 	return nil
+}
+
+// refuseConflictingSettings refuses user settings whose env already routes Claude another way.
+func refuseConflictingSettings(path string) error {
+	_, err := updateClaudeSettingsEnv(path, false, func(env map[string]json.RawMessage) error {
+		for _, key := range agentConflictingEnv {
+			if _, ok := env[key]; ok {
+				return fmt.Errorf("%s sets %s in env, which Claude would follow instead of the agent; remove it first", path, key)
+			}
+		}
+		return nil
+	})
+	return err
 }
 
 func (opts *AgentInstallOptions) defaults() error {
@@ -183,13 +245,34 @@ func (opts *AgentInstallOptions) defaults() error {
 	return nil
 }
 
+func (opts *AgentInstallOptions) domain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
+
 func (opts *AgentInstallOptions) plistPath() string {
 	return filepath.Join(opts.home, "Library", "LaunchAgents", agentLaunchLabel+".plist")
 }
 
-// agentPlist is a launchd job that runs args at login and again whenever it exits.
-func agentPlist(args []string) ([]byte, error) {
+func (opts *AgentInstallOptions) recordPath() string {
+	return filepath.Join(opts.home, "Library", "Application Support", "claw-master", "agent-install.json")
+}
+
+// stopJob stops the agent's launchd job if it is loaded; a job that is loaded but will not stop is
+// an error, so nothing is changed around a running agent.
+func (opts *AgentInstallOptions) stopJob(ctx context.Context) error {
+	service := opts.domain() + "/" + agentLaunchLabel
+	if opts.launchctl(ctx, "print", service) != nil {
+		return nil // not loaded
+	}
+	if err := opts.launchctl(ctx, "bootout", service); err != nil {
+		return fmt.Errorf("launchctl could not stop the running agent: %w", err)
+	}
+	return nil
+}
+
+// agentPlist is a launchd job that runs args at login and again whenever it exits; what it prints
+// before its logging starts (a port in use, unreadable credentials) goes to stderrPath.
+func agentPlist(args []string, stderrPath string) ([]byte, error) {
 	var b bytes.Buffer
+	escape := func(s string) error { return xml.EscapeText(&b, []byte(s)) }
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -200,12 +283,16 @@ func agentPlist(args []string) ([]byte, error) {
 `)
 	for _, arg := range args {
 		b.WriteString("    <string>")
-		if err := xml.EscapeText(&b, []byte(arg)); err != nil {
+		if err := escape(arg); err != nil {
 			return nil, err
 		}
 		b.WriteString("</string>\n")
 	}
-	b.WriteString(`  </array>
+	b.WriteString("  </array>\n  <key>StandardErrorPath</key><string>")
+	if err := escape(stderrPath); err != nil {
+		return nil, err
+	}
+	b.WriteString(`</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
@@ -215,15 +302,16 @@ func agentPlist(args []string) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// waitAgentListening waits, briefly, for the job launchd just started to accept connections.
-func waitAgentListening(ctx context.Context, address string, wait time.Duration) error {
+// waitAgentReady waits, briefly, until this machine's agent (not just anything listening there)
+// answers its probe with the token.
+func waitAgentReady(ctx context.Context, address, token string, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
 	for {
-		conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", address)
+		err := probeAgent(ctx, address, token)
 		if err == nil {
-			return conn.Close()
+			return nil
 		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
+		if time.Now().After(deadline) {
 			return err
 		}
 		select {
@@ -234,15 +322,39 @@ func waitAgentListening(ctx context.Context, address string, wait time.Duration)
 	}
 }
 
+func probeAgent(ctx context.Context, address, token string) error {
+	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	auth := base64.StdEncoding.EncodeToString([]byte(forwarderUser + ":" + token))
+	if _, err := fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: claw-master\r\nProxy-Authorization: Basic %s\r\nConnection: close\r\n\r\n", agentProbePath, auth); err != nil {
+		return err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || resp.Header.Get(agentProbeHeader) != "1" {
+		return fmt.Errorf("something else is listening there (answered %s)", resp.Status)
+	}
+	return nil
+}
+
 const agentSettingsBackupSuffix = ".before-claw-master"
 
 // updateClaudeSettingsEnv changes the env object of a Claude settings file, keeping every other
-// setting. The file is replaced atomically, with its mode, after the previous content is copied
-// beside it; it reports whether anything changed.
-func updateClaudeSettingsEnv(path string, update func(env map[string]json.RawMessage)) (bool, error) {
+// setting, and reports whether anything changed. The file is replaced atomically and made private,
+// since the agent's entries carry its token; with backup, the content it had before the first
+// install is kept beside it.
+func updateClaudeSettingsEnv(path string, backup bool, update func(env map[string]json.RawMessage) error) (bool, error) {
 	settings := map[string]json.RawMessage{}
 	var original []byte
-	mode := fs.FileMode(0o600)
 	info, err := os.Lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -251,13 +363,12 @@ func updateClaudeSettingsEnv(path string, update func(env map[string]json.RawMes
 	case !info.Mode().IsRegular() || info.Size() > settingsByteLimit:
 		return false, fmt.Errorf("%s is not a bounded regular file; edit it by hand", path)
 	default:
-		mode = info.Mode().Perm()
 		if original, err = os.ReadFile(path); err != nil {
 			return false, fmt.Errorf("cannot read %s: %w", path, err)
 		}
 		if len(bytes.TrimSpace(original)) > 0 {
 			if err := json.Unmarshal(original, &settings); err != nil || settings == nil {
-				return false, fmt.Errorf("%s is not a JSON object; fix it before installing the agent", path)
+				return false, fmt.Errorf("%s is not a JSON object; fix it first", path)
 			}
 		}
 	}
@@ -268,7 +379,9 @@ func updateClaudeSettingsEnv(path string, update func(env map[string]json.RawMes
 		}
 	}
 	before, _ := json.Marshal(env)
-	update(env)
+	if err := update(env); err != nil {
+		return false, err
+	}
 	after, _ := json.Marshal(env)
 	if bytes.Equal(before, after) {
 		return false, nil
@@ -285,15 +398,40 @@ func updateClaudeSettingsEnv(path string, update func(env map[string]json.RawMes
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
 	}
-	if original != nil {
-		if err := writeFileAtomic(path+agentSettingsBackupSuffix, original, mode); err != nil {
-			return false, err
+	if backup && original != nil {
+		if _, err := os.Lstat(path + agentSettingsBackupSuffix); errors.Is(err, fs.ErrNotExist) {
+			if err := writeFileAtomic(path+agentSettingsBackupSuffix, original, 0o600); err != nil {
+				return false, err
+			}
 		}
 	}
-	if err := writeFileAtomic(path, append(out, '\n'), mode); err != nil {
+	if err := writeFileAtomic(path, append(out, '\n'), 0o600); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func readAgentInstallRecord(path string) (agentInstallRecord, error) {
+	var record agentInstallRecord
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return record, err
+	}
+	if err := json.Unmarshal(raw, &record); err != nil || record.Settings == "" || record.Plist == "" {
+		return record, fmt.Errorf("%s is not an agent installation record", path)
+	}
+	return record, nil
+}
+
+func writeAgentInstallRecord(path string, record agentInstallRecord) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, append(out, '\n'), 0o600) // holds the token, like the settings
 }
 
 // writeFileAtomic replaces path with data: a reader sees the old file or the new one, never a part.

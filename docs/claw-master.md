@@ -631,21 +631,31 @@ claw-master agent install --listen 127.0.0.1:8445 --open 127.0.0.1:8444 --ca ~/.
 ```
 
 It writes a launchd job (`~/Library/LaunchAgents/dev.claw-master.agent.plist`: started at login, restarted
-if it exits, logging to `~/Library/Logs/claw-master-agent.log`), starts it, waits until it listens, and
-then sets three entries in the `env` of `~/.claude/settings.json`, which the CLI, the desktop app's Code
-tab and the IDE extensions all read: `HTTPS_PROXY` (its URL carries the token; treat it as a secret),
+if it exits, logging to `~/Library/Logs/claw-master-agent.log`, and anything it prints before logging starts
+to `claw-master-agent.stderr.log` beside it), starts it, and waits until that agent answers a probe with its
+token (an unrelated program on the port does not count). Only then does it set three entries in the `env`
+of `~/.claude/settings.json`, which the CLI, the desktop app's Code tab and the IDE extensions all read:
+`HTTPS_PROXY` (its URL carries the token, so the file is made private, mode 0600),
 `NODE_EXTRA_CA_CERTS`, and `NO_PROXY=localhost,127.0.0.1,::1` (Claude uses one proxy for every scheme, and
 the agent only tunnels CONNECT, so loopback MCP servers need the exemption). Other settings are kept; the
-file is rewritten with its keys in sorted order, and the previous file is kept as
-`settings.json.before-claw-master`. Restart the desktop app and running sessions afterwards. From then on
-every Claude Code on the Mac uses the pool, and none falls back to the Mac's login while the agent or the
-server is down. `claw-master agent uninstall` with the same flags stops the job and removes exactly those
-entries. Cloud and SSH sessions of the desktop app do not use the local agent.
+file is rewritten with its keys in sorted order, and the file as it was before the first install is kept as
+`settings.json.before-claw-master`. It refuses to install while that `env` already sets `https_proxy`,
+`HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy` or `no_proxy`, which Claude would follow instead.
+Restart the desktop app and running sessions afterwards. From then on every Claude Code on the Mac uses the
+pool, and none falls back to the Mac's login while the agent or the server is down. Project settings and
+`CLAUDE_CONFIG_DIR` can still override user settings, as for any setting. Cloud and SSH sessions of the
+desktop app do not use the local agent.
+
+`claw-master agent uninstall` (no flags) undoes what the install recorded in
+`~/Library/Application Support/claw-master/agent-install.json`: it stops the job (and changes nothing if the
+job will not stop), puts back the entries the install replaced, removes those it added (unless they were
+changed since), and removes the plist.
 
 `connect` refuses settings files whose `env` sets proxy or CA variables, with one exception: the entries
 `agent install` writes, while they name a loopback address with the token in `agent.token` beside
-`connect`'s own CA (or in its `--dir`) and that same CA. A launch's Claude then reaches the pool through
-the agent rather than through the launch's own forwarder, so its tokens are not split by project.
+`connect`'s own CA (or in its `--dir`) and that same CA. A launch through `connect` also sets the lowercase
+`https_proxy`, which Claude prefers, so it keeps using its own forwarder and its tokens are still counted by
+project.
 
 Elsewhere, run `claw-master agent` under the system's service manager and put the lines
 `claw-master agent env` prints (same flags) into the settings `env` yourself. A box with a client

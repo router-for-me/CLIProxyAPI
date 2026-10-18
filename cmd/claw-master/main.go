@@ -476,7 +476,7 @@ func runConnect(ctx context.Context, args []string) (int, error) {
 	return clawmaster.Connect(ctx, clawmaster.ConnectOptions{Server: server, Dir: dir, Open: open, CAFile: caFile, Out: os.Stderr}, flags.Args())
 }
 
-const agentUsage = "usage: claw-master agent [env|install|uninstall] --listen 127.0.0.1:PORT (--server ADDRESS:PORT --dir DIR | --open 127.0.0.1:PORT --ca FILE) [--token-file FILE] (defaults from CLAW_MASTER_AGENT_LISTEN, CLAW_MASTER_SERVER, CLAW_MASTER_CLIENT_DIR, CLAW_MASTER_OPEN, CLAW_MASTER_CA)"
+const agentUsage = "usage: claw-master agent uninstall | claw-master agent [env|install] --listen 127.0.0.1:PORT (--server ADDRESS:PORT --dir DIR | --open 127.0.0.1:PORT --ca FILE) [--token-file FILE] (defaults from CLAW_MASTER_AGENT_LISTEN, CLAW_MASTER_SERVER, CLAW_MASTER_CLIENT_DIR, CLAW_MASTER_OPEN, CLAW_MASTER_CA)"
 
 // runAgent serves a long-running forwarder for a Claude that no launcher starts (the desktop app's
 // Code tab); "agent env" prints the settings that Claude needs to use it.
@@ -498,7 +498,7 @@ func runAgent(ctx context.Context, args []string) (int, error) {
 	flags.StringVar(&logLevel, "log-level", "info", "debug, info, warn, error or off")
 	flags.StringVar(&logFile, "log-file", "", "append logs to this file, rotated by size (default: standard error)")
 	flags.StringVar(&logFormat, "log-format", "text", "text or json")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || opts.Listen == "" {
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || (opts.Listen == "" && action != "uninstall") {
 		return 2, errors.New(agentUsage)
 	}
 	switch action {

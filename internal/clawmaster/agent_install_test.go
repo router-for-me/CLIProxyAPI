@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -74,10 +76,14 @@ func TestSettingsMayPointClaudeAtThisMachinesAgentOnly(t *testing.T) {
 type agentInstallTest struct {
 	home, ca, listen string
 	calls            [][]string
+	loaded           bool
+	failBootout      bool
 	opts             AgentInstallOptions
 }
 
-func newAgentInstallTest(t *testing.T, listening bool) *agentInstallTest {
+// newAgentInstallTest prepares a home with a CA. With agent, the listen address is served by a real
+// agent (standing in for the job launchd starts); with other, by something that is not the agent.
+func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 	t.Helper()
 	x := &agentInstallTest{home: t.TempDir()}
 	config := filepath.Join(x.home, ".config", "claw-master")
@@ -90,24 +96,71 @@ func newAgentInstallTest(t *testing.T, listening bool) *agentInstallTest {
 		t.Fatal(err)
 	}
 	x.listen = listener.Addr().String()
-	if listening { // stands in for the job launchd starts
-		t.Cleanup(func() { _ = listener.Close() })
-	} else {
-		_ = listener.Close()
-	}
 	x.opts = AgentInstallOptions{
 		Agent: AgentOptions{Listen: x.listen, Open: "127.0.0.1:8444", CAFile: x.ca},
 		home:  x.home, binary: "/Applications/claw & master/claw-master", wait: 300 * time.Millisecond,
 		launchctl: func(_ context.Context, args ...string) error {
 			x.calls = append(x.calls, args)
+			switch args[0] {
+			case "print":
+				if !x.loaded {
+					return errors.New("could not find service")
+				}
+			case "bootstrap":
+				x.loaded = true
+			case "bootout":
+				if x.failBootout {
+					return errors.New("operation not permitted")
+				}
+				x.loaded = false
+			}
 			return nil
 		},
+	}
+	switch serve {
+	case "agent":
+		endpoint, err := resolveAgent(x.opts.Agent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		endpoint.check = func(context.Context) error { return nil }
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- serveAgent(ctx, listener, endpoint, nil) }()
+		t.Cleanup(func() { cancel(); <-done })
+	case "other":
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+				_ = conn.Close()
+			}
+		}()
+		t.Cleanup(func() { _ = listener.Close() })
+	default:
+		_ = listener.Close()
 	}
 	return x
 }
 
 func (x *agentInstallTest) settingsPath() string {
 	return filepath.Join(x.home, ".claude", "settings.json")
+}
+
+func (x *agentInstallTest) writeSettings(t *testing.T, raw string, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(x.settingsPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(x.settingsPath(), []byte(raw), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(x.settingsPath(), mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readSettingsForTest(t *testing.T, path string) map[string]any {
@@ -124,21 +177,16 @@ func readSettingsForTest(t *testing.T, path string) map[string]any {
 }
 
 func TestAgentInstallRunsTheJobAndPointsSettingsAtIt(t *testing.T) {
-	x := newAgentInstallTest(t, true)
-	original := []byte(`{"model": "claude-test-model", "env": {"FOO": "bar"}, "permissions": {"allow": ["Bash(ls)"]}}`)
-	if err := os.MkdirAll(filepath.Dir(x.settingsPath()), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(x.settingsPath(), original, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	x := newAgentInstallTest(t, "agent")
+	original := `{"model": "claude-test-model", "env": {"FOO": "bar", "NO_PROXY": "intranet.example"}, "permissions": {"allow": ["Bash(ls)"]}}`
+	x.writeSettings(t, original, 0o644)
 	if err := InstallAgent(t.Context(), x.opts); err != nil {
 		t.Fatal(err)
 	}
 
-	uid := "gui/" + itoaForTest(os.Getuid())
+	service := "gui/" + strconv.Itoa(os.Getuid()) + "/" + agentLaunchLabel
 	plistPath := filepath.Join(x.home, "Library", "LaunchAgents", agentLaunchLabel+".plist")
-	want := [][]string{{"bootout", uid + "/" + agentLaunchLabel}, {"bootstrap", uid, plistPath}}
+	want := [][]string{{"print", service}, {"bootstrap", "gui/" + strconv.Itoa(os.Getuid()), plistPath}}
 	if !reflect.DeepEqual(x.calls, want) {
 		t.Fatalf("launchctl calls = %q, want %q", x.calls, want)
 	}
@@ -152,11 +200,14 @@ func TestAgentInstallRunsTheJobAndPointsSettingsAtIt(t *testing.T) {
 	if err := xml.Unmarshal(plist, &parsed); err != nil {
 		t.Fatalf("the plist is not XML: %v\n%s", err, plist)
 	}
-	tokenPath := filepath.Join(filepath.Dir(x.ca), agentTokenName)
+	logs := filepath.Join(x.home, "Library", "Logs")
 	wantArgs := []string{x.opts.binary, "agent", "--listen", x.listen, "--open", "127.0.0.1:8444", "--ca", x.ca,
-		"--token-file", tokenPath, "--log-file", filepath.Join(x.home, "Library", "Logs", "claw-master-agent.log")}
+		"--log-file", filepath.Join(logs, "claw-master-agent.log")}
 	if !reflect.DeepEqual(parsed.Strings, wantArgs) {
 		t.Fatalf("plist arguments = %q, want %q", parsed.Strings, wantArgs)
+	}
+	if !strings.Contains(string(plist), filepath.Join(logs, "claw-master-agent.stderr.log")) {
+		t.Fatalf("the plist does not capture standard error:\n%s", plist)
 	}
 
 	settings := readSettingsForTest(t, x.settingsPath())
@@ -177,14 +228,17 @@ func TestAgentInstallRunsTheJobAndPointsSettingsAtIt(t *testing.T) {
 			t.Fatalf("env[%s] = %v, want %q", key, env[key], value)
 		}
 	}
-	if backup, err := os.ReadFile(x.settingsPath() + agentSettingsBackupSuffix); err != nil || string(backup) != string(original) {
+	for _, path := range []string{x.settingsPath(), x.settingsPath() + agentSettingsBackupSuffix} {
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %v, %v; want 0600, since it holds the token", path, info.Mode().Perm(), err)
+		}
+	}
+	if backup, err := os.ReadFile(x.settingsPath() + agentSettingsBackupSuffix); err != nil || string(backup) != original {
 		t.Fatalf("backup = %q, %v; want the original file", backup, err)
 	}
-	if info, err := os.Stat(x.settingsPath()); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
-		t.Fatalf("settings mode = %v, %v; want 0600 kept", info.Mode().Perm(), err)
-	}
 
-	// connect accepts these settings, because they lead to the pool; without the token it does not.
+	// connect accepts these settings, because they lead to the pool; without the allowance it does not.
+	tokenPath := filepath.Join(filepath.Dir(x.ca), agentTokenName)
 	if err := validateSettingsFile(x.settingsPath(), agentSettingsAllowance(tokenPath, x.ca)); err != nil {
 		t.Fatalf("connect would refuse the installed settings: %v", err)
 	}
@@ -192,65 +246,98 @@ func TestAgentInstallRunsTheJobAndPointsSettingsAtIt(t *testing.T) {
 		t.Fatal("the installed settings pass without the agent allowance")
 	}
 
-	// A second install changes nothing in the settings.
+	// A second install restarts the job and changes nothing in the settings.
+	x.calls = nil
 	if err := InstallAgent(t.Context(), x.opts); err != nil {
 		t.Fatal(err)
 	}
 	if again := readSettingsForTest(t, x.settingsPath()); !reflect.DeepEqual(again, settings) {
 		t.Fatalf("a second install changed the settings: %v", again)
 	}
+	if len(x.calls) != 3 || x.calls[1][0] != "bootout" {
+		t.Fatalf("reinstall launchctl calls = %q, want print, bootout, bootstrap", x.calls)
+	}
 
-	x.calls = nil
-	if err := UninstallAgent(t.Context(), x.opts); err != nil {
+	// Uninstall needs no flags: it restores what the install replaced and removes what it added.
+	if err := UninstallAgent(t.Context(), AgentInstallOptions{home: x.home, binary: "unused", launchctl: x.opts.launchctl}); err != nil {
 		t.Fatal(err)
 	}
 	after := readSettingsForTest(t, x.settingsPath())
-	if env, _ := after["env"].(map[string]any); len(env) != 1 || env["FOO"] != "bar" || after["model"] != "claude-test-model" {
+	if env, _ := after["env"].(map[string]any); len(env) != 2 || env["FOO"] != "bar" || env["NO_PROXY"] != "intranet.example" || after["model"] != "claude-test-model" {
 		t.Fatalf("after uninstall settings = %v, want the original values", after)
 	}
-	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
-		t.Fatalf("the plist is still there: %v", err)
+	if backup, err := os.ReadFile(x.settingsPath() + agentSettingsBackupSuffix); err != nil || string(backup) != original {
+		t.Fatalf("uninstall replaced the backup: %q, %v", backup, err)
 	}
-	if len(x.calls) != 1 || x.calls[0][0] != "bootout" {
-		t.Fatalf("uninstall launchctl calls = %q", x.calls)
+	for _, path := range []string{plistPath, filepath.Join(x.home, "Library", "Application Support", "claw-master", "agent-install.json")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s is still there: %v", path, err)
+		}
 	}
-}
-
-func TestAgentInstallLeavesSettingsAloneWhenTheAgentDoesNotStart(t *testing.T) {
-	x := newAgentInstallTest(t, false)
-	if err := InstallAgent(t.Context(), x.opts); err == nil {
-		t.Fatal("install succeeded with nothing listening")
-	}
-	if _, err := os.Stat(x.settingsPath()); !os.IsNotExist(err) {
-		t.Fatalf("settings were written for an agent that is not running: %v", err)
+	if x.loaded {
+		t.Fatal("the job is still loaded")
 	}
 }
 
-func TestAgentInstallRefusesSettingsItCannotMergeSafely(t *testing.T) {
-	for name, setup := range map[string]func(path string) error{
-		"not an object": func(path string) error { return os.WriteFile(path, []byte(`["x"]`), 0o600) },
-		"not JSON":      func(path string) error { return os.WriteFile(path, []byte(`{"model":`), 0o600) },
-		"env a string":  func(path string) error { return os.WriteFile(path, []byte(`{"env":"x"}`), 0o600) },
-		"a symlink": func(path string) error {
-			target := path + ".target"
-			if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
-				return err
+func TestAgentInstallWritesNoSettingsUnlessItsAgentAnswers(t *testing.T) {
+	for _, serve := range []string{"nothing", "other"} {
+		t.Run(serve, func(t *testing.T) {
+			x := newAgentInstallTest(t, serve)
+			if err := InstallAgent(t.Context(), x.opts); err == nil {
+				t.Fatal("install succeeded without the agent answering")
 			}
-			return os.Symlink(target, path)
-		},
-	} {
+			if _, err := os.Stat(x.settingsPath()); !os.IsNotExist(err) {
+				t.Fatalf("settings were written for an agent that is not running: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentInstallRefusesWhatItCannotDoSafely(t *testing.T) {
+	cases := map[string]struct {
+		settings string
+		symlink  bool
+		token    bool
+	}{
+		"not an object":       {settings: `["x"]`},
+		"not JSON":            {settings: `{"model":`},
+		"env a string":        {settings: `{"env":"x"}`},
+		"a lowercase proxy":   {settings: `{"env":{"https_proxy":"http://proxy.example:3128"}}`},
+		"an all-scheme proxy": {settings: `{"env":{"ALL_PROXY":"http://proxy.example:3128"}}`},
+		"a symlink":           {symlink: true},
+		"a custom token file": {settings: `{}`, token: true},
+	}
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			x := newAgentInstallTest(t, true)
-			if err := os.MkdirAll(filepath.Dir(x.settingsPath()), 0o700); err != nil {
-				t.Fatal(err)
+			x := newAgentInstallTest(t, "agent")
+			if c.symlink {
+				target := filepath.Join(x.home, "elsewhere.json")
+				if err := os.WriteFile(target, []byte(`{}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(x.settingsPath()), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, x.settingsPath()); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				x.writeSettings(t, c.settings, 0o600)
 			}
-			if err := setup(x.settingsPath()); err != nil {
-				t.Fatal(err)
+			if c.token {
+				x.opts.Agent.TokenFile = filepath.Join(x.home, "custom.token")
 			}
 			before, _ := os.Readlink(x.settingsPath())
 			raw, _ := os.ReadFile(x.settingsPath())
-			if err := InstallAgent(t.Context(), x.opts); err == nil {
-				t.Fatal("install merged into it")
+			err := InstallAgent(t.Context(), x.opts)
+			if err == nil {
+				t.Fatal("install went ahead")
+			}
+			if c.token && !strings.Contains(err.Error(), "--token-file") {
+				t.Fatalf("install failed for another reason: %v", err)
+			}
+			if len(x.calls) != 0 {
+				t.Fatalf("install touched launchd before refusing: %q", x.calls)
 			}
 			after, _ := os.Readlink(x.settingsPath())
 			now, _ := os.ReadFile(x.settingsPath())
@@ -261,9 +348,44 @@ func TestAgentInstallRefusesSettingsItCannotMergeSafely(t *testing.T) {
 	}
 }
 
-func itoaForTest(n int) string {
-	raw, _ := json.Marshal(n)
-	return string(raw)
+func TestAgentUninstallChangesNothingWhileTheJobWillNotStop(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := os.ReadFile(x.settingsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.failBootout = true
+	if err := UninstallAgent(t.Context(), x.opts); err == nil {
+		t.Fatal("uninstall succeeded while the job would not stop")
+	}
+	if now, _ := os.ReadFile(x.settingsPath()); string(now) != string(installed) {
+		t.Fatal("uninstall changed the settings around a running agent")
+	}
+	if _, err := os.Stat(filepath.Join(x.home, "Library", "LaunchAgents", agentLaunchLabel+".plist")); err != nil {
+		t.Fatalf("uninstall removed the plist of a running job: %v", err)
+	}
+}
+
+func TestAgentAnswersItsProbeOnlyWithItsToken(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	token, err := agentToken(filepath.Join(filepath.Dir(x.ca), agentTokenName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := probeAgent(t.Context(), x.listen, token); err != nil {
+		t.Fatalf("the agent did not answer its probe: %v", err)
+	}
+	if err := probeAgent(t.Context(), x.listen, strings.Repeat("A", 26)); err == nil {
+		t.Fatal("the agent answered a probe with another token")
+	}
+	// A launch's forwarder is not an agent.
+	launch := startForwarderForTest(t, forwarderNoUpstream(t))
+	if err := probeAgent(t.Context(), launch.listener.Addr().String(), launch.token); err == nil {
+		t.Fatal("a launch forwarder answered the agent probe")
+	}
 }
 
 // connect checks the native settings before it launches Claude: the agent's entries pass while the
