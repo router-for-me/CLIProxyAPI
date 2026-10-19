@@ -33,7 +33,8 @@ class PublishTests(unittest.TestCase):
         (self.output / 'validation.json').write_bytes(runtime.encoded(self.validation))
         self.checksums()
         self.env = {'GITHUB_REPOSITORY': 'PinableAgents/CLIProxyAPI',
-                    'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/main'}
+                    'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/main',
+                    'GITHUB_SHA': COMMIT}
 
     def checksums(self):
         lines = [f'{runtime.digest(p.read_bytes())}  {p.name}\n' for p in sorted(self.output.iterdir())
@@ -69,9 +70,12 @@ class PublishTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unsafe'):
             publish_runtime.validate(self.output, COMMIT)
 
-    def test_non_manual_or_non_main_publish_does_not_call_api(self):
-        for key, value in [('GITHUB_EVENT_NAME', 'pull_request'), ('GITHUB_EVENT_NAME', 'push'),
-                           ('GITHUB_REF', 'refs/heads/topic'), ('GITHUB_REPOSITORY', 'other/repo')]:
+    def test_untrusted_event_branch_repository_or_source_does_not_call_api(self):
+        for key, value in [('GITHUB_EVENT_NAME', 'pull_request'), ('GITHUB_EVENT_NAME', 'pull_request_target'),
+                           ('GITHUB_EVENT_NAME', 'workflow_run'), ('GITHUB_EVENT_NAME', 'release'),
+                           ('GITHUB_REF', 'refs/heads/topic'), ('GITHUB_REF', 'refs/tags/test'),
+                           ('GITHUB_REPOSITORY', 'other/repo'), ('GITHUB_SHA', 'b' * 40),
+                           ('GITHUB_SHA', '')]:
             with self.subTest(key=key, value=value), mock.patch.dict(os.environ, dict(self.env, **{key:value})), \
                  mock.patch.object(publish_runtime, 'api') as api, self.assertRaises(ValueError):
                 publish_runtime.publish(self.output, COMMIT)
@@ -98,20 +102,22 @@ class PublishTests(unittest.TestCase):
                 {'draft': False, 'prerelease': False, 'tag_name': tag, 'html_url': 'https://example.invalid/release'}]
 
     def test_draft_then_upload_then_publish_without_clobber(self):
-        with mock.patch.dict(os.environ, self.env), \
-             mock.patch.object(publish_runtime, 'api', side_effect=self.responses()) as api, \
-             mock.patch.object(publish_runtime.subprocess, 'run') as run:
-            publish_runtime.publish(self.output, COMMIT)
-        self.assertEqual(api.call_args_list[2].args[1],
-                         {'ref': 'refs/tags/pinable-runtime-test-1', 'sha': COMMIT})
-        payload = api.call_args_list[3].args[1]
-        self.assertTrue(payload['draft'])
-        self.assertFalse(payload['prerelease'])
-        self.assertEqual(payload['make_latest'], 'false')
-        self.assertEqual(run.call_count, 1)
-        self.assertNotIn('--clobber', run.call_args.args[0])
-        self.assertEqual(api.call_args.kwargs, {'method': 'PATCH'})
-        self.assertEqual(api.call_args.args[1], {'draft': False, 'prerelease': False, 'make_latest': 'false'})
+        for event in ('push', 'workflow_dispatch'):
+            with self.subTest(event=event), \
+                 mock.patch.dict(os.environ, dict(self.env, GITHUB_EVENT_NAME=event)), \
+                 mock.patch.object(publish_runtime, 'api', side_effect=self.responses()) as api, \
+                 mock.patch.object(publish_runtime.subprocess, 'run') as run:
+                publish_runtime.publish(self.output, COMMIT)
+            self.assertEqual(api.call_args_list[2].args[1],
+                             {'ref': 'refs/tags/pinable-runtime-test-1', 'sha': COMMIT})
+            payload = api.call_args_list[3].args[1]
+            self.assertTrue(payload['draft'])
+            self.assertFalse(payload['prerelease'])
+            self.assertEqual(payload['make_latest'], 'false')
+            self.assertEqual(run.call_count, 1)
+            self.assertNotIn('--clobber', run.call_args.args[0])
+            self.assertEqual(api.call_args.kwargs, {'method': 'PATCH'})
+            self.assertEqual(api.call_args.args[1], {'draft': False, 'prerelease': False, 'make_latest': 'false'})
 
     def test_publication_races_and_incomplete_upload_leave_draft(self):
         import copy

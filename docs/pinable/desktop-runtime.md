@@ -48,33 +48,43 @@ They are not Universal 2, Developer ID signed or notarized. Windows executables
 are unsigned. Final application signing/notarization remains the Desktop release
 operator's responsibility. No signing secrets are required or changed here.
 
-## Workflow, downloads and optional publication
+## Workflow, downloads and automatic publication
 
 Actions workflow: **Pinable desktop runtime** (`.github/workflows/pinable-runtime.yml`).
 
-- Every main push builds current source, including merged weekly upstream syncs.
-- Packaging-related PRs produce native-tested candidate downloads.
+- Every main push builds current source, including merged upstream syncs, and
+  automatically publishes a dedicated `pinable-runtime-<version>` stable Release
+  after the full quality suite and all six native platform checks pass.
+- Packaging-related PRs produce native-tested candidate downloads without publishing.
 - Run workflow builds the selected branch; `version` is optional.
-- Only explicit `publish_release=true` on main publishes a dedicated
-  `pinable-runtime-<version>` stable Release after all gates pass. Default: false.
+- For manual runs, `publish_release=false` (default) produces Actions artifacts only;
+  `publish_release=true` on main uses the same publication gates. This manual input
+  does not disable automatic main-push publication.
+- The default version is the source commit timestamp plus its short SHA, so each
+  source revision has its own release without a manual version bump.
 
 Individual `pinable-runtime-<os>-<arch>` Actions artifacts are retained 30 days;
 `pinable-runtime-all` is retained 90 days. Download URLs appear in the run summary.
 Actions downloads require GitHub access. For durable public downloads use the
-explicit stable-release path; published release assets are not temporary Actions files.
+automatic main-push or manual stable-release path; published assets are not temporary Actions files.
 
-Publication validates the complete set again, requires main still at the tested
-SHA, refuses existing tags and atomically reserves a new tag at that exact
-commit. It creates a draft and uploads without clobbering. Before publication it
+Publication accepts only this repository's main push or manual event, and the
+artifact source must equal the event's GITHUB_SHA. It validates the complete set
+again, requires main still at the tested SHA, refuses existing tags and atomically
+reserves a new tag at that exact commit. Older builds stop publishing if main
+has advanced; the newer commit's workflow handles the next release. It creates a
+draft and uploads without clobbering. Before publication it
 checks the tag and main again, verifies the complete uploaded asset set and each
 GitHub-reported asset size/SHA256, then publishes with `prerelease=false` and
 `make_latest=false`. Failed uploads or concurrent source/tag changes leave the
 draft and reserved tag for inspection. Published assets are never replaced; use
-a new source commit for a new release. It never replaces the upstream latest
-release or deploys. The standard Actions token is used.
+a new source commit for a new release. It does not promote Latest or deploy.
+GitHub may still return the first stable release as the default Latest when no
+previous release exists; Desktop must pin a tag and hashes instead of Latest.
+The standard Actions token is used.
 The new workflow has no tag trigger. Do not manually push `pinable-runtime-*`
 tags: the independent upstream release workflow has an all-tags trigger; only the
-manual publication job should create these runtime releases.
+runtime publication job should create these releases using the Actions token.
 
 ## Artifact contract
 
@@ -215,7 +225,7 @@ The native smoke suite verifies both the legacy atomic key rotation and a v8
 management key rotation, including rejection of the replaced key, survival of
 the ephemeral key without persistence, and continued v0 runtime control.
 
-A source sync generates Actions artifacts through the existing workflow. It
-does not by itself publish a new Release, replace Latest, or update Desktop's
-component lock. Approve the new source and binary hashes before changing that
-lock; retain the signing and plugin limitations described above.
+A source sync merged into main automatically builds, verifies and publishes a
+new stable runtime Release. It does not update Desktop's component lock. Approve
+the new source and binary hashes before changing that lock; retain the signing
+and plugin limitations described above.
