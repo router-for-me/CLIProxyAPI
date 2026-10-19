@@ -666,10 +666,13 @@ is you (or Administrators, for an administrator) and nobody else but SYSTEM and 
 `%USERPROFILE%\.claude\settings.json`, and managed settings from `C:\Program Files\ClaudeCode`.
 
 `agent install` on Windows (same flags; `--ca` names the `ca.pem` copied to the PC) registers a Task
-Scheduler task, `claw-master agent`, in place of the launchd job. It runs at your own logon, as you, with
-your normal rights, so it needs no administrator (a logon trigger for any user would), and Task Scheduler
-starts it again a minute after it fails. It runs under `conhost --headless`, so no console window opens,
-and with `--exit-with-parent`, because ending the task ends only that conhost. Its definition, log and
+Scheduler task, `claw-master agent <your SID>` (task names are machine-wide, so each user of a shared PC has
+their own), in place of the launchd job. It runs at your own logon, as you, with your normal rights, so it
+needs no administrator (a logon trigger for any user would). It runs under `conhost --headless`, so no
+console window opens, and with `--exit-with-parent`, because ending the task ends only that conhost.
+conhost exits 0 whatever the agent does, so a failure cannot trigger a restart; instead the task is also
+started every minute from the install on, which does nothing while it runs, so an agent that has ended is
+back within a minute. Paths containing `%` are refused (Windows would expand them). Its definition, log and
 record are in `%LOCALAPPDATA%\claw-master` (`agent-task.xml`, `agent.log`, `agent-install.json`); a hidden
 agent has no console, so a failure to start is in the log. Everything else (the probe, the settings, the
 refusals, `agent uninstall`) is as on macOS.

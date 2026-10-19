@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 )
 
@@ -78,8 +79,9 @@ func (s launchdService) start(ctx context.Context) error {
 // remove: a booted-out job is gone from launchd; only its plist is left, for the caller.
 func (s launchdService) remove(context.Context) error { return nil }
 
-// agentTaskName is the agent's Task Scheduler task, in the root folder.
-const agentTaskName = "claw-master agent"
+// agentTaskName is the agent's Task Scheduler task, in the root folder. Task names are machine-wide,
+// so it carries the user's SID: each user of a shared PC has their own.
+func agentTaskName(userSID string) string { return "claw-master agent " + userSID }
 
 // errTaskNotFound is schtasks saying there is no such task.
 var errTaskNotFound = errors.New("Task Scheduler has no such task")
@@ -94,7 +96,7 @@ type scheduledTaskService struct {
 }
 
 func (s scheduledTaskService) describe() string {
-	return "scheduled task " + strconv.Quote(agentTaskName)
+	return "scheduled task " + strconv.Quote(agentTaskName(s.userSID))
 }
 
 func (s scheduledTaskService) definitionPath() string {
@@ -102,7 +104,12 @@ func (s scheduledTaskService) definitionPath() string {
 }
 
 func (s scheduledTaskService) write(args []string) error {
-	task, err := agentTaskXML(s.userSID, args)
+	for _, arg := range args {
+		if strings.Contains(arg, "%") {
+			return fmt.Errorf("Windows would read %q in the agent's command line as an environment variable; use paths without %%", arg)
+		}
+	}
+	task, err := agentTaskXML(s.userSID, args, time.Now())
 	if err != nil {
 		return err
 	}
@@ -112,29 +119,29 @@ func (s scheduledTaskService) write(args []string) error {
 // stop ends the task if it exists. /end succeeds whether or not it is running (its status text is
 // localized, so it is not read), and ends conhost, which ends the agent (--exit-with-parent).
 func (s scheduledTaskService) stop(ctx context.Context) error {
-	if _, err := s.schtasks(ctx, "/query", "/tn", agentTaskName); errors.Is(err, errTaskNotFound) {
+	if _, err := s.schtasks(ctx, "/query", "/tn", agentTaskName(s.userSID)); errors.Is(err, errTaskNotFound) {
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("schtasks could not tell whether the agent is installed: %w", err)
 	}
-	if _, err := s.schtasks(ctx, "/end", "/tn", agentTaskName); err != nil {
+	if _, err := s.schtasks(ctx, "/end", "/tn", agentTaskName(s.userSID)); err != nil {
 		return fmt.Errorf("schtasks could not stop the running agent: %w", err)
 	}
 	return nil
 }
 
 func (s scheduledTaskService) start(ctx context.Context) error {
-	if _, err := s.schtasks(ctx, "/create", "/tn", agentTaskName, "/xml", s.definitionPath(), "/f"); err != nil {
+	if _, err := s.schtasks(ctx, "/create", "/tn", agentTaskName(s.userSID), "/xml", s.definitionPath(), "/f"); err != nil {
 		return fmt.Errorf("schtasks could not register the agent: %w", err)
 	}
-	if _, err := s.schtasks(ctx, "/run", "/tn", agentTaskName); err != nil {
+	if _, err := s.schtasks(ctx, "/run", "/tn", agentTaskName(s.userSID)); err != nil {
 		return fmt.Errorf("schtasks could not start the agent: %w", err)
 	}
 	return nil
 }
 
 func (s scheduledTaskService) remove(ctx context.Context) error {
-	if _, err := s.schtasks(ctx, "/delete", "/tn", agentTaskName, "/f"); err != nil && !errors.Is(err, errTaskNotFound) {
+	if _, err := s.schtasks(ctx, "/delete", "/tn", agentTaskName(s.userSID), "/f"); err != nil && !errors.Is(err, errTaskNotFound) {
 		return fmt.Errorf("schtasks could not remove the agent's task: %w", err)
 	}
 	return nil
@@ -142,8 +149,10 @@ func (s scheduledTaskService) remove(ctx context.Context) error {
 
 // agentTaskXML is a Task Scheduler definition (UTF-16, as schtasks /xml reads it) that runs args in
 // this user's session at their logon, without a console window (conhost --headless), with no time
-// limit, and again a minute after it fails.
-func agentTaskXML(userSID string, args []string) ([]byte, error) {
+// limit. conhost exits 0 whatever the agent does, so a failure cannot trigger RestartOnFailure;
+// instead a second trigger, from the install on, starts the task every minute, and IgnoreNew makes
+// that nothing while it runs: an agent that has ended is back within a minute.
+func agentTaskXML(userSID string, args []string, installed time.Time) ([]byte, error) {
 	if userSID == "" {
 		return nil, errors.New("cannot tell this user's SID")
 	}
@@ -156,7 +165,10 @@ func agentTaskXML(userSID string, args []string) ([]byte, error) {
 	b.WriteString(`<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>claw-master agent: Claude Code's proxy to the claw-master server</Description></RegistrationInfo>
-  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>` + esc(userSID) + `</UserId></LogonTrigger></Triggers>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>` + esc(userSID) + `</UserId></LogonTrigger>
+    <TimeTrigger><Enabled>true</Enabled><StartBoundary>` + installed.Format("2006-01-02T15:04:05") + `</StartBoundary><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></TimeTrigger>
+  </Triggers>
   <Principals><Principal id="Author"><UserId>` + esc(userSID) + `</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
@@ -211,3 +223,7 @@ func windowsCommandLine(args []string) string {
 	}
 	return strings.Join(quoted, " ")
 }
+
+// parentCameFirst: a process's real parent started no later than it did; a "parent" created later is
+// another process that was given the ended parent's ID.
+func parentCameFirst(parent, self time.Time) bool { return !parent.After(self) }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -206,11 +207,20 @@ func syncReadOnlyFile(f *os.File) error {
 
 // parentExited reports when the process that started this one ends (conhost, for the scheduled task).
 func parentExited() (<-chan struct{}, error) {
-	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(os.Getppid()))
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(os.Getppid()))
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the parent process: %w", err)
 	}
 	gone := make(chan struct{})
+	// The parent ID may already belong to a later process (Windows reuses IDs): a parent created
+	// after this process is not the one that started it, which has ended.
+	parentCreated, errParent := processCreated(handle)
+	selfCreated, errSelf := processCreated(windows.CurrentProcess())
+	if errParent != nil || errSelf != nil || !parentCameFirst(parentCreated, selfCreated) {
+		_ = windows.CloseHandle(handle)
+		close(gone)
+		return gone, nil
+	}
 	go func() {
 		defer func() { _ = windows.CloseHandle(handle) }()
 		_, _ = windows.WaitForSingleObject(handle, windows.INFINITE)
@@ -226,6 +236,15 @@ func currentUserSIDString() (string, error) {
 		return "", err
 	}
 	return sid.String(), nil
+}
+
+// processCreated is when the process behind handle started.
+func processCreated(handle windows.Handle) (time.Time, error) {
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(0, created.Nanoseconds()), nil
 }
 
 // profilesSupported: profiles hold the pool's subscription credentials, which only a server keeps.

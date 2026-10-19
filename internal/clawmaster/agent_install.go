@@ -111,6 +111,11 @@ func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	if err := svc.stop(ctx); err != nil {
 		return err
 	}
+	// The stopped agent may take a moment to let go of its port; the new one must get it, or the
+	// old one would answer the probe below.
+	if err := waitPortFree(ctx, endpoint.listen, opts.wait); err != nil {
+		return err
+	}
 	if err := svc.start(ctx); err != nil {
 		return err
 	}
@@ -328,19 +333,26 @@ func runLaunchctl(ctx context.Context, args ...string) error {
 	return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
 }
 
-// runSchtasks runs schtasks. Its messages are localized, so a missing task is told apart by asking
-// for the task by name first: /query of one task fails exactly when there is no such task (or no
-// right to see it, which is the same for this user's own task).
+// runSchtasks runs schtasks with /hresult, so a failure is an HRESULT, not a localized message.
 func runSchtasks(ctx context.Context, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, "schtasks", args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "schtasks", append(args, "/hresult")...).CombinedOutput()
 	if err == nil {
 		return string(out), nil
 	}
 	var exited *exec.ExitError
-	if ctx.Err() == nil && errors.As(err, &exited) && exited.ExitCode() == 1 && len(args) > 0 && (args[0] == "/query" || args[0] == "/delete") {
-		return "", errTaskNotFound
+	if ctx.Err() != nil || !errors.As(err, &exited) {
+		return "", fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
 	}
-	return "", fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+	return "", schtasksError(exited.ExitCode(), out)
+}
+
+// schtasksError reads a schtasks /hresult exit code: HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) is a
+// task that does not exist; anything else is a failure.
+func schtasksError(code int, out []byte) error {
+	if uint32(code) == 0x80070002 {
+		return errTaskNotFound
+	}
+	return fmt.Errorf("schtasks failed (0x%08X): %s", uint32(code), bytes.TrimSpace(out))
 }
 
 // agentPlist is a launchd job that runs args at login and again whenever it exits; what it prints
@@ -375,6 +387,25 @@ func agentPlist(args []string, stderrPath string) ([]byte, error) {
 </plist>
 `)
 	return b.Bytes(), nil
+}
+
+// waitPortFree waits, briefly, until nothing listens on address.
+func waitPortFree(ctx context.Context, address string, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		listener, err := net.Listen("tcp", address)
+		if err == nil {
+			return listener.Close()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s is still in use after the old agent was stopped: %w", address, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // waitAgentReady waits, briefly, until this machine's agent (not just anything listening there)
