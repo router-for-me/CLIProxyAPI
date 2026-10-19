@@ -62,6 +62,8 @@ type Builder struct {
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
+
+	ephemeralAPIKey string
 }
 
 // Hooks allows callers to plug into service lifecycle stages.
@@ -277,7 +279,7 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:                 b.cfg.CloneForRuntime(),
+		cfg:                 b.cfg,
 		configPath:          b.configPath,
 		tokenProvider:       tokenProvider,
 		apiKeyProvider:      apiKeyProvider,
@@ -302,6 +304,7 @@ func (b *Builder) Build() (*Service, error) {
 			service.reloadConfigFromWatcher()
 		}),
 	)
+	service.configureRuntimeAccess(b.ephemeralAPIKey)
 	return service, nil
 }
 
@@ -321,8 +324,8 @@ func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {
 			ID:     auth.ID,
 			Auth:   auth,
 		}
-		if watcher := s.currentWatcher(); watcher != nil {
-			_, rev := watcher.DispatchPersistedAuthUpdateWithRevision(&update)
+		if s.watcher != nil {
+			_, rev := s.watcher.DispatchPersistedAuthUpdateWithRevision(&update)
 			if rev > 0 {
 				update.SetRevision(rev)
 			}

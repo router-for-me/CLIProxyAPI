@@ -1,0 +1,73 @@
+name: Pinable monolith check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/monolith/**'
+      - 'scripts/monolith/**'
+      - 'scripts/pinable/*monolith.py'
+      - '.github/workflows/pinable-monolith-check.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/server/**'
+      - 'internal/api/**'
+      - 'internal/config/**'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/monolith/**'
+      - 'scripts/monolith/**'
+      - 'scripts/pinable/*monolith.py'
+      - '.github/workflows/pinable-monolith-check.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/server/**'
+      - 'internal/api/**'
+      - 'internal/config/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinable-monolith-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  scripts:
+    if: github.repository == 'PinableAgents/CLIProxyAPI'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Offline script and package regressions
+        run: python3 scripts/pinable/test_monolith.py -v
+
+  container:
+    if: github.repository == 'PinableAgents/CLIProxyAPI'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build real monolith image and verify two SSH releases
+        run: python3 scripts/pinable/smoke_monolith.py --run-disposable-docker --report "$RUNNER_TEMP/monolith-smoke.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pinable-monolith-smoke
+          path: ${{ runner.temp }}/monolith-smoke.json
+          if-no-files-found: warn
+          retention-days: 14

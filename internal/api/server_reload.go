@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/access"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
@@ -29,6 +30,8 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 	if _, err := access.ApplyAccessProviders(s.accessManager, oldCfg, newCfg); err != nil {
 		return false
 	}
+	providers := sdkaccess.MergeProviders(s.accessManager.Providers(), s.runtimeAccessProviders)
+	s.accessManager.SetProviders(providers)
 	return true
 }
 

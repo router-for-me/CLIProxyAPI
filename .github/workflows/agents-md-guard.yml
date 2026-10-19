@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   close-when-agents-md-changed:
+    if: github.repository == 'router-for-me/CLIProxyAPI'
     runs-on: ubuntu-latest
     steps:
       - name: Detect AGENTS.md changes and close PR
