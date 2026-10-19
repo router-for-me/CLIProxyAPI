@@ -140,6 +140,51 @@ func TestUsageQueuePluginPayloadIncludesGenerateFalse(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginPayloadIncludesClientTag(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
+			UserAgent: "claude-cli/2.1.296 (external, sdk-cli)",
+			ClientTag: "team-a",
+		})
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "claude",
+			Model:    "claude-opus-5-5",
+			Detail: coreusage.Detail{
+				InputTokens: 1,
+				TotalTokens: 1,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "client_tag", "team-a")
+	})
+}
+
+func TestUsageQueuePluginOmitsClientTagWhenEmpty(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
+			UserAgent: "test-client/1.0",
+		})
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "openai",
+			Model:    "gpt-5.4",
+			Detail: coreusage.Detail{
+				InputTokens: 1,
+				TotalTokens: 1,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireMissingField(t, payload, "client_tag")
+	})
+}
+
 func TestUsageQueuePluginPayloadDefaultsGenerateTrueWhenOmitted(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithResponseStatusHolder(context.Background())
