@@ -307,6 +307,21 @@ func requestClientIP(request *http.Request) string {
 	return remoteAddr
 }
 
+// usageClientTag returns the attribution value carried by the configured
+// usage-client-tag-header, or "" when tagging is disabled or the header is
+// missing. Only the first value is used and it is trimmed; nothing else about
+// the request is touched.
+func usageClientTag(cfg *config.SDKConfig, request *http.Request) string {
+	if cfg == nil || request == nil || request.Header == nil {
+		return ""
+	}
+	name := strings.TrimSpace(cfg.UsageClientTagHeader)
+	if name == "" {
+		return ""
+	}
+	return strings.TrimSpace(request.Header.Get(name))
+}
+
 func extractSessionIDsFromRequest(request *http.Request) (string, string) {
 	if request == nil || request.Header == nil {
 		return "", ""
@@ -611,6 +626,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			UserAgent:        strings.TrimSpace(c.Request.UserAgent()),
 			SessionID:        sessionID,
 			ParentSessionID:  parentSessionID,
+			ClientTag:        usageClientTag(h.CurrentConfig(), c.Request),
 		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
