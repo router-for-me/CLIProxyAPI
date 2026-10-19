@@ -7,17 +7,18 @@ installers. The workflow and stdlib Python tools are fork-owned and separate fro
 upstream release workflows. Dependencies, model catalogs, release credentials and
 Desktop's Go build orchestrator are not changed.
 
-The supplied Desktop build/release document requires pinned source revisions and
-SHA256 values, generated assets outside Git, native Windows/macOS/Linux packages,
-and fail-fast component validation before Wails. It supports an absolute binary
-path through `CLIPROXYAPI_COMPONENT_ASSET`.
+The distribution manifest supplies pinned source revisions, platform identities,
+archive and executable SHA256 values, and host-contract versions. It is an input
+for reviewing Desktop's component lock, not a replacement for its schema. This
+producer does not update that lock or implement Desktop's first-use downloader.
 
-That document does not define the Desktop `component-lock.json` schema or the
-exact `CLIPROXYAPI_COMPONENT_ASSET_DIR` filenames. No Desktop source or lock schema
-was retrieved through the connected repositories during this change. Therefore
-`runtime-index.json` is a distribution manifest, NOT a drop-in replacement for
-`pinable-desktop/internal/assets/cliproxyapi/component-lock.json`. These tools do
-not invent, rewrite or relax that lock. End-to-end Wails packaging is not claimed.
+After verifying the locked archive and binary hashes, Desktop can extract the
+executable and install it as `PINABLE_HOME/bin/cliproxyapi[.exe]`. Configuration,
+credentials and logs remain in `PINABLE_HOME/components/cliproxyapi/data/` and are
+not included or replaced by the runtime archive. The archive executable retains
+its upstream name `cli-proxy-api[.exe]`; the consumer performs the final rename.
+The existing build override `CLIPROXYAPI_COMPONENT_ASSET` remains available for
+maintainer validation of a locked binary.
 
 ## Targets and portable profile
 
@@ -55,17 +56,22 @@ Actions workflow: **Pinable desktop runtime** (`.github/workflows/pinable-runtim
 - Packaging-related PRs produce native-tested candidate downloads.
 - Run workflow builds the selected branch; `version` is optional.
 - Only explicit `publish_release=true` on main publishes a dedicated
-  `pinable-runtime-<version>` prerelease after all gates pass. Default: false.
+  `pinable-runtime-<version>` stable Release after all gates pass. Default: false.
 
 Individual `pinable-runtime-<os>-<arch>` Actions artifacts are retained 30 days;
 `pinable-runtime-all` is retained 90 days. Download URLs appear in the run summary.
 Actions downloads require GitHub access. For durable public downloads use the
-explicit prerelease path; published release assets are not temporary Actions files.
+explicit stable-release path; published release assets are not temporary Actions files.
 
 Publication validates the complete set again, requires main still at the tested
-SHA, refuses existing tags, creates a draft, uploads without clobbering, and only
-then publishes it. Failed uploads leave a draft for inspection. It never replaces
-the upstream latest release or deploys. The standard Actions token is used.
+SHA, refuses existing tags and atomically reserves a new tag at that exact
+commit. It creates a draft and uploads without clobbering. Before publication it
+checks the tag and main again, verifies the complete uploaded asset set and each
+GitHub-reported asset size/SHA256, then publishes with `prerelease=false` and
+`make_latest=false`. Failed uploads or concurrent source/tag changes leave the
+draft and reserved tag for inspection. Published assets are never replaced; use
+a new source commit for a new release. It never replaces the upstream latest
+release or deploys. The standard Actions token is used.
 The new workflow has no tag trigger. Do not manually push `pinable-runtime-*`
 tags: the independent upstream release workflow has an all-tags trigger; only the
 manual publication job should create these runtime releases.
@@ -171,7 +177,9 @@ A real-filesystem regression requires two consecutive replacements and a subsequ
 in-place write to finish reloading, using observable hash/port completion rather
 than guessed sleeps. A second test checks unrelated siblings are ignored. The
 packaged-binary smoke continues using atomic replacement: no reload assertion was
-removed or weakened. This small watcher fix is the only production-code change.
+removed or weakened. The release preparation also restores the two Antigravity persistence-state
+fields omitted by the upstream merge; the full application suite must pass
+before any runtime can be published.
 
 ## Local commands
 
@@ -184,7 +192,11 @@ python scripts/pinable/smoke_runtime.py --artifact-dir /tmp/new-runtime-output
 Use exactly the Go version declared in go.mod. Native macOS is required for signing.
 The optional safe `--version` label defaults to source timestamp plus SHA. No pip
 modules, Node, Docker, GoReleaser or zip/unzip executables are required by these
-packaging tools. Do not commit generated runtimes.
+packaging tools. CI pins Python 3.12 on every job to keep archive validation
+consistent across runner images. Do not commit generated runtimes. Build outputs
+are written only to the selected artifact/staging directory; smoke checks use
+isolated temporary config/auth/log directories and remove them on completion.
+No user configuration, credentials or installed component is replaced.
 
 ## Upstream v8 compatibility (2026-09-30)
 
