@@ -16,6 +16,8 @@ func CanonicalCredentialMetadataKey(key string) string {
 		return "fingerprint_profile"
 	case "model-aliases":
 		return "model_aliases"
+	case "model-weights":
+		return "model_weights"
 	case "openapi-location":
 		return "openapi_location"
 	case "openapi-models":
