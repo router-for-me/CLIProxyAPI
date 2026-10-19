@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -112,47 +110,6 @@ func TestCompoundRateLimitWindowsKeepTheirName(t *testing.T) {
 	} {
 		if window, measure := splitLimitHeader(header); window != want[0] || measure != want[1] {
 			t.Errorf("%s -> %s/%s, want %s/%s", header, window, measure, want[0], want[1])
-		}
-	}
-}
-
-// OpenFile's mode only applies to a file it creates; one that already exists and is world readable must
-// still end up private, along with every rotated copy.
-func TestAnExistingLooseLogFileAndItsRotationsBecomePrivate(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "server.log")
-	for _, name := range []string{path, path + ".1", path + ".2"} {
-		if err := os.WriteFile(name, []byte("old line\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(name, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	file, err := openRotatingFile(path, 100, 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	mode := func(name string) os.FileMode {
-		info, err := os.Stat(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return info.Mode().Perm()
-	}
-	if got := mode(path); got != 0o600 {
-		t.Fatalf("the live log is %v, want 0600", got)
-	}
-	if _, err := file.Write([]byte(strings.Repeat("x", 120) + "\n")); err != nil { // forces a rotation
-		t.Fatal(err)
-	}
-	for _, name := range []string{path, path + ".1", path + ".2", path + ".3"} {
-		if _, err := os.Stat(name); err != nil {
-			continue
-		}
-		if got := mode(name); got != 0o600 {
-			t.Errorf("%s is %v, want 0600", filepath.Base(name), got)
 		}
 	}
 }

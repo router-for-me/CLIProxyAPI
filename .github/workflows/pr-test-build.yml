@@ -24,6 +24,24 @@ jobs:
           go build -o test-output ./cmd/server
           rm -f test-output
 
+  claw-master-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test claw-master on Windows
+        run: go test -count=1 ./internal/clawmaster ./cmd/claw-master
+      - name: Build claw-master
+        run: go build -o claw-master-test-output.exe ./cmd/claw-master
+
   claw-master:
     strategy:
       fail-fast: false

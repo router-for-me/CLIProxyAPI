@@ -247,10 +247,7 @@ func forwarderGymRun(t *testing.T, mode string) {
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	shim := "#!/bin/sh\nexec \"$" + forwarderGymBinary + "\" -test.run='^TestForwarderGymHelper$' -test.count=1 -- \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(shim), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeGymShim(t, bin, forwarderGymBinary)
 	report := filepath.Join(dir, "report")
 	home := filepath.Join(dir, "home")
 	work := filepath.Join(dir, "work")
@@ -259,8 +256,8 @@ func forwarderGymRun(t *testing.T, mode string) {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("HOME", home)
-	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	setHomeForTest(t, home)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+systemPathForTest())
 	t.Setenv(forwarderGymRole, "claude")
 	t.Setenv(forwarderGymReport, report)
 	t.Setenv(forwarderGymOriginCA, origin.caPath)

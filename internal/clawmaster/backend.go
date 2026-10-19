@@ -418,7 +418,7 @@ func loadBackendCredentialAs(ctx context.Context, opts BackendOptions, runtimeID
 		return nil, nil, errors.New("invalid inference credential location")
 	}
 	info, err := os.Lstat(opts.AuthDir)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || checkOwnedDirectory(opts.AuthDir, info, true) != nil {
 		return nil, nil, errors.New("inference auth directory must be private and not a symlink")
 	}
 	unlockRefresh, err := lockRefresh(ctx, opts.AuthDir)
@@ -435,7 +435,7 @@ func loadBackendCredentialAs(ctx context.Context, opts BackendOptions, runtimeID
 	}
 	path := filepath.Join(opts.AuthDir, opts.AuthID)
 	info, err = os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.Mode().IsRegular() || readableByOthers(path, info) {
 		return nil, nil, errors.New("inference credential must be a private regular file")
 	}
 	inner := sdkauth.NewFileTokenStore()
@@ -536,11 +536,11 @@ func (s *backendStore) saveLocked(auth *coreauth.Auth) (string, error) {
 		return "", err
 	}
 	info, err := os.Lstat(s.opts.AuthDir)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || checkOwnedDirectory(s.opts.AuthDir, info, true) != nil {
 		return "", errors.New("inference auth directory is no longer private")
 	}
 	info, err = os.Lstat(s.path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.Mode().IsRegular() || readableByOthers(s.path, info) {
 		return "", errors.New("selected credential file is no longer safe to update")
 	}
 	metadata := make(map[string]any, len(auth.Metadata)+4)
@@ -604,13 +604,7 @@ func (s *backendStore) saveLocked(auth *coreauth.Auth) (string, error) {
 		return "", errors.New("cannot commit refreshed inference credential")
 	}
 	retainStage = false
-	dir, err := os.Open(s.opts.AuthDir)
-	if err != nil {
-		return "", errors.New("refreshed credential was committed but its directory could not be opened for sync")
-	}
-	errSync := dir.Sync()
-	errClose := dir.Close()
-	if errSync != nil || errClose != nil {
+	if err := syncDirectory(s.opts.AuthDir); err != nil {
 		return "", errors.New("refreshed credential was committed but its directory sync failed")
 	}
 	return s.path, nil

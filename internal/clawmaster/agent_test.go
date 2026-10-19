@@ -31,13 +31,7 @@ func TestAgentTokenIsCreatedPrivateAndKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Fatalf("token file mode = %v, want 0600", info.Mode().Perm())
-	}
+	requirePrivateFile(t, path)
 	second, err := agentToken(path)
 	if err != nil {
 		t.Fatal(err)

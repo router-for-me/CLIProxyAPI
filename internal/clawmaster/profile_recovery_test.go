@@ -133,9 +133,7 @@ func TestRecoverStagedRefreshPreservesAmbiguousOrUnsafeStages(t *testing.T) {
 			case "multiple":
 				recoveryStage(t, opts, raw)
 			case "public":
-				if err := os.Chmod(stage, 0644); err != nil {
-					t.Fatal(err)
-				}
+				loosenForTest(t, stage)
 			case "symlink":
 				if err := os.Remove(stage); err != nil {
 					t.Fatal(err)

@@ -203,6 +203,10 @@ func (r *rotatingFile) open() error {
 		_ = f.Close()
 		return err
 	}
+	if err := restrictToOwner(r.path); err != nil {
+		_ = f.Close()
+		return err
+	}
 	info, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
@@ -246,6 +250,7 @@ func (r *rotatingFile) rotate() error {
 	}
 	for i := 1; i <= r.keep; i++ { // rotated copies are as private as the live file, whatever they were before
 		_ = os.Chmod(fmt.Sprintf("%s.%d", r.path, i), 0o600)
+		_ = restrictToOwner(fmt.Sprintf("%s.%d", r.path, i))
 	}
 	return r.open()
 }

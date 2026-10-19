@@ -1,3 +1,7 @@
+//go:build !windows
+
+// Unix only: these drive the manual gym's bash scripts (tmux, jq).
+
 package clawmaster
 
 import (

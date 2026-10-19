@@ -448,13 +448,18 @@ func updateClaudeSettingsEnv(path string, backup bool, update func(env map[strin
 // makePrivate makes an existing regular file readable by its owner only.
 func makePrivate(path string) error {
 	info, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && (!info.Mode().IsRegular() || info.Mode().Perm()&0o077 == 0)) {
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	return os.Chmod(path, info.Mode().Perm()&0o700)
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(path, info.Mode().Perm()&0o700); err != nil {
+			return err
+		}
+	}
+	return restrictToOwner(path)
 }
 
 func readAgentInstallRecord(path string) (agentInstallRecord, error) {
@@ -482,7 +487,11 @@ func writeAgentInstallRecord(path string, record agentInstallRecord) error {
 
 // writeFileAtomic replaces path with data: a reader sees the old file or the new one, never a part.
 func writeFileAtomic(path string, data []byte, mode fs.FileMode) error {
-	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	create := func() (*os.File, error) { return os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*") }
+	if mode&0o077 == 0 {
+		create = func() (*os.File, error) { return createPrivateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-") }
+	}
+	temp, err := create()
 	if err != nil {
 		return fmt.Errorf("cannot write %s: %w", path, err)
 	}

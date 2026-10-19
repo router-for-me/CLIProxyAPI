@@ -1,3 +1,7 @@
+//go:build !windows
+
+// Unix only: it runs the repository's bash scripts.
+
 package clawmaster
 
 import (

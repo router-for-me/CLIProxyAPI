@@ -658,6 +658,13 @@ changed since), and removes the plist.
 `https_proxy`, which Claude prefers, so it keeps using its own forwarder and its tokens are still counted by
 project.
 
+On Windows, `connect`, `agent` and `agent env` work the same way (and `client-init` for a box with a
+certificate): files that must be private (the agent token, `client.key`, the settings `agent install`
+writes, logs) are given an owner-only DACL, and a private file or directory is accepted only when its owner
+is you (or Administrators, for an administrator) and nobody else but SYSTEM and Administrators has access.
+`login`, `run` and `serve` refuse: subscription logins belong to a server. Claude Code on Windows reads
+`%USERPROFILE%\.claude\settings.json`, and managed settings from `C:\Program Files\ClaudeCode`.
+
 Elsewhere, run `claw-master agent` under the system's service manager and put the lines
 `claw-master agent env` prints (same flags) into the settings `env` yourself. A box with a client
 certificate uses `--server ADDRESS:PORT --dir DIR` instead of `--open` and `--ca`. The server logs the

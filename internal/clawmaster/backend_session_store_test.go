@@ -139,10 +139,7 @@ func TestBackendSessionRoutesAPIBackupSameKeyRestoresDifferentKeyRefuses(t *test
 			if strings.Contains(string(raw), "synthetic-key") || strings.Contains(string(raw), "api-resume") || strings.Contains(string(raw), "account_uuid") || strings.Contains(entry.Name(), "api-resume") {
 				t.Fatal("private routing record leaked credentials or raw session identity")
 			}
-			info, errStat := entry.Info()
-			if errStat != nil || info.Mode().Perm() != 0o600 {
-				t.Fatal("routing file was not private")
-			}
+			requirePrivateFile(t, filepath.Join(dir, entry.Name()))
 		}
 	}
 }

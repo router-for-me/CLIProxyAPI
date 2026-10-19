@@ -308,9 +308,7 @@ func TestTheLogFileRotatesBySizeAndKeepsAFixedNumberOfFiles(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 		info, _ := e.Info()
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("%s has mode %v, want 0600", e.Name(), info.Mode().Perm())
-		}
+		requirePrivateFile(t, filepath.Join(dir, e.Name()))
 		if info.Size() > 400+200 {
 			t.Errorf("%s is %d bytes, far over its 400 byte limit", e.Name(), info.Size())
 		}
@@ -398,5 +396,33 @@ func TestAProfileWithoutANameIsNeverNamedAfterItsEmailBearingFile(t *testing.T) 
 	store := &backendStore{opts: BackendOptions{AuthID: fileName}}
 	if strings.Contains(store.name(), "someone") {
 		t.Fatalf("a store named itself %q", store.name())
+	}
+}
+
+// OpenFile's mode only applies to a file it creates; one that already exists and is world readable must
+// still end up private, along with every rotated copy.
+func TestAnExistingLooseLogFileAndItsRotationsBecomePrivate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.log")
+	for _, name := range []string{path, path + ".1", path + ".2"} {
+		if err := os.WriteFile(name, []byte("old line\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		loosenForTest(t, name)
+	}
+	file, err := openRotatingFile(path, 100, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	requirePrivateFile(t, path)
+	if _, err := file.Write([]byte(strings.Repeat("x", 120) + "\n")); err != nil { // forces a rotation
+		t.Fatal(err)
+	}
+	for _, name := range []string{path, path + ".1", path + ".2", path + ".3"} {
+		if _, err := os.Stat(name); err != nil {
+			continue
+		}
+		requirePrivateFile(t, name)
 	}
 }
