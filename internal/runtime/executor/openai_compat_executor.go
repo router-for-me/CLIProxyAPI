@@ -208,6 +208,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 	reporter.ObserveResponseModel(body)
+	body = helps.NormalizeOpenAICompatNonStreamPayload(body, helps.NewOpenAICompatStreamState())
 	// Ensure we at least record the request even if upstream doesn't return usage
 	// Translate response back to source format when needed
 	var param any
@@ -438,6 +439,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+		streamState := helps.NewOpenAICompatStreamState()
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		var streamUsage helps.StreamUsageBuffer
@@ -485,6 +487,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			dataPayload := bytes.TrimSpace(bytes.Join(dataLines, []byte("\n")))
 			isDone := bytes.Equal(dataPayload, []byte("[DONE]"))
+			if isDone {
+				if synthetic := helps.SyntheticOpenAICompatReasoningFinishChunk(streamState); len(synthetic) > 0 {
+					dataPayload = synthetic
+				}
+			} else {
+				dataPayload = helps.NormalizeOpenAICompatStreamPayload(dataPayload, streamState)
+			}
 			if isDone && openAICompatErrorEvent(eventName) {
 				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream error event ended before [DONE]"}, false)
 				return true
@@ -1154,8 +1163,11 @@ func openAICompatRetryAfter(status int, headers http.Header, body []byte, now ti
 
 	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
 	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	topLevelType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "type").String()))
+	topLevelMessage := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "message").String()))
 	if strings.Contains(code, "tpmratelimitexceeded") ||
-		(strings.Contains(message, "tokens per minute") && strings.Contains(message, "limit") && strings.Contains(message, "exceeded")) {
+		(strings.Contains(message, "tokens per minute") && strings.Contains(message, "limit") && strings.Contains(message, "exceeded")) ||
+		topLevelType == "rate_limit_error" || strings.Contains(topLevelMessage, "upstream rate limit exceeded") {
 		delay := openAICompatTPMFallbackRetryAfter
 		return &delay
 	}
