@@ -24,7 +24,7 @@ func testManagementOIDC() *managementOIDC {
 	return &managementOIDC{
 		issuer:   "https://issuer.example",
 		clientID: "management",
-		redirect: "https://admin.example/v8/management/oidc/callback",
+		redirect: "https://admin.example/v8/management/auth/oidc/callback",
 		origin:   "https://admin.example",
 		subjects: map[string]struct{}{"owner": {}},
 		flows:    make(map[string]oidcFlow),
@@ -121,7 +121,7 @@ func TestManagementOIDCConfiguration(t *testing.T) {
 	t.Setenv("MANAGEMENT_OIDC_ISSUER", "https://issuer.example/realms/ducktape")
 	t.Setenv("MANAGEMENT_OIDC_CLIENT_ID", "management")
 	t.Setenv("MANAGEMENT_OIDC_CLIENT_SECRET", "")
-	t.Setenv("MANAGEMENT_OIDC_REDIRECT_URL", "https://admin.example/v8/management/oidc/callback")
+	t.Setenv("MANAGEMENT_OIDC_REDIRECT_URL", "https://admin.example/v8/management/auth/oidc/callback")
 	t.Setenv("MANAGEMENT_OIDC_ALLOWED_SUBJECTS", " owner,second-owner ")
 	o, err := newManagementOIDC()
 	if err != nil {
@@ -139,7 +139,7 @@ func TestManagementOIDCConfiguration(t *testing.T) {
 		{name: "issuer scheme", key: "MANAGEMENT_OIDC_ISSUER", value: "http://issuer.example"},
 		{name: "client id", key: "MANAGEMENT_OIDC_CLIENT_ID", value: " "},
 		{name: "redirect path", key: "MANAGEMENT_OIDC_REDIRECT_URL", value: "https://admin.example/wrong"},
-		{name: "redirect credentials", key: "MANAGEMENT_OIDC_REDIRECT_URL", value: "https://user:pass@admin.example/v8/management/oidc/callback"},
+		{name: "redirect credentials", key: "MANAGEMENT_OIDC_REDIRECT_URL", value: "https://user:pass@admin.example/v8/management/auth/oidc/callback"},
 		{name: "empty subject allowlist", key: "MANAGEMENT_OIDC_ALLOWED_SUBJECTS", value: " , "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,14 +243,14 @@ func TestManagementOIDCLoginAndCallback(t *testing.T) {
 			h := &Handler{oidc: o}
 			cookie := []*http.Cookie{{Name: managementOIDCFlowCookie, Value: "binding"}}
 			before := tokenCalls
-			response := managementOIDCRequest(h.ManagementOIDCCallback, http.MethodGet, "https://admin.example/v8/management/oidc/callback?state="+tc.state+"&code=code", cookie, nil)
+			response := managementOIDCRequest(h.ManagementOIDCCallback, http.MethodGet, "https://admin.example/v8/management/auth/oidc/callback?state="+tc.state+"&code=code", cookie, nil)
 			if response.Code != tc.status {
 				t.Fatalf("status=%d want=%d body=%s", response.Code, tc.status, response.Body.String())
 			}
 			if tc.state != "state" && tokenCalls != before {
 				t.Fatal("exchanged a code before checking state")
 			}
-			replay := managementOIDCRequest(h.ManagementOIDCCallback, http.MethodGet, "https://admin.example/v8/management/oidc/callback?state=state&code=code", cookie, nil)
+			replay := managementOIDCRequest(h.ManagementOIDCCallback, http.MethodGet, "https://admin.example/v8/management/auth/oidc/callback?state=state&code=code", cookie, nil)
 			if replay.Code != http.StatusBadRequest {
 				t.Fatalf("accepted callback replay: %d", replay.Code)
 			}
@@ -285,7 +285,7 @@ func TestManagementOIDCLoginAndCallback(t *testing.T) {
 	o.provider = provider
 	o.oauth = oauth2.Config{ClientID: o.clientID, Endpoint: provider.Endpoint(), RedirectURL: o.redirect}
 	h := &Handler{oidc: o}
-	response := managementOIDCRequest(h.ManagementOIDCLogin, http.MethodGet, "https://admin.example/v8/management/oidc/login", nil, nil)
+	response := managementOIDCRequest(h.ManagementOIDCLogin, http.MethodGet, "https://admin.example/v8/management/auth/oidc/login", nil, nil)
 	redirect, err := url.Parse(response.Header().Get("Location"))
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +306,7 @@ func TestManagementOIDCLoginAndCallback(t *testing.T) {
 	for i := 0; i < managementOIDCMaxEntries; i++ {
 		o.flows[fmt.Sprintf("flow-%d", i)] = oidcFlow{expires: time.Now().Add(time.Minute)}
 	}
-	if got := managementOIDCRequest(h.ManagementOIDCLogin, http.MethodGet, "https://admin.example/v8/management/oidc/login", nil, nil).Code; got != http.StatusTooManyRequests {
+	if got := managementOIDCRequest(h.ManagementOIDCLogin, http.MethodGet, "https://admin.example/v8/management/auth/oidc/login", nil, nil).Code; got != http.StatusTooManyRequests {
 		t.Fatalf("flow store limit status=%d want=%d", got, http.StatusTooManyRequests)
 	}
 }
@@ -328,7 +328,7 @@ func TestManagementOIDCCallbackRequiresBrowserBinding(t *testing.T) {
 			}
 			o.flows["binding"] = oidcFlow{state: "state", expires: expires}
 			h := &Handler{oidc: o}
-			response := managementOIDCRequest(h.ManagementOIDCCallback, http.MethodGet, "/v8/management/oidc/callback?state=state&code=code", []*http.Cookie{{Name: managementOIDCFlowCookie, Value: tc.cookie}}, nil)
+			response := managementOIDCRequest(h.ManagementOIDCCallback, http.MethodGet, "/v8/management/auth/oidc/callback?state=state&code=code", []*http.Cookie{{Name: managementOIDCFlowCookie, Value: tc.cookie}}, nil)
 			if response.Code != http.StatusBadRequest || len(o.sessions) != 0 {
 				t.Fatal("accepted an unbound or expired callback")
 			}

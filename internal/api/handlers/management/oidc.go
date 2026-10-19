@@ -65,8 +65,8 @@ func newManagementOIDC() (*managementOIDC, error) {
 		return nil, fmt.Errorf("MANAGEMENT_OIDC_ISSUER must be an HTTPS URL without credentials, query, or fragment")
 	}
 	redirectURL, err := managementOIDCHTTPSURL(redirect)
-	if err != nil || redirectURL.Path != "/v8/management/oidc/callback" {
-		return nil, fmt.Errorf("MANAGEMENT_OIDC_REDIRECT_URL must be HTTPS and use /v8/management/oidc/callback")
+	if err != nil || redirectURL.Path != "/v8/management/auth/oidc/callback" {
+		return nil, fmt.Errorf("MANAGEMENT_OIDC_REDIRECT_URL must be HTTPS and use /v8/management/auth/oidc/callback")
 	}
 
 	clientID := strings.TrimSpace(os.Getenv("MANAGEMENT_OIDC_CLIENT_ID"))

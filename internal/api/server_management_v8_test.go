@@ -66,7 +66,7 @@ func TestManagementOIDCEnablesV8WithoutManagementKey(t *testing.T) {
 	t.Setenv("MANAGEMENT_OIDC_ISSUER", "https://issuer.example/realms/ducktape")
 	t.Setenv("MANAGEMENT_OIDC_CLIENT_ID", "management")
 	t.Setenv("MANAGEMENT_OIDC_CLIENT_SECRET", "")
-	t.Setenv("MANAGEMENT_OIDC_REDIRECT_URL", "https://admin.example/v8/management/oidc/callback")
+	t.Setenv("MANAGEMENT_OIDC_REDIRECT_URL", "https://admin.example/v8/management/auth/oidc/callback")
 	t.Setenv("MANAGEMENT_OIDC_ALLOWED_SUBJECTS", "owner")
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -93,7 +93,26 @@ func TestManagementOIDCEnablesV8WithoutManagementKey(t *testing.T) {
 		return response
 	}
 
-	response := request("/v8/management/oidc/session", false)
+	// Browser authentication and provider credential acquisition have distinct routes.
+	routes := make(map[string]bool)
+	for _, route := range s.engine.Routes() {
+		routes[route.Method+" "+route.Path] = true
+	}
+	for _, route := range []string{
+		"GET /v8/management/auth/session",
+		"GET /v8/management/auth/oidc/login",
+		"GET /v8/management/auth/oidc/callback",
+		"POST /v8/management/auth/logout",
+		"GET /v8/management/oauth/auth-url",
+		"GET /v8/management/oauth/callback",
+		"POST /v8/management/oauth/callback",
+	} {
+		if !routes[route] {
+			t.Errorf("missing route %s", route)
+		}
+	}
+
+	response := request("/v8/management/auth/session", false)
 	if response.Code != http.StatusOK {
 		t.Fatalf("session discovery status=%d body=%s", response.Code, response.Body.String())
 	}
