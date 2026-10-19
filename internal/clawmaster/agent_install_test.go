@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 func agentSettingsJSON(t *testing.T, env map[string]string) []byte {
@@ -76,21 +77,27 @@ func TestSettingsMayPointClaudeAtThisMachinesAgentOnly(t *testing.T) {
 }
 
 type agentInstallTest struct {
+	t                *testing.T
 	home, ca, listen string
+	serve            string // what runs when the service starts: agent, other, forged or nothing
 	calls            [][]string
 	loaded           bool
 	failBootout      bool
 	failPrint        bool
+	slowStop         bool   // a stopped agent keeps its port (it has not exited yet)
+	stopRunning      func() // stops what is on the listen address; nil when nothing is
 	mu               sync.Mutex
 	seen             []string // request lines another program on the port received
 	opts             AgentInstallOptions
 }
 
-// newAgentInstallTest prepares a home with a CA. With agent, the listen address is served by a real
-// agent (standing in for the job launchd starts); with other, by something that is not the agent.
+// newAgentInstallTest prepares a home with a CA and a fake launchd that, like the real one, starts
+// what serve names on the listen address when the job is bootstrapped and stops it at bootout: the
+// real agent, another program (other: a plain web server; forged: one answering the probe without
+// the token), or nothing.
 func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 	t.Helper()
-	x := &agentInstallTest{home: t.TempDir()}
+	x := &agentInstallTest{t: t, home: t.TempDir(), serve: serve}
 	config := filepath.Join(x.home, ".config", "claw-master")
 	if err := os.MkdirAll(config, 0o700); err != nil {
 		t.Fatal(err)
@@ -101,9 +108,11 @@ func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 		t.Fatal(err)
 	}
 	x.listen = listener.Addr().String()
+	_ = listener.Close()
+	t.Cleanup(x.down)
 	x.opts = AgentInstallOptions{
 		Agent: AgentOptions{Listen: x.listen, Open: "127.0.0.1:8444", CAFile: x.ca},
-		home:  x.home, binary: "/Applications/claw & master/claw-master", wait: 300 * time.Millisecond,
+		goos:  "darwin", home: x.home, binary: "/Applications/claw & master/claw-master", wait: 300 * time.Millisecond,
 		launchctl: func(_ context.Context, args ...string) error {
 			x.calls = append(x.calls, args)
 			switch args[0] {
@@ -116,16 +125,33 @@ func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 				}
 			case "bootstrap":
 				x.loaded = true
+				x.up()
 			case "bootout":
 				if x.failBootout {
 					return errors.New("operation not permitted")
 				}
 				x.loaded = false
+				if !x.slowStop {
+					x.down()
+				}
 			}
 			return nil
 		},
 	}
-	switch serve {
+	return x
+}
+
+// up starts what x.serve names on the listen address (as the service manager would).
+func (x *agentInstallTest) up() {
+	t := x.t
+	if x.stopRunning != nil || x.serve == "nothing" {
+		return
+	}
+	listener, err := net.Listen("tcp4", x.listen)
+	if err != nil {
+		t.Fatalf("cannot serve %s on %s: %v", x.serve, x.listen, err)
+	}
+	switch x.serve {
 	case "agent":
 		endpoint, err := resolveAgent(x.opts.Agent)
 		if err != nil {
@@ -135,11 +161,10 @@ func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- serveAgent(ctx, listener, endpoint, nil) }()
-		t.Cleanup(func() { cancel(); <-done })
+		x.stopRunning = func() { cancel(); <-done }
 	case "other", "forged":
-		// Another program: a plain web server, or one that answers the probe without the token.
 		reply := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-		if serve == "forged" {
+		if x.serve == "forged" {
 			reply = "HTTP/1.1 204 No Content\r\n" + agentProbeHeader + ": 1\r\n\r\n"
 		}
 		go func() {
@@ -164,11 +189,16 @@ func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 				_ = conn.Close()
 			}
 		}()
-		t.Cleanup(func() { _ = listener.Close() })
-	default:
-		_ = listener.Close()
+		x.stopRunning = func() { _ = listener.Close() }
 	}
-	return x
+}
+
+// down stops what up started.
+func (x *agentInstallTest) down() {
+	if x.stopRunning != nil {
+		x.stopRunning()
+		x.stopRunning = nil
+	}
 }
 
 func (x *agentInstallTest) settingsPath() string {
@@ -282,7 +312,7 @@ func TestAgentInstallRunsTheJobAndPointsSettingsAtIt(t *testing.T) {
 	}
 
 	// Uninstall needs no flags: it restores what the install replaced and removes what it added.
-	if err := UninstallAgent(t.Context(), AgentInstallOptions{home: x.home, binary: "unused", launchctl: x.opts.launchctl}); err != nil {
+	if err := UninstallAgent(t.Context(), AgentInstallOptions{goos: "darwin", home: x.home, binary: "unused", launchctl: x.opts.launchctl}); err != nil {
 		t.Fatal(err)
 	}
 	after := readSettingsForTest(t, x.settingsPath())
@@ -357,21 +387,14 @@ func TestAgentUninstallRemovesValuesAnInterruptedReinstallLeft(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The same agent (same token) on another port, as launchd would run it after the reinstall.
+	// The same agent (same token) on another port, as launchd runs it after the reinstall.
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	x.opts.Agent.Listen = listener.Addr().String()
-	endpoint, err := resolveAgent(x.opts.Agent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	endpoint.check = func(context.Context) error { return nil }
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serveAgent(ctx, listener, endpoint, nil) }()
-	t.Cleanup(func() { cancel(); <-done })
+	x.listen = listener.Addr().String()
+	_ = listener.Close()
+	x.opts.Agent.Listen = x.listen
 
 	claude := filepath.Dir(x.settingsPath())
 	writable := makeReadOnlyForTest(t, claude)
@@ -507,6 +530,7 @@ func TestAgentUninstallChangesNothingWhileTheJobWillNotStop(t *testing.T) {
 
 func TestAgentAnswersItsProbeOnlyWithItsToken(t *testing.T) {
 	x := newAgentInstallTest(t, "agent")
+	x.up()
 	token, err := agentToken(filepath.Join(filepath.Dir(x.ca), agentTokenName))
 	if err != nil {
 		t.Fatal(err)
@@ -561,5 +585,234 @@ func TestConnectAcceptsSettingsThatPointAtThisMachinesAgent(t *testing.T) {
 	}
 	if _, err := Connect(t.Context(), opts, nil); err == nil || !strings.Contains(err.Error(), "proxy") {
 		t.Fatalf("Connect without the agent's token = %v; want the proxy override refused", err)
+	}
+}
+
+// decodeUTF16ForTest reads the task XML as schtasks would.
+func decodeUTF16ForTest(t *testing.T, raw []byte) string {
+	t.Helper()
+	if len(raw) < 2 || raw[0] != 0xFF || raw[1] != 0xFE || len(raw)%2 != 0 {
+		t.Fatalf("not UTF-16LE with a byte-order mark: % x", raw[:min(len(raw), 4)])
+	}
+	units := make([]uint16, 0, len(raw)/2-1)
+	for i := 2; i < len(raw); i += 2 {
+		units = append(units, uint16(raw[i])|uint16(raw[i+1])<<8)
+	}
+	return string(utf16.Decode(units))
+}
+
+func TestAgentInstallOnWindowsRegistersALogonTaskForThisUser(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	local := filepath.Join(x.home, "AppData", "Local")
+	var calls [][]string
+	registered := false
+	x.opts.goos, x.opts.launchctl = "windows", nil
+	x.opts.localAppData, x.opts.userSID = local, "S-1-5-21-1-2-3-1001"
+	x.opts.binary = `C:\Users\Test User\.local\bin\claw-master.exe`
+	x.opts.schtasks = func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, args)
+		switch args[0] {
+		case "/query":
+			if !registered {
+				return "", errTaskNotFound
+			}
+		case "/create":
+			registered = true
+		case "/run":
+			x.up()
+		case "/end":
+			x.down()
+		case "/delete":
+			registered = false
+		}
+		return "", nil
+	}
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	xmlPath := filepath.Join(local, "claw-master", "agent-task.xml")
+	name := agentTaskName(x.opts.userSID)
+	want := [][]string{
+		{"/query", "/tn", name},
+		{"/create", "/tn", name, "/xml", xmlPath, "/f"},
+		{"/run", "/tn", name},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("schtasks calls = %q, want %q", calls, want)
+	}
+	raw, err := os.ReadFile(xmlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := decodeUTF16ForTest(t, raw)
+	var parsed struct {
+		Trigger   string `xml:"Triggers>LogonTrigger>UserId"`
+		Every     string `xml:"Triggers>TimeTrigger>Repetition>Interval"`
+		Instances string `xml:"Settings>MultipleInstancesPolicy"`
+		User      string `xml:"Principals>Principal>UserId"`
+		Logon     string `xml:"Principals>Principal>LogonType"`
+		RunLevel  string `xml:"Principals>Principal>RunLevel"`
+		TimeLimit string `xml:"Settings>ExecutionTimeLimit"`
+		Restart   string `xml:"Settings>RestartOnFailure>Interval"`
+		Command   string `xml:"Actions>Exec>Command"`
+		Arguments string `xml:"Actions>Exec>Arguments"`
+	}
+	decoder := xml.NewDecoder(strings.NewReader(task))
+	decoder.CharsetReader = func(_ string, r io.Reader) (io.Reader, error) { return r, nil } // already decoded
+	if err := decoder.Decode(&parsed); err != nil {
+		t.Fatalf("the task XML does not parse: %v\n%s", err, task)
+	}
+	// The user's own logon only (no administrator needed), with the user's normal rights.
+	if parsed.Trigger != x.opts.userSID || parsed.User != x.opts.userSID || parsed.Logon != "InteractiveToken" || parsed.RunLevel != "LeastPrivilege" {
+		t.Fatalf("trigger/principal = %+v", parsed)
+	}
+	if parsed.TimeLimit != "PT0S" || parsed.Restart != "PT1M" {
+		t.Fatalf("settings = %+v, want no time limit and a restart a minute after a failure", parsed)
+	}
+	// conhost exits 0 whatever the agent does, so the task is started again every minute instead,
+	// which does nothing while it runs.
+	if parsed.Every != "PT1M" || parsed.Instances != "IgnoreNew" {
+		t.Fatalf("triggers = %+v, want a start every minute, ignored while running", parsed)
+	}
+	if !strings.Contains(name, x.opts.userSID) {
+		t.Fatalf("task name %q does not name this user: task names are machine-wide", name)
+	}
+	logFile := filepath.Join(local, "claw-master", "agent.log")
+	wantArgs := `--headless "C:\Users\Test User\.local\bin\claw-master.exe" agent --listen ` + x.listen +
+		` --open 127.0.0.1:8444 --ca ` + windowsCommandLine([]string{x.ca}) + ` --log-file ` + windowsCommandLine([]string{logFile}) + ` --exit-with-parent`
+	if parsed.Command != `%SystemRoot%\System32\conhost.exe` || parsed.Arguments != wantArgs {
+		t.Fatalf("action = %q %q\nwant %q", parsed.Command, parsed.Arguments, wantArgs)
+	}
+	if _, err := os.Stat(filepath.Join(local, "claw-master", "agent-install.json")); err != nil {
+		t.Fatalf("no install record under LOCALAPPDATA: %v", err)
+	}
+	if env, _ := readSettingsForTest(t, x.settingsPath())["env"].(map[string]any); env["HTTPS_PROXY"] == nil {
+		t.Fatalf("settings were not pointed at the agent: %v", env)
+	}
+
+	// A reinstall ends the running task (which ends the agent) before registering it again.
+	calls = nil
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	// Disabled before it is ended, so the every-minute trigger cannot start it again before it is
+	// replaced (and /create registers the new one enabled).
+	if len(calls) != 5 || calls[1][0] != "/change" || calls[1][3] != "/disable" || calls[2][0] != "/end" || calls[3][0] != "/create" {
+		t.Fatalf("reinstall schtasks calls = %q, want query, change /disable, end, create, run", calls)
+	}
+
+	calls = nil
+	if err := UninstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 4 || calls[1][0] != "/change" || calls[2][0] != "/end" || calls[3][0] != "/delete" {
+		t.Fatalf("uninstall schtasks calls = %q, want query, change /disable, end, delete", calls)
+	}
+	if _, err := os.Stat(xmlPath); !os.IsNotExist(err) {
+		t.Fatalf("the task XML is still there: %v", err)
+	}
+}
+
+func TestAgentUninstallOnWindowsChangesNothingWhenSchtasksFails(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	failEnd := false
+	x.opts.goos, x.opts.launchctl = "windows", nil
+	x.opts.localAppData, x.opts.userSID = filepath.Join(x.home, "AppData", "Local"), "S-1-5-21-1-2-3-1001"
+	x.opts.schtasks = func(_ context.Context, args ...string) (string, error) {
+		switch {
+		case args[0] == "/end" && failEnd:
+			return "", errors.New("access is denied")
+		case args[0] == "/run":
+			x.up()
+		case args[0] == "/end":
+			x.down()
+		}
+		return "", nil
+	}
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	installed, _ := os.ReadFile(x.settingsPath())
+	failEnd = true
+	if err := UninstallAgent(t.Context(), x.opts); err == nil {
+		t.Fatal("uninstall succeeded although the task would not end")
+	}
+	if now, _ := os.ReadFile(x.settingsPath()); string(now) != string(installed) {
+		t.Fatal("uninstall changed the settings around a running agent")
+	}
+}
+
+func TestWindowsCommandLineQuotesAsCommandLineToArgvSplits(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{`C:\claw\claw-master.exe`, `C:\claw\claw-master.exe`},
+		{`C:\Program Files\claw\claw-master.exe`, `"C:\Program Files\claw\claw-master.exe"`},
+		{`C:\dir with space\`, `"C:\dir with space\\"`},
+		{`say "hi"`, `"say \"hi\""`},
+		{`a\"b`, `"a\\\"b"`},
+		{``, `""`},
+	} {
+		if got := windowsCommandLine([]string{c.in}); got != c.want {
+			t.Errorf("windowsCommandLine(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+	if got := windowsCommandLine([]string{"agent", "--listen", "127.0.0.1:8445"}); got != "agent --listen 127.0.0.1:8445" {
+		t.Errorf("plain arguments = %s", got)
+	}
+}
+
+func TestSchtasksHResultsTellAMissingTaskFromAFailure(t *testing.T) {
+	if !errors.Is(schtasksError(int(int32(-2147024894)), nil), errTaskNotFound) { // 0x80070002
+		t.Fatal("HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) is not a missing task")
+	}
+	for _, code := range []int{1, int(int32(-2147024891))} { // a plain failure; 0x80070005 access denied
+		if err := schtasksError(code, []byte("ERROR: ...")); err == nil || errors.Is(err, errTaskNotFound) {
+			t.Fatalf("exit code %#x read as %v, want a failure", code, err)
+		}
+	}
+}
+
+// A reinstall whose old agent has not let go of its port yet must not go on: the old agent would
+// answer the probe, and the new one would never start.
+func TestAgentReinstallWaitsForTheOldAgentsPort(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	installed, _ := os.ReadFile(x.settingsPath())
+	x.slowStop = true
+	err := InstallAgent(t.Context(), x.opts)
+	if err == nil || !strings.Contains(err.Error(), "still in use") {
+		t.Fatalf("reinstall with the old agent still on its port = %v; want it refused", err)
+	}
+	if now, _ := os.ReadFile(x.settingsPath()); string(now) != string(installed) {
+		t.Fatal("the refused reinstall changed the settings")
+	}
+}
+
+func TestAgentInstallOnWindowsRefusesPathsWithPercent(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	x.opts.goos, x.opts.launchctl = "windows", nil
+	x.opts.localAppData, x.opts.userSID = filepath.Join(x.home, "AppData", "Local"), "S-1-5-21-1-2-3-1001"
+	x.opts.binary = `C:\tools\%USERNAME%\claw-master.exe`
+	created := false
+	x.opts.schtasks = func(_ context.Context, args ...string) (string, error) {
+		if args[0] == "/create" {
+			created = true
+		}
+		return "", errTaskNotFound
+	}
+	err := InstallAgent(t.Context(), x.opts)
+	if err == nil || !strings.Contains(err.Error(), "environment variable") || created {
+		t.Fatalf("install with %%USERNAME%% in the binary's path = %v (task created: %v); want it refused", err, created)
+	}
+}
+
+func TestAgentParentMustHaveStartedFirst(t *testing.T) {
+	now := time.Now()
+	if !parentCameFirst(now.Add(-time.Second), now) || !parentCameFirst(now, now) {
+		t.Fatal("a parent that started first was refused")
+	}
+	if parentCameFirst(now.Add(time.Second), now) {
+		t.Fatal("a process that started after this one was taken for its parent")
 	}
 }

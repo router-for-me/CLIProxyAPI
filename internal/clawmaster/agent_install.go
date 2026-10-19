@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -31,25 +30,32 @@ const agentLaunchLabel = "dev.claw-master.agent"
 var errLaunchdNoService = errors.New("launchd has no such service")
 
 // AgentInstallOptions configures `agent install` and `agent uninstall`: the agent's own options, the
-// log file it writes, and, for tests, the home directory, the binary and how launchctl is run.
+// log file it writes, and, for tests, the system, the home directory, the binary and how launchctl
+// or schtasks is run.
 type AgentInstallOptions struct {
 	Agent   AgentOptions
-	LogFile string // default: ~/Library/Logs/claw-master-agent.log
+	LogFile string // default: ~/Library/Logs/claw-master-agent.log; %LOCALAPPDATA%\claw-master\agent.log
 	Out     io.Writer
 
-	home      string
-	binary    string
-	launchctl func(ctx context.Context, args ...string) error
-	wait      time.Duration // how long the new job has to answer (default 15s)
+	goos         string
+	home         string
+	localAppData string
+	userSID      string
+	binary       string
+	launchctl    func(ctx context.Context, args ...string) error
+	schtasks     func(ctx context.Context, args ...string) (string, error)
+	wait         time.Duration // how long the new job has to answer (default 15s)
 }
 
 // agentInstallRecord is what InstallAgent changed, so UninstallAgent can undo exactly that without
 // the agent's credentials: the entries it set in the settings env and what they replaced.
 type agentInstallRecord struct {
-	Settings string                     `json:"settings"`
-	Plist    string                     `json:"plist"`
-	Set      map[string]string          `json:"set"`
-	Previous map[string]json.RawMessage `json:"previous,omitempty"`
+	Settings string `json:"settings"`
+	// Definition is the service's file: the launchd plist or the scheduled task's XML (the key
+	// predates Windows).
+	Definition string                     `json:"plist"`
+	Set        map[string]string          `json:"set"`
+	Previous   map[string]json.RawMessage `json:"previous,omitempty"`
 	// Earlier are values earlier installs set, so uninstall still recognizes one a reinstall did not
 	// get to replace.
 	Earlier map[string][]string `json:"earlier,omitempty"`
@@ -90,24 +96,28 @@ func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 		args = append(args, "--server", opts.Agent.Server, "--dir", dir)
 	}
 	args = append(args, "--log-file", opts.LogFile)
-	plist, err := agentPlist(args, strings.TrimSuffix(opts.LogFile, ".log")+".stderr.log")
-	if err != nil {
-		return err
+	if opts.goos == "windows" {
+		args = append(args, "--exit-with-parent") // Task Scheduler ends only the conhost it started
 	}
-	plistPath := opts.plistPath()
-	for _, dir := range []string{filepath.Dir(plistPath), filepath.Dir(opts.LogFile)} {
+	svc := opts.service()
+	for _, dir := range []string{filepath.Dir(svc.definitionPath()), filepath.Dir(opts.LogFile)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("cannot create %s: %w", dir, err)
 		}
 	}
-	if err := writeFileAtomic(plistPath, plist, 0o644); err != nil {
+	if err := svc.write(args); err != nil {
 		return err
 	}
-	if err := opts.stopJob(ctx); err != nil {
+	if err := svc.stop(ctx); err != nil {
 		return err
 	}
-	if err := opts.launchctl(ctx, "bootstrap", opts.domain(), plistPath); err != nil {
-		return fmt.Errorf("launchctl could not start the agent: %w", err)
+	// The stopped agent may take a moment to let go of its port; the new one must get it, or the
+	// old one would answer the probe below.
+	if err := waitPortFree(ctx, endpoint.listen, opts.wait); err != nil {
+		return err
+	}
+	if err := svc.start(ctx); err != nil {
+		return err
 	}
 	if err := waitAgentReady(ctx, endpoint.listen, endpoint.token, opts.wait); err != nil {
 		return fmt.Errorf("the agent did not answer on %s (see %s): %w", endpoint.listen, opts.LogFile, err)
@@ -116,7 +126,7 @@ func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	if err != nil {
 		return err
 	}
-	record := agentInstallRecord{Settings: settingsPath, Plist: plistPath, Set: map[string]string{}, Previous: map[string]json.RawMessage{}, Earlier: map[string][]string{}}
+	record := agentInstallRecord{Settings: settingsPath, Definition: svc.definitionPath(), Set: map[string]string{}, Previous: map[string]json.RawMessage{}, Earlier: map[string][]string{}}
 	old, err := readAgentInstallRecord(opts.recordPath())
 	reinstall := err == nil && old.Settings == settingsPath
 	if reinstall {
@@ -161,9 +171,9 @@ func InstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 		}
 	}
 	if opts.Out != nil {
-		fmt.Fprintf(opts.Out, "claw-master agent: running as launchd job %s on %s, logging to %s\n", agentLaunchLabel, endpoint.listen, opts.LogFile)
+		fmt.Fprintf(opts.Out, "claw-master agent: running as %s on %s, logging to %s\n", svc.describe(), endpoint.listen, opts.LogFile)
 		if changed {
-			fmt.Fprintf(opts.Out, "claw-master agent: every Claude Code on this Mac now uses the pool (%s env)\n", settingsPath)
+			fmt.Fprintf(opts.Out, "claw-master agent: every Claude Code on this computer now uses the pool (%s env)\n", settingsPath)
 		}
 		fmt.Fprintln(opts.Out, "claw-master agent: restart the Claude desktop app and running Claude sessions to pick it up")
 	}
@@ -184,7 +194,8 @@ func UninstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := opts.stopJob(ctx); err != nil {
+	svc := opts.service()
+	if err := svc.stop(ctx); err != nil {
 		return err
 	}
 	if _, err := updateClaudeSettingsEnv(record.Settings, false, func(env map[string]json.RawMessage) error {
@@ -203,14 +214,17 @@ func UninstallAgent(ctx context.Context, opts AgentInstallOptions) error {
 	}); err != nil {
 		return err
 	}
-	if err := os.Remove(record.Plist); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := svc.remove(ctx); err != nil {
+		return err
+	}
+	if err := os.Remove(record.Definition); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	if err := os.Remove(opts.recordPath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	if opts.Out != nil {
-		fmt.Fprintln(opts.Out, "claw-master agent: stopped and removed; Claude Code on this Mac uses its own login again")
+		fmt.Fprintln(opts.Out, "claw-master agent: stopped and removed; Claude Code on this computer uses its own login again")
 	}
 	return nil
 }
@@ -229,21 +243,8 @@ func refuseConflictingSettings(path string) error {
 }
 
 func (opts *AgentInstallOptions) defaults() error {
-	if opts.launchctl == nil {
-		if runtime.GOOS != "darwin" {
-			return errors.New("agent install is for macOS (launchd); elsewhere run `claw-master agent` as a service and set `claw-master agent env` in Claude's settings")
-		}
-		opts.launchctl = func(ctx context.Context, args ...string) error {
-			out, err := exec.CommandContext(ctx, "launchctl", args...).CombinedOutput()
-			if err == nil {
-				return nil
-			}
-			var exited *exec.ExitError
-			if ctx.Err() == nil && errors.As(err, &exited) && (exited.ExitCode() == 113 || bytes.Contains(out, []byte("Could not find service"))) {
-				return errLaunchdNoService
-			}
-			return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
-		}
+	if opts.goos == "" {
+		opts.goos = runtime.GOOS
 	}
 	if opts.home == "" {
 		home, err := os.UserHomeDir()
@@ -251,6 +252,31 @@ func (opts *AgentInstallOptions) defaults() error {
 			return errors.New("cannot locate the home directory")
 		}
 		opts.home = home
+	}
+	switch opts.goos {
+	case "darwin":
+		if opts.launchctl == nil {
+			opts.launchctl = runLaunchctl
+		}
+	case "windows":
+		if opts.schtasks == nil {
+			opts.schtasks = runSchtasks
+		}
+		if opts.localAppData == "" {
+			opts.localAppData = os.Getenv("LOCALAPPDATA")
+		}
+		if opts.localAppData == "" {
+			opts.localAppData = filepath.Join(opts.home, "AppData", "Local")
+		}
+		if opts.userSID == "" {
+			sid, err := currentUserSIDString()
+			if err != nil {
+				return fmt.Errorf("cannot tell this user's SID: %w", err)
+			}
+			opts.userSID = sid
+		}
+	default:
+		return errors.New("agent install is for macOS (launchd) and Windows (Task Scheduler); elsewhere run `claw-master agent` as a service and set `claw-master agent env` in Claude's settings")
 	}
 	if opts.binary == "" {
 		binary, err := os.Executable()
@@ -267,6 +293,9 @@ func (opts *AgentInstallOptions) defaults() error {
 	}
 	if opts.LogFile == "" {
 		opts.LogFile = filepath.Join(opts.home, "Library", "Logs", "claw-master-agent.log")
+		if opts.goos == "windows" {
+			opts.LogFile = filepath.Join(opts.localAppData, "claw-master", "agent.log")
+		}
 	}
 	logFile, err := filepath.Abs(opts.LogFile)
 	if err != nil {
@@ -276,29 +305,54 @@ func (opts *AgentInstallOptions) defaults() error {
 	return nil
 }
 
-func (opts *AgentInstallOptions) domain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
-
-func (opts *AgentInstallOptions) plistPath() string {
-	return filepath.Join(opts.home, "Library", "LaunchAgents", agentLaunchLabel+".plist")
+// service is how this system keeps the agent running.
+func (opts *AgentInstallOptions) service() agentService {
+	if opts.goos == "windows" {
+		return scheduledTaskService{dir: filepath.Join(opts.localAppData, "claw-master"), userSID: opts.userSID, schtasks: opts.schtasks}
+	}
+	return launchdService{home: opts.home, logFile: opts.LogFile, launchctl: opts.launchctl}
 }
 
 func (opts *AgentInstallOptions) recordPath() string {
+	if opts.goos == "windows" {
+		return filepath.Join(opts.localAppData, "claw-master", "agent-install.json")
+	}
 	return filepath.Join(opts.home, "Library", "Application Support", "claw-master", "agent-install.json")
 }
 
-// stopJob stops the agent's launchd job if it is loaded; a job that is loaded but will not stop is
-// an error, so nothing is changed around a running agent.
-func (opts *AgentInstallOptions) stopJob(ctx context.Context) error {
-	service := opts.domain() + "/" + agentLaunchLabel
-	if err := opts.launchctl(ctx, "print", service); errors.Is(err, errLaunchdNoService) {
-		return nil // not loaded
-	} else if err != nil {
-		return fmt.Errorf("launchctl could not tell whether the agent is running: %w", err)
+// runLaunchctl runs launchctl; a job that is not loaded is errLaunchdNoService.
+func runLaunchctl(ctx context.Context, args ...string) error {
+	out, err := exec.CommandContext(ctx, "launchctl", args...).CombinedOutput()
+	if err == nil {
+		return nil
 	}
-	if err := opts.launchctl(ctx, "bootout", service); err != nil {
-		return fmt.Errorf("launchctl could not stop the running agent: %w", err)
+	var exited *exec.ExitError
+	if ctx.Err() == nil && errors.As(err, &exited) && (exited.ExitCode() == 113 || bytes.Contains(out, []byte("Could not find service"))) {
+		return errLaunchdNoService
 	}
-	return nil
+	return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+}
+
+// runSchtasks runs schtasks with /hresult, so a failure is an HRESULT, not a localized message.
+func runSchtasks(ctx context.Context, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, "schtasks", append(args, "/hresult")...).CombinedOutput()
+	if err == nil {
+		return string(out), nil
+	}
+	var exited *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &exited) {
+		return "", fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+	}
+	return "", schtasksError(exited.ExitCode(), out)
+}
+
+// schtasksError reads a schtasks /hresult exit code: HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) is a
+// task that does not exist; anything else is a failure.
+func schtasksError(code int, out []byte) error {
+	if uint32(code) == 0x80070002 {
+		return errTaskNotFound
+	}
+	return fmt.Errorf("schtasks failed (0x%08X): %s", uint32(code), bytes.TrimSpace(out))
 }
 
 // agentPlist is a launchd job that runs args at login and again whenever it exits; what it prints
@@ -333,6 +387,25 @@ func agentPlist(args []string, stderrPath string) ([]byte, error) {
 </plist>
 `)
 	return b.Bytes(), nil
+}
+
+// waitPortFree waits, briefly, until nothing listens on address.
+func waitPortFree(ctx context.Context, address string, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		listener, err := net.Listen("tcp", address)
+		if err == nil {
+			return listener.Close()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s is still in use after the old agent was stopped: %w", address, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // waitAgentReady waits, briefly, until this machine's agent (not just anything listening there)
@@ -468,7 +541,7 @@ func readAgentInstallRecord(path string) (agentInstallRecord, error) {
 	if err != nil {
 		return record, err
 	}
-	if err := json.Unmarshal(raw, &record); err != nil || record.Settings == "" || record.Plist == "" {
+	if err := json.Unmarshal(raw, &record); err != nil || record.Settings == "" || record.Definition == "" {
 		return record, fmt.Errorf("%s is not an agent installation record", path)
 	}
 	return record, nil

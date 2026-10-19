@@ -624,7 +624,7 @@ nowhere: while the server or the tunnel is down it is answered `502`, and one wi
 (a stale or mistyped proxy URL) is answered `407` instead of being sent to Anthropic with the machine's own
 login. Both are logged. Other hosts (OAuth refresh, telemetry) are tunnelled directly, as in a launch.
 
-On macOS, one command sets it up, behind the tunnel above:
+On macOS and Windows, one command sets it up, behind the tunnel above:
 
 ```sh
 claw-master agent install --listen 127.0.0.1:8445 --open 127.0.0.1:8444 --ca ~/.config/claw-master/ca.pem
@@ -664,6 +664,18 @@ writes, logs) are given an owner-only DACL, and a private file or directory is a
 is you (or Administrators, for an administrator) and nobody else but SYSTEM and Administrators has access.
 `login`, `run` and `serve` refuse: subscription logins belong to a server. Claude Code on Windows reads
 `%USERPROFILE%\.claude\settings.json`, and managed settings from `C:\Program Files\ClaudeCode`.
+
+`agent install` on Windows (same flags; `--ca` names the `ca.pem` copied to the PC) registers a Task
+Scheduler task, `claw-master agent <your SID>` (task names are machine-wide, so each user of a shared PC has
+their own), in place of the launchd job. It runs at your own logon, as you, with your normal rights, so it
+needs no administrator (a logon trigger for any user would). It runs under `conhost --headless`, so no
+console window opens, and with `--exit-with-parent`, because ending the task ends only that conhost.
+conhost exits 0 whatever the agent does, so a failure cannot trigger a restart; instead the task is also
+started every minute from the install on, which does nothing while it runs, so an agent that has ended is
+back within a minute. Paths containing `%` are refused (Windows would expand them). Its definition, log and
+record are in `%LOCALAPPDATA%\claw-master` (`agent-task.xml`, `agent.log`, `agent-install.json`); a hidden
+agent has no console, so a failure to start is in the log. Everything else (the probe, the settings, the
+refusals, `agent uninstall`) is as on macOS.
 
 Elsewhere, run `claw-master agent` under the system's service manager and put the lines
 `claw-master agent env` prints (same flags) into the settings `env` yourself. A box with a client
