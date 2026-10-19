@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	log "github.com/sirupsen/logrus"
@@ -24,12 +25,34 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 	RegisterOAuthSession(state, "codex")
 
 	ctx, cancel := context.WithCancel(PopulateAuthContext(context.Background(), c))
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	requestCtx := c.Request.Context()
+	stopRequestCancel := context.AfterFunc(requestCtx, cancel)
+	responseReady := make(chan struct{})
 	deviceCodeCh := make(chan sdkAuth.DeviceCodeInfo, 1)
 	loginDone := make(chan struct{})
-	go watchOAuthSessionCancel(ctx, cancel, state, "codex")
+	watchDone := make(chan struct{})
+	handedOff := false
+	defer func() {
+		stopRequestCancel()
+		if !handedOff {
+			oauthSessions.Discard(state)
+			cancel()
+			<-loginDone
+			<-watchDone
+		}
+	}()
+	go func() {
+		defer close(watchDone)
+		watchOAuthSessionCancel(watchCtx, cancel, state, "codex")
+	}()
 	go func() {
 		defer close(loginDone)
-		defer cancel()
+		defer func() {
+			stopWatch()
+			<-watchDone
+			cancel()
+		}()
 
 		authenticator := h.codexDeviceAuthenticator
 		if authenticator == nil {
@@ -53,6 +76,12 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			SetOAuthSessionError(state, "Authentication failed")
 			return
 		}
+		// A fast login must not persist credentials before the caller receives its session.
+		select {
+		case <-responseReady:
+		case <-ctx.Done():
+			return
+		}
 		if !oauthSessions.BeginSave(state, "codex") {
 			return
 		}
@@ -66,7 +95,10 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 
 	startTimer := time.NewTimer(codexDeviceStartTimeout)
 	defer startTimer.Stop()
-	info, started, timedOut := waitForCodexDeviceStart(deviceCodeCh, loginDone, startTimer.C)
+	info, started, timedOut := waitForCodexDeviceStart(deviceCodeCh, loginDone, startTimer.C, requestCtx.Done())
+	if requestCtx.Err() != nil {
+		return
+	}
 	if started {
 		userCode := strings.TrimSpace(info.UserCode)
 		verificationURL := strings.TrimSpace(info.VerificationURL)
@@ -76,6 +108,7 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "invalid device authorization response"})
 			return
 		}
+		responseErrors := len(c.Errors)
 		c.JSON(http.StatusOK, gin.H{
 			"status":     "ok",
 			"url":        verificationURL,
@@ -84,6 +117,17 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			"user_code":  userCode,
 			"expires_in": info.ExpiresIn,
 		})
+		if len(c.Errors) > responseErrors {
+			return
+		}
+		if errFlush := httpwire.FlushResponse(c.Writer); errFlush != nil {
+			return
+		}
+		if requestCtx.Err() != nil || !stopRequestCancel() {
+			return
+		}
+		handedOff = true
+		close(responseReady)
 		return
 	}
 	if timedOut {
@@ -97,15 +141,17 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 	c.JSON(http.StatusBadGateway, gin.H{"error": "failed to start device authorization flow"})
 }
 
-func waitForCodexDeviceStart(deviceCodeCh <-chan sdkAuth.DeviceCodeInfo, loginDone <-chan struct{}, timeout <-chan time.Time) (sdkAuth.DeviceCodeInfo, bool, bool) {
+func waitForCodexDeviceStart(deviceCodeCh <-chan sdkAuth.DeviceCodeInfo, loginDone <-chan struct{}, timeout <-chan time.Time, requestDone <-chan struct{}) (sdkAuth.DeviceCodeInfo, bool, bool) {
 	if info, ok := takeReadyCodexDeviceCode(deviceCodeCh); ok {
 		return info, true, false
 	}
-	return waitForCodexDeviceStartAfterDrain(deviceCodeCh, loginDone, timeout)
+	return waitForCodexDeviceStartAfterDrain(deviceCodeCh, loginDone, timeout, requestDone)
 }
 
-func waitForCodexDeviceStartAfterDrain(deviceCodeCh <-chan sdkAuth.DeviceCodeInfo, loginDone <-chan struct{}, timeout <-chan time.Time) (sdkAuth.DeviceCodeInfo, bool, bool) {
+func waitForCodexDeviceStartAfterDrain(deviceCodeCh <-chan sdkAuth.DeviceCodeInfo, loginDone <-chan struct{}, timeout <-chan time.Time, requestDone <-chan struct{}) (sdkAuth.DeviceCodeInfo, bool, bool) {
 	select {
+	case <-requestDone:
+		return sdkAuth.DeviceCodeInfo{}, false, false
 	case info := <-deviceCodeCh:
 		return info, true, false
 	case <-loginDone:

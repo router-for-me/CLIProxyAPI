@@ -139,7 +139,7 @@ func TestWaitForCodexDeviceStartPrefersCodeWhenLoginAlreadyFinished(t *testing.T
 	loginDone := make(chan struct{})
 	close(loginDone)
 
-	info, started, timedOut := waitForCodexDeviceStart(deviceCodeCh, loginDone, nil)
+	info, started, timedOut := waitForCodexDeviceStart(deviceCodeCh, loginDone, nil, nil)
 	if !started || timedOut || info != expected {
 		t.Fatalf("waitForCodexDeviceStart() = (%#v, %t, %t), want ready code", info, started, timedOut)
 	}
@@ -152,7 +152,7 @@ func TestWaitForCodexDeviceStartPrefersCodeWhenTimeoutFires(t *testing.T) {
 	timeout := make(chan time.Time, 1)
 	timeout <- time.Time{}
 
-	info, started, timedOut := waitForCodexDeviceStartAfterDrain(deviceCodeCh, nil, timeout)
+	info, started, timedOut := waitForCodexDeviceStartAfterDrain(deviceCodeCh, nil, timeout, nil)
 	if !started || timedOut || info != expected {
 		t.Fatalf("waitForCodexDeviceStartAfterDrain() = (%#v, %t, %t), want ready code", info, started, timedOut)
 	}
