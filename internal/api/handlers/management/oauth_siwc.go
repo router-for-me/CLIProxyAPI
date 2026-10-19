@@ -77,6 +77,12 @@ func resolveSIWCBindFile(authDir, path string) (string, map[string]any, error) {
 	if errDir != nil {
 		return "", nil, errDir
 	}
+	// Match the commit-time rule: directory aliases are allowed, but the
+	// credential itself must not be a symlink.
+	originalInfo, errLstat := os.Lstat(path)
+	if errLstat != nil || !originalInfo.Mode().IsRegular() {
+		return "", nil, errors.New("credential must be an existing regular file")
+	}
 	realPath, errPath := filepath.EvalSymlinks(path)
 	if errPath != nil {
 		return "", nil, errPath

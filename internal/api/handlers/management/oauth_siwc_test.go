@@ -395,6 +395,47 @@ func TestSIWCBindOAuthErrorAndEligibility(t *testing.T) {
 	}
 }
 
+func TestSIWCBindRejectsLegacyCallback(t *testing.T) {
+	f := setupSIWCFlow(t, false)
+	state, flow := f.start(t)
+	w := siwcRequest(t, f.router, http.MethodPost, "/legacy-callback", map[string]any{"state": state, "code": "issued-code"})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("legacy callback: %d %s", w.Code, w.Body.String())
+	}
+	path := filepath.Join(filepath.Dir(f.path), ".oauth-codex-"+state+".oauth")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy callback created a file: %v", err)
+	}
+	if !f.store.IsPending(state, "codex") || f.service.calls.Load() != 0 {
+		t.Fatal("legacy callback consumed the SIWC session")
+	}
+	w = siwcRequest(t, f.router, http.MethodPost, "/callback", map[string]any{"redirect_url": siwcCallbackURL(state)})
+	if w.Code != http.StatusOK {
+		t.Fatalf("v8 retry: %d %s", w.Code, w.Body.String())
+	}
+	waitSIWCExchange(t, flow)
+}
+
+func TestSIWCBindRejectsCredentialSymlinkAtStart(t *testing.T) {
+	f := setupSIWCFlow(t, false)
+	target := filepath.Join(filepath.Dir(f.path), "target.json")
+	if err := os.Rename(f.path, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, f.path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	w := siwcRequest(t, f.router, http.MethodPost, "/bind", map[string]any{"name": f.auth.FileName})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("symlink accepted: %d %s", w.Code, w.Body.String())
+	}
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	if len(f.store.sessions) != 0 || f.service.calls.Load() != 0 {
+		t.Fatal("symlink rejection created an OAuth session or exchanged tokens")
+	}
+}
+
 func TestSIWCBindTargetValidationAndLegacyCallback(t *testing.T) {
 	f := setupSIWCFlow(t, false)
 	for _, name := range []string{"", "../codex.json", "missing.json", f.path} {

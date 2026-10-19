@@ -32,6 +32,9 @@ var (
 	errOAuthSessionExists     = errors.New("oauth session already exists")
 )
 
+// ErrSIWCCallbackRequiresV8 prevents legacy callback sinks from accepting SIWC codes.
+var ErrSIWCCallbackRequiresV8 = fmt.Errorf("%w: SIWC callbacks require /v8/management/oauth/callback", errOAuthSessionNotPending)
+
 type oauthSession struct {
 	Provider       string
 	Status         string
@@ -524,6 +527,9 @@ func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, err
 	canonicalProvider, err := normalizeOAuthCallbackProviderForPendingSession(provider, state)
 	if err != nil {
 		return "", err
+	}
+	if session, ok := oauthSessions.Get(state); ok && session.SIWC != nil {
+		return "", ErrSIWCCallbackRequiresV8
 	}
 	if !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending
