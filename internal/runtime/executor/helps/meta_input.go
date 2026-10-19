@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -64,6 +65,49 @@ func metaReasoningDangles(rest []gjson.Result) bool {
 			return false
 		case itemType == "message":
 			return true
+		}
+	}
+	return false
+}
+
+// TagMetaCommentaryPhase marks assistant text that precedes a function_call in
+// the same assistant turn with phase "commentary", as Meta labels a preamble it
+// emits before a tool call. Meta asks clients to replay that phase: dropping it
+// can degrade quality, and text before a function_call is otherwise read as a
+// final answer. Messages that already carry a phase are left alone.
+func TagMetaCommentaryPhase(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	items := input.Array()
+	for i, item := range items {
+		itemType, role := metaInputItemKind(item)
+		if itemType != "message" || role != "assistant" || item.Get("phase").Exists() {
+			continue
+		}
+		if !metaAssistantTurnCallsTool(items[i+1:]) {
+			continue
+		}
+		if updated, err := sjson.SetBytes(body, "input."+strconv.Itoa(i)+".phase", "commentary"); err == nil {
+			body = updated
+		}
+	}
+	return body
+}
+
+// metaAssistantTurnCallsTool reports whether a function_call follows before
+// the assistant turn ends.
+func metaAssistantTurnCallsTool(rest []gjson.Result) bool {
+	for _, next := range rest {
+		itemType, role := metaInputItemKind(next)
+		switch {
+		case itemType == "function_call":
+			return true
+		case itemType == "reasoning", itemType == "message" && role == "assistant":
+			continue
+		default:
+			return false
 		}
 	}
 	return false

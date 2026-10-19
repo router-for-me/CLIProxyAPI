@@ -2064,7 +2064,8 @@ func testMuseReasoningSignature(t *testing.T, fill string) string {
 // A Claude client replays Muse's reasoning as thinking blocks signed with
 // Muse's encrypted_content. The Claude->Codex translation replays those by
 // target and drops other providers' signatures; the Meta executor then drops
-// reasoning a thinking-only turn leaves directly before the next message.
+// reasoning a thinking-only turn leaves directly before the next message and
+// tags the preamble before a tool call as commentary.
 func TestMetaExecutor_ClaudeRequestReplaysMuseReasoning(t *testing.T) {
 	toolTurn := testMuseReasoningSignature(t, "B")
 	thinkingOnly := testMuseReasoningSignature(t, "C")
@@ -2126,6 +2127,16 @@ func TestMetaExecutor_ClaudeRequestReplaysMuseReasoning(t *testing.T) {
 		}
 		if len(reasoning) != 2 || reasoning[0] != toolTurn || reasoning[1] != answerTurn {
 			t.Fatalf("reasoning items do not carry the tool-turn and answer-turn Muse blobs verbatim; body=%s", body)
+		}
+		// The preamble before the tool call is commentary; the last answer is not.
+		input := gjson.GetBytes(body, "input")
+		if got := input.Get("2.phase").String(); got != "commentary" {
+			t.Fatalf("input.2.phase = %q, want commentary; body=%s", got, body)
+		}
+		for _, item := range input.Array()[3:] {
+			if item.Get("phase").Exists() {
+				t.Fatalf("unexpected phase on %s; body=%s", item.Raw, body)
+			}
 		}
 	}
 
