@@ -204,6 +204,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	sawOutputDelta := false
+	sseFrameHasContent := false
 	if buffering {
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -216,6 +217,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			var translatedLine []byte
 			isHandshake := false
 			terminalSuccess := false
+			if len(line) > 0 {
+				sseFrameHasContent = true
+			}
 
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
@@ -296,6 +300,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				// the frame they belong to. They spend the same budgets.
 				// Non-data lines also need owned storage before translation can retain them.
 				translatedLine = bytes.Clone(line)
+				if len(line) == 0 && sseFrameHasContent {
+					// Preserve event boundaries without turning a blank prelude into response output.
+					translatedLine = []byte("\n\n")
+					sseFrameHasContent = false
+				}
 				isHandshake = true
 			}
 
@@ -412,6 +421,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			line := scanner.Bytes()
 			var translatedLine []byte
 			terminalSuccess := false
+			if len(line) > 0 {
+				sseFrameHasContent = true
+			}
 
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
@@ -474,6 +486,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			} else {
 				translatedLine = bytes.Clone(line)
+				if len(line) == 0 && sseFrameHasContent {
+					translatedLine = []byte("\n\n")
+					sseFrameHasContent = false
+				}
 			}
 
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
