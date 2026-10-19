@@ -204,6 +204,30 @@ func syncReadOnlyFile(f *os.File) error {
 	return errSync
 }
 
+// parentExited reports when the process that started this one ends (conhost, for the scheduled task).
+func parentExited() (<-chan struct{}, error) {
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(os.Getppid()))
+	if err != nil {
+		return nil, fmt.Errorf("cannot open the parent process: %w", err)
+	}
+	gone := make(chan struct{})
+	go func() {
+		defer func() { _ = windows.CloseHandle(handle) }()
+		_, _ = windows.WaitForSingleObject(handle, windows.INFINITE)
+		close(gone)
+	}()
+	return gone, nil
+}
+
+// currentUserSIDString is this user's SID, for the scheduled task's trigger and principal.
+func currentUserSIDString() (string, error) {
+	sid, err := currentUserSID()
+	if err != nil {
+		return "", err
+	}
+	return sid.String(), nil
+}
+
 // profilesSupported: profiles hold the pool's subscription credentials, which only a server keeps.
 func profilesSupported() error {
 	return errors.New("profiles (login, run, serve) are not supported on Windows; on Windows use connect or agent")

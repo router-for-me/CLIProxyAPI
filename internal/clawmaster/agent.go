@@ -26,6 +26,9 @@ type AgentOptions struct {
 	CAFile    string
 	TokenFile string // the agent's token; created on first use (default: agent.token beside the CA)
 	Out       io.Writer
+	// ExitWithParent ends the agent when the process that started it ends. Windows' Task Scheduler
+	// starts it under conhost --headless and, told to end the task, ends only that conhost.
+	ExitWithParent bool
 }
 
 // agentTokenName is the agent's token file, beside the CA (--open) or in the client directory.
@@ -51,11 +54,32 @@ type agentEndpoint struct {
 func RunAgent(ctx context.Context, opts AgentOptions) error {
 	endpoint, err := resolveAgent(opts)
 	if err != nil {
+		lg().Error("agent: cannot start", "error", err) // a hidden agent has only its log
 		return err
 	}
 	listener, err := net.Listen("tcp", endpoint.listen)
 	if err != nil {
+		lg().Error("agent: cannot listen", "address", endpoint.listen, "error", err)
 		return fmt.Errorf("cannot listen on %s: %w", endpoint.listen, err)
+	}
+	if opts.ExitWithParent {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		gone, err := parentExited()
+		if err != nil {
+			_ = listener.Close()
+			lg().Error("agent: cannot watch the process that started it", "error", err)
+			return err
+		}
+		go func() {
+			select {
+			case <-gone:
+				lg().Info("agent: the process that started it has ended; stopping")
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 	}
 	return serveAgent(ctx, listener, endpoint, opts.Out)
 }

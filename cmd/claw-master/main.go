@@ -493,6 +493,7 @@ func runAgent(ctx context.Context, args []string) (int, error) {
 	flags.StringVar(&opts.Open, "open", clawmaster.Getenv("OPEN"), "loopback ADDRESS:PORT of an authenticating tunnel to the server's open listener")
 	flags.StringVar(&opts.CAFile, "ca", clawmaster.Getenv("CA"), "the server's public ca.pem (with --open)")
 	flags.StringVar(&opts.TokenFile, "token-file", "", "the agent's private token, created on first use (default: agent.token beside the CA)")
+	flags.BoolVar(&opts.ExitWithParent, "exit-with-parent", false, "stop when the process that started the agent ends (the Windows scheduled task uses it)")
 	flags.StringVar(&logLevel, "log-level", "info", "debug, info, warn, error or off")
 	flags.StringVar(&logFile, "log-file", "", "append logs to this file, rotated by size (default: standard error)")
 	flags.StringVar(&logFormat, "log-format", "text", "text or json")

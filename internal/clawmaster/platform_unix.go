@@ -97,5 +97,12 @@ const directorySyncSupported = true
 // syncReadOnlyFile makes f's contents durable; Unix allows it through a read-only descriptor.
 func syncReadOnlyFile(f *os.File) error { return f.Sync() }
 
+// parentExited reports when the process that started this one ends: it is used only where a service
+// manager cannot end the agent itself (Windows), so on Unix it never does.
+func parentExited() (<-chan struct{}, error) { return make(chan struct{}), nil }
+
+// currentUserSIDString is for the Windows scheduled task only.
+func currentUserSIDString() (string, error) { return "", errors.New("no SID outside Windows") }
+
 // profilesSupported: profiles (login, run, serve) need the locks and ownership checks above.
 func profilesSupported() error { return nil }

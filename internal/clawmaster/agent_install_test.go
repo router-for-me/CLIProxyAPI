@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 func agentSettingsJSON(t *testing.T, env map[string]string) []byte {
@@ -103,7 +104,7 @@ func newAgentInstallTest(t *testing.T, serve string) *agentInstallTest {
 	x.listen = listener.Addr().String()
 	x.opts = AgentInstallOptions{
 		Agent: AgentOptions{Listen: x.listen, Open: "127.0.0.1:8444", CAFile: x.ca},
-		home:  x.home, binary: "/Applications/claw & master/claw-master", wait: 300 * time.Millisecond,
+		goos:  "darwin", home: x.home, binary: "/Applications/claw & master/claw-master", wait: 300 * time.Millisecond,
 		launchctl: func(_ context.Context, args ...string) error {
 			x.calls = append(x.calls, args)
 			switch args[0] {
@@ -282,7 +283,7 @@ func TestAgentInstallRunsTheJobAndPointsSettingsAtIt(t *testing.T) {
 	}
 
 	// Uninstall needs no flags: it restores what the install replaced and removes what it added.
-	if err := UninstallAgent(t.Context(), AgentInstallOptions{home: x.home, binary: "unused", launchctl: x.opts.launchctl}); err != nil {
+	if err := UninstallAgent(t.Context(), AgentInstallOptions{goos: "darwin", home: x.home, binary: "unused", launchctl: x.opts.launchctl}); err != nil {
 		t.Fatal(err)
 	}
 	after := readSettingsForTest(t, x.settingsPath())
@@ -561,5 +562,155 @@ func TestConnectAcceptsSettingsThatPointAtThisMachinesAgent(t *testing.T) {
 	}
 	if _, err := Connect(t.Context(), opts, nil); err == nil || !strings.Contains(err.Error(), "proxy") {
 		t.Fatalf("Connect without the agent's token = %v; want the proxy override refused", err)
+	}
+}
+
+// decodeUTF16ForTest reads the task XML as schtasks would.
+func decodeUTF16ForTest(t *testing.T, raw []byte) string {
+	t.Helper()
+	if len(raw) < 2 || raw[0] != 0xFF || raw[1] != 0xFE || len(raw)%2 != 0 {
+		t.Fatalf("not UTF-16LE with a byte-order mark: % x", raw[:min(len(raw), 4)])
+	}
+	units := make([]uint16, 0, len(raw)/2-1)
+	for i := 2; i < len(raw); i += 2 {
+		units = append(units, uint16(raw[i])|uint16(raw[i+1])<<8)
+	}
+	return string(utf16.Decode(units))
+}
+
+func TestAgentInstallOnWindowsRegistersALogonTaskForThisUser(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	local := filepath.Join(x.home, "AppData", "Local")
+	var calls [][]string
+	registered := false
+	x.opts.goos, x.opts.launchctl = "windows", nil
+	x.opts.localAppData, x.opts.userSID = local, "S-1-5-21-1-2-3-1001"
+	x.opts.binary = `C:\Users\Test User\.local\bin\claw-master.exe`
+	x.opts.schtasks = func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, args)
+		switch args[0] {
+		case "/query":
+			if !registered {
+				return "", errTaskNotFound
+			}
+		case "/create":
+			registered = true
+		case "/delete":
+			registered = false
+		}
+		return "", nil
+	}
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	xmlPath := filepath.Join(local, "claw-master", "agent-task.xml")
+	want := [][]string{
+		{"/query", "/tn", agentTaskName},
+		{"/create", "/tn", agentTaskName, "/xml", xmlPath, "/f"},
+		{"/run", "/tn", agentTaskName},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("schtasks calls = %q, want %q", calls, want)
+	}
+	raw, err := os.ReadFile(xmlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := decodeUTF16ForTest(t, raw)
+	var parsed struct {
+		Trigger   string `xml:"Triggers>LogonTrigger>UserId"`
+		User      string `xml:"Principals>Principal>UserId"`
+		Logon     string `xml:"Principals>Principal>LogonType"`
+		RunLevel  string `xml:"Principals>Principal>RunLevel"`
+		TimeLimit string `xml:"Settings>ExecutionTimeLimit"`
+		Restart   string `xml:"Settings>RestartOnFailure>Interval"`
+		Command   string `xml:"Actions>Exec>Command"`
+		Arguments string `xml:"Actions>Exec>Arguments"`
+	}
+	decoder := xml.NewDecoder(strings.NewReader(task))
+	decoder.CharsetReader = func(_ string, r io.Reader) (io.Reader, error) { return r, nil } // already decoded
+	if err := decoder.Decode(&parsed); err != nil {
+		t.Fatalf("the task XML does not parse: %v\n%s", err, task)
+	}
+	// The user's own logon only (no administrator needed), with the user's normal rights.
+	if parsed.Trigger != x.opts.userSID || parsed.User != x.opts.userSID || parsed.Logon != "InteractiveToken" || parsed.RunLevel != "LeastPrivilege" {
+		t.Fatalf("trigger/principal = %+v", parsed)
+	}
+	if parsed.TimeLimit != "PT0S" || parsed.Restart != "PT1M" {
+		t.Fatalf("settings = %+v, want no time limit and a restart a minute after a failure", parsed)
+	}
+	logFile := filepath.Join(local, "claw-master", "agent.log")
+	wantArgs := `--headless "C:\Users\Test User\.local\bin\claw-master.exe" agent --listen ` + x.listen +
+		` --open 127.0.0.1:8444 --ca ` + windowsCommandLine([]string{x.ca}) + ` --log-file ` + windowsCommandLine([]string{logFile}) + ` --exit-with-parent`
+	if parsed.Command != `%SystemRoot%\System32\conhost.exe` || parsed.Arguments != wantArgs {
+		t.Fatalf("action = %q %q\nwant %q", parsed.Command, parsed.Arguments, wantArgs)
+	}
+	if _, err := os.Stat(filepath.Join(local, "claw-master", "agent-install.json")); err != nil {
+		t.Fatalf("no install record under LOCALAPPDATA: %v", err)
+	}
+	if env, _ := readSettingsForTest(t, x.settingsPath())["env"].(map[string]any); env["HTTPS_PROXY"] == nil {
+		t.Fatalf("settings were not pointed at the agent: %v", env)
+	}
+
+	// A reinstall ends the running task (which ends the agent) before registering it again.
+	calls = nil
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 4 || calls[1][0] != "/end" || calls[2][0] != "/create" {
+		t.Fatalf("reinstall schtasks calls = %q, want query, end, create, run", calls)
+	}
+
+	calls = nil
+	if err := UninstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 3 || calls[1][0] != "/end" || calls[2][0] != "/delete" {
+		t.Fatalf("uninstall schtasks calls = %q, want query, end, delete", calls)
+	}
+	if _, err := os.Stat(xmlPath); !os.IsNotExist(err) {
+		t.Fatalf("the task XML is still there: %v", err)
+	}
+}
+
+func TestAgentUninstallOnWindowsChangesNothingWhenSchtasksFails(t *testing.T) {
+	x := newAgentInstallTest(t, "agent")
+	failEnd := false
+	x.opts.goos, x.opts.launchctl = "windows", nil
+	x.opts.localAppData, x.opts.userSID = filepath.Join(x.home, "AppData", "Local"), "S-1-5-21-1-2-3-1001"
+	x.opts.schtasks = func(_ context.Context, args ...string) (string, error) {
+		if args[0] == "/end" && failEnd {
+			return "", errors.New("access is denied")
+		}
+		return "", nil
+	}
+	if err := InstallAgent(t.Context(), x.opts); err != nil {
+		t.Fatal(err)
+	}
+	installed, _ := os.ReadFile(x.settingsPath())
+	failEnd = true
+	if err := UninstallAgent(t.Context(), x.opts); err == nil {
+		t.Fatal("uninstall succeeded although the task would not end")
+	}
+	if now, _ := os.ReadFile(x.settingsPath()); string(now) != string(installed) {
+		t.Fatal("uninstall changed the settings around a running agent")
+	}
+}
+
+func TestWindowsCommandLineQuotesAsCommandLineToArgvSplits(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{`C:\claw\claw-master.exe`, `C:\claw\claw-master.exe`},
+		{`C:\Program Files\claw\claw-master.exe`, `"C:\Program Files\claw\claw-master.exe"`},
+		{`C:\dir with space\`, `"C:\dir with space\\"`},
+		{`say "hi"`, `"say \"hi\""`},
+		{`a\"b`, `"a\\\"b"`},
+		{``, `""`},
+	} {
+		if got := windowsCommandLine([]string{c.in}); got != c.want {
+			t.Errorf("windowsCommandLine(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+	if got := windowsCommandLine([]string{"agent", "--listen", "127.0.0.1:8445"}); got != "agent --listen 127.0.0.1:8445" {
+		t.Errorf("plain arguments = %s", got)
 	}
 }
