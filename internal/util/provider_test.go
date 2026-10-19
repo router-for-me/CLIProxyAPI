@@ -36,4 +36,14 @@ func TestMaskSensitiveQueryMasksValue(t *testing.T) {
 			t.Fatalf("secret parameter leaked in full: %s", masked)
 		}
 	})
+
+	t.Run("oauth callback parameters are masked", func(t *testing.T) {
+		masked := util.MaskSensitiveQuery("code=temporary-code&state=transaction-state")
+		if strings.Contains(masked, "temporary-code") || strings.Contains(masked, "transaction-state") {
+			t.Fatalf("OAuth callback parameters leaked in full: %s", masked)
+		}
+		if masked != "code=%5Bredacted%5D&state=%5Bredacted%5D" {
+			t.Fatalf("OAuth callback parameters were not fully redacted: %s", masked)
+		}
+	})
 }

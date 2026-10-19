@@ -146,6 +146,9 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+The v8 Management API also supports optional browser OpenID Connect login; see
+[management OIDC](docs/management-oidc.md) for configuration and security requirements.
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:

@@ -12,6 +12,13 @@ Send `Authorization: Bearer <management-key>` or `X-Management-Key: <management-
 OAuth callbacks validate a pending login state and do not require a management-key
 header. Home mode disables local management endpoints for both versions.
 
+Optional browser OIDC login is available for v8 when configured through
+`MANAGEMENT_OIDC_*` environment variables. See [management OIDC](management-oidc.md)
+for configuration and security details. The `/auth/session`, `/auth/oidc/login`, and
+`/auth/oidc/callback` routes do not require a management key; `/auth/logout` requires the
+browser CSRF header. OIDC cookies authenticate v8 management requests only; v0
+continues to require a management key.
+
 ## Configuration endpoints
 
 All paths below are relative to `/v8/management`.

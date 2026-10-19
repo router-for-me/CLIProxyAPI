@@ -61,6 +61,79 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
 	}
 }
 
+func TestManagementOIDCEnablesV8WithoutManagementKey(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	t.Setenv("MANAGEMENT_OIDC_ISSUER", "https://issuer.example/realms/ducktape")
+	t.Setenv("MANAGEMENT_OIDC_CLIENT_ID", "management")
+	t.Setenv("MANAGEMENT_OIDC_CLIENT_SECRET", "")
+	t.Setenv("MANAGEMENT_OIDC_REDIRECT_URL", "https://admin.example/v8/management/auth/oidc/callback")
+	t.Setenv("MANAGEMENT_OIDC_ALLOWED_SUBJECTS", "owner")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("port: 8317\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.CommercialMode = true
+	s := NewServer(cfg, nil, nil, path)
+
+	request := func(target string, cookie bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "203.0.113.12:1234"
+		if cookie {
+			req.AddCookie(&http.Cookie{Name: "__Host-management-session", Value: "unrecognized"})
+			req.Header.Set("Origin", "https://admin.example")
+			req.Header.Set("X-Management-CSRF", "1")
+		}
+		response := httptest.NewRecorder()
+		s.engine.ServeHTTP(response, req)
+		return response
+	}
+
+	// Browser authentication and provider credential acquisition have distinct routes.
+	routes := make(map[string]bool)
+	for _, route := range s.engine.Routes() {
+		routes[route.Method+" "+route.Path] = true
+	}
+	for _, route := range []string{
+		"GET /v8/management/auth/session",
+		"GET /v8/management/auth/oidc/login",
+		"GET /v8/management/auth/oidc/callback",
+		"POST /v8/management/auth/logout",
+		"GET /v8/management/oauth/auth-url",
+		"GET /v8/management/oauth/callback",
+		"POST /v8/management/oauth/callback",
+	} {
+		if !routes[route] {
+			t.Errorf("missing route %s", route)
+		}
+	}
+
+	response := request("/v8/management/auth/session", false)
+	if response.Code != http.StatusOK {
+		t.Fatalf("session discovery status=%d body=%s", response.Code, response.Body.String())
+	}
+	var session struct {
+		OIDCEnabled   bool `json:"oidcEnabled"`
+		Authenticated bool `json:"authenticated"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	if !session.OIDCEnabled || session.Authenticated {
+		t.Fatalf("unexpected OIDC session discovery response: %+v", session)
+	}
+	if response := request("/v8/management/config", false); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated v8 request status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := request("/v0/management/config", true); response.Code != http.StatusForbidden {
+		t.Fatalf("OIDC incorrectly changed v0 key authentication: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestManagementV8IndependentContract(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	raw := "port: 8317\nrequest-retry: 3\ndebug: false\napi-keys: [client]\nremote-management: {secret-key: test-password}\n"

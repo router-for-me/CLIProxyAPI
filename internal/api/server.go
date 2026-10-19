@@ -245,12 +245,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		optionState.routerConfigurator(engine, s.handlers, cfg)
 	}
 
-	// Register management routes when configuration or environment secrets are available,
-	// or when a local management password is provided (e.g. TUI mode).
+	// Register management routes when key authentication or browser OIDC is available.
 	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
-	s.managementRoutesEnabled.Store(hasManagementSecret)
-	redisqueue.SetEnabled(hasManagementSecret || (cfg != nil && cfg.Home.Enabled))
-	if hasManagementSecret {
+	managementAvailable := hasManagementSecret || s.mgmt.OIDCEnabled()
+	s.managementRoutesEnabled.Store(managementAvailable)
+	redisqueue.SetEnabled(managementAvailable || (cfg != nil && cfg.Home.Enabled))
+	if managementAvailable {
 		s.registerManagementRoutes()
 	}
 	s.refreshPluginManagementRoutes()
