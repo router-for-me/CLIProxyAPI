@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,16 @@ var (
 
 type antigravityHubUpdaterManifest struct {
 	Version string `yaml:"version"`
+	// StagingPercentage is kept as a raw node because upstream manifests are not
+	// guaranteed to use a plain integer, and a malformed value must not discard an
+	// otherwise valid version. See parseAntigravityStagingPercentage.
+	StagingPercentage yaml.Node `yaml:"stagingPercentage"`
+}
+
+// antigravityVersionCandidate is a parsed Hub updater manifest after validation.
+type antigravityVersionCandidate struct {
+	version           string
+	stagingPercentage *int
 }
 
 var (
@@ -74,7 +85,7 @@ func runAntigravityVersionUpdater(ctx context.Context) {
 }
 
 func refreshAntigravityVersion(ctx context.Context) {
-	version, errFetch := fetchAntigravityLatestVersion(ctx)
+	candidate, errFetch := fetchAntigravityLatestVersion(ctx)
 
 	antigravityVersionMu.Lock()
 	defer antigravityVersionMu.Unlock()
@@ -82,9 +93,27 @@ func refreshAntigravityVersion(ctx context.Context) {
 	now := time.Now()
 
 	if errFetch == nil {
-		cachedAntigravityVersion = version
+		// Align with electron-updater staged rollout: clients always see the latest
+		// manifest version, but only fully released builds are adopted for UA spoofing.
+		released, stagingPercentage := antigravityManifestIsClientReleased(candidate.stagingPercentage)
+		if !released {
+			antigravityVersionExpiry = now.Add(antigravityVersionCacheTTL)
+			fields := log.Fields{
+				"version":            candidate.version,
+				"staging_percentage": stagingPercentage,
+				"cached_version":     cachedAntigravityVersion,
+			}
+			if cachedAntigravityVersion == "" {
+				cachedAntigravityVersion = antigravityFallbackVersion
+				fields["cached_version"] = cachedAntigravityVersion
+			}
+			log.WithFields(fields).Info("antigravity Hub latest is still staged; keeping client-aligned version")
+			return
+		}
+
+		cachedAntigravityVersion = candidate.version
 		antigravityVersionExpiry = now.Add(antigravityVersionCacheTTL)
-		log.WithField("version", version).Info("fetched latest antigravity version")
+		log.WithField("version", candidate.version).Info("fetched latest antigravity version")
 		return
 	}
 
@@ -96,6 +125,62 @@ func refreshAntigravityVersion(ctx context.Context) {
 	}
 
 	log.WithError(errFetch).Debug("failed to refresh antigravity version, keeping cached value")
+}
+
+// antigravityManifestIsClientReleased reports whether a Hub updater manifest should
+// be treated as generally available to real clients, along with the effective rollout
+// percentage behind the decision (100 when the manifest omits stagingPercentage).
+// Returning the percentage keeps callers from dereferencing the pointer themselves.
+//
+// electron-updater always fetches the latest.yml entry, but only installs it when
+// stagingPercentage is absent/fully rolled out, or the local .updaterId is inside
+// the staged cohort. CPA cannot honestly claim membership in a minority staged
+// cohort for all traffic, so only fully released versions are used for UA imitation.
+func antigravityManifestIsClientReleased(stagingPercentage *int) (bool, int) {
+	if stagingPercentage == nil {
+		return true, 100
+	}
+	return *stagingPercentage >= 100, *stagingPercentage
+}
+
+// parseAntigravityStagingPercentage interprets the manifest stagingPercentage field
+// the way electron-updater does: the raw value goes through an integer parse, and an
+// unusable value is warned about rather than treated as fatal. Returning nil means
+// "no staged rollout", i.e. the version is fully released.
+//
+// Values are clamped instead of rejected because electron-updater compares a
+// per-install ratio against stagingPercentage/100: anything above 100 matches every
+// client, and anything below 0 matches none. Rejecting the manifest instead would
+// throw away a version that already passed validation.
+func parseAntigravityStagingPercentage(node yaml.Node) *int {
+	// Kind 0 means the key was absent; !!null means it was present but empty.
+	if node.Kind == 0 || node.Tag == "!!null" {
+		return nil
+	}
+
+	raw := strings.TrimSpace(node.Value)
+	if raw == "" {
+		log.Warn("antigravity Hub updater manifest has a non-scalar stagingPercentage; treating version as fully released")
+		return nil
+	}
+
+	parsed, errParse := strconv.ParseFloat(raw, 64)
+	if errParse != nil {
+		log.WithField("staging_percentage", raw).Warn("antigravity Hub updater manifest has an unparsable stagingPercentage; treating version as fully released")
+		return nil
+	}
+
+	percentage := int(parsed)
+	switch {
+	case percentage > 100:
+		log.WithField("staging_percentage", raw).Warn("antigravity Hub updater manifest stagingPercentage above 100; clamping to 100")
+		percentage = 100
+	case percentage < 0:
+		log.WithField("staging_percentage", raw).Warn("antigravity Hub updater manifest stagingPercentage below 0; clamping to 0")
+		percentage = 0
+	}
+
+	return &percentage
 }
 
 // AntigravityLatestVersion returns the cached antigravity version refreshed by StartAntigravityVersionUpdater.
@@ -198,7 +283,7 @@ func AntigravityVersionFromUserAgent(userAgent string) string {
 	return rest
 }
 
-func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
+func fetchAntigravityLatestVersion(ctx context.Context) (antigravityVersionCandidate, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -207,17 +292,17 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 	return fetchAntigravityHubLatestManifestVersion(ctx, client)
 }
 
-func fetchAntigravityHubLatestManifestVersion(ctx context.Context, client *http.Client) (string, error) {
+func fetchAntigravityHubLatestManifestVersion(ctx context.Context, client *http.Client) (antigravityVersionCandidate, error) {
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityHubLatestManifestURL, nil)
 	if errReq != nil {
-		return "", fmt.Errorf("build antigravity Hub updater manifest request: %w", errReq)
+		return antigravityVersionCandidate{}, fmt.Errorf("build antigravity Hub updater manifest request: %w", errReq)
 	}
 	httpReq.Header.Set("User-Agent", "electron-builder")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {
-		return "", fmt.Errorf("fetch antigravity Hub updater manifest: %w", errDo)
+		return antigravityVersionCandidate{}, fmt.Errorf("fetch antigravity Hub updater manifest: %w", errDo)
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -226,27 +311,30 @@ func fetchAntigravityHubLatestManifestVersion(ctx context.Context, client *http.
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("antigravity Hub updater manifest returned status %d", resp.StatusCode)
+		return antigravityVersionCandidate{}, fmt.Errorf("antigravity Hub updater manifest returned status %d", resp.StatusCode)
 	}
 
 	raw, errRead := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if errRead != nil {
-		return "", fmt.Errorf("read antigravity Hub updater manifest: %w", errRead)
+		return antigravityVersionCandidate{}, fmt.Errorf("read antigravity Hub updater manifest: %w", errRead)
 	}
 
 	var manifest antigravityHubUpdaterManifest
 	if errDecode := yaml.Unmarshal(raw, &manifest); errDecode != nil {
-		return "", fmt.Errorf("decode antigravity Hub updater manifest: %w", errDecode)
+		return antigravityVersionCandidate{}, fmt.Errorf("decode antigravity Hub updater manifest: %w", errDecode)
 	}
 
 	version := strings.TrimSpace(manifest.Version)
 	if version == "" {
-		return "", errors.New("antigravity Hub updater manifest returned empty version")
+		return antigravityVersionCandidate{}, errors.New("antigravity Hub updater manifest returned empty version")
 	}
 	if !isValidAntigravitySemVersion(version) {
-		return "", fmt.Errorf("antigravity Hub updater manifest returned invalid version %q", version)
+		return antigravityVersionCandidate{}, fmt.Errorf("antigravity Hub updater manifest returned invalid version %q", version)
 	}
-	return version, nil
+	return antigravityVersionCandidate{
+		version:           version,
+		stagingPercentage: parseAntigravityStagingPercentage(manifest.StagingPercentage),
+	}, nil
 }
 
 func isValidAntigravitySemVersion(version string) bool {
