@@ -3303,6 +3303,18 @@ func TestModelsForCPAClientSerializesWebSearchCapabilities(t *testing.T) {
 	if strings.Contains(legacyRecorder.Body.String(), "cpa_capabilities") {
 		t.Fatalf("non-CPA response exposed CPA capability: %s", legacyRecorder.Body.String())
 	}
+
+	guiRequest := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.3.37", nil)
+	guiRequest.Header.Set("Authorization", "Bearer test-key")
+	guiRequest.Header.Set("User-Agent", "EasyCLIProxyAPI/0.3.37")
+	guiRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(guiRecorder, guiRequest)
+	if guiRecorder.Code != http.StatusOK {
+		t.Fatalf("EasyCLIProxyAPI status = %d, want %d body=%s", guiRecorder.Code, http.StatusOK, guiRecorder.Body.String())
+	}
+	if !strings.Contains(guiRecorder.Body.String(), "cpa_capabilities") {
+		t.Fatalf("EasyCLIProxyAPI response omitted CPA capability: %s", guiRecorder.Body.String())
+	}
 }
 
 func TestHomeModelsRequirePerEntryWebSearchCapabilityAndConservativeRoutes(t *testing.T) {

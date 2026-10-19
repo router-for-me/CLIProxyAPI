@@ -1733,3 +1733,51 @@ func assertCodexNullableFieldCleared(t *testing.T, entry map[string]any, key str
 		t.Errorf("%s = %#v, want null", key, value)
 	}
 }
+
+
+func TestResolveClientVersion(t *testing.T) {
+	tests := []struct {
+		name          string
+		clientVersion string
+		userAgent     string
+		want          string
+	}{
+		{
+			name:          "EasyCLIProxyAPI desktop app version maps to cpa",
+			clientVersion: "0.3.37",
+			userAgent:     "EasyCLIProxyAPI/0.3.37",
+			want:          "cpa",
+		},
+		{
+			name:          "explicit Codex CLI version is preserved",
+			clientVersion: "0.137.0",
+			userAgent:     "codex_cli_rs/0.137.0",
+			want:          "0.137.0",
+		},
+		{
+			name:          "empty client_version falls back to Codex CLI User-Agent",
+			clientVersion: "",
+			userAgent:     "codex_cli_rs/0.162.1 (Mac OS 26.0; arm64)",
+			want:          "0.162.1",
+		},
+		{
+			name:          "empty client_version falls back to Codex Desktop User-Agent",
+			clientVersion: "",
+			userAgent:     "Codex Desktop/0.162.0-alpha.17.2",
+			want:          "0.162.0-alpha.17.2",
+		},
+		{
+			name:          "empty User-Agent keeps client_version unchanged",
+			clientVersion: "0.153.4",
+			userAgent:     "",
+			want:          "0.153.4",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveClientVersion(tt.clientVersion, tt.userAgent); got != tt.want {
+				t.Fatalf("ResolveClientVersion(%q, %q) = %q, want %q", tt.clientVersion, tt.userAgent, got, tt.want)
+			}
+		})
+	}
+}
