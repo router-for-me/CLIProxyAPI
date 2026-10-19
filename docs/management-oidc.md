@@ -38,7 +38,12 @@ continue to use the existing key-authentication rules. OIDC cookies do not grant
 access to `/v0/management`.
 
 Sessions and login transactions are held in memory and capped at 1024 entries each.
-Login transactions expire after five minutes. Sessions expire at the earlier of one
-hour and ID-token expiry; restarting the process revokes all sessions. Use one
+Login transactions expire after five minutes. Starting another login replaces that
+browser's previous transaction; when the pending store is full, new logins evict the
+oldest pending transaction. A displaced login must be restarted. This keeps abandoned
+attempts from blocking all new logins until expiry, but does not provide rate limiting
+against a sustained flood.
+
+Sessions expire at the earlier of one hour and ID-token expiry; restarting the process revokes all sessions. Use one
 instance or sticky routing. Logout revokes the local browser session and does not
 sign the user out of the identity provider.

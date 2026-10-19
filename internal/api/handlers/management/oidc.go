@@ -263,10 +263,21 @@ func (h *Handler) ManagementOIDCLogin(c *gin.Context) {
 	}
 	o.mu.Lock()
 	o.pruneLocked(time.Now())
+	if previous, err := c.Cookie(managementOIDCFlowCookie); err == nil {
+		// Starting again replaces the transaction this browser can no longer finish.
+		delete(o.flows, previous)
+	}
 	if len(o.flows) >= managementOIDCMaxEntries {
-		o.mu.Unlock()
-		c.AbortWithStatus(http.StatusTooManyRequests)
-		return
+		// Abandoned public login requests must not lock out new logins until expiry.
+		// Every transaction has the same lifetime, so the earliest expiry is oldest.
+		var oldest string
+		var expires time.Time
+		for key, pending := range o.flows {
+			if expires.IsZero() || pending.expires.Before(expires) {
+				oldest, expires = key, pending.expires
+			}
+		}
+		delete(o.flows, oldest)
 	}
 	o.flows[binding] = flow
 	o.mu.Unlock()

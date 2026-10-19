@@ -293,21 +293,68 @@ func TestManagementOIDCLoginAndCallback(t *testing.T) {
 	if response.Code != http.StatusFound || redirect.Query().Get("code_challenge_method") != "S256" || redirect.Query().Get("nonce") == "" || redirect.Query().Get("state") == "" {
 		t.Fatal("login redirect is missing PKCE, state, or nonce")
 	}
-	flowCookieFound := false
+	var flowCookie *http.Cookie
 	for _, cookie := range response.Result().Cookies() {
 		if cookie.Name == managementOIDCFlowCookie && cookie.Secure && cookie.HttpOnly && cookie.SameSite == http.SameSiteLaxMode {
-			flowCookieFound = true
+			flowCookie = cookie
 		}
 	}
-	if !flowCookieFound {
+	if flowCookie == nil {
 		t.Fatal("login binding cookie does not use secure attributes")
 	}
 
-	for i := 0; i < managementOIDCMaxEntries; i++ {
-		o.flows[fmt.Sprintf("flow-%d", i)] = oidcFlow{expires: time.Now().Add(time.Minute)}
+	response = managementOIDCRequest(h.ManagementOIDCLogin, http.MethodGet, "https://admin.example/v8/management/auth/oidc/login", []*http.Cookie{flowCookie}, nil)
+	if response.Code != http.StatusFound || len(o.flows) != 1 {
+		t.Fatal("restarting login did not replace the browser's previous transaction")
 	}
-	if got := managementOIDCRequest(h.ManagementOIDCLogin, http.MethodGet, "https://admin.example/v8/management/auth/oidc/login", nil, nil).Code; got != http.StatusTooManyRequests {
-		t.Fatalf("flow store limit status=%d want=%d", got, http.StatusTooManyRequests)
+	if _, ok := o.flows[flowCookie.Value]; ok {
+		t.Fatal("restarting login retained the superseded transaction")
+	}
+
+	// Model a store filled with abandoned unauthenticated requests. Admission must
+	// stay bounded, evict the oldest attempt, and let a fresh browser finish login.
+	clear(o.flows)
+	now := time.Now()
+	for i := 0; i < managementOIDCMaxEntries; i++ {
+		o.flows[fmt.Sprintf("flow-%d", i)] = oidcFlow{expires: now.Add(time.Minute + time.Duration(i))}
+	}
+	for i := 0; i < 3; i++ {
+		response = managementOIDCRequest(h.ManagementOIDCLogin, http.MethodGet, "https://admin.example/v8/management/auth/oidc/login", nil, nil)
+		if response.Code != http.StatusFound || len(o.flows) != managementOIDCMaxEntries {
+			t.Fatalf("saturated login status=%d entries=%d", response.Code, len(o.flows))
+		}
+		if _, ok := o.flows[fmt.Sprintf("flow-%d", i)]; ok {
+			t.Fatal("saturated login did not evict the oldest pending transaction")
+		}
+	}
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == managementOIDCFlowCookie {
+			flowCookie = cookie
+		}
+	}
+	flow, ok := o.flows[flowCookie.Value]
+	if !ok {
+		t.Fatal("fresh login transaction was not retained")
+	}
+	expectedVerifier = flow.verifier
+	payload, err := json.Marshal(map[string]any{
+		"iss": issuer, "sub": "owner", "aud": o.clientID,
+		"exp": time.Now().Add(time.Hour).Unix(), "nonce": flow.nonce,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := signer.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawToken, err = signed.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = managementOIDCRequest(h.ManagementOIDCCallback, http.MethodGet, o.redirect+"?state="+flow.state+"&code=code", []*http.Cookie{flowCookie}, nil)
+	if response.Code != http.StatusSeeOther || len(o.sessions) != 1 {
+		t.Fatalf("fresh login could not complete after saturation: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
