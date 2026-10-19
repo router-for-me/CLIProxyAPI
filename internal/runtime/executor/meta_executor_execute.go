@@ -78,6 +78,18 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
 		body = helps.DropMetaDanglingReasoning(body)
 		body = helps.TagMetaCommentaryPhase(body)
+		// Meta routes requests that share a prompt_cache_key together, which
+		// keeps one Claude Code agent's growing prefix on a warm cache. Reuse
+		// the key the Codex executor derives for the same session and agent.
+		if !gjson.GetBytes(body, "prompt_cache_key").Exists() {
+			cache, ok, errCache := helps.ClaudeCodePromptCache(ctx, baseModel, req.Payload, opts.Headers)
+			if errCache != nil {
+				return nil, errCache
+			}
+			if ok {
+				body = helps.SetStringIfDifferent(body, "prompt_cache_key", cache.ID)
+			}
+		}
 	}
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
