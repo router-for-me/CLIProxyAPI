@@ -1,0 +1,85 @@
+name: claw-master release
+
+# Every merge into the claw-master branch is released as claw-master-<sha7>: a pre-release with the
+# claw-master binaries and SHA256SUMS, the names ejc3/aws pins (claw_master_tag and its sha256).
+# The tag is created by this workflow's token, which does not start release.yaml (GitHub does not run
+# workflows for events its own token causes), so the CLIProxyAPI archives are not built for it.
+
+on:
+  push:
+    branches:
+      - feature/claude-master-inference
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: claw-master-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Name the release
+        id: name
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="claw-master-${GITHUB_SHA::7}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$tag is already released; nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Test
+        if: steps.name.outputs.exists == 'false'
+        run: go test -count=1 ./internal/clawmaster ./cmd/claw-master
+      - name: Build
+        if: steps.name.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            os=${target%/*}; arch=${target#*/}; ext=""
+            [ "$os" = windows ] && ext=.exe
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -o "dist/claw-master-$os-$arch$ext" ./cmd/claw-master
+          done
+          (cd dist && sha256sum claw-master-* > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: Release
+        if: steps.name.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.name.outputs.tag }}
+        run: |
+          set -euo pipefail
+          previous=$(git tag --list 'claw-master-*' --merged "$GITHUB_SHA" --sort=-creatordate | grep -vx "$TAG" | head -1 || true)
+          {
+            echo "claw-master build of \`$GITHUB_SHA\` on \`${GITHUB_REF_NAME}\`."
+            echo
+            if [ -n "$previous" ]; then
+              echo "## Merged since $previous"
+              echo
+              git log --first-parent --format='- %s (%h)' "$previous..$GITHUB_SHA"
+            fi
+            echo
+            echo "Binaries are built with $(go version | cut -d' ' -f3), CGO_ENABLED=0, -trimpath; check them against SHA256SUMS."
+          } > notes.md
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes-file notes.md --prerelease

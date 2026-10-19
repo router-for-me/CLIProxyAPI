@@ -683,7 +683,11 @@ certificate uses `--server ADDRESS:PORT --dir DIR` instead of `--open` and `--ca
 agent's first tunnel as `client connected for the first time client=tunnel listener=open`, as for any
 tunnel client.
 
-Release assets: `checksums.txt` lists only the archives. The bare `claw-master-<os>-<arch>` binaries are
+Releases: every merge into `feature/claude-master-inference` is released by CI
+(`.github/workflows/claw-master-release.yml`) as the pre-release `claw-master-<sha7>`, with
+`claw-master-<os>-<arch>` for darwin-arm64, linux-amd64, linux-arm64, windows-amd64 and windows-arm64
+(`.exe`) and their `SHA256SUMS`, after the claw-master tests pass. Release assets of a tag pushed by hand also
+include the CLIProxyAPI archives (`release.yaml`); `checksums.txt` lists only the archives. The bare `claw-master-<os>-<arch>` binaries are
 not in it; check one against the digest GitHub records for the asset
 (`gh api repos/OWNER/CLIProxyAPI/releases/tags/TAG --jq '.assets[] | [.name, .digest]'`).
 
