@@ -268,6 +268,10 @@ func MaskSensitiveQuery(raw string) string {
 			decodedValue = valuePart
 		}
 		masked := HideAPIKey(strings.TrimSpace(decodedValue))
+		normalizedKey := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(decodedKey)), "[]")
+		if normalizedKey == "code" || normalizedKey == "state" {
+			masked = "[redacted]"
+		}
 		parts[i] = keyPart + "=" + url.QueryEscape(masked)
 		changed = true
 	}
@@ -285,7 +289,8 @@ func shouldMaskQueryParam(key string) bool {
 	key = strings.TrimSuffix(key, "[]")
 	// The management API deletes a client API key by ?value=<key>, so a plain
 	// "value" parameter can carry a full secret into the request log.
-	if key == "key" || key == "value" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
+	if key == "key" || key == "value" || key == "code" || key == "state" ||
+		strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
 		return true
 	}
 	if strings.Contains(key, "token") || strings.Contains(key, "secret") {

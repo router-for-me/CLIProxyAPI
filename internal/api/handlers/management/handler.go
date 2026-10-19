@@ -38,6 +38,7 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
+	oidc                    *managementOIDC
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex
@@ -72,8 +73,10 @@ type configReloadSnapshot struct {
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
+	oidc, oidcErr := newManagementOIDC()
 
 	h := &Handler{
+		oidc:                oidc,
 		cfg:                 cfg.CloneForRuntime(),
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
@@ -81,6 +84,9 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+	}
+	if oidcErr != nil {
+		log.WithError(oidcErr).Error("management OIDC disabled because its configuration is invalid")
 	}
 	h.startAttemptCleanup()
 	return h
@@ -294,6 +300,19 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 		c.Header("X-CPA-SUPPORT-PLUGIN", pluginhost.SupportPluginHeaderValue())
+
+		if isV8ManagementRequest(c) && h.OIDCEnabled() && !hasManagementCredential(c) {
+			if _, ok := h.oidc.session(c); !ok {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "management login required"})
+				return
+			}
+			if !h.oidc.sameOrigin(c) {
+				c.AbortWithStatus(http.StatusForbidden)
+				return
+			}
+			c.Next()
+			return
+		}
 
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"

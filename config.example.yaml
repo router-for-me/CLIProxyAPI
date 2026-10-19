@@ -80,13 +80,20 @@ server:
 # Management API settings
 management:
   # Whether to allow remote (non-localhost) management access.
-  # When false, only localhost can access management endpoints (a key is still required).
+  # When false, management-key access is limited to localhost. A configured OIDC browser
+  # session can still access the v8 Management API remotely.
   allow-remote: false
 
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
-  # All management requests (even from localhost) require this key.
-  # Leave empty to disable the Management API entirely (404 for /v0/management and /v8/management routes).
+  # Management-key requests (even from localhost) require this key.
+  # Leave empty to disable the Management API unless MANAGEMENT_PASSWORD or valid
+  # MANAGEMENT_OIDC_* environment variables enable it.
   secret-key: ""
+
+  # Optional browser OIDC login is configured through MANAGEMENT_OIDC_ISSUER,
+  # MANAGEMENT_OIDC_CLIENT_ID, MANAGEMENT_OIDC_CLIENT_SECRET,
+  # MANAGEMENT_OIDC_REDIRECT_URL, and MANAGEMENT_OIDC_ALLOWED_SUBJECTS.
+  # See docs/management-oidc.md for the security and deployment requirements.
 
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false

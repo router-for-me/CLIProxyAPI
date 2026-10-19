@@ -19,7 +19,7 @@ func (s *Server) registerManagementRoutes() {
 		return
 	}
 
-	log.Info("management routes registered after secret key configuration")
+	log.Info("management routes registered")
 
 	s.registerManagementV8Routes()
 	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
