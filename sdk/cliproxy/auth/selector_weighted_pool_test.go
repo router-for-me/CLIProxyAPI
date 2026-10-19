@@ -98,7 +98,7 @@ func TestWeightedPoolInterleavingMatchesIndependentSelectors(t *testing.T) {
 		committed := rng.IntN(4) != 0
 		reservation.finish(committed)
 		independentReservation.finish(committed)
-		poolKey := weightedPoolStateKey("route", authWeightVector(pool))
+		poolKey := weightedPoolStateKey("route", authWeightVector(pool, ""))
 		state, independentState := shared.states[poolKey], independent[mask].states[poolKey]
 		if !maps.Equal(state.currentForTest(), independentState.currentForTest()) || len(state.pendingForTest()) != 0 {
 			t.Fatalf("step %d pool %d: credits diverged or pending leaked", step, mask)

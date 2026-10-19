@@ -998,7 +998,7 @@ func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Select
 	if UnwrapWeightedRoundRobinSelector(selector) != nil {
 		// Exclude zero-weight credentials before priority selection, just as the
 		// scheduler predicate does, including when only a lower tier has weight.
-		auths = positiveWeightAuths(auths)
+		auths = positiveWeightAuths(auths, routeModel)
 	}
 
 	if !sessionAffinity && !schedulerAcross {
@@ -1058,7 +1058,7 @@ func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(ctx context.Conte
 		return nil
 	}
 	if _, weighted := affinity.fallback.(*WeightedRoundRobinSelector); weighted {
-		affinityCandidates = positiveWeightAuths(affinityCandidates)
+		affinityCandidates = positiveWeightAuths(affinityCandidates, routeModel)
 	}
 	var authIDs map[string]struct{}
 	for _, candidate := range affinityCandidates {
@@ -3293,7 +3293,7 @@ func (m *Manager) earliestPoolCooldownForModelAt(ctx context.Context, providers 
 		if isAuthDisabled(candidate) {
 			continue
 		}
-		if excludeZeroWeight && authWeight(candidate) <= 0 {
+		if excludeZeroWeight && authWeightForModel(candidate, model) <= 0 {
 			continue
 		}
 		rawProvider := executorKeyFromAuth(candidate)

@@ -740,7 +740,7 @@ func (m *Manager) buildCodexContinuityCandidates(
 		if !eligibility.allows(candidate) {
 			continue
 		}
-		if weightedSelection && authWeight(candidate) <= 0 {
+		if weightedSelection && authWeightForModel(candidate, model) <= 0 {
 			continue
 		}
 		if applyRetryRoundExclusions && retryRound > 0 && effectiveRequestRetryLimit(candidate, defaultRequestRetry) < retryRound {

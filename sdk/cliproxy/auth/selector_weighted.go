@@ -60,6 +60,7 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, nil, errContext
 	}
+	stateModel := weightedSelectorStateModel(ctx, model)
 	if accountingAuths, ok := ctx.Value(weightedAccountingPoolKey{}).([]*Auth); ok {
 		pinnedID := pinnedAuthIDFromMetadata(opts.Metadata)
 		if bound == nil {
@@ -70,10 +71,10 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 				}
 			}
 		}
-		if bound == nil || bound.ID != pinnedID || authWeight(bound) <= 0 {
+		if bound == nil || bound.ID != pinnedID || authWeightForModel(bound, stateModel) <= 0 {
 			return nil, nil, &Error{Code: "auth_unavailable", Message: "pinned auth is not available for weighted accounting"}
 		}
-		auths = positiveWeightAuths(accountingAuths)
+		auths = positiveWeightAuths(accountingAuths, stateModel)
 	}
 	transportProvider := provider
 	if singleProvider, ok := ctx.Value(weightedTransportProviderKey{}).(string); ok {
@@ -88,7 +89,7 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 	transportClass := ""
 	if bound == nil {
 		var errAvailable error
-		available, errAvailable = getSelectorAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
+		available, errAvailable = getSelectorAvailableAuths(ctx, positiveWeightAuths(auths, stateModel), provider, model, time.Now())
 		if errAvailable != nil {
 			return nil, nil, errAvailable
 		}
@@ -133,8 +134,8 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 		}
 	}
 	priority := inferredWeightedPoolPriority(available)
-	key := provider + ":" + canonicalModelLookupKey(weightedSelectorStateModel(ctx, model))
-	picked, pending := s.reserveScoped(key, priority, transportClass, available, authID)
+	key := provider + ":" + canonicalModelLookupKey(stateModel)
+	picked, pending := s.reserveScoped(key, stateModel, priority, transportClass, available, authID)
 	if picked == nil {
 		return nil, nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
 	}
@@ -333,11 +334,13 @@ func (s *weightedPoolState) prepareWithVersions(weights []int64, versions []weig
 // reserve selects and reserves credit atomically. A non-empty authID preserves a
 // sticky binding; otherwise committed and pending credits both guide selection.
 func (s *WeightedRoundRobinSelector) reserve(route string, available []*Auth, authID string) (*Auth, *weightedReservation) {
-	return s.reserveScoped(route, inferredWeightedPoolPriority(available), "", available, authID)
+	return s.reserveScoped(route, "", inferredWeightedPoolPriority(available), "", available, authID)
 }
 
-func (s *WeightedRoundRobinSelector) reserveScoped(route string, priority int, transportClass string, available []*Auth, authID string) (*Auth, *weightedReservation) {
-	weightVector := authWeightVector(available)
+// reserveScoped resolves each credential's weight for weightModel (per-model override
+// first, account-level weight otherwise); an empty weightModel uses account-level weights.
+func (s *WeightedRoundRobinSelector) reserveScoped(route, weightModel string, priority int, transportClass string, available []*Auth, authID string) (*Auth, *weightedReservation) {
+	weightVector := authWeightVector(available, weightModel)
 	ids := sortedWeightedIDs(weightVector)
 	weights := make([]int64, len(ids))
 	for i, id := range ids {
