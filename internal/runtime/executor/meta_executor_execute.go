@@ -79,9 +79,12 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 		body = helps.DropMetaDanglingReasoning(body)
 		body = helps.TagMetaCommentaryPhase(body)
 		// Meta routes requests that share a prompt_cache_key together, which
-		// keeps one Claude Code agent's growing prefix on a warm cache. Reuse
-		// the key the Codex executor derives for the same session and agent.
-		if !gjson.GetBytes(body, "prompt_cache_key").Exists() {
+		// keeps one Claude Code agent's growing prefix on a warm cache. A key
+		// the caller set wins; otherwise reuse the key the Codex executor
+		// derives for the same session and agent.
+		if key := helps.ExplicitPromptCacheKey(req.Payload, opts.OriginalRequest, body); key != "" {
+			body = helps.SetStringIfDifferent(body, "prompt_cache_key", key)
+		} else {
 			cache, ok, errCache := helps.ClaudeCodePromptCache(ctx, baseModel, req.Payload, opts.Headers)
 			if errCache != nil {
 				return nil, errCache

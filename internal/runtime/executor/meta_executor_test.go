@@ -2188,7 +2188,8 @@ func TestMetaExecutor_ClaudeCodeRequestSendsPromptCacheKey(t *testing.T) {
 			"base_url": server.URL,
 		},
 	}
-	send := func(sessionID, agentID string) string {
+	const plainPayload = `{"model":"muse-spark-1.3","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`
+	sendPayload := func(payload, sessionID, agentID string) string {
 		t.Helper()
 		headers := http.Header{}
 		if sessionID != "" {
@@ -2199,7 +2200,7 @@ func TestMetaExecutor_ClaudeCodeRequestSendsPromptCacheKey(t *testing.T) {
 		}
 		_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 			Model:   "muse-spark-1.3",
-			Payload: []byte(`{"model":"muse-spark-1.3","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`),
+			Payload: []byte(payload),
 		}, cliproxyexecutor.Options{
 			SourceFormat: sdktranslator.FormatClaude,
 			Headers:      headers,
@@ -2208,6 +2209,10 @@ func TestMetaExecutor_ClaudeCodeRequestSendsPromptCacheKey(t *testing.T) {
 			t.Fatalf("Execute() error = %v", err)
 		}
 		return gjson.GetBytes(gotBodies[len(gotBodies)-1], "prompt_cache_key").String()
+	}
+	send := func(sessionID, agentID string) string {
+		t.Helper()
+		return sendPayload(plainPayload, sessionID, agentID)
 	}
 
 	first := send("session-1", "")
@@ -2222,5 +2227,11 @@ func TestMetaExecutor_ClaudeCodeRequestSendsPromptCacheKey(t *testing.T) {
 	}
 	if none := send("", ""); none != "" {
 		t.Fatalf("prompt_cache_key = %q without a Claude Code session, want none", none)
+	}
+	// A key the caller set wins over the derived one, even though the
+	// Claude-to-Responses translation drops it from the translated body.
+	explicitPayload := `{"model":"muse-spark-1.3","max_tokens":64,"prompt_cache_key":"shared-group","messages":[{"role":"user","content":"hello"}]}`
+	if explicit := sendPayload(explicitPayload, "session-1", ""); explicit != "shared-group" {
+		t.Fatalf("prompt_cache_key = %q with an explicit caller key, want %q", explicit, "shared-group")
 	}
 }
