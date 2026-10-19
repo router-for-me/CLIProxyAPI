@@ -26,7 +26,7 @@ on:
         type: string
         required: false
       publish_release:
-        description: 'Publish verified assets as a dedicated stable GitHub Release (main only)'
+        description: 'Publish this manual main build; main pushes already publish automatically'
         type: boolean
         default: false
 
@@ -196,8 +196,10 @@ jobs:
           printf '%s\n' '## Pinable Desktop runtime set' "Source: \`$SOURCE_SHA\`" "[Download all six verified platforms, index and SHA256SUMS]($DOWNLOAD_URL)" 'No Desktop component lock has been modified.' >> "$GITHUB_STEP_SUMMARY"
 
   publish:
-    name: Publish explicitly requested stable runtime
-    if: github.repository == 'PinableAgents/CLIProxyAPI' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_release
+    name: Publish verified stable runtime
+    if: >-
+      github.repository == 'PinableAgents/CLIProxyAPI' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release))
     needs: [assemble]
     runs-on: ubuntu-22.04
     timeout-minutes: 15

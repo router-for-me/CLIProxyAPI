@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit, immutable GitHub stable runtime publication; never runs on push or PR."""
+"""Immutable stable runtime publication from main pushes or requested manual runs."""
 import argparse
 import hashlib
 import json
@@ -58,8 +58,10 @@ def validate(directory, expected_commit):
 def publish(directory, expected_commit):
     repo = "PinableAgents/CLIProxyAPI"
     runtime.require(os.environ.get("GITHUB_REPOSITORY") == repo and
-                    os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and
-                    os.environ.get("GITHUB_REF") == "refs/heads/main", "publication is manual and main-only")
+                    os.environ.get("GITHUB_EVENT_NAME") in ("push", "workflow_dispatch") and
+                    os.environ.get("GITHUB_REF") == "refs/heads/main" and
+                    os.environ.get("GITHUB_SHA") == expected_commit,
+                    "publication requires a main push or manual run at the expected source")
     index, files = validate(directory, expected_commit)
     runtime.require(api(f"repos/{repo}/git/ref/heads/main")["object"]["sha"] == expected_commit,
                     "main moved after validation; build the new revision before publishing")
