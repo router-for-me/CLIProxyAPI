@@ -7198,6 +7198,7 @@ func TestApplyPatchActualCodexExecutorNativePassthrough(t *testing.T) {
 		t.Run(responseFormat.String(), func(t *testing.T) {
 			tool := `{ "type":"custom", "name":"apply_patch", "format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}`
 			history := `{ "type":"custom_tool_call", "call_id":"old", "name":"apply_patch", "input":"{\"input\":\"raw\"}"}`
+			historyOutput := `{"type":"custom_tool_call_output","call_id":"old","output":"ok"}`
 			events := []string{
 				`{ "type":"response.output_item.added", "output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`,
 				`{ "type":"response.custom_tool_call_input.delta", "item_id":"a", "delta":"p"}`,
@@ -7216,7 +7217,7 @@ func TestApplyPatchActualCodexExecutorNativePassthrough(t *testing.T) {
 			}))
 			defer server.Close()
 			exec := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{DisableCodexCloaking: true}})
-			req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(`{"input":[` + history + `],"tools":[` + tool + `]}`)}
+			req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(`{"input":[` + history + `,` + historyOutput + `],"tools":[` + tool + `]}`)}
 			result, errExecute := exec.ExecuteStream(t.Context(), codexTestAuth(server.URL), req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: responseFormat, Headers: http.Header{codexResponsesLiteHeader: {"true"}}})
 			if errExecute != nil {
 				t.Fatal(errExecute)
