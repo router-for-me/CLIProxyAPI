@@ -23,6 +23,9 @@ type ClientRequestMetadata struct {
 	NodeKind         string
 	IsFork           bool
 	IsCompaction     bool
+	// ClientTag is the caller-supplied attribution value read from the header named by
+	// usage-client-tag-header. Empty when the feature is off or the header is absent.
+	ClientTag string
 }
 
 type responseStatusHolder struct {
