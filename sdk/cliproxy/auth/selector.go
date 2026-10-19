@@ -915,6 +915,7 @@ type SessionAffinitySelector struct {
 	matcher           *cliproxysession.MerklePrefixMatcher
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
+	persistence       *sessionAffinityPersistence
 }
 
 const (
@@ -1046,6 +1047,7 @@ type SessionAffinityConfig struct {
 	TTL              time.Duration
 	SubagentAffinity *bool
 	RebindOn         string
+	PersistencePath  string
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1069,13 +1071,15 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		subagentAffinity = *cfg.SubagentAffinity
 	}
 	rebindOnQuotaOnly := normalizeSessionAffinityRebindOn(cfg.RebindOn) == SessionAffinityRebindOnQuota
-	return &SessionAffinitySelector{
+	selector := &SessionAffinitySelector{
 		fallback:          cfg.Fallback,
 		cache:             NewSessionCache(cfg.TTL),
 		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
 		subagentAffinity:  subagentAffinity,
 		rebindOnQuotaOnly: rebindOnQuotaOnly,
 	}
+	selector.startPersistence(cfg.PersistencePath)
+	return selector
 }
 
 // Trees returns a backward-compatible in-memory session tree store.
@@ -1498,6 +1502,7 @@ func (s *SessionAffinitySelector) Stop() {
 	if s == nil {
 		return
 	}
+	s.stopPersistence()
 	if s.cache != nil {
 		s.cache.Stop()
 	}
