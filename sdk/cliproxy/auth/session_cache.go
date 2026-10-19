@@ -30,6 +30,18 @@ type SessionCache struct {
 	ttl              time.Duration
 	stopCh           chan struct{}
 	stopOnce         sync.Once
+	// invalidationEpoch advances on every InvalidateMatching call. releases keeps
+	// the matcher of each call in epoch order so a selection that started earlier
+	// does not write back any key the release covers, including keys that did not
+	// exist yet (another model of the same session); selections for other sessions
+	// are unaffected. Bounded by maxEntries, oldest release dropped first.
+	invalidationEpoch uint64
+	releases          []sessionCacheRelease
+}
+
+type sessionCacheRelease struct {
+	epoch uint64
+	match func(alias string) bool
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -146,6 +158,40 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.setAliasesLocked(authID, sessionIDs...)
+}
+
+// InvalidationEpoch returns the current invalidation epoch for SetAliasesIfEpoch.
+func (c *SessionCache) InvalidationEpoch() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.invalidationEpoch
+}
+
+// SetAliasesIfEpoch is SetAliases for a selection that observed epoch. If any of
+// sessionIDs is covered by an InvalidateMatching call made since then, nothing is written
+// and false is returned, so a selection racing a release cannot restore it.
+func (c *SessionCache) SetAliasesIfEpoch(epoch uint64, authID string, sessionIDs ...string) bool {
+	if c == nil || authID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for index := len(c.releases) - 1; index >= 0 && c.releases[index].epoch > epoch; index-- {
+		for _, sessionID := range sessionIDs {
+			if c.releases[index].match(sessionID) {
+				return false
+			}
+		}
+	}
+	c.setAliasesLocked(authID, sessionIDs...)
+	return true
+}
+
+func (c *SessionCache) setAliasesLocked(authID string, sessionIDs ...string) {
 	c.ensureInitializedLocked()
 	now := time.Now()
 
@@ -392,6 +438,54 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 		if group.authID == authID {
 			c.removeAliasGroupLocked(group)
 		}
+	}
+}
+
+// InvalidateMatching removes every alias group that owns at least one alias
+// accepted by match. It returns the number of removed groups and the number of
+// aliases those groups held.
+//
+// Removal is deliberately group-wide rather than alias-wide. Every alias in a
+// group names the same logical session (the canonical key plus any parent or
+// fork identity merged by SetAliases), so dropping only the requested alias
+// would let the very next request rediscover the surviving sibling and re-bind
+// the caller to the same auth. Invalidate remains available when a caller
+// really wants the surgical, sibling-preserving removal.
+func (c *SessionCache) InvalidateMatching(match func(alias string) bool) (groups int, aliases int) {
+	if c == nil || match == nil {
+		return 0, 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	for _, group := range c.groups {
+		matched := false
+		for _, alias := range group.aliases {
+			if match(alias) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		groups++
+		aliases += len(group.aliases)
+		c.removeAliasGroupLocked(group)
+	}
+	c.recordReleaseLocked(match)
+	return groups, aliases
+}
+
+func (c *SessionCache) recordReleaseLocked(match func(alias string) bool) {
+	c.invalidationEpoch++
+	c.releases = append(c.releases, sessionCacheRelease{epoch: c.invalidationEpoch, match: match})
+	limit := c.maxEntries
+	if limit <= 0 {
+		limit = defaultMaxSessionEntries
+	}
+	if extra := len(c.releases) - limit; extra > 0 {
+		c.releases = append([]sessionCacheRelease(nil), c.releases[extra:]...)
 	}
 }
 

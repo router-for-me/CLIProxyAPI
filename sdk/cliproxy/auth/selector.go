@@ -1175,11 +1175,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
 	}
+	// A per-session invalidation that lands while this selection is running must
+	// not be undone by the bind below.
+	epoch := s.cache.InvalidationEpoch()
 	bind := func(authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
-			s.cache.SetAliases(authID, cacheKey, fallbackKey)
+			s.cache.SetAliasesIfEpoch(epoch, authID, cacheKey, fallbackKey)
 		} else {
-			s.cache.Set(cacheKey, authID)
+			s.cache.SetAliasesIfEpoch(epoch, authID, cacheKey)
 		}
 	}
 
@@ -1288,7 +1291,8 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		return nil, true, errAvailable
 	}
 
-	var preservedAuthID string
+	var preservedAuthID, preservedSessionID string
+	var preservedGeneration uint64
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
 		for _, auth := range available {
 			if auth == nil || auth.ID != match.AuthID {
@@ -1332,6 +1336,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 		if !match.IsFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
 			preservedAuthID = match.AuthID
+			preservedSessionID, preservedGeneration = match.SessionID, match.AccessNumber
 		}
 	}
 
@@ -1342,6 +1347,10 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	}
 	if auth == nil {
 		return nil, true, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	// Do not preserve a binding the session was released from after it was matched.
+	if preservedAuthID != "" && s.matcher.SessionReleasedSince(preservedSessionID, preservedGeneration) {
+		preservedAuthID = ""
 	}
 	bindAuthID := auth.ID
 	if preservedAuthID != "" {
@@ -1620,6 +1629,71 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 	return "", "unbound"
 }
 
+// SessionInvalidation reports what a single-session affinity invalidation removed.
+type SessionInvalidation struct {
+	// CacheGroups counts TTL-cache alias groups that were dropped.
+	CacheGroups int `json:"cache_groups"`
+	// CacheAliases counts the individual identifiers those groups held.
+	CacheAliases int `json:"cache_aliases"`
+	// LCPGroups counts Merkle-prefix bindings that were dropped.
+	LCPGroups int `json:"lcp_groups"`
+}
+
+// Removed reports whether the invalidation dropped at least one binding.
+func (r SessionInvalidation) Removed() bool {
+	return r.CacheGroups > 0 || r.LCPGroups > 0
+}
+
+// InvalidateSession releases the affinity bindings of a single logical session
+// across every provider and model, in both the TTL cache and the LCP matcher,
+// and reports what it removed.
+//
+// InvalidateAuth is the credential-wide hammer: it moves every session off one
+// credential. This is its per-session counterpart, for the case where a single
+// caller has to be re-spread onto another credential while every other session
+// keeps its binding, its upstream prompt cache, and its place in the pool.
+// Without it the only ways to move one caller are to change its session id
+// (which loses the upstream prompt cache for that conversation) or to restart
+// the proxy (which loses every binding for every caller).
+//
+// The cache is keyed by provider + "::" + sessionID + "::" + model, so one
+// logical session usually owns several cache entries; all of them are matched.
+func (s *SessionAffinitySelector) InvalidateSession(sessionID string) SessionInvalidation {
+	result := SessionInvalidation{}
+	if s == nil || sessionID == "" {
+		return result
+	}
+	if s.cache != nil {
+		result.CacheGroups, result.CacheAliases = s.cache.InvalidateMatching(func(alias string) bool {
+			return alias == sessionID || affinityCacheKeyOwnedBySession(alias, sessionID)
+		})
+	}
+	if s.matcher != nil {
+		result.LCPGroups = s.matcher.InvalidateSession(sessionID)
+	}
+	return result
+}
+
+// affinityCacheKeyOwnedBySession reports whether a composite affinity cache key
+// of the form provider "::" sessionID "::" model belongs to sessionID.
+//
+// The key is not decoded. Both the session id and the model may themselves
+// contain "::", so no split point can be inferred from the key alone: taking
+// the model from the last separator misreads a model that contains "::", and
+// taking it from the first misreads a session id that does. Testing a known
+// session id as a prefix of the remainder is exact for both, because the
+// session id is the first field after the provider.
+func affinityCacheKeyOwnedBySession(alias, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	_, rest, ok := strings.Cut(alias, "::")
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(rest, sessionID+"::")
+}
+
 // OnResult handles session affinity binding or release based on execution outcome.
 func (s *SessionAffinitySelector) OnResult(res Result) {
 	if s == nil || res.AuthID == "" {
@@ -1667,7 +1741,12 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 			}
 			if len(fingerprints) > 0 && minPrefixLength > 0 && minPrefixLength <= len(fingerprints) {
 				if res.Success {
-					s.matcher.TouchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, res.AuthID)
+					var generation uint64
+					if gen, ok := res.Options.Metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey].(uint64); ok {
+						generation = gen
+					}
+					lcpSessionID := sessionMetadataString(res.Options.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
+					s.matcher.TouchSessionFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, res.AuthID, lcpSessionID, generation)
 				} else {
 					var generation uint64
 					if res.Options.Metadata != nil {
