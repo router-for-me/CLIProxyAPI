@@ -89,19 +89,64 @@ class PublishTests(unittest.TestCase):
             run.assert_not_called()
             self.assertTrue(all(len(call.args) == 1 for call in api.call_args_list))
 
+    def responses(self):
+        tag = 'pinable-runtime-' + self.index['version']
+        assets = [{'name': p.name, 'state': 'uploaded', 'size': p.stat().st_size,
+                   'digest': 'sha256:' + runtime.digest(p.read_bytes())} for p in self.output.iterdir()]
+        return [{'object': {'sha': COMMIT}}, [], {'object': {'sha': COMMIT}}, {'id': 42},
+                {'object': {'sha': COMMIT}}, {'object': {'sha': COMMIT}}, assets,
+                {'draft': False, 'prerelease': False, 'tag_name': tag, 'html_url': 'https://example.invalid/release'}]
+
     def test_draft_then_upload_then_publish_without_clobber(self):
         with mock.patch.dict(os.environ, self.env), \
-             mock.patch.object(publish_runtime, 'api', side_effect=[{'object': {'sha': COMMIT}}, [],
-                 {'id': 42, 'html_url': 'https://example.invalid/release'}]) as api, \
+             mock.patch.object(publish_runtime, 'api', side_effect=self.responses()) as api, \
              mock.patch.object(publish_runtime.subprocess, 'run') as run:
             publish_runtime.publish(self.output, COMMIT)
-        payload = api.call_args_list[-1].args[1]
+        self.assertEqual(api.call_args_list[2].args[1],
+                         {'ref': 'refs/tags/pinable-runtime-test-1', 'sha': COMMIT})
+        payload = api.call_args_list[3].args[1]
         self.assertTrue(payload['draft'])
-        self.assertTrue(payload['prerelease'])
+        self.assertFalse(payload['prerelease'])
         self.assertEqual(payload['make_latest'], 'false')
-        self.assertEqual(run.call_count, 2)
-        self.assertNotIn('--clobber', run.call_args_list[0].args[0])
-        self.assertFalse(json.loads(run.call_args_list[1].kwargs['input'])['draft'])
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn('--clobber', run.call_args.args[0])
+        self.assertEqual(api.call_args.kwargs, {'method': 'PATCH'})
+        self.assertEqual(api.call_args.args[1], {'draft': False, 'prerelease': False, 'make_latest': 'false'})
+
+    def test_publication_races_and_incomplete_upload_leave_draft(self):
+        import copy
+        for failure in ('tag', 'main', 'missing-asset', 'digest', 'size'):
+            responses = copy.deepcopy(self.responses())
+            if failure == 'tag': responses[4]['object']['sha'] = 'b' * 40
+            elif failure == 'main': responses[5]['object']['sha'] = 'b' * 40
+            elif failure == 'missing-asset': responses[6].pop()
+            elif failure == 'digest': responses[6][0]['digest'] = 'sha256:' + '0' * 64
+            elif failure == 'size': responses[6][0]['size'] += 1
+            with self.subTest(failure=failure), mock.patch.dict(os.environ, self.env), \
+                 mock.patch.object(publish_runtime, 'api', side_effect=responses) as api, \
+                 mock.patch.object(publish_runtime.subprocess, 'run'), self.assertRaises(ValueError):
+                publish_runtime.publish(self.output, COMMIT)
+            self.assertFalse(any(c.kwargs.get('method') == 'PATCH' for c in api.call_args_list))
+
+    def test_atomic_tag_conflict_does_not_create_release(self):
+        import subprocess
+        responses = self.responses()[:2] + [subprocess.CalledProcessError(1, 'gh')]
+        with mock.patch.dict(os.environ, self.env), \
+             mock.patch.object(publish_runtime, 'api', side_effect=responses) as api, \
+             mock.patch.object(publish_runtime.subprocess, 'run') as run, \
+             self.assertRaises(subprocess.CalledProcessError):
+            publish_runtime.publish(self.output, COMMIT)
+        run.assert_not_called()
+        self.assertEqual(api.call_count, 3)
+
+    def test_upload_failure_does_not_publish(self):
+        import subprocess
+        with mock.patch.dict(os.environ, self.env), \
+             mock.patch.object(publish_runtime, 'api', side_effect=self.responses()) as api, \
+             mock.patch.object(publish_runtime.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'gh')), \
+             self.assertRaises(subprocess.CalledProcessError):
+            publish_runtime.publish(self.output, COMMIT)
+        self.assertEqual(api.call_count, 4)
 
 
 if __name__ == '__main__':

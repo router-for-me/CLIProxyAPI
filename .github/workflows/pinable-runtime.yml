@@ -26,7 +26,7 @@ on:
         type: string
         required: false
       publish_release:
-        description: 'Publish verified assets as a dedicated GitHub prerelease (main only)'
+        description: 'Publish verified assets as a dedicated stable GitHub Release (main only)'
         type: boolean
         default: false
 
@@ -53,6 +53,9 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -103,6 +106,9 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -146,6 +152,9 @@ jobs:
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           pattern: pinable-runtime-*
@@ -187,7 +196,7 @@ jobs:
           printf '%s\n' '## Pinable Desktop runtime set' "Source: \`$SOURCE_SHA\`" "[Download all six verified platforms, index and SHA256SUMS]($DOWNLOAD_URL)" 'No Desktop component lock has been modified.' >> "$GITHUB_STEP_SUMMARY"
 
   publish:
-    name: Publish explicitly requested runtime prerelease
+    name: Publish explicitly requested stable runtime
     if: github.repository == 'PinableAgents/CLIProxyAPI' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_release
     needs: [assemble]
     runs-on: ubuntu-22.04
@@ -199,6 +208,9 @@ jobs:
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           name: pinable-runtime-all

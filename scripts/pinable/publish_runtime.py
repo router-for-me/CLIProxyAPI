@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit, immutable GitHub prerelease publication; never runs on push or PR."""
+"""Explicit, immutable GitHub stable runtime publication; never runs on push or PR."""
 import argparse
 import hashlib
 import json
@@ -12,10 +12,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 import runtime
 
 
-def api(path, payload=None):
+def api(path, payload=None, method=None):
     args = ["gh", "api", path]
     if payload is not None:
-        args += ["--method", "POST", "--input", "-"]
+        args += ["--method", method or "POST", "--input", "-"]
     result = subprocess.run(args, input=json.dumps(payload) if payload is not None else None,
                             check=True, text=True, stdout=subprocess.PIPE)
     return json.loads(result.stdout)
@@ -67,6 +67,8 @@ def publish(directory, expected_commit):
     refs = api(f"repos/{repo}/git/matching-refs/tags/{tag}")
     runtime.require(not any(r["ref"] == "refs/tags/" + tag for r in refs),
                     "runtime tag already exists; publication never overwrites artifacts")
+    created = api(f"repos/{repo}/git/refs", {"ref": "refs/tags/" + tag, "sha": expected_commit})
+    runtime.require(created["object"]["sha"] == expected_commit, "reserved tag source mismatch")
     notes = (f"Pinable Desktop portable runtime, source `{expected_commit}`.\n\n"
              "All six platform executables passed native host-contract smoke checks. "
              "Normal Go regression tests passed before publication.\n\n"
@@ -77,13 +79,26 @@ def publish(directory, expected_commit):
              "binaries are unsigned. This is not a Desktop application installer.")
     release = api(f"repos/{repo}/releases", {"tag_name": tag, "target_commitish": expected_commit,
                   "name": "Pinable runtime " + index["version"], "body": notes,
-                  "draft": True, "prerelease": True, "make_latest": "false"})
+                  "draft": True, "prerelease": False, "make_latest": "false"})
     subprocess.run(["gh", "release", "upload", tag, "--repo", repo,
                     *[str(directory / name) for name in files]], check=True)
-    subprocess.run(["gh", "api", f"repos/{repo}/releases/{release['id']}", "--method", "PATCH",
-                    "--input", "-"], input=json.dumps({"draft": False, "make_latest": "false"}),
-                   text=True, check=True)
-    print(release["html_url"])
+    runtime.require(api(f"repos/{repo}/git/ref/tags/{tag}")["object"]["sha"] == expected_commit,
+                    "release tag moved")
+    runtime.require(api(f"repos/{repo}/git/ref/heads/main")["object"]["sha"] == expected_commit,
+                    "main moved during publication; leave draft for inspection")
+    assets = api(f"repos/{repo}/releases/{release['id']}/assets?per_page=100")
+    runtime.require(len(assets) == len(files) and {a["name"] for a in assets} == set(files),
+                    "uploaded asset set mismatch")
+    for asset in assets:
+        path = directory / asset["name"]
+        runtime.require(asset["state"] == "uploaded" and asset["size"] == path.stat().st_size and
+                        asset["digest"] == "sha256:" + runtime.digest(path.read_bytes()),
+                        "uploaded asset hash/size mismatch")
+    published = api(f"repos/{repo}/releases/{release['id']}",
+                    {"draft": False, "prerelease": False, "make_latest": "false"}, method="PATCH")
+    runtime.require(published["draft"] is False and published["prerelease"] is False and published["tag_name"] == tag,
+                    "stable release publication not confirmed")
+    print(published["html_url"])
 
 
 if __name__ == "__main__":
