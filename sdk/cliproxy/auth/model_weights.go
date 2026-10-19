@@ -1,0 +1,151 @@
+package auth
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
+)
+
+// modelWeightKey normalizes a model identifier for per-model weight lookups. The
+// thinking suffix is stripped the same way selector state keys are built, and the
+// result is lower-cased so lookups are case-insensitive like registry model matching.
+func modelWeightKey(model string) string {
+	return strings.ToLower(canonicalModelKey(model))
+}
+
+// ParseModelWeights parses an optional per-model weight override table. Accepted
+// inputs are a JSON object string or a decoded JSON object (map[string]any), the
+// forms auth files and the management API produce. Keys are normalized with modelWeightKey and values
+// follow the same rules as the account-level weight (non-positive normalizes to zero,
+// which excludes the credential for that model only). A nil or empty input yields nil.
+func ParseModelWeights(value any) (map[string]int64, error) {
+	if value == nil {
+		return nil, nil
+	}
+	var raw map[string]any
+	switch typed := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return nil, nil
+		}
+		if errUnmarshal := json.Unmarshal([]byte(trimmed), &raw); errUnmarshal != nil {
+			return nil, fmt.Errorf("model_weights must be a JSON object: %w", errUnmarshal)
+		}
+	case map[string]any:
+		raw = typed
+	default:
+		return nil, fmt.Errorf("model_weights must be a JSON object")
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]int64, len(raw))
+	// Two entries can normalize to the same key ("Claude-Opus-5" and
+	// "claude-opus-5", or a model and its thinking-suffix form). Silently
+	// keeping one of them would make the table depend on Go's unspecified map
+	// iteration order: the same file could load a different weight on each
+	// read, and with values 0 and positive the credential would flip between
+	// excluded and active. Reject the table instead — an ambiguous routing
+	// rule must be corrected by its author, not resolved by chance.
+	seen := make(map[string]string, len(raw))
+	for model, rawWeight := range raw {
+		key := modelWeightKey(model)
+		if key == "" {
+			return nil, fmt.Errorf("model_weights contains an empty model key")
+		}
+		if previous, dup := seen[key]; dup {
+			return nil, ambiguousModelWeightsError(previous, model, key)
+		}
+		seen[key] = model
+		weight, errParse := credentialweight.ParseValue(rawWeight)
+		if errParse != nil {
+			return nil, fmt.Errorf("model_weights[%s]: %w", model, errParse)
+		}
+		out[key] = weight
+	}
+	return out, nil
+}
+
+// ambiguousModelWeightsError reports two spellings that normalize to the same
+// key, in a stable order so the message does not depend on map iteration.
+func ambiguousModelWeightsError(previous, model, key string) error {
+	first, second := previous, model
+	if second < first {
+		first, second = second, first
+	}
+	return fmt.Errorf("model_weights has ambiguous entries %q and %q: both resolve to %q", first, second, key)
+}
+
+// EncodeModelWeights serializes a normalized per-model weight table into the
+// canonical attribute form (a JSON object with sorted keys). Empty input yields "".
+func EncodeModelWeights(weights map[string]int64) string {
+	if len(weights) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(weights))
+	for key := range weights {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var builder strings.Builder
+	builder.WriteByte('{')
+	for index, key := range keys {
+		if index > 0 {
+			builder.WriteByte(',')
+		}
+		encodedKey, _ := json.Marshal(key)
+		builder.Write(encodedKey)
+		builder.WriteByte(':')
+		builder.WriteString(fmt.Sprintf("%d", weights[key]))
+	}
+	builder.WriteByte('}')
+	return builder.String()
+}
+
+// authModelWeights returns the per-model weight table for an auth. The attribute form
+// (set by the synthesizer or the management API) takes precedence over raw metadata,
+// mirroring authWeight. Invalid tables are treated as absent so the account-level
+// weight keeps applying; validation happens earlier via ValidateAuthWeight.
+func authModelWeights(auth *Auth) map[string]int64 {
+	if auth == nil {
+		return nil
+	}
+	// A blank attribute is treated as absent, like the account-level weight attribute.
+	if raw, ok := auth.Attributes[AttributeModelWeights]; ok && strings.TrimSpace(raw) != "" {
+		weights, errParse := ParseModelWeights(raw)
+		if errParse != nil {
+			return nil
+		}
+		return weights
+	}
+	if raw, ok := auth.Metadata[AttributeModelWeights]; ok {
+		weights, errParse := ParseModelWeights(raw)
+		if errParse != nil {
+			return nil
+		}
+		return weights
+	}
+	return nil
+}
+
+// authWeightForModel returns the routing weight of an auth for the requested model.
+// When the auth defines model_weights and the (normalized) model is present, that
+// value wins; otherwise the account-level weight applies exactly as before. An empty
+// model always resolves to the account-level weight.
+func authWeightForModel(auth *Auth, model string) int64 {
+	if auth == nil {
+		return credentialweight.Default
+	}
+	if key := modelWeightKey(model); key != "" {
+		if weights := authModelWeights(auth); len(weights) > 0 {
+			if weight, ok := weights[key]; ok {
+				return weight
+			}
+		}
+	}
+	return authWeight(auth)
+}
