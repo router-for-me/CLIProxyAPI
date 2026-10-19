@@ -2,6 +2,7 @@ package helps
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -123,5 +124,32 @@ func TestDropMetaDanglingReasoning_ReturnsUnchangedBody(t *testing.T) {
 	body := []byte(`{"input":[{"type":"reasoning","summary":[],"encrypted_content":"Q-PaD1"},{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"}]}`)
 	if got := DropMetaDanglingReasoning(body); string(got) != string(body) {
 		t.Fatalf("body changed: %s", got)
+	}
+}
+
+// A long run of consecutive assistant messages and reasoning items is decided
+// in one pass: every preamble before the trailing function_call is tagged, and
+// every reasoning item before the trailing user message is dropped.
+func TestMetaInputHelpers_LongRuns(t *testing.T) {
+	const n = 20000
+	var b strings.Builder
+	b.WriteString(`{"input":[`)
+	for i := 0; i < n; i++ {
+		b.WriteString(`{"type":"message","role":"assistant","content":[]},`)
+	}
+	b.WriteString(`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},`)
+	for i := 0; i < n; i++ {
+		b.WriteString(`{"type":"reasoning","summary":[],"encrypted_content":"Q-PaD1"},`)
+	}
+	b.WriteString(`{"role":"user","content":"again"}]}`)
+	body := []byte(b.String())
+
+	tagged := TagMetaCommentaryPhase(body)
+	if got := strings.Count(string(tagged), `"phase":"commentary"`); got != n {
+		t.Fatalf("tagged %d preambles, want %d", got, n)
+	}
+	dropped := DropMetaDanglingReasoning(body)
+	if kinds := metaInputKinds(dropped); len(kinds) != n+2 || kinds[len(kinds)-1] != "message:user" {
+		t.Fatalf("got %d items after drop, want %d ending in the user message", len(kinds), n+2)
 	}
 }
