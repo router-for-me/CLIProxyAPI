@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -117,6 +118,79 @@ func TestAntigravityDynamicRegistrationExclusions(t *testing.T) {
 	hints := antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{"gemini-3.1-flash-lite": {}}}
 	if models := svc.antigravityModelsForHints(auth, hints); len(models) != 0 {
 		t.Fatalf("excluded models restored: %v", models)
+	}
+}
+
+func TestAntigravityGemini38FlashTierRegistration(t *testing.T) {
+	tiers := []string{"gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-tiered"}
+	for _, advertised := range tiers {
+		t.Run(advertised, func(t *testing.T) {
+			resetAntigravityCapabilityCache()
+			t.Cleanup(resetAntigravityCapabilityCache)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"models": map[string]any{advertised: map[string]any{}}})
+			}))
+			defer server.Close()
+			manager := coreauth.NewManager(nil, nil, nil)
+			svc := &Service{cfg: &config.Config{}, coreManager: manager}
+			auth, err := manager.Register(t.Context(), antigravityTestAuth("gemini38-"+advertised, server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
+			svc.registerModelsForAuth(t.Context(), auth)
+			svc.WaitAntigravityProbes()
+
+			var registered []string
+			for _, model := range GlobalModelRegistry().GetModelsForClient(auth.ID) {
+				if model.Name != model.ID || model.MetadataModelID != "" {
+					t.Errorf("registered model is not a complete upstream ID: %+v", model)
+				}
+				registered = append(registered, model.ID)
+			}
+			slices.Sort(registered)
+			if !slices.Equal(registered, tiers) {
+				t.Fatalf("registered %v, want %v", registered, tiers)
+			}
+			available := GlobalModelRegistry().GetAvailableModels("openai")
+			for _, id := range tiers {
+				if !slices.ContainsFunc(available, func(model map[string]any) bool { return model["id"] == id }) {
+					t.Errorf("%s missing from downstream model list", id)
+				}
+			}
+		})
+	}
+}
+
+func TestAntigravityGemini38FlashTierRegistrationKeepsRestrictions(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		modelIDs  map[string]struct{}
+		global    []string
+		attribute string
+		want      []string
+	}{
+		{name: "empty catalog", modelIDs: map[string]struct{}{}},
+		{name: "unknown catalog"},
+		{name: "other model", modelIDs: map[string]struct{}{"gemini-3.1-flash-lite": {}}, want: []string{"gemini-3.1-flash-lite"}},
+		{name: "unknown tier", modelIDs: map[string]struct{}{"gemini-3.8-flash-unknown": {}}},
+		{name: "global exclusion", modelIDs: map[string]struct{}{"gemini-3.8-flash-high": {}}, global: []string{"gemini-3.8-flash-low", "gemini-3.8-flash-tiered"}, want: []string{"gemini-3.8-flash-high", "gemini-3.8-flash-medium"}},
+		{name: "account exclusion", modelIDs: map[string]struct{}{"gemini-3.8-flash-high": {}}, attribute: "gemini-3.8-flash-high,gemini-3.8-flash-medium", want: []string{"gemini-3.8-flash-low", "gemini-3.8-flash-tiered"}},
+		{name: "wildcard exclusion", modelIDs: map[string]struct{}{"gemini-3.8-flash-high": {}}, global: []string{"gemini-3.8-flash-*"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &Service{cfg: &config.Config{OAuthExcludedModels: map[string][]string{"antigravity": tt.global}}}
+			auth := antigravityTestAuth("gemini38-restrictions", "http://127.0.0.1:1")
+			auth.Attributes["excluded_models"] = tt.attribute
+			var got []string
+			for _, model := range svc.antigravityModelsForHints(auth, antigravityModelCapabilityHints{ModelIDs: tt.modelIDs}) {
+				got = append(got, model.ID)
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("models = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

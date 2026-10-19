@@ -188,6 +188,56 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 	}
 }
 
+func TestAntigravityGemini38FlashTiersSurviveCatalogRefresh(t *testing.T) {
+	original := getModels()
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+
+	for _, tt := range []struct {
+		name    string
+		catalog []byte
+	}{
+		{name: "embedded", catalog: embeddedModelsJSON},
+		{name: "remote high only", catalog: []byte(`{"antigravity":[{"id":"gemini-3.8-flash-high","name":"gemini-3.8-flash-high","context_length":2000000}]}`)},
+		{name: "remote without family", catalog: []byte(`{"antigravity":[{"id":"unrelated"}]}`)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := loadModelsFromBytes(tt.catalog, tt.name); err != nil {
+				t.Fatal(err)
+			}
+			models := GetAntigravityModels()
+			for _, id := range []string{"gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-tiered"} {
+				count := 0
+				for _, model := range models {
+					if model != nil && model.ID == id {
+						count++
+						if model.Name != id || model.MetadataModelID != "" {
+							t.Errorf("%s is not a complete upstream ID: %+v", id, model)
+						}
+					}
+				}
+				if count != 1 {
+					t.Errorf("%s appears %d times, want 1", id, count)
+				}
+				if info := LookupStaticModelInfoByChannel(id, "antigravity"); info == nil || info.ID != id {
+					t.Errorf("LookupStaticModelInfoByChannel(%s) = %+v", id, info)
+				}
+				if info := LookupStaticModelInfo(id); info == nil || info.ID != id {
+					t.Errorf("LookupStaticModelInfo(%s) = %+v", id, info)
+				}
+			}
+			if tt.name == "remote high only" {
+				if info := LookupStaticModelInfo("gemini-3.8-flash-high"); info == nil || info.ContextLength != 2000000 {
+					t.Fatalf("catalog definition was replaced by builtin: %+v", info)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateModelsCatalog_Meta(t *testing.T) {
 	valid := &staticModelsJSON{
 		Meta: []*ModelInfo{

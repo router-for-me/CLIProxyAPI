@@ -419,10 +419,19 @@ func (s *Service) antigravityHomeEnabled() bool {
 }
 
 func filterAntigravityModels(models []*ModelInfo, hints antigravityModelCapabilityHints) []*ModelInfo {
+	// An account advertising any Gemini 3.8 Flash tier is entitled to every complete tier ID.
+	gemini38Flash := false
+	for id := range hints.ModelIDs {
+		if registry.IsAntigravityGemini38FlashModel(id) {
+			gemini38Flash = true
+			break
+		}
+	}
 	filtered := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
 		if model != nil {
-			if _, ok := hints.ModelIDs[normalizeAntigravityFetchedModelID(model.ID)]; ok {
+			id := normalizeAntigravityFetchedModelID(model.ID)
+			if _, ok := hints.ModelIDs[id]; ok || (gemini38Flash && registry.IsAntigravityGemini38FlashModel(id)) {
 				filtered = append(filtered, model)
 			}
 		}

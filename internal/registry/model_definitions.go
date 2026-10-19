@@ -3,6 +3,7 @@
 package registry
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -19,6 +20,15 @@ const (
 	xaiBuiltinVideo15ModelID           = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewID         = "grok-imagine-video-1.5-preview"
 )
+
+// antigravityGemini38FlashTiers lists the complete Gemini 3.8 Flash IDs that
+// Antigravity accepts upstream. Each tier is a distinct model ID, not a thinking level.
+var antigravityGemini38FlashTiers = []struct{ id, label string }{
+	{id: "gemini-3.8-flash-high", label: "High"},
+	{id: "gemini-3.8-flash-low", label: "Low"},
+	{id: "gemini-3.8-flash-medium", label: "Medium"},
+	{id: "gemini-3.8-flash-tiered", label: "Tiered"},
+}
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
@@ -84,7 +94,7 @@ func GetKimiModels() []*ModelInfo {
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Antigravity)
+	return withAntigravityBuiltins(cloneModelInfos(getModels().Antigravity))
 }
 
 var staticDevinModels = []*ModelInfo{
@@ -259,6 +269,57 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+}
+
+// IsAntigravityGemini38FlashModel reports whether modelID is a complete Gemini 3.8
+// Flash tier ID. Antigravity may advertise only some tiers to an entitled account.
+func IsAntigravityGemini38FlashModel(modelID string) bool {
+	modelID = strings.TrimSpace(modelID)
+	for _, tier := range antigravityGemini38FlashTiers {
+		if strings.EqualFold(tier.id, modelID) {
+			return true
+		}
+	}
+	return false
+}
+
+// withAntigravityBuiltins appends Gemini 3.8 Flash tiers missing from the catalog.
+// Catalog definitions take precedence, so remote metadata updates still apply.
+func withAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
+	// Clip so appends never write into a shared catalog backing array.
+	models = slices.Clip(models)
+	for _, tier := range antigravityGemini38FlashTiers {
+		if !slices.ContainsFunc(models, func(model *ModelInfo) bool {
+			return model != nil && strings.EqualFold(strings.TrimSpace(model.ID), tier.id)
+		}) {
+			models = append(models, antigravityBuiltinGemini38FlashModelInfo(tier.id, tier.label))
+		}
+	}
+	return models
+}
+
+// antigravityBuiltinGemini38FlashModelInfo mirrors the catalog's
+// gemini-3.8-flash-high entry. Web search stays unknown until the account probe reports it.
+func antigravityBuiltinGemini38FlashModelInfo(id, label string) *ModelInfo {
+	return &ModelInfo{
+		ID:                  id,
+		Object:              "model",
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		DisplayName:         "Gemini 3.8 Flash (" + label + ")",
+		Name:                id,
+		Description:         "Gemini 3.8 Flash (" + label + ")",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			Min:            1,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		SupportedInputModalities:  []string{"text", "image", "audio", "video"},
+		SupportedOutputModalities: []string{"text"},
+	}
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -545,7 +606,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,
-		data.Antigravity,
+		withAntigravityBuiltins(data.Antigravity),
 		data.XAI,
 		data.Devin,
 		staticDevinModels,
