@@ -372,30 +372,66 @@ func (h *Host) callQuotaDescribe(ctx context.Context, record capabilityRecord, p
 	return desc, true, nil
 }
 
+func (h *Host) quotaAuthByIndex(authIndex string) (*coreauth.Auth, error) {
+	authIndex = strings.TrimSpace(authIndex)
+	if authIndex == "" {
+		return nil, fmt.Errorf("quota credential auth_index is required")
+	}
+	manager := h.currentAuthManager()
+	if manager == nil {
+		return nil, fmt.Errorf("quota credential auth manager unavailable")
+	}
+	var selected *coreauth.Auth
+	for _, auth := range manager.List() {
+		if auth == nil || auth.EnsureIndex() != authIndex {
+			continue
+		}
+		if selected != nil {
+			return nil, fmt.Errorf("quota credential auth_index is ambiguous")
+		}
+		selected = auth
+	}
+	if selected == nil {
+		return nil, fmt.Errorf("quota credential not found")
+	}
+	return selected, nil
+}
+
 func (h *Host) callQuotaFetch(ctx context.Context, record capabilityRecord, provider pluginapi.QuotaProvider, req pluginapi.QuotaFetchRequest) (resp pluginapi.QuotaFetchResponse, handled bool, err error) {
 	if h == nil || provider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.QuotaFetchResponse{}, false, nil
 	}
 	var authRecord *coreauth.Auth
 	if req.AuthIndex != "" {
-		if auth, rawJSON, errLookup := h.authPhysicalJSONByIndex(req.AuthIndex); errLookup == nil && auth != nil {
-			authRecord = auth
-			if req.AuthID == "" {
-				req.AuthID = auth.ID
+		var errLookup error
+		authRecord, errLookup = h.quotaAuthByIndex(req.AuthIndex)
+		if errLookup != nil {
+			return pluginapi.QuotaFetchResponse{}, true, errLookup
+		}
+		if req.AuthID != "" && req.AuthID != authRecord.ID {
+			return pluginapi.QuotaFetchResponse{}, true, fmt.Errorf("quota credential auth_id does not match auth_index")
+		}
+		requestedProvider := normalizeProviderID(req.Provider)
+		credentialProvider := normalizeProviderID(authRecord.Provider)
+		if requestedProvider != "" && requestedProvider != credentialProvider {
+			if requestedProvider != normalizeProviderID(record.id) {
+				return pluginapi.QuotaFetchResponse{}, true, fmt.Errorf("quota credential provider does not match auth_index")
 			}
-			if req.Provider == "" {
-				req.Provider = auth.Provider
-			}
-			if len(req.StorageJSON) == 0 {
-				req.StorageJSON = rawJSON
-			}
-			if req.Metadata == nil {
-				req.Metadata = auth.Metadata
-			}
-			if req.Attributes == nil {
-				req.Attributes = auth.Attributes
+			credentialRoute := h.quotaProviderRecord(ctx, credentialProvider)
+			if credentialRoute == nil || credentialRoute.id != record.id {
+				return pluginapi.QuotaFetchResponse{}, true, fmt.Errorf("quota plugin does not match credential provider")
 			}
 		}
+		req.StorageJSON = storageJSONFromAuth(authRecord)
+		if len(req.StorageJSON) == 0 {
+			return pluginapi.QuotaFetchResponse{}, true, fmt.Errorf("quota credential storage could not be serialized")
+		}
+		req.AuthID = authRecord.ID
+		req.AuthIndex = authRecord.Index
+		req.Provider = authRecord.Provider
+		req.Metadata = authRecord.Metadata
+		req.Attributes = authRecord.Attributes
+		req.HTTPClient = h.newHTTPClient(authRecord, req.Provider)
 	}
 	if req.HTTPClient == nil {
 		req.HTTPClient = h.newHTTPClient(authRecord, req.Provider)

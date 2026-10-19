@@ -149,6 +149,8 @@ func TestFetchCredentialQuota_Endpoint(t *testing.T) {
 		},
 	})
 
+	host.SetAuthManager(manager)
+
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 	h.SetPluginHost(host)
 
@@ -259,6 +261,7 @@ func TestPluginSpecificQuotaEndpoints(t *testing.T) {
 		ID:       "workbuddy-auth",
 		FileName: "workbuddy.json",
 		Provider: "workbuddy",
+		Metadata: map[string]any{"api_key": "synthetic-workbuddy-key"},
 	}
 	authIndex := auth.EnsureIndex()
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
@@ -272,6 +275,8 @@ func TestPluginSpecificQuotaEndpoints(t *testing.T) {
 			QuotaProvider: &mockQuotaProvider{identifier: "workbuddy"},
 		},
 	})
+
+	host.SetAuthManager(manager)
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 	h.SetPluginHost(host)

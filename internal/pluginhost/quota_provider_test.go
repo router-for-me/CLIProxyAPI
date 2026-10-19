@@ -1,9 +1,16 @@
 package pluginhost
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -69,13 +76,9 @@ func (p *testQuotaProvider) ResetQuota(ctx context.Context, req pluginapi.QuotaR
 
 func TestQuotaProviderCapability_Direct(t *testing.T) {
 	provider := &testQuotaProvider{identifier: "opencode-go"}
-	host := newHostWithRecords(capabilityRecord{
-		id: "opencode-go-plugin",
-		plugin: pluginapi.Plugin{
-			Capabilities: pluginapi.Capabilities{
-				QuotaProvider: provider,
-			},
-		},
+	host := quotaCredentialHost(t, provider, &coreauth.Auth{
+		ID: "direct-auth", Index: "auth-123", Provider: "opencode-go",
+		Metadata: map[string]any{"api_key": "synthetic-direct-key"},
 	})
 
 	if !host.HasQuotaProvider("opencode-go") {
@@ -217,9 +220,9 @@ func TestQuotaProviderCapability_RPC(t *testing.T) {
 		t.Fatal("expected registered plugin to have QuotaProvider capability")
 	}
 
-	hostWithRPC := newHostWithRecords(capabilityRecord{
-		id:     "rpc-quota-plugin",
-		plugin: registered,
+	hostWithRPC := quotaCredentialHost(t, registered.Capabilities.QuotaProvider, &coreauth.Auth{
+		ID: "rpc-auth", Index: "auth-rpc-1", Provider: "rpc-quota-provider",
+		Metadata: map[string]any{"api_key": "synthetic-rpc-key"},
 	})
 
 	if !hostWithRPC.HasQuotaProvider("rpc-quota-provider") {
@@ -583,5 +586,260 @@ func TestQuotaProviderPluginIDsMatchesQuotaProviderRecordPrecedence(t *testing.T
 		if record == nil || record.id != pluginID {
 			t.Fatalf("quotaProviderRecord(%q) = %#v, want plugin %q", provider, record, pluginID)
 		}
+	}
+}
+
+func quotaCredentialHost(t *testing.T, provider pluginapi.QuotaProvider, auths ...*coreauth.Auth) *Host {
+	t.Helper()
+	host := newHostWithRecords(capabilityRecord{
+		id:     "quota-plugin",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{QuotaProvider: provider}},
+	})
+	manager := coreauth.NewManager(nil, nil, nil)
+	host.SetAuthManager(manager)
+	for _, auth := range auths {
+		if _, err := manager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
+			t.Fatal("register synthetic auth:", err)
+		}
+	}
+	return host
+}
+
+func TestQuotaFetchSelectedCredentialSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		disk     bool
+		raw      bool
+		override bool
+	}{
+		{name: "memory differs from disk", disk: true, raw: true},
+		{name: "runtime only", raw: true},
+		{name: "metadata fallback"},
+		{name: "caller overrides", disk: true, raw: true, override: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selectedJSON := []byte(`{"api_key":"synthetic-selected-key"}`)
+			auth := &coreauth.Auth{
+				ID: "selected-auth", Index: "selected-index", Provider: "quota-provider",
+				ProxyURL:   "http://selected-proxy.invalid:3128",
+				Metadata:   map[string]any{"api_key": "synthetic-selected-key", "access_token": "synthetic-selected-token"},
+				Attributes: map[string]string{"owner": "selected"},
+			}
+			if tc.raw {
+				auth.Storage = &memoryAuthStorage{payload: selectedJSON}
+				auth.Metadata["api_key"] = "synthetic-stale-metadata-key"
+			} else {
+				selectedJSON = []byte(`{"access_token":"synthetic-selected-token","api_key":"synthetic-selected-key"}`)
+			}
+			if tc.disk {
+				path := filepath.Join(t.TempDir(), "auth.json")
+				if err := os.WriteFile(path, []byte(`{"api_key":"synthetic-stale-disk-key"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				auth.Attributes["path"] = path
+			}
+			var captured pluginapi.QuotaFetchRequest
+			calls := 0
+			provider := &testQuotaProvider{identifier: "quota-provider", fetchFn: func(_ context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+				captured = req
+				calls++
+				return pluginapi.QuotaFetchResponse{Subscription: &pluginapi.QuotaSubscription{Plan: "synthetic-plan"}}, nil
+			}}
+			host := quotaCredentialHost(t, provider, auth)
+			req := pluginapi.QuotaFetchRequest{AuthIndex: auth.Index}
+			if tc.override {
+				req.AuthID = auth.ID
+				req.Provider = auth.Provider
+				req.StorageJSON = []byte(`{"api_key":"synthetic-caller-key"}`)
+				req.Metadata = map[string]any{"api_key": "synthetic-caller-key", "access_token": "synthetic-caller-token"}
+				req.Attributes = map[string]string{"owner": "caller"}
+				req.HTTPClient = host.newHTTPClient(nil, "caller-provider")
+			}
+			resp, handled, err := host.FetchQuotaByPlugin(context.Background(), "quota-plugin", req)
+			if err != nil || !handled || calls != 1 {
+				t.Fatalf("fetch: handled=%v calls=%d err=%v", handled, calls, err)
+			}
+			if !bytes.Equal(captured.StorageJSON, selectedJSON) {
+				t.Error("plugin did not receive selected in-memory StorageJSON")
+			}
+			if captured.AuthID != auth.ID || captured.AuthIndex != auth.Index || captured.Provider != auth.Provider {
+				t.Error("plugin received conflicting credential identity")
+			}
+			if captured.Metadata["access_token"] != "synthetic-selected-token" || captured.Metadata["api_key"] != auth.Metadata["api_key"] || captured.Attributes["owner"] != "selected" {
+				t.Error("caller metadata or attributes replaced selected context")
+			}
+			client, ok := captured.HTTPClient.(*hostHTTPClient)
+			if !ok || client.auth == nil || client.auth.ID != auth.ID || client.auth.ProxyURL != auth.ProxyURL || client.provider != auth.Provider {
+				t.Error("HTTP client is not bound to selected credential and proxy context")
+			}
+			responseJSON, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(responseJSON, []byte("synthetic-selected-key")) || bytes.Contains(responseJSON, []byte("synthetic-selected-token")) {
+				t.Error("secret canary escaped in quota response")
+			}
+			if t.Failed() {
+				return
+			}
+			captured.StorageJSON[0] = '!'
+			captured.Metadata["access_token"] = "mutated"
+			captured.Attributes["owner"] = "mutated"
+			stored, _ := host.currentAuthManager().GetByID(auth.ID)
+			if stored.Metadata["access_token"] != "synthetic-selected-token" || stored.Attributes["owner"] != "selected" {
+				t.Error("plugin mutated manager credential maps")
+			}
+			if tc.raw && !bytes.Equal(storageJSONFromAuth(stored), selectedJSON) {
+				t.Error("plugin mutated manager credential storage")
+			}
+		})
+	}
+}
+
+type quotaMarshalFailure struct{}
+
+func (quotaMarshalFailure) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("synthetic-secret-marshal-error")
+}
+
+func TestQuotaFetchRejectsUnresolvedCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mutate    func(*coreauth.Auth, *pluginapi.QuotaFetchRequest)
+		noManager bool
+		duplicate bool
+	}{
+		{name: "missing manager", noManager: true},
+		{name: "missing index", mutate: func(_ *coreauth.Auth, req *pluginapi.QuotaFetchRequest) { req.AuthIndex = "missing-index" }},
+		{name: "blank index", mutate: func(_ *coreauth.Auth, req *pluginapi.QuotaFetchRequest) { req.AuthIndex = "   " }},
+		{name: "wrong ID", mutate: func(_ *coreauth.Auth, req *pluginapi.QuotaFetchRequest) { req.AuthID = "synthetic-secret-wrong-id" }},
+		{name: "wrong provider", mutate: func(_ *coreauth.Auth, req *pluginapi.QuotaFetchRequest) {
+			req.Provider = "synthetic-secret-wrong-provider"
+		}},
+		{name: "wrong plugin route", mutate: func(auth *coreauth.Auth, req *pluginapi.QuotaFetchRequest) {
+			auth.Provider = "other-provider"
+			req.Provider = "quota-plugin"
+		}},
+		{name: "ambiguous index", duplicate: true},
+		{name: "metadata serialization error", mutate: func(auth *coreauth.Auth, _ *pluginapi.QuotaFetchRequest) {
+			auth.Storage = nil
+			auth.Metadata = map[string]any{"bad": quotaMarshalFailure{}}
+		}},
+		{name: "unsupported metadata", mutate: func(auth *coreauth.Auth, _ *pluginapi.QuotaFetchRequest) {
+			auth.Storage = nil
+			auth.Metadata = map[string]any{"bad": make(chan int)}
+		}},
+		{name: "empty storage cannot fall back", mutate: func(auth *coreauth.Auth, _ *pluginapi.QuotaFetchRequest) { auth.Storage = &memoryAuthStorage{} }},
+		{name: "no credential data", mutate: func(auth *coreauth.Auth, _ *pluginapi.QuotaFetchRequest) { auth.Storage = nil; auth.Metadata = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			provider := &testQuotaProvider{identifier: "quota-provider", fetchFn: func(context.Context, pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+				calls++
+				return pluginapi.QuotaFetchResponse{}, nil
+			}}
+			auth := &coreauth.Auth{
+				ID: "selected-auth", Index: "selected-index", Provider: "quota-provider",
+				Storage:  &memoryAuthStorage{payload: []byte(`{"api_key":"synthetic-selected-key"}`)},
+				Metadata: map[string]any{"api_key": "synthetic-secret-metadata"},
+			}
+			req := pluginapi.QuotaFetchRequest{
+				AuthIndex: auth.Index, AuthID: auth.ID, Provider: auth.Provider,
+				StorageJSON: []byte(`{"api_key":"synthetic-secret-caller"}`),
+				Metadata:    map[string]any{"access_token": "synthetic-secret-caller-token"},
+			}
+			if tc.mutate != nil {
+				tc.mutate(auth, &req)
+			}
+			auths := []*coreauth.Auth{auth}
+			if tc.duplicate {
+				duplicate := auth.Clone()
+				duplicate.ID = "another-auth"
+				duplicate.Provider = "another-provider"
+				auths = append(auths, duplicate)
+			}
+			host := quotaCredentialHost(t, provider, auths...)
+			if tc.noManager {
+				host.SetAuthManager(nil)
+			}
+			_, handled, err := host.FetchQuotaByPlugin(context.Background(), "quota-plugin", req)
+			if err == nil || !handled {
+				t.Errorf("expected handled resolution error, got handled=%v err=%v", handled, err)
+			}
+			if calls != 0 {
+				t.Error("plugin fetch invoked for refused credential resolution")
+			}
+			if err != nil && strings.Contains(err.Error(), "synthetic-secret") {
+				t.Error("secret canary escaped in resolution error")
+			}
+			if host.isPluginFused("quota-plugin") {
+				t.Error("invalid credential request fused healthy plugin")
+			}
+		})
+	}
+}
+
+func TestQuotaFetchWithoutIndexPreservesCallerContext(t *testing.T) {
+	calls := 0
+	provider := &testQuotaProvider{identifier: "quota-provider", fetchFn: func(_ context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+		calls++
+		if req.AuthIndex != "" || req.AuthID != "caller-auth" || string(req.StorageJSON) != `{"api_key":"synthetic-caller-key"}` || req.Metadata["access_token"] != "synthetic-caller-token" || req.Attributes["owner"] != "caller" {
+			t.Error("quota request without index lost caller context")
+		}
+		if req.HTTPClient == nil {
+			t.Error("missing HTTP client")
+		}
+		return pluginapi.QuotaFetchResponse{Subscription: &pluginapi.QuotaSubscription{Plan: "synthetic-plan"}}, nil
+	}}
+	host := quotaCredentialHost(t, provider)
+	client := host.newHTTPClient(nil, "quota-provider")
+	resp, handled, err := host.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{
+		Provider: "quota-provider", AuthID: "caller-auth",
+		StorageJSON: []byte(`{"api_key":"synthetic-caller-key"}`),
+		Metadata:    map[string]any{"access_token": "synthetic-caller-token"},
+		Attributes:  map[string]string{"owner": "caller"}, HTTPClient: client,
+	})
+	if err != nil || !handled || calls != 1 || resp.Subscription == nil || resp.Subscription.Plan != "synthetic-plan" {
+		t.Fatalf("non-indexed fetch: handled=%v calls=%d err=%v", handled, calls, err)
+	}
+}
+
+func TestQuotaFetchCredentialProviderAndPluginRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider string
+		byPlugin bool
+	}{
+		{name: "provider route", provider: "quota-provider"},
+		{name: "normalized provider", provider: " QUOTA-PROVIDER "},
+		{name: "plugin route", provider: "quota-plugin"},
+		{name: "explicit plugin target", provider: "quota-provider", byPlugin: true},
+		{name: "inferred credential provider", byPlugin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			provider := &testQuotaProvider{identifier: "quota-provider", fetchFn: func(_ context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+				calls++
+				if req.AuthID != "selected-auth" || req.AuthIndex != "selected-index" || req.Provider != "quota-provider" || string(req.StorageJSON) != `{"api_key":"synthetic-route-key"}` {
+					t.Error("plugin did not receive canonical selected credential context")
+				}
+				return pluginapi.QuotaFetchResponse{}, nil
+			}}
+			host := quotaCredentialHost(t, provider, &coreauth.Auth{
+				ID: "selected-auth", Index: "selected-index", Provider: "quota-provider",
+				Storage: &memoryAuthStorage{payload: []byte(`{"api_key":"synthetic-route-key"}`)},
+			})
+			req := pluginapi.QuotaFetchRequest{AuthIndex: "selected-index", Provider: tc.provider}
+			var handled bool
+			var err error
+			if tc.byPlugin {
+				_, handled, err = host.FetchQuotaByPlugin(context.Background(), "quota-plugin", req)
+			} else {
+				_, handled, err = host.FetchQuota(context.Background(), req)
+			}
+			if err != nil || !handled || calls != 1 {
+				t.Fatalf("fetch: handled=%v calls=%d err=%v", handled, calls, err)
+			}
+		})
 	}
 }
