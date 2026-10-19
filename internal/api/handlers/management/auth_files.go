@@ -423,8 +423,8 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 		// Read file to get type field
 		full := filepath.Join(h.cfg.AuthDir, name)
 		if data, errRead := os.ReadFile(full); errRead == nil {
-			var fieldBuf [7]ojson.Result
-			fields := ojson.GetManyBytesNoCopy(fieldBuf[:0], data, "type", "email", "project_id", "priority", coreauth.AttributeWeight, "note", "websockets")
+			var fieldBuf [9]ojson.Result
+			fields := ojson.GetManyBytesNoCopy(fieldBuf[:0], data, "type", "email", "project_id", "priority", coreauth.AttributeWeight, "note", "websockets", coreauth.AttributeModelWeights, "model-weights")
 			typeValue := strings.Clone(fields[0].String())
 			emailValue := strings.Clone(fields[1].String())
 			fileData["type"] = typeValue
@@ -454,6 +454,15 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 					if weight, errWeight := credentialweight.ParseString(rawWeight); errWeight == nil {
 						fileData[coreauth.AttributeWeight] = weight
 					}
+				}
+			}
+			mv := fields[7]
+			if !mv.Exists() {
+				mv = fields[8]
+			}
+			if c.GetBool(ConfigV8ContextKey) && mv.Exists() && mv.IsObject() {
+				if modelWeights, errModelWeights := coreauth.ParseModelWeights(mv.Raw); errModelWeights == nil && len(modelWeights) > 0 {
+					fileData[coreauth.AttributeModelWeights] = modelWeights
 				}
 			}
 			if nv := fields[5]; nv.Exists() && nv.Type == ojson.String {
@@ -796,6 +805,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	if weight, ok := authWeightValue(auth); ok {
 		entry[coreauth.AttributeWeight] = weight
 	}
+	if modelWeights := authModelWeightsValue(auth); quota.v8 && len(modelWeights) > 0 {
+		entry[coreauth.AttributeModelWeights] = modelWeights
+	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
 	}
@@ -944,6 +956,33 @@ func authWeightValue(auth *coreauth.Auth) (int64, bool) {
 	}
 	weight, errWeight := credentialweight.ParseValue(rawWeight)
 	return weight, errWeight == nil
+}
+
+// authModelWeightsValue exposes the per-model weight table (attribute form first, raw
+// metadata second) so the management API mirrors what the selector actually uses.
+func authModelWeightsValue(auth *coreauth.Auth) map[string]int64 {
+	if auth == nil {
+		return nil
+	}
+	if raw := strings.TrimSpace(authAttribute(auth, coreauth.AttributeModelWeights)); raw != "" {
+		modelWeights, errParse := coreauth.ParseModelWeights(raw)
+		if errParse != nil {
+			return nil
+		}
+		return modelWeights
+	}
+	if auth.Metadata == nil {
+		return nil
+	}
+	rawModelWeights, ok := auth.Metadata[coreauth.AttributeModelWeights]
+	if !ok || rawModelWeights == nil {
+		return nil
+	}
+	modelWeights, errParse := coreauth.ParseModelWeights(rawModelWeights)
+	if errParse != nil {
+		return nil
+	}
+	return modelWeights
 }
 
 func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
