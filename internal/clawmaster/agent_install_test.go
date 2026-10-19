@@ -695,16 +695,18 @@ func TestAgentInstallOnWindowsRegistersALogonTaskForThisUser(t *testing.T) {
 	if err := InstallAgent(t.Context(), x.opts); err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 4 || calls[1][0] != "/end" || calls[2][0] != "/create" {
-		t.Fatalf("reinstall schtasks calls = %q, want query, end, create, run", calls)
+	// Disabled before it is ended, so the every-minute trigger cannot start it again before it is
+	// replaced (and /create registers the new one enabled).
+	if len(calls) != 5 || calls[1][0] != "/change" || calls[1][3] != "/disable" || calls[2][0] != "/end" || calls[3][0] != "/create" {
+		t.Fatalf("reinstall schtasks calls = %q, want query, change /disable, end, create, run", calls)
 	}
 
 	calls = nil
 	if err := UninstallAgent(t.Context(), x.opts); err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 3 || calls[1][0] != "/end" || calls[2][0] != "/delete" {
-		t.Fatalf("uninstall schtasks calls = %q, want query, end, delete", calls)
+	if len(calls) != 4 || calls[1][0] != "/change" || calls[2][0] != "/end" || calls[3][0] != "/delete" {
+		t.Fatalf("uninstall schtasks calls = %q, want query, change /disable, end, delete", calls)
 	}
 	if _, err := os.Stat(xmlPath); !os.IsNotExist(err) {
 		t.Fatalf("the task XML is still there: %v", err)

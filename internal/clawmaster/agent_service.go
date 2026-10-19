@@ -116,13 +116,17 @@ func (s scheduledTaskService) write(args []string) error {
 	return writeFileAtomic(s.definitionPath(), task, 0o644)
 }
 
-// stop ends the task if it exists. /end succeeds whether or not it is running (its status text is
-// localized, so it is not read), and ends conhost, which ends the agent (--exit-with-parent).
+// stop disables the task, so its every-minute trigger cannot start it again before it is replaced or
+// deleted, then ends it. /end succeeds whether or not it is running (its status text is localized,
+// so it is not read), and ends conhost, which ends the agent (--exit-with-parent).
 func (s scheduledTaskService) stop(ctx context.Context) error {
 	if _, err := s.schtasks(ctx, "/query", "/tn", agentTaskName(s.userSID)); errors.Is(err, errTaskNotFound) {
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("schtasks could not tell whether the agent is installed: %w", err)
+	}
+	if _, err := s.schtasks(ctx, "/change", "/tn", agentTaskName(s.userSID), "/disable"); err != nil {
+		return fmt.Errorf("schtasks could not disable the agent's task: %w", err)
 	}
 	if _, err := s.schtasks(ctx, "/end", "/tn", agentTaskName(s.userSID)); err != nil {
 		return fmt.Errorf("schtasks could not stop the running agent: %w", err)
