@@ -21,6 +21,12 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "meta"); errExpand != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.HasResponsesCompactionTriggerRequest(req, opts) {
+		return e.executeMetaCompactionStream(ctx, auth, req, opts)
+	}
 
 	enriched, errAuth := e.ensureAuth(ctx, auth)
 	if errAuth != nil {

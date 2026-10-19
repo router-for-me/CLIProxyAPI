@@ -94,7 +94,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	webSearchSessionKey, webSearchTTL, webSearchLimit := e.claudeWebSearchResultCacheScope(ctx, from, req, opts, originalPayload)
-	body = helps.RestoreClaudeWebSearchResults(body, webSearchSessionKey, webSearchTTL)
+	body = helps.RestoreClaudeWebSearchResultsContext(ctx, body, webSearchSessionKey, webSearchTTL)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
@@ -476,7 +476,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				return
 			}
 			line = e.restoreResponseModel(restoredLine, req.Model)
-			helps.RecordClaudeWebSearchResults(webSearchSessionKey, line, webSearchTTL, webSearchLimit)
+			helps.RecordClaudeWebSearchResultsContext(ctx, webSearchSessionKey, line, webSearchTTL, webSearchLimit)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,

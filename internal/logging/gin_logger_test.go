@@ -211,6 +211,30 @@ func TestGinLogrusLoggerKeepsMaskedQueryReadable(t *testing.T) {
 	}
 }
 
+func TestGinLogrusLoggerRedactsV8OAuthQueries(t *testing.T) {
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.InfoLevel)
+	t.Cleanup(func() { logger.ReplaceHooks(previousHooks); logger.SetLevel(previousLevel) })
+	engine := gin.New()
+	engine.Use(GinLogrusLogger())
+	for _, path := range []string{"/v8/management/oauth/callback", "/v8/management/oauth/status", "/v8/management/oauth/session"} {
+		engine.GET(path, func(c *gin.Context) { c.Status(http.StatusBadRequest) })
+		hook.Reset()
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path+"?state=secret-state&code=secret-code&client_id=issued-secret&error=secret-error", nil))
+		entries := hook.AllEntries()
+		if len(entries) != 1 || !strings.Contains(entries[0].Message, path) {
+			t.Fatal("expected access log for OAuth path")
+		}
+		if strings.Contains(entries[0].Message, "secret") || strings.Contains(entries[0].Message, "?") {
+			t.Fatal("OAuth callback or state leaked into access log")
+		}
+	}
+}
+
 func TestGinLogrusLoggerHealthProbeStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger := log.StandardLogger()
