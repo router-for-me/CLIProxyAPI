@@ -3,11 +3,14 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -48,19 +51,138 @@ func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.
 	return sjson.SetRaw(itemRaw, "summary", b.String())
 }
 
+type metaSignaturePolicy int
+
+const (
+	// metaSignatureForeign: target is not Meta; a recognized Meta envelope is foreign.
+	metaSignatureForeign metaSignaturePolicy = iota
+	// metaSignatureNativeOnly: native Meta upstream (api.meta.ai); only unsuffixed envelopes replay.
+	metaSignatureNativeOnly
+	// metaSignatureAllowRouted: Meta-family model served by a router (e.g. OpenRouter meta/muse-*); native or router-suffixed envelopes replay verbatim.
+	metaSignatureAllowRouted
+)
+
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, false)
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, false, metaSignatureForeign, signature.SignatureProviderUnknown, false)
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx context.Context, provider string, body []byte, isCompat bool) []byte {
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, isCompat, isCompat)
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(ctx, provider, body, isCompat, "")
+}
+
+// sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel is the
+// compat variant that knows its target model: a positively recognized Meta
+// Muse envelope is preserved whenever the upstream actually serves a
+// Meta-family model, whether or not the route is flagged compat (native
+// OpenAI never serves muse-* models, but a router key such as an OpenRouter
+// codex endpoint can serve meta/muse-* through the Codex executor without
+// isCompat). Router-suffixed envelopes replay verbatim there; the native
+// Meta executor keeps its own stricter native-only gate. For any other
+// target the recognized Meta envelope is known-foreign and stripped like
+// other providers'.
+// resolveResponsesSignatureTargetModel returns the canonical model name to use
+// for reasoning signature target checks, falling back to the client-requested
+// model when an upstream alias mapping hides the Meta Muse family name.
+func resolveResponsesSignatureTargetModel(baseModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	if signature.SignatureProviderFromModelName(baseModel) != signature.SignatureProviderUnknown {
+		return baseModel
+	}
+	requested := thinking.ParseSuffix(helps.PayloadRequestedModel(opts, req.Model)).ModelName
+	switch signature.SignatureProviderFromModelName(requested) {
+	case signature.SignatureProviderMeta, signature.SignatureProviderGrok, signature.SignatureProviderGPT:
+		return requested
+	}
+	return baseModel
+}
+
+func resolveMetaSignatureTargetModel(baseModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	targetModel := resolveResponsesSignatureTargetModel(baseModel, req, opts)
+	if signature.SignatureProviderFromModelName(targetModel) == signature.SignatureProviderMeta {
+		return targetModel
+	}
+	return "muse-" + baseModel
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(ctx context.Context, provider string, body []byte, isCompat bool, targetModel string) []byte {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, provider, body, isCompat, targetModel, "")
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx context.Context, provider string, body []byte, isCompat bool, targetModel string, baseURL string) []byte {
+	targetProvider := signature.SignatureProviderFromModelName(targetModel)
+	metaPolicy := metaSignatureForeign
+	if targetProvider == signature.SignatureProviderMeta {
+		if strings.TrimSpace(baseURL) != "" && isNativeMetaUpstreamURL(baseURL) {
+			metaPolicy = metaSignatureNativeOnly
+		} else {
+			metaPolicy = metaSignatureAllowRouted
+		}
+	}
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, isCompat, isCompat, metaPolicy, targetProvider, isOpenRouterUpstreamURL(baseURL))
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx context.Context, provider string, body []byte) []byte {
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true)
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true, metaSignatureForeign, signature.SignatureProviderUnknown, false)
 }
 
-func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Context, provider string, body []byte, isCompat bool, keepForeign bool) []byte {
+// sanitizeOpenAIResponsesReasoningEncryptedContentForMeta is the Meta-target
+// variant and is deliberately native-only: only positively recognized Meta
+// Muse envelopes without a router suffix may replay to api.meta.ai, whose
+// suffix acceptance is unverified. GPT, other known-provider,
+// unknown-format, and router-suffixed values are all stripped, so a wrong
+// signature can never reach the Meta upstream through this path. A future
+// Meta envelope revision will be stripped until the inspector learns it
+// (fail-closed).
+func sanitizeOpenAIResponsesReasoningEncryptedContentForMeta(ctx context.Context, provider string, body []byte) []byte {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true, metaSignatureNativeOnly, signature.SignatureProviderMeta, false)
+}
+
+// sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL gates Meta
+// reasoning signatures by whether baseURL is the native Meta upstream
+// (api.meta.ai, which accepts only unsuffixed envelopes) or a third-party
+// Responses provider configured under meta-api-key (which may emit and consume
+// router-suffixed Meta Muse envelopes verbatim when targeting OpenRouter, or
+// strip the OpenRouter suffix for other providers).
+func sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(ctx context.Context, provider string, body []byte, baseURL string) []byte {
+	if isNativeMetaUpstreamURL(baseURL) {
+		return sanitizeOpenAIResponsesReasoningEncryptedContentForMeta(ctx, provider, body)
+	}
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true, metaSignatureAllowRouted, signature.SignatureProviderMeta, isOpenRouterUpstreamURL(baseURL))
+}
+
+func isNativeMetaUpstreamURL(rawURL string) bool {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return true
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return true
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	return host == "" || host == "api.meta.ai" || strings.HasSuffix(host, ".meta.ai")
+}
+
+func isOpenRouterUpstreamURL(rawURL string) bool {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	return host == "openrouter.ai" || strings.HasSuffix(host, ".openrouter.ai")
+}
+
+func stripRouterSuffix(rawSignature, suffix string) string {
+	if suffix == "" || len(rawSignature) <= len(suffix)+1 {
+		return rawSignature
+	}
+	return rawSignature[:len(rawSignature)-len(suffix)-1]
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Context, provider string, body []byte, isCompat bool, keepForeign bool, metaPolicy metaSignaturePolicy, targetProvider signature.SignatureProvider, allowRouterSuffix bool) []byte {
 	inputResult := util.GetGJSONBytesNoCopy(body, "input")
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
@@ -170,17 +292,72 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 		}
 
 		reason := ""
+		rewrittenSignature := ""
 		switch encryptedContent.Type {
 		case gjson.String:
 			rawSignature := encryptedContent.String()
 			if rawSignature != strings.TrimSpace(rawSignature) {
 				reason = "encrypted_content has leading or trailing whitespace"
-			} else if _, err := signature.InspectGPTReasoningSignature(rawSignature); err != nil {
-				// When keepForeign is true (compat callers enable it via WithCompat),
-				// third-party Responses models (such as Muse) expect their own
-				// unknown-format encrypted_content to be replayed.
-				if !keepForeign || rawSignature == "" || signature.DetectSignatureProvider(rawSignature) != signature.SignatureProviderUnknown {
+			} else if metaPolicy != metaSignatureForeign {
+				// Meta targets never reach the GPT-first gate: a GPT,
+				// foreign-provider, or unknown-format blob must not replay to
+				// Meta. Only a positively recognized Meta envelope survives,
+				// and the native Meta upstream additionally refuses the
+				// router suffix a router such as OpenRouter appends.
+				if info, err := signature.InspectMetaReasoningSignature(rawSignature); err != nil {
 					reason = err.Error()
+				} else if info.RouterSuffix != "" {
+					if metaPolicy == metaSignatureNativeOnly {
+						reason = "router-suffixed Meta reasoning signature is not accepted by the native Meta upstream"
+					} else if !allowRouterSuffix {
+						rewrittenSignature = stripRouterSuffix(rawSignature, info.RouterSuffix)
+					}
+				}
+			} else if targetProvider == signature.SignatureProviderUnknown || targetProvider == signature.SignatureProviderGPT {
+				candidate := rawSignature
+				hasGPTPrefix := false
+				if prefixedProvider, unprefixed, ok := signature.SplitSignatureProviderPrefix(rawSignature); ok && prefixedProvider == signature.SignatureProviderGPT {
+					candidate = unprefixed
+					hasGPTPrefix = true
+				}
+				if gptInfo, err := signature.InspectGPTReasoningSignature(candidate); err == nil {
+					if gptInfo.RouterSuffix != "" && !allowRouterSuffix {
+						rewrittenSignature = stripRouterSuffix(candidate, gptInfo.RouterSuffix)
+					} else if hasGPTPrefix {
+						rewrittenSignature = candidate
+					}
+				} else if !(keepForeign && rawSignature != "" && signature.DetectSignatureProvider(rawSignature) == signature.SignatureProviderUnknown) {
+					reason = err.Error()
+				}
+			} else {
+				// Target model belongs to a known non-GPT, non-Meta family (such as
+				// Grok or Gemini served through a Responses router like OpenRouter).
+				// Only preserve signatures that match that target family (or
+				// unknown-format blobs when keepForeign is enabled); foreign GPT or
+				// other known-provider envelopes are stripped.
+				keep := false
+				if rawSignature != "" {
+					switch targetProvider {
+					case signature.SignatureProviderGrok:
+						if grokInfo, errGrok := signature.InspectGrokEncryptedContent(rawSignature); errGrok == nil {
+							keep = true
+							if grokInfo.RouterSuffix != "" && !allowRouterSuffix {
+								rewrittenSignature = stripRouterSuffix(rawSignature, grokInfo.RouterSuffix)
+							}
+						}
+					case signature.SignatureProviderGemini, signature.SignatureProviderClaude, signature.SignatureProviderKimi, signature.SignatureProviderSWE:
+						var normalized string
+						normalized, keep = signature.CompatibleSignatureForProvider(targetProvider, rawSignature)
+						if keep && normalized != "" && normalized != rawSignature {
+							rewrittenSignature = normalized
+						}
+					}
+					if !keep && keepForeign {
+						keep = signature.DetectSignatureProvider(rawSignature) == signature.SignatureProviderUnknown
+					}
+				}
+				if !keep {
+					reason = fmt.Sprintf("reasoning encrypted_content is not compatible with target provider %s", targetProvider)
 				}
 			}
 		case gjson.Null:
@@ -189,6 +366,13 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
+			if rewrittenSignature != "" {
+				if updatedItem, errSet := sjson.Set(nextItem, "encrypted_content", rewrittenSignature); errSet == nil {
+					nextItem = updatedItem
+					changed = true
+					helps.LogWithRequestID(ctx).Debugf("%s: stripped router suffix from reasoning encrypted_content at input[%d] item_id=%q", provider, index, itemID)
+				}
+			}
 			if !changed {
 				keep(item.Raw)
 				continue

@@ -199,7 +199,8 @@ func codexInputHasValidReasoningEncryptedContent(body []byte) bool {
 		if encryptedContent.Type != gjson.String {
 			continue
 		}
-		if _, err := signature.InspectGPTReasoningSignature(encryptedContent.String()); err == nil {
+		rawSig := signature.SignaturePayloadWithoutProviderPrefix(encryptedContent.String())
+		if signature.IsValidGPTReasoningSignature(rawSig) || signature.IsValidMetaReasoningSignature(rawSig) || signature.IsValidGrokEncryptedContent(rawSig) {
 			return true
 		}
 	}
@@ -361,6 +362,20 @@ func codexReasoningReplayTurnAnchorIndex(inputItems []gjson.Result, turn codexRe
 	return 0, false
 }
 
+func canonicalCodexReasoningReplaySignatureKey(rawSignature string) string {
+	sig := signature.SignaturePayloadWithoutProviderPrefix(strings.TrimSpace(rawSignature))
+	if gptInfo, err := signature.InspectGPTReasoningSignature(sig); err == nil && gptInfo.RouterSuffix != "" {
+		return stripRouterSuffix(sig, gptInfo.RouterSuffix)
+	}
+	if metaInfo, err := signature.InspectMetaReasoningSignature(sig); err == nil && metaInfo.RouterSuffix != "" {
+		return stripRouterSuffix(sig, metaInfo.RouterSuffix)
+	}
+	if grokInfo, err := signature.InspectGrokEncryptedContent(sig); err == nil && grokInfo.RouterSuffix != "" {
+		return stripRouterSuffix(sig, grokInfo.RouterSuffix)
+	}
+	return sig
+}
+
 func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]byte) [][]byte {
 	existingReasoning := make(map[string]bool)
 	existingCalls := make(map[string]bool)
@@ -369,7 +384,7 @@ func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]by
 		itemType := strings.TrimSpace(inputItem.Get("type").String())
 		switch itemType {
 		case "reasoning":
-			if encryptedContent := strings.TrimSpace(inputItem.Get("encrypted_content").String()); encryptedContent != "" {
+			if encryptedContent := canonicalCodexReasoningReplaySignatureKey(inputItem.Get("encrypted_content").String()); encryptedContent != "" {
 				existingReasoning[encryptedContent] = true
 			}
 		case "function_call_output", "custom_tool_call_output":
@@ -387,7 +402,7 @@ func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]by
 		itemResult := gjson.ParseBytes(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "reasoning":
-			if existingReasoning[strings.TrimSpace(itemResult.Get("encrypted_content").String())] {
+			if existingReasoning[canonicalCodexReasoningReplaySignatureKey(itemResult.Get("encrypted_content").String())] {
 				continue
 			}
 		case "function_call", "custom_tool_call":

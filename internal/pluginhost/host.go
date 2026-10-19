@@ -75,7 +75,7 @@ type Host struct {
 	runtimeConfig          *config.Config
 	authManager            *coreauth.Manager
 	modelExecutor          modelExecutor
-	modelClientIDs         map[string]struct{}
+	modelClientIDs         map[string]struct{} // Reserved for future use; catalog-only plugins do not populate it.
 	executorModelClientIDs map[string]struct{}
 	modelProviders         map[string]string
 	modelRegistrations     map[string]pluginModelRegistration

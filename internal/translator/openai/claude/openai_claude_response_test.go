@@ -1468,3 +1468,79 @@ func TestExtractOpenAIUsage(t *testing.T) {
 		})
 	}
 }
+
+const streamFlagTestChunk = `data: {"id":"chatcmpl_1","model":"test-model","created":1,"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`
+
+func TestConvertOpenAIResponseToClaude_StreamFlagResolvedOncePerStream(t *testing.T) {
+	var param any
+	first := ConvertOpenAIResponseToClaude(context.Background(), "test-model", []byte(`{"model":"m","stream":true}`), nil, []byte(streamFlagTestChunk), &param)
+	if !bytes.Contains(bytes.Join(first, nil), []byte("content_block_delta")) {
+		t.Fatalf("expected streaming events on first chunk, got %q", bytes.Join(first, nil))
+	}
+
+	// An empty original request on subsequent chunks would parse as non-streaming if re-read.
+	second := ConvertOpenAIResponseToClaude(context.Background(), "test-model", nil, nil, []byte(streamFlagTestChunk), &param)
+	if !bytes.Contains(bytes.Join(second, nil), []byte("content_block_delta")) {
+		t.Fatalf("expected cached stream flag to be reused on subsequent chunks, got %q", bytes.Join(second, nil))
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_ToolNameMapResolvedOnceWhenNoTools(t *testing.T) {
+	var param any
+	first := ConvertOpenAIResponseToClaude(context.Background(), "test-model", []byte(`{"model":"m","stream":true}`), nil, []byte(streamFlagTestChunk), &param)
+	if !bytes.Contains(bytes.Join(first, nil), []byte("content_block_delta")) {
+		t.Fatalf("expected streaming events on first chunk, got %q", bytes.Join(first, nil))
+	}
+
+	// Even when the first chunk resolved ToolNameMap to nil (no tools in request),
+	// later chunks must not re-parse originalRequestRawJSON to rebuild ToolNameMap.
+	toolChunk := `data: {"id":"chatcmpl_1","model":"test-model","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":null}]}`
+	laterReqWithTools := []byte(`{"model":"m","stream":true,"tools":[{"name":"Bash"}]}`)
+	second := ConvertOpenAIResponseToClaude(context.Background(), "test-model", laterReqWithTools, nil, []byte(toolChunk), &param)
+	joined := bytes.Join(second, nil)
+	if !bytes.Contains(joined, []byte(`"name":"bash"`)) {
+		t.Fatalf("expected cached nil ToolNameMap to be reused without re-parsing originalRequestRawJSON, got %q", joined)
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_NonStreamingRequestStaysNonStreaming(t *testing.T) {
+	for _, original := range []string{`{"model":"m"}`, `{"model":"m","stream":false}`} {
+		var param any
+		out := ConvertOpenAIResponseToClaude(context.Background(), "test-model", []byte(original), nil, []byte(streamFlagTestChunk), &param)
+		joined := bytes.Join(out, nil)
+		if len(out) != 1 || gjson.GetBytes(joined, "type").String() != "message" {
+			t.Fatalf("request %s expected a single non-streaming message payload, got %q", original, joined)
+		}
+		if bytes.Contains(joined, []byte("content_block_delta")) {
+			t.Fatalf("request %s must not produce streaming events, got %q", original, joined)
+		}
+
+		// Subsequent call with stream:true must still use the cached non-streaming decision.
+		second := ConvertOpenAIResponseToClaude(context.Background(), "test-model", []byte(`{"model":"m","stream":true}`), nil, []byte(streamFlagTestChunk), &param)
+		secondJoined := bytes.Join(second, nil)
+		if len(second) != 1 || gjson.GetBytes(secondJoined, "type").String() != "message" || bytes.Contains(secondJoined, []byte("content_block_delta")) {
+			t.Fatalf("request %s expected cached non-streaming flag on second call, got %q", original, secondJoined)
+		}
+	}
+}
+
+func BenchmarkConvertOpenAIResponseToClaude_LargeOriginalRequest(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString(`{"model":"m","tools":[`)
+	for i := 0; i < 60; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `{"name":"tool_%d","description":%q,"input_schema":{"type":"object","properties":{"a":{"type":"string"}}}}`, i, strings.Repeat("x", 5000))
+	}
+	sb.WriteString(`],"stream":true}`)
+	original := []byte(sb.String())
+	chunk := []byte(streamFlagTestChunk)
+
+	var param any
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ConvertOpenAIResponseToClaude(context.Background(), "test-model", original, nil, chunk, &param)
+	}
+}

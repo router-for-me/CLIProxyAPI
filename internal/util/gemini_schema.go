@@ -134,10 +134,9 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	// Phase 0: Normalize malformed schemas (e.g. bare property maps and boolean required from MCP tools)
 	jsonStr = normalizeMalformedSchemaObjects(jsonStr, options.addMissingArrayItems)
 
-	// Phase 1: Convert and add hints
-	if options.antigravitySemantics {
-		jsonStr = inlineLocalRefs(jsonStr)
-	}
+	// Phase 1: Convert and add hints. Every cleaner removes $defs/definitions later, so local
+	// references must be expanded here for every route; otherwise nested fields are lost.
+	jsonStr = inlineLocalRefsForClean(jsonStr)
 	jsonStr = convertRefsToHints(jsonStr, options.antigravitySemantics)
 	jsonStr = convertConstToEnum(jsonStr)
 	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
@@ -171,8 +170,8 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 		jsonStr = removeKeywords(jsonStr, []string{"title"})
 	}
 	jsonStr = cleanupRequiredFields(jsonStr)
-	jsonStr = sanitizeArrayItems(jsonStr)
 	jsonStr = sanitizeObjectProperties(jsonStr)
+	jsonStr = sanitizeArrayItems(jsonStr, options.addMissingArrayItems)
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
 	if options.addPlaceholder {
 		jsonStr = addEmptySchemaPlaceholder(jsonStr)
@@ -206,10 +205,13 @@ func sanitizeObjectProperties(jsonStr string) string {
 	return jsonStr
 }
 
-// sanitizeArrayItems ensures that any schema node declaring "items" has "type": "array".
+// sanitizeArrayItems ensures that any schema node declaring "items" has "type": "array", and
+// (when addMissing is set) that array-typed nodes still missing "items" after reference
+// inlining receive the placeholder Phase 0 adds. Phase 0 cannot add it before inlining: on a
+// $ref node the placeholder would clobber the referenced definition's real items.
 // Gemini's protobuf validator enforces a strict field predicate on items ($type == Type.ARRAY);
 // if type is missing, it is inferred as array; if type is explicitly a non-array, items is removed.
-func sanitizeArrayItems(jsonStr string) string {
+func sanitizeArrayItems(jsonStr string, addMissing bool) string {
 	paths := findPaths(jsonStr, "items")
 	sortByDepth(paths)
 	for _, p := range paths {
@@ -225,6 +227,23 @@ func sanitizeArrayItems(jsonStr string) string {
 		} else if !strings.EqualFold(t, "array") {
 			jsonStr, _ = sjson.Delete(jsonStr, p)
 		}
+	}
+
+	if !addMissing {
+		return jsonStr
+	}
+	typePaths := findPaths(jsonStr, "type")
+	sortByDepth(typePaths)
+	for _, p := range typePaths {
+		parentPath := trimSuffix(p, ".type")
+		if isPropertyDefinition(parentPath) || !isArrayDeclaredType(gjson.Get(jsonStr, p).Value()) {
+			continue
+		}
+		if gjson.Get(jsonStr, joinPath(parentPath, "items")).Exists() || gjson.Get(jsonStr, joinPath(parentPath, "$ref")).Exists() {
+			continue
+		}
+		updated, _ := sjson.SetRawBytes([]byte(jsonStr), joinPath(parentPath, "items"), []byte(`{"type":"string"}`))
+		jsonStr = string(updated)
 	}
 	return jsonStr
 }
@@ -533,8 +552,10 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 	}
 
 	// Gemini and Antigravity reject tool array schemas without an items definition,
-	// and reject tool schemas with items whose type is not ARRAY.
-	if addMissingArrayItems {
+	// and reject tool schemas with items whose type is not ARRAY. A node still holding an
+	// unresolved $ref gets neither a placeholder items nor a synthesized type: both would become
+	// sibling keywords during inlining and clobber the referenced definition's real values.
+	if addMissingArrayItems && clone["$ref"] == nil {
 		if isArrayDeclaredType(clone["type"]) {
 			if _, hasItems := clone["items"]; !hasItems {
 				clone["items"] = map[string]any{"type": "string"}
@@ -734,17 +755,34 @@ func mergeStringSlices(existing, promoted []string) []string {
 	return res
 }
 
-// InlineLocalRefs resolves JSON Pointer references against the original schema before definition
-// containers are stripped. Each expansion receives its own copy, sibling keywords override the
+// InlineLocalRefs resolves JSON Pointer references against the original schema. Every reference
+// receives its own copy as long as the expansion budget lasts, sibling keywords override the
 // referenced definition, and cycles terminate as a typed hint instead of recursing forever.
 func InlineLocalRefs(jsonStr string) string {
 	return inlineLocalRefs(jsonStr)
 }
 
-// inlineLocalRefs resolves JSON Pointer references against the original schema before definition
-// containers are stripped. Each expansion receives its own copy, sibling keywords override the
+// maxInlinedSchemaBytes bounds the total size of schema material copied into the output by local
+// reference expansion. Shared definitions fan out once per reference, so a small input can expand
+// exponentially; expansions past the budget degrade to a typed hint like cycles do.
+const maxInlinedSchemaBytes = 256 * 1024
+
+// maxFallbackDescriptionBytes bounds the target description copied into a degraded reference, so a
+// large shared description cannot be repeated per reference and defeat the expansion budget.
+const maxFallbackDescriptionBytes = 512
+
+// inlineLocalRefs resolves JSON Pointer references against the original schema. Every reference
+// receives its own copy as long as the expansion budget lasts, sibling keywords override the
 // referenced definition, and cycles terminate as a typed hint instead of recursing forever.
 func inlineLocalRefs(jsonStr string) string {
+	return inlineLocalRefsRooted(jsonStr, nil, false)
+}
+
+// inlineLocalRefsForClean inlines local references for schema cleaning. Cleaning sometimes
+// receives the single-key {"schema": ...} carrier used to nest a schema one level down (see Phase
+// 0); references inside it must then resolve against the inner schema, not the carrier, or every
+// lookup misses. The carrier shape and root keys are otherwise preserved byte-for-byte.
+func inlineLocalRefsForClean(jsonStr string) string {
 	if !strings.Contains(jsonStr, `"$ref"`) {
 		return jsonStr
 	}
@@ -756,7 +794,43 @@ func inlineLocalRefs(jsonStr string) string {
 		return jsonStr
 	}
 
-	resolved := resolveLocalRefs(root, root, make(map[string]bool))
+	resolveRoot := root
+	wrapped := false
+	if rootMap, ok := root.(map[string]any); ok && len(rootMap) == 1 {
+		if inner, okInner := rootMap["schema"].(map[string]any); okInner {
+			resolveRoot = inner
+			wrapped = true
+		}
+	}
+	if !wrapped {
+		return inlineLocalRefsRooted(jsonStr, root, true)
+	}
+
+	state := newRefResolveState()
+	resolved := resolveSchemaRoot(resolveRoot, state, true)
+	out, err := json.Marshal(map[string]any{"schema": resolved})
+	if err != nil {
+		return jsonStr
+	}
+	return string(out)
+}
+
+func inlineLocalRefsRooted(jsonStr string, parsedRoot any, forClean bool) string {
+	if !strings.Contains(jsonStr, `"$ref"`) {
+		return jsonStr
+	}
+
+	root := parsedRoot
+	if root == nil {
+		decoder := json.NewDecoder(strings.NewReader(jsonStr))
+		decoder.UseNumber()
+		if err := decoder.Decode(&root); err != nil {
+			return jsonStr
+		}
+	}
+
+	state := newRefResolveState()
+	resolved := resolveSchemaRoot(root, state, forClean)
 	out, err := json.Marshal(resolved)
 	if err != nil {
 		return jsonStr
@@ -764,43 +838,366 @@ func inlineLocalRefs(jsonStr string) string {
 	return string(out)
 }
 
-func resolveLocalRefs(root, value any, active map[string]bool) any {
+// refResolveState carries the remaining expansion budget of one inlining pass. Every reference
+// charges the size of the target it copies (nested references charge their own targets), so
+// shared-definition fan-out stops once the budget is spent while ordinary reuse still expands.
+type refResolveState struct {
+	budget int
+}
+
+func newRefResolveState() *refResolveState {
+	return &refResolveState{budget: maxInlinedSchemaBytes}
+}
+
+// sortedKeys returns map keys in a deterministic order, so budget allocation never depends on
+// Go map iteration order.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// resolveSchemaRoot resolves references in the schema body before resolving definition
+// containers. Definitions only matter through references, so walking them first would spend the
+// expansion budget on copies the cleaners delete next (and whose map order is arbitrary), while
+// the fields that are actually kept degraded to hints. For the public InlineLocalRefs the
+// containers are kept, so they are still resolved afterwards with whatever budget remains; when
+// cleaning they are dropped here altogether (references still resolve against the original
+// root), so their bytes never reach the intermediate JSON at all.
+func resolveSchemaRoot(root any, state *refResolveState, forClean bool) any {
+	rootMap, ok := root.(map[string]any)
+	if !ok {
+		return resolveLocalRefs(root, root, make(map[string]bool), state, false, forClean)
+	}
+
+	out := make(map[string]any, len(rootMap))
+	for _, key := range sortedKeys(rootMap) {
+		item := rootMap[key]
+		switch key {
+		case "$defs", "definitions":
+			if !forClean {
+				out[key] = nil // placeholder, resolved after the schema body below
+			}
+		case "$ref":
+			out[key] = item
+		default:
+			out[key] = resolveSchemaEntry(rootMap, key, item, make(map[string]bool), state, forClean)
+		}
+	}
+
+	// A root-level reference expands into the whole referenced schema; its siblings were resolved
+	// above and must override the target, mirroring resolveLocalRefs.
+	if ref, hasRef := rootMap["$ref"].(string); hasRef && strings.HasPrefix(ref, "#/") {
+		if target, okTarget := resolveJSONPointer(rootMap, ref); okTarget {
+			if size := targetExpansionSize(target, forClean); size <= state.budget {
+				state.budget -= size
+				active := map[string]bool{ref: true}
+				if targetMap, okMap := resolveLocalRefs(rootMap, target, active, state, false, forClean).(map[string]any); okMap {
+					merged := make(map[string]any, len(targetMap)+len(out))
+					for _, key := range sortedKeys(targetMap) {
+						merged[key] = targetMap[key]
+					}
+					for _, key := range sortedKeys(out) {
+						if key != "$ref" {
+							merged[key] = out[key]
+						}
+					}
+					out = merged
+				} else {
+					out = resolveRefFallback(rootMap, out, target, ref, make(map[string]bool), state, forClean)
+				}
+			} else {
+				out = resolveRefFallback(rootMap, out, target, ref, make(map[string]bool), state, forClean)
+			}
+			delete(out, "$ref")
+		}
+	}
+
+	if !forClean {
+		for _, key := range []string{"$defs", "definitions"} {
+			if item, exists := rootMap[key]; exists {
+				out[key] = resolveSchemaEntry(rootMap, key, item, make(map[string]bool), state, false)
+			}
+		}
+	}
+	return out
+}
+
+// targetExpansionSize estimates what copying a reference target into the output costs. When
+// cleaning, definitions nested inside the target are deleted later and never copied, so they are
+// excluded; otherwise a small target carrying a large unused definitions block would be degraded
+// purely because of material that is about to be thrown away. Name-map and literal context is
+// threaded so properties named like a container keyword, and data inside literal values, still
+// count in full.
+func targetExpansionSize(value any, forClean bool) int {
+	if !forClean {
+		return jsonValueSize(value)
+	}
+	return cleanExpansionSize(value, false)
+}
+
+func cleanExpansionSize(value any, inNameMap bool) int {
+	switch node := value.(type) {
+	case nil:
+		return 4
+	case bool:
+		return 5
+	case json.Number:
+		return len(node.String())
+	case string:
+		return jsonStringEncodedSize(node)
+	case []any:
+		size := 2
+		for _, item := range node {
+			size += cleanExpansionSize(item, false) + 1
+			if size > maxInlinedSchemaBytes+1 {
+				return maxInlinedSchemaBytes + 1
+			}
+		}
+		return size
+	case map[string]any:
+		size := 2
+		for key, item := range node {
+			if !inNameMap && (key == "$defs" || key == "definitions") {
+				continue
+			}
+			child := item
+			childInNameMap := false
+			if !inNameMap {
+				if isLiteralValueKeyword(key) {
+					size += jsonStringEncodedSize(key) + 1 + jsonValueSize(child) + 1
+					if size > maxInlinedSchemaBytes+1 {
+						return maxInlinedSchemaBytes + 1
+					}
+					continue
+				}
+				if _, isNameMap := schemaNameMapKeywords[key]; isNameMap {
+					childInNameMap = true
+				}
+			}
+			size += jsonStringEncodedSize(key) + 1 + cleanExpansionSize(child, childInNameMap) + 1
+			if size > maxInlinedSchemaBytes+1 {
+				return maxInlinedSchemaBytes + 1
+			}
+		}
+		return size
+	default:
+		return 16
+	}
+}
+
+// jsonValueSize estimates the encoded size of a decoded JSON value as encoding/json will emit
+// it, including string escaping (notably the six-byte \u00XX forms for <, >, & and control
+// characters). It is used to bound ref expansion, so it must not under-count what serialization
+// will actually produce.
+func jsonValueSize(value any) int {
+	switch node := value.(type) {
+	case nil:
+		return 4
+	case bool:
+		return 5
+	case json.Number:
+		return len(node.String())
+	case string:
+		return jsonStringEncodedSize(node)
+	case []any:
+		size := 2
+		for _, item := range node {
+			size += jsonValueSize(item) + 1
+		}
+		return size
+	case map[string]any:
+		size := 2
+		for key, item := range node {
+			size += jsonStringEncodedSize(key) + 1 + jsonValueSize(item) + 1
+		}
+		return size
+	default:
+		return 16
+	}
+}
+
+// jsonStringEncodedSize returns the encoded length of one JSON string including quotes,
+// mirroring encoding/json's default HTML escaping.
+func jsonStringEncodedSize(s string) int {
+	size := 2
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c < 0x20:
+			if c == '\n' || c == '\r' || c == '\t' {
+				size += 2
+			} else {
+				size += 6
+			}
+		case c == '"' || c == '\\':
+			size += 2
+		case c == '<' || c == '>' || c == '&':
+			size += 6
+		case c < 0x80:
+			size++
+		case c == 0xe2 && i+2 < len(s) && s[i+1] == 0x80 && (s[i+2] == 0xa8 || s[i+2] == 0xa9):
+			size += 6
+			i += 2
+		default:
+			size++
+		}
+	}
+	return size
+}
+
+// literalValueKeywords carry client data rather than subschemas. Cleaning and ref inlining must
+// copy their values verbatim: keys inside them that happen to look like schema keywords are data.
+var literalValueKeywords = map[string]struct{}{
+	"default":  {},
+	"example":  {},
+	"examples": {},
+	"const":    {},
+	"enum":     {},
+}
+
+func isLiteralValueKeyword(key string) bool {
+	_, ok := literalValueKeywords[key]
+	return ok
+}
+
+func resolveLocalRefs(root, value any, active map[string]bool, state *refResolveState, inNameMap, forClean bool) any {
 	switch node := value.(type) {
 	case []any:
 		out := make([]any, len(node))
 		for i, item := range node {
-			out[i] = resolveLocalRefs(root, item, active)
+			out[i] = resolveLocalRefs(root, item, active, state, false, forClean)
 		}
 		return out
 	case map[string]any:
-		ref, hasRef := node["$ref"].(string)
-		if hasRef && strings.HasPrefix(ref, "#/") {
-			if target, ok := resolveJSONPointer(root, ref); ok {
-				if active[ref] {
-					return cyclicRefFallback(node, target, ref)
-				}
-				active[ref] = true
-				resolvedTarget := resolveLocalRefs(root, target, active)
-				delete(active, ref)
-				if targetMap, okTarget := resolvedTarget.(map[string]any); okTarget {
-					out := make(map[string]any, len(targetMap)+len(node))
-					for key, item := range targetMap {
-						out[key] = item
+		if !inNameMap {
+			ref, hasRef := node["$ref"].(string)
+			if hasRef && strings.HasPrefix(ref, "#/") {
+				if target, ok := resolveJSONPointer(root, ref); ok {
+					if active[ref] {
+						return resolveRefFallback(root, node, target, ref, active, state, forClean)
 					}
-					for key, item := range node {
-						if key == "$ref" {
-							continue
+					// Charge the stored target size and let nested references charge their own
+					// costs during recursion. The total copied material stays bounded, while an
+					// over-budget chain still expands its affordable outer levels and only the
+					// deepest references degrade to hints.
+					if size := targetExpansionSize(target, forClean); size > state.budget {
+						return resolveRefFallback(root, node, target, ref, active, state, forClean)
+					} else {
+						state.budget -= size
+					}
+					active[ref] = true
+					resolvedTarget := resolveLocalRefs(root, target, active, state, false, forClean)
+					delete(active, ref)
+					if targetMap, okTarget := resolvedTarget.(map[string]any); okTarget {
+						out := make(map[string]any, len(targetMap)+len(node))
+						for _, key := range sortedKeys(targetMap) {
+							if forClean && (key == "$defs" || key == "definitions") {
+								continue // dropped with every other definitions container when cleaning
+							}
+							out[key] = targetMap[key]
 						}
-						out[key] = resolveLocalRefs(root, item, active)
+						for _, key := range sortedKeys(node) {
+							if key == "$ref" {
+								continue
+							}
+							if forClean && (key == "$defs" || key == "definitions") {
+								continue
+							}
+							out[key] = resolveSchemaEntry(root, key, node[key], active, state, forClean)
+						}
+						return out
 					}
-					return out
 				}
 			}
 		}
 
 		out := make(map[string]any, len(node))
+		for _, key := range sortedKeys(node) {
+			if forClean && !inNameMap && (key == "$defs" || key == "definitions") {
+				continue // dropped with every other definitions container when cleaning
+			}
+			out[key] = resolveSchemaEntry(root, key, node[key], active, state, forClean)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+// resolveRefFallback degrades a reference that cannot be expanded (cycle or exhausted budget) to
+// a typed hint, but still resolves the sibling subschemas on the same node so their own references
+// are not left dangling behind the degraded one. Literal values stay verbatim through
+// resolveSchemaEntry. The description assembled by cyclicRefFallback is kept afterwards so
+// resolved siblings cannot clobber the hint.
+func resolveRefFallback(root any, node map[string]any, target any, ref string, active map[string]bool, state *refResolveState, forClean bool) map[string]any {
+	out := cyclicRefFallback(node, target, ref)
+	// The target description copied into the fallback is expansion output like any other; charge
+	// it to the budget. Once the budget is spent, fallbacks carry only the short hint, so a large
+	// number of degraded references cannot multiply copied descriptions without bound. Cyclic
+	// fallbacks omit over-long descriptions entirely, and omitted content is not charged.
+	if targetMap, okMap := target.(map[string]any); okMap {
+		if description, okDescription := targetMap["description"].(string); okDescription && description != "" && len(description) <= maxFallbackDescriptionBytes {
+			if _, hasOwn := node["description"]; !hasOwn {
+				cost := jsonStringEncodedSize(description)
+				if cost > state.budget {
+					out["description"] = "See: " + refName(ref)
+				} else {
+					state.budget -= cost
+				}
+			}
+		}
+	}
+	for _, key := range sortedKeys(node) {
+		if key == "$ref" || key == "description" {
+			continue
+		}
+		if forClean && (key == "$defs" || key == "definitions") {
+			delete(out, key)
+			continue
+		}
+		out[key] = resolveSchemaEntry(root, key, node[key], active, state, forClean)
+	}
+	return out
+}
+
+// resolveSchemaEntry resolves one map entry during ref inlining. A literal-value keyword's value
+// is client data and is deep-copied without resolving refs inside it. Under a name map
+// ("properties" and friends), however, a key spelled like a literal keyword is an author-chosen
+// property name whose value is a subschema; name-map entries are therefore resolved directly
+// here so such property names keep their schema semantics. Nested definition containers outside
+// the root still resolve through this path; when cleaning, callers skip them entirely instead.
+func resolveSchemaEntry(root any, key string, item any, active map[string]bool, state *refResolveState, forClean bool) any {
+	if isLiteralValueKeyword(key) {
+		return deepCopyJSONValue(item)
+	}
+	if _, isNameMap := schemaNameMapKeywords[key]; isNameMap {
+		if nameMap, ok := item.(map[string]any); ok {
+			out := make(map[string]any, len(nameMap))
+			for _, name := range sortedKeys(nameMap) {
+				out[name] = resolveLocalRefs(root, nameMap[name], active, state, false, forClean)
+			}
+			return out
+		}
+	}
+	return resolveLocalRefs(root, item, active, state, false, forClean)
+}
+
+func deepCopyJSONValue(value any) any {
+	switch node := value.(type) {
+	case []any:
+		out := make([]any, len(node))
+		for i, item := range node {
+			out[i] = deepCopyJSONValue(item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(node))
 		for key, item := range node {
-			out[key] = resolveLocalRefs(root, item, active)
+			out[key] = deepCopyJSONValue(item)
 		}
 		return out
 	default:
@@ -837,6 +1234,11 @@ func cyclicRefFallback(node map[string]any, target any, ref string) map[string]a
 	if targetMap, ok := target.(map[string]any); ok {
 		for _, key := range []string{"type", "nullable", "description"} {
 			if value, exists := targetMap[key]; exists {
+				if key == "description" {
+					if description, okDescription := value.(string); okDescription && len(description) > maxFallbackDescriptionBytes {
+						continue
+					}
+				}
 				out[key] = value
 			}
 		}
@@ -870,10 +1272,12 @@ func convertRefsToHints(jsonStr string, preserveSiblings bool) string {
 	sortByDepth(paths)
 
 	for _, p := range paths {
+		parentPath := trimSuffix(p, ".$ref")
+		if isPropertyDefinition(parentPath) {
+			continue // a property literally named "$ref", not a reference keyword
+		}
 		refVal := gjson.Get(jsonStr, p).String()
 		defName := refName(refVal)
-
-		parentPath := trimSuffix(p, ".$ref")
 		hint := fmt.Sprintf("See: %s", defName)
 		if !preserveSiblings {
 			if existing := gjson.Get(jsonStr, descriptionPath(parentPath)).String(); existing != "" {
@@ -1582,6 +1986,11 @@ func walkForExtensions(value gjson.Result, path string, paths *[]string) {
 				return true
 			}
 
+			// Literal values are client data; x-* keys inside them are not schema extensions.
+			if isLiteralValueKeyword(keyStr) && !isPropertyDefinition(path) {
+				return true
+			}
+
 			walkForExtensions(val, childPath, paths)
 			return true
 		})
@@ -1698,7 +2107,7 @@ func addEmptySchemaPlaceholder(jsonStr string) string {
 
 func findPaths(jsonStr, field string) []string {
 	var paths []string
-	Walk(gjson.Parse(jsonStr), "", field, &paths)
+	WalkSchema(gjson.Parse(jsonStr), "", field, &paths)
 	return paths
 }
 
@@ -1728,6 +2137,12 @@ func walkForFields(value gjson.Result, path string, fields map[string]struct{}, 
 
 			if _, ok := fields[keyStr]; ok {
 				paths[keyStr] = append(paths[keyStr], childPath)
+			}
+
+			// Literal values are client data; schema-looking keys inside them are not keywords.
+			// Under a name map the key is a property name instead, so keep descending there.
+			if isLiteralValueKeyword(keyStr) && !isPropertyDefinition(path) {
+				return true
 			}
 
 			walkForFields(val, childPath, fields, paths)
@@ -1767,11 +2182,14 @@ func setRawAt(jsonStr, path, value string) string {
 }
 
 // schemaNameMapKeywords are the schema keywords whose value maps author-chosen names to
-// subschemas. A key directly under one of them is a name, never a schema keyword.
+// subschemas. A key directly under one of them is a name, never a schema keyword. The Draft-07
+// "dependencies" container qualifies for object (schema) values; array values are property-name
+// lists and are never walked as maps by the checks that use this set.
 var schemaNameMapKeywords = map[string]struct{}{
 	"properties":        {},
 	"patternProperties": {},
 	"dependentSchemas":  {},
+	"dependencies":      {},
 	"$defs":             {},
 	"definitions":       {},
 }

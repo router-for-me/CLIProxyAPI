@@ -34,4 +34,18 @@ type SynthesisContext struct {
 	PluginAuthParser PluginAuthParser
 	// StrictFileParsing surfaces parse errors instead of silently skipping or falling back.
 	StrictFileParsing bool
+	// IncompleteFiles records existing auth JSON file paths whose contents were
+	// empty or not valid JSON during a non-strict directory scan.
+	IncompleteFiles map[string]struct{}
+}
+
+// RecordIncompleteFile records an existing auth JSON file whose content is not yet complete JSON.
+func (c *SynthesisContext) RecordIncompleteFile(path string) {
+	if c == nil || path == "" {
+		return
+	}
+	if c.IncompleteFiles == nil {
+		c.IncompleteFiles = make(map[string]struct{})
+	}
+	c.IncompleteFiles[path] = struct{}{}
 }

@@ -29,6 +29,19 @@ import (
 // The function works recursively, building dot-notation paths to each occurrence
 // of the specified field throughout the JSON structure.
 func Walk(value gjson.Result, path, field string, paths *[]string) {
+	walk(value, path, field, paths, false)
+}
+
+// WalkSchema is Walk for JSON Schema documents: it records the field wherever a schema keyword
+// may appear, but does not descend into literal values (default, example, examples, const, enum),
+// whose contents are client data rather than subschemas. The literal keyword itself is still
+// recorded when it is the searched field, and under a property-name map a key spelled like one is
+// a property name whose subschema is still walked.
+func WalkSchema(value gjson.Result, path, field string, paths *[]string) {
+	walk(value, path, field, paths, true)
+}
+
+func walk(value gjson.Result, path, field string, paths *[]string, schemaAware bool) {
 	switch value.Type {
 	case gjson.JSON:
 		// For JSON objects and arrays, iterate through each child
@@ -49,7 +62,10 @@ func Walk(value gjson.Result, path, field string, paths *[]string) {
 			if keyStr == field {
 				*paths = append(*paths, childPath)
 			}
-			Walk(val, childPath, field, paths)
+			if schemaAware && isLiteralValueKeyword(keyStr) && !isPropertyDefinition(path) {
+				return true
+			}
+			walk(val, childPath, field, paths, schemaAware)
 			return true
 		})
 	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:

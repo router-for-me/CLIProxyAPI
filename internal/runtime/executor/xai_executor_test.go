@@ -5269,6 +5269,18 @@ func TestSanitizeXAIInputEncryptedContent_PreservesValidBlob(t *testing.T) {
 	if gotEnc := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotEnc != sample {
 		t.Fatalf("valid encrypted_content should be preserved, got %q", gotEnc)
 	}
+
+	routedSample := sample + "." + strings.Repeat("Ab3", 21)[:62]
+	routedBody, _ := sjson.SetBytes(body, "input.0.encrypted_content", routedSample)
+	gotRouted := sanitizeXAIInputEncryptedContent(routedBody)
+	if gotEnc := gjson.GetBytes(gotRouted, "input.0.encrypted_content").String(); gotEnc != sample {
+		t.Fatalf("router suffix should be stripped for native xAI upstream, got %q want %q", gotEnc, sample)
+	}
+
+	gotOpenRouter := sanitizeXAIInputEncryptedContentForBaseURL(routedBody, "https://openrouter.ai/api/v1")
+	if gotEnc := gjson.GetBytes(gotOpenRouter, "input.0.encrypted_content").String(); gotEnc != routedSample {
+		t.Fatalf("router suffix should be preserved for OpenRouter xAI upstream, got %q want %q", gotEnc, routedSample)
+	}
 }
 
 func TestXAIExecutorReMergesReasoningAfterDroppingInvalidEncryptedContent(t *testing.T) {

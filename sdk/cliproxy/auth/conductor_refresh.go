@@ -177,7 +177,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		return time.Until(expiry) <= *lead
+		return expiry.Sub(now) <= *lead
 	}
 	if !lastRefresh.IsZero() {
 		return now.Sub(lastRefresh) >= *lead
@@ -794,15 +794,13 @@ func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
 	releaseMutation := m.lockAuthMutation(id)
 	defer releaseMutation()
 	m.mu.Lock()
-	if current := m.auths[id]; current != nil && authAccessToken(current) == failedAccessToken {
-		if _, hasExp := current.AccessTokenExpirationTime(); !hasExp {
-			current.Generation++
-			current.UpdatedAt = time.Now()
-			current.RejectedAccessToken = failedAccessToken
-			m.auths[id] = current
-			if m.scheduler != nil {
-				m.scheduler.upsertAuth(current.Clone())
-			}
+	if current := m.auths[id]; current != nil && authAccessToken(current) == failedAccessToken && current.RejectedAccessToken != failedAccessToken {
+		current.Generation++
+		current.UpdatedAt = time.Now()
+		current.RejectedAccessToken = failedAccessToken
+		m.auths[id] = current
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(current.Clone())
 		}
 	}
 	m.mu.Unlock()

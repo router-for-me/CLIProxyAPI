@@ -1584,12 +1584,86 @@ type claudeWirePolicy struct {
 	ProfileClaudeCodeCLI bool // request fingerprint looks like Claude Code CLI
 	ConfirmedClaudeCode  bool
 	Cloak                bool
+	Uncloak              bool
 }
 
 type claudeCloakSettings struct {
 	strictMode     bool
 	sensitiveWords []string
 	cacheUserID    bool
+}
+
+func isClaudeCodeIdentitySystemText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return trimmed == claudeCodeCLIIdentity ||
+		trimmed == "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+}
+
+func stripClaudeCodeSystemBlocks(payload []byte) []byte {
+	payload = util.StripClaudeCodeAttributionSystem(payload)
+	system := gjson.GetBytes(payload, "system")
+	if !system.Exists() {
+		return payload
+	}
+	if system.Type == gjson.String {
+		if !isClaudeCodeIdentitySystemText(system.String()) {
+			return payload
+		}
+		if updated, errDelete := sjson.DeleteBytes(payload, "system"); errDelete == nil {
+			return updated
+		}
+		return payload
+	}
+	if !system.IsArray() {
+		return payload
+	}
+	kept := make([]string, 0, len(system.Array()))
+	removed := false
+	system.ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "text" && isClaudeCodeIdentitySystemText(block.Get("text").String()) {
+			removed = true
+			return true
+		}
+		if block.Raw != "" {
+			kept = append(kept, block.Raw)
+		}
+		return true
+	})
+	if !removed {
+		return payload
+	}
+	if len(kept) == 0 {
+		if updated, errDelete := sjson.DeleteBytes(payload, "system"); errDelete == nil {
+			return updated
+		}
+		return payload
+	}
+	if updated, errSet := sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(kept, ",")+"]")); errSet == nil {
+		return updated
+	}
+	return payload
+}
+
+func uncloakClaudeCodePayload(payload []byte, confirmedClaudeCode bool) []byte {
+	payload = stripClaudeCodeSystemBlocks(payload)
+	if metadata := gjson.GetBytes(payload, "metadata"); metadata.Exists() && metadata.IsObject() {
+		if userID := metadata.Get("user_id"); userID.Exists() && (confirmedClaudeCode || helps.IsValidUserID(userID.String())) {
+			if updated, errDelete := sjson.DeleteBytes(payload, "metadata.user_id"); errDelete == nil {
+				payload = updated
+				if remaining := gjson.GetBytes(payload, "metadata"); remaining.Exists() && remaining.IsObject() && len(remaining.Map()) == 0 {
+					if updatedMeta, errDeleteMeta := sjson.DeleteBytes(payload, "metadata"); errDeleteMeta == nil {
+						payload = updatedMeta
+					}
+				}
+			}
+		}
+	}
+	if diag := gjson.GetBytes(payload, "diagnostics"); diag.Exists() && (confirmedClaudeCode || diag.Get("previous_message_id").Exists()) {
+		if updated, errDelete := sjson.DeleteBytes(payload, "diagnostics"); errDelete == nil {
+			payload = updated
+		}
+	}
+	return payload
 }
 
 func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool) (claudeWirePolicy, claudeCloakSettings) {
@@ -1608,12 +1682,14 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		sensitiveWords: attrWords,
 		cacheUserID:    attrCache,
 	}
+	explicitMode := strings.ToLower(strings.TrimSpace(attrMode))
 	if attrMode != "" {
 		cloakMode = attrMode
 	}
 	if cloakCfg != nil {
 		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
 			cloakMode = mode
+			explicitMode = strings.ToLower(mode)
 		}
 		if cloakCfg.StrictMode {
 			settings.strictMode = true
@@ -1628,23 +1704,25 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
 	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
+	trimmedMode := strings.ToLower(strings.TrimSpace(cloakMode))
+	uncloak := !fp.ProfileClaudeCodeCLI && (explicitMode == "never" || explicitMode == "uncloak")
 	policy := claudeWirePolicy{
 		OAuth:                fp.AuthIsOAuthToken,
 		ProfileClaudeCodeCLI: fp.ProfileClaudeCodeCLI,
 		ConfirmedClaudeCode:  confirmedClaudeCode,
-		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode,
+		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode && !uncloak,
+		Uncloak:              uncloak,
 	}
 	if confirmedClaudeCode {
-		// Native Claude Code is always a passthrough client. An operator-level
-		// "always" mode may cloak unknown callers, but must not overwrite a
-		// strongly confirmed CLI, sdk-cli, or claude-vscode fingerprint.
+		// Native Claude Code is always a passthrough client unless the
+		// credential explicitly opts out of Claude Code identity via never/uncloak.
 		policy.Cloak = false
 		return policy, settings
 	}
-	switch strings.ToLower(strings.TrimSpace(cloakMode)) {
+	switch trimmedMode {
 	case "always":
 		policy.Cloak = true
-	case "never":
+	case "never", "uncloak":
 		policy.Cloak = false
 	default:
 		// Auto applies the CLI cloak only to real Claude OAuth credentials,
@@ -1681,6 +1759,9 @@ func applyCloakingInternal(
 ) ([]byte, bool, error) {
 	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
 	if !policy.Cloak {
+		if policy.Uncloak {
+			payload = uncloakClaudeCodePayload(payload, confirmedClaudeCode)
+		}
 		return payload, false, nil
 	}
 	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheModeContext(ctx)

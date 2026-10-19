@@ -68,6 +68,14 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	UsageOutputTokens     int64
 	UsageCachedTokens     int64
 	UsageCacheWriteTokens int64
+	// ToolNameMapResolved tracks whether ToolNameMap has been resolved from
+	// the original request once per stream.
+	ToolNameMapResolved bool
+	// StreamResolved and StreamRequested cache whether the original request
+	// asked for streaming, resolved once per stream so large request bodies
+	// are not re-parsed on every chunk.
+	StreamResolved  bool
+	StreamRequested bool
 }
 
 // InterleavedContentChunk stores a buffered chunk of text or thinking arriving while a tool call is open
@@ -131,21 +139,28 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
-	if (*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
-		(*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	state := (*param).(*ConvertOpenAIResponseToAnthropicParams)
+	if !state.ToolNameMapResolved {
+		if state.ToolNameMap == nil {
+			state.ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+		}
+		state.ToolNameMapResolved = true
 	}
 
 	// Check if this is the [DONE] marker
 	if bytes.Equal(bytes.TrimSpace(rawJSON), []byte("[DONE]")) {
-		return convertOpenAIDoneToAnthropic((*param).(*ConvertOpenAIResponseToAnthropicParams))
+		return convertOpenAIDoneToAnthropic(state)
 	}
 
-	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
-	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
-		return convertOpenAINonStreamingToAnthropic(rawJSON)
-	} else {
-		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
+	if !state.StreamResolved {
+		streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
+		state.StreamRequested = streamResult.Exists() && streamResult.Type != gjson.False
+		state.StreamResolved = true
 	}
+	if !state.StreamRequested {
+		return convertOpenAINonStreamingToAnthropic(rawJSON)
+	}
+	return convertOpenAIStreamingChunkToAnthropic(rawJSON, state)
 }
 
 func hasValidToolCallArguments(param *ConvertOpenAIResponseToAnthropicParams) bool {
