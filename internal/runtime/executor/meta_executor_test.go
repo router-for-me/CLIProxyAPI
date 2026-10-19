@@ -20,6 +20,7 @@ import (
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -2047,4 +2048,110 @@ func TestMetaExecutor_ResponsesCompactionTriggerAndReplay_Issue6781(t *testing.T
 		t.Fatal("expected ExecuteStream(compaction_trigger) to fail on incomplete summary, got nil")
 	}
 	assertStatusErr(t, errIncStream, http.StatusBadGateway)
+}
+
+// testMuseReasoningSignature returns a shape-valid synthetic Meta Muse
+// envelope (observed header, 1 KiB bucket) whose body is filled with fill.
+func testMuseReasoningSignature(t *testing.T, fill string) string {
+	t.Helper()
+	sig := "Q-PaDgE" + strings.Repeat(fill, 1418) + "A"
+	if !signature.IsValidMetaReasoningSignature(sig) {
+		t.Fatalf("synthetic Muse signature is not a valid Meta envelope")
+	}
+	return sig
+}
+
+// A Claude client replays Muse's reasoning as thinking blocks signed with
+// Muse's encrypted_content. The Claude->Codex translation replays those by
+// target and drops other providers' signatures; the Meta executor then drops
+// reasoning a thinking-only turn leaves directly before the next message.
+func TestMetaExecutor_ClaudeRequestReplaysMuseReasoning(t *testing.T) {
+	toolTurn := testMuseReasoningSignature(t, "B")
+	thinkingOnly := testMuseReasoningSignature(t, "C")
+	answerTurn := testMuseReasoningSignature(t, "D")
+
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+	// A tool round trip, a thinking-only turn, then an answer turn that also
+	// carries a Claude-signed and an unsigned thinking block.
+	payload := []byte(`{"model":"muse-spark-1.3","max_tokens":1024,"messages":[` +
+		`{"role":"user","content":"list the files"},` +
+		`{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"","signature":"` + toolTurn + `"},` +
+		`{"type":"text","text":"Let me check."},` +
+		`{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.txt"}]},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"` + thinkingOnly + `"}]},` +
+		`{"role":"user","content":"and now?"},` +
+		`{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"","signature":"` + testClaudeCAISSample + `"},` +
+		`{"type":"thinking","thinking":"","signature":""},` +
+		`{"type":"thinking","thinking":"","signature":"` + answerTurn + `"},` +
+		`{"type":"text","text":"Done."}]},` +
+		`{"role":"user","content":"thanks"}]}`)
+
+	assertReplay := func(t *testing.T, body []byte) {
+		t.Helper()
+		var kinds, reasoning []string
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			kind := item.Get("type").String()
+			if kind == "message" {
+				kind = item.Get("role").String()
+			}
+			kinds = append(kinds, kind)
+			if kind == "reasoning" {
+				reasoning = append(reasoning, item.Get("encrypted_content").String())
+			}
+		}
+		wantKinds := []string{"user", "reasoning", "assistant", "function_call", "function_call_output", "user", "reasoning", "assistant", "user"}
+		if strings.Join(kinds, ",") != strings.Join(wantKinds, ",") {
+			t.Fatalf("input = %v, want %v; body=%s", kinds, wantKinds, body)
+		}
+		if len(reasoning) != 2 || reasoning[0] != toolTurn || reasoning[1] != answerTurn {
+			t.Fatalf("reasoning items do not carry the tool-turn and answer-turn Muse blobs verbatim; body=%s", body)
+		}
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertReplay(t, gotBody)
+
+	gotBody = nil
+	result, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for range result.Chunks {
+	}
+	assertReplay(t, gotBody)
 }

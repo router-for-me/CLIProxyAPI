@@ -75,6 +75,9 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	body = normalizeCodexInstructions(body)
 	baseURL, _ := metaCreds(auth)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(ctx, "meta executor", body, baseURL)
+	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		body = helps.DropMetaDanglingReasoning(body)
+	}
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 
