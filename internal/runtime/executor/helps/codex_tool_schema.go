@@ -394,7 +394,8 @@ func codexNumericBoundDomain(typeVal any) codexNumericBoundDomainKind {
 //   - a bound no int64 can violate (upper bound above MaxInt64, lower bound below
 //     MinInt64) is a tautology over integer schemas and is dropped; on numeric
 //     schemas bigger JSON numbers still exist, so the bound clamps to the nearest
-//     int64 edge instead;
+//     int64 edge instead — an exclusive bound rewrites to the non-exclusive edge,
+//     since the original bound admits the edge value;
 //   - opposite-side bounds (upper bound below MinInt64, lower bound above
 //     MaxInt64) admit no int64 at all; clamping or dropping would widen the
 //     contract, so the schema collapses to an in-range unsatisfiable pair;
@@ -419,11 +420,16 @@ func sanitizeCodexNumericBounds(schema map[string]any) bool {
 			delete(schema, boundKey)
 		case (upper && class == codexBoundAboveInt64) || (!upper && class == codexBoundBelowInt64):
 			// Tautology direction: no int64 value can violate the bound.
-			if domain == codexDomainInteger {
+			switch {
+			case domain == codexDomainInteger:
 				delete(schema, boundKey)
-			} else if upper {
+			case boundKey == "exclusiveMaximum":
+				rewriteCodexExclusiveBound(schema, "maximum", boundKey, codexMaxInt64Literal)
+			case boundKey == "exclusiveMinimum":
+				rewriteCodexExclusiveBound(schema, "minimum", boundKey, codexMinInt64Literal)
+			case upper:
 				schema[boundKey] = json.Number(codexMaxInt64Literal)
-			} else {
+			default:
 				schema[boundKey] = json.Number(codexMinInt64Literal)
 			}
 		default:
@@ -443,6 +449,18 @@ func sanitizeCodexNumericBounds(schema map[string]any) bool {
 		schema["maximum"] = json.Number(codexMinInt64Literal)
 	}
 	return changed
+}
+
+// rewriteCodexExclusiveBound rewrites an out-of-int64 exclusive bound on a numeric
+// schema to the non-exclusive int64 edge: the tautological bound admits the edge
+// value, so an exclusive rewrite would reject a value the original contract allows.
+// A non-exclusive keyword already present dominates the tautology, so the exclusive
+// keyword is just removed.
+func rewriteCodexExclusiveBound(schema map[string]any, edgeKey, exclusiveKey, edgeLiteral string) {
+	delete(schema, exclusiveKey)
+	if _, exists := schema[edgeKey]; !exists {
+		schema[edgeKey] = json.Number(edgeLiteral)
+	}
 }
 
 func stripIncompatiblePatterns(v any) bool {

@@ -1377,19 +1377,21 @@ func TestNormalizeCodexToolSchemas_StripsOutOfRangeInt64Bounds(t *testing.T) {
 	}
 
 	// Scientific/decimal integer bounds: in-range preserved; number-typed
-	// out-of-range bounds keep their keyword and clamp to the int64 edge so the
-	// schema stays at least as restrictive as the tool contract.
+	// out-of-range non-exclusive bounds keep their keyword and clamp to the
+	// int64 edge so the schema stays at least as restrictive as the tool
+	// contract; out-of-range exclusive bounds rewrite to the non-exclusive edge,
+	// and a dominating in-range keyword leaves them simply redundant.
 	if got := optsProps.Get("scientific_bounds.minimum").Raw; got != "1e5" {
 		t.Errorf("expected scientific_bounds.minimum == 1e5, got %s", got)
 	}
-	for kw, want := range map[string]string{
-		"maximum":          "9223372036854775807",
-		"exclusiveMinimum": "-9223372036854775808",
-		"exclusiveMaximum": "9223372036854775807",
-	} {
-		if got := optsProps.Get("scientific_bounds." + kw).Raw; got != want {
-			t.Errorf("expected scientific_bounds.%s == %s, got %s", kw, want, got)
-		}
+	if got := optsProps.Get("scientific_bounds.maximum").Raw; got != "9223372036854775807" {
+		t.Errorf("expected scientific_bounds.maximum == 9223372036854775807, got %s", got)
+	}
+	if optsProps.Get("scientific_bounds.exclusiveMinimum").Exists() {
+		t.Errorf("expected scientific_bounds.exclusiveMinimum to be dropped, got %s", optsProps.Get("scientific_bounds.exclusiveMinimum").Raw)
+	}
+	if optsProps.Get("scientific_bounds.exclusiveMaximum").Exists() {
+		t.Errorf("expected scientific_bounds.exclusiveMaximum to be dropped, got %s", optsProps.Get("scientific_bounds.exclusiveMaximum").Raw)
 	}
 
 	// High-precision non-integer bound must not be rounded to an integer and dropped.
@@ -1453,7 +1455,9 @@ func TestNormalizeCodexToolSchemas_PreservesNumericBoundStrength(t *testing.T) {
 							"tag": {"type": "string", "default": {"maximum": 123}},
 							"ratio": {"type": "number", "exclusiveMinimum": 0.5, "maximum": 1e100},
 							"floor": {"type": "number", "minimum": -1e100},
+							"floor_x": {"type": "number", "exclusiveMinimum": -1e100},
 							"capped": {"type": "number", "exclusiveMaximum": 1e100},
+							"dominated": {"type": "number", "maximum": 100, "exclusiveMaximum": 1e100},
 							"impossible_max": {"type": "integer", "minimum": 0, "maximum": -1e100},
 							"impossible_min": {"type": "number", "minimum": 1e100, "exclusiveMinimum": 2e100},
 							"typeless": {"maximum": 1e100},
@@ -1490,8 +1494,29 @@ func TestNormalizeCodexToolSchemas_PreservesNumericBoundStrength(t *testing.T) {
 	if got := props.Get("floor.minimum").Raw; got != "-9223372036854775808" {
 		t.Fatalf("number-typed below-int64 minimum must clamp to MinInt64, got %s", got)
 	}
-	if got := props.Get("capped.exclusiveMaximum").Raw; got != "9223372036854775807" {
-		t.Fatalf("clamped exclusiveMaximum must keep its keyword, got %s", got)
+
+	// An out-of-int64 exclusive bound admits the int64 edge value, so the rewrite
+	// must land on the non-exclusive edge instead of rejecting a valid int64
+	// (codex review on #6591).
+	if got := props.Get("capped.maximum").Raw; got != "9223372036854775807" {
+		t.Fatalf("out-of-int64 exclusiveMaximum must rewrite to a non-exclusive maximum, got %s", got)
+	}
+	if props.Get("capped.exclusiveMaximum").Exists() {
+		t.Fatalf("rewritten exclusiveMaximum must not keep the exclusive keyword")
+	}
+	if got := props.Get("floor_x.minimum").Raw; got != "-9223372036854775808" {
+		t.Fatalf("out-of-int64 exclusiveMinimum must rewrite to a non-exclusive minimum, got %s", got)
+	}
+	if props.Get("floor_x.exclusiveMinimum").Exists() {
+		t.Fatalf("rewritten exclusiveMinimum must not keep the exclusive keyword")
+	}
+	// A present non-exclusive bound dominates the tautology, so the exclusive
+	// keyword is simply redundant.
+	if got := props.Get("dominated.maximum").Int(); got != 100 {
+		t.Fatalf("dominating in-range maximum must stay, got %d", got)
+	}
+	if props.Get("dominated.exclusiveMaximum").Exists() {
+		t.Fatalf("redundant tautological exclusiveMaximum must be dropped")
 	}
 	if got := props.Get("typeless.maximum").Raw; got != "9223372036854775807" {
 		t.Fatalf("type-less schemas must clamp conservatively, got %s", got)
