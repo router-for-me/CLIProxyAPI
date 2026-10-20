@@ -1180,6 +1180,28 @@ observability:
     # Default: 60. Max: 3600.
     redis-usage-queue-retention-seconds: 60
 
+    # Client-key authenticated usage query API (GET /v1/usage).
+    # Disabled by default. A valid client access key is required; management
+    # keys are not accepted. Only the providers and credentials selected here
+    # are returned. Raw upstream keys, base URLs, account emails, auth IDs, and
+    # auth file paths are never exposed.
+    #
+    # Optional query parameters narrow the response further; they never widen
+    # the allowlist below:
+    #   ?provider=<name>    repeatable or comma-separated provider keys
+    #   ?credential=<name>  repeatable or comma-separated public credential names
+    user-api:
+      enabled: false
+      # Expose aggregate request counters for these provider keys. Wildcards
+      # are not supported. An empty list exposes no provider aggregate.
+      providers: []
+      # Expose per-credential request counters under a public name. The auth
+      # index is used only for server-side matching and is never returned.
+      credentials: []
+      # credentials:
+      #   - auth-index: "0123456789abcdef"
+      #     name: "team-claude"
+
   # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
   pprof:
     enable: false

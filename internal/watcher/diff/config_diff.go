@@ -43,6 +43,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.UsageStatisticsEnabled != newCfg.UsageStatisticsEnabled {
 		changes = append(changes, fmt.Sprintf("usage-statistics-enabled: %t -> %t", oldCfg.UsageStatisticsEnabled, newCfg.UsageStatisticsEnabled))
 	}
+	if !reflect.DeepEqual(oldCfg.UsageAPI, newCfg.UsageAPI) {
+		changes = append(changes, fmt.Sprintf("usage-api: enabled %t -> %t, providers %d -> %d, credentials %d -> %d", oldCfg.UsageAPI.Enabled, newCfg.UsageAPI.Enabled, len(oldCfg.UsageAPI.Providers), len(newCfg.UsageAPI.Providers), len(oldCfg.UsageAPI.Credentials), len(newCfg.UsageAPI.Credentials)))
+	}
 	if oldCfg.RedisUsageQueueRetentionSeconds != newCfg.RedisUsageQueueRetentionSeconds {
 		changes = append(changes, fmt.Sprintf("redis-usage-queue-retention-seconds: %d -> %d", oldCfg.RedisUsageQueueRetentionSeconds, newCfg.RedisUsageQueueRetentionSeconds))
 	}

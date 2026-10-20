@@ -398,6 +398,33 @@ type RemoteManagement struct {
 	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
 }
 
+// UsageAPIConfig controls the client-key authenticated usage query API.
+// The API is disabled by default. Provider entries expose aggregate request
+// counters; credential entries expose counters for a single auth record under
+// an operator-chosen public name. Raw credentials are never exposed.
+type UsageAPIConfig struct {
+	// Enabled toggles the client-key usage query endpoint.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Providers lists the provider keys whose aggregate usage is exposed.
+	// Provider names must match the runtime provider key (for example "claude"
+	// or the compatibility name of an OpenAI-compatible provider). Wildcards
+	// are not supported; an empty list exposes no provider aggregate.
+	Providers []string `yaml:"providers" json:"providers"`
+
+	// Credentials lists individual auth records exposed by public name.
+	// Auth indexes are matched server-side and never returned to clients.
+	Credentials []UsageAPICredential `yaml:"credentials" json:"credentials"`
+}
+
+// UsageAPICredential selects one auth record for credential-level usage output.
+type UsageAPICredential struct {
+	// AuthIndex is the runtime auth index to expose.
+	AuthIndex string `yaml:"auth-index" json:"auth-index"`
+	// Name is the public label returned to clients for this credential.
+	Name string `yaml:"name" json:"name"`
+}
+
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
 // It provides configuration options for automatic failover mechanisms.
 type QuotaExceeded struct {

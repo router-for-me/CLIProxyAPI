@@ -74,6 +74,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsageAPI configures the client-key usage query endpoint. Disabled by default.
+	UsageAPI UsageAPIConfig `yaml:"usage-api" json:"usage-api"`
+
 	// RedisUsageQueueRetentionSeconds controls how long usage queue items are retained
 	// in memory for Management API consumers.
 	// Default: 60. Max: 3600.
