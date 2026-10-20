@@ -58,6 +58,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	webSearchSessionKey, webSearchTTL, _ := e.claudeWebSearchResultCacheScope(ctx, from, req, opts, originalPayload)
 	body = helps.RestoreClaudeWebSearchResultsContext(ctx, body, webSearchSessionKey, webSearchTTL)
+	body = helps.LimitClaudeRequestImages(body)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
@@ -67,6 +68,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body = stripPromptCacheOptions(body)
 	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
+	}
+	// Same local answer as Execute for a request Anthropic would reject.
+	if errImages := helps.ValidateClaudeImageLimits(body); errImages != nil {
+		return cliproxyexecutor.Response{}, errImages
 	}
 
 	// Custom API-key gateways without a native count_tokens contract continue to
@@ -177,6 +182,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 	webSearchSessionKey, webSearchTTL, _ := e.claudeWebSearchResultCacheScope(ctx, from, req, opts, originalPayload)
 	body = helps.RestoreClaudeWebSearchResultsContext(ctx, body, webSearchSessionKey, webSearchTTL)
+	body = helps.LimitClaudeRequestImages(body)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
@@ -253,6 +259,9 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 	body = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)(body)
 	body = stripPromptCacheOptions(body)
+	if errImages := helps.ValidateClaudeImageLimits(body); errImages != nil {
+		return cliproxyexecutor.Response{}, errImages
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
