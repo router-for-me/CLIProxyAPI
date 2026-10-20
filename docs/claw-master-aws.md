@@ -59,8 +59,9 @@ terraform apply
 ```
 
 `release_tag` and `binary_sha256` pin the binary: the bootstrap refuses a download that does not match. Defaults point
-at a known release; to use another, take its `claw-master-linux-arm64` line from the release's `SHA256SUMS` (releases
-named `claw-master-*` publish one) and set both.
+at a known release; to use another, take its `claw-master-linux-arm64` line from the release's `SHA256SUMS` (the
+releases `claw-master-release.yml` makes publish one; for an older release uploaded by hand, take the digest GitHub
+records for the asset) and set both.
 
 ### 2. Open a shell on the box
 

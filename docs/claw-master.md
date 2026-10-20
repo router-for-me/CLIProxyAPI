@@ -74,8 +74,9 @@ subscription; without one, inference stays subscription-only.
 
 ## Install, login, and run
 
-Requirements are Go 1.26+ and `claude` on `PATH`. Linux and macOS run everything; Windows runs `check`, `connect`,
-`client-init` and `agent` (see the agent section below):
+Requirements are Go 1.26+ and `claude` on `PATH`. Linux and macOS run everything (Linux has no `agent install`;
+run the agent under its service manager); Windows runs `check`, `connect`, `client-init` and `agent` (see the agent
+section below):
 
 ```bash
 go build -o claw-master ./cmd/claw-master
@@ -700,9 +701,9 @@ Releases: every push to `feature/claude-master-inference` (a merge, or a run sta
 `claw-master-<os>-<arch>` for darwin-arm64, linux-amd64, linux-arm64, windows-amd64 and windows-arm64
 (`.exe`) and their `SHA256SUMS`, after the claw-master tests pass on Linux (pull requests also run them on macOS
 and Windows). A tag pushed by hand is built by `release.yaml` instead and carries the CLIProxyAPI archives only,
-listed in its `checksums.txt`, not the `claw-master-<os>-<arch>` binaries; check a binary from such a release
-against the digest GitHub records for the asset
-(`gh api repos/OWNER/CLIProxyAPI/releases/tags/TAG --jq '.assets[] | [.name, .digest]'`).
+listed in its `checksums.txt`, not the `claw-master-<os>-<arch>` binaries. A binary uploaded to a release by hand
+(some early `claude-master-*` releases) has no `SHA256SUMS`; check it against the digest GitHub records for the
+asset (`gh api repos/OWNER/CLIProxyAPI/releases/tags/TAG --jq '.assets[] | [.name, .digest]'`).
 
 ### Stopping and rolling restarts
 
@@ -773,7 +774,7 @@ loads it again and swaps the labels in: no restart. A file with a line that is n
 loaded; the labels already in use stay and the log says why.
 
 **Dimensions.** `profile` (the subscription profile's own name, or `api-backup`), `client` (the connecting box's
-certificate name, `tunnel` on the open listener, or `local` for a launch's own Claude), `provider` (`claude` on
+certificate name, `tunnel` on the open listener, or `claw-master launch` for a launch's own Claude), `provider` (`claude` on
 Claude measurements; absent on the pool's own), **`client_account`** (the INCOMING user's Anthropic account: your
 label, else `acct-` and 8 hex of a hash; `unknown` when the request has none), `model`, `status_class`, `status`,
 `stream`, `route`, `reason`, `result`, `window`, `measure`. A profile with no name is shown as a short hash, never
