@@ -454,3 +454,91 @@ func TestSIWCBindTargetValidationAndLegacyCallback(t *testing.T) {
 		t.Fatal("ordinary callback file missing")
 	}
 }
+
+func TestSIWCBindRelativeAuthDirCommit(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if errMkdir := os.Mkdir("auths", 0o700); errMkdir != nil {
+		t.Fatal(errMkdir)
+	}
+	f := setupSIWCFlow(t, false)
+	relPath := filepath.Join("auths", "codex.json")
+	raw, errRead := os.ReadFile(f.path)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if errWrite := os.WriteFile(relPath, raw, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	f.h.cfg.AuthDir = "./auths"
+	f.manager.SetConfig(f.h.cfg)
+	f.auth.Attributes["path"] = relPath
+	f.auth.Attributes["source"] = relPath
+	if _, errUpdate := f.manager.Update(context.Background(), f.auth); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	state, flow := f.start(t)
+	w := siwcRequest(t, f.router, http.MethodPost, "/callback", map[string]any{"provider": "codex", "redirect_url": siwcCallbackURL(state)})
+	if w.Code != http.StatusOK {
+		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+	}
+	waitSIWCExchange(t, flow)
+	if status := performOAuthStatusRequest(t, f.router, state); status.Status != "ok" {
+		t.Fatalf("status: %#v", status)
+	}
+}
+
+func TestSIWCBindRejectsReplacedAccount(t *testing.T) {
+	for _, mode := range []string{"legacy-upload", "watcher-update"} {
+		t.Run(mode, func(t *testing.T) {
+			f := setupSIWCFlow(t, false)
+			f.router.POST("/legacy", f.h.UploadAuthFile)
+			state, flow := f.start(t)
+			replacement := map[string]any{
+				"type":          "codex",
+				"access_token":  "outer-b",
+				"refresh_token": "outer-refresh-b",
+				"account_id":    "account-b",
+			}
+			switch mode {
+			case "legacy-upload":
+				wUpload := siwcRequest(t, f.router, http.MethodPost, "/legacy?name=codex.json", replacement)
+				if wUpload.Code != http.StatusOK {
+					t.Fatalf("legacy upload: %d %s", wUpload.Code, wUpload.Body.String())
+				}
+			case "watcher-update":
+				if errWrite := codex.WriteJSONFileAtomic(f.path, replacement); errWrite != nil {
+					t.Fatal(errWrite)
+				}
+				replaced := f.auth.Clone()
+				replaced.RegistrationEpoch = 0
+				replaced.Metadata = replacement
+				if _, errUpdate := f.manager.Update(context.Background(), replaced); errUpdate != nil {
+					t.Fatal(errUpdate)
+				}
+			}
+			w := siwcRequest(t, f.router, http.MethodPost, "/callback", map[string]any{"provider": "codex", "redirect_url": siwcCallbackURL(state)})
+			if w.Code != http.StatusOK {
+				t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+			}
+			waitSIWCExchange(t, flow)
+			if status := performOAuthStatusRequest(t, f.router, state); status.Status != "error" {
+				t.Fatalf("expected error status for replaced account, got %#v", status)
+			}
+			got, _ := f.manager.GetByID(f.auth.ID)
+			if got.Metadata["account_id"] != "account-b" || got.Metadata["use_siwc"] == true || got.Metadata["siwc"] != nil {
+				t.Fatalf("binding mixed SIWC tokens into replaced account in memory: %#v", got.Metadata)
+			}
+			diskData, errRead := os.ReadFile(f.path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			var disk map[string]any
+			if errJSON := json.Unmarshal(diskData, &disk); errJSON != nil {
+				t.Fatal(errJSON)
+			}
+			if disk["account_id"] != "account-b" || disk["use_siwc"] == true || disk["siwc"] != nil {
+				t.Fatalf("binding mixed SIWC tokens into replaced account on disk: %#v", disk)
+			}
+		})
+	}
+}

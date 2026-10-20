@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -109,6 +111,12 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 					fullPath := filepath.Join(resolvedAuthDir, name)
 					data, errReadFile := os.ReadFile(fullPath)
 					if errReadFile != nil {
+						if !errors.Is(errReadFile, fs.ErrNotExist) {
+							if incompleteRescanPaths == nil {
+								incompleteRescanPaths = make(map[string]struct{})
+							}
+							incompleteRescanPaths[w.normalizeAuthPath(fullPath)] = struct{}{}
+						}
 						continue
 					}
 					normalizedPath := w.normalizeAuthPath(fullPath)

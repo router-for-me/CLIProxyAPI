@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -1154,4 +1157,54 @@ func TestFileSynthesizerRecordsIncompleteFiles(t *testing.T) {
 	if _, ok := ctx.IncompleteFiles[validAuthPath]; ok {
 		t.Fatalf("did not expect valid auth file %s in IncompleteFiles", validAuthPath)
 	}
+
+	t.Run("dangling_symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		danglingPath := filepath.Join(dir, "dangling.json")
+		if errSymlink := os.Symlink(filepath.Join(dir, "missing.json"), danglingPath); errSymlink != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink unavailable: %v", errSymlink)
+			}
+			t.Fatal(errSymlink)
+		}
+		if _, errRead := os.ReadFile(danglingPath); !errors.Is(errRead, fs.ErrNotExist) {
+			t.Fatalf("ReadFile() error = %v, want fs.ErrNotExist", errRead)
+		}
+		ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: dir}
+		if _, errSynthesize := NewFileSynthesizer().Synthesize(ctx); errSynthesize != nil {
+			t.Fatal(errSynthesize)
+		}
+		if _, ok := ctx.IncompleteFiles[danglingPath]; ok {
+			t.Fatal("dangling symlink must not be recorded in IncompleteFiles")
+		}
+	})
+
+	t.Run("unreadable_file", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("requires Unix file permissions and a non-root user")
+		}
+		dir := t.TempDir()
+		unreadablePath := filepath.Join(dir, "unreadable.json")
+		if errWrite := os.WriteFile(unreadablePath, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		t.Cleanup(func() {
+			if errChmod := os.Chmod(unreadablePath, 0o600); errChmod != nil {
+				t.Error(errChmod)
+			}
+		})
+		if errChmod := os.Chmod(unreadablePath, 0); errChmod != nil {
+			t.Fatal(errChmod)
+		}
+		if _, errRead := os.ReadFile(unreadablePath); !errors.Is(errRead, fs.ErrPermission) {
+			t.Fatalf("ReadFile() error = %v, want fs.ErrPermission", errRead)
+		}
+		ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: dir}
+		if _, errSynthesize := NewFileSynthesizer().Synthesize(ctx); errSynthesize != nil {
+			t.Fatal(errSynthesize)
+		}
+		if _, ok := ctx.IncompleteFiles[unreadablePath]; !ok {
+			t.Fatal("unreadable auth file must be recorded in IncompleteFiles")
+		}
+	})
 }

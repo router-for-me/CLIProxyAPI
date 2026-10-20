@@ -605,3 +605,249 @@ func TestGeminiVertexOpenAPI_CountTokens(t *testing.T) {
 		t.Fatalf("expected positive totalTokens, got: %s", string(resp.Payload))
 	}
 }
+
+func TestGeminiVertexOpenAPI_ExplicitOptIn_GeminiClientToolCallThoughtSignatureRoundTrip(t *testing.T) {
+	var mu sync.Mutex
+	var upstreamBodies [][]byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"mock-vertex-sa-token","token_type":"Bearer","expires_in":3600}`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		callIdx := len(upstreamBodies)
+		upstreamBodies = append(upstreamBodies, body)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if callIdx == 0 {
+			_, _ = w.Write([]byte(`{
+				"id":"chatcmpl-turn-1",
+				"object":"chat.completion",
+				"model":"google/gemini-3-pro",
+				"choices":[{
+					"index":0,
+					"finish_reason":"tool_calls",
+					"message":{
+						"role":"assistant",
+						"tool_calls":[{
+							"id":"c1",
+							"type":"function",
+							"function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"},
+							"extra_content":{"google":{"thought_signature":"SIG_VERTEX_OPENAPI"}}
+						}]
+					}
+				}]
+			}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-turn-2",
+			"object":"chat.completion",
+			"model":"google/gemini-3-pro",
+			"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"20C in Paris"}}]
+		}`))
+	}))
+	defer server.Close()
+
+	targetURL, errParse := url.Parse(server.URL)
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	t.Cleanup(transport.CloseIdleConnections)
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", issue6258RedirectTransport{
+		target: targetURL,
+		base:   transport,
+	})
+
+	var sa map[string]any
+	if errUnmarshal := json.Unmarshal(testVertexServiceAccountJSON(t, server.URL+"/token"), &sa); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "vertex-sa-openapi-sig",
+		Provider: "vertex",
+		Metadata: map[string]any{
+			"project_id":      "proxy-test",
+			"location":        "global",
+			"openapi":         true,
+			"service_account": sa,
+		},
+	}
+	exec := NewGeminiVertexExecutor(&config.Config{})
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatGemini,
+		ResponseFormat: sdktranslator.FormatGemini,
+	}
+
+	// Turn 1: Gemini generateContent request -> Vertex OpenAPI tool call response with thought_signature
+	turn1Resp, errTurn1 := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model: "gemini-3-pro",
+		Payload: []byte(`{
+			"contents":[{"role":"user","parts":[{"text":"weather in Paris?"}]}],
+			"tools":[{"functionDeclarations":[{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}]
+		}`),
+	}, opts)
+	if errTurn1 != nil {
+		t.Fatalf("Turn 1 Execute() error = %v", errTurn1)
+	}
+	gotSig := gjson.GetBytes(turn1Resp.Payload, "candidates.0.content.parts.0.thoughtSignature").String()
+	if gotSig != "SIG_VERTEX_OPENAPI" {
+		t.Fatalf("Turn 1 response thoughtSignature = %q, want SIG_VERTEX_OPENAPI; payload=%s", gotSig, string(turn1Resp.Payload))
+	}
+
+	// Turn 2: Gemini client replays the model functionCall part with thoughtSignature + functionResponse
+	_, errTurn2 := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model: "gemini-3-pro",
+		Payload: []byte(`{
+			"contents":[
+				{"role":"user","parts":[{"text":"weather in Paris?"}]},
+				{"role":"model","parts":[{"functionCall":{"id":"c1","name":"get_weather","args":{"city":"Paris"}},"thoughtSignature":"SIG_VERTEX_OPENAPI"}]},
+				{"role":"user","parts":[{"functionResponse":{"id":"c1","name":"get_weather","response":{"t":20}}}]}
+			]
+		}`),
+	}, opts)
+	if errTurn2 != nil {
+		t.Fatalf("Turn 2 Execute() error = %v", errTurn2)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(upstreamBodies) != 2 {
+		t.Fatalf("expected 2 upstream requests, got %d", len(upstreamBodies))
+	}
+	if got := gjson.GetBytes(upstreamBodies[1], "messages.1.tool_calls.0.extra_content.google.thought_signature").String(); got != "SIG_VERTEX_OPENAPI" {
+		t.Fatalf("Turn 2 upstream tool_calls.0.extra_content.google.thought_signature = %q, want SIG_VERTEX_OPENAPI; body=%s", got, string(upstreamBodies[1]))
+	}
+}
+
+func TestGeminiVertexOpenAPI_ExplicitOptIn_GeminiClientStreamToolCallThoughtSignatureRoundTrip(t *testing.T) {
+	var mu sync.Mutex
+	var upstreamBodies [][]byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"mock-vertex-sa-token","token_type":"Bearer","expires_in":3600}`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		callIdx := len(upstreamBodies)
+		upstreamBodies = append(upstreamBodies, body)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if callIdx == 0 {
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-stream-1\",\"object\":\"chat.completion.chunk\",\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"},\"extra_content\":{\"google\":{\"thought_signature\":\"SIG_STREAM_OPENAPI\"}}}]},\"finish_reason\":null}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-stream-1\",\"object\":\"chat.completion.chunk\",\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-stream-2\",\"object\":\"chat.completion.chunk\",\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"20C\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	targetURL, errParse := url.Parse(server.URL)
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	t.Cleanup(transport.CloseIdleConnections)
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", issue6258RedirectTransport{
+		target: targetURL,
+		base:   transport,
+	})
+
+	var sa map[string]any
+	if errUnmarshal := json.Unmarshal(testVertexServiceAccountJSON(t, server.URL+"/token"), &sa); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "vertex-sa-openapi-stream-sig",
+		Provider: "vertex",
+		Metadata: map[string]any{
+			"project_id":      "proxy-test",
+			"location":        "global",
+			"openapi":         true,
+			"service_account": sa,
+		},
+	}
+	exec := NewGeminiVertexExecutor(&config.Config{})
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatGemini,
+		ResponseFormat: sdktranslator.FormatGemini,
+		Stream:         true,
+	}
+
+	stream1, errStream1 := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model: "gemini-3-pro",
+		Payload: []byte(`{
+			"contents":[{"role":"user","parts":[{"text":"weather in Paris?"}]}],
+			"tools":[{"functionDeclarations":[{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}]
+		}`),
+	}, opts)
+	if errStream1 != nil {
+		t.Fatalf("Turn 1 ExecuteStream() error = %v", errStream1)
+	}
+	var turn1Chunks [][]byte
+	for chunk := range stream1.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("Turn 1 stream chunk error: %v", chunk.Err)
+		}
+		if len(chunk.Payload) > 0 {
+			turn1Chunks = append(turn1Chunks, chunk.Payload)
+		}
+	}
+	if len(turn1Chunks) == 0 {
+		t.Fatal("expected non-empty stream chunks in Turn 1")
+	}
+	var gotStreamSig string
+	for _, c := range turn1Chunks {
+		if sig := gjson.GetBytes(c, "candidates.0.content.parts.0.thoughtSignature").String(); sig != "" {
+			gotStreamSig = sig
+		}
+	}
+	if gotStreamSig != "SIG_STREAM_OPENAPI" {
+		t.Fatalf("Turn 1 stream thoughtSignature = %q, want SIG_STREAM_OPENAPI", gotStreamSig)
+	}
+
+	stream2, errStream2 := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model: "gemini-3-pro",
+		Payload: []byte(`{
+			"contents":[
+				{"role":"user","parts":[{"text":"weather in Paris?"}]},
+				{"role":"model","parts":[{"functionCall":{"id":"c1","name":"get_weather","args":{"city":"Paris"}},"thoughtSignature":"SIG_STREAM_OPENAPI"}]},
+				{"role":"user","parts":[{"functionResponse":{"id":"c1","name":"get_weather","response":{"t":20}}}]}
+			]
+		}`),
+	}, opts)
+	if errStream2 != nil {
+		t.Fatalf("Turn 2 ExecuteStream() error = %v", errStream2)
+	}
+	for chunk := range stream2.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("Turn 2 stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(upstreamBodies) != 2 {
+		t.Fatalf("expected 2 upstream stream requests, got %d", len(upstreamBodies))
+	}
+	if got := gjson.GetBytes(upstreamBodies[1], "messages.1.tool_calls.0.extra_content.google.thought_signature").String(); got != "SIG_STREAM_OPENAPI" {
+		t.Fatalf("Turn 2 stream upstream tool_calls.0.extra_content.google.thought_signature = %q, want SIG_STREAM_OPENAPI; body=%s", got, string(upstreamBodies[1]))
+	}
+}

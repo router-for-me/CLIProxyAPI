@@ -16,8 +16,8 @@ import (
 
 // BindCodexSIWC explicitly replaces the SIWC partition of an existing file-backed
 // Codex registration. Unlike ordinary persistence, a failed write never publishes
-// credentials. expectedEpoch must be the nonzero epoch captured before OAuth.
-func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch uint64, tokenData *codex.CodexSIWCTokenData) (*Auth, error) {
+// credentials. expectedEpoch and expectedAccount must match the registration captured before OAuth.
+func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch uint64, expectedAccount string, tokenData *codex.CodexSIWCTokenData) (*Auth, error) {
 	if m == nil || strings.TrimSpace(id) == "" || expectedEpoch == 0 || tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" || strings.TrimSpace(tokenData.RefreshToken) == "" || strings.TrimSpace(tokenData.ClientID) == "" {
 		return nil, fmt.Errorf("bind SIWC: invalid target or token data")
 	}
@@ -65,7 +65,7 @@ func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch ui
 		if !strings.EqualFold(strings.TrimSpace(kind), "codex") {
 			return fmt.Errorf("bind SIWC: backing file type changed")
 		}
-		if account, _ := base.Metadata["account_id"].(string); account != "" && disk["account_id"] != account {
+		if account, _ := base.Metadata["account_id"].(string); account != expectedAccount || (account != "" && disk["account_id"] != account) || (account == "" && disk["account_id"] != nil && disk["account_id"] != "") {
 			return fmt.Errorf("bind SIWC: backing account changed")
 		}
 		// Keep arbitrary disk values (including large JSON numbers) losslessly. Only
@@ -181,6 +181,10 @@ func (m *Manager) codexBindingPath(auth *Auth) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("bind SIWC: resolve auth directory: %w", err)
 	}
+	authDir, err = filepath.Abs(authDir)
+	if err != nil {
+		return "", err
+	}
 	root, err := filepath.EvalSymlinks(authDir)
 	if err != nil {
 		return "", fmt.Errorf("bind SIWC: invalid auth directory")
@@ -193,14 +197,22 @@ func (m *Manager) codexBindingPath(auth *Auth) (string, error) {
 	if path == "" {
 		path = strings.TrimSpace(auth.Attributes["source"])
 	}
-	if path == "" {
-		path = strings.TrimSpace(auth.FileName)
+	if path != "" && !filepath.IsAbs(path) {
+		path, err = filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+	}
+	if path == "" && strings.TrimSpace(auth.FileName) != "" {
+		fileName := strings.TrimSpace(auth.FileName)
+		if filepath.IsAbs(fileName) {
+			path = fileName
+		} else {
+			path = filepath.Join(root, fileName)
+		}
 	}
 	if path == "" {
 		return "", fmt.Errorf("bind SIWC: target is not file-backed")
-	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(root, path)
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
