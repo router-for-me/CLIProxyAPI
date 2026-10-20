@@ -2117,3 +2117,45 @@ func TestApplyPatchChatSuccessfulTerminalSealsState(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_MapsReasoningTokens(t *testing.T) {
+	request := []byte(`{"model":"mercury-3"}`)
+	cases := []struct {
+		name string
+		raw  string
+		want int64
+	}{
+		{
+			name: "chat completions shape",
+			raw:  `{"id":"chatcmpl_reasoning","object":"chat.completion","created":1773896263,"model":"mercury-3","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":184,"total_tokens":193,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":154}}}`,
+			want: 154,
+		},
+		{
+			name: "responses shape wins when both present",
+			raw:  `{"id":"chatcmpl_reasoning","object":"chat.completion","created":1773896263,"model":"mercury-3","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":184,"total_tokens":193,"output_tokens_details":{"reasoning_tokens":7},"completion_tokens_details":{"reasoning_tokens":154}}}`,
+			want: 7,
+		},
+		{
+			name: "absent reasoning stays absent",
+			raw:  `{"id":"chatcmpl_reasoning","object":"chat.completion","created":1773896263,"model":"mercury-3","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":12,"total_tokens":21}}`,
+			want: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "mercury-3", request, request, []byte(tc.raw), nil)
+			data := gjson.ParseBytes(resp)
+			got := data.Get("usage.output_tokens_details.reasoning_tokens")
+			if tc.want == 0 {
+				if got.Exists() {
+					t.Fatalf("reasoning_tokens should stay absent, got %d; response=%s", got.Int(), resp)
+				}
+				return
+			}
+			if !got.Exists() || got.Int() != tc.want {
+				t.Fatalf("reasoning_tokens = %d (exists=%v), want %d; response=%s", got.Int(), got.Exists(), tc.want, resp)
+			}
+		})
+	}
+}
