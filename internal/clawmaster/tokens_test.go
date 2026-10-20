@@ -126,9 +126,9 @@ func (*tokenUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestTokensOfAnInferenceRequestAreCounted(t *testing.T) {
 	for _, stream := range []bool{true, false} {
 		t.Run(fmt.Sprint("stream=", stream), func(t *testing.T) {
-			reader := startMetrics(t, map[string]string{testAccountUUID: "colton"})
+			reader := startMetrics(t, map[string]string{testAccountUUID: "alice"})
 			backend := newBackendNativeResponseFixture(t)
-			backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-connor"}
+			backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-primary"}
 			backend.manager.SetRoundTripperProvider(&tokenUpstream{})
 			rec := serve(t, backend, inferenceRequest(testAccountUUID, stream))
 			want := tokenTestJSON
@@ -140,10 +140,10 @@ func TestTokensOfAnInferenceRequestAreCounted(t *testing.T) {
 			}
 			rm := collect(t, reader)
 			for typ, n := range map[string]int64{"input": 11, "output": 25, "cache_read": 300, "cache_creation": 40} {
-				if got := sumOf(rm, "claw_master.inference.tokens", map[string]string{"profile": "claude-connor", "type": typ}); got != n {
+				if got := sumOf(rm, "claw_master.inference.tokens", map[string]string{"profile": "claude-primary", "type": typ}); got != n {
 					t.Errorf("tokens{profile,type=%s} = %d, want %d", typ, got, n)
 				}
-				if got := sumOf(rm, "claw_master.inference.tokens.by_client_account", map[string]string{"client_account": "colton", "type": typ}); got != n {
+				if got := sumOf(rm, "claw_master.inference.tokens.by_client_account", map[string]string{"client_account": "alice", "type": typ}); got != n {
 					t.Errorf("tokens.by_client_account{type=%s} = %d, want %d", typ, got, n)
 				}
 				if got := sumOf(rm, "claw_master.inference.tokens.by_client", map[string]string{"client": "unknown", "type": typ}); got != n {

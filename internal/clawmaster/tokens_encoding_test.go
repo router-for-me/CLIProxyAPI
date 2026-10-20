@@ -150,9 +150,9 @@ func TestTokensOfACompressedAnswerAreCounted(t *testing.T) {
 	for _, enc := range []string{"gzip", "br"} {
 		for _, stream := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/stream=%v", enc, stream), func(t *testing.T) {
-				reader := startMetrics(t, map[string]string{testAccountUUID: "colton"})
+				reader := startMetrics(t, map[string]string{testAccountUUID: "alice"})
 				backend := newBackendNativeResponseFixture(t)
-				backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-connor"}
+				backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-primary"}
 				backend.manager.SetRoundTripperProvider(&compressedTokenUpstream{t: t, encoding: enc})
 				rec := serve(t, backend, inferenceRequest(testAccountUUID, stream))
 				plain := tokenTestJSON
@@ -171,7 +171,7 @@ func TestTokensOfACompressedAnswerAreCounted(t *testing.T) {
 				}
 				rm := collect(t, reader)
 				for typ, n := range map[string]int64{"input": 11, "output": 25, "cache_read": 300, "cache_creation": 40} {
-					if got := sumOf(rm, "claw_master.inference.tokens", map[string]string{"profile": "claude-connor", "type": typ}); got != n {
+					if got := sumOf(rm, "claw_master.inference.tokens", map[string]string{"profile": "claude-primary", "type": typ}); got != n {
 						t.Errorf("tokens{type=%s} = %d, want %d", typ, got, n)
 					}
 				}

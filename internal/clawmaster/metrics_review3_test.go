@@ -77,14 +77,14 @@ func TestARequestWithASecretLookingModelLeavesNoTraceInMetricsOrLogs(t *testing.
 	reader := startMetrics(t, nil)
 	logs := captureLogs(t, "debug")
 	backend := newBackendNativeResponseFixture(t)
-	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-connor"}
+	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-primary"}
 	backend.manager.SetRoundTripperProvider(&upstream{})
-	for _, model := range []string{"ejc3@example.com", "my-secret-project-name with spaces"} {
+	for _, model := range []string{"alice@example.com", "my-secret-project-name with spaces"} {
 		_ = serve(t, backend, requestWithModel(model))
 	}
 	rm := collect(t, reader)
 	encoded, _ := json.Marshal(rm)
-	for _, secret := range []string{"ejc3@example.com", "secret-project", "spaces"} {
+	for _, secret := range []string{"alice@example.com", "secret-project", "spaces"} {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("%q reached the metrics", secret)
 		}
@@ -120,9 +120,9 @@ func TestCompoundRateLimitWindowsKeepTheirName(t *testing.T) {
 // profile or model.
 func TestNoMetricCrossesTheAxes(t *testing.T) {
 	freshBounds(t)
-	reader := startMetrics(t, map[string]string{testAccountUUID: "colton"})
+	reader := startMetrics(t, map[string]string{testAccountUUID: "alice"})
 	backend := newBackendNativeResponseFixture(t)
-	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-connor"}
+	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-primary"}
 	backend.manager.SetRoundTripperProvider(&upstream{status: 529, headers: http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.1"}}})
 	_ = serve(t, backend, inferenceRequest(testAccountUUID, true))
 	observeControl(httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))

@@ -29,7 +29,7 @@ import (
 // Collector). Nothing here is specific to any cloud: claw-master only speaks OTLP.
 //
 // DIMENSIONS (attributes) are kept low-cardinality and never identifying:
-//   profile         the subscription profile's own name (claude-connor), or api-backup
+//   profile         the subscription profile's own name (claude-primary), or api-backup
 //   client          the connecting box: its certificate name, "tunnel" (the open listener) or "local"
 //   client_account  the INCOMING user's Anthropic account: your label for it (--account-label), else
 //                   acct-<8 hex> derived from a hash. The account id itself is never emitted.
