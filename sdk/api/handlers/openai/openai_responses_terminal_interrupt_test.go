@@ -29,8 +29,11 @@ func TestResponsesTerminalClosesLocalInterruptBeforePublication(t *testing.T) {
 	for _, terminal := range []string{"response.completed", "response.done", "response.incomplete"} {
 		t.Run(terminal, func(t *testing.T) {
 			local := newResponsesLocalInterrupt()
-			data := make(chan []byte, 2)
+			data := make(chan []byte, 4)
+			// Private usage events must be filtered without disturbing interrupt state.
+			data <- []byte(`{"type":"response.subscription_usage","subscription":{"tier":"private"}}`)
 			data <- []byte(`{"type":"response.created","response":{"id":"r1"}}`)
+			data <- []byte(`{"type":"response.subscription_usage","subscription":{"tier":"private"}}`)
 			data <- []byte(fmt.Sprintf(`{"type":%q,"response":{"id":"r1","output":[]}}`, terminal))
 			atTerminal, releaseTerminal := make(chan struct{}), make(chan struct{})
 			atLocalTerminal, releaseLocalTerminal := make(chan struct{}), make(chan struct{})

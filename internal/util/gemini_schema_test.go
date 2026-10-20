@@ -3,6 +3,7 @@ package util
 import (
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -158,8 +159,10 @@ func TestCleanJSONSchemaForAntigravity_OneOfFlattening(t *testing.T) {
 		"type": "object",
 		"properties": {
 			"config": {
-				"type": "string",
-				"description": "Accepts: string | integer"
+				"anyOf": [
+					{ "type": "string" },
+					{ "type": "integer" }
+				]
 			}
 		}
 	}`
@@ -445,14 +448,22 @@ func TestCleanJSONSchemaForAntigravity_AnyOfAlternativeHints(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForAntigravity(input)
+	expected := `{
+		"type": "object",
+		"properties": {
+			"value": {
+				"anyOf": [
+					{ "type": "string" },
+					{ "type": "integer" }
+				],
+				"nullable": true,
+				"description": "(nullable)"
+			}
+		}
+	}`
 
-	if !strings.Contains(result, "Accepts:") {
-		t.Errorf("Expected alternative types hint, got: %s", result)
-	}
-	if !strings.Contains(result, "string") || !strings.Contains(result, "integer") {
-		t.Errorf("Expected all alternative types in hint, got: %s", result)
-	}
+	result := CleanJSONSchemaForAntigravity(input)
+	compareJSON(t, expected, result)
 }
 
 func TestCleanJSONSchemaForAntigravity_NullableHint(t *testing.T) {
@@ -549,7 +560,34 @@ func TestCleanJSONSchemaForAntigravity_AdditionalPropertiesHint(t *testing.T) {
 }
 
 func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_PreservesDescription(t *testing.T) {
-	input := `{
+	nullableInput := `{
+		"type": "object",
+		"properties": {
+			"config": {
+				"description": "Parent desc",
+				"anyOf": [
+					{ "type": "string", "description": "Child desc" },
+					{ "type": "null" }
+				]
+			}
+		}
+	}`
+
+	expectedNullable := `{
+		"type": "object",
+		"properties": {
+			"config": {
+				"type": "string",
+				"nullable": true,
+				"description": "Parent desc (Child desc) (Accepts: string | null)"
+			}
+		}
+	}`
+
+	resultNullable := CleanJSONSchemaForAntigravity(nullableInput)
+	compareJSON(t, expectedNullable, resultNullable)
+
+	multiBranchInput := `{
 		"type": "object",
 		"properties": {
 			"config": {
@@ -562,18 +600,8 @@ func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_PreservesDescription(t *t
 		}
 	}`
 
-	expected := `{
-		"type": "object",
-		"properties": {
-			"config": {
-				"type": "string",
-				"description": "Parent desc (Child desc) (Accepts: string | integer)"
-			}
-		}
-	}`
-
-	result := CleanJSONSchemaForAntigravity(input)
-	compareJSON(t, expected, result)
+	resultMulti := CleanJSONSchemaForAntigravity(multiBranchInput)
+	compareJSON(t, multiBranchInput, resultMulti)
 }
 
 func TestCleanJSONSchemaForAntigravity_SingleEnumBecomesHint(t *testing.T) {
@@ -2280,7 +2308,8 @@ func TestCleanJSONSchema_PreservesAdditionalPropertiesObjectSchema(t *testing.T)
 }
 
 // TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches tests issue 5219 #2:
-// anyOf with required-only branches should not overwrite the parent object's type and properties.
+// anyOf with required-only branches should not overwrite the parent object's type and properties,
+// and should materialize valid typed object branches from parent properties so the union is preserved.
 func TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches(t *testing.T) {
 	input := `{
 		"type": "object",
@@ -2304,8 +2333,15 @@ func TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches(t *test
 	if !parsed.Get("properties.left").Exists() || !parsed.Get("properties.right").Exists() {
 		t.Fatalf("properties were wiped out; cleaned: %s", got)
 	}
-	if parsed.Get("anyOf").Exists() {
-		t.Fatalf("anyOf was not removed; cleaned: %s", got)
+	branches := parsed.Get("anyOf").Array()
+	if len(branches) != 2 {
+		t.Fatalf("anyOf branch count = %d, want 2; cleaned: %s", len(branches), got)
+	}
+	if branches[0].Get("type").String() != "object" || !branches[0].Get("properties.left").Exists() || branches[0].Get("required.0").String() != "left" {
+		t.Fatalf("anyOf[0] was not materialized into valid object branch: %s", branches[0].Raw)
+	}
+	if branches[1].Get("type").String() != "object" || !branches[1].Get("properties.right").Exists() || branches[1].Get("required.0").String() != "right" {
+		t.Fatalf("anyOf[1] was not materialized into valid object branch: %s", branches[1].Raw)
 	}
 }
 
@@ -3038,4 +3074,1339 @@ func TestCleanJSONSchema_EnforcesObjectTypeForProperties_Issue6394(t *testing.T)
 			})
 		}
 	})
+}
+
+// TestCleanJSONSchema_RemovesDependentKeywords_Issue6539 covers Issue #6539:
+// JSON Schema keywords dependentRequired, dependentSchemas, and dependencies are rejected by
+// the Gemini/Antigravity backend with 400 INVALID_ARGUMENT ("Unknown name \"dependentRequired\" ... Cannot find field")
+// and must be stripped while preserving legitimate tool properties with those names.
+func TestCleanJSONSchema_RemovesDependentKeywords_Issue6539(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"baseline_url": {"type": "string"},
+			"candidate_url": {"type": "string"},
+			"options": {
+				"type": "object",
+				"properties": {
+					"threshold": {"type": "number"},
+					"diff_color": {"type": "string"}
+				},
+				"dependentRequired": {
+					"threshold": ["diff_color"]
+				},
+				"dependentSchemas": {
+					"threshold": {
+						"properties": {
+							"diff_color": {"type": "string"}
+						}
+					}
+				},
+				"dependencies": {
+					"threshold": ["diff_color"]
+				}
+			},
+			"dependentRequired": {
+				"type": "string",
+				"description": "Legitimate property named dependentRequired"
+			},
+			"dependentSchemas": {
+				"type": "object",
+				"properties": {
+					"nested": {"type": "string"}
+				},
+				"dependentRequired": {
+					"nested": ["other"]
+				}
+			},
+			"dependencies": {
+				"type": "string",
+				"description": "Legitimate property named dependencies"
+			}
+		},
+		"dependentRequired": {
+			"baseline_url": ["candidate_url"]
+		},
+		"dependentSchemas": {
+			"baseline_url": {
+				"required": ["candidate_url"]
+			}
+		},
+		"dependencies": {
+			"baseline_url": ["candidate_url"]
+		}
+	}`
+
+	cleaners := map[string]func(string) string{
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Gemini":              CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":    CleanJSONSchemaForGeminiJSONSchema,
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			parsed := gjson.Parse(got)
+
+			for _, kw := range []string{"dependentRequired", "dependentSchemas", "dependencies"} {
+				if parsed.Get(kw).Exists() {
+					t.Errorf("[%s] root %q was not removed: %s", name, kw, got)
+				}
+				if parsed.Get("properties.options." + kw).Exists() {
+					t.Errorf("[%s] nested properties.options.%s was not removed: %s", name, kw, got)
+				}
+			}
+
+			if parsed.Get("properties.dependentSchemas.dependentRequired").Exists() {
+				t.Errorf("[%s] properties.dependentSchemas.dependentRequired was not removed: %s", name, got)
+			}
+
+			for _, prop := range []string{"dependentRequired", "dependentSchemas", "dependencies"} {
+				if !parsed.Get("properties." + prop).Exists() {
+					t.Errorf("[%s] legitimate property %q was removed: %s", name, prop, got)
+				}
+			}
+		})
+	}
+}
+
+// TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662 covers Issue #3662:
+// Multi-branch anyOf/oneOf unions (such as string | image object | audio object) must not be
+// flattened to a single selected branch, which previously caused non-first object branches (e.g. audio)
+// to disappear from the cleaned schema.
+// Multi-branch unions are preserved by every cleaner except the Antigravity Claude
+// tool cleaner, which flattens them for the Claude-side upstream that rejects nested
+// multi-branch unions (Issue 3662 regression follow-up).
+func TestCleanJSONSchema_PreservesMultiBranchAnyOfOneOf_Issue3662(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"item": {
+				"anyOf": [
+					{ "type": "string" },
+					{
+						"type": "object",
+						"properties": {
+							"image": { "type": "string" }
+						},
+						"required": ["image"]
+					},
+					{
+						"type": "object",
+						"properties": {
+							"audio": { "type": "string" }
+						},
+						"required": ["audio"]
+					}
+				]
+			}
+		},
+		"required": ["item"]
+	}`
+
+	cleaners := map[string]func(string) string{
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Gemini":              CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":    CleanJSONSchemaForGeminiJSONSchema,
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			compareJSON(t, input, got)
+
+			// Verify idempotency when cleaned a second time
+			gotSecond := clean(got)
+			compareJSON(t, got, gotSecond)
+		})
+	}
+
+	t.Run("NullableMultiBranchUnionStripsNullBranchAndSetsNullable", func(t *testing.T) {
+		nullableUnion := `{
+			"type": "object",
+			"properties": {
+				"item": {
+					"anyOf": [
+						{ "type": "string" },
+						{
+							"type": "object",
+							"properties": { "image": { "type": "string" } },
+							"required": ["image"]
+						},
+						{
+							"type": "object",
+							"properties": { "audio": { "type": "string" } },
+							"required": ["audio"]
+						},
+						{ "type": "null" }
+					]
+				}
+			},
+			"required": ["item"]
+		}`
+
+		agCleaned := gjson.Parse(CleanJSONSchemaForAntigravity(nullableUnion))
+		branches := agCleaned.Get("properties.item.anyOf").Array()
+		if len(branches) != 3 {
+			t.Fatalf("Antigravity anyOf branch count = %d, want 3: %s", len(branches), agCleaned.Raw)
+		}
+		if !agCleaned.Get("properties.item.nullable").Bool() {
+			t.Fatalf("Antigravity properties.item.nullable = false, want true: %s", agCleaned.Raw)
+		}
+		if !agCleaned.Get("properties.item.anyOf.2.properties.audio").Exists() {
+			t.Fatalf("Antigravity lost audio branch: %s", agCleaned.Raw)
+		}
+
+		geminiCleaned := gjson.Parse(CleanJSONSchemaForGeminiJSONSchema(nullableUnion))
+		if len(geminiCleaned.Get("properties.item.anyOf").Array()) != 3 {
+			t.Fatalf("GeminiJSONSchema anyOf branch count = %d, want 3: %s", len(geminiCleaned.Get("properties.item.anyOf").Array()), geminiCleaned.Raw)
+		}
+		if geminiCleaned.Get("properties.item.nullable").Exists() {
+			t.Fatalf("GeminiJSONSchema should not keep nullable keyword: %s", geminiCleaned.Raw)
+		}
+		if !strings.Contains(geminiCleaned.Get("properties.item.description").String(), "(nullable)") {
+			t.Fatalf("GeminiJSONSchema missing (nullable) hint: %s", geminiCleaned.Raw)
+		}
+
+		// Nested nullable union in both [null, nestedUnion] and [nestedUnion, null] orders
+		// must unwrap to the nested union with nullable metadata and remain idempotent.
+		for _, nestedNullable := range []string{
+			`{"type":"object","properties":{"item":{"anyOf":[{"type":"null"},{"anyOf":[{"type":"string"},{"type":"integer"}]}]}}}`,
+			`{"type":"object","properties":{"item":{"anyOf":[{"anyOf":[{"type":"string"},{"type":"integer"}]},{"type":"null"}]}}}`,
+		} {
+			expectedNested := `{
+				"type": "object",
+				"properties": {
+					"item": {
+						"anyOf": [
+							{ "type": "string" },
+							{ "type": "integer" }
+						],
+						"nullable": true,
+						"description": "(nullable)"
+					}
+				}
+			}`
+			cleanedOnce := CleanJSONSchemaForAntigravity(nestedNullable)
+			compareJSON(t, expectedNested, cleanedOnce)
+			cleanedTwice := CleanJSONSchemaForAntigravity(cleanedOnce)
+			compareJSON(t, expectedNested, cleanedTwice)
+		}
+	})
+
+	t.Run("OneOfNormalizedToAnyOfOnNativeSchemaCarriers", func(t *testing.T) {
+		oneOfInput := `{
+			"type": "object",
+			"properties": {
+				"item": {
+					"oneOf": [
+						{ "type": "string" },
+						{
+							"type": "object",
+							"properties": { "image": { "type": "string" } },
+							"required": ["image"]
+						},
+						{
+							"type": "object",
+							"properties": { "audio": { "type": "string" } },
+							"required": ["audio"]
+						}
+					]
+				}
+			},
+			"required": ["item"]
+		}`
+
+		for name, clean := range map[string]func(string) string{
+			"Antigravity":         CleanJSONSchemaForAntigravity,
+			"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+			"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+			"Gemini":              CleanJSONSchemaForGemini,
+		} {
+			parsed := gjson.Parse(clean(oneOfInput))
+			if parsed.Get("properties.item.oneOf").Exists() {
+				t.Fatalf("[%s] oneOf survived on native Schema carrier: %s", name, parsed.Raw)
+			}
+			if got := len(parsed.Get("properties.item.anyOf").Array()); got != 3 {
+				t.Fatalf("[%s] anyOf branch count = %d, want 3: %s", name, got, parsed.Raw)
+			}
+		}
+
+		// parametersJsonSchema carrier preserves standard JSON Schema oneOf
+		jsonSchemaParsed := gjson.Parse(CleanJSONSchemaForGeminiJSONSchema(oneOfInput))
+		if got := len(jsonSchemaParsed.Get("properties.item.oneOf").Array()); got != 3 {
+			t.Fatalf("[GeminiJSONSchema] oneOf branch count = %d, want 3: %s", got, jsonSchemaParsed.Raw)
+		}
+	})
+
+	t.Run("PreservesUnionAndBranchRequiredWhenParentHasProperties", func(t *testing.T) {
+		parentPropsUnion := `{
+			"type": "object",
+			"properties": {},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				}
+			]
+		}`
+
+		for name, clean := range cleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(parentPropsUnion)
+				compareJSON(t, parentPropsUnion, got)
+			})
+		}
+
+		// Mixed union with a required-only branch materializes the required-only branch from parent properties
+		// so that the alternative branch (e.g. text) is preserved in anyOf.
+		mixedRequiredOnlyBranch := `{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" },
+				"text": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				},
+				{
+					"required": ["text"]
+				}
+			]
+		}`
+		expectedMixedRequiredOnly := `{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" },
+				"text": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				},
+				{
+					"type": "object",
+					"properties": { "text": { "type": "string" } },
+					"required": ["text"]
+				}
+			]
+		}`
+		compareJSON(t, expectedMixedRequiredOnly, CleanJSONSchemaForAntigravity(mixedRequiredOnlyBranch))
+
+		// Pure required-only union branches on an object with parent properties are materialized into valid object branches.
+		pureRequiredOnlyUnion := `{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" }
+			},
+			"anyOf": [
+				{ "required": ["image"] },
+				{ "required": ["audio"] }
+			]
+		}`
+		expectedPureRequiredOnly := `{
+			"type": "object",
+			"properties": {
+				"image": { "type": "string" },
+				"audio": { "type": "string" }
+			},
+			"anyOf": [
+				{
+					"type": "object",
+					"properties": { "image": { "type": "string" } },
+					"required": ["image"]
+				},
+				{
+					"type": "object",
+					"properties": { "audio": { "type": "string" } },
+					"required": ["audio"]
+				}
+			]
+		}`
+		compareJSON(t, expectedPureRequiredOnly, CleanJSONSchemaForAntigravity(pureRequiredOnlyUnion))
+	})
+
+	t.Run("BooleanUnionBranchesAndSiblingAnyOfOneOf", func(t *testing.T) {
+		// Boolean false subschema branches in anyOf/oneOf are unsatisfiable and must be stripped
+		// instead of leaking raw boolean false into protobuf Schema anyOf.
+		falseSingleBranch := `{"type":"object","properties":{"value":{"anyOf":[false,{"type":"string"}]}}}`
+		expectedFalseSingle := `{"type":"object","properties":{"value":{"type":"string"}}}`
+		compareJSON(t, expectedFalseSingle, CleanJSONSchemaForAntigravity(falseSingleBranch))
+
+		falseMultiBranch := `{"type":"object","properties":{"value":{"oneOf":[false,{"type":"string"},{"type":"integer"}]}}}`
+		expectedFalseMulti := `{"type":"object","properties":{"value":{"anyOf":[{"type":"string"},{"type":"integer"}]}}}`
+		compareJSON(t, expectedFalseMulti, CleanJSONSchemaForAntigravity(falseMultiBranch))
+
+		// Boolean true subschema branch in anyOf/oneOf is normalized to an unconstrained {} branch and preserved.
+		trueMultiBranch := `{"type":"object","properties":{"value":{"anyOf":[true,{"type":"string"},{"type":"integer"}]}}}`
+		expectedTrueMulti := `{"type":"object","properties":{"value":{"anyOf":[{},{"type":"string"},{"type":"integer"}]}}}`
+		compareJSON(t, expectedTrueMulti, CleanJSONSchemaForAntigravityTool(trueMultiBranch, false))
+
+		// When a node declares both anyOf and oneOf, native Schema carriers keep anyOf without concatenating
+		// oneOf into it and record oneOf as a description hint, while GeminiJSONSchema preserves both.
+		siblingUnions := `{
+			"type": "object",
+			"properties": {
+				"value": {
+					"anyOf": [
+						{ "type": "string" },
+						{ "type": "integer" }
+					],
+					"oneOf": [
+						{ "type": "string" },
+						{ "type": "boolean" }
+					]
+				}
+			}
+		}`
+		for name, clean := range map[string]func(string) string{
+			"Antigravity":         CleanJSONSchemaForAntigravity,
+			"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+			"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+			"Gemini":              CleanJSONSchemaForGemini,
+		} {
+			parsed := gjson.Parse(clean(siblingUnions))
+			if parsed.Get("properties.value.oneOf").Exists() {
+				t.Fatalf("[%s] sibling oneOf survived on native Schema carrier: %s", name, parsed.Raw)
+			}
+			if got := len(parsed.Get("properties.value.anyOf").Array()); got != 2 {
+				t.Fatalf("[%s] anyOf branch count = %d, want 2 (must not concatenate oneOf): %s", name, got, parsed.Raw)
+			}
+			if !strings.Contains(parsed.Get("properties.value.description").String(), "oneOf:") {
+				t.Fatalf("[%s] missing oneOf description hint: %s", name, parsed.Raw)
+			}
+		}
+
+		jsonSchemaSibling := gjson.Parse(CleanJSONSchemaForGeminiJSONSchema(siblingUnions))
+		if len(jsonSchemaSibling.Get("properties.value.anyOf").Array()) != 2 || len(jsonSchemaSibling.Get("properties.value.oneOf").Array()) != 2 {
+			t.Fatalf("[GeminiJSONSchema] expected both anyOf and oneOf to be preserved: %s", jsonSchemaSibling.Raw)
+		}
+
+		// Issue 3662 regression: only the Antigravity Claude tool cleaner flattens the
+		// multi-branch unions that every other cleaner above preserves, because only the
+		// Antigravity Claude backend is known to reject nested multi-branch unions when
+		// it converts function declarations to Claude custom.input_schema.
+		t.Run("AntigravityClaudeToolFlattensNestedUnions", func(t *testing.T) {
+			flattened := gjson.Parse(CleanJSONSchemaForAntigravityClaudeTool(input, false))
+			item := flattened.Get("properties.item")
+			if item.Get("anyOf").Exists() || item.Get("oneOf").Exists() {
+				t.Fatalf("Antigravity Claude tool union survived cleaning: %s", flattened.Raw)
+			}
+			if got := item.Get("type").String(); got != "object" {
+				t.Fatalf("Antigravity Claude flattened item type = %q, want object (strongest branch): %s", got, flattened.Raw)
+			}
+			if !item.Get("properties.image").Exists() {
+				t.Fatalf("Antigravity Claude flattened item lost the first object branch: %s", flattened.Raw)
+			}
+			if desc := item.Get("description").String(); !strings.Contains(desc, "Accepts:") || !strings.Contains(desc, "string") {
+				t.Fatalf("Antigravity Claude flattened item lost the dropped-branch hint: %s", flattened.Raw)
+			}
+
+			// Idempotency matters on the Antigravity path: translators clean the schema
+			// once, then the executor cleans it again before sending it upstream.
+			flattenedTwice := CleanJSONSchemaForAntigravityClaudeTool(flattened.Raw, false)
+			compareJSON(t, flattened.Raw, flattenedTwice)
+
+			// Double-cleaning across the canonical translator -> executor chain must
+			// keep the flattened Claude shape unchanged on the second pass.
+			recleaned := CleanJSONSchemaForAntigravityClaudeTool(CleanJSONSchemaForAntigravity(input), false)
+			compareJSON(t, flattened.Raw, recleaned)
+			compareJSON(t, flattened.Raw, CleanJSONSchemaForAntigravity(flattened.Raw))
+
+			// Nullable multi-branch unions must keep nullability through the whole
+			// translator -> executor chain: the union-preserving first pass strips the
+			// null branch and marks the parent nullable:true, so the flattening second
+			// pass must inherit that marker instead of silently dropping it.
+			nullableUnionInput := `{"type":"object","properties":{"value":{"anyOf":[{"type":"string"},{"type":"integer"},{"type":"null"}]}}}`
+			directFlattened := CleanJSONSchemaForAntigravityClaudeTool(nullableUnionInput, false)
+			directValue := gjson.Parse(directFlattened).Get("properties.value")
+			if !directValue.Get("nullable").Bool() || directValue.Get("type").String() != "string" {
+				t.Fatalf("direct Claude flattening lost nullability: %s", directFlattened)
+			}
+			chainedFlattened := CleanJSONSchemaForAntigravityClaudeTool(CleanJSONSchemaForAntigravity(nullableUnionInput), false)
+			chainedValue := gjson.Parse(chainedFlattened).Get("properties.value")
+			if !chainedValue.Get("nullable").Bool() || chainedValue.Get("type").String() != "string" || chainedValue.Get("anyOf").Exists() {
+				t.Fatalf("translator -> executor chain lost nullability while flattening: %s", chainedFlattened)
+			}
+			compareJSON(t, chainedFlattened, CleanJSONSchemaForAntigravityClaudeTool(chainedFlattened, false))
+
+			// Boolean subschema branches must not leak raw booleans or unions into the
+			// flattened output: true normalizes away, false is unstisfiable and dropped.
+			trueBranch := `{"type":"object","properties":{"value":{"anyOf":[true,{"type":"string"},{"type":"integer"}]}}}`
+			compareJSON(t, `{"type":"object","properties":{"value":{"type":"string","description":"Accepts: string | integer"}}}`, CleanJSONSchemaForAntigravityClaudeTool(trueBranch, false))
+			falseBranch := `{"type":"object","properties":{"value":{"oneOf":[false,{"type":"string"},{"type":"integer"}]}}}`
+			compareJSON(t, `{"type":"object","properties":{"value":{"type":"string","description":"Accepts: string | integer"}}}`, CleanJSONSchemaForAntigravityClaudeTool(falseBranch, false))
+
+			// Sibling anyOf + oneOf on one node: both are flattened and neither raw union
+			// JSON leaks into the description (paths are processed oneOf-first, so the
+			// oneOf branch set wins the single remaining node).
+			siblingClaude := gjson.Parse(CleanJSONSchemaForAntigravityClaudeTool(siblingUnions, false))
+			siblingValue := siblingClaude.Get("properties.value")
+			if siblingValue.Get("anyOf").Exists() || siblingValue.Get("oneOf").Exists() {
+				t.Fatalf("Antigravity Claude sibling union survived cleaning: %s", siblingClaude.Raw)
+			}
+			compareJSON(t, `{"type":"string","description":"Accepts: string | boolean"}`, siblingValue.Raw)
+			compareJSON(t, siblingClaude.Raw, CleanJSONSchemaForAntigravityClaudeTool(siblingClaude.Raw, false))
+		})
+
+		// Null-only unions (anyOf:[null], oneOf:[null], anyOf:[false, null]) must not panic across any cleaner.
+		nullOnlyCleaners := map[string]func(string) string{
+			"Antigravity":           CleanJSONSchemaForAntigravity,
+			"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+			"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, false) },
+			"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+			"Gemini":                CleanJSONSchemaForGemini,
+			"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
+		}
+		for _, nullOnlyInput := range []string{
+			`{"type":"object","properties":{"value":{"anyOf":[{"type":"null"}]}}}`,
+			`{"type":"object","properties":{"value":{"oneOf":[{"type":"null"},{"type":"null"}]}}}`,
+			`{"type":"object","properties":{"value":{"anyOf":[false,{"type":"null"}],"description":"Null only"}}}`,
+		} {
+			for name, clean := range nullOnlyCleaners {
+				got := clean(nullOnlyInput)
+				if !gjson.Valid(got) {
+					t.Fatalf("[%s] invalid JSON for null-only union %s: %s", name, nullOnlyInput, got)
+				}
+				if gjson.Get(got, "properties.value.type").String() != "null" {
+					t.Fatalf("[%s] expected properties.value.type = null, got: %s", name, got)
+				}
+			}
+		}
+	})
+}
+
+// TestCleanJSONSchema_RemovesDiscriminatorKeyword_Issue6639 covers Issue #6639:
+// OpenAPI/JSON Schema keyword "discriminator" alongside preserved anyOf/oneOf unions
+// (both directly on a property schema and inside array items) or on object schemas
+// is rejected by the Gemini/Antigravity backend with 400 INVALID_ARGUMENT
+// ("Unknown name \"discriminator\" ... Cannot find field") and must be stripped while
+// preserving legitimate tool properties named "discriminator".
+func TestCleanJSONSchema_RemovesDiscriminatorKeyword_Issue6639(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"target": {
+				"anyOf": [
+					{"type": "object", "properties": {"kind": {"const": "a"}, "url": {"type": "string"}}},
+					{"type": "object", "properties": {"kind": {"const": "b"}, "path": {"type": "string"}}}
+				],
+				"discriminator": {"propertyName": "kind"}
+			},
+			"deliverables": {
+				"type": "array",
+				"items": {
+					"anyOf": [
+						{"type": "object", "properties": {"kind": {"const": "file"}, "path": {"type": "string"}}},
+						{"type": "object", "properties": {"kind": {"const": "link"}, "url": {"type": "string"}}}
+					],
+					"discriminator": {"propertyName": "kind"}
+				}
+			},
+			"polymorphicObject": {
+				"type": "object",
+				"properties": {
+					"kind": {"type": "string"}
+				},
+				"oneOf": [
+					{"properties": {"a": {"type": "string"}}},
+					{"properties": {"b": {"type": "number"}}}
+				],
+				"discriminator": {
+					"propertyName": "kind",
+					"mapping": {"a": "#/definitions/A", "b": "#/definitions/B"}
+				}
+			},
+			"discriminator": {
+				"type": "string",
+				"description": "Legitimate property named discriminator"
+			},
+			"nestedDiscriminatorProp": {
+				"type": "object",
+				"properties": {
+					"discriminator": {
+						"type": "object",
+						"properties": {
+							"kind": {"type": "string"}
+						},
+						"discriminator": {"propertyName": "kind"}
+					}
+				}
+			}
+		},
+		"discriminator": {"propertyName": "target"}
+	}`
+
+	cleaners := map[string]func(string) string{
+		"Antigravity":           CleanJSONSchemaForAntigravity,
+		"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, false) },
+		"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+		"Gemini":                CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			parsed := gjson.Parse(got)
+
+			for _, forbiddenPath := range []string{
+				"discriminator",
+				"properties.target.discriminator",
+				"properties.deliverables.items.discriminator",
+				"properties.polymorphicObject.discriminator",
+				"properties.nestedDiscriminatorProp.properties.discriminator.discriminator",
+			} {
+				if parsed.Get(forbiddenPath).Exists() {
+					t.Errorf("[%s] %s was not removed: %s", name, forbiddenPath, got)
+				}
+			}
+
+			if name != "AntigravityClaudeTool" {
+				if gotBranches := len(parsed.Get("properties.target.anyOf").Array()); gotBranches != 2 {
+					t.Errorf("[%s] properties.target.anyOf branch count = %d, want 2: %s", name, gotBranches, got)
+				}
+				if gotBranches := len(parsed.Get("properties.deliverables.items.anyOf").Array()); gotBranches != 2 {
+					t.Errorf("[%s] properties.deliverables.items.anyOf branch count = %d, want 2: %s", name, gotBranches, got)
+				}
+			}
+
+			if !parsed.Get("properties.discriminator").Exists() {
+				t.Errorf("[%s] legitimate property \"discriminator\" was removed: %s", name, got)
+			}
+			if !parsed.Get("properties.nestedDiscriminatorProp.properties.discriminator.properties.kind").Exists() {
+				t.Errorf("[%s] legitimate nested property \"discriminator\" was removed: %s", name, got)
+			}
+		})
+	}
+}
+
+// TestCleanJSONSchema_RemovesContentMediaTypeKeyword_Issue6699 covers Issue #6699:
+// JSON Schema Content Vocabulary annotations ("contentMediaType" and "contentEncoding")
+// inside nested anyOf/oneOf branches, on property schemas, or at the schema root are
+// rejected by the Gemini/Antigravity backend with 400 INVALID_ARGUMENT
+// ("Unknown name \"contentMediaType\" ... Cannot find field") and must be stripped
+// while preserving the anyOf branches and any legitimate property named
+// "contentMediaType" or "contentEncoding".
+func TestCleanJSONSchema_RemovesContentMediaTypeKeyword_Issue6699(t *testing.T) {
+	input := `{
+		"type": "object",
+		"contentMediaType": "application/json",
+		"contentEncoding": "utf-8",
+		"properties": {
+			"value": {
+				"anyOf": [
+					{ "type": "object", "properties": {} },
+					{ "type": "string", "contentMediaType": "application/json", "contentEncoding": "base64" }
+				]
+			},
+			"directPayload": {
+				"type": "string",
+				"contentMediaType": "application/json",
+				"contentEncoding": "base64"
+			},
+			"contentMediaType": {
+				"type": "string",
+				"contentMediaType": "text/plain",
+				"description": "Legitimate property named contentMediaType"
+			},
+			"contentEncoding": {
+				"type": "string",
+				"contentEncoding": "base64",
+				"description": "Legitimate property named contentEncoding"
+			}
+		}
+	}`
+
+	cleaners := map[string]func(string) string{
+		"Antigravity":           CleanJSONSchemaForAntigravity,
+		"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, false) },
+		"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+		"Gemini":                CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			parsed := gjson.Parse(got)
+
+			for _, forbiddenPath := range []string{
+				"contentMediaType",
+				"contentEncoding",
+				"properties.value.anyOf.1.contentMediaType",
+				"properties.value.anyOf.1.contentEncoding",
+				"properties.directPayload.contentMediaType",
+				"properties.directPayload.contentEncoding",
+				"properties.contentMediaType.contentMediaType",
+				"properties.contentEncoding.contentEncoding",
+			} {
+				if parsed.Get(forbiddenPath).Exists() {
+					t.Errorf("[%s] %s was not removed: %s", name, forbiddenPath, got)
+				}
+			}
+
+			if name != "AntigravityClaudeTool" {
+				if gotBranches := len(parsed.Get("properties.value.anyOf").Array()); gotBranches != 2 {
+					t.Errorf("[%s] properties.value.anyOf branch count = %d, want 2: %s", name, gotBranches, got)
+				}
+				if gotType := parsed.Get("properties.value.anyOf.1.type").String(); gotType != "string" {
+					t.Errorf("[%s] properties.value.anyOf.1.type = %q, want \"string\": %s", name, gotType, got)
+				}
+			}
+
+			if !parsed.Get("properties.contentMediaType").Exists() {
+				t.Errorf("[%s] legitimate property \"contentMediaType\" was removed: %s", name, got)
+			}
+			if !parsed.Get("properties.contentEncoding").Exists() {
+				t.Errorf("[%s] legitimate property \"contentEncoding\" was removed: %s", name, got)
+			}
+		})
+	}
+}
+
+// TestIssue6732_GeminiCleanersInlineLocalDefs verifies that the Gemini cleaners expand local
+// $defs references before the definition container is stripped, so nested fields survive.
+func TestIssue6732_GeminiCleanersInlineLocalDefs(t *testing.T) {
+	input := `{"type":"object","properties":{"person":{"$ref":"#/$defs/Person"}},"required":["person"],"$defs":{"Person":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}`
+
+	for name, clean := range map[string]func(string) string{
+		"gemini":           CleanJSONSchemaForGemini,
+		"geminiJSONSchema": CleanJSONSchemaForGeminiJSONSchema,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		if gotType := parsed.Get("properties.person.properties.name.type").String(); gotType != "string" {
+			t.Errorf("%s: inlined properties.person.properties.name.type = %q, want %q: %s", name, gotType, "string", got)
+		}
+		if parsed.Get("$defs").Exists() {
+			t.Errorf("%s: $defs should be removed after inlining: %s", name, got)
+		}
+		if strings.Contains(got, "See: Person") {
+			t.Errorf("%s: resolvable local ref degraded to a hint: %s", name, got)
+		}
+	}
+}
+
+// TestIssue6732_GeminiCleanersInlinePropertyReuse verifies that a Zod-style #/properties/...
+// reference is expanded by the Gemini cleaners instead of becoming a description hint.
+func TestIssue6732_GeminiCleanersInlinePropertyReuse(t *testing.T) {
+	input := `{"type":"object","properties":{"billing":{"type":"object","properties":{"zip":{"type":"string"}}},"shipping":{"$ref":"#/properties/billing"}}}`
+
+	for name, clean := range map[string]func(string) string{
+		"gemini":           CleanJSONSchemaForGemini,
+		"geminiJSONSchema": CleanJSONSchemaForGeminiJSONSchema,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		if gotType := parsed.Get("properties.shipping.properties.zip.type").String(); gotType != "string" {
+			t.Errorf("%s: properties.shipping.properties.zip.type = %q, want %q: %s", name, gotType, "string", got)
+		}
+	}
+}
+
+// TestIssue6732_GeminiCleanersReuseSameDefinitionTwice verifies that two properties referencing
+// the same definition both keep the referenced fields; bounding expansion must not degrade
+// ordinary reuse of a shared definition to a hint.
+func TestIssue6732_GeminiCleanersReuseSameDefinitionTwice(t *testing.T) {
+	input := `{"type":"object","properties":{"billing":{"$ref":"#/$defs/Address"},"shipping":{"$ref":"#/$defs/Address"}},"$defs":{"Address":{"type":"object","properties":{"zip":{"type":"string"}}}}}`
+
+	for name, clean := range map[string]func(string) string{
+		"gemini":           CleanJSONSchemaForGemini,
+		"geminiJSONSchema": CleanJSONSchemaForGeminiJSONSchema,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		for _, field := range []string{"billing", "shipping"} {
+			if gotType := parsed.Get("properties." + field + ".properties.zip.type").String(); gotType != "string" {
+				t.Errorf("%s: properties.%s.properties.zip.type = %q, want %q: %s", name, field, gotType, "string", got)
+			}
+		}
+	}
+}
+
+// TestIssue6732_WrappedSchemaResolvesAgainstInnerRoot verifies that a schema wrapped in the
+// single-key {"schema": ...} carrier used by the Antigravity executor resolves local refs
+// against the inner schema rather than the carrier.
+func TestIssue6732_WrappedSchemaResolvesAgainstInnerRoot(t *testing.T) {
+	inner := `{"type":"object","properties":{"person":{"$ref":"#/$defs/Person"}},"required":["person"],"$defs":{"Person":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}`
+	wrapped := `{"schema":` + inner + `}`
+
+	got := CleanJSONSchemaForAntigravityTool(wrapped, false)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get("schema.properties.person.properties.name.type").String(); gotType != "string" {
+		t.Errorf("wrapped schema.properties.person.properties.name.type = %q, want %q: %s", gotType, "string", got)
+	}
+	if parsed.Get("schema.$defs").Exists() {
+		t.Errorf("wrapped $defs should be removed after inlining: %s", got)
+	}
+	if strings.Contains(got, "See: Person") {
+		t.Errorf("wrapped resolvable local ref degraded to a hint: %s", got)
+	}
+}
+
+// TestIssue6732_DefaultLiteralPreservedOnJSONSchemaRoute verifies that the parametersJsonSchema
+// route forwards default values verbatim even when they contain schema-looking keys.
+func TestIssue6732_DefaultLiteralPreservedOnJSONSchemaRoute(t *testing.T) {
+	input := `{"type":"object","properties":{"report":{"type":"object","default":{"title":"Report","format":"pdf","id":7,"x-owner":"ops"}}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	def := gjson.Parse(got).Get("properties.report.default")
+	if !def.Exists() {
+		t.Fatalf("default literal missing: %s", got)
+	}
+	if def.Get("title").String() != "Report" || def.Get("format").String() != "pdf" || def.Get("id").Int() != 7 || def.Get("x-owner").String() != "ops" {
+		t.Errorf("default literal was rewritten, got %s: %s", def.Raw, got)
+	}
+}
+
+// TestIssue6732_ExampleLiteralsPreserved verifies that example/examples values keep
+// schema-looking keys on the parametersJsonSchema route.
+func TestIssue6732_ExampleLiteralsPreserved(t *testing.T) {
+	input := `{"type":"object","properties":{"a":{"type":"string","example":{"title":"Hi","x-owner":"ops","id":3},"examples":[{"title":"Hi2","x-owner":"ops","id":4}]}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+	example := parsed.Get("properties.a.example")
+	if example.Get("title").String() != "Hi" || example.Get("x-owner").String() != "ops" || example.Get("id").Int() != 3 {
+		t.Errorf("example literal was rewritten, got %s: %s", example.Raw, got)
+	}
+	exampleItem := parsed.Get("properties.a.examples.0")
+	if exampleItem.Get("title").String() != "Hi2" || exampleItem.Get("x-owner").String() != "ops" || exampleItem.Get("id").Int() != 4 {
+		t.Errorf("examples literal was rewritten, got %s: %s", exampleItem.Raw, got)
+	}
+}
+
+// TestIssue6732_InlineLocalRefsLeavesLiteralRefs verifies that the inliner does not resolve
+// {"$ref": ...} objects that appear as client data inside a default value.
+func TestIssue6732_InlineLocalRefsLeavesLiteralRefs(t *testing.T) {
+	input := `{"type":"object","properties":{"a":{"type":"object","default":{"$ref":"#/$defs/Person"}}},"$defs":{"Person":{"type":"object","properties":{"name":{"type":"string"}}}}}`
+
+	got := InlineLocalRefs(input)
+	parsed := gjson.Parse(got)
+	if ref := parsed.Get("properties.a.default.$ref").String(); ref != "#/$defs/Person" {
+		t.Errorf("literal $ref inside default = %q, want it preserved verbatim: %s", ref, got)
+	}
+	if parsed.Get("properties.a.default.properties").Exists() {
+		t.Errorf("literal $ref inside default was expanded: %s", got)
+	}
+	if !parsed.Get("$defs.Person.properties.name").Exists() {
+		t.Errorf("InlineLocalRefs must not strip definitions: %s", got)
+	}
+}
+
+// TestIssue6732_PropertiesNamedDefaultAndTypeRemainSchemas verifies that properties literally
+// named "default" and "type" keep their schema semantics: their own keywords are still cleaned
+// and their own $ref is still inlined.
+func TestIssue6732_PropertiesNamedDefaultAndTypeRemainSchemas(t *testing.T) {
+	input := `{"type":"object","properties":{"default":{"$ref":"#/$defs/Person"},"type":{"type":"string","title":"Kind"}},"$defs":{"Person":{"type":"object","properties":{"name":{"type":"string"}}}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get("properties.default.properties.name.type").String(); gotType != "string" {
+		t.Errorf("property named \"default\" ref was not inlined, name type = %q: %s", gotType, got)
+	}
+	if parsed.Get("properties.type.title").Exists() {
+		t.Errorf("property named \"type\" schema title should still be cleaned: %s", got)
+	}
+}
+
+// TestIssue6732_ExpansionBudgetBoundsSharedDefs verifies that inlining a schema whose shared
+// definitions fan out exponentially stays bounded instead of expanding without limit, while the
+// affordable outer levels are still expanded.
+func TestIssue6732_ExpansionBudgetBoundsSharedDefs(t *testing.T) {
+	input := geminiSchemaDiamondInput()
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	if len(got) >= 512*1024 {
+		t.Errorf("diamond schema output = %d bytes, want < %d (input %d bytes)", len(got), 512*1024, len(input))
+	}
+	parsed := gjson.Parse(got)
+	if !parsed.Get("properties.leaf").Exists() {
+		t.Errorf("diamond schema lost the top-level property: %s", got)
+	}
+	if !parsed.Get("properties.leaf.properties.a.properties.a").Exists() {
+		t.Errorf("diamond schema outer levels should still be expanded: %s", got)
+	}
+	if parsed.Get("$defs").Exists() {
+		t.Errorf("diamond schema should not retain $defs: %s", got)
+	}
+}
+
+// TestIssue6732_UnusedDefinitionsDoNotConsumeExpansionBudget verifies that definitions the
+// cleaners are about to delete anyway neither consume the expansion budget nor make the kept
+// fields depend on map iteration order.
+func TestIssue6732_UnusedDefinitionsDoNotConsumeExpansionBudget(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"type":"object","properties":{"person":{"$ref":"#/$defs/Person"}},"required":["person"],"$defs":{"leaf0":{"type":"string","description":"leaf leaf leaf leaf leaf leaf leaf leaf leaf leaf"},"Person":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`)
+	for i := range 13 {
+		target := "leaf0"
+		if i > 0 {
+			target = "D" + strconv.Itoa(i-1)
+		}
+		sb.WriteString(`,"D` + strconv.Itoa(i) + `":{"type":"object","properties":{"a":{"$ref":"#/$defs/` + target + `"},"b":{"$ref":"#/$defs/` + target + `"}}}`)
+	}
+	sb.WriteString(`}}`)
+	input := sb.String()
+
+	first := CleanJSONSchemaForGeminiJSONSchema(input)
+	for run := range 30 {
+		got := CleanJSONSchemaForGeminiJSONSchema(input)
+		if got != first {
+			t.Fatalf("run %d: output is not deterministic:\nfirst: %s\ngot:   %s", run, first, got)
+		}
+		parsed := gjson.Parse(got)
+		if gotType := parsed.Get("properties.person.properties.name.type").String(); gotType != "string" {
+			t.Fatalf("run %d: used definition was not inlined, name type = %q: %s", run, gotType, got)
+		}
+		if parsed.Get("$defs").Exists() {
+			t.Fatalf("run %d: $defs should be removed: %s", run, got)
+		}
+	}
+}
+
+// TestIssue6732_BudgetFallbackDoesNotCopyLargeDescriptions verifies that references degraded by
+// the expansion budget do not each copy a large target description, which would defeat the bound.
+func TestIssue6732_BudgetFallbackDoesNotCopyLargeDescriptions(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"type":"object","properties":{`)
+	for i := range 200 {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(`"p` + strconv.Itoa(i) + `":{"$ref":"#/$defs/Big"}`)
+	}
+	sb.WriteString(`},"$defs":{"Big":{"type":"object","description":"` + strings.Repeat("x", 32*1024) + `","properties":{"name":{"type":"string"}}}}}`)
+
+	got := CleanJSONSchemaForGeminiJSONSchema(sb.String())
+	if len(got) >= 512*1024 {
+		t.Errorf("shared large-description output = %d bytes, want < %d", len(got), 512*1024)
+	}
+	parsed := gjson.Parse(got)
+	if !parsed.Get("properties.p0").Exists() || !parsed.Get("properties.p199").Exists() {
+		t.Errorf("shared large-description schema lost properties: %s", got)
+	}
+	if gotType := parsed.Get("properties.p0.properties.name.type").String(); gotType != "string" {
+		t.Errorf("first affordable expansion should keep its fields, name type = %q: %s", gotType, got)
+	}
+	if parsed.Get("$defs").Exists() {
+		t.Errorf("$defs should be removed: %s", got)
+	}
+}
+
+// TestIssue6732_NestedUnusedDefinitionsGraphDoesNotConsumeBudget verifies that a self-contained
+// reference graph inside a nested definitions container (which cleaning deletes at every level)
+// neither spends the expansion budget nor starves kept fields.
+func TestIssue6732_NestedUnusedDefinitionsGraphDoesNotConsumeBudget(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"type":"object","properties":{"person":{"$ref":"#/$defs/Person"},"a":{"type":"object","$defs":{"Leaf":{"type":"string","description":"` + strings.Repeat("x", 1024) + `"}`)
+	for i := range 256 {
+		sb.WriteString(`,"U` + strconv.Itoa(i) + `":{"$ref":"#/properties/a/$defs/Leaf"}`)
+	}
+	sb.WriteString(`}}},"required":["person"],"$defs":{"Person":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}`)
+
+	got := CleanJSONSchemaForGeminiJSONSchema(sb.String())
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get("properties.person.properties.name.type").String(); gotType != "string" {
+		t.Errorf("nested unused definitions starved the kept field, name type = %q: %s", gotType, got)
+	}
+	if parsed.Get("properties.a.$defs").Exists() || parsed.Get("$defs").Exists() {
+		t.Errorf("nested and root $defs should be removed: %s", got)
+	}
+}
+
+// TestIssue6732_RefSiblingNameMapReferencesStillExpand verifies that references inside a $ref
+// node's own name-map siblings expand when the reference target itself expands.
+func TestIssue6732_RefSiblingNameMapReferencesStillExpand(t *testing.T) {
+	input := `{"type":"object","properties":{"a":{"$ref":"#/$defs/Base","properties":{"x":{"$ref":"#/$defs/S"}}}},"$defs":{"Base":{"type":"object"},"S":{"type":"string"}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get("properties.a.properties.x.type").String(); gotType != "string" {
+		t.Errorf("ref sibling name-map reference lost its type, got %q: %s", gotType, got)
+	}
+}
+
+// TestIssue6732_CleanInliningStripsDefinitionsFromIntermediate verifies that the cleaning
+// inliner's intermediate output does not serialize definition containers (root or carried inside
+// expanded targets), so repeated references to a target holding a huge unused definitions block
+// cannot multiply that block in the intermediate JSON.
+func TestIssue6732_CleanInliningStripsDefinitionsFromIntermediate(t *testing.T) {
+	person := `{"type":"object","properties":{"name":{"type":"string"}},"$defs":{"Unused":{"type":"string","description":"` + strings.Repeat("x", 280*1024) + `"}}}`
+	input := `{"type":"object","properties":{"p0":{"$ref":"#/$defs/Person"},"p1":{"$ref":"#/$defs/Person"}},"$defs":{"Person":` + person + `}}`
+
+	got := inlineLocalRefsForClean(input)
+	if len(got) >= 64*1024 {
+		t.Errorf("clean inlining intermediate = %d bytes, want < %d", len(got), 64*1024)
+	}
+	parsed := gjson.Parse(got)
+	if parsed.Get("$defs").Exists() {
+		t.Errorf("intermediate should not carry root $defs: %s", got)
+	}
+	if parsed.Get("properties.p0.$defs").Exists() {
+		t.Errorf("intermediate should not carry target-nested $defs: %s", got)
+	}
+	if gotType := parsed.Get("properties.p1.properties.name.type").String(); gotType != "string" {
+		t.Errorf("second expansion lost its fields, name type = %q: %s", gotType, got)
+	}
+}
+
+// TestIssue6732_ArrayRefWithExplicitTypeKeepsTargetItems verifies that the placeholder items
+// Phase 0 adds to a typed but unresolved $ref node does not clobber the items of the referenced
+// definition during inlining.
+func TestIssue6732_ArrayRefWithExplicitTypeKeepsTargetItems(t *testing.T) {
+	input := `{"type":"object","properties":{"rows":{"type":"array","$ref":"#/$defs/Rows"}},"$defs":{"Rows":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"}}}}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get("properties.rows.items.properties.name.type").String(); gotType != "string" {
+		t.Errorf("array ref target items were clobbered, name type = %q: %s", gotType, got)
+	}
+}
+
+// TestIssue6732_BudgetFallbackStillResolvesSiblings verifies that when a reference target is too
+// large to expand, sibling subschemas on the same node are still resolved instead of being copied
+// verbatim with their own references left dangling.
+func TestIssue6732_BudgetFallbackStillResolvesSiblings(t *testing.T) {
+	input := `{"type":"object","properties":{"a":{"$ref":"#/$defs/Big","properties":{"x":{"$ref":"#/$defs/S"}}}},"$defs":{"Big":{"type":"object","description":"` + strings.Repeat("x", 280*1024) + `"},"S":{"type":"string"}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get("properties.a.properties.x.type").String(); gotType != "string" {
+		t.Errorf("sibling reference after budget fallback lost its type, got %q: %s", gotType, got)
+	}
+	if strings.Contains(got, `"$ref"`) {
+		t.Errorf("cleaned schema left a dangling reference: %s", got)
+	}
+}
+
+// TestIssue6732_InlineLocalRefsDefinitionNamesKeepSchemaSemantics verifies that definitions whose
+// names look like schema keywords are treated as schemas by the public inliner: a definition named
+// "properties" keeps its literal default intact, and a definition named "default" still expands.
+func TestIssue6732_InlineLocalRefsDefinitionNamesKeepSchemaSemantics(t *testing.T) {
+	input := `{"$defs":{"S":{"type":"string"},"properties":{"type":"object","default":{"$ref":"#/$defs/S"}},"default":{"type":"object","properties":{"x":{"$ref":"#/$defs/S"}}}}}`
+
+	got := InlineLocalRefs(input)
+	parsed := gjson.Parse(got)
+	if ref := parsed.Get("$defs.properties.default.$ref").String(); ref != "#/$defs/S" {
+		t.Errorf("literal default inside definition named \"properties\" was expanded, $ref = %q: %s", ref, got)
+	}
+	if gotType := parsed.Get("$defs.default.properties.x.type").String(); gotType != "string" {
+		t.Errorf("definition named \"default\" was not resolved as a schema, x type = %q: %s", gotType, got)
+	}
+}
+
+// TestIssue6732_TargetNestedDefinitionsExemptFromBudget verifies that unused definitions nested
+// inside a referenced target (which cleaning deletes) do not inflate the target's budget charge.
+func TestIssue6732_TargetNestedDefinitionsExemptFromBudget(t *testing.T) {
+	person := `{"type":"object","properties":{"name":{"type":"string"}},"$defs":{"Unused":{"type":"string","description":"` + strings.Repeat("x", 280*1024) + `"}}}`
+	cases := map[string]string{
+		"propertyRef": `{"type":"object","properties":{"person":{"$ref":"#/$defs/Person"}},"$defs":{"Person":` + person + `}}`,
+		"rootRef":     `{"$ref":"#/$defs/Person","$defs":{"Person":` + person + `}}`,
+	}
+	for caseName, input := range cases {
+		got := CleanJSONSchemaForGeminiJSONSchema(input)
+		parsed := gjson.Parse(got)
+		namePath := "properties.person.properties.name.type"
+		if caseName == "rootRef" {
+			namePath = "properties.name.type"
+		}
+		if gotType := parsed.Get(namePath).String(); gotType != "string" {
+			t.Errorf("%s: %s = %q, want %q: %s", caseName, namePath, gotType, "string", got)
+		}
+		if parsed.Get("$defs").Exists() {
+			t.Errorf("%s: $defs should be removed: %s", caseName, got)
+		}
+	}
+}
+
+// TestIssue6732_ArrayRefWithoutTargetItemsGetsPlaceholder verifies that a typed array whose
+// referenced definition carries no items still ends up with the placeholder items Phase 0 would
+// have added, and that cleaning twice is stable.
+func TestIssue6732_ArrayRefWithoutTargetItemsGetsPlaceholder(t *testing.T) {
+	input := `{"type":"object","properties":{"rows":{"type":"array","$ref":"#/$defs/Common"}},"$defs":{"Common":{"description":"Rows"}}}`
+
+	first := CleanJSONSchemaForAntigravityTool(input, false)
+	parsed := gjson.Parse(first)
+	if gotType := parsed.Get("properties.rows.items.type").String(); gotType != "string" {
+		t.Errorf("array ref without target items missing placeholder items, got %q: %s", gotType, first)
+	}
+	if second := CleanJSONSchemaForAntigravityTool(first, false); second != first {
+		t.Errorf("cleaning is not idempotent for array refs:\nfirst:  %s\nsecond: %s", first, second)
+	}
+}
+
+// TestIssue6732_SmallTargetFanOutStaysBounded verifies that thousands of references to a small
+// target with a near-limit description cannot multiply the description without bound through a
+// mix of expansions and fallback copies.
+func TestIssue6732_SmallTargetFanOutStaysBounded(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"type":"object","properties":{`)
+	for i := range 2000 {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(`"p` + strconv.Itoa(i) + `":{"$ref":"#/$defs/S"}`)
+	}
+	sb.WriteString(`},"$defs":{"S":{"type":"string","description":"` + strings.Repeat("x", 512) + `"}}}`)
+
+	got := CleanJSONSchemaForGeminiJSONSchema(sb.String())
+	if len(got) >= 512*1024 {
+		t.Errorf("small-target fan-out output = %d bytes, want < %d", len(got), 512*1024)
+	}
+}
+
+// TestIssue6732_EscapedDescriptionFanOutStaysBounded verifies that budget accounting covers
+// HTML-escaped string growth during JSON encoding.
+func TestIssue6732_EscapedDescriptionFanOutStaysBounded(t *testing.T) {
+	input := `{"type":"object","properties":{"p0":{"$ref":"#/$defs/Big"},"p1":{"$ref":"#/$defs/Big"},"p2":{"$ref":"#/$defs/Big"},"p3":{"$ref":"#/$defs/Big"},"p4":{"$ref":"#/$defs/Big"},"p5":{"$ref":"#/$defs/Big"},"p6":{"$ref":"#/$defs/Big"},"p7":{"$ref":"#/$defs/Big"}},"$defs":{"Big":{"type":"object","description":"` + strings.Repeat("<", 32*1024) + `","properties":{"name":{"type":"string"}}}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	if len(got) >= 512*1024 {
+		t.Errorf("escaped-description fan-out output = %d bytes, want < %d", len(got), 512*1024)
+	}
+}
+
+// TestIssue6732_DependenciesNameMapKeepsSchemaSemantics verifies that the Draft-07 dependencies
+// container behaves as a name map: a dependency keyed "default" holds a schema whose references
+// still expand in the public inliner.
+func TestIssue6732_DependenciesNameMapKeepsSchemaSemantics(t *testing.T) {
+	input := `{"type":"object","dependencies":{"default":{"properties":{"x":{"$ref":"#/definitions/S"}}}},"definitions":{"S":{"type":"string"}}}`
+
+	got := InlineLocalRefs(input)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get("dependencies.default.properties.x.type").String(); gotType != "string" {
+		t.Errorf("dependency schema named \"default\" was not resolved, x type = %q: %s", gotType, got)
+	}
+	if parsed.Get("dependencies.default.properties.x.$ref").Exists() {
+		t.Errorf("dependency schema reference was left dangling: %s", got)
+	}
+}
+
+// TestIssue6732_OmittedFallbackDescriptionNotCharged verifies that a target description the
+// fallback omits (because it exceeds the copy limit) is not charged to the expansion budget, so
+// a following small reference still expands.
+func TestIssue6732_OmittedFallbackDescriptionNotCharged(t *testing.T) {
+	input := `{"type":"object","properties":{"a":{"$ref":"#/$defs/A"},"b":{"$ref":"#/$defs/B"}},"$defs":{"A":{"type":"string","description":"` + strings.Repeat("x", 262142) + `"},"B":{"type":"object","properties":{"name":{"type":"string"}}}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get("properties.b.properties.name.type").String(); gotType != "string" {
+		t.Errorf("small reference after omitted fallback description lost its fields, name type = %q: %s", gotType, got)
+	}
+}
+
+// TestIssue6732_SynthesizedTypeDoesNotOverrideRefTarget verifies that the type Phase 0 would
+// infer from a ref node's sibling items does not clobber the referenced definition's object
+// type, and that cleaning the result again is stable.
+func TestIssue6732_SynthesizedTypeDoesNotOverrideRefTarget(t *testing.T) {
+	input := `{"$ref":"#/$defs/O","items":{"type":"integer"},"$defs":{"O":{"type":"object","properties":{"x":{"type":"string"}}}}}`
+
+	first := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(first)
+	if gotType := parsed.Get("type").String(); gotType != "object" {
+		t.Errorf("root ref target type = %q, want %q: %s", gotType, "object", first)
+	}
+	if parsed.Get("items").Exists() {
+		t.Errorf("object schema should not carry items: %s", first)
+	}
+	if gotType := parsed.Get("properties.x.type").String(); gotType != "string" {
+		t.Errorf("target property lost its type, got %q: %s", gotType, first)
+	}
+	if second := CleanJSONSchemaForGeminiJSONSchema(first); second != first {
+		t.Errorf("cleaning is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
+	}
+}
+
+// TestIssue6732_PropertyNamedRefRemainsProperty verifies that a property literally named "$ref"
+// is treated as a property, not as a reference keyword, by the cleaner.
+func TestIssue6732_PropertyNamedRefRemainsProperty(t *testing.T) {
+	input := `{"type":"object","properties":{"$ref":{"type":"string"}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get(`properties.\$ref.type`).String(); gotType != "string" {
+		t.Errorf("property named $ref lost its schema, type = %q: %s", gotType, got)
+	}
+	if strings.Contains(got, "See:") {
+		t.Errorf("property named $ref was converted into a hint: %s", got)
+	}
+}
+
+// TestIssue6732_PropertyNamedConstRemainsProperty verifies that a property literally named
+// "const" holding a schema object is not converted into an enum constraint on its parent.
+func TestIssue6732_PropertyNamedConstRemainsProperty(t *testing.T) {
+	input := `{"type":"object","properties":{"const":{"type":"string"}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+	if gotType := parsed.Get(`properties.const.type`).String(); gotType != "string" {
+		t.Errorf("property named const lost its schema, type = %q: %s", gotType, got)
+	}
+	if parsed.Get("enum").Exists() {
+		t.Errorf("property named const fabricates a root enum: %s", got)
+	}
+}
+
+// geminiSchemaDiamondInput builds a schema referencing D12, where each Di is an object with two
+// properties referencing Di-1 and D0 references a leaf definition twice. Fully expanding it
+// produces 2^13 leaf copies.
+func geminiSchemaDiamondInput() string {
+	var sb strings.Builder
+	sb.WriteString(`{"type":"object","properties":{"leaf":{"$ref":"#/$defs/D12"}},"$defs":{"leaf0":{"type":"string","description":"leaf leaf leaf leaf leaf leaf leaf leaf leaf leaf"}`)
+	for i := range 13 {
+		target := "leaf0"
+		if i > 0 {
+			target = "D" + strconv.Itoa(i-1)
+		}
+		sb.WriteString(`,"D` + strconv.Itoa(i) + `":{"type":"object","properties":{"a":{"$ref":"#/$defs/` + target + `"},"b":{"$ref":"#/$defs/` + target + `"}}}`)
+	}
+	sb.WriteString(`}}`)
+	return sb.String()
+}
+
+// TestCleanJSONSchema_RemovesReadOnlyWriteOnlyKeywords_Issue6778 covers Issue #6778:
+// JSON Schema annotation keywords "readOnly" and "writeOnly" (common in Google Discovery-derived
+// MCP tools such as Firestore) are rejected by the Gemini/Antigravity backend with 400
+// INVALID_ARGUMENT ("Unknown name \"readOnly\" ... Cannot find field") and must be stripped
+// while preserving legitimate tool properties named "readOnly" or "writeOnly".
+func TestCleanJSONSchema_RemovesReadOnlyWriteOnlyKeywords_Issue6778(t *testing.T) {
+	input := `{
+		"type": "object",
+		"$schema": "http://json-schema.org/draft-04/schema#",
+		"readOnly": false,
+		"writeOnly": false,
+		"properties": {
+			"parent": { "type": "string", "description": "Parent resource name" },
+			"database": {
+				"type": "object",
+				"properties": {
+					"name":       { "type": "string", "description": "Database resource name", "readOnly": true },
+					"uid":        { "type": "string", "readOnly": true },
+					"createTime": { "type": "string", "readOnly": true },
+					"etag":       { "type": "string", "writeOnly": true },
+					"locationId": { "type": "string" }
+				}
+			},
+			"itemsList": {
+				"type": "array",
+				"items": {
+					"type": "string",
+					"readOnly": true,
+					"writeOnly": false
+				}
+			},
+			"unionField": {
+				"anyOf": [
+					{ "type": "string", "readOnly": true },
+					{ "type": "integer", "writeOnly": true }
+				]
+			},
+			"readOnly": {
+				"type": "boolean",
+				"readOnly": true,
+				"description": "Legitimate property named readOnly"
+			},
+			"writeOnly": {
+				"type": "boolean",
+				"writeOnly": true,
+				"description": "Legitimate property named writeOnly"
+			}
+		},
+		"required": ["parent"]
+	}`
+
+	cleaners := map[string]func(string) string{
+		"Antigravity":           CleanJSONSchemaForAntigravity,
+		"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, false) },
+		"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+		"Gemini":                CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			parsed := gjson.Parse(got)
+
+			for _, forbiddenPath := range []string{
+				"readOnly",
+				"writeOnly",
+				"properties.database.properties.name.readOnly",
+				"properties.database.properties.uid.readOnly",
+				"properties.database.properties.createTime.readOnly",
+				"properties.database.properties.etag.writeOnly",
+				"properties.itemsList.items.readOnly",
+				"properties.itemsList.items.writeOnly",
+				"properties.unionField.readOnly",
+				"properties.unionField.writeOnly",
+				"properties.unionField.anyOf.0.readOnly",
+				"properties.unionField.anyOf.1.writeOnly",
+				"properties.readOnly.readOnly",
+				"properties.writeOnly.writeOnly",
+			} {
+				if parsed.Get(forbiddenPath).Exists() {
+					t.Errorf("[%s] %s was not removed: %s", name, forbiddenPath, got)
+				}
+			}
+
+			for _, keptField := range []string{
+				"name",
+				"uid",
+				"createTime",
+				"etag",
+				"locationId",
+			} {
+				if gotType := parsed.Get("properties.database.properties." + keptField + ".type").String(); gotType != "string" {
+					t.Errorf("[%s] properties.database.properties.%s.type = %q, want \"string\": %s", name, keptField, gotType, got)
+				}
+			}
+			if gotDesc := parsed.Get("properties.database.properties.name.description").String(); gotDesc != "Database resource name" {
+				t.Errorf("[%s] properties.database.properties.name.description = %q, want %q: %s", name, gotDesc, "Database resource name", got)
+			}
+
+			if gotType := parsed.Get("properties.readOnly.type").String(); gotType != "boolean" {
+				t.Errorf("[%s] legitimate property \"readOnly\" lost its type (%q): %s", name, gotType, got)
+			}
+			if gotDesc := parsed.Get("properties.readOnly.description").String(); gotDesc != "Legitimate property named readOnly" {
+				t.Errorf("[%s] legitimate property \"readOnly\" lost its description (%q): %s", name, gotDesc, got)
+			}
+			if gotType := parsed.Get("properties.writeOnly.type").String(); gotType != "boolean" {
+				t.Errorf("[%s] legitimate property \"writeOnly\" lost its type (%q): %s", name, gotType, got)
+			}
+			if gotDesc := parsed.Get("properties.writeOnly.description").String(); gotDesc != "Legitimate property named writeOnly" {
+				t.Errorf("[%s] legitimate property \"writeOnly\" lost its description (%q): %s", name, gotDesc, got)
+			}
+		})
+	}
 }

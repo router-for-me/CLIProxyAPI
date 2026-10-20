@@ -75,7 +75,7 @@ type Host struct {
 	runtimeConfig          *config.Config
 	authManager            *coreauth.Manager
 	modelExecutor          modelExecutor
-	modelClientIDs         map[string]struct{}
+	modelClientIDs         map[string]struct{} // Reserved for future use; catalog-only plugins do not populate it.
 	executorModelClientIDs map[string]struct{}
 	modelProviders         map[string]string
 	modelRegistrations     map[string]pluginModelRegistration
@@ -163,7 +163,7 @@ func (h *Host) Snapshot() *Snapshot {
 	return emptySnapshot()
 }
 
-// PluginLoaded reports whether a plugin dynamic library is still loaded by the host.
+// PluginLoaded reports whether a plugin is still active in the host runtime.
 func (h *Host) PluginLoaded(id string) bool {
 	if h == nil {
 		return false
@@ -181,7 +181,7 @@ func (h *Host) PluginLoaded(id string) bool {
 	return len(h.retired[id]) > 0
 }
 
-// PluginBusy reports whether a plugin dynamic library is loaded or being loaded.
+// PluginBusy reports whether a plugin is active in the host runtime or being loaded.
 func (h *Host) PluginBusy(id string) bool {
 	if h == nil {
 		return false
@@ -640,7 +640,8 @@ func (h *Host) withLoadedPluginFallbacks(files []pluginFile, items map[string]ru
 	return files
 }
 
-// UnloadPlugin removes one plugin from the active runtime and closes its dynamic library.
+// UnloadPlugin removes one plugin from the active runtime.
+// The plugin image itself stays mapped for the lifetime of the process.
 func (h *Host) UnloadPlugin(id string) bool {
 	return h.UnloadPluginContext(context.Background(), id)
 }
@@ -779,7 +780,8 @@ func enabledPluginIDs(files []pluginFile, items map[string]runtimeItemConfig) ma
 	return ids
 }
 
-// ShutdownAll removes active plugin capabilities and closes all loaded dynamic libraries.
+// ShutdownAll removes active plugin capabilities and detaches all plugins.
+// Plugin images stay mapped for the lifetime of the process.
 func (h *Host) ShutdownAll() {
 	h.ShutdownAllContext(context.Background())
 }

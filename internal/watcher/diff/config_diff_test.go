@@ -48,6 +48,32 @@ func TestBuildConfigChangeDetailsClientCodexOptimizeMultiAgentV2(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetailsClientCodexWebSearchResultCache(t *testing.T) {
+	oldCfg, newCfg := &config.Config{}, &config.Config{}
+	newCfg.Client.Codex.WebSearchResultCache = config.CodexWebSearchResultCacheConfig{
+		Enabled: true,
+		TTL:     "30m",
+		Limit:   256,
+	}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	want := []string{
+		"client.codex.web-search-result-cache.enabled: false -> true",
+		"client.codex.web-search-result-cache.ttl:  -> 30m",
+		"client.codex.web-search-result-cache.limit: 0 -> 256",
+	}
+	if len(changes) != len(want) {
+		t.Fatalf("changes = %v, want %v", changes, want)
+	}
+	for i := range want {
+		if changes[i] != want[i] {
+			t.Fatalf("changes[%d] = %q, want %q", i, changes[i], want[i])
+		}
+	}
+	if unchanged := BuildConfigChangeDetails(newCfg, newCfg); len(unchanged) != 0 {
+		t.Fatalf("unchanged web-search-result-cache produced changes: %v", unchanged)
+	}
+}
+
 func TestBuildConfigChangeDetails(t *testing.T) {
 	oldCfg := &config.Config{
 		Port:    8080,
@@ -442,7 +468,8 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 				IdleConnTimeout: "10s",
 			},
 		},
-		XAI: config.XAIConfig{InjectXSearch: true},
+		XAI:    config.XAIConfig{InjectXSearch: true},
+		Claude: config.ClaudeConfig{ToolSearch: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -494,6 +521,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "antigravity.connection-pool.enabled: false -> true")
 	expectContains(t, details, `antigravity.connection-pool.idle-conn-timeout: "30s" -> "10s"`)
 	expectContains(t, details, "xai.inject-x-search: false -> true")
+	expectContains(t, details, "claude.tool-search: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")
 	expectContains(t, details, "claude-api-key count: 1 -> 2")
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
@@ -739,4 +767,10 @@ func TestTrimStrings(t *testing.T) {
 	if len(out) != 3 || out[0] != "a" || out[1] != "b" || out[2] != "c" {
 		t.Fatalf("unexpected trimmed strings: %v", out)
 	}
+}
+
+func TestBuildConfigChangeDetails_ClaudeNativeToolSearch(t *testing.T) {
+	oldCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", BaseURL: "https://gateway.example.com"}}}
+	newCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", BaseURL: "https://gateway.example.com", NativeToolSearch: true}}}
+	expectContains(t, BuildConfigChangeDetails(oldCfg, newCfg), "claude[0].native-tool-search: false -> true")
 }

@@ -16,6 +16,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const (
+	defaultClaudeChatMaxTokens = 32000
+	defaultFableChatMaxTokens  = 64000
+)
+
 // ConvertOpenAIRequestToClaude parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
@@ -53,6 +58,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	// Base Claude Code API template with default max_tokens value
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
 	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
+	out, _ = sjson.SetBytes(out, "max_tokens", defaultClaudeChatMaxTokensForModel(modelName))
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -78,8 +84,10 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
 					out, _ = sjson.DeleteBytes(out, "output_config.effort")
 				default:
-					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
-						effort = mapped
+					if !thinking.HasLevel(mi.Thinking.Levels, effort) {
+						if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
+							effort = mapped
+						}
 					}
 					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
@@ -577,10 +585,29 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	return content.Raw, false
 }
 
-// firstExisting returns the first result that exists, or an empty result.
+func defaultClaudeChatMaxTokensForModel(modelName string) int {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	maxTokens := defaultClaudeChatMaxTokens
+	if strings.Contains(normalized, "fable") {
+		maxTokens = defaultFableChatMaxTokens
+	}
+	info := registry.LookupModelInfo(modelName, "claude")
+	if info == nil || info.MaxCompletionTokens <= 0 {
+		return maxTokens
+	}
+	// Fable keeps its conservative omitted-field ceiling. Every other registered
+	// model uses its output limit, including when that limit is above the
+	// historical 32000 default.
+	if strings.Contains(normalized, "fable") && info.MaxCompletionTokens >= maxTokens {
+		return maxTokens
+	}
+	return info.MaxCompletionTokens
+}
+
+// firstExisting returns the first non-null result that exists, or an empty result.
 func firstExisting(values ...gjson.Result) gjson.Result {
 	for _, value := range values {
-		if value.Exists() {
+		if value.Exists() && value.Type != gjson.Null {
 			return value
 		}
 	}

@@ -301,14 +301,17 @@ func (h *BaseAPIHandler) modelRouterHost() PluginModelRouterHost {
 	if h == nil {
 		return nil
 	}
-	if !isNilPluginModelRouterHost(h.ModelRouterHost) {
-		return h.ModelRouterHost
+	h.runtimeMu.RLock()
+	routerHost := h.ModelRouterHost
+	pluginHost := h.PluginHost
+	h.runtimeMu.RUnlock()
+	if !isNilPluginModelRouterHost(routerHost) {
+		return routerHost
 	}
-	host := h.interceptorHost()
-	if host == nil {
+	if isNilPluginInterceptorHost(pluginHost) {
 		return nil
 	}
-	router, ok := host.(PluginModelRouterHost)
+	router, ok := pluginHost.(PluginModelRouterHost)
 	if !ok {
 		return nil
 	}

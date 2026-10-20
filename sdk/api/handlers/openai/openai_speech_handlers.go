@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 )
@@ -51,7 +52,7 @@ func (h *OpenAIAPIHandler) XAITTS(c *gin.Context) {
 func (h *OpenAIAPIHandler) handleXAISpeech(c *gin.Context) {
 	raw, err := handlers.ReadRequestBody(c)
 	if err != nil {
-		writeSpeechError(c, http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err))
+		writeSpeechError(c, clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), fmt.Sprintf("Invalid request: %v", err))
 		return
 	}
 	if len(raw) > maxXAISpeechBody {

@@ -56,9 +56,13 @@ func (s *Service) Run(ctx context.Context) error {
 	s.startModelCatalogUpdaters(ctx)
 
 	usage.StartDefault(ctx)
-	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
+	cfg := s.currentConfig()
+	homeEnabled := cfg != nil && cfg.Home.Enabled
 	if homeEnabled {
+		s.cfgMu.Lock()
 		forceHomeRuntimeConfig(s.cfg)
+		cfg = s.cfg
+		s.cfgMu.Unlock()
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
@@ -76,16 +80,16 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}
 
-	s.applyRetryConfig(s.cfg)
-	s.configureCooldownStateStore(s.cfg)
+	s.applyRetryConfig(cfg)
+	s.configureCooldownStateStore(cfg)
 
 	s.registerPluginAuthParser()
 	if s.coreManager != nil && !homeEnabled {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
-		s.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), s.cfg)
-		if s.cfg.SaveCooldownStatus {
+		s.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), cfg)
+		if cfg != nil && cfg.SaveCooldownStatus {
 			if errRestoreCooldown := s.coreManager.RestoreCooldownStates(ctx); errRestoreCooldown != nil {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
@@ -100,7 +104,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	if !homeEnabled {
-		tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
+		tokenResult, err := s.tokenProvider.Load(ctx, cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
@@ -108,7 +112,7 @@ func (s *Service) Run(ctx context.Context) error {
 			tokenResult = &TokenClientResult{}
 		}
 
-		apiKeyResult, err := s.apiKeyProvider.Load(ctx, s.cfg)
+		apiKeyResult, err := s.apiKeyProvider.Load(ctx, cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
@@ -129,10 +133,12 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	s.server = api.NewServer(cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
+		s.configRuntimeMu.Lock()
 		s.syncPluginModelRuntime(ctx)
+		s.configRuntimeMu.Unlock()
 	}
 
 	if s.authManager == nil {
@@ -164,7 +170,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	if s.hooks.OnBeforeStart != nil {
-		s.hooks.OnBeforeStart(s.cfg)
+		s.hooks.OnBeforeStart(s.currentConfig())
 	}
 
 	s.serverErr = make(chan error, 1)
@@ -177,10 +183,15 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
+	if currentCfg := s.currentConfig(); currentCfg != nil {
+		fmt.Printf("API server started successfully on: %s:%d\n", currentCfg.Host, currentCfg.Port)
+	}
 
-	s.applyPprofConfig(s.cfg)
-	s.applyDiscoveryConfig(s.cfg)
+	s.configRuntimeMu.Lock()
+	currentCfg := s.currentConfig()
+	s.applyPprofConfig(currentCfg)
+	s.applyDiscoveryConfig(currentCfg)
+	s.configRuntimeMu.Unlock()
 
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
@@ -190,25 +201,33 @@ func (s *Service) Run(ctx context.Context) error {
 		var watcherWrapper *WatcherWrapper
 		reloadCallback := func(newCfg *config.Config) { s.applyWatcherConfigUpdate(newCfg) }
 
-		watcherWrapper, errCreate := s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
+		authDir := ""
+		if currentCfg := s.currentConfig(); currentCfg != nil {
+			authDir = currentCfg.AuthDir
+		}
+		watcherWrapper, errCreate := s.watcherFactory(s.configPath, authDir, reloadCallback)
 		if errCreate != nil {
 			return fmt.Errorf("cliproxy: failed to create watcher: %w", errCreate)
 		}
-		s.watcher = watcherWrapper
+		s.setWatcher(watcherWrapper)
 		s.ensureAuthUpdateQueue(ctx)
 		if s.authUpdates != nil {
 			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 		}
-		watcherWrapper.SetConfig(s.cfg)
+		watcherWrapper.SetConfig(s.currentConfig())
 		s.registerPluginAuthParser()
 
 		watcherCtx, watcherCancel := context.WithCancel(context.Background())
+		s.cfgMu.Lock()
 		s.watcherCancel = watcherCancel
+		s.cfgMu.Unlock()
 		if errStart := watcherWrapper.Start(watcherCtx); errStart != nil {
 			return fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
 		}
 		log.Info("file watcher started for config and auth directory changes")
+		s.configRuntimeMu.Lock()
 		s.syncPluginModelRuntime(ctx)
+		s.configRuntimeMu.Unlock()
 	}
 
 	s.registerModelRefreshCallback()
@@ -299,14 +318,17 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		// legacy refresh loop removed; only stopping core auth manager below
 
-		if s.watcherCancel != nil {
-			s.watcherCancel()
+		s.cfgMu.RLock()
+		watcherCancel := s.watcherCancel
+		s.cfgMu.RUnlock()
+		if watcherCancel != nil {
+			watcherCancel()
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
 		}
-		if s.watcher != nil {
-			if err := s.watcher.Stop(); err != nil {
+		if watcher := s.currentWatcher(); watcher != nil {
+			if err := watcher.Stop(); err != nil {
 				log.Errorf("failed to stop file watcher: %v", err)
 				shutdownErr = err
 			}
@@ -352,8 +374,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)
 			sdkAuth.RegisterPluginAuthParser(nil)
-			if s.watcher != nil {
-				s.watcher.SetPluginAuthParser(nil)
+			if watcher := s.currentWatcher(); watcher != nil {
+				watcher.SetPluginAuthParser(nil)
 			}
 			s.pluginHost.ApplyConfig(ctx, &config.Config{})
 			s.pluginHost.RegisterModels(ctx, registry.GetGlobalRegistry())
@@ -373,19 +395,24 @@ func (s *Service) Shutdown(ctx context.Context) error {
 }
 
 func (s *Service) ensureAuthDir() error {
-	info, err := os.Stat(s.cfg.AuthDir)
+	cfg := s.currentConfig()
+	authDir := ""
+	if cfg != nil {
+		authDir = cfg.AuthDir
+	}
+	info, err := os.Stat(authDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o755); mkErr != nil {
-				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", s.cfg.AuthDir, mkErr)
+			if mkErr := os.MkdirAll(authDir, 0o755); mkErr != nil {
+				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", authDir, mkErr)
 			}
-			log.Infof("created missing auth directory: %s", s.cfg.AuthDir)
+			log.Infof("created missing auth directory: %s", authDir)
 			return nil
 		}
-		return fmt.Errorf("cliproxy: error checking auth directory %s: %w", s.cfg.AuthDir, err)
+		return fmt.Errorf("cliproxy: error checking auth directory %s: %w", authDir, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
+		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", authDir)
 	}
 	return nil
 }

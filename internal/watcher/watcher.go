@@ -31,40 +31,42 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath        string
-	authDir           string
-	config            *config.Config
-	clientsMutex      sync.RWMutex
-	authRescanMu      sync.Mutex
-	configReloadMu    sync.Mutex
-	configReloadTimer *time.Timer
-	serverUpdateMu    sync.Mutex
-	serverUpdateTimer *time.Timer
-	serverUpdateLast  time.Time
-	serverUpdatePend  bool
-	stopped           atomic.Bool
-	reloadCallback    func(*config.Config)
-	watcher           *fsnotify.Watcher
-	lastAuthHashes    map[string]string
-	lastAuthContents  map[string]*coreauth.Auth
-	fileAuthsByPath   map[string]map[string]*coreauth.Auth
-	lastRemoveTimes   map[string]time.Time
-	lastConfigHash    string
-	authQueue         chan<- AuthUpdate
-	currentAuths      map[string]*coreauth.Auth
-	authRevisions     map[string]uint64 // Includes deletion tombstones; guarded by clientsMutex.
-	fileObservations  map[string]uint64 // Tracks file events even when content is unchanged.
-	activeAuthScans   int               // Guarded by clientsMutex.
-	runtimeAuths      map[string]*coreauth.Auth
-	dispatchMu        sync.Mutex
-	dispatchCond      *sync.Cond
-	pendingUpdates    map[string]AuthUpdate
-	pendingOrder      []string
-	dispatchCancel    context.CancelFunc
-	storePersister    storePersister
-	pluginAuthParser  synthesizer.PluginAuthParser
-	mirroredAuthDir   string
-	oldConfigYaml     []byte
+	configPath                 string
+	authDir                    string
+	config                     *config.Config
+	clientsMutex               sync.RWMutex
+	authRescanMu               sync.Mutex
+	configReloadMu             sync.Mutex
+	configReloadTimer          *time.Timer
+	configApplyMu              sync.Mutex // Serializes config file reloads so they apply in file order.
+	serverUpdateMu             sync.Mutex
+	serverUpdateTimer          *time.Timer
+	serverUpdateLast           time.Time
+	serverUpdatePend           bool
+	stopped                    atomic.Bool
+	reloadCallback             func(*config.Config)
+	watcher                    *fsnotify.Watcher
+	lastAuthHashes             map[string]string
+	lastAuthContents           map[string]*coreauth.Auth
+	fileAuthsByPath            map[string]map[string]*coreauth.Auth
+	lastRemoveTimes            map[string]time.Time
+	lastConfigHash             string
+	authQueue                  chan<- AuthUpdate
+	currentAuths               map[string]*coreauth.Auth
+	pendingProviderReloadAuths map[string]*coreauth.Auth
+	authRevisions              map[string]uint64 // Includes deletion tombstones; guarded by clientsMutex.
+	fileObservations           map[string]uint64 // Tracks file events even when content is unchanged.
+	activeAuthScans            int               // Guarded by clientsMutex.
+	runtimeAuths               map[string]*coreauth.Auth
+	dispatchMu                 sync.Mutex
+	dispatchCond               *sync.Cond
+	pendingUpdates             map[string]AuthUpdate
+	pendingOrder               []string
+	dispatchCancel             context.CancelFunc
+	storePersister             storePersister
+	pluginAuthParser           synthesizer.PluginAuthParser
+	mirroredAuthDir            string
+	oldConfigYaml              []byte
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -78,10 +80,23 @@ const (
 
 // AuthUpdate describes an incremental change to auth configuration.
 type AuthUpdate struct {
-	Action   AuthUpdateAction
-	ID       string
-	Auth     *coreauth.Auth
-	revision uint64 // Watcher-local ordering, independent of runtime auth generations.
+	Action      AuthUpdateAction
+	ID          string
+	Auth        *coreauth.Auth
+	revision    uint64 // Watcher-local ordering, independent of runtime auth generations.
+	fileRemoval bool   // The source file was removed, not just an ID from its content.
+}
+
+// IsFileRemoval reports whether this delete was observed as a whole-file removal.
+func (u AuthUpdate) IsFileRemoval() bool {
+	return u.fileRemoval
+}
+
+// SetFileRemoval marks a delete as a whole-file removal rather than a per-ID diff.
+func (u *AuthUpdate) SetFileRemoval(fileRemoval bool) {
+	if u != nil {
+		u.fileRemoval = fileRemoval
+	}
 }
 
 // Revision returns the monotonic watcher revision assigned to this update.
@@ -151,10 +166,11 @@ func (w *Watcher) Stop() error {
 
 // SetConfig updates the current configuration
 func (w *Watcher) SetConfig(cfg *config.Config) {
+	cloned := cfg.CloneForRuntime()
 	w.clientsMutex.Lock()
 	defer w.clientsMutex.Unlock()
-	w.config = cfg
-	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+	w.config = cloned
+	w.oldConfigYaml, _ = yaml.Marshal(cloned)
 }
 
 // SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.

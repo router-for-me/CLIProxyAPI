@@ -61,7 +61,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	var keepAliveC <-chan time.Time
 	keepAliveInterval := time.Duration(0)
 	if h != nil {
-		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.Cfg)
+		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.CurrentConfig())
 	}
 	if opts.keepAliveInterval != nil {
 		keepAliveInterval = *opts.keepAliveInterval
@@ -165,6 +165,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
 				eventType := gjson.GetBytes(payloads[i], "type").String()
+				if eventType == "response.subscription_usage" {
+					continue
+				}
 				responseID := gjson.GetBytes(payloads[i], "response.id").String()
 				if eventType == "response.created" {
 					opts.localInterrupt.observeCreated(responseID)

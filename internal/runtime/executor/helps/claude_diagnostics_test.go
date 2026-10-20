@@ -447,29 +447,71 @@ func TestPinClaudeSessionDateAnchorsFirstRequestAndReanchorsAfterTTL(t *testing.
 	defer resetClaudeDiagnosticsForTest()
 
 	key, _, _ := BeginClaudeDiagnostics("credential", "session")
-	if got := PinClaudeSessionDate(key, "2026-08-01"); got != "2026-08-01" {
+	if got := PinClaudeSessionDate(key, "session", "2026-08-01", 0); got != "2026-08-01" {
 		t.Fatalf("first pin = %q, want 2026-08-01", got)
 	}
 	// Later requests of the same session keep the anchor even when the
 	// candidate date has flipped past local midnight.
-	if got := PinClaudeSessionDate(key, "2026-08-02"); got != "2026-08-01" {
+	if got := PinClaudeSessionDate(key, "session", "2026-08-02", 0); got != "2026-08-01" {
 		t.Fatalf("second pin = %q, want anchored 2026-08-01", got)
 	}
 
-	// TTL expiry resets the entry, so the session re-anchors to the current date.
+	// With no retention, continuity TTL expiry preserves the legacy anchor.
 	claudeDiagnosticsState.Lock()
 	entry := claudeDiagnosticsState.entries[key]
 	entry.expiresAt = time.Now().Add(-time.Second)
 	claudeDiagnosticsState.entries[key] = entry
 	claudeDiagnosticsState.Unlock()
 	BeginClaudeDiagnostics("credential", "session")
-	if got := PinClaudeSessionDate(key, "2026-08-02"); got != "2026-08-02" {
+	if got := PinClaudeSessionDate(key, "session", "2026-08-02", 0); got != "2026-08-02" {
 		t.Fatalf("post-TTL pin = %q, want re-anchored 2026-08-02", got)
 	}
 
 	// Unknown keys (no continuity entry) fall back to the candidate date,
 	// preserving the pre-pinning per-request behaviour.
-	if got := PinClaudeSessionDate("unknown-key", "2026-08-03"); got != "2026-08-03" {
+	if got := PinClaudeSessionDate("unknown-key", "", "2026-08-03", 0); got != "2026-08-03" {
 		t.Fatalf("unknown key pin = %q, want candidate 2026-08-03", got)
+	}
+}
+
+func TestPinClaudeSessionDateRetentionSurvivesContinuityTTLAndCredentialSwitch(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	retention := 7 * 24 * time.Hour
+	keyA, _, _ := BeginClaudeDiagnostics("credential-a", "session")
+	if got := PinClaudeSessionDate(keyA, "session", "2026-08-01", retention); got != "2026-08-01" {
+		t.Fatalf("first pin = %q, want 2026-08-01", got)
+	}
+
+	claudeDiagnosticsState.Lock()
+	entry := claudeDiagnosticsState.entries[keyA]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.entries[keyA] = entry
+	claudeDiagnosticsState.lastCleanup = time.Time{}
+	claudeDiagnosticsState.Unlock()
+	BeginClaudeDiagnostics("credential-a", "session")
+	if got := PinClaudeSessionDate(keyA, "session", "2026-08-02", retention); got != "2026-08-01" {
+		t.Fatalf("post-continuity-TTL pin = %q, want anchored 2026-08-01", got)
+	}
+
+	keyB, _, _ := BeginClaudeDiagnostics("credential-b", "session")
+	if got := PinClaudeSessionDate(keyB, "session", "2026-08-02", retention); got != "2026-08-01" {
+		t.Fatalf("post-credential-switch pin = %q, want anchored 2026-08-01", got)
+	}
+
+	claudeDiagnosticsState.Lock()
+	delete(claudeDiagnosticsState.entries, keyA)
+	delete(claudeDiagnosticsState.entries, keyB)
+	for pinKey := range claudeDiagnosticsState.datePins {
+		pin := claudeDiagnosticsState.datePins[pinKey]
+		pin.expiresAt = time.Now().Add(-time.Second)
+		claudeDiagnosticsState.datePins[pinKey] = pin
+	}
+	claudeDiagnosticsState.lastCleanup = time.Time{}
+	claudeDiagnosticsState.Unlock()
+	keyC, _, _ := BeginClaudeDiagnostics("credential-c", "session")
+	if got := PinClaudeSessionDate(keyC, "session", "2026-08-02", retention); got != "2026-08-02" {
+		t.Fatalf("post-pin-TTL pin = %q, want re-anchored 2026-08-02", got)
 	}
 }
