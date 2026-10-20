@@ -65,6 +65,26 @@ HTTP/SSE quota with request counts; useful tool output never authorizes replay.
 Control lookup returns trusted refusal category/scope and executor-attempt counts;
 consumer must use it, never exception prose or a blanket HTTP429 account block.
 
+## F7/F8 repair threat rationale (before gate changes)
+
+Scheduler Generation, transient Status and refresh timestamps are not credential
+identity: healthy shared-account traffic must not revoke an established pin.
+The private revision instead binds registration epoch, credential version, auth
+ID/provider, credential tokens and account selection, credential mode, endpoint,
+injected headers and proxy. Only security-relevant metadata/attributes enter the
+hash; expiry, last_refresh, plan/email and scheduler availability do not. Manager
+credential-version production remains unchanged. Removal/re-registration, real
+token replacement and final account/model/header/target checks must still deny.
+Fixtures must mutate those authority inputs both between turns and during probes.
+
+Executor attempts cannot identify a refusal that happened before execution.
+Every newly latched refusal therefore advances a separate refusal version;
+re-reading an existing latch must not advance it. Resume requires the inspected
+nonzero version and a current latch, preserving principal/session, inactive and
+revocation checks. Missing, stale and already-consumed acknowledgements refuse.
+Two quota-probe refusals at zero executor attempts must reject the first version.
+Acknowledgement never authorizes dispatch: fresh auth/quota/model checks remain.
+
 ## Source provenance
 
 Implementation base: fetched router-for-me/CLIProxyAPI main
@@ -133,19 +153,25 @@ No locks span network probes. Probe deadlines are three seconds; prepare is five
 Control endpoints relative to `basePath`, all using the same authentication:
 
 - `GET /state`: `{state: pending|established|released|invalid, active,
-  executorAttempts, refusal?}`. Refusal is `{code,quotaScope,quotaDomains,bindingId}`.
+  executorAttempts, refusalVersion, refusal?}`. Refusal is `{code,quotaScope,quotaDomains,bindingId}`.
   The counter measures executor invocations, including compact and invocations
   rejected by final payload validation, not billed tokens or guaranteed upstream
   requests. Offline transport fixtures separately count actual provider requests.
+  `refusalVersion` is a separate monotonically increasing binding-local counter:
+  it advances on every newly latched refusal, including pre-executor probe/auth
+  denials, and stays stable when an existing latch is returned. It starts at zero;
+  it remains at its last value after acknowledgement, with no refusal present.
 - `POST /release`: idempotent revoke and cancel registered active contexts. A
   wrong principal/session has no effect and discloses no binding state.
 - `POST /touch`: explicit same-principal/session heartbeat for an established,
   unexpired pin during long tool work. It refreshes only idle storage activity,
   never admission quota freshness or the pinned auth revision. Pending/released/
   expired bindings cannot be revived. No automatic heartbeat client is supplied.
-- `POST /resume` with `{expectedExecutorAttempts:<inspected counter>}` acknowledges
-  a latched refusal without changing the pin; it is refused while active/revoked,
-  expired, wrong-principal/session or at a different attempt count. Fresh quota
+- `POST /resume` with `{expectedRefusalVersion:<inspected nonzero version>}`
+  acknowledges the currently latched refusal without changing the pin. It is
+  refused while active/revoked, expired, wrong-principal/session, at a different
+  refusal version or with no current latch. Missing/zero versions and the old
+  executor-attempt request shape refuse; no legacy consumer exists. Fresh quota
   and auth validation still precede the next request. This is an explicit consumer
   retry control, never automatic launch replay after useful work.
 - `POST /v1/delegated-launch/cancel` with `{clientRequestId}` cancels pending

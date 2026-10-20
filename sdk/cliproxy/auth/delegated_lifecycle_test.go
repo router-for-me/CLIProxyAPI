@@ -198,6 +198,9 @@ func TestDelegatedLaunchActiveReleaseAndBounds(t *testing.T) {
 	result := make(chan error, 1)
 	go func() { result <- f.execute("client", r, r.Model, r.SessionID, false) }()
 	<-ex.entered
+	if f.pool.Resume("client", r.BindingID, r.SessionID, 1) {
+		t.Fatal("resume authorized during active execution")
+	}
 	f.now = f.now.Add(2 * launchIdleTTL)
 	f.pool.mu.Lock()
 	f.pool.pruneLocked()
@@ -243,6 +246,22 @@ func TestDelegatedLaunchExplicitResumeKeepsPin(t *testing.T) {
 	}
 	if f.executor.starts.Load() != 2 || f.executor.ids[0] != f.executor.ids[1] {
 		t.Fatal("resume rebound")
+	}
+	f.executor.err = launchTestFailure{}
+	requireLaunchRefusal(t, f.execute("client", r, r.Model, r.SessionID, false), "usage_limit")
+	state := f.pool.Inspect("client", r.BindingID, r.SessionID)
+	a, _ := f.manager.GetByID(t.Name() + "-a")
+	a.Disabled = true
+	if _, err := f.manager.Update(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if !f.pool.Resume("client", r.BindingID, r.SessionID, state.RefusalVersion) {
+		t.Fatal("matching acknowledgement denied")
+	}
+	f.executor.err = nil
+	requireLaunchRefusal(t, f.execute("client", r, r.Model, r.SessionID, false), "binding_changed")
+	if f.executor.starts.Load() != 3 {
+		t.Fatal("matching refusal version bypassed disabled auth")
 	}
 }
 
@@ -332,5 +351,151 @@ func TestDelegatedLaunchExplicitHeartbeat(t *testing.T) {
 	f.pool.Release("client", r.BindingID, r.SessionID)
 	if f.pool.Touch("client", r.BindingID, r.SessionID) {
 		t.Fatal("heartbeat revived released binding")
+	}
+}
+
+func TestReviewEstablishedSurvivesOrdinaryTraffic(t *testing.T) {
+	f := newLaunchFixture(t)
+	f.add(t, "a", "account")
+	r := f.pool.Prepare(context.Background(), "client", launchRequest("shared-pool"))
+	if err := f.execute("client", r, r.Model, r.SessionID, false); err != nil {
+		t.Fatal(err)
+	}
+	id := t.Name() + "-a"
+	before, _ := f.manager.GetByID(id)
+	f.manager.MarkResult(context.Background(), Result{AuthID: id, Provider: "codex", Model: r.Model, Success: true})
+	after, _ := f.manager.GetByID(id)
+	t.Logf("ordinary success generation %d -> %d; credential version %d -> %d; account unchanged=%t token unchanged=%t", before.Generation, after.Generation, before.CredentialVersion, after.CredentialVersion, before.Metadata["account_id"] == after.Metadata["account_id"], before.Metadata["access_token"] == after.Metadata["access_token"])
+	if err := f.execute("client", r, r.Model, r.SessionID, false); err != nil {
+		t.Fatalf("healthy same-pin second turn after ordinary traffic: %v", err)
+	}
+}
+
+func TestReviewResumeRejectsStaleProbeRefusalAcknowledgement(t *testing.T) {
+	f := newLaunchFixture(t)
+	f.add(t, "a", "account")
+	r := f.pool.Prepare(context.Background(), "client", launchRequest("refusal-epoch"))
+	f.handler = func(w http.ResponseWriter, q *http.Request) { _, _ = w.Write(launchUsage("account", false, 12, f.now)) }
+	requireLaunchRefusal(t, f.execute("client", r, r.Model, r.SessionID, false), "usage_limit")
+	first := f.pool.Inspect("client", r.BindingID, r.SessionID)
+	if !f.pool.Resume("client", r.BindingID, r.SessionID, first.RefusalVersion) {
+		t.Fatal("first acknowledgement denied")
+	}
+	requireLaunchRefusal(t, f.execute("client", r, r.Model, r.SessionID, false), "usage_limit")
+	newer := f.pool.Inspect("client", r.BindingID, r.SessionID)
+	t.Logf("first attempts=%d newer attempts=%d executor starts=%d; refusal versions %d -> %d", first.ExecutorAttempts, newer.ExecutorAttempts, f.executor.starts.Load(), first.RefusalVersion, newer.RefusalVersion)
+	if f.pool.Resume("client", r.BindingID, r.SessionID, first.RefusalVersion) {
+		t.Fatal("stale acknowledgement cleared newer pre-executor refusal")
+	}
+	if first.RefusalVersion == 0 || newer.RefusalVersion <= first.RefusalVersion || newer.ExecutorAttempts != 0 || f.executor.starts.Load() != 0 {
+		t.Fatal("pre-executor refusals need distinct versions without execution")
+	}
+	if !f.pool.Resume("client", r.BindingID, r.SessionID, newer.RefusalVersion) || f.pool.Resume("client", r.BindingID, r.SessionID, newer.RefusalVersion) {
+		t.Fatal("fresh acknowledgement must be consumed exactly once")
+	}
+	f.handler = func(w http.ResponseWriter, q *http.Request) { _, _ = w.Write(launchUsage("account", true, 12, f.now)) }
+	if err := f.execute("client", r, r.Model, r.SessionID, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDelegatedLaunchEstablishedSurvivesBookkeeping(t *testing.T) {
+	f := newLaunchFixture(t)
+	f.add(t, "a", "account")
+	r := f.pool.Prepare(context.Background(), "client", launchRequest("bookkeeping"))
+	execute := func() {
+		t.Helper()
+		if err := f.execute("client", r, r.Model, r.SessionID, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execute()
+	id := t.Name() + "-a"
+	before, _ := f.manager.GetByID(id)
+	f.manager.recordAvailabilityNeutralResult(context.Background(), Result{AuthID: id, Provider: "codex", Model: r.Model, Success: false})
+	execute()
+	job := f.manager.markRefreshPending(nil, id, before.RegistrationEpoch, f.now)
+	if job == nil {
+		t.Fatal("refresh was not scheduled")
+	}
+	execute()
+	f.manager.finishRefreshJob(job, time.Time{}, false)
+	execute()
+	a, _ := f.manager.GetByID(id)
+	a.Status = StatusError // transient availability, not explicit disable
+	a.Metadata["last_refresh"] = f.now.Format(time.RFC3339)
+	a.Metadata["expired"] = f.now.Add(time.Hour).Format(time.RFC3339)
+	a.Metadata["plan_type"] = "pro"
+	a.Metadata["email"] = "synthetic@example.invalid"
+	a.Attributes = map[string]string{"plan_type": "pro"}
+	after, err := f.manager.Update(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Generation <= before.Generation || after.CredentialVersion != before.CredentialVersion {
+		t.Fatal("fixture must change bookkeeping without replacing credentials")
+	}
+	execute()
+	if f.executor.starts.Load() != 5 {
+		t.Fatal("same-pin bookkeeping interrupted execution")
+	}
+}
+
+func TestDelegatedLaunchEstablishedSecurityChanges(t *testing.T) {
+	mutations := map[string]func(*Auth){
+		"access-token":    func(a *Auth) { a.Metadata["access_token"] = "synthetic-replacement" },
+		"refresh-token":   func(a *Auth) { a.Metadata["refresh_token"] = "synthetic-refresh" },
+		"id-token":        func(a *Auth) { a.Metadata["id_token"] = "synthetic-identity" },
+		"workspace":       func(a *Auth) { a.Metadata["account_id"] = "other-workspace" },
+		"provider":        func(a *Auth) { a.Provider = "other" },
+		"auth-mode":       func(a *Auth) { a.Metadata["use_siwc"] = true },
+		"endpoint":        func(a *Auth) { a.Attributes["base_url"] = "https://example.invalid" },
+		"header":          func(a *Auth) { a.Attributes["header:Authorization"] = "Bearer synthetic-other" },
+		"proxy":           func(a *Auth) { a.ProxyURL = "http://example.invalid:8080" },
+		"disable":         func(a *Auth) { a.Disabled = true },
+		"disabled-status": func(a *Auth) { a.Status = StatusDisabled },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			f := newLaunchFixture(t)
+			f.add(t, "a", "account")
+			r := f.pool.Prepare(context.Background(), "client", launchRequest("security"))
+			if err := f.execute("client", r, r.Model, r.SessionID, false); err != nil {
+				t.Fatal(err)
+			}
+			a, _ := f.manager.GetByID(t.Name() + "-a")
+			if a.Attributes == nil {
+				a.Attributes = make(map[string]string)
+			}
+			mutate(a)
+			if _, err := f.manager.Update(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			requireLaunchRefusal(t, f.execute("client", r, r.Model, r.SessionID, false), "binding_changed")
+			state := f.pool.Inspect("client", r.BindingID, r.SessionID)
+			if !f.pool.Resume("client", r.BindingID, r.SessionID, state.RefusalVersion) {
+				t.Fatal("fresh refusal acknowledgement denied")
+			}
+			requireLaunchRefusal(t, f.execute("client", r, r.Model, r.SessionID, false), "binding_changed")
+			if f.executor.starts.Load() != 1 {
+				t.Fatal("acknowledgement bypassed changed security identity")
+			}
+		})
+	}
+}
+
+func TestDelegatedLaunchRemoveReregisterInvalidatesPin(t *testing.T) {
+	f := newLaunchFixture(t)
+	f.add(t, "a", "account")
+	r := f.pool.Prepare(context.Background(), "client", launchRequest("reregister"))
+	if err := f.execute("client", r, r.Model, r.SessionID, false); err != nil {
+		t.Fatal(err)
+	}
+	id := t.Name() + "-a"
+	f.manager.Remove(context.Background(), id)
+	f.add(t, "a", "account")
+	requireLaunchRefusal(t, f.execute("client", r, r.Model, r.SessionID, false), "binding_changed")
+	if f.executor.starts.Load() != 1 {
+		t.Fatal("re-registration restored old pin")
 	}
 }

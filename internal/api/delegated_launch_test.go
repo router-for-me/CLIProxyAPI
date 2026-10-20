@@ -303,6 +303,59 @@ func TestDelegatedLaunchControlIsolation(t *testing.T) {
 	}
 }
 
+func TestDelegatedLaunchRefusalVersionControl(t *testing.T) {
+	f := newDelegatedHTTPFixture(t)
+	r := f.prepare(t)
+	f.allowed.Store(false)
+	inspect := func() auth.LaunchBindingState {
+		t.Helper()
+		w := f.call("GET", r.BasePath+"/state", "client", "")
+		var state auth.LaunchBindingState
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &state) != nil {
+			t.Fatal(w.Body.String())
+		}
+		return state
+	}
+	refuse := func() auth.LaunchBindingState {
+		t.Helper()
+		if w := f.call("POST", r.BasePath+"/responses", "client", `{"model":"gpt-6.1-sol"}`); w.Code != 429 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return inspect()
+	}
+	first := refuse()
+	for _, body := range []string{`{}`, `{"expectedExecutorAttempts":0}`, `{"expectedRefusalVersion":null}`, `{"expectedRefusalVersion":0}`, `{"expectedRefusalVersion":-1}`} {
+		if w := f.call("POST", r.BasePath+"/resume", "client", body); w.Code != 400 {
+			t.Fatal("missing/invalid version accepted", w.Code, body)
+		}
+	}
+	ack := fmt.Sprintf(`{"expectedRefusalVersion":%d}`, first.RefusalVersion)
+	if w := f.call("POST", r.BasePath+"/resume", "attacker", ack); w.Code != 409 {
+		t.Fatal("wrong-principal resume accepted")
+	}
+	if current := refuse(); current.RefusalVersion != first.RefusalVersion {
+		t.Fatal("existing latch acquired a new version")
+	}
+	if w := f.call("POST", r.BasePath+"/resume", "client", ack); w.Code != 200 {
+		t.Fatal("fresh acknowledgement refused", w.Code)
+	}
+	second := refuse()
+	if first.RefusalVersion == 0 || second.RefusalVersion <= first.RefusalVersion || second.ExecutorAttempts != 0 || f.generations.Load() != 0 {
+		t.Fatal("probe refusals need distinct versions without execution", first, second)
+	}
+	if w := f.call("POST", r.BasePath+"/resume", "client", ack); w.Code != 409 || inspect().Refusal == nil {
+		t.Fatal("stale acknowledgement cleared newer refusal")
+	}
+	ack = fmt.Sprintf(`{"expectedRefusalVersion":%d}`, second.RefusalVersion)
+	if w := f.call("POST", r.BasePath+"/resume", "client", ack); w.Code != 200 {
+		t.Fatal("fresh second acknowledgement refused")
+	}
+	f.allowed.Store(true)
+	if w := f.call("POST", r.BasePath+"/responses", "client", `{"model":"gpt-6.1-sol"}`); w.Code != 200 || f.generations.Load() != 1 {
+		t.Fatal("acknowledged same-pin continuation failed", w.Code, w.Body.String())
+	}
+}
+
 func TestDelegatedLaunchExecutionRedirectRefused(t *testing.T) {
 	f := newDelegatedHTTPFixture(t)
 	r := f.prepare(t)

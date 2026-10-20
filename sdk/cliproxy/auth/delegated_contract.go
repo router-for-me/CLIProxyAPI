@@ -60,12 +60,13 @@ type LaunchBindingState struct {
 	State            string         `json:"state"`
 	Active           bool           `json:"active"`
 	ExecutorAttempts int            `json:"executorAttempts"`
+	RefusalVersion   uint64         `json:"refusalVersion"`
 	Refusal          *LaunchRefusal `json:"refusal,omitempty"`
 }
 
-// ResumeLaunchRequest acknowledges only the inspected execution epoch.
+// ResumeLaunchRequest acknowledges only the inspected, currently latched refusal.
 type ResumeLaunchRequest struct {
-	ExpectedExecutorAttempts *int `json:"expectedExecutorAttempts"`
+	ExpectedRefusalVersion *uint64 `json:"expectedRefusalVersion"`
 }
 
 // CancelLaunchRequest cancels preparation in the authenticated request-ID scope.

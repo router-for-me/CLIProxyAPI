@@ -230,7 +230,7 @@ func TestDelegatedLaunchNativeAppServer(t *testing.T) {
 				if mode == "capacity" {
 					expectedCategory, expectedScope = "model_capacity", "model"
 				}
-				if control.Refusal == nil || control.Refusal.Code != expectedCategory || control.Refusal.QuotaScope != expectedScope {
+				if control.Refusal == nil || control.RefusalVersion == 0 || control.Refusal.Code != expectedCategory || control.Refusal.QuotaScope != expectedScope {
 					t.Fatalf("wrong trusted category: %+v", control)
 				}
 				if expectedScope != "account" && len(control.Refusal.QuotaDomains) != 0 {
@@ -244,6 +244,19 @@ func TestDelegatedLaunchNativeAppServer(t *testing.T) {
 				}
 				if control.ExecutorAttempts != int(expected) {
 					t.Fatal(state.Body.String())
+				}
+				var repeated auth.LaunchBindingState
+				if json.Unmarshal(f.call("GET", r.BasePath+"/state", "client", "").Body.Bytes(), &repeated) != nil || repeated.RefusalVersion != control.RefusalVersion {
+					t.Fatal("retry changed latched refusal version")
+				}
+				if mode == "http-quota" {
+					if w := f.call("POST", r.BasePath+"/resume", "client", `{"expectedExecutorAttempts":1}`); w.Code != 400 {
+						t.Fatal("legacy acknowledgement accepted")
+					}
+					ack := fmt.Sprintf(`{"expectedRefusalVersion":%d}`, control.RefusalVersion)
+					if w := f.call("POST", r.BasePath+"/resume", "client", ack); w.Code != 200 || f.generations.Load() != expected {
+						t.Fatal("native refusal acknowledgement failed or executed work")
+					}
 				}
 			}
 			t.Logf("native HTTP bound route: mode=%s provider_requests=%d compact_requests=%d useful_tool=%t state=%s", mode, f.generations.Load(), f.compactions.Load(), toolSeen, state.Body.String())

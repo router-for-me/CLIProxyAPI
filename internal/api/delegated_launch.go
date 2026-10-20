@@ -73,11 +73,11 @@ func registerDelegatedLaunch(v1 *gin.RouterGroup, pool *auth.LaunchPool) {
 		var request auth.ResumeLaunchRequest
 		decoder := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 1024))
 		decoder.DisallowUnknownFields()
-		if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF || request.ExpectedExecutorAttempts == nil || *request.ExpectedExecutorAttempts < 0 {
+		if decoder.Decode(&request) != nil || decoder.Decode(&struct{}{}) != io.EOF || request.ExpectedRefusalVersion == nil || *request.ExpectedRefusalVersion == 0 {
 			c.Status(400)
 			return
 		}
-		if !pool.Resume(launchPrincipal(c), c.Param("bindingId"), c.Param("sessionId"), *request.ExpectedExecutorAttempts) {
+		if !pool.Resume(launchPrincipal(c), c.Param("bindingId"), c.Param("sessionId"), *request.ExpectedRefusalVersion) {
 			c.Status(409)
 			return
 		}

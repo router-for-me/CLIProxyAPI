@@ -36,19 +36,20 @@ type DelegatedLaunchExecutor interface {
 var exactLaunchModel = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
 
 type launchEntry struct {
-	request       PrepareLaunchRequest
-	principal     string
-	result        LaunchResult
-	authID        string
-	revision      [32]byte
-	done          chan struct{}
-	expires       time.Time
-	established   bool
-	revoked       bool
-	active        context.CancelFunc
-	prepareCancel context.CancelFunc
-	attempts      int
-	lastRefusal   *LaunchRefusal
+	request        PrepareLaunchRequest
+	principal      string
+	result         LaunchResult
+	authID         string
+	revision       [32]byte
+	done           chan struct{}
+	expires        time.Time
+	established    bool
+	revoked        bool
+	active         context.CancelFunc
+	prepareCancel  context.CancelFunc
+	attempts       int
+	refusalVersion uint64
+	lastRefusal    *LaunchRefusal
 }
 
 // LaunchPool owns admission and dispatch. All state is bounded and process-local;
@@ -206,9 +207,22 @@ func launchAccount(a *Auth) string {
 }
 
 func launchRevision(a *Auth) [32]byte {
-	// Never persisted, logged or sent to clients. Includes token changes as well
-	// as monotonic identity revisions (including remove/re-register).
-	b, _ := json.Marshal([]any{a.ID, a.Provider, a.Generation, a.RegistrationEpoch, a.Disabled, a.Status, a.Attributes, a.Metadata, a.ProxyURL})
+	// Private security identity, not scheduler/refresh bookkeeping. CredentialVersion
+	// covers manager-owned token replacements; explicit fields also guard snapshots
+	// mutated during probes without going through Manager.Update.
+	metadata := make(map[string]any)
+	for _, key := range []string{"type", "access_token", "accessToken", "refresh_token", "refreshToken", "id_token", "idToken", "api_key", "account_id", "use_siwc", "siwc"} {
+		if value, ok := a.Metadata[key]; ok {
+			metadata[key] = value
+		}
+	}
+	attributes := make(map[string]string)
+	for key, value := range a.Attributes {
+		if key == "api_key" || key == "base_url" || key == "use_siwc" || strings.HasPrefix(key, "header:") {
+			attributes[key] = value
+		}
+	}
+	b, _ := json.Marshal([]any{a.ID, a.Provider, a.RegistrationEpoch, a.CredentialVersion, a.Disabled, a.Status == StatusDisabled, attributes, metadata, a.ProxyURL})
 	return sha256.Sum256(b)
 }
 
@@ -471,6 +485,15 @@ func (p *LaunchPool) authorize(ctx context.Context, cancel context.CancelFunc, p
 	return current.Clone(), ex, nil
 }
 
+// latchRefusal runs under the pool lock. Returning an existing refusal is not a
+// new event; its acknowledgement remains stable until consumed by Resume.
+func (e *launchEntry) latchRefusal(r *LaunchRefusal) {
+	if e.lastRefusal == nil {
+		e.refusalVersion++
+		e.lastRefusal = cloneLaunchRefusal(r)
+	}
+}
+
 func cloneLaunchRefusal(r *LaunchRefusal) *LaunchRefusal {
 	if r == nil {
 		return nil
@@ -526,7 +549,7 @@ func (p *LaunchPool) Inspect(principal, binding, session string) LaunchBindingSt
 	if e.revoked {
 		state = "released"
 	}
-	return LaunchBindingState{ProtocolVersion: LaunchProtocolVersion, State: state, Active: e.active != nil, ExecutorAttempts: e.attempts, Refusal: cloneLaunchRefusal(e.lastRefusal)}
+	return LaunchBindingState{ProtocolVersion: LaunchProtocolVersion, State: state, Active: e.active != nil, ExecutorAttempts: e.attempts, RefusalVersion: e.refusalVersion, Refusal: cloneLaunchRefusal(e.lastRefusal)}
 }
 
 // Touch is an explicit consumer heartbeat during long tool work. It renews
@@ -544,14 +567,14 @@ func (p *LaunchPool) Touch(principal, binding, session string) bool {
 }
 
 // Resume acknowledges a terminal refusal without changing the pin. Consumers
-// must never use this as startup replay after useful work. The attempt counter
-// prevents a stale acknowledgement from clearing a newer refusal.
-func (p *LaunchPool) Resume(principal, binding, session string, expectedAttempts int) bool {
+// must never use this as startup replay after useful work. The refusal version
+// distinguishes even consecutive pre-executor denials at the same attempt count.
+func (p *LaunchPool) Resume(principal, binding, session string, expectedRefusalVersion uint64) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pruneLocked()
 	e := p.bindings[binding]
-	if e == nil || e.revoked || principal == "" || e.principal != principal || e.request.SessionID != session || e.active != nil || e.attempts != expectedAttempts {
+	if e == nil || e.revoked || principal == "" || e.principal != principal || e.request.SessionID != session || e.active != nil || e.lastRefusal == nil || expectedRefusalVersion == 0 || e.refusalVersion != expectedRefusalVersion {
 		return false
 	}
 	e.lastRefusal = nil
@@ -577,7 +600,7 @@ func (p *LaunchPool) ExecuteBound(ctx context.Context, principal, binding, sessi
 	if refusal != nil {
 		p.mu.Lock()
 		if e := p.bindings[binding]; e != nil && principal != "" && e.principal == principal && e.request.SessionID == session && e.request.Model == req.Model && !e.revoked && refusal.Code != "binding_busy" {
-			e.lastRefusal = cloneLaunchRefusal(refusal)
+			e.latchRefusal(refusal)
 		}
 		p.mu.Unlock()
 		cancel()
@@ -666,7 +689,7 @@ func (p *LaunchPool) boundError(err error, binding string, a *Auth) error {
 	}
 	p.mu.Lock()
 	if e := p.bindings[binding]; e != nil {
-		e.lastRefusal = cloneLaunchRefusal(r)
+		e.latchRefusal(r)
 	}
 	p.mu.Unlock()
 	return r
