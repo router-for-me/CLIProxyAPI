@@ -1,0 +1,474 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	execution "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+)
+
+const launchTTL = 30 * time.Second
+const launchLimit = 256
+const usageURL = "https://chatgpt.com/backend-api/wham/usage"
+
+// DelegatedLaunchExecutor is an execution-owned boundary: implementations must
+// use this exact immutable auth/model, validate the final payload and never
+// reselect credentials or models. Ordinary/plugin executors do not opt in by
+// merely registering under the name "codex".
+type DelegatedLaunchExecutor interface {
+	ExecuteDelegatedLaunch(context.Context, *Auth, execution.Request, execution.Options) (execution.Response, *execution.StreamResult, error)
+}
+
+var exactLaunchModel = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
+
+type launchEntry struct {
+	request   PrepareLaunchRequest
+	principal string
+	result    LaunchResult
+	authID    string
+	revision  [32]byte
+	done      chan struct{}
+	expires   time.Time
+}
+
+// LaunchPool owns admission and dispatch. All state is bounded and process-local;
+// a restart invalidates bindings. The consumer owns durable waiting/re-preparation.
+type LaunchPool struct {
+	manager  *Manager
+	now      func() time.Time
+	mu       sync.Mutex
+	entries  map[[32]byte]*launchEntry
+	bindings map[string]*launchEntry
+	probes   chan struct{}
+}
+
+func NewLaunchPool(manager *Manager) *LaunchPool {
+	return &LaunchPool{manager: manager, now: time.Now, entries: make(map[[32]byte]*launchEntry), bindings: make(map[string]*launchEntry), probes: make(chan struct{}, 4)}
+}
+
+func launchRefusal(code, binding string, domains []string) *LaunchRefusal {
+	return &LaunchRefusal{Code: code, BindingID: binding, QuotaScope: "account", QuotaDomains: append([]string{}, domains...)}
+}
+
+func unverifiedLaunch(code string) LaunchResult {
+	return LaunchResult{Status: "unverified", Code: code, QuotaScope: "unknown", QuotaDomains: []string{}}
+}
+
+func validLaunchRequest(r PrepareLaunchRequest) bool {
+	if r.Provider != "codex" || !exactLaunchModel.MatchString(r.Model) || !exactLaunchModel.MatchString(r.SessionID) || r.ClientRequestID == "" || len(r.ClientRequestID) > 256 || len(r.BlockedQuotaDomains) > 64 {
+		return false
+	}
+	for _, d := range r.BlockedQuotaDomains {
+		if len(d) > 512 || d == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// Prepare performs read-only bounded probes, never executor generation.
+func (p *LaunchPool) Prepare(ctx context.Context, principal string, r PrepareLaunchRequest) LaunchResult {
+	if principal == "" || !validLaunchRequest(r) {
+		return unverifiedLaunch("invalid_prepare")
+	}
+	// Normalize a private copy so idempotency includes the complete blocked set.
+	r.BlockedQuotaDomains = append([]string{}, r.BlockedQuotaDomains...)
+	sort.Strings(r.BlockedQuotaDomains)
+	requestJSON, _ := json.Marshal(r)
+	key := sha256.Sum256([]byte(principal + "\x00" + r.ClientRequestID))
+	p.mu.Lock()
+	p.pruneLocked()
+	if old := p.entries[key]; old != nil {
+		oldJSON, _ := json.Marshal(old.request)
+		if old.principal != principal || string(oldJSON) != string(requestJSON) {
+			p.mu.Unlock()
+			return unverifiedLaunch("idempotency_conflict")
+		}
+		p.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return unverifiedLaunch("prepare_cancelled")
+		case <-old.done:
+			return cloneLaunchResult(old.result)
+		}
+	}
+	if len(p.entries) >= launchLimit {
+		p.mu.Unlock()
+		return unverifiedLaunch("pool_busy")
+	}
+	entry := &launchEntry{request: r, principal: principal, done: make(chan struct{}), expires: p.now().Add(launchTTL)}
+	p.entries[key] = entry
+	p.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result, authID, revision := p.prepare(ctx, r)
+	p.mu.Lock()
+	entry.result, entry.authID, entry.revision = result, authID, revision
+	entry.expires = p.now().Add(launchTTL)
+	if result.Status == "ready" {
+		p.bindings[result.BindingID] = entry
+		entry.expires = result.ExpiresAt
+	}
+	close(entry.done)
+	p.mu.Unlock()
+	return cloneLaunchResult(result)
+}
+
+func cloneLaunchResult(r LaunchResult) LaunchResult {
+	r.QuotaDomains = append([]string{}, r.QuotaDomains...)
+	r.Windows = append([]LaunchWindow(nil), r.Windows...)
+	return r
+}
+
+func (p *LaunchPool) pruneLocked() {
+	for k, e := range p.entries {
+		select {
+		case <-e.done:
+			if !p.now().Before(e.expires) {
+				delete(p.entries, k)
+				delete(p.bindings, e.result.BindingID)
+			}
+		default:
+		}
+	}
+}
+
+func launchAccount(a *Auth) string {
+	if a == nil || a.Provider != "codex" || a.Disabled || a.Status == StatusDisabled {
+		return ""
+	}
+	// Custom endpoints, API keys, SIWC and injected credential headers cannot prove
+	// that the wham account is the account used by Responses.
+	for k, v := range a.Attributes {
+		if v != "" && (k == "api_key" || k == "base_url" || strings.HasPrefix(k, "header:")) {
+			return ""
+		}
+	}
+	if a.Metadata["type"] != "codex" {
+		return ""
+	}
+	if _, ok := a.Metadata["use_siwc"]; ok {
+		return ""
+	}
+	if a.Attributes["use_siwc"] != "" {
+		return ""
+	}
+	token, _ := a.Metadata["access_token"].(string)
+	id, _ := a.Metadata["account_id"].(string)
+	if strings.TrimSpace(token) == "" || strings.TrimSpace(id) == "" || len(id) > 256 {
+		return ""
+	}
+	return id
+}
+
+func launchRevision(a *Auth) [32]byte {
+	// Never persisted, logged or sent to clients. Includes token changes as well
+	// as monotonic identity revisions (including remove/re-register).
+	b, _ := json.Marshal([]any{a.ID, a.Provider, a.Generation, a.RegistrationEpoch, a.Disabled, a.Status, a.Attributes, a.Metadata, a.ProxyURL})
+	return sha256.Sum256(b)
+}
+
+func quotaDomain(id string) string { return "codex:credential:" + id }
+
+type launchProbe struct {
+	auth     *Auth
+	revision [32]byte
+	result   LaunchResult
+}
+
+func (p *LaunchPool) prepare(ctx context.Context, r PrepareLaunchRequest) (LaunchResult, string, [32]byte) {
+	if p.manager == nil {
+		return unverifiedLaunch("pool_unavailable"), "", [32]byte{}
+	}
+	auths := p.manager.List()
+	sort.Slice(auths, func(i, j int) bool { return auths[i].ID < auths[j].ID })
+	blocked := make(map[string]bool)
+	for _, d := range r.BlockedQuotaDomains {
+		blocked[d] = true
+	}
+	var candidates []*Auth
+	seen := make(map[string]bool)
+	for _, a := range auths {
+		account := launchAccount(a)
+		if account == "" || blocked[quotaDomain(account)] || seen[account] {
+			continue
+		}
+		if !registry.GetGlobalRegistry().ClientSupportsModel(a.ID, r.Model) {
+			continue
+		}
+		seen[account] = true
+		candidates = append(candidates, a)
+		if len(candidates) == 32 {
+			break
+		}
+	}
+	if len(candidates) == 0 {
+		return unverifiedLaunch("no_verified_account"), "", [32]byte{}
+	}
+	// Independent probes run concurrently in a globally bounded pool. Saturation
+	// fails closed rather than spawning unbounded goroutines or queued work.
+	results := make([]launchProbe, len(candidates))
+	var wg sync.WaitGroup
+	for i, a := range candidates {
+		select {
+		case p.probes <- struct{}{}:
+			wg.Add(1)
+			go func(i int, a *Auth) {
+				defer wg.Done()
+				defer func() { <-p.probes }()
+				results[i] = launchProbe{auth: a, revision: launchRevision(a), result: p.probe(ctx, a)}
+			}(i, a)
+		default:
+			results[i] = launchProbe{auth: a, result: unverifiedLaunch("pool_busy")}
+		}
+	}
+	wg.Wait()
+	denied := LaunchResult{Status: "waiting", Code: "usage_limit", QuotaScope: "account", QuotaDomains: []string{}}
+	for _, probe := range results {
+		q := probe.result
+		if q.Status == "ready" && ctx.Err() == nil {
+			current, ok := p.manager.GetByID(probe.auth.ID)
+			if !ok || launchRevision(current) != probe.revision {
+				denied.Status = "unverified"
+				continue
+			}
+			var random [24]byte
+			if _, err := rand.Read(random[:]); err != nil {
+				return unverifiedLaunch("binding_unavailable"), "", [32]byte{}
+			}
+			q.BindingID = hex.EncodeToString(random[:])
+			q.Provider, q.Model, q.SessionID = r.Provider, r.Model, r.SessionID
+			q.BasePath = "/v1/delegated-launch/bindings/" + q.BindingID + "/sessions/" + url.PathEscape(r.SessionID)
+			return q, probe.auth.ID, probe.revision
+		}
+		if q.Status != "waiting" {
+			denied.Status = "unverified"
+			denied.Code = "capacity_unverified"
+			denied.QuotaScope = "unknown"
+		}
+		denied.QuotaDomains = append(denied.QuotaDomains, q.QuotaDomains...)
+	}
+	return denied, "", [32]byte{}
+}
+
+// probe uses the existing executor's credential injection, but owns a bounded,
+// no-redirect HTTP client. No manager lock is held during the read-only request.
+func (p *LaunchPool) probe(ctx context.Context, a *Auth) LaunchResult {
+	unknown := unverifiedLaunch("capacity_unverified")
+	account := launchAccount(a)
+	if account == "" {
+		return unknown
+	}
+	unknown.QuotaDomains = []string{quotaDomain(account)}
+	p.manager.mu.RLock()
+	ex := p.manager.executors["codex"]
+	p.manager.mu.RUnlock()
+	preparer, ok := ex.(RequestPreparer)
+	if !ok {
+		return unknown
+	}
+	if _, ok := ex.(DelegatedLaunchExecutor); !ok {
+		return unknown
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
+	if err != nil || preparer.PrepareRequest(req, a) != nil {
+		return unknown
+	}
+	req.Header.Set("Chatgpt-Account-Id", account)
+	req.Header.Set("Cache-Control", "no-cache, no-store")
+	transport := p.manager.roundTripperFor(a)
+	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		return unknown
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return unknown
+	}
+	date, err := http.ParseTime(resp.Header.Get("Date"))
+	now := p.now().UTC()
+	if err != nil || now.Sub(date) > launchTTL || date.Sub(now) > launchTTL || (resp.Header.Get("Age") != "" && resp.Header.Get("Age") != "0") {
+		return unknown
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil || len(body) > 1<<20 || ctx.Err() != nil {
+		return unknown
+	}
+	return decodeLaunchUsage(body, account, now)
+}
+
+func decodeLaunchUsage(body []byte, account string, now time.Time) LaunchResult {
+	unknown := unverifiedLaunch("capacity_unverified")
+	unknown.QuotaDomains = []string{quotaDomain(account)}
+	type window struct {
+		Used    *float64 `json:"used_percent"`
+		Reset   *int64   `json:"reset_at"`
+		Seconds *int64   `json:"limit_window_seconds"`
+	}
+	var raw struct {
+		Account    string          `json:"account_id"`
+		Additional json.RawMessage `json:"additional_rate_limits"`
+		Rate       struct {
+			Allowed   *bool   `json:"allowed"`
+			Reached   *bool   `json:"limit_reached"`
+			Primary   *window `json:"primary_window"`
+			Secondary *window `json:"secondary_window"`
+		} `json:"rate_limit"`
+	}
+	if json.Unmarshal(body, &raw) != nil || raw.Account != account || raw.Rate.Allowed == nil {
+		return unknown
+	}
+	// Extra model-specific limits have no proven normalization in this protocol.
+	// Ignoring them could turn a partial snapshot into a false healthy result.
+	if extra := strings.TrimSpace(string(raw.Additional)); extra != "" && extra != "null" && extra != "[]" {
+		return unknown
+	}
+	r := LaunchResult{Status: "ready", QuotaDomains: []string{quotaDomain(account)}, CheckedAt: now, ExpiresAt: now.Add(launchTTL), OrdinaryUsageAllowed: *raw.Rate.Allowed}
+	for i, w := range []*window{raw.Rate.Primary, raw.Rate.Secondary} {
+		if w == nil || w.Used == nil || w.Reset == nil || w.Seconds == nil || *w.Seconds <= 0 || *w.Used < 0 || *w.Used > 100 || !time.Unix(*w.Reset, 0).After(now) {
+			return unknown
+		}
+		id := []string{"primary", "secondary"}[i]
+		r.Windows = append(r.Windows, LaunchWindow{ID: id, UsedPercent: *w.Used, ResetsAt: time.Unix(*w.Reset, 0).UTC()})
+		if *w.Used >= 100 {
+			r.Status = "waiting"
+		}
+		if reset := time.Unix(*w.Reset, 0); reset.Before(r.ExpiresAt) {
+			r.ExpiresAt = reset
+		}
+	}
+	if !r.OrdinaryUsageAllowed || (raw.Rate.Reached != nil && *raw.Rate.Reached) {
+		r.Status = "waiting"
+	}
+	if r.Status == "waiting" {
+		r.Code = "usage_limit"
+		r.QuotaScope = "account"
+	}
+	return r
+}
+
+// authorize revalidates the exact auth and returns an immutable execution
+// snapshot. A concurrent replacement cannot make dispatch use new credentials.
+func (p *LaunchPool) authorize(ctx context.Context, principal, binding, session, model string) (*Auth, ProviderExecutor, *LaunchRefusal) {
+	p.mu.Lock()
+	p.pruneLocked()
+	e := p.bindings[binding]
+	if e == nil || e.principal != principal || principal == "" || e.request.SessionID != session || e.request.Model != model || !p.now().Before(e.expires) {
+		p.mu.Unlock()
+		return nil, nil, launchRefusal("binding_invalid", binding, nil)
+	}
+	authID, revision, domains := e.authID, e.revision, append([]string{}, e.result.QuotaDomains...)
+	p.mu.Unlock()
+	a, ok := p.manager.GetByID(authID)
+	if !ok || launchRevision(a) != revision || launchAccount(a) == "" {
+		return nil, nil, launchRefusal("binding_changed", binding, domains)
+	}
+	select {
+	case p.probes <- struct{}{}:
+	default:
+		return nil, nil, launchRefusal("capacity_unverified", binding, domains)
+	}
+	quota := p.probe(ctx, a)
+	<-p.probes
+	if quota.Status != "ready" {
+		code := quota.Code
+		if code == "" {
+			code = "capacity_unverified"
+		}
+		return nil, nil, launchRefusal(code, binding, domains)
+	}
+	p.manager.mu.RLock()
+	current := p.manager.auths[authID]
+	ex := p.manager.executors["codex"]
+	valid := current != nil && launchRevision(current) == revision && registry.GetGlobalRegistry().ClientSupportsModel(authID, model)
+	if valid {
+		a = current.Clone()
+	}
+	p.manager.mu.RUnlock()
+	if !valid || ex == nil || ctx.Err() != nil || !p.now().Before(e.expires) {
+		return nil, nil, launchRefusal("binding_changed", binding, domains)
+	}
+	return a, ex, nil
+}
+
+// ExecuteBound has exactly one credential/model attempt. It deliberately bypasses
+// model routing, preview-model retries, Home and ordinary affinity/failover.
+func (p *LaunchPool) ExecuteBound(ctx context.Context, principal, binding, session string, req execution.Request, opts execution.Options) (execution.Response, *execution.StreamResult, error) {
+	a, ex, refusal := p.authorize(ctx, principal, binding, session, req.Model)
+	if refusal != nil {
+		return execution.Response{}, nil, refusal
+	}
+	if execution.ValidateBoundModel(execution.WithBoundModel(ctx, req.Model), req.Payload) != nil || opts.Alt != "" {
+		return execution.Response{}, nil, launchRefusal("model_mismatch", binding, nil)
+	}
+	ctx = execution.WithBoundModel(ctx, req.Model)
+	if rt := p.manager.roundTripperFor(a); rt != nil {
+		ctx = context.WithValue(ctx, "cliproxy.roundtripper", rt)
+	}
+	opts.Metadata = map[string]any{execution.PinnedAuthMetadataKey: a.ID, execution.CanonicalSessionIDMetadataKey: session}
+	opts.RequestAfterAuthInterceptor = nil
+	boundExecutor, ok := ex.(DelegatedLaunchExecutor)
+	if !ok {
+		return execution.Response{}, nil, launchRefusal("capacity_unverified", binding, nil)
+	}
+	response, stream, err := boundExecutor.ExecuteDelegatedLaunch(ctx, a, req, opts)
+	if opts.Stream {
+		if err == nil && stream != nil {
+			original := stream.Chunks
+			chunks := make(chan execution.StreamChunk)
+			stream = &execution.StreamResult{Headers: stream.Headers, Chunks: chunks}
+			go func() {
+				defer close(chunks)
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case chunk, ok := <-original:
+						if !ok {
+							return
+						}
+						chunk.Err = p.boundError(chunk.Err, binding, a)
+						select {
+						case chunks <- chunk:
+						case <-ctx.Done():
+							return
+						}
+						if chunk.Err != nil {
+							return
+						}
+					}
+				}
+			}()
+		}
+		return execution.Response{}, stream, p.boundError(err, binding, a)
+	}
+	return response, nil, p.boundError(err, binding, a)
+}
+
+// BoundError maps only structured HTTP status; upstream prose is never parsed.
+func (p *LaunchPool) boundError(err error, binding string, a *Auth) error {
+	if errors.Is(err, execution.ErrBoundModelChanged) {
+		return launchRefusal("model_mismatch", binding, []string{quotaDomain(launchAccount(a))})
+	}
+	var status interface{ StatusCode() int }
+	if errors.As(err, &status) && status.StatusCode() == http.StatusTooManyRequests {
+		return launchRefusal("usage_limit", binding, []string{quotaDomain(launchAccount(a))})
+	}
+	return err
+}
