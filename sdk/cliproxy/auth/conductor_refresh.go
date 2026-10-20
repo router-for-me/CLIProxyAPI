@@ -1016,7 +1016,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		updated.Runtime = auth.Runtime
 	}
 	updated.LastRefreshedAt = now
-	updated.NextRefreshAfter = time.Time{}
+	if !updated.NextRefreshAfter.After(now) {
+		updated.NextRefreshAfter = time.Time{}
+	}
 	updated.LastError = nil
 	updated.StatusMessage = ""
 	updated.Unavailable = false
