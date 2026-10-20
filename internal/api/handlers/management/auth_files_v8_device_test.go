@@ -80,6 +80,7 @@ func TestStartOAuthV8CodexDeviceFlowReturnsCodeAndUsesSessionStatusAndCancel(t *
 func TestStartOAuthV8CodexDeviceFlowSavesThroughManagementAuthHook(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	saved := make(chan string, 1)
+	workerContext := make(chan context.Context, 1)
 	preSave := make(chan string, 1)
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	store := &memoryAuthStore{}
@@ -92,7 +93,8 @@ func TestStartOAuthV8CodexDeviceFlowSavesThroughManagementAuthHook(t *testing.T)
 		saved <- record.ID
 		return nil
 	})
-	h.codexDeviceAuthenticator = codexDeviceAuthenticatorFunc(func(_ context.Context, _ *config.Config, opts *sdkAuth.LoginOptions) (*coreauth.Auth, error) {
+	h.codexDeviceAuthenticator = codexDeviceAuthenticatorFunc(func(ctx context.Context, _ *config.Config, opts *sdkAuth.LoginOptions) (*coreauth.Auth, error) {
+		workerContext <- ctx
 		opts.OnDeviceCode(sdkAuth.DeviceCodeInfo{UserCode: "ABCD-EFGH", VerificationURL: "https://auth.openai.com/codex/device", ExpiresIn: 900})
 		return &coreauth.Auth{ID: "codex-device.json", FileName: "codex-device.json", Provider: "codex"}, nil
 	})
@@ -102,6 +104,14 @@ func TestStartOAuthV8CodexDeviceFlowSavesThroughManagementAuthHook(t *testing.T)
 
 	start := httptest.NewRecorder()
 	router.ServeHTTP(start, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?provider=codex&flow=device", nil))
+	ctx := <-workerContext
+	t.Cleanup(func() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(3 * time.Second):
+			t.Error("device worker did not finish")
+		}
+	})
 	if start.Code != http.StatusOK {
 		t.Fatalf("start status = %d, body=%s", start.Code, start.Body.String())
 	}
