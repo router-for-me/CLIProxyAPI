@@ -1011,3 +1011,128 @@ func TestAntigravityConcurrentAuthUpdatePreservesBothNewTokenAndPersistedHints(t
 		t.Fatalf("expected version 2 hints to survive preemption and stale-snapshot Update, got %v", loadedHints.ModelIDs)
 	}
 }
+
+func TestFilterAntigravityModelsDerivesArgonMediumAndLowFromHigh(t *testing.T) {
+	hints := antigravityModelCapabilityHints{
+		ModelIDs: map[string]struct{}{
+			"gemini-4-argon-high": {},
+		},
+	}
+	models := filterAntigravityModels(registry.GetAntigravityModels(), hints)
+	got := make(map[string]bool, len(models))
+	for _, m := range models {
+		if m != nil {
+			got[m.ID] = true
+		}
+	}
+	for _, want := range []string{"gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"} {
+		if !got[want] {
+			t.Fatalf("expected %s to be included when gemini-4-argon-high is in capability hints; got=%v", want, got)
+		}
+	}
+}
+
+func TestAntigravityPersistedHintsInvalidateOnUserAgentUpgrade(t *testing.T) {
+	resetAntigravityCapabilityCache()
+	t.Cleanup(resetAntigravityCapabilityCache)
+
+	const endpoint = "https://daily.invalid"
+	authOldUA := &coreauth.Auth{
+		ID:       "antigravity-ua-upgrade.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "token-ua",
+			"project_id":   "project-ua",
+			"base_url":     endpoint,
+			"user_agent":   "antigravity/hub/2.9.1 darwin/arm64",
+			antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(
+				"project-ua",
+				endpoint,
+				"antigravity/hub/2.9.1 darwin/arm64",
+				antigravityModelCapabilityHints{
+					ModelIDs: map[string]struct{}{"gemini-3-flash": {}},
+				},
+			),
+		},
+	}
+
+	svc := &Service{cfg: &config.Config{}}
+	if hints := svc.cachedAntigravityHints(authOldUA); len(hints.ModelIDs) != 1 {
+		t.Fatalf("expected hints matching 2.9.1 UA to load, got %v", hints.ModelIDs)
+	}
+
+	authUpgradedUA := authOldUA.Clone()
+	authUpgradedUA.Metadata["user_agent"] = "antigravity/hub/2.23.0 darwin/arm64"
+	if svc.antigravityCapabilityKey(authOldUA) == svc.antigravityCapabilityKey(authUpgradedUA) {
+		t.Fatal("expected capability cache key to change when User-Agent upgrades")
+	}
+	if hints := svc.cachedAntigravityHints(authUpgradedUA); hints.ModelIDs != nil {
+		t.Fatalf("expected stale 2.9.1 persisted hints to be invalidated under 2.23.0 UA, got %v", hints.ModelIDs)
+	}
+
+	// Patch updates at or above the 2.23.0 capability floor (e.g. 2.23.0 <-> 2.23.1)
+	// must preserve persisted hints at startup and share the same capability cohort key.
+	auth2231 := &coreauth.Auth{
+		ID:       "antigravity-ua-cohort.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "token-ua-cohort",
+			"project_id":   "project-ua",
+			"base_url":     endpoint,
+			"user_agent":   "antigravity/hub/2.23.0 darwin/arm64",
+			antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(
+				"project-ua",
+				endpoint,
+				"antigravity/hub/2.23.1 darwin/arm64",
+				antigravityModelCapabilityHints{
+					ModelIDs: map[string]struct{}{"gemini-4-argon": {}},
+				},
+			),
+		},
+	}
+	auth2231Updated := auth2231.Clone()
+	auth2231Updated.Metadata["user_agent"] = "antigravity/hub/2.23.1 darwin/arm64"
+	if svc.antigravityCapabilityKey(auth2231) != svc.antigravityCapabilityKey(auth2231Updated) {
+		t.Fatal("expected capability cache key to remain stable across >=2.23.0 Hub patch versions")
+	}
+	if hints := svc.cachedAntigravityHints(auth2231); len(hints.ModelIDs) != 1 {
+		t.Fatalf("expected >=2.23.0 persisted hints to survive minor/patch Hub version skew at startup, got %v", hints.ModelIDs)
+	}
+}
+
+func TestAntigravityPersistedHintsManagerFallbackUsesRequestUserAgent(t *testing.T) {
+	resetAntigravityCapabilityCache()
+	t.Cleanup(resetAntigravityCapabilityCache)
+
+	const endpoint = "https://daily.invalid"
+	manager := coreauth.NewManager(nil, nil, nil)
+	current, errRegister := manager.Register(t.Context(), &coreauth.Auth{
+		ID:       "antigravity-manager-ua.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "token-manager-ua",
+			"project_id":   "project-manager-ua",
+			"base_url":     endpoint,
+			"user_agent":   "antigravity/hub/2.9.1 darwin/arm64",
+			antigravityPersistedHintsMetaKey: buildPersistedAntigravityCapabilityHintsValue(
+				"project-manager-ua",
+				endpoint,
+				"antigravity/hub/2.9.1 darwin/arm64",
+				antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{"gemini-3-flash": {}}},
+			),
+		},
+	})
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+
+	request := current.Clone()
+	request.Metadata["user_agent"] = "antigravity/hub/2.23.0 darwin/arm64"
+	svc := &Service{cfg: &config.Config{}, coreManager: manager}
+	if hints := svc.cachedAntigravityHints(request); hints.ModelIDs != nil {
+		t.Fatalf("expected manager hints for the old User-Agent to be rejected, got %v", hints.ModelIDs)
+	}
+}

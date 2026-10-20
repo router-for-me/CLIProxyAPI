@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -68,7 +69,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 
 	isClaudeModel := strings.Contains(modelName, "claude")
-	useAntigravitySchema := isClaudeModel || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	useAntigravitySchema := isClaudeModel || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro") || strings.Contains(modelName, "gemini-4-argon") || strings.Contains(modelName, "gemini-3.8-flash")
 	var (
 		bodyReader io.Reader
 		payloadLog []byte
@@ -648,8 +649,62 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
+const (
+	argonThinkingConfigPath = "request.generationConfig.thinkingConfig"
+	argonThinkingLevelPath  = argonThinkingConfigPath + ".thinkingLevel"
+	argonThinkingBudgetPath = argonThinkingConfigPath + ".thinkingBudget"
+)
+
+// resolveAntigravityArgonTier maps a Gemini 4 Argon request onto one of the three
+// upstream tier models and normalizes its thinking config.
+//
+// Cloud Code exposes Argon only as gemini-4-argon-{low,medium,high}; the bare
+// "gemini-4-argon" ID returns 404. Upstream accepts thinkingLevel "high" on
+// gemini-4-argon-high, while gemini-4-argon-medium and gemini-4-argon-low reject
+// thinkingLevel and require a dynamic thinkingBudget (-1). A requested level or
+// numeric budget selects the tier. Argon cannot run without thinking (the
+// registry definitions carry no zero_allowed and no "none" level), so central
+// validation has already clamped an explicit disable to the lowest level before
+// this resolver runs; the tier is then derived from that clamped level.
+// includeThoughts is left as set by the caller.
+func resolveAntigravityArgonTier(modelName string, payload []byte) (string, []byte) {
+	tier := strings.ToLower(strings.TrimSpace(modelName))
+	switch tier {
+	case "gemini-4-argon":
+		tier = "high"
+	case "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low":
+		tier = strings.TrimPrefix(tier, "gemini-4-argon-")
+	default:
+		return modelName, payload
+	}
+
+	level := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, argonThinkingLevelPath).String()))
+	budget := gjson.GetBytes(payload, argonThinkingBudgetPath)
+	if level == "" && budget.Exists() && budget.Type == gjson.Number && budget.Int() > 0 {
+		level, _ = thinking.ConvertBudgetToLevel(int(budget.Int()))
+	}
+	switch level {
+	case "none", "minimal", "low":
+		tier = "low"
+	case "medium":
+		tier = "medium"
+	case "high", "xhigh", "max":
+		tier = "high"
+	}
+
+	if tier == "high" {
+		payload, _ = sjson.DeleteBytes(payload, argonThinkingBudgetPath)
+		payload, _ = sjson.SetBytes(payload, argonThinkingLevelPath, "high")
+	} else {
+		payload, _ = sjson.DeleteBytes(payload, argonThinkingLevelPath)
+		payload, _ = sjson.SetBytes(payload, argonThinkingBudgetPath, -1)
+	}
+	return "gemini-4-argon-" + tier, payload
+}
+
 func geminiToAntigravity(modelName string, payload []byte, projectID string, derivedSessionIDs ...string) []byte {
 	template := payload
+	modelName, template = resolveAntigravityArgonTier(modelName, template)
 	template = helps.SetStringIfDifferent(template, "model", modelName)
 	template = helps.SetStringIfDifferent(template, "userAgent", "antigravity")
 

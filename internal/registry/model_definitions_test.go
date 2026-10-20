@@ -288,6 +288,28 @@ func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
 	}
 }
 
+func TestWithAntigravityBuiltinsRestoresArgonWithoutRemoteEntries(t *testing.T) {
+	models := WithAntigravityBuiltins([]*ModelInfo{{ID: "gemini-3-flash"}})
+	byID := make(map[string]*ModelInfo, len(models))
+	for _, model := range models {
+		if model != nil {
+			byID[model.ID] = model
+		}
+	}
+	if byID["gemini-3-flash"] == nil {
+		t.Fatal("non-Argon remote model was removed")
+	}
+	for _, id := range []string{"gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"} {
+		model := byID[id]
+		if model == nil {
+			t.Fatalf("expected built-in model %s when remote catalog has no Argon entries", id)
+		}
+		if model.ContextLength != 1048576 || model.MaxCompletionTokens != 65536 {
+			t.Fatalf("%s limits = (%d, %d), want (1048576, 65536)", id, model.ContextLength, model.MaxCompletionTokens)
+		}
+	}
+}
+
 func TestGetDevinModelsFallback(t *testing.T) {
 	devinModels := GetDevinModels()
 	if len(devinModels) == 0 {

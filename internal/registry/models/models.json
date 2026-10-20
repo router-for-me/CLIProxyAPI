@@ -1733,7 +1733,7 @@
       "name": "gemini-4-argon",
       "description": "Gemini 4 Argon",
       "context_length": 1048576,
-      "max_completion_tokens": 1048576,
+      "max_completion_tokens": 65536,
       "thinking": {
         "min": 128,
         "max": 65535,
@@ -4074,13 +4074,81 @@
       "owned_by": "antigravity",
       "type": "antigravity",
       "supports_web_search": true,
-      "display_name": "Gemini 4 Argon",
+      "display_name": "Gemini 4 Argon (High)",
       "name": "gemini-4-argon-high",
       "description": "Gemini 4 Argon (High)",
       "context_length": 1048576,
-      "max_completion_tokens": 1048576,
+      "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1,
+        "min": 32,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-argon-medium",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 4 Argon (Medium)",
+      "name": "gemini-4-argon-medium",
+      "description": "Gemini 4 Argon (Medium)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 32,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-argon-low",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 4 Argon (Low)",
+      "name": "gemini-4-argon-low",
+      "description": "Gemini 4 Argon (Low)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 32,
         "max": 65535,
         "dynamic_allowed": true,
         "levels": [
