@@ -33,7 +33,8 @@ func TestGeminiAppImportPersistsAuth(t *testing.T) {
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
 	manager := NewManager(store, authenticator)
-	record, saved, err := manager.Login(context.Background(), "gemini-app", &config.Config{AuthDir: dir}, &LoginOptions{Metadata: map[string]string{"cookie-file": path}})
+	opts := &LoginOptions{Metadata: map[string]string{"cookie-file": path, "account": "personal"}}
+	record, saved, err := manager.Login(context.Background(), "gemini-app", &config.Config{AuthDir: dir}, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,5 +64,38 @@ func TestGeminiAppImportPersistsAuth(t *testing.T) {
 	}
 	if info.Mode().Perm()&0077 != 0 {
 		t.Fatalf("auth file is not private: %v", info.Mode())
+	}
+	if err := os.WriteFile(path, []byte(`{"__Secure-1PSID":"replacement-session-cookie"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, replacedPath, err := manager.Login(context.Background(), "gemini-app", &config.Config{AuthDir: dir}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacedPath != saved {
+		t.Fatal("re-import created a second credential for the same account")
+	}
+	data, err = os.ReadFile(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "private-session-cookie") || !strings.Contains(string(data), "replacement-session-cookie") {
+		t.Fatal("expired credential was not replaced")
+	}
+	opts.Metadata["account"] = "work"
+	_, otherPath, err := manager.Login(context.Background(), "gemini-app", &config.Config{AuthDir: dir}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherPath == saved {
+		t.Fatal("different accounts overwrite each other")
+	}
+}
+
+func TestGeminiAppImportRequiresStableAccount(t *testing.T) {
+	authenticator := NewGeminiAppAuthenticator()
+	_, err := authenticator.Login(context.Background(), &config.Config{}, &LoginOptions{Metadata: map[string]string{"cookie-file": "cookies.json", "account": "   "}})
+	if err == nil || !strings.Contains(err.Error(), "stable account name") {
+		t.Fatalf("expected account-name validation before reading credentials, got %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -178,12 +179,16 @@ func ReadGeminiAppStream(reader io.Reader, emit func(string) error) (string, err
 	return text, nil
 }
 
-// GeminiAppResponse presents App text to the existing Gemini response translators.
-func GeminiAppResponse(text string, final bool) []byte {
-	candidate := map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": text}}}}
-	if final {
-		candidate["finishReason"] = "STOP"
+// NewGeminiAppResponse preserves one local response identity across all chunks.
+// The model identifies the proxy route, not an unreported upstream model version.
+func NewGeminiAppResponse(model string) func(string, bool) []byte {
+	id, created := "gemini-app-"+uuid.NewString(), time.Now().UTC().Format(time.RFC3339Nano)
+	return func(text string, final bool) []byte {
+		candidate := map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": text}}}}
+		if final {
+			candidate["finishReason"] = "STOP"
+		}
+		body, _ := json.Marshal(map[string]any{"candidates": []any{candidate}, "responseId": id, "modelVersion": model, "createTime": created})
+		return body
 	}
-	body, _ := json.Marshal(map[string]any{"candidates": []any{candidate}})
-	return body
 }

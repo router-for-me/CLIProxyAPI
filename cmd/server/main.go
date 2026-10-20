@@ -117,6 +117,7 @@ func main() {
 	var devinLogin bool
 	var metaLogin bool
 	var geminiAppImport string
+	var geminiAppAccount string
 	var discoverGateways bool
 	var discoverTimeout int
 	var discoverJSON bool
@@ -148,6 +149,7 @@ func main() {
 	flag.BoolVar(&devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.BoolVar(&metaLogin, "meta-login", false, "Login to Meta using OAuth")
 	flag.StringVar(&geminiAppImport, "gemini-app-import", "", "Import Gemini App browser cookies from a JSON file")
+	flag.StringVar(&geminiAppAccount, "gemini-app-account", "", "Stable account name for Gemini App imports; reuse it to replace expired cookies")
 	flag.BoolVar(&discoverGateways, "discover", false, "Discover local AI gateways and CPA instances on the LAN")
 	flag.IntVar(&discoverTimeout, "discover-timeout", 3, "Timeout in seconds for LAN discovery (default 3s)")
 	flag.BoolVar(&discoverJSON, "discover-json", false, "Output discovered gateways in JSON format")
@@ -744,7 +746,7 @@ func main() {
 	} else if metaLogin {
 		cmd.DoMetaLogin(cfg, options)
 	} else if geminiAppImport != "" {
-		cmd.DoGeminiAppImport(cfg, geminiAppImport)
+		cmd.DoGeminiAppImport(cfg, geminiAppImport, geminiAppAccount)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

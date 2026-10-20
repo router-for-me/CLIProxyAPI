@@ -86,6 +86,7 @@ func (e *GeminiAppExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	reporter := helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	response := helps.NewGeminiAppResponse(req.Model)
 	httpResp, translated, err := e.open(ctx, auth, req, opts)
 	if err != nil {
 		return resp, err
@@ -96,7 +97,7 @@ func (e *GeminiAppExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 	var param any
-	payload := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatGemini, cliproxyexecutor.ResponseFormatOrSource(opts), req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, helps.GeminiAppResponse(text, true), &param)
+	payload := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatGemini, cliproxyexecutor.ResponseFormatOrSource(opts), req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, response(text, true), &param)
 	if len(payload) == 0 {
 		return resp, statusErr{code: http.StatusBadGateway, msg: "gemini-app: empty translated response"}
 	}
@@ -110,6 +111,7 @@ func (e *GeminiAppExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	reporter := helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	response := helps.NewGeminiAppResponse(req.Model)
 	httpResp, translated, err := e.open(ctx, auth, req, opts)
 	if err != nil {
 		return nil, err
@@ -132,9 +134,9 @@ func (e *GeminiAppExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			}
 			return nil
 		}
-		_, streamErr := helps.ReadGeminiAppStream(httpResp.Body, func(delta string) error { return send(helps.GeminiAppResponse(delta, false)) })
+		_, streamErr := helps.ReadGeminiAppStream(httpResp.Body, func(delta string) error { return send(response(delta, false)) })
 		if streamErr == nil {
-			streamErr = send(helps.GeminiAppResponse("", true))
+			streamErr = send(response("", true))
 		}
 		if streamErr == nil {
 			streamErr = send([]byte("[DONE]"))
@@ -160,7 +162,7 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	if len(opts.OriginalRequest) > 0 {
 		original = opts.OriginalRequest
 	}
-	_, translated, err := helps.TranslateRequestPairReturningError(ctx, opts.Headers, e.cfg, opts.SourceFormat, sdktranslator.FormatGemini, req.Model, original, req.Payload, opts.Stream, false)
+	translatedOriginal, translated, err := helps.TranslateRequestPairReturningError(ctx, opts.Headers, e.cfg, opts.SourceFormat, sdktranslator.FormatGemini, req.Model, original, req.Payload, opts.Stream, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -169,7 +171,7 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 		return nil, nil, helps.NewGeminiAppRequestError(http.StatusBadRequest, err.Error())
 	}
 	body := helps.GeminiAppPayload(prompt)
-	finalize := helps.NewPayloadFinalizer(e.cfg, e.Identifier(), req.Model, e.Identifier(), "", body, req, opts)
+	finalize := helps.NewPayloadFinalizer(e.cfg, e.Identifier(), req.Model, e.Identifier(), "", translatedOriginal, req, opts)
 	body = finalize(body)
 	// Only transport framing follows the final payload barrier.
 	wire, err := helps.GeminiAppWirePayload(body)

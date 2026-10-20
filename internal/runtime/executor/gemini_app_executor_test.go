@@ -93,6 +93,8 @@ func TestGeminiAppExecutorProtocolResponses(t *testing.T) {
 				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(test.body)}
 				opts := cliproxyexecutor.Options{SourceFormat: test.format, OriginalRequest: req.Payload}
 				var output string
+				var responseID string
+				var created int64
 				if stream {
 					result, err := e.ExecuteStream(ctx, geminiAppTestAuth(), req, opts)
 					if err != nil {
@@ -103,6 +105,16 @@ func TestGeminiAppExecutorProtocolResponses(t *testing.T) {
 							t.Fatal(chunk.Err)
 						}
 						output += string(chunk.Payload)
+						if test.format == sdktranslator.FormatOpenAI {
+							metadata := gjson.ParseBytes(chunk.Payload)
+							if metadata.Get("id").String() == "" || metadata.Get("model").String() != "gemini-app" || metadata.Get("created").Int() <= 0 {
+								t.Fatalf("missing response metadata: %s", chunk.Payload)
+							}
+							if responseID != "" && (responseID != metadata.Get("id").String() || created != metadata.Get("created").Int()) {
+								t.Fatal("response metadata changed between chunks")
+							}
+							responseID, created = metadata.Get("id").String(), metadata.Get("created").Int()
+						}
 					}
 					if !strings.Contains(output, "Hel") || !strings.Contains(output, "lo 🌏") {
 						t.Fatalf("missing text deltas: %s", output)
@@ -116,9 +128,21 @@ func TestGeminiAppExecutorProtocolResponses(t *testing.T) {
 					if !gjson.Valid(output) || !strings.Contains(output, "Hello 🌏") {
 						t.Fatalf("invalid text response: %s", output)
 					}
+					if test.format == sdktranslator.FormatOpenAI || test.format == sdktranslator.FormatClaude {
+						metadata := gjson.Parse(output)
+						if metadata.Get("id").String() == "" || metadata.Get("model").String() != "gemini-app" {
+							t.Fatalf("missing response metadata: %s", output)
+						}
+						if test.format == sdktranslator.FormatOpenAI && metadata.Get("created").Int() <= 0 {
+							t.Fatalf("missing response timestamp: %s", output)
+						}
+					}
 				}
 				if strings.Contains(output, "csrf+token") || strings.Contains(output, "test-session") {
 					t.Fatal("session material leaked downstream")
+				}
+				if stream && test.format == sdktranslator.FormatClaude && (!strings.Contains(output, `"model":"gemini-app"`) || !strings.Contains(output, `"id":"gemini-app-`)) {
+					t.Fatalf("missing Claude message metadata: %s", output)
 				}
 			})
 		}
@@ -160,6 +184,40 @@ func TestGeminiAppPayloadRulesAreFinal(t *testing.T) {
 			}
 			if !sent {
 				t.Fatal("upstream request was not sent")
+			}
+		})
+	}
+}
+
+func TestGeminiAppDefaultPayloadRulesOverrideBuiltins(t *testing.T) {
+	models := []config.PayloadModelRule{{Name: "gemini-app", Protocol: "gemini-app"}}
+	cfg := &config.Config{Payload: config.PayloadConfig{
+		Default:    []config.PayloadRule{{Models: models, Params: map[string]any{"0.0": "default prompt", "45": 0}}},
+		DefaultRaw: []config.PayloadRule{{Models: models, Params: map[string]any{"7": "0"}}},
+	}}
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			ctx := geminiAppTestContext(t, geminiAppTestFrame("answer", true), func(req *http.Request) {
+				body := gjson.Parse(gjson.Get(req.Form.Get("f.req"), "1").String())
+				if body.Get("0.0").String() != "default prompt" || body.Get("45").Int() != 0 || body.Get("7").Int() != 0 {
+					t.Fatalf("built-in values blocked caller defaults: %s", body.Raw)
+				}
+			})
+			req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"original"}]}]}`)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, OriginalRequest: req.Payload}
+			e := NewGeminiAppExecutor(cfg)
+			if stream {
+				result, err := e.ExecuteStream(ctx, geminiAppTestAuth(), req, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+				}
+			} else if _, err := e.Execute(ctx, geminiAppTestAuth(), req, opts); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

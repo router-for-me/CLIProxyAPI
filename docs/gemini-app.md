@@ -20,13 +20,16 @@ browser session. It does not require a Gemini API key or Gemini CLI credentials.
 3. Import the file using the same configuration as the server:
 
    ```sh
-   cli-proxy-api --config config.yaml --gemini-app-import gemini-cookies.json
+   cli-proxy-api --config config.yaml --gemini-app-import gemini-cookies.json --gemini-app-account personal
    ```
 
 The importer validates the session and saves a `gemini-app-*.json` credential
 under the configured `auth-dir`. The server discovers this file through its
 existing auth-file watcher. Import each account separately for normal account
-selection and load balancing. Browser cookies are credentials: keep the export
+selection and load balancing, using a distinct stable `--gemini-app-account`
+name for each account. Reuse that name on every re-import: rotated cookies
+replace the existing credential instead of adding a duplicate.
+Browser cookies are credentials: keep the export
 and saved auth file private, and delete the export after importing it.
 
 ## Send a request
@@ -53,7 +56,8 @@ the API fields. Tool calling, media input/output, token counting, and compact
 responses are unsupported. Token usage is not reported by the App endpoint.
 
 Cookies do not have OAuth refresh tokens. If authentication expires, sign in
-again and re-import fresh cookies. Upstream Google web protocol changes can
+again and re-import fresh cookies with the same `--gemini-app-account` name.
+Upstream Google web protocol changes can
 require an update to this provider.
 
 ## Payload rules
