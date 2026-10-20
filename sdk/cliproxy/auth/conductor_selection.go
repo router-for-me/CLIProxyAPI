@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"reflect"
@@ -42,25 +43,31 @@ func (m *Manager) hasPluginScheduler() bool {
 	return true
 }
 
-func (m *Manager) pluginSchedulerWantsAcrossPrioritiesLocked() bool {
-	if m == nil || m.pluginScheduler == nil {
+func pluginSchedulerWantsAcrossPriorities(scheduler PluginScheduler) bool {
+	if scheduler == nil {
 		return false
 	}
-	if opt, ok := m.pluginScheduler.(PluginSchedulerAcrossPriorities); ok && opt != nil {
+	if opt, ok := scheduler.(PluginSchedulerAcrossPriorities); ok && opt != nil {
 		return opt.SchedulerWantsAcrossPriorities()
 	}
 	return false
 }
 
+func (m *Manager) snapshotPluginScheduler() (PluginScheduler, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	scheduler := m.pluginScheduler
+	m.mu.RUnlock()
+	return scheduler, pluginSchedulerWantsAcrossPriorities(scheduler)
+}
+
 // PluginSchedulerWantsAcrossPriorities reports whether the configured plugin scheduler
 // opted into receiving candidates across all priority tiers.
 func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
-	if m == nil {
-		return false
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.pluginSchedulerWantsAcrossPrioritiesLocked()
+	_, wants := m.snapshotPluginScheduler()
+	return wants
 }
 
 func isBuiltInSelector(selector Selector) bool {
@@ -620,9 +627,8 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
 // unless session affinity or an across-priorities scheduler is active, in which case the selector
 // or scheduler additionally receives lower priority tiers.
-func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
+func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
-	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
 
 	if !sessionAffinity && !schedulerAcross {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
@@ -1563,6 +1569,69 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+// PublishIfRegistrationCurrent serializes the final model-registration
+// publication against identity mutations for this auth, then calls publish
+// only if the manager still holds auth with the same model-registration
+// inputs. It does not persist or clone auth state. publish must be fast and
+// must not re-enter the manager.
+func (m *Manager) PublishIfRegistrationCurrent(id string, registrationEpoch uint64, prefix, provider string, disabled bool, authKind string, attributes map[string]string, publish func() bool) bool {
+	if m == nil || id == "" || publish == nil {
+		return false
+	}
+	releaseMutation := m.lockAuthMutation(id)
+	defer releaseMutation()
+	m.mu.RLock()
+	current, ok := m.auths[id]
+	matches := ok && current != nil && modelRegistrationInputsMatch(current, registrationEpoch, prefix, provider, disabled, authKind, attributes)
+	m.mu.RUnlock()
+	if !matches {
+		return false
+	}
+	return publish()
+}
+
+// UpdateIfRegistrationCurrent applies a plugin-returned auth update only
+// while the manager still holds the exact registration inputs the plugin
+// computation started from. It prevents an old plugin result from adopting
+// a removed or re-registered identity merely because its zero registration
+// epoch would otherwise inherit the current epoch during Update.
+func (m *Manager) UpdateIfRegistrationCurrent(ctx context.Context, base *Auth, updated *Auth) (*Auth, bool, error) {
+	if m == nil || base == nil || updated == nil || base.ID == "" || updated.ID != base.ID {
+		return nil, false, nil
+	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, base.ID)
+	if errMutation != nil {
+		return nil, false, errMutation
+	}
+	defer releaseMutation()
+	m.mu.RLock()
+	current, ok := m.auths[base.ID]
+	matches := ok && current != nil && modelRegistrationInputsMatch(current, base.RegistrationEpoch, base.Prefix, base.Provider, base.Disabled || base.Status == StatusDisabled, base.AuthKind(), base.Attributes)
+	m.mu.RUnlock()
+	if !matches {
+		return nil, false, nil
+	}
+	committedAuth, didCommit, persistCooldown, errUpdate := m.updateInternalLocked(ctx, nil, updated, updateModeReplace)
+	releaseMutation()
+	if errUpdate == nil && didCommit && committedAuth != nil {
+		m.finishAuthUpdate(ctx, committedAuth, persistCooldown)
+	}
+	return committedAuth, errUpdate == nil && didCommit && committedAuth != nil, errUpdate
+}
+
+func modelRegistrationInputsMatch(current *Auth, registrationEpoch uint64, prefix, provider string, disabled bool, authKind string, attributes map[string]string) bool {
+	if current == nil {
+		return false
+	}
+	currentDisabled := current.Disabled || current.Status == StatusDisabled
+	return current.RegistrationEpoch == registrationEpoch &&
+		current.Prefix == prefix &&
+		current.Provider == provider &&
+		currentDisabled == disabled &&
+		current.AuthKind() == authKind &&
+		maps.Equal(current.Attributes, attributes)
+}
+
 // GetExecutionSessionAuthByID retrieves a Home runtime auth scoped to an execution session.
 func (m *Manager) GetExecutionSessionAuthByID(sessionID string, authID string) (*Auth, bool) {
 	sessionID = strings.TrimSpace(sessionID)
@@ -1757,11 +1826,11 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	pluginScheduler, schedulerAcross := m.snapshotPluginScheduler()
 
 	m.mu.RLock()
 	selector := m.selector
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
-	pluginScheduler := m.pluginScheduler
 	executor, okExecutor := m.executorLocked(provider)
 	if !okExecutor {
 		m.mu.RUnlock()
@@ -1810,7 +1879,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, now)
+	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, now, schedulerAcross)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -2099,11 +2168,11 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if len(providerSet) == 0 {
 		return nil, nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	pluginScheduler, schedulerAcross := m.snapshotPluginScheduler()
 
 	m.mu.RLock()
 	selector := m.selector
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
-	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.
@@ -2156,7 +2225,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, now)
+	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, now, schedulerAcross)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)

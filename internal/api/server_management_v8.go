@@ -11,8 +11,8 @@ import (
 // Configuration paths mirror the v8 YAML tree; operational routes use its groups.
 func (s *Server) registerManagementV8Routes() {
 	const prefix = "/v8/management"
-	s.engine.GET(prefix+"/oauth/callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
-	s.engine.POST(prefix+"/oauth/callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
+	s.engine.GET(prefix+"/oauth/callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallbackV8)
+	s.engine.POST(prefix+"/oauth/callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallbackV8)
 
 	v8 := s.engine.Group(prefix)
 	v8.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
@@ -41,8 +41,8 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
 
 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
-	v8.POST("/credentials", s.mgmt.UploadAuthFile)
-	v8.DELETE("/credentials", s.mgmt.DeleteAuthFile)
+	v8.POST("/credentials", s.mgmt.UploadAuthFileV8)
+	v8.DELETE("/credentials", s.mgmt.DeleteAuthFileV8)
 	v8.GET("/credentials/models", s.mgmt.GetAuthFileModels)
 	v8.GET("/credentials/download", s.mgmt.DownloadAuthFile)
 	v8.PATCH("/credentials/status", s.mgmt.PatchAuthFileStatus)
@@ -50,6 +50,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.POST("/credentials/refresh", s.mgmt.RefreshAuthFiles)
 	v8.POST("/oauth/import", s.mgmt.ImportOAuthV8)
 	v8.GET("/oauth/auth-url", s.mgmt.StartOAuthV8)
+	v8.POST("/oauth/siwc/bind", s.mgmt.StartSIWCBind)
 	v8.GET("/oauth/status", s.mgmt.GetAuthStatus)
 	v8.DELETE("/oauth/session", s.mgmt.CancelAuthSession)
 

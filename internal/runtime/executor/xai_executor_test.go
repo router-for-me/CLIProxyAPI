@@ -1157,6 +1157,56 @@ func TestXAIExecutorPrepareNormalizesClaudeWebSearchToolChoice_Grok46(t *testing
 	}
 }
 
+func TestXAIExecutorPrepareStripsUnsupportedWebSearchOptions(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.3",
+		Payload: []byte(`{
+			"model":"grok-4.3",
+			"input":[{"role":"user","content":"hello"}],
+			"tools":[
+				{"type":"web_search","external_web_access":true,"search_context_size":"high","search_content_types":["text","image"],"user_location":{"type":"approximate","country":"NL"},"filters":{"allowed_domains":["github.com"]}},
+				{"type":"namespace","name":"research","description":"Research tools.","tools":[{"type":"web_search","search_context_size":"low"}]}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}, false)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	webSearchTools := 0
+	for i, tool := range gjson.GetBytes(prepared.body, "tools").Array() {
+		if tool.Get("type").String() != "web_search" {
+			continue
+		}
+		webSearchTools++
+		for _, field := range []string{"external_web_access", "search_context_size"} {
+			if tool.Get(field).Exists() {
+				t.Fatalf("tools.%d.%s exists, want removed; body=%s", i, field, prepared.body)
+			}
+		}
+		if webSearchTools > 1 {
+			continue
+		}
+		if got := tool.Get("search_content_types.1").String(); got != "image" {
+			t.Fatalf("tools.%d.search_content_types.1 = %q, want image; body=%s", i, got, prepared.body)
+		}
+		if got := tool.Get("user_location.country").String(); got != "NL" {
+			t.Fatalf("tools.%d.user_location.country = %q, want NL; body=%s", i, got, prepared.body)
+		}
+		if got := tool.Get("filters.allowed_domains.0").String(); got != "github.com" {
+			t.Fatalf("tools.%d.filters.allowed_domains.0 = %q, want github.com; body=%s", i, got, prepared.body)
+		}
+	}
+	if webSearchTools == 0 {
+		t.Fatalf("web_search tool missing from prepared request; body=%s", prepared.body)
+	}
+}
+
 func TestPruneXAIOrphanedToolChoice(t *testing.T) {
 	t.Parallel()
 
@@ -2797,8 +2847,24 @@ func TestXAIExecutorCompactOAuthUsesOfficialAPIHeadersNotCLIProxy(t *testing.T) 
 	if gotClientVersion != "" {
 		t.Fatalf("%s = %q, want empty on compact", xaiClientVersionHeader, gotClientVersion)
 	}
-	if strings.Contains(gotUserAgent, "xai-grok-workspace/") {
-		t.Fatalf("User-Agent = %q, want no CLI workspace UA on compact", gotUserAgent)
+	if got, want := gotUserAgent, "xai-grok-workspace/"+xaiClientVersion(); got != want {
+		t.Fatalf("User-Agent = %q, want default %q on compact when downstream UA is absent", got, want)
+	}
+
+	_, err = exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","input":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Alt:          "responses/compact",
+		Stream:       false,
+		Headers:      http.Header{"User-Agent": []string{"downstream-compact-client/1.0"}},
+	})
+	if err != nil {
+		t.Fatalf("Execute compact with downstream UA error: %v", err)
+	}
+	if gotUserAgent != "downstream-compact-client/1.0" {
+		t.Fatalf("User-Agent = %q, want downstream-compact-client/1.0 on compact", gotUserAgent)
 	}
 }
 
@@ -5219,6 +5285,18 @@ func TestSanitizeXAIInputEncryptedContent_PreservesValidBlob(t *testing.T) {
 	if gotEnc := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotEnc != sample {
 		t.Fatalf("valid encrypted_content should be preserved, got %q", gotEnc)
 	}
+
+	routedSample := sample + "." + strings.Repeat("Ab3", 21)[:62]
+	routedBody, _ := sjson.SetBytes(body, "input.0.encrypted_content", routedSample)
+	gotRouted := sanitizeXAIInputEncryptedContent(routedBody)
+	if gotEnc := gjson.GetBytes(gotRouted, "input.0.encrypted_content").String(); gotEnc != sample {
+		t.Fatalf("router suffix should be stripped for native xAI upstream, got %q want %q", gotEnc, sample)
+	}
+
+	gotOpenRouter := sanitizeXAIInputEncryptedContentForBaseURL(routedBody, "https://openrouter.ai/api/v1")
+	if gotEnc := gjson.GetBytes(gotOpenRouter, "input.0.encrypted_content").String(); gotEnc != routedSample {
+		t.Fatalf("router suffix should be preserved for OpenRouter xAI upstream, got %q want %q", gotEnc, routedSample)
+	}
 }
 
 func TestXAIExecutorReMergesReasoningAfterDroppingInvalidEncryptedContent(t *testing.T) {
@@ -6236,8 +6314,8 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 				t.Fatalf("%s = %q, want empty for official API", header, got)
 			}
 		}
-		if got := req.Header.Get("User-Agent"); got != "" {
-			t.Fatalf("User-Agent = %q, want empty for official API", got)
+		if got, want := req.Header.Get("User-Agent"), "xai-grok-workspace/"+xaiClientVersionValue; got != want {
+			t.Fatalf("User-Agent = %q, want %q for official API default", got, want)
 		}
 	})
 
@@ -6295,8 +6373,45 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 				t.Fatalf("%s = %q, want empty for custom gateway", header, got)
 			}
 		}
-		if got := req.Header.Get("User-Agent"); got != "" {
-			t.Fatalf("User-Agent = %q, want empty for custom gateway", got)
+		if got, want := req.Header.Get("User-Agent"), "xai-grok-workspace/"+xaiClientVersionValue; got != want {
+			t.Fatalf("User-Agent = %q, want %q for custom gateway default", got, want)
+		}
+	})
+
+	t.Run("forwards downstream User-Agent on official API and custom gateway but keeps CLI proxy UA on chat proxy", func(t *testing.T) {
+		clientHeaders := http.Header{"User-Agent": []string{"downstream-client/2.0"}}
+
+		apiReq := httptest.NewRequest(http.MethodPost, "https://api.x.ai/v1/responses", nil)
+		apiAuth := &cliproxyauth.Auth{
+			Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL},
+		}
+		applyXAIChatHeaders(apiReq, apiAuth, "xai-token", true, "conv-1", clientHeaders)
+		if got := apiReq.Header.Get("User-Agent"); got != "downstream-client/2.0" {
+			t.Fatalf("official API User-Agent = %q, want downstream-client/2.0", got)
+		}
+
+		customReq := httptest.NewRequest(http.MethodPost, "https://gateway.example.com/responses", nil)
+		customAuth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"base_url":      "https://gateway.example.com/v1",
+				xaiUsingAPIAttr: "false",
+			},
+		}
+		applyXAIChatHeaders(customReq, customAuth, "xai-token", false, "", clientHeaders)
+		if got := customReq.Header.Get("User-Agent"); got != "downstream-client/2.0" {
+			t.Fatalf("custom gateway User-Agent = %q, want downstream-client/2.0", got)
+		}
+
+		proxyReq := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+		proxyAuth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  xaiauth.DefaultAPIBaseURL,
+			},
+		}
+		applyXAIChatHeaders(proxyReq, proxyAuth, "xai-token", true, "conv-1", clientHeaders)
+		if got, want := proxyReq.Header.Get("User-Agent"), "xai-grok-workspace/"+xaiClientVersionValue; got != want {
+			t.Fatalf("CLI chat proxy User-Agent = %q, want %q", got, want)
 		}
 	})
 

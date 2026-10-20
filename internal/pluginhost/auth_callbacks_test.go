@@ -848,3 +848,91 @@ func TestHostAuthSaveCallbackUnregistersModelsForRemovedStaleSameFileAuth(t *tes
 		t.Fatalf("GetModelsForClient(%q) = %#v, want empty slice after stale auth removal", staleID, models)
 	}
 }
+
+func TestHostAuthSaveRelativeAuthDirPreservesIdentity(t *testing.T) {
+	for _, relative := range []bool{false, true} {
+		name := "absolute"
+		if relative {
+			name = "relative"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			work := filepath.Join(root, "core")
+			authDir := filepath.Join(root, "oauth")
+			for _, dir := range []string{work, authDir} {
+				if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
+					t.Fatal(errMkdir)
+				}
+			}
+			t.Chdir(work)
+			if relative {
+				authDir = filepath.Join("..", "oauth")
+			}
+			const fileName = "demo-credential.json"
+			payload := []byte(`{"type":"demo","access_token":"synthetic-not-a-real-token"}`)
+			path := filepath.Join(authDir, fileName)
+			if errWrite := os.WriteFile(path, payload, 0o600); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			host := newHostWithRecords(capabilityRecord{
+				id: "demo-plugin",
+				plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "demo",
+						parseAuth: func(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+							return pluginapi.AuthParseResponse{
+								Handled: true,
+								Auth: pluginapi.AuthData{
+									Provider:    "demo",
+									FileName:    req.FileName,
+									StorageJSON: req.RawJSON,
+								},
+							}, nil
+						},
+					},
+				}},
+			})
+			host.runtimeConfig = &config.Config{AuthDir: authDir}
+			ctx := context.Background()
+			initial, handled, errParse := host.ParseAuth(ctx, pluginapi.AuthParseRequest{
+				Provider: "demo",
+				Path:     path,
+				FileName: fileName,
+				RawJSON:  payload,
+			})
+			if errParse != nil || !handled || initial == nil || initial.ID != fileName {
+				t.Fatalf("initial parse: auth=%#v handled=%v err=%v", initial, handled, errParse)
+			}
+			manager := coreauth.NewManager(nil, nil, nil)
+			host.SetAuthManager(manager)
+			if _, errRegister := manager.Register(coreauth.WithSkipPersist(ctx), initial); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(initial.ID, "demo", []*registry.ModelInfo{{ID: "demo-model"}})
+			t.Cleanup(func() {
+				reg.UnregisterClient(initial.ID)
+				for _, auth := range manager.List() {
+					reg.UnregisterClient(auth.ID)
+				}
+			})
+			request, errMarshal := json.Marshal(pluginapi.HostAuthSaveRequest{Name: fileName, JSON: payload})
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			if _, errCall := host.callFromPlugin(ctx, pluginabi.MethodHostAuthSave, request); errCall != nil {
+				t.Fatal(errCall)
+			}
+			auths := manager.List()
+			if len(auths) != 1 {
+				t.Fatalf("got %d auth records, want 1", len(auths))
+			}
+			if auths[0].ID != initial.ID {
+				t.Errorf("Core changed auth ID: before=%q after=%q", initial.ID, auths[0].ID)
+			}
+			if models := reg.GetModelsForClient(initial.ID); len(models) != 1 {
+				t.Errorf("Core removed registered models: got %d, want 1", len(models))
+			}
+		})
+	}
+}

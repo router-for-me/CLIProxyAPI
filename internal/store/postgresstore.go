@@ -14,6 +14,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -469,6 +470,12 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 					return fmt.Errorf("postgres store: create empty config: %w", errWrite)
 				}
 			}
+		}
+		// Seed the database with the file the startup load leaves behind, so a plaintext
+		// management secret never reaches it. Fail instead of skipping: the startup load
+		// could turn a refused file into one that a later start would upload.
+		if errPrepare := config.PrepareConfigFileForUpload(s.configPath); errPrepare != nil {
+			return fmt.Errorf("postgres store: prepare local config for seeding: %w", errPrepare)
 		}
 		data, errRead := os.ReadFile(s.configPath)
 		if errRead != nil {

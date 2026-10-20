@@ -405,7 +405,7 @@ func normalizeCodexReasoningReplayReasoningItem(itemResult gjson.Result) ([]byte
 	if encryptedContent != strings.TrimSpace(encryptedContent) {
 		return nil, false
 	}
-	if _, err := signature.InspectGPTReasoningSignature(encryptedContent); err != nil {
+	if !signature.IsValidGPTReasoningSignature(encryptedContent) && !signature.IsValidMetaReasoningSignature(encryptedContent) {
 		return nil, false
 	}
 

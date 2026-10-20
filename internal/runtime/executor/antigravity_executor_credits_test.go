@@ -10,11 +10,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -627,7 +629,7 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	}
 	refreshDone := make(chan struct{})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		return &http.Response{
@@ -670,6 +672,282 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	}
 }
 
+func TestMaybeRefreshAntigravityCreditsHint_RefreshesExpiredHintAndRecoversCredits(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+	})
+	auth := &cliproxyauth.Auth{
+		ID: fmt.Sprintf("auth-expired-credits-hint-%d", time.Now().UnixNano()),
+		Metadata: map[string]any{
+			"access_token": "token",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	t.Cleanup(func() {
+		cliproxyauth.SetAntigravityCreditsHint(auth.ID, cliproxyauth.AntigravityCreditsHint{})
+	})
+
+	markAntigravityCreditsPermanentlyDisabled(auth)
+	if _, failed := antigravityCreditsFailureByAuth.Load(auth.ID); !failed {
+		t.Fatal("expected auth to be marked permanently disabled for credits")
+	}
+
+	var loadCodeAssistCalls int
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+			t.Fatalf("unexpected request url %s", req.URL.String())
+		}
+		loadCodeAssistCalls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"2516","minimumCreditAmountForUsage":"50"}]}}`)),
+		}, nil
+	}))
+
+	// Fresh hint (< antigravityCreditsHintRefreshInterval) must not trigger a refresh.
+	exec.maybeRefreshAntigravityCreditsHint(ctx, auth, "token")
+	if loadCodeAssistCalls != 0 {
+		t.Fatalf("loadCodeAssist calls for fresh hint = %d, want 0", loadCodeAssistCalls)
+	}
+
+	// Once hint.UpdatedAt is older than antigravityCreditsHintRefreshInterval,
+	// maybeRefreshAntigravityCreditsHint must re-query loadCodeAssist and recover credits.
+	cliproxyauth.SetAntigravityCreditsHint(auth.ID, cliproxyauth.AntigravityCreditsHint{
+		Known:           true,
+		Available:       false,
+		CreditAmount:    0,
+		MinCreditAmount: 1,
+		UpdatedAt:       time.Now().Add(-antigravityCreditsHintRefreshInterval - time.Second),
+	})
+
+	exec.maybeRefreshAntigravityCreditsHint(ctx, auth, "token")
+	if value, ok := antigravityCreditsHintRefreshByID.Load(auth.ID); ok {
+		if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
+			waitForAntigravityCreditsRefresh(t, state)
+		}
+	}
+
+	if loadCodeAssistCalls != 1 {
+		t.Fatalf("loadCodeAssist calls for expired hint = %d, want 1", loadCodeAssistCalls)
+	}
+	hint, ok := cliproxyauth.GetAntigravityCreditsHint(auth.ID)
+	if !ok || !hint.Known || !hint.Available {
+		t.Fatalf("credits hint after refresh = %#v (ok=%v), want Known=true Available=true", hint, ok)
+	}
+	if hint.CreditAmount != 2516 || hint.MinCreditAmount != 50 {
+		t.Fatalf("hint amounts = (%v, %v), want (2516, 50)", hint.CreditAmount, hint.MinCreditAmount)
+	}
+	if _, failed := antigravityCreditsFailureByAuth.Load(auth.ID); failed {
+		t.Fatal("expected permanently disabled credits state to be cleared after recovery")
+	}
+}
+
+func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCooldown(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		mode := "execute"
+		if stream {
+			mode = "execute_stream"
+		}
+		t.Run(mode, func(t *testing.T) {
+			resetAntigravityCreditsRetryState()
+			t.Cleanup(resetAntigravityCreditsRetryState)
+
+			const model = "claude-sonnet-4-6"
+			var toppedUp atomic.Bool
+			var loadCodeAssistCalls atomic.Int32
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				_ = r.Body.Close()
+
+				if r.URL.Path == "/v1internal:loadCodeAssist" {
+					callNum := loadCodeAssistCalls.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					if toppedUp.Load() {
+						_, _ = w.Write([]byte(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"2516","minimumCreditAmountForUsage":"50"}]}}`))
+					} else if callNum == 1 {
+						_, _ = w.Write([]byte(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"100","minimumCreditAmountForUsage":"50"}]}}`))
+					} else {
+						_, _ = w.Write([]byte(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"0","minimumCreditAmountForUsage":"50"}]}}`))
+					}
+					return
+				}
+
+				hasCreditsFlag := strings.Contains(string(body), `"enabledCreditTypes":["GOOGLE_ONE_AI"]`)
+				if !hasCreditsFlag {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusTooManyRequests)
+					_, _ = w.Write([]byte(`{
+						"error": {
+							"code": 429,
+							"message": "You have exhausted your capacity on this model. Your quota will reset after 1h0m0s.",
+							"status": "RESOURCE_EXHAUSTED",
+							"details": [
+								{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED"},
+								{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "3600s"}
+							]
+						}
+					}`))
+					return
+				}
+
+				if !toppedUp.Load() {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusTooManyRequests)
+					_, _ = w.Write([]byte(`{
+						"error": {
+							"code": 429,
+							"message": "Insufficient Google One AI credits balance.",
+							"status": "RESOURCE_EXHAUSTED",
+							"details": [
+								{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "INSUFFICIENT_G1_CREDITS_BALANCE"}
+							]
+						}
+					}`))
+					return
+				}
+
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"recovered\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}}\n\n"))
+			}))
+			defer server.Close()
+
+			cfg := &config.Config{
+				QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+			}
+			exec := NewAntigravityExecutor(cfg)
+			manager := cliproxyauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			manager.RegisterExecutor(exec)
+
+			authID := fmt.Sprintf("ag-topup-recovery-%s-%d", mode, time.Now().UnixNano())
+			registry.GetGlobalRegistry().RegisterClient(authID, "antigravity", []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(authID)
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			if _, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
+				ID:       authID,
+				Provider: "antigravity",
+				Attributes: map[string]string{
+					"base_url": server.URL,
+				},
+				Metadata: map[string]any{
+					"access_token": "token",
+					"project_id":   "project-1",
+					"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+				},
+			}); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			req := cliproxyexecutor.Request{
+				Model:   model,
+				Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatAntigravity,
+				ResponseFormat: sdktranslator.FormatAntigravity,
+			}
+
+			// Step 1: Exhaust weekly quota (QUOTA_EXHAUSTED) and credits (INSUFFICIENT_G1_CREDITS_BALANCE).
+			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+				Known:           true,
+				Available:       true,
+				CreditAmount:    100,
+				MinCreditAmount: 50,
+				UpdatedAt:       time.Now(),
+			})
+			if stream {
+				if _, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, req, opts); errStream == nil {
+					t.Fatal("initial ExecuteStream() succeeded, want 429 after quota and credits exhaustion")
+				}
+			} else {
+				if _, errExec := manager.Execute(context.Background(), []string{"antigravity"}, req, opts); errExec == nil {
+					t.Fatal("initial Execute() succeeded, want 429 after quota and credits exhaustion")
+				}
+			}
+			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
+				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
+					waitForAntigravityCreditsRefresh(t, state)
+				}
+			}
+			if _, failed := antigravityCreditsFailureByAuth.Load(authID); !failed {
+				t.Fatal("expected auth to be marked permanently disabled after INSUFFICIENT_G1_CREDITS_BALANCE")
+			}
+			hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID)
+			if !ok || !hint.Known || hint.Available {
+				t.Fatalf("hint after exhaustion = %#v (ok=%v), want Known=true Available=false", hint, ok)
+			}
+
+			// Step 2: Top up credits and expire the cached hint/throttle window while model remains in 1h quota cooldown.
+			toppedUp.Store(true)
+			callsBeforeTopUp := loadCodeAssistCalls.Load()
+			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
+				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
+					state.mu.Lock()
+					state.lastAttempt = time.Now().Add(-antigravityCreditsHintRefreshInterval - time.Second)
+					state.mu.Unlock()
+				}
+			}
+			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+				Known:           true,
+				Available:       false,
+				CreditAmount:    0,
+				MinCreditAmount: 1,
+				UpdatedAt:       time.Now().Add(-antigravityCreditsHintRefreshInterval - time.Second),
+			})
+
+			// Step 3: Request recovers via credits fallback while model cooldown is active and triggers loadCodeAssist refresh.
+			if stream {
+				streamResult, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() after top-up error = %v", errStream)
+				}
+				var streamed strings.Builder
+				for chunk := range streamResult.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+					}
+					streamed.Write(chunk.Payload)
+				}
+				if !strings.Contains(streamed.String(), "recovered") {
+					t.Fatalf("ExecuteStream() payload = %s, want recovered", streamed.String())
+				}
+			} else {
+				resp, errExec := manager.Execute(context.Background(), []string{"antigravity"}, req, opts)
+				if errExec != nil {
+					t.Fatalf("Execute() after top-up error = %v", errExec)
+				}
+				if !strings.Contains(string(resp.Payload), "recovered") {
+					t.Fatalf("Execute() payload = %s, want recovered", string(resp.Payload))
+				}
+			}
+
+			if value, ok := antigravityCreditsHintRefreshByID.Load(authID); ok {
+				if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
+					waitForAntigravityCreditsRefresh(t, state)
+				}
+			}
+			if loadCodeAssistCalls.Load() <= callsBeforeTopUp {
+				t.Fatalf("loadCodeAssist calls after top-up = %d, want > %d", loadCodeAssistCalls.Load(), callsBeforeTopUp)
+			}
+			hint, ok = cliproxyauth.GetAntigravityCreditsHint(authID)
+			if !ok || !hint.Known || !hint.Available || hint.CreditAmount != 2516 {
+				t.Fatalf("hint after recovery = %#v (ok=%v), want Known=true Available=true CreditAmount=2516", hint, ok)
+			}
+			if _, failed := antigravityCreditsFailureByAuth.Load(authID); failed {
+				t.Fatal("expected permanently disabled credits state to be cleared after recovery")
+			}
+		})
+	}
+}
+
 func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
@@ -682,11 +960,14 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 		Attributes: map[string]string{"user_agent": configuredUserAgent},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		if got := req.Header.Get("User-Agent"); got != loadCodeAssistUserAgent {
 			t.Fatalf("User-Agent = %q, want %q", got, loadCodeAssistUserAgent)
+		}
+		if got := req.Header.Get("Accept"); got != "" {
+			t.Fatalf("Accept = %q, want omitted", got)
 		}
 		if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
 			t.Fatalf("X-Goog-Api-Client = %q, want empty", got)

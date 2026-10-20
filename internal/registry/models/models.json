@@ -112,9 +112,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -142,9 +141,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -233,9 +231,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
-        "zero_allowed": true,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -263,9 +260,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
-        "zero_allowed": true,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -296,7 +292,7 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "zero_allowed": true,
+        "zero_allowed": false,
         "dynamic_allowed": true,
         "levels": [
           "low",
@@ -330,6 +326,7 @@
       "thinking": {
         "zero_allowed": true,
         "dynamic_allowed": true,
+        "disable_type": "between_tools",
         "levels": [
           "low",
           "medium",
@@ -983,6 +980,39 @@
       "description": "Gemini 3.8 Flash",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 128,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-argon",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Argon",
+      "name": "models/gemini-4-argon",
+      "description": "Gemini 4 Argon",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
       "thinking": {
         "min": 128,
         "max": 65535,

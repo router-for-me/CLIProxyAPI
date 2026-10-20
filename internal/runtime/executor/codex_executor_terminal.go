@@ -528,8 +528,7 @@ func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 
 // isCodexBufferableOutputItem reports whether an announced output item is one the model produces by
 // itself and has not started producing, so nothing is running upstream yet. The emptiness checks
-// follow the ones IsResponsesTokenEvent applies to response.output_item.done, extended to the
-// reasoning summary, which that helper has no case for. Every other item type
+// cover message and reasoning text, tool arguments, and encrypted reasoning. Every other item type
 // is released, which covers the server-side operations that may already have been dispatched - a
 // web_search_call is announced with status "in_progress" and its searching event follows
 // immediately, and failing the attempt over after one would run it again on another credential - and

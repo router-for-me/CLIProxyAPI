@@ -744,26 +744,7 @@ func (h *Host) resolvedAuthDir() string {
 }
 
 func (h *Host) authIDForPath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) {
-		if abs, errAbs := filepath.Abs(path); errAbs == nil {
-			path = abs
-		}
-	}
-	id := path
-	if authDir := h.resolvedAuthDir(); authDir != "" {
-		if rel, errRel := filepath.Rel(authDir, path); errRel == nil && rel != "" {
-			id = rel
-		}
-	}
-	if runtime.GOOS == "windows" {
-		id = strings.ToLower(id)
-	}
-	return id
+	return authIDForPath(path, h.resolvedAuthDir())
 }
 
 func authEmail(auth *coreauth.Auth) string {

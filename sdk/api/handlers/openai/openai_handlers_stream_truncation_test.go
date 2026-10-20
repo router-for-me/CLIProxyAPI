@@ -19,7 +19,8 @@ import (
 const truncatedStreamChatModel = "truncated-stream-chat-model"
 
 type mockStreamExecutor struct {
-	chunks []string
+	chunks      []string
+	trailingErr error
 }
 
 func (*mockStreamExecutor) Identifier() string { return "mock-stream-executor" }
@@ -29,9 +30,16 @@ func (*mockStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor
 }
 
 func (e *mockStreamExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
-	chunks := make(chan coreexecutor.StreamChunk, len(e.chunks))
+	total := len(e.chunks)
+	if e.trailingErr != nil {
+		total++
+	}
+	chunks := make(chan coreexecutor.StreamChunk, total)
 	for _, c := range e.chunks {
 		chunks <- coreexecutor.StreamChunk{Payload: []byte(c)}
+	}
+	if e.trailingErr != nil {
+		chunks <- coreexecutor.StreamChunk{Err: e.trailingErr}
 	}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
@@ -50,10 +58,14 @@ func (*mockStreamExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Re
 }
 
 func runMockStreamTest(t *testing.T, chunks []string, authID string) string {
+	return runMockStreamTestWithError(t, chunks, nil, authID)
+}
+
+func runMockStreamTestWithError(t *testing.T, chunks []string, trailingErr error, authID string) string {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	executor := &mockStreamExecutor{chunks: chunks}
+	executor := &mockStreamExecutor{chunks: chunks, trailingErr: trailingErr}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
 	auth := &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}
@@ -93,6 +105,45 @@ func TestChatCompletionsStreamWithoutFinishReasonIsReportedAsError(t *testing.T)
 	}
 	if !strings.Contains(out, `"error":{"message":"upstream stream closed before any chunk carried finish_reason"`) {
 		t.Errorf("truncated stream did not format structured error payload: %q", out)
+	}
+}
+
+// A translated terminal error chunk (Claude model_context_window_exceeded ->
+// context_length_exceeded) ends the stream on its own: the handler must not add
+// a second "closed before finish_reason" error after it.
+func TestChatCompletionsStreamTerminalErrorChunkIsTheOnlyError(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		chunks      []string
+		trailingErr error
+	}{
+		{name: "after content", chunks: []string{
+			`{"choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+			`{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+		}},
+		{name: "first chunk", chunks: []string{
+			`{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+		}},
+		{name: "eof before message_stop after error", chunks: []string{
+			`{"choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+			`{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+		}, trailingErr: errors.New("upstream stream closed before message_stop")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runMockStreamTestWithError(t, tc.chunks, tc.trailingErr, "terminal-error-"+strings.ReplaceAll(tc.name, " ", "-"))
+			if got := strings.Count(out, `"error":`); got != 1 {
+				t.Fatalf("error objects = %d, want 1: %q", got, out)
+			}
+			if !strings.Contains(out, `"code":"context_length_exceeded"`) {
+				t.Fatalf("terminal error missing: %q", out)
+			}
+			if strings.Contains(out, "upstream stream closed before") || strings.Contains(out, "data: [DONE]") {
+				t.Fatalf("synthetic truncation error or [DONE] added after terminal error: %q", out)
+			}
+			if strings.Contains(out, `"finish_reason":"`) || strings.Contains(out, `"usage"`) {
+				t.Fatalf("success finish or usage emitted: %q", out)
+			}
+		})
 	}
 }
 

@@ -108,6 +108,13 @@ func buildResponsesWebSearchCallItem(claudeToolUseID, query string, results []by
 // buildResponsesWebSearchCallItem: it rebuilds the Claude block pair so a
 // replayed turn still shows that the search happened and what it returned.
 func convertResponsesWebSearchCallToClaudeBlocks(item gjson.Result) [][]byte {
+	return convertResponsesWebSearchCallToClaudeBlocksWithQuery(item, "", true)
+}
+
+// convertResponsesWebSearchCallToClaudeBlocksWithQuery rebuilds the server_tool_use
+// block, using fallbackQuery when the item carries none, and the result block
+// only when withResult is set.
+func convertResponsesWebSearchCallToClaudeBlocksWithQuery(item gjson.Result, fallbackQuery string, withResult bool) [][]byte {
 	toolUseID := claudeWebSearchToolUseID(strings.TrimSpace(item.Get("id").String()))
 	if toolUseID == "" {
 		return nil
@@ -116,8 +123,15 @@ func convertResponsesWebSearchCallToClaudeBlocks(item gjson.Result) [][]byte {
 	use := []byte(`{"type":"server_tool_use","id":"","name":"","input":{}}`)
 	use, _ = sjson.SetBytes(use, "id", toolUseID)
 	use, _ = sjson.SetBytes(use, "name", claudeWebSearchToolName)
-	if query := responsesWebSearchCallQuery(item); query != "" {
+	query := responsesWebSearchCallQuery(item)
+	if query == "" {
+		query = fallbackQuery
+	}
+	if query != "" {
 		use, _ = sjson.SetBytes(use, "input.query", query)
+	}
+	if !withResult {
+		return [][]byte{use}
 	}
 
 	result := []byte(`{"type":"web_search_tool_result","tool_use_id":"","content":[]}`)
@@ -126,6 +140,98 @@ func convertResponsesWebSearchCallToClaudeBlocks(item gjson.Result) [][]byte {
 		result, _ = sjson.SetRawBytes(result, "content", content)
 	}
 	return [][]byte{use, result}
+}
+
+// responsesWebSearchHistory indexes web_search_call items of one request so a
+// search paused by pause_turn replays faithfully:
+//   - while the paused turn is the tail of the history, the search is sent back
+//     as a server_tool_use without a result, unchanged, as Anthropic requires;
+//   - when the continuation delivered the result under the same id within the
+//     same assistant run (no user turn or tool output in between), the paused
+//     item is skipped and the continuation item emits the full pair, keeping the
+//     query recorded by the paused item.
+//
+// Every other web_search_call, including repeated ids across separate turns,
+// keeps its previous one-pair-per-item replay.
+type responsesWebSearchHistory struct {
+	// boundaryAfter[i] reports whether a user turn or a tool output follows index i.
+	boundaryAfter []bool
+	// skip marks paused items that a later continuation item replaces.
+	skip map[int]bool
+	// pausedQuery carries the paused item's query to its continuation item.
+	pausedQuery map[int]string
+}
+
+func responsesWebSearchItemIsPaused(item gjson.Result) bool {
+	return item.Get("type").String() == "web_search_call" &&
+		strings.EqualFold(strings.TrimSpace(item.Get("status").String()), "in_progress") &&
+		!item.Get("results").Exists()
+}
+
+func responsesItemIsTurnBoundary(item gjson.Result) bool {
+	typ := item.Get("type").String()
+	role := item.Get("role").String()
+	if typ == "" && role != "" {
+		typ = "message"
+	}
+	switch typ {
+	case "message":
+		return role != "assistant"
+	case "function_call_output", "custom_tool_call_output", "tool_search_output":
+		return true
+	}
+	return false
+}
+
+func scanResponsesWebSearchHistory(items []gjson.Result) responsesWebSearchHistory {
+	history := responsesWebSearchHistory{
+		boundaryAfter: make([]bool, len(items)),
+		skip:          map[int]bool{},
+		pausedQuery:   map[int]string{},
+	}
+	boundary := false
+	for index := len(items) - 1; index >= 0; index-- {
+		history.boundaryAfter[index] = boundary
+		if responsesItemIsTurnBoundary(items[index]) {
+			boundary = true
+		}
+	}
+	for index, item := range items {
+		if !responsesWebSearchItemIsPaused(item) {
+			continue
+		}
+		id := strings.TrimSpace(item.Get("id").String())
+		if id == "" {
+			continue
+		}
+		for next := index + 1; next < len(items); next++ {
+			if responsesItemIsTurnBoundary(items[next]) {
+				break
+			}
+			if items[next].Get("type").String() == "web_search_call" && strings.TrimSpace(items[next].Get("id").String()) == id {
+				history.skip[index] = true
+				query := responsesWebSearchCallQuery(item)
+				if previous, ok := history.pausedQuery[index]; ok && query == "" {
+					query = previous
+				}
+				history.pausedQuery[next] = query
+				break
+			}
+		}
+	}
+	return history
+}
+
+func (h responsesWebSearchHistory) claudeBlocks(index int, item gjson.Result) [][]byte {
+	if h.skip[index] {
+		return nil
+	}
+	query := h.pausedQuery[index]
+	tail := index >= len(h.boundaryAfter) || !h.boundaryAfter[index]
+	if responsesWebSearchItemIsPaused(item) && tail {
+		return convertResponsesWebSearchCallToClaudeBlocksWithQuery(item, query, false)
+	}
+	return convertResponsesWebSearchCallToClaudeBlocksWithQuery(item, query, true)
 }
 
 // responsesWebSearchCallQuery reads the query from a Responses web_search_call,

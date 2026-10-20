@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
+	log "github.com/sirupsen/logrus"
 )
 
 // NormalizePluginsConfig applies default plugin configuration values.
@@ -33,6 +34,17 @@ func (cfg *Config) NormalizePluginsConfig() {
 	}
 }
 
+// NormalizeClaudeConfig applies default Claude provider configuration values.
+func (cfg *Config) NormalizeClaudeConfig() {
+	if cfg == nil {
+		return
+	}
+	if cfg.Claude.SessionDatePinDays == nil {
+		days := DefaultClaudeSessionDatePinDays
+		cfg.Claude.SessionDatePinDays = &days
+	}
+}
+
 // SanitizeCodexHeaderDefaults trims surrounding whitespace from the
 // configured Codex header fallback values.
 func (cfg *Config) SanitizeCodexHeaderDefaults() {
@@ -45,11 +57,22 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the
-// configured Claude fingerprint baseline values.
+// configured Claude fingerprint baseline values, normalizes the beta override
+// lists, and resets an unknown client-request-id mode to the default.
 func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	if cfg == nil {
 		return
 	}
+	cfg.ClaudeHeaderDefaults.AnthropicBetaStrip = normalizeClaudeBetaNames(cfg.ClaudeHeaderDefaults.AnthropicBetaStrip)
+	cfg.ClaudeHeaderDefaults.AnthropicBetaAppend = normalizeClaudeBetaNames(cfg.ClaudeHeaderDefaults.AnthropicBetaAppend)
+	mode := strings.ToLower(strings.TrimSpace(cfg.ClaudeHeaderDefaults.ClientRequestID))
+	switch mode {
+	case "", ClaudeClientRequestIDOn, ClaudeClientRequestIDOff, ClaudeClientRequestIDPassthrough:
+	default:
+		log.Warnf("unrecognized claude header-defaults client-request-id %q (supported: on, off, passthrough); falling back to on", cfg.ClaudeHeaderDefaults.ClientRequestID)
+		mode = ""
+	}
+	cfg.ClaudeHeaderDefaults.ClientRequestID = mode
 	cfg.ClaudeHeaderDefaults.UserAgent = strings.TrimSpace(cfg.ClaudeHeaderDefaults.UserAgent)
 	cfg.ClaudeHeaderDefaults.PackageVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion)
 	cfg.ClaudeHeaderDefaults.RuntimeVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion)
@@ -57,6 +80,31 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
 	cfg.ClaudeHeaderDefaults.Timezone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
+}
+
+// normalizeClaudeBetaNames trims beta names and drops empty and duplicate
+// entries while keeping the configured order.
+func normalizeClaudeBetaNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

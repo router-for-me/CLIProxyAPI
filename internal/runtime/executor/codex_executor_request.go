@@ -200,26 +200,32 @@ func codexSIWCUserAgent(cfg *config.Config) string {
 	return fmt.Sprintf("%s (%s; %s)", agentName, runtime.GOOS, runtime.GOARCH)
 }
 
-func applyCodexSIWCRequestBodyRules(body []byte, hasExplicitInstructions bool) []byte {
+func applyCodexSIWCRequestBodyRules(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
 	body = helps.SetBoolIfDifferent(body, "store", false)
 	body = helps.SetBoolIfDifferent(body, "stream", true)
-	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions)
+	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions, opts...)
 }
 
-func applyCodexSIWCWebsocketBodyRules(body []byte, hasExplicitInstructions bool) []byte {
+func applyCodexSIWCWebsocketBodyRules(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
 	body = helps.SetBoolIfDifferent(body, "store", false)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body, _ = sjson.DeleteBytes(body, "background")
-	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions)
+	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions, opts...)
 }
 
-func applyCodexSIWCCompactBodyRules(body []byte, hasExplicitInstructions bool) []byte {
+func applyCodexSIWCCompactBodyRules(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body, _ = sjson.DeleteBytes(body, "store")
-	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions)
+	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions, opts...)
 }
 
-func stripCodexSIWCUnsupportedFields(body []byte, hasExplicitInstructions bool) []byte {
+func stripCodexSIWCUnsupportedFields(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
+	// SIWC subscriptions reject configuration_update input items, so degrade
+	// them to the classic top-level reasoning.effort and accept the cache loss.
+	// An explicit model thinking suffix is an operator override: the thinking
+	// layer has already resolved it into the top-level effort, so only the
+	// unsupported items are removed in that case.
+	body = thinking.CollapseConfigurationUpdates(body, len(opts) > 0 && opts[0].KeepTopLevelEffort)
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_options")
 	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
@@ -398,6 +404,81 @@ func normalizeCodexInstructions(body []byte, nativeRequest ...bool) []byte {
 
 var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
 var imageGenToolArrayJSON = []byte(`[{"type":"image_generation","output_format":"png"}]`)
+var webSearchToolJSON = []byte(`{"type":"web_search"}`)
+var webSearchToolArrayJSON = []byte(`[{"type":"web_search"}]`)
+
+func isCodexWebSearchToolType(toolType string) bool {
+	switch strings.TrimSpace(toolType) {
+	case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
+		return true
+	default:
+		return false
+	}
+}
+
+// ensureWebSearchToolForHistory reconciles replayed web_search_call input items
+// with the request's tool declarations so upstream Codex does not fail with
+// "response protection is unavailable". Standard Responses requests receive a
+// {"type":"web_search"} tool declaration when missing, while Responses Lite
+// requests (which omit top-level hosted tools) strip the replayed search items.
+func ensureWebSearchToolForHistory(body []byte, headers http.Header) []byte {
+	if !bytes.Contains(body, []byte("web_search_call")) {
+		return body
+	}
+	input := util.GetGJSONBytesNoCopy(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	hasWebSearchCall := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if strings.TrimSpace(item.Get("type").String()) == "web_search_call" {
+			hasWebSearchCall = true
+			return false
+		}
+		return true
+	})
+	if !hasWebSearchCall {
+		return body
+	}
+
+	tools := util.GetGJSONBytesNoCopy(body, "tools")
+	if tools.IsArray() {
+		for _, t := range tools.Array() {
+			if isCodexWebSearchToolType(t.Get("type").String()) {
+				return body
+			}
+		}
+	}
+
+	if util.IsCodexResponsesLiteRequest(body, headers) {
+		items := input.Array()
+		rebuilt := make([]string, 0, len(items))
+		for _, item := range items {
+			if strings.TrimSpace(item.Get("type").String()) == "web_search_call" {
+				continue
+			}
+			rebuilt = append(rebuilt, item.Raw)
+		}
+		updated, errSet := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(rebuilt, ",")+"]"))
+		if errSet != nil {
+			return body
+		}
+		return updated
+	}
+
+	if !tools.Exists() || !tools.IsArray() {
+		updated, errSet := sjson.SetRawBytes(body, "tools", webSearchToolArrayJSON)
+		if errSet != nil {
+			return body
+		}
+		return updated
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tools.-1", webSearchToolJSON)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
 
 func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {

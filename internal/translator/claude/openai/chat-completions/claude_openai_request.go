@@ -84,8 +84,10 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
 					out, _ = sjson.DeleteBytes(out, "output_config.effort")
 				default:
-					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
-						effort = mapped
+					if !thinking.HasLevel(mi.Thinking.Levels, effort) {
+						if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
+							effort = mapped
+						}
 					}
 					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
 					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")

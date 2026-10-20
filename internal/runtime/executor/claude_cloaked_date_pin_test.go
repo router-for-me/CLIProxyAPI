@@ -80,7 +80,7 @@ func TestClaudeCloakedDateReminderPinnedToSessionAcrossMidnight(t *testing.T) {
 	if nextDay == cCtx1.PinnedDate {
 		t.Fatalf("test setup: anchor %q must differ from the simulated next day", cCtx1.PinnedDate)
 	}
-	resolved := helps.PinClaudeSessionDate(cCtx1.Key, nextDay)
+	resolved := helps.PinClaudeSessionDate(cCtx1.Key, "sess-midnight", nextDay, 0)
 	if resolved != cCtx1.PinnedDate {
 		t.Fatalf("second request resolved date = %q, want session-pinned %q (local midnight flip busts the cached prefix)", resolved, cCtx1.PinnedDate)
 	}

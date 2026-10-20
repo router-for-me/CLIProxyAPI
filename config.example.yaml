@@ -223,6 +223,17 @@ requests:
   # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
   proxy-url: ""
 
+  # Maximum time, in seconds, for upstream TLS handshakes made by the shared built-in
+  # uTLS client. It applies to both the Claude Code Anthropic transport and the Chrome
+  # ChatGPT/Codex transport; the standard fallback transport is unaffected. The timer
+  # starts after TCP or proxy connection establishment returns; it does not bound dialing
+  # or proxy CONNECT. When the upstream path accepts the connection but never answers the
+  # TLS ClientHello, the request would otherwise wait indefinitely and request-retry could
+  # never engage. The bound applies only during the TLS handshake and is lifted once it
+  # succeeds, so inference and long-running streams are never time-limited.
+  # Set to 0 to disable (default).
+  tls-handshake-timeout-seconds: 0
+
   # When true, forward filtered upstream response headers to downstream clients.
   # Default is false (disabled).
   passthrough-headers: false
@@ -314,6 +325,12 @@ client:
     # Default false. Applies to both OAuth and API-key credentials across providers.
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
+    # Cache upstream web search results per session so replayed Codex web_search_call items
+    # that omit results still retain search results in later turns.
+    web-search-result-cache:
+      enabled: false
+      ttl: "24h"
+      limit: 1024
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
@@ -411,6 +428,11 @@ upstream:
     # Default false keeps the translation and catalog behavior that predate tool_search support.
     tool-search: false
 
+    # Days to retain the cloaked currentDate pin per session, so an idle gap or a credential
+    # switch cannot re-anchor the date and invalidate earlier thinking signatures and the
+    # prompt cache. Default 7; an explicit 0 keeps the continuity-scoped pin (1h lifetime).
+    session-date-pin-days: 7
+
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
     # system prompt replacement), so the original system prompt is passed through to Claude as-is.
     # Credential attributes and explicit per-key cloak modes override this shared default.
@@ -449,6 +471,20 @@ upstream:
     #   timeout: "600"
     #   timezone: "Asia/Singapore"  # fallback IANA timezone for cloaked currentDate; a credential JSON "timezone" takes priority
     #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth fingerprint pinning
+    #   # Advanced operator overrides for exact-parity or gateway lanes. They apply to every Claude
+    #   # request, after the per-request derivation above, and can produce a beta set real Claude Code
+    #   # never sends, which api.anthropic.com may reject. Names are matched exactly; strip runs first.
+    #   # A credential's own "headers" entries are more specific and keep precedence where they already
+    #   # did: Anthropic-Beta on custom gateways and x-client-request-id everywhere.
+    #   anthropic-beta-strip: []   # remove these names from the derived or caller-supplied set, keeping order
+    #   anthropic-beta-append: []  # append these names at the end unless already present
+    #   # Cloaked requests to api.anthropic.com get a "diagnostics" body field like Claude Code, which in
+    #   # turn adds cache-diagnosis-2026-04-07. Set false to stop injecting it (default true).
+    #   inject-diagnostics: true
+    #   # x-client-request-id on first-party CLI-profile requests: "on" (default) synthesizes a fresh
+    #   # UUID per request (a confirmed Claude Code client keeps its own), "passthrough" forwards only
+    #   # the caller's value and never synthesizes one, "off" never sends the header.
+    #   client-request-id: "on"
 
   xai:
     # When true, inject the native x_search tool when the request does not declare it.
@@ -692,7 +728,7 @@ upstream:
 #           cloak:                         # optional: explicitly enable request cloaking for non-Claude-Code clients
 #             mode: "auto"                 # "auto" (default inside this block): cloak only when client is not Claude Code
 #                                          # "always": cloak every unconfirmed client; confirmed native Claude Code still passes through
-#                                          # "never": never apply cloaking
+#                                          # "never" / "uncloak": never apply cloaking; on non-CLI API keys, also strip incoming Claude Code identity/billing attribution
 #             # This "cloak" block applies to this api-keys.claude key entry only. For Claude OAuth
 #             # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
 #             # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id".
@@ -954,6 +990,11 @@ oauth:
   #       max-context-length: 1048576
 
   # OAuth provider excluded models
+  # Applies to OAuth/file-backed credentials of each provider.
+  # A credential's own non-empty "excluded_models" list (set in its auth JSON file) takes priority
+  # over these rules for that credential and is not merged with them. Credentials without their own
+  # list (missing, empty, or null) inherit the current rules here; changes to these rules
+  # take effect for them on config reload.
   # excluded-models:
   #   vertex:
   #     - "gemini-3-pro-preview"

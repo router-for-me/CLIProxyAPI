@@ -42,6 +42,7 @@ var (
 	callbackForwarders    = make(map[int]*callbackForwarder)
 	authFileEntryMu       sync.Mutex
 	errAuthFileMustBeJSON = errors.New("auth file must be .json")
+	errInvalidAuthFile    = errors.New("invalid auth file")
 	errAuthFileNotFound   = errors.New("auth file not found")
 	errPluginVirtualAuth  = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
 	newCodexOAuthService  = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
@@ -782,6 +783,18 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	}
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
+	}
+	if quota.v8 && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		entry["siwc_bind_supported"] = siwcBindEligible(auth)
+		entry["use_siwc"] = coreauth.IsCodexUseSIWC(auth)
+		section, _ := auth.Metadata["siwc"].(map[string]any)
+		accessToken, _ := section["access_token"].(string)
+		refreshToken, _ := section["refresh_token"].(string)
+		clientID, _ := section["client_id"].(string)
+		entry["siwc_bound"] = strings.TrimSpace(accessToken) != "" && strings.TrimSpace(refreshToken) != "" && strings.TrimSpace(clientID) != ""
+		if expiry, okExpiry := auth.SIWCExpirationTime(); okExpiry {
+			entry["siwc_expires_at"] = expiry.UTC().Format(time.RFC3339)
+		}
 	}
 	return entry
 }

@@ -109,8 +109,8 @@ func EnsureGeminiTrailingUserContent(payload []byte, path string) []byte {
 // DropGeminiTrailingThoughtOnlyContent removes trailing model turns made only of
 // thought parts, keeping at least one turn. Such a tail comes from a replayed
 // trailing reasoning item; dropping it avoids relying only on the synthetic
-// empty user turn, which did not prevent Antigravity from rejecting the request
-// as ending with a model turn in #6530.
+// empty user turn, which did not prevent Antigravity (#6530) or Vertex (#6630)
+// from rejecting the request as ending with a model turn.
 func DropGeminiTrailingThoughtOnlyContent(payload []byte, path string) []byte {
 	contents := util.GetGJSONBytesNoCopy(payload, path)
 	if !contents.IsArray() {

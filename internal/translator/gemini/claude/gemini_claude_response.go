@@ -21,19 +21,22 @@ import (
 
 // Params holds parameters for response conversion.
 type Params struct {
-	IsGlAPIKey       bool
-	HasFirstResponse bool
-	ResponseType     int
-	ResponseIndex    int
-	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
-	ToolNameMap      map[string]string
-	SanitizedNameMap map[string]string
-	SawToolCall      bool
-	HasFinalEvents   bool
-	FinishReason     string
-	InputTokens      int64
-	OutputTokens     int64
-	CachedTokens     int64
+	IsGlAPIKey                 bool
+	HasFirstResponse           bool
+	ResponseType               int
+	ResponseIndex              int
+	HasContent                 bool // Tracks whether any content (text, thinking, or tool use) has been output
+	ToolNameMap                map[string]string
+	SanitizedNameMap           map[string]string
+	SawToolCall                bool
+	HasFinalEvents             bool
+	FinishReason               string
+	InputTokens                int64
+	OutputTokens               int64
+	CachedTokens               int64
+	CurrentToolName            string // Client-facing name of the currently open tool_use block
+	CurrentToolIsParameterless bool   // Whether the open tool_use block was declared parameterless
+	CurrentToolInputEmitted    bool   // Whether cleaned input JSON was already emitted for the open tool_use block
 }
 
 const geminiMalformedFunctionCallErrorPayload = `{"type":"error","error":{"type":"api_error","message":"Gemini response finished with MALFORMED_FUNCTION_CALL"}}`
@@ -258,11 +261,21 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				(*param).(*Params).SawToolCall = true
 				upstreamToolName := functionCallResult.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName((*param).(*Params).SanitizedNameMap, upstreamToolName)
-				clientToolName := util.MapToolName((*param).(*Params).ToolNameMap, upstreamToolName)
+				clientToolName := util.MapClaudeToolName((*param).(*Params).ToolNameMap, originalRequestRawJSON, upstreamToolName)
 
 				if (*param).(*Params).ResponseType == 3 && upstreamToolName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+						partialJSON := util.CleanClaudeToolArgumentsWithTranslated(fcArgsResult.Raw, (*param).(*Params).CurrentToolName, originalRequestRawJSON, requestRawJSON)
+						if (*param).(*Params).CurrentToolIsParameterless {
+							if (*param).(*Params).CurrentToolInputEmitted {
+								partialJSON = ""
+							} else {
+								(*param).(*Params).CurrentToolInputEmitted = true
+							}
+						} else if partialJSON != "" {
+							(*param).(*Params).CurrentToolInputEmitted = true
+						}
+						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", partialJSON)
 						appendEvent("content_block_delta", string(data))
 					}
 					if hasThoughtSignature {
@@ -285,13 +298,26 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					(*param).(*Params).ResponseIndex++
 				}
 
+				(*param).(*Params).CurrentToolName = clientToolName
+				(*param).(*Params).CurrentToolIsParameterless = util.ClaudeToolIsParameterless(clientToolName, originalRequestRawJSON)
+				(*param).(*Params).CurrentToolInputEmitted = false
 				data := []byte(fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, (*param).(*Params).ResponseIndex))
 				data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
 				data, _ = sjson.SetBytes(data, "content_block.name", clientToolName)
 				appendEvent("content_block_start", string(data))
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+					partialJSON := util.CleanClaudeToolArgumentsWithTranslated(fcArgsResult.Raw, clientToolName, originalRequestRawJSON, requestRawJSON)
+					if (*param).(*Params).CurrentToolIsParameterless {
+						if (*param).(*Params).CurrentToolInputEmitted {
+							partialJSON = ""
+						} else {
+							(*param).(*Params).CurrentToolInputEmitted = true
+						}
+					} else if partialJSON != "" {
+						(*param).(*Params).CurrentToolInputEmitted = true
+					}
+					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", partialJSON)
 					appendEvent("content_block_delta", string(data))
 				}
 				(*param).(*Params).ResponseType = 3
@@ -526,13 +552,13 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 				upstreamToolName := functionCall.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName(sanitizedNameMap, upstreamToolName)
-				clientToolName := util.MapToolName(toolNameMap, upstreamToolName)
+				clientToolName := util.MapClaudeToolName(toolNameMap, originalRequestRawJSON, upstreamToolName)
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolBlock, _ = sjson.SetBytes(toolBlock, "id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", clientToolName)
 				inputRaw := "{}"
 				if args := functionCall.Get("args"); args.Exists() && gjson.Valid(args.Raw) && args.IsObject() {
-					inputRaw = args.Raw
+					inputRaw = util.CleanClaudeToolArgumentsWithTranslated(args.Raw, clientToolName, originalRequestRawJSON, requestRawJSON)
 				}
 				toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(inputRaw))
 				blocks = append(blocks, toolBlock)

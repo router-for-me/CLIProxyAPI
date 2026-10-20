@@ -45,12 +45,16 @@ func TestMetadataConfigFieldsExposePluginSchema(t *testing.T) {
 		ConfigFields: []ConfigField{{
 			Name:        "mode",
 			Type:        ConfigFieldTypeEnum,
+			Default:     "safe",
 			EnumValues:  []string{"safe", "fast"},
 			Description: "Execution mode.",
 		}},
 	}
 	if meta.Logo == "" || len(meta.ConfigFields) != 1 {
 		t.Fatalf("metadata missing logo or config fields: %#v", meta)
+	}
+	if meta.ConfigFields[0].Default != "safe" {
+		t.Fatalf("config field default = %#v, want safe", meta.ConfigFields[0].Default)
 	}
 }
 

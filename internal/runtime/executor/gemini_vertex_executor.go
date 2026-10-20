@@ -269,6 +269,9 @@ func (e *GeminiVertexExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if helps.ShouldExecuteVertexOpenAPI(auth, req.Model) {
+		return e.executeOpenAPI(ctx, auth, req, opts)
+	}
 	if shouldExecuteVertexInteractions(auth, opts) {
 		return e.executeInteractions(ctx, auth, req, opts)
 	}
@@ -294,6 +297,9 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if helps.ShouldExecuteVertexOpenAPI(auth, req.Model) {
+		return e.executeOpenAPIStream(ctx, auth, req, opts)
+	}
 	if shouldExecuteVertexInteractions(auth, opts) {
 		return e.executeInteractionsStream(ctx, auth, req, opts)
 	}
@@ -315,6 +321,10 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 // CountTokens counts tokens for the given request using the Vertex AI API.
 func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if helps.ShouldExecuteVertexOpenAPI(auth, req.Model) {
+		normalizedReq, normalizedOpts := normalizeVertexOpenAPIRequest(req, opts)
+		return NewOpenAICompatExecutor(e.Identifier(), e.cfg).CountTokens(ctx, auth, normalizedReq, normalizedOpts)
+	}
 	// Try API key authentication first
 	apiKey, baseURL := vertexAPICreds(auth)
 
@@ -329,6 +339,77 @@ func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 
 	// Use API key authentication
 	return e.countTokensWithAPIKey(ctx, auth, req, opts, apiKey, baseURL)
+}
+
+func normalizeVertexOpenAPIRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	normalizedModel := helps.NormalizeVertexOpenAPIModel(req.Model)
+	if normalizedModel == "" || normalizedModel == req.Model {
+		return req, opts
+	}
+	if len(opts.OriginalRequest) == 0 && len(req.Payload) > 0 {
+		opts.OriginalRequest = req.Payload
+	}
+	req.Model = normalizedModel
+	return req, opts
+}
+
+func hasVertexServiceAccount(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	sa, ok := auth.Metadata["service_account"].(map[string]any)
+	return ok && len(sa) > 0
+}
+
+func (e *GeminiVertexExecutor) resolveOpenAPICredentials(ctx context.Context, auth *cliproxyauth.Auth) (string, string, error) {
+	apiKey, baseURL := vertexAPICreds(auth)
+	if apiKey == "" || hasVertexServiceAccount(auth) {
+		projectID, location, saJSON, errCreds := vertexCreds(auth)
+		if errCreds != nil {
+			return "", "", errCreds
+		}
+		token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON)
+		if errTok != nil {
+			log.Errorf("vertex executor: access token error: %v", errTok)
+			return "", "", statusErr{code: 500, msg: "internal server error"}
+		}
+		if strings.TrimSpace(token) == "" {
+			return "", "", statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+		}
+		openAPILocation := helps.VertexOpenAPILocation(auth, location)
+		openAPIBaseURL := helps.VertexServiceAccountOpenAPIBaseURL(helps.VertexAuthBaseURL(auth), vertexAPIVersion, projectID, openAPILocation)
+		return openAPIBaseURL, token, nil
+	}
+	if helps.IsGoogleVertexHost(baseURL) {
+		return "", "", statusErr{code: http.StatusBadRequest, msg: "vertex endpoints/openapi on aiplatform.googleapis.com requires service account credentials"}
+	}
+	openAPILocation := helps.VertexOpenAPILocation(auth, "")
+	openAPIBaseURL := helps.VertexAPIKeyOpenAPIBaseURL(baseURL, vertexAPIVersion, helps.VertexAuthProjectID(auth), openAPILocation)
+	return openAPIBaseURL, apiKey, nil
+}
+
+func (e *GeminiVertexExecutor) executeOpenAPI(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	req, opts = normalizeVertexOpenAPIRequest(req, opts)
+	openAPIBaseURL, token, errCreds := e.resolveOpenAPICredentials(ctx, auth)
+	if errCreds != nil {
+		baseModel := thinking.ParseSuffix(req.Model).ModelName
+		reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+		reporter.TrackFailure(ctx, &errCreds)
+		return resp, errCreds
+	}
+	return NewOpenAICompatExecutor(e.Identifier(), e.cfg).executeWithCredentials(ctx, auth, req, opts, openAPIBaseURL, token, nil)
+}
+
+func (e *GeminiVertexExecutor) executeOpenAPIStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	req, opts = normalizeVertexOpenAPIRequest(req, opts)
+	openAPIBaseURL, token, errCreds := e.resolveOpenAPICredentials(ctx, auth)
+	if errCreds != nil {
+		baseModel := thinking.ParseSuffix(req.Model).ModelName
+		reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+		reporter.TrackFailure(ctx, &errCreds)
+		return nil, errCreds
+	}
+	return NewOpenAICompatExecutor(e.Identifier(), e.cfg).executeStreamWithCredentials(ctx, auth, req, opts, openAPIBaseURL, token, nil)
 }
 
 // Refresh refreshes the authentication credentials (no-op for Vertex).
@@ -399,6 +480,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	}
 	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
 	if action != "countTokens" {
+		body = helps.DropGeminiTrailingThoughtOnlyContent(body, "contents")
 		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
 	}
 	baseURL := vertexBaseURL(location)
@@ -543,14 +625,15 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	}
 	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
 	if action != "countTokens" {
+		body = helps.DropGeminiTrailingThoughtOnlyContent(body, "contents")
 		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
 	}
 
-	// For API key auth, use simpler URL format without project/location
-	if baseURL == "" {
-		baseURL = "https://aiplatform.googleapis.com"
-	}
-	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
+	// For API key auth, use simpler URL format without project/location.
+	// The helper honors base URLs that already encode "/publishers/..." so
+	// configurations like ".../v1/projects/P/locations/L/publishers/google/models"
+	// keep working without a duplicated "/v1" segment.
+	url := vertexAPIKeyModelsURL(baseURL, baseModel, action)
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
@@ -671,6 +754,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	body = internalsignature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 
 	action := getVertexAction(baseModel, true)
+	body = helps.DropGeminiTrailingThoughtOnlyContent(body, "contents")
 	body = helps.EnsureGeminiBoundaryUserContent(body, "contents")
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
@@ -759,12 +843,16 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 		}()
 		var terminalDelivered bool
+		var sawFinishReason bool
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(line)) {
+				sawFinishReason = true
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				streamUsage.Observe(detail, true)
 			}
@@ -806,6 +894,18 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			return
 		}
 		if ctx.Err() != nil {
+			return
+		}
+		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
+				reporter.PublishFailure(ctx, truncErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case <-ctx.Done():
+			}
 			return
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
@@ -865,12 +965,10 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	body = internalsignature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 
 	action := getVertexAction(baseModel, true)
+	body = helps.DropGeminiTrailingThoughtOnlyContent(body, "contents")
 	body = helps.EnsureGeminiBoundaryUserContent(body, "contents")
 	// For API key auth, use simpler URL format without project/location
-	if baseURL == "" {
-		baseURL = "https://aiplatform.googleapis.com"
-	}
-	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
+	url := vertexAPIKeyModelsURL(baseURL, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
 	if !isImagenModel(baseModel) {
 		if opts.Alt == "" {
@@ -953,12 +1051,16 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 		}()
 		var terminalDelivered bool
+		var sawFinishReason bool
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(line)) {
+				sawFinishReason = true
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				streamUsage.Observe(detail, true)
 			}
@@ -1000,6 +1102,18 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			return
 		}
 		if ctx.Err() != nil {
+			return
+		}
+		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
+				reporter.PublishFailure(ctx, truncErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case <-ctx.Done():
+			}
 			return
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
@@ -1159,10 +1273,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 	translatedReq = helps.EnsureGeminiLeadingUserContent(translatedReq, "contents")
 
 	// For API key auth, use simpler URL format without project/location
-	if baseURL == "" {
-		baseURL = "https://aiplatform.googleapis.com"
-	}
-	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, "countTokens")
+	url := vertexAPIKeyModelsURL(baseURL, baseModel, "countTokens")
 
 	translatedReq = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)(translatedReq)
 	httpReq, errNewReq := http.NewRequestWithContext(respCtx, http.MethodPost, url, bytes.NewReader(translatedReq))
@@ -1283,6 +1394,54 @@ func vertexAPICreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+// vertexAPIKeyModelsURL builds the API-key models endpoint URL.
+//
+// The configured base URL is treated as a full resource prefix when it
+// already contains a "/publishers/" segment (e.g. a real Vertex endpoint
+// such as "https://aiplatform.googleapis.com/v1/projects/{p}/locations/{l}/publishers/google/models"),
+// in which case only "/{model}:{action}" is appended. Otherwise the default
+// "/v1/publishers/google/models" segment is inserted so short third-party
+// hosts keep working; if the base already ends in a version segment such
+// as "/v1" or "/v1beta1", only "/publishers/google/models" is appended to
+// avoid producing a duplicated version path.
+func vertexAPIKeyModelsURL(baseURL, model, action string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		base = "https://aiplatform.googleapis.com"
+	}
+	if strings.Contains(base, "/publishers/") {
+		return fmt.Sprintf("%s/%s:%s", base, model, action)
+	}
+	if !vertexAPIVersionSuffix(base) {
+		base = fmt.Sprintf("%s/%s", base, vertexAPIVersion)
+	}
+	return fmt.Sprintf("%s/publishers/google/models/%s:%s", base, model, action)
+}
+
+// vertexAPIVersionSuffix reports whether the trimmed base URL already ends
+// with a Google API version segment like "/v1" or "/v1beta1".
+func vertexAPIVersionSuffix(base string) bool {
+	if base == "" {
+		return false
+	}
+	seg := base[strings.LastIndexByte(base, '/')+1:]
+	if len(seg) < 2 || seg[0] != 'v' {
+		return false
+	}
+	hasDigit := false
+	for i := 1; i < len(seg); i++ {
+		c := seg[i]
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c == '_' || c == '-' || (c >= 'a' && c <= 'z'):
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func vertexBaseURL(location string) string {

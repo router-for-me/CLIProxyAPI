@@ -60,6 +60,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 	rootResult := gjson.ParseBytes(rawJSON)
 	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
+	signatureTargetModel := translatorcommon.ResolveCodexReplayTargetModel(modelName, rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
 	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
 
@@ -175,7 +176,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				}
 
 				rawSignature := part.Get("signature").String()
-				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
+				signature, ok := translatorcommon.CodexReplaySignatureForTarget(signatureTargetModel, rawSignature)
 				if !ok && preserveEmptyThinkingBlocks && part.Get("signature").Type == gjson.String && strings.TrimSpace(rawSignature) != "" &&
 					sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking) == sigcompat.SignatureProviderUnknown {
 					signature = rawSignature
@@ -185,13 +186,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					if preserveEmptyThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
 						signature = rawSignature
 					} else {
-						if !codexClaudeTargetAcceptsGrokSignature(modelName) {
-							return
-						}
-						if _, err := sigcompat.InspectGrokEncryptedContent(rawSignature); err != nil {
-							return
-						}
-						signature = rawSignature
+						return
 					}
 				}
 
@@ -462,11 +457,6 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	template = translatorcommon.SetRawArrayItems(template, "input", inputItems)
 
 	return template, drops.Err()
-}
-
-func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
-	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
-	return strings.Contains(baseModel, "grok")
 }
 
 func normalizeCodexServiceTier(result gjson.Result) string {

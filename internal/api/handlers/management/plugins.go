@@ -51,6 +51,7 @@ type pluginMetadataInfo struct {
 }
 
 type pluginConfigFieldInfo struct {
+	Default     any      `json:"default"`
 	Name        string   `json:"name"`
 	Type        string   `json:"type"`
 	EnumValues  []string `json:"enum_values"`
@@ -469,6 +470,7 @@ func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo 
 		out = append(out, pluginConfigFieldInfo{
 			Name:        htmlsanitize.String(field.Name),
 			Type:        htmlsanitize.String(string(field.Type)),
+			Default:     htmlsanitize.JSONValue(field.Default),
 			EnumValues:  htmlsanitize.Strings(field.EnumValues),
 			Description: htmlsanitize.String(field.Description),
 		})

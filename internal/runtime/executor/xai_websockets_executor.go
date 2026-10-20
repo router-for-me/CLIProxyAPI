@@ -519,6 +519,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
+	prepared.body = sanitizeXAIInputEncryptedContentForBaseURL(prepared.body, baseURL)
 	wsHeaders := applyXAIWebsocketHeaders(ctx, http.Header{}, auth, token, prepared.sessionID, opts.Headers)
 	wsReqBody := buildXAIWebsocketRequestBody(prepared.body, prepared.finalizePayload)
 	requestType := strings.TrimSpace(gjson.GetBytes(req.Payload, "type").String())
@@ -1668,6 +1669,7 @@ func applyXAIWebsocketHeaders(ctx context.Context, headers http.Header, auth *cl
 	} else {
 		req = &http.Request{Header: headers}
 	}
+	ensureXAIUserAgent(req, clientHeaders...)
 	util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders...)
 	return headers
 }
