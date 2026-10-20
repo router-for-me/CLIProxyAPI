@@ -138,6 +138,19 @@ func antigravityBaseUserAgent(userAgent string) string {
 	return userAgent
 }
 
+// AntigravityConfiguredUserAgent returns the per-auth User-Agent override, read
+// from the "user_agent" attribute first and the "user_agent" metadata field
+// second. It returns an empty string when neither is set.
+func AntigravityConfiguredUserAgent(attributes map[string]string, metadata map[string]any) string {
+	if ua := strings.TrimSpace(attributes["user_agent"]); ua != "" {
+		return ua
+	}
+	if ua, ok := metadata["user_agent"].(string); ok {
+		return strings.TrimSpace(ua)
+	}
+	return ""
+}
+
 // AntigravityRequestUserAgent returns the short Antigravity runtime UA used by
 // generate/stream/model-list requests.
 func AntigravityRequestUserAgent(userAgent string) string {
