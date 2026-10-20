@@ -155,6 +155,21 @@ see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
 
+### Built-in client usage API
+
+CLIProxyAPI can expose lightweight, in-memory request counters for configured providers and credentials without returning upstream secrets. It is disabled by default:
+
+```yaml
+observability:
+  usage:
+    user-api:
+      enabled: false
+      providers: []   # provider keys to expose, for example claude or codex
+      credentials: [] # {auth-index, name} entries exposed under a public name
+```
+
+When enabled, authenticated client keys can call `GET /v1/usage` with `?provider=<name>` and/or `?credential=<name>` filters. Management keys are not accepted. The response never contains upstream keys, base URLs, account emails, auth IDs, or auth file paths, and an empty allowlist exposes nothing. Counters are in-memory and reset when the process restarts; use a dedicated usage sink for billing-grade accounting.
+
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
 Standalone persistence and visualization service for CLIProxyAPI, with periodic data sync, SQLite storage, aggregate APIs, and a built-in dashboard for usage and statistics.
