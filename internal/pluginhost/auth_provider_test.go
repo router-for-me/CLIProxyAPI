@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -710,3 +711,145 @@ func TestRefreshAuth_MergesAttributesAndPreservesPath_Issue6119(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthIDForPath_RelativeAuthDir(t *testing.T) {
+	tempDir := t.TempDir()
+	authDir := filepath.Join(tempDir, "oauth")
+	if err := os.MkdirAll(filepath.Join(authDir, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir oauth: %v", err)
+	}
+
+	origWd, errWd := os.Getwd()
+	if errWd != nil {
+		t.Fatalf("getwd: %v", errWd)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir tempDir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origWd)
+	}()
+
+	relAuthDir := "oauth"
+	fileName := "qoder-demo.json"
+	absPath := filepath.Join(authDir, fileName)
+	relPath := filepath.Join(relAuthDir, fileName)
+
+	// Case 1: Absolute path with relative authDir
+	if got := authIDForPath(absPath, relAuthDir); got != fileName {
+		t.Errorf("authIDForPath(absPath, relAuthDir) = %q, want %q", got, fileName)
+	}
+
+	// Case 2: Relative path with relative authDir
+	if got := authIDForPath(relPath, relAuthDir); got != fileName {
+		t.Errorf("authIDForPath(relPath, relAuthDir) = %q, want %q", got, fileName)
+	}
+
+	// Case 3: Absolute path with absolute authDir
+	if got := authIDForPath(absPath, authDir); got != fileName {
+		t.Errorf("authIDForPath(absPath, authDir) = %q, want %q", got, fileName)
+	}
+
+	// Case 4: Relative path with absolute authDir
+	if got := authIDForPath(relPath, authDir); got != fileName {
+		t.Errorf("authIDForPath(relPath, authDir) = %q, want %q", got, fileName)
+	}
+
+	// Case 5: Nested subpath
+	nestedAbs := filepath.Join(authDir, "sub", fileName)
+	nestedRel := filepath.Join(relAuthDir, "sub", fileName)
+	wantNested := "sub/" + fileName
+	if got := authIDForPath(nestedAbs, relAuthDir); got != wantNested {
+		t.Errorf("authIDForPath(nestedAbs, relAuthDir) = %q, want %q", got, wantNested)
+	}
+	if got := authIDForPath(nestedRel, relAuthDir); got != wantNested {
+		t.Errorf("authIDForPath(nestedRel, relAuthDir) = %q, want %q", got, wantNested)
+	}
+
+	// Case 6: Path outside authDir does not escape with ..
+	outsidePath := filepath.Join(tempDir, "other", fileName)
+	gotOutside := authIDForPath(outsidePath, relAuthDir)
+	if strings.HasPrefix(gotOutside, "..") {
+		t.Errorf("authIDForPath(outsidePath, relAuthDir) = %q should not start with ..", gotOutside)
+	}
+
+	// Case 7: Empty path returns empty string
+	if got := authIDForPath("", relAuthDir); got != "" {
+		t.Errorf("authIDForPath(\"\", relAuthDir) = %q, want empty", got)
+	}
+	if got := authIDForPath("   ", relAuthDir); got != "" {
+		t.Errorf("authIDForPath(\"   \", relAuthDir) = %q, want empty", got)
+	}
+}
+
+func TestHostAuthDataToCoreAuth_RelativeAuthDirAndEmptyID(t *testing.T) {
+	tempDir := t.TempDir()
+	authDir := filepath.Join(tempDir, "oauth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("mkdir oauth: %v", err)
+	}
+
+	origWd, errWd := os.Getwd()
+	if errWd != nil {
+		t.Fatalf("getwd: %v", errWd)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir tempDir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origWd)
+	}()
+
+	relAuthDir := "oauth"
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: relAuthDir}
+
+	fileName := "qoder-demo.json"
+	absPath := filepath.Join(authDir, fileName)
+	relPath := filepath.Join(relAuthDir, fileName)
+
+	// Startup simulation: relative path with empty AuthData.ID
+	startupAuth := host.AuthDataToCoreAuth(pluginapi.AuthData{
+		Provider: "qoder",
+		ID:       "",
+	}, relPath, fileName)
+	if startupAuth == nil {
+		t.Fatal("AuthDataToCoreAuth(startup) returned nil")
+	}
+	if startupAuth.ID != fileName {
+		t.Fatalf("startupAuth.ID = %q, want %q", startupAuth.ID, fileName)
+	}
+
+	// Writeback save simulation: absolute path with empty AuthData.ID
+	saveAuth := host.AuthDataToCoreAuth(pluginapi.AuthData{
+		Provider: "qoder",
+		ID:       "",
+	}, absPath, fileName)
+	if saveAuth == nil {
+		t.Fatal("AuthDataToCoreAuth(save) returned nil")
+	}
+	if saveAuth.ID != fileName {
+		t.Fatalf("saveAuth.ID = %q, want %q", saveAuth.ID, fileName)
+	}
+
+	// Check consistency between startup and writeback
+	if startupAuth.ID != saveAuth.ID {
+		t.Fatalf("ID mismatch: startup ID %q != save ID %q", startupAuth.ID, saveAuth.ID)
+	}
+
+	// Check alignment with Host.authIDForPath from auth_callbacks.go
+	callbackID := host.authIDForPath(absPath)
+	if callbackID != saveAuth.ID {
+		t.Fatalf("host.authIDForPath(%q) = %q != AuthDataToCoreAuth.ID %q", absPath, callbackID, saveAuth.ID)
+	}
+
+	// Explicit ID should be respected when present
+	explicitAuth := host.AuthDataToCoreAuth(pluginapi.AuthData{
+		Provider: "qoder",
+		ID:       "explicit-id",
+	}, absPath, fileName)
+	if explicitAuth == nil || explicitAuth.ID != "explicit-id" {
+		t.Fatalf("explicitAuth.ID = %v, want explicit-id", explicitAuth)
+	}
+}
+

@@ -936,3 +936,110 @@ func TestHostAuthSaveRelativeAuthDirPreservesIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestHostAuthSaveCallback_RelativeAuthDirAndEmptyPluginAuthDataID(t *testing.T) {
+	tempDir := t.TempDir()
+	authDir := filepath.Join(tempDir, "oauth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("mkdir oauth: %v", err)
+	}
+
+	origWd, errWd := os.Getwd()
+	if errWd != nil {
+		t.Fatalf("getwd: %v", errWd)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir tempDir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origWd)
+	}()
+
+	const fileName = "qoder-demo.json"
+	initialPath := filepath.Join(authDir, fileName)
+	initialPayload := []byte(`{"type":"qoder","email":"user@example.com","access_token":"tok-1"}`)
+	if errWrite := os.WriteFile(initialPath, initialPayload, 0o600); errWrite != nil {
+		t.Fatalf("write initial auth file: %v", errWrite)
+	}
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "qoder-plugin",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "qoder",
+					parseAuth: func(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+						var meta map[string]any
+						if errUnmarshal := json.Unmarshal(req.RawJSON, &meta); errUnmarshal != nil {
+							return pluginapi.AuthParseResponse{}, errUnmarshal
+						}
+						email, _ := meta["email"].(string)
+						return pluginapi.AuthParseResponse{
+							Handled: true,
+							Auth: pluginapi.AuthData{
+								Provider:    "qoder",
+								ID:          "",
+								FileName:    filepath.Base(req.FileName),
+								Label:       email,
+								StorageJSON: req.RawJSON,
+								Metadata:    meta,
+							},
+						}, nil
+					},
+				},
+			},
+		},
+	})
+	relAuthDir := "oauth"
+	host.runtimeConfig = &config.Config{AuthDir: relAuthDir}
+
+	sdkauth.RegisterPluginAuthParser(host)
+	t.Cleanup(func() {
+		sdkauth.RegisterPluginAuthParser(nil)
+	})
+
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(authDir)
+	manager := coreauth.NewManager(store, nil, nil)
+	if errLoad := manager.Load(context.Background()); errLoad != nil {
+		t.Fatalf("manager.Load() error = %v", errLoad)
+	}
+	host.SetAuthManager(manager)
+
+	initialAuths := manager.List()
+	if len(initialAuths) != 1 || initialAuths[0].ID != fileName {
+		t.Fatalf("initial manager.List() = %#v, want single auth with ID=%q", initialAuths, fileName)
+	}
+
+	reqSave, errMarshal := json.Marshal(pluginapi.HostAuthSaveRequest{
+		Name: fileName,
+		JSON: json.RawMessage(`{"type":"qoder","email":"user@example.com","access_token":"tok-2"}`),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal save request: %v", errMarshal)
+	}
+	rawSaveResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthSave, reqSave)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin(host.auth.save) error = %v", errCall)
+	}
+	if _, errDecode := decodeRPCEnvelope[pluginapi.HostAuthSaveResponse](rawSaveResp); errDecode != nil {
+		t.Fatalf("decode save response: %v", errDecode)
+	}
+
+	authsAfterSave := manager.List()
+	if len(authsAfterSave) != 1 {
+		ids := make([]string, 0, len(authsAfterSave))
+		for _, a := range authsAfterSave {
+			if a != nil {
+				ids = append(ids, a.ID)
+			}
+		}
+		t.Fatalf("manager.List() after host.auth.save len = %d (%v), want exactly 1 credential without ID split", len(authsAfterSave), ids)
+	}
+	if authsAfterSave[0].ID != fileName {
+		t.Fatalf("auth after save ID = %q, want %q", authsAfterSave[0].ID, fileName)
+	}
+	if gotToken := authsAfterSave[0].Metadata["access_token"]; gotToken != "tok-2" {
+		t.Fatalf("auth Metadata[access_token] = %v, want tok-2", gotToken)
+	}
+}
