@@ -332,8 +332,9 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	emittedToolResults := map[string]struct{}{}
 	emittedRawToolUses := map[string]struct{}{}
 	unmappedItemTypes := map[string]int{}
+	webSearchHistory := scanResponsesWebSearchHistory(inputItems)
 
-	for _, item := range inputItems {
+	for itemIndex, item := range inputItems {
 		// System-level items already became top-level system blocks.
 		if isResponsesSystemLevelRole(item.Get("role").String()) {
 			continue
@@ -479,7 +480,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		case "web_search_call":
 			// Rebuild the Claude server-side search pair so the replayed turn
 			// still shows the search and its hits.
-			if blocks := convertResponsesWebSearchCallToClaudeBlocks(item); len(blocks) > 0 {
+			if blocks := webSearchHistory.claudeBlocks(itemIndex, item); len(blocks) > 0 {
 				appendParts("assistant", blocks...)
 			}
 
@@ -686,6 +687,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	// Map tool_choice similar to Chat Completions translator (optional in docs, safe to handle)
+	toolChoiceNone := false
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		switch toolChoice.Type {
 		case gjson.String:
@@ -694,6 +696,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 			case "none":
 				// Leave unset; implies no tools
+				toolChoiceNone = true
 			case "required":
 				if len(includedToolNames) > 0 {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
@@ -733,7 +736,35 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
+	// parallel_tool_calls=false maps to Anthropic's disable_parallel_tool_use,
+	// mirroring the Chat Completions translator. It is not added when the
+	// effective choice is none, when no tool survived conversion, or when a
+	// forced tool was filtered out (no tool_choice was produced for it).
+	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Type == gjson.False && !toolChoiceNone && len(toolItems) > 0 {
+		if choice := gjson.GetBytes(out, "tool_choice"); choice.Exists() {
+			if choice.Get("type").String() != "none" {
+				out, _ = sjson.SetBytes(out, "tool_choice.disable_parallel_tool_use", true)
+			}
+		} else if !responsesToolChoiceForcesTool(root.Get("tool_choice")) {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto","disable_parallel_tool_use":true}`))
+		}
+	}
+
 	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai-response", modelName), drops.Err()
+}
+
+// responsesToolChoiceForcesTool reports a client tool_choice that names a
+// specific tool or requires a tool call. When such a choice produced no Claude
+// tool_choice (the forced tool was filtered out), the request keeps its previous
+// shape instead of gaining an auto choice the client never asked for.
+func responsesToolChoiceForcesTool(toolChoice gjson.Result) bool {
+	switch toolChoice.Type {
+	case gjson.String:
+		return toolChoice.String() == "required"
+	case gjson.JSON:
+		return toolChoice.Get("type").String() != "auto"
+	}
+	return false
 }
 
 func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
@@ -767,15 +798,27 @@ func isResponsesSystemLevelRole(role string) bool {
 	}
 }
 
-// dropUnsupportedClaudeAssistantPrefill removes a trailing assistant message for
-// Claude model families that reject assistant message prefill (e.g., Fable,
-// Opus 5, Sonnet 4.6, Haiku 5.5).
+// dropUnsupportedClaudeAssistantPrefill removes a trailing text-only assistant
+// message for Claude model families that reject assistant message prefill (e.g.,
+// Fable, Opus 5, Sonnet 4.6, Haiku 5.5). A trailing assistant message carrying
+// protocol blocks, such as the server_tool_use of a pause_turn response, is
+// conversation state the continuation must send back, not prefill.
 func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) [][]byte {
 	if !claudeModelRejectsAssistantPrefill(modelName) || len(messages) == 0 {
 		return messages
 	}
 	last := gjson.ParseBytes(messages[len(messages)-1])
 	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	content := last.Get("content")
+	if content.IsArray() {
+		for _, part := range content.Array() {
+			if !strings.EqualFold(strings.TrimSpace(part.Get("type").String()), "text") {
+				return messages
+			}
+		}
+	} else if content.Type != gjson.String {
 		return messages
 	}
 	return messages[:len(messages)-1]

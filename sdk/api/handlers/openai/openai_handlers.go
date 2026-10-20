@@ -786,6 +786,12 @@ func chunkHasFinishReason(chunk []byte) bool {
 	if bytes.HasPrefix(chunk, []byte("data:")) {
 		chunk = bytes.TrimSpace(chunk[5:])
 	}
+	// A translated terminal error (for example Claude's
+	// model_context_window_exceeded mapped to context_length_exceeded) already
+	// ends the stream; it must not be followed by a second synthetic error.
+	if !gjson.GetBytes(chunk, "choices").Exists() && gjson.GetBytes(chunk, "error").IsObject() {
+		return true
+	}
 	for _, choice := range gjson.GetBytes(chunk, "choices").Array() {
 		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != gjson.Null && reason.String() != "" {
 			return true

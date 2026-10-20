@@ -96,6 +96,40 @@ func TestChatCompletionsStreamWithoutFinishReasonIsReportedAsError(t *testing.T)
 	}
 }
 
+// A translated terminal error chunk (Claude model_context_window_exceeded ->
+// context_length_exceeded) ends the stream on its own: the handler must not add
+// a second "closed before finish_reason" error after it.
+func TestChatCompletionsStreamTerminalErrorChunkIsTheOnlyError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+	}{
+		{"after content", []string{
+			`{"choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+			`{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+		}},
+		{"first chunk", []string{
+			`{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runMockStreamTest(t, tc.chunks, "terminal-error-"+strings.ReplaceAll(tc.name, " ", "-"))
+			if got := strings.Count(out, `"error":`); got != 1 {
+				t.Fatalf("error objects = %d, want 1: %q", got, out)
+			}
+			if !strings.Contains(out, `"code":"context_length_exceeded"`) {
+				t.Fatalf("terminal error missing: %q", out)
+			}
+			if strings.Contains(out, "upstream stream closed before any chunk carried finish_reason") {
+				t.Fatalf("synthetic truncation error added: %q", out)
+			}
+			if strings.Contains(out, `"finish_reason":"`) || strings.Contains(out, `"usage"`) {
+				t.Fatalf("success finish or usage emitted: %q", out)
+			}
+		})
+	}
+}
+
 // Issue #6371: A stream with explicit null or empty finish_reason must still be detected as truncated.
 func TestChatCompletionsStreamExplicitNullOrEmptyFinishReasonIsReportedAsError(t *testing.T) {
 	chunks := []string{
