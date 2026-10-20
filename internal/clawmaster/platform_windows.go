@@ -119,13 +119,15 @@ func readableByOthers(path string, _ fs.FileInfo) bool {
 
 // privateSecurityAttributes is the owner-only descriptor restrictToOwner applies, for creating a
 // file or directory that is private from its first instant: no handle can be opened on it under
-// the parent's inherited permissions before they are replaced.
+// the parent's inherited permissions before they are replaced. It names this user as the owner: an
+// elevated administrator's new files are otherwise owned by Administrators, which the same user
+// does not count as when not elevated (the agent's logon task), so it would refuse them.
 func privateSecurityAttributes() (*windows.SecurityAttributes, error) {
 	user, err := currentUserSID()
 	if err != nil {
 		return nil, err
 	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.String() + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	sd, err := windows.SecurityDescriptorFromString("O:" + user.String() + "D:P(A;OICI;FA;;;" + user.String() + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +170,9 @@ func mkdirPrivate(path string) error {
 
 // restrictToOwner gives path a protected DACL, as mode 0600 or 0700 does on Unix: full control for
 // this user, SYSTEM and Administrators (who hold it on every user's profile anyway), nothing
-// inherited from the parent, and the same for anything later created inside.
+// inherited from the parent, and the same for anything later created inside. It also makes this
+// user the owner (see privateSecurityAttributes), which heals a file an elevated run left owned by
+// Administrators; where taking ownership is refused, the DACL alone is set, as before.
 func restrictToOwner(path string) error {
 	sa, err := privateSecurityAttributes()
 	if err != nil {
@@ -178,8 +182,15 @@ func restrictToOwner(path string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	owner, _, err := sa.SecurityDescriptor.Owner()
+	if err != nil {
+		return err
+	}
+	const info = windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info|windows.OWNER_SECURITY_INFORMATION, owner, nil, dacl, nil); err == nil {
+		return nil
+	}
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, dacl, nil)
 }
 
 // executable: Windows has no execute bit; what runs is decided by the extension (claude.exe).
