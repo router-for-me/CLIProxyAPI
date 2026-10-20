@@ -1046,7 +1046,8 @@ func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
 		usageNode.Get("input_tokens_details.cache_write_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cache_creation_tokens").Exists() ||
 		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
-		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
+		usageNode.Get("output_tokens_details.reasoning_tokens").Exists() ||
+		usageNode.Get("reasoning_tokens").Exists()
 }
 
 func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
@@ -1084,6 +1085,10 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
 		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
+	}
+	if !reasoning.Exists() {
+		// Flat dialect (e.g. SGLang): usage.reasoning_tokens at top level.
+		reasoning = usageNode.Get("reasoning_tokens")
 	}
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()

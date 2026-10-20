@@ -107,6 +107,14 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td width="180"><a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi"><img src="./assets/modelflare.png" alt="Modelflare" width="150"></a></td>
 <td>Modelflare による本プロジェクトへのご支援に感謝します！Modelflare：フルスペックで安定、水増しなし。世界の SOTA モデルを低コストで利用できます。米国法人 Havenbyte LLC が運営し、GPT、Claude、Gemini、Grok などの主要モデルと一般的な互換プロトコルに対応しているほか、40 種類以上の画像・動画モデルもサポートしています。キャッシュ補償が大きな特長です：一部の OpenAI 価格優先・安定・プレミアムグループでは、1 日あたり 65%、75%、85% のキャッシュヒット率を保証し、対象リクエストが目標に達しなかった場合は差額を補償します。精算後に使用量ダッシュボードで確認できます。特別キャンペーン：1 回 US&#36;20 のチャージで価格倍率 0.015 倍の GPT 特別グループが、1 回 US&#36;50 のチャージで価格倍率 0.03 倍の Claude 特別グループが解放されます。<a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi">専用リンク</a>から登録してご参加ください。</td>
 </tr>
+<tr>
+<td width="180"><a href="https://kedaya.ai/register?aff=824X8RAHCYXM"><img src="./assets/kedaya.jpg" alt="kedaya.ai" width="150"></a></td>
+<td>kedaya.ai は、安定性と効率性に優れた AI モデル API 中継サービスプロバイダーです。Claude、GPT、Gemini、Grok、Antigravity、DeepSeek などの主要モデルをカバーし、OpenAI（Responses を含む）、Anthropic、Gemini のネイティブプロトコルに対応しているため、CLIProxyAPI、Claude Code、Codex、Gemini CLI、Grok CLI などのクライアントにシームレスに接続できます。OpenAI および Grok モデルの価格は、最安で公式価格の 0.1% から！専用リンク：<a href="https://kedaya.ai/register?aff=824X8RAHCYXM">https://kedaya.ai/register?aff=824X8RAHCYXM</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
+<td>こちらのAIモデル中转サービスはいつでも返金可能で、どのユーザーも無料でインボイスを発行できます。法人のご利用も個人のご利用もどちらも対応可能で、主要なモデルはすべて揃っています。カスタマーサポートは長時間オンラインで皆様のご指示をお待ちしております。何かございましたらお気軽にご指示ください。お客様のご意見をしっかり取り入れるのがモットーです！！！<br><br>Xcode VIPエントランス→ <a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a></td>
+</tr>
 </tbody>
 </table>
 
