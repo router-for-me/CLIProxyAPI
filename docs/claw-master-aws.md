@@ -59,7 +59,8 @@ terraform apply
 ```
 
 `release_tag` and `binary_sha256` pin the binary: the bootstrap refuses a download that does not match. Defaults point
-at a known release; to use another, take the sha256 of its `claw-master-linux-arm64` asset and set both.
+at a known release; to use another, take its `claw-master-linux-arm64` line from the release's `SHA256SUMS` (releases
+named `claw-master-*` publish one) and set both.
 
 ### 2. Open a shell on the box
 
@@ -96,6 +97,9 @@ claw-master client-init --dir ~/.config/claw-master --name dev-box-1
 base64 -w0 ~/.config/claw-master/client.csr; echo
 ```
 
+(On macOS: `base64 -i ~/.config/claw-master/client.csr | tr -d '\n'; echo`. On Windows, in PowerShell:
+`[Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.config\claw-master\client.csr"))`.)
+
 On the server (a Session Manager shell), sign it. The request is public, so it is safe to paste:
 
 ```bash
@@ -115,7 +119,7 @@ Re-enrol before the certificate expires; a lost box expires on its own.
 ### 5. Check it
 
 ```bash
-sudo tail -f /var/log/claw-master/server.log        # info lines: what CHANGES, plus a quota snapshot every 5 minutes
+sudo tail -f /var/log/claw-master/server-blue.log   # or server-green.log: the active colour (claw-master-status)
 ```
 
 ## Rolling the binary forward
@@ -167,7 +171,8 @@ catalogue, with dimensions, is in [claw-master.md](claw-master.md#metrics-opente
 | Is the box OK? | `claw_master.process.*`, `mem_used_percent`, `swap_used_percent` | uptime, goroutines, heap, memory and swap |
 
 Name your users instead of seeing `acct-xxxxxxxx`: `claw-master account-key <accountUuid>` prints a key, and
-`/etc/claw-master/account-labels` takes `ACCOUNT_UUID=NAME` lines (the account id itself is never exported).
+`/etc/claw-master/account-labels` takes `ACCOUNT_UUID=NAME` lines (the account id itself is never exported). The
+server re-reads the file every minute, so an edit (replace the file with a rename) needs no restart.
 
 **Example CloudWatch Metrics Insights queries**
 
@@ -181,13 +186,15 @@ SELECT MIN("claw_master.auth.token_expires_in_seconds") FROM "ClawMaster" GROUP 
 ```
 
 Useful alarms: any subscription's `quota.used_fraction` above 0.9 for a sustained period, more than a handful of
-`inference.errors` in ten minutes, `auth.refresh` with `result` other than ok, and `mem_used_percent` above 85.
+`inference.errors` in ten minutes, `auth.refresh` with `result=failed` (healthy results are `rotated_*`, `adopted` and
+`adopted_after_401`), and `mem_used_percent` above 85.
 
 **Cost shape.** CloudWatch bills every distinct combination of a metric's dimensions as its own custom metric (about
 $0.30 a month each), and every OTLP attribute becomes a dimension. The proxy therefore never crosses its axes: each
-metric carries at most three attributes and each axis (profile, user, box, model) has its own projection. Through the
+request and quota metric carries at most three attributes besides `provider` (`anthropic.ratelimit.state` carries four),
+and each axis (profile, user, box, model) has its own projection. Through the
 CloudWatch agent, counters arrive as deltas (use `SUM`), histograms as approximate statistic sets with no percentiles
-(use `duration_quantile`), and `service.name` is an extra dimension on every metric. Do not add an attribute to a request
+(use `duration_quantile`), and `service.name` and `service.instance.id` are extra dimensions on every metric. Do not add an attribute to a request
 metric without counting the series it multiplies. Model names and user accounts come from the client's request, so they
 are bounded (64 models, 256 unlabelled accounts; the rest is `other`), and a client cannot create series by choosing a
 name.

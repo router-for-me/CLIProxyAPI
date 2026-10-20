@@ -19,7 +19,8 @@ The old names keep working, so servers, client boxes and their configuration can
 order:
 
 - `CLAUDE_MASTER_<NAME>` is read when `CLAW_MASTER_<NAME>` is unset (the server, client directory,
-  open tunnel, CA and OTLP endpoint settings, and `CLAUDE_MASTER_BACKUP_API_KEY`). Both backup-key
+  open tunnel, CA, agent listen address and OTLP endpoint settings: `SERVER`, `CLIENT_DIR`, `OPEN`,
+  `CA`, `AGENT_LISTEN`, `OTLP_ENDPOINT`; and `CLAUDE_MASTER_BACKUP_API_KEY`). Both backup-key
   names are always kept out of the launched Claude's environment.
 - `~/.local/share/claude-master` holds the profiles while `~/.local/share/claw-master` does not
   exist; move it to switch.
@@ -30,7 +31,9 @@ order:
 
 Metrics are `claw_master.*`. Measurements about Claude carry `provider=claude`; the pool's own
 (connections, TLS handshakes, the process) carry none. The metric namespace is whatever the
-collector is configured with (the reference deployment's is `ClawMaster`).
+collector is configured with (the reference deployment's is `ClawMaster`). To carry CloudWatch
+history across the rename, `scripts/claw-master-migrate-metrics.py` copies the old `ClaudeMaster`
+streams to the new names (a dry run unless given `--write`; `--verify` compares the copy).
 
 ## Data path
 
@@ -71,7 +74,8 @@ subscription; without one, inference stays subscription-only.
 
 ## Install, login, and run
 
-Requirements are Go 1.26+, Linux or macOS, and `claude` on `PATH`:
+Requirements are Go 1.26+ and `claude` on `PATH`. Linux and macOS run everything; Windows runs `check`, `connect`,
+`client-init` and `agent` (see the agent section below):
 
 ```bash
 go build -o claw-master ./cmd/claw-master
@@ -183,7 +187,7 @@ standard API-key variable and removes it from native startup, so Claude Code con
 to use its normal subscription login and Remote Control. An explicit file or environment
 source overrides the optional dedicated environment variable.
 
-The backup is used only while it can pay. claw-master checks it at start and every five minutes with a
+The backup is used only while it can pay. claw-master checks it at start and about every five minutes (jittered by 20%) with a
 token count (not billed; an organization with no credit is refused there too), and marks it unavailable at
 once when a real request to it is refused for credit. While it is unavailable the pool behaves as if there
 were no backup: a session gets Anthropic's weekly-limit 429 with `retry-after` and waits, instead of the
@@ -255,8 +259,8 @@ After startup, the usage API is polled about every 3 minutes (each round jittere
 way) for all subscription profiles, never the API-key backup. The profiles do not ask at once:
 each waits its own fixed phase after the round starts, spread across the first half of the
 interval. Anthropic limits this endpoint per account (polled every minute, every other request
-was refused with 429), so a 429 holds that profile's poll back for its `Retry-After`, or one
-more interval without one, at most 15 minutes. Busy profiles are also updated from every
+was refused with 429), so a 429 holds that profile's poll back for its `Retry-After` but at least
+one interval, at most 15 minutes. Busy profiles are also updated from every
 inference response's rate-limit headers; the poll keeps idle ones and reset times current. This retries failed startup reads and picks up weekly resets,
 quota grants, and usage from other processes. Accounts are queried independently, with
 at most one usage request in flight per account, so a stalled account does not stop
@@ -398,11 +402,10 @@ create would have sent anyway, and no turn fails.
     than the shortest jittered interval) when another launcher fetched it, so N launchers make about
     one usage request per interval per account.
   The kernel releases the lock when its holder dies, so a crashed launcher cannot wedge the rest.
-  Conversation routing records are one file per session and need no coordination. A Codex profile
-  keeps the old rule of one launcher at a time.
+  Conversation routing records are one file per session and need no coordination.
 - **Launcher flags and Claude settings.** `run` and `connect` start Claude with the process proxy and the master login, so
   they refuse launcher flags that would change them: `--setting-sources`, `--sdk-url`, `--api-key`, `--base-url`,
-  `--claudeai-user-id`, `--claudeai-org-id`, `--remote-control-session-id`, `--cwd`, `--worktree`. `--settings FILE` (or
+  `--claudeai-user-id`, `--claudeai-org-id`, `--remote-control-session-id`, `--cwd`, `--worktree` (`-w`). `--settings FILE` (or
   inline JSON) is allowed, so a launcher can carry hooks and notification settings, **unless it is known to conflict**: the
   login and provider settings `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh`, `forceLoginMethod`
   and `forceLoginOrgUUID`, or an `env` block that sets a provider variable (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`,
@@ -500,7 +503,7 @@ exists anywhere.
 
 ```bash
 # on the server (profiles are shared, so this can run beside local launches)
-claw-master serve claude-connor --next-profile claude-ejc3 --next-profile claude-colton \
+claw-master serve claude-primary --next-profile claude-secondary --next-profile claude-tertiary \
   --listen 10.0.0.10:8443 --state-dir /var/lib/claw-master
 
 # on a new client box: make its key (never leaves the box) and a request
@@ -536,7 +539,7 @@ certificate, on a loopback address only:
 
 ```bash
 # on the server: the certificate listener as before, plus a loopback-only open one
-claw-master serve claude-connor --next-profile claude-ejc3 --next-profile claude-colton \
+claw-master serve claude-primary --next-profile claude-secondary --next-profile claude-tertiary \
   --listen 10.0.0.10:8443 --open-loopback 127.0.0.1:8444 --state-dir /var/lib/claw-master
 
 # on the laptop, behind a tunnel that authenticates (for example `cloudflared access tcp` to a
@@ -611,13 +614,19 @@ NO_PROXY=localhost,127.0.0.1,::1; no_proxy=$NO_PROXY; export NO_PROXY no_proxy
 exec "$HOME/.local/bin/claude" "$@"
 ```
 
-### Every Claude Code on a Mac, the desktop app included: `claw-master agent`
+### Every Claude Code on a Mac or Windows PC, the desktop app included: `claw-master agent`
 
 The desktop app's Code tab runs its own copy of Claude Code, which the app downloads and starts itself, so
 no launcher can set its environment. `claw-master agent` is a long-running forwarder for it, and for every
 other Claude Code on the machine: the same forwarder a launch starts, on a fixed loopback address and
 with a token kept in a file (`agent.token` beside the CA, or in `--dir`; created with mode 0600 on first
 start and refused if others can read it).
+
+Flags: `--listen` (or `CLAW_MASTER_AGENT_LISTEN`) is where Claude reaches it, and must differ from `--open`;
+`--open` and `--ca`, or `--server` and `--dir`, say how it reaches the server; `--token-file` places the token
+elsewhere (not with `install`, which keeps it where `connect` looks); `--log-level`, `--log-file` and
+`--log-format` as for `serve`, of which `install` carries only `--log-file` into the job. `agent env` creates the
+token if it does not exist yet.
 
 It fails closed, like `connect`. A CONNECT to `api.anthropic.com:443` goes to the claw-master server or
 nowhere: while the server or the tunnel is down it is answered `502`, and one without the agent's token
@@ -660,9 +669,12 @@ project.
 
 On Windows, `connect`, `agent` and `agent env` work the same way (and `client-init` for a box with a
 certificate): files that must be private (the agent token, `client.key`, the settings `agent install`
-writes, logs) are given an owner-only DACL, and a private file or directory is accepted only when its owner
-is you (or Administrators, for an administrator) and nobody else but SYSTEM and Administrators has access.
-`login`, `run` and `serve` refuse: subscription logins belong to a server. Claude Code on Windows reads
+writes, logs) are created owned by you, with a protected DACL that grants only you, SYSTEM and Administrators
+(an existing one is given back to you where Windows allows, so files an elevated run left owned by
+Administrators heal), and a private file or directory is accepted only when its owner is you (or Administrators,
+for an administrator) and nobody else but SYSTEM and Administrators has access. `login`, `run`, `serve` and
+`probe` refuse: they need profiles, and subscription logins belong to a server. `check`, `issue` and
+`account-key` work. Claude Code on Windows reads
 `%USERPROFILE%\.claude\settings.json`, and managed settings from `C:\Program Files\ClaudeCode`.
 
 `agent install` on Windows (same flags; `--ca` names the `ca.pem` copied to the PC) registers a Task
@@ -683,12 +695,13 @@ certificate uses `--server ADDRESS:PORT --dir DIR` instead of `--open` and `--ca
 agent's first tunnel as `client connected for the first time client=tunnel listener=open`, as for any
 tunnel client.
 
-Releases: every merge into `feature/claude-master-inference` is released by CI
+Releases: every push to `feature/claude-master-inference` (a merge, or a run started by hand) is released by CI
 (`.github/workflows/claw-master-release.yml`) as the pre-release `claw-master-<sha7>`, with
 `claw-master-<os>-<arch>` for darwin-arm64, linux-amd64, linux-arm64, windows-amd64 and windows-arm64
-(`.exe`) and their `SHA256SUMS`, after the claw-master tests pass. Release assets of a tag pushed by hand also
-include the CLIProxyAPI archives (`release.yaml`); `checksums.txt` lists only the archives. The bare `claw-master-<os>-<arch>` binaries are
-not in it; check one against the digest GitHub records for the asset
+(`.exe`) and their `SHA256SUMS`, after the claw-master tests pass on Linux (pull requests also run them on macOS
+and Windows). A tag pushed by hand is built by `release.yaml` instead and carries the CLIProxyAPI archives only,
+listed in its `checksums.txt`, not the `claw-master-<os>-<arch>` binaries; check a binary from such a release
+against the digest GitHub records for the asset
 (`gh api repos/OWNER/CLIProxyAPI/releases/tags/TAG --jq '.assets[] | [.name, .digest]'`).
 
 ### Stopping and rolling restarts
@@ -752,7 +765,7 @@ backend stay apart.
 # which dashboard key is which Anthropic account? (the account id is never exported, only this key)
 claw-master account-key 11111111-2222-3333-4444-555555555555     # -> acct-666ff6cc
 # give an account a readable name in every dashboard
-claw-master serve ... --account-label 11111111-2222-3333-4444-555555555555=colton --account-labels-file labels.txt
+claw-master serve ... --account-label 11111111-2222-3333-4444-555555555555=alice --account-labels-file labels.txt
 ```
 
 `serve` looks at `--account-labels-file` every minute and, when the file has changed (replace it with a rename),
@@ -760,7 +773,8 @@ loads it again and swaps the labels in: no restart. A file with a line that is n
 loaded; the labels already in use stay and the log says why.
 
 **Dimensions.** `profile` (the subscription profile's own name, or `api-backup`), `client` (the connecting box's
-certificate name, `tunnel` on the open listener), **`client_account`** (the INCOMING user's Anthropic account: your
+certificate name, `tunnel` on the open listener, or `local` for a launch's own Claude), `provider` (`claude` on
+Claude measurements; absent on the pool's own), **`client_account`** (the INCOMING user's Anthropic account: your
 label, else `acct-` and 8 hex of a hash; `unknown` when the request has none), `model`, `status_class`, `status`,
 `stream`, `route`, `reason`, `result`, `window`, `measure`. A profile with no name is shown as a short hash, never
 from its credential file name (those carry the account's email address).
@@ -778,7 +792,7 @@ from its credential file name (those carry the account's email address).
 | `claw_master.inference.tokens` {profile, type}, `.tokens.by_client_account` {client_account, type}, `.tokens.by_client` {client, type}, `.tokens.by_project` {project, type} | counter | tokens each subscription (or `api-backup`) served, each user used, each box carried and each project asked for (`project` is the name of the git repository a launch was started in, or of its directory, sent by the launch's forwarder on its tunnel; `none` without one, `other` past 100 names per process); `type` is `input`, `output`, `cache_read` or `cache_creation` (input excludes the cache fields, output includes thinking), from the usage Anthropic reports in each successful response |
 | `claw_master.inference.request_bytes`, `.response_bytes` {profile} | histogram | sizes |
 | `claw_master.quota.used_fraction`, `.resets_in_seconds`, `.rate_limited_for_seconds`, `.band` {profile} | gauge | each subscription's weekly allowance, when it resets, any cooldown, band (0 ok, 1 reserve, 2 exhausted, -1 unknown) |
-| `claw_master.quota.five_hour.used_fraction`, `.five_hour.resets_in_seconds` {profile} | gauge | each subscription's five-hour window from the usage poll (about every 3 minutes, idle or not); 0 once the window has reset, and no countdown while no window is open |
+| `claw_master.quota.five_hour.used_fraction`, `.five_hour.resets_in_seconds` {profile} | gauge | each subscription's five-hour window from the usage poll (about every 3 minutes, idle or not, in a pool of two or more profiles or with a backup key); 0 once the window has reset, and no countdown while no window is open |
 | `claw_master.anthropic.ratelimit` {profile, window, measure} | gauge | EVERY `Anthropic-Ratelimit-*` header: windows `5h`, `7d`, `api`; measures `utilization`, `resets_in_seconds`, `remaining`, `limit` ... |
 | `claw_master.anthropic.ratelimit.state` {profile, window, measure, value} | counter | status words: `allowed`, `allowed_warning`, `rejected` |
 | `claw_master.routing.picks` {profile}, `.switches` {from, to, reason}, `.backup_requests`, `.pick_duration` | counter / histogram | routing and failover |
@@ -791,8 +805,9 @@ from its credential file name (those carry the account's email address).
 
 **Why the dimensions are not crossed.** A metrics backend such as CloudWatch bills every distinct combination of
 a metric's attributes as its own series. Crossing profile, model, client and account on every metric would be
-hundreds of series for a few users, so each axis has its own projection and no metric carries more than three
-attributes (a test enforces it). You can still split by any one axis, and `inference.requests` gives
+hundreds of series for a few users, so each axis has its own projection and no request or quota metric carries
+more than three attributes besides `provider`; `anthropic.ratelimit.state` carries four (`profile`, `window`,
+`measure`, `value`). You can still split by any one axis, and `inference.requests` gives
 profile x account x status; what you give up is the full cross-product (say, one model on one box for one user).
 Through the CloudWatch agent: counters arrive as deltas (a Sum is a count), histograms as approximate statistic
 sets (Sum, SampleCount and Min/Max, no percentiles: use `inference.duration_quantile`), and the resource's
