@@ -168,3 +168,53 @@ func TestClaudeExecutor_PreserveNativeIdentityKeepsBodyAndHeaderSessionConsisten
 		})
 	}
 }
+
+func TestClaudeExecutor_PreserveNativeIdentityIgnoresShapeOnlyConfirmation(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-haiku-5-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	// sdk-py is not a native entrypoint; under cloak_mode never it is only
+	// confirmed by shape, which must not be enough to keep its identity.
+	const sessionID = "44444444-5555-4666-8777-888888888888"
+	const callerDeviceID = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	const userID = `{"device_id":"` + callerDeviceID + `","account_uuid":"","session_id":"` + sessionID + `"}`
+	payload := []byte(`{"model":"claude-haiku-5-5","max_tokens":1024,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.304.c80; cc_entrypoint=sdk-py"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."},{"type":"text","text":"You are naming a coding session."}],"tools":[],"messages":[{"role":"user","content":[{"type":"text","text":"name session"}]}],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `}}`)
+	incoming := http.Header{
+		"User-Agent":     {"claude-cli/2.1.304 (external, sdk-py, agent-sdk/0.3.276)"},
+		"X-App":          {"cli"},
+		"Anthropic-Beta": {"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15"},
+		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
+		"X-Claude-Code-Session-Id":                  {sessionID},
+		"X-Stainless-Package-Version":               {"0.128.0"},
+		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Os":                            {"MacOS"},
+		"X-Stainless-Arch":                          {"arm64"},
+	}
+	metadata := claudeOAuthTestMetadata()
+	metadata["cloak_mode"] = "never"
+	auth := &cliproxyauth.Auth{
+		ID:         "claude-preserve-native-identity-shape-only",
+		Attributes: map[string]string{"api_key": "sk-ant-oat01-shape-only", "base_url": server.URL},
+		Metadata:   metadata,
+	}
+
+	_, errExecute := NewClaudeExecutor(preserveNativeIdentityConfig(true)).Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-haiku-5-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Headers:         incoming,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if got := gjson.Get(gjson.GetBytes(seenBody, "metadata.user_id").String(), "device_id").String(); got == callerDeviceID {
+		t.Fatalf("device_id = %q, want per-credential identity for a shape-only confirmed caller", got)
+	}
+}

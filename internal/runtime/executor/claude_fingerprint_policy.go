@@ -121,13 +121,14 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 }
 
 // preserveNativeClaudeIdentity reports whether a confirmed native Claude Code
-// request keeps its own metadata.user_id. It only applies when the operator
+// request keeps its own metadata.user_id. confirmedNative must come from native
+// client detection (not the cloak_mode never shape-only confirmation). It only applies when the operator
 // opted in and the caller's identity is well formed and bound to both its
 // incoming session header and the outbound session ID. Requests whose outbound
 // session is derived (for example agent-scoped subagent sessions) keep the
 // per-credential identity so body and X-Claude-Code-Session-Id stay consistent.
-func preserveNativeClaudeIdentity(cfg *config.Config, confirmedClaudeCode bool, headers http.Header, body []byte, outboundSessionID string) bool {
-	if !confirmedClaudeCode || !helps.ClaudeNativeIdentityPreserved(cfg) {
+func preserveNativeClaudeIdentity(cfg *config.Config, confirmedNative bool, headers http.Header, body []byte, outboundSessionID string) bool {
+	if !confirmedNative || !helps.ClaudeNativeIdentityPreserved(cfg) {
 		return false
 	}
 	if !helps.ClaudeNativeMetadataUserIDMatches(headers, body) {
