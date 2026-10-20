@@ -237,12 +237,62 @@ func TestWindowsPrivateFilesArePrivateFromCreation(t *testing.T) {
 	if err := checkOwnedSecurity(sd, true); err != nil {
 		t.Fatalf("a file just created is not private (%s): %v", sd, err)
 	}
+	requireOwnedByThisUser(t, sd)
 	sub := filepath.Join(dir, "sub")
 	if err := mkdirPrivate(sub); err != nil {
 		t.Fatal(err)
 	}
 	if err := ownedDirectory(sub, false, true); err != nil {
 		t.Fatalf("a directory just created is not private: %v", err)
+	}
+	dsd, err := windows.GetNamedSecurityInfo(sub, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireOwnedByThisUser(t, dsd)
+}
+
+// requireOwnedByThisUser fails unless sd's owner is this process's user, not merely a group it is in.
+// An elevated administrator's (and SYSTEM's) new files are owned by Administrators by default, and the
+// same user not elevated (the agent's logon task) does not count as an administrator, so it refused
+// them: "the agent token ... can be read by others".
+func requireOwnedByThisUser(t *testing.T, sd *windows.SECURITY_DESCRIPTOR) {
+	t.Helper()
+	owner, _, err := sd.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owner.Equals(user) {
+		t.Fatalf("owned by %s, not this user %s", owner, user)
+	}
+}
+
+// A file an elevated run left owned by Administrators becomes this user's when it is restricted again.
+// Only an elevated or privileged account can make Administrators the owner to begin with; without
+// that right the file stays this user's, and restrictToOwner must keep it so.
+func TestWindowsRestrictToOwnerTakesOwnership(t *testing.T) {
+	dir := privateTestDir(t)
+	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("icacls", path, "/setowner", "*S-1-5-32-544").CombinedOutput(); err != nil {
+		t.Logf("cannot make Administrators the owner here (%v: %s); checking a file this user owns", err, out)
+	}
+	if err := restrictToOwner(path); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireOwnedByThisUser(t, sd)
+	if err := checkOwnedSecurity(sd, true); err != nil {
+		t.Fatalf("not private after restrictToOwner: %v", err)
 	}
 }
 
