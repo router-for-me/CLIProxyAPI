@@ -823,6 +823,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	if errPromptCache != nil {
 		return nil, errPromptCache
 	}
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		body = helps.DropOrphanResponsesToolCalls(body)
+	}
 	body = helps.SanitizeCodexInputItemIDs(body)
 	if useSIWC {
 		body = applyCodexSIWCWebsocketBodyRules(body, hasExplicitInstructions, cliproxyexecutor.Options{KeepTopLevelEffort: thinking.HasThinkingSuffix(req.Model)})

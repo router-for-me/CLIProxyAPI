@@ -1,11 +1,15 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -50,4 +54,93 @@ func TestCodexExecutorExecuteStreamDropsOrphanFunctionCalls(t *testing.T) {
 	if n := len(gjson.GetBytes(gotBody, "input").Array()); n != 3 {
 		t.Fatalf("upstream input length = %d, want 3: %s", n, gotBody)
 	}
+}
+
+const codexOrphanToolCallPayload = `{"model":"gpt-5.4","input":[` +
+	`{"type":"function_call","call_id":"call_orphan","name":"lookup","arguments":"{}"},` +
+	`{"type":"function_call","call_id":"call_ok","name":"lookup","arguments":"{}"},` +
+	`{"type":"function_call_output","call_id":"call_ok","output":"ok"},` +
+	`{"type":"message","role":"user","content":"continue"}]}`
+
+func newCodexOrphanToolCallWebsocketServer(t *testing.T, captured chan<- []byte) *httptest.Server {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		captured <- bytes.Clone(payload)
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+		}
+	}))
+}
+
+func assertCodexOrphanToolCallDropped(t *testing.T, captured <-chan []byte) {
+	t.Helper()
+	select {
+	case payload := <-captured:
+		for _, item := range gjson.GetBytes(payload, "input").Array() {
+			if item.Get("call_id").String() == "call_orphan" {
+				t.Fatalf("orphan function_call forwarded upstream: %s", payload)
+			}
+		}
+		if n := len(gjson.GetBytes(payload, "input").Array()); n != 3 {
+			t.Fatalf("upstream input length = %d, want 3: %s", n, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func TestCodexWebsocketsExecuteDropsOrphanFunctionCalls(t *testing.T) {
+	captured := make(chan []byte, 1)
+	server := newCodexOrphanToolCallWebsocketServer(t, captured)
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(codexOrphanToolCallPayload),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	assertCodexOrphanToolCallDropped(t, captured)
+}
+
+func TestCodexWebsocketsExecuteStreamDropsOrphanFunctionCalls(t *testing.T) {
+	captured := make(chan []byte, 1)
+	server := newCodexOrphanToolCallWebsocketServer(t, captured)
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(codexOrphanToolCallPayload),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	assertCodexOrphanToolCallDropped(t, captured)
 }
