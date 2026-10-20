@@ -260,7 +260,7 @@ func TestReadyzAndMetricsRoutes(t *testing.T) {
 		body := rr.Body.String()
 		for _, want := range []string{
 			"cliproxy_auth_status",
-			`cliproxy_auth_status{status="error"}`,
+			`cliproxy_auth_status{status="error",provider="openai-compatibility",reason="other"}`,
 			"cliproxy_auth_unavailable",
 			`cliproxy_upstream_errors_total{status="402"}`,
 		} {
@@ -269,4 +269,71 @@ func TestReadyzAndMetricsRoutes(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestRenderPrometheusMetrics_AuthStatusReasons(t *testing.T) {
+	auth.ResetUpstreamMetricsForTest()
+	t.Cleanup(auth.ResetUpstreamMetricsForTest)
+
+	manager := auth.NewManager(nil, nil, nil)
+	entries := []*auth.Auth{
+		{
+			ID:            "ok.json",
+			Provider:      "codex",
+			Status:        auth.StatusActive,
+			StatusMessage: "should not appear in labels",
+		},
+		{
+			ID:            "dead-refresh.json",
+			Provider:      "claude",
+			Status:        auth.StatusError,
+			Unavailable:   true,
+			StatusMessage: "unauthorized (refresh token invalid)",
+			LastError:     &auth.Error{Code: "unauthorized", HTTPStatus: http.StatusUnauthorized, Message: "invalid_grant"},
+		},
+		{
+			ID:            "quota.json",
+			Provider:      "gemini",
+			Status:        auth.StatusError,
+			Unavailable:   true,
+			StatusMessage: "quota exhausted",
+			Quota:         auth.QuotaState{Exceeded: true, Reason: "quota"},
+		},
+		{
+			ID:            "transient.json",
+			Provider:      "antigravity",
+			Status:        auth.StatusError,
+			Unavailable:   true,
+			StatusMessage: "transient upstream error",
+			LastError:     &auth.Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+		},
+		{
+			ID:       "identifying.json",
+			Provider: "name@host",
+			Status:   auth.StatusActive,
+		},
+	}
+	for _, entry := range entries {
+		if _, err := manager.Register(context.Background(), entry); err != nil {
+			t.Fatalf("register %s: %v", entry.ID, err)
+		}
+	}
+
+	body := renderPrometheusMetrics(manager)
+	for _, want := range []string{
+		`cliproxy_auth_status{status="active",provider="codex",reason="other"} 1`,
+		`cliproxy_auth_status{status="error",provider="claude",reason="unauthorized"} 1`,
+		`cliproxy_auth_status{status="error",provider="gemini",reason="quota"} 1`,
+		`cliproxy_auth_status{status="error",provider="antigravity",reason="other"} 1`,
+		`cliproxy_auth_status{status="active",provider="unknown",reason="other"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, body)
+		}
+	}
+	for _, leak := range []string{"ok.json", "dead-refresh.json", "quota.json", "name@host", "should not appear in labels"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("metrics leaked identifying value %q:\n%s", leak, body)
+		}
+	}
 }

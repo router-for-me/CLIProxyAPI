@@ -152,14 +152,24 @@ func (s *Server) handleMetrics(c *gin.Context) {
 	c.String(http.StatusOK, renderPrometheusMetrics(manager))
 }
 
+type authStatusLabels struct {
+	status   string
+	provider string
+	reason   string
+}
+
 func renderPrometheusMetrics(manager *auth.Manager) string {
-	statusCounts := map[string]int{
-		string(auth.StatusUnknown):    0,
-		string(auth.StatusActive):     0,
-		string(auth.StatusPending):    0,
-		string(auth.StatusRefreshing): 0,
-		string(auth.StatusError):      0,
-		string(auth.StatusDisabled):   0,
+	statusCounts := map[authStatusLabels]int{}
+	// Keep a stable zero series for each lifecycle status when nothing is registered.
+	for _, status := range []string{
+		string(auth.StatusUnknown),
+		string(auth.StatusActive),
+		string(auth.StatusPending),
+		string(auth.StatusRefreshing),
+		string(auth.StatusError),
+		string(auth.StatusDisabled),
+	} {
+		statusCounts[authStatusLabels{status: status, provider: auth.MetricAuthProvider(nil), reason: auth.MetricReasonOther}] = 0
 	}
 	unavailable := 0
 	if manager != nil {
@@ -167,9 +177,14 @@ func renderPrometheusMetrics(manager *auth.Manager) string {
 			if entry == nil {
 				continue
 			}
-			key := string(entry.Status)
-			if key == "" {
-				key = string(auth.StatusUnknown)
+			status := string(entry.Status)
+			if status == "" {
+				status = string(auth.StatusUnknown)
+			}
+			key := authStatusLabels{
+				status:   status,
+				provider: auth.MetricAuthProvider(entry),
+				reason:   auth.MetricAuthReason(entry),
 			}
 			statusCounts[key]++
 			if entry.Unavailable {
@@ -179,15 +194,23 @@ func renderPrometheusMetrics(manager *auth.Manager) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("# HELP cliproxy_auth_status Number of auth entries by lifecycle status.\n")
+	b.WriteString("# HELP cliproxy_auth_status Number of auth entries by lifecycle status, provider, and coarse reason.\n")
 	b.WriteString("# TYPE cliproxy_auth_status gauge\n")
-	statusKeys := make([]string, 0, len(statusCounts))
+	statusKeys := make([]authStatusLabels, 0, len(statusCounts))
 	for key := range statusCounts {
 		statusKeys = append(statusKeys, key)
 	}
-	sort.Strings(statusKeys)
+	sort.Slice(statusKeys, func(i, j int) bool {
+		if statusKeys[i].status != statusKeys[j].status {
+			return statusKeys[i].status < statusKeys[j].status
+		}
+		if statusKeys[i].provider != statusKeys[j].provider {
+			return statusKeys[i].provider < statusKeys[j].provider
+		}
+		return statusKeys[i].reason < statusKeys[j].reason
+	})
 	for _, key := range statusKeys {
-		fmt.Fprintf(&b, "cliproxy_auth_status{status=%q} %d\n", key, statusCounts[key])
+		fmt.Fprintf(&b, "cliproxy_auth_status{status=%q,provider=%q,reason=%q} %d\n", key.status, key.provider, key.reason, statusCounts[key])
 	}
 	b.WriteString("# HELP cliproxy_auth_unavailable Number of auth entries marked unavailable.\n")
 	b.WriteString("# TYPE cliproxy_auth_unavailable gauge\n")
