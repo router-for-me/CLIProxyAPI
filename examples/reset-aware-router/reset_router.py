@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prefer Codex credentials with expiring earned resets; redeem only when useful.
+"""Prefer usable quota that renews soon, then expiring earned resets.
 
 This companion uses the supported Codex app-server account API and the
 CLIProxyAPI management API. It never sends model requests to spend quota.
@@ -113,13 +113,6 @@ def weekly_window(result):
     return max(windows, key=lambda value: value.get("usedPercent") or 0, default=None)
 
 
-def shortest_window(result):
-    bucket = result.get("rateLimits") or {}
-    options = [bucket.get(name) for name in ("primary", "secondary")]
-    options = [x for x in options if isinstance(x, dict) and x.get("windowDurationMins")]
-    return min(options, key=lambda x: x["windowDurationMins"], default=None)
-
-
 def available_credits(result, now):
     reset = result.get("rateLimitResetCredits") or {}
     credits = reset.get("credits")
@@ -154,15 +147,24 @@ def should_redeem(result, now):
 
 
 def account_rank(result, now):
+    """Rank natural weekly renewal first; an expiring credit breaks ties.
+
+    An exhausted weekly bucket cannot serve a request until a reset is redeemed,
+    so do not promote it merely because its renewal is close.
+    """
     credits = available_credits(result, now)
-    if not credits:
-        return None
-    expiry = dt.datetime.fromtimestamp(credits[0]["expiresAt"], UTC)
-    if expiry - now > EXPIRY_HORIZON:
-        return None
+    credit_expiry = credits[0]["expiresAt"] if credits else float("inf")
     weekly = weekly_window(result) or {}
-    short = shortest_window(result) or {}
-    return (credits[0]["expiresAt"], -(weekly.get("usedPercent") or 0), short.get("usedPercent") or 0)
+    reset_at = weekly.get("resetsAt")
+    used = weekly.get("usedPercent")
+    if (isinstance(reset_at, (int, float)) and reset_at > now.timestamp()
+            and isinstance(used, (int, float)) and 0 <= used < 100):
+        return (0, reset_at, credit_expiry, used)
+    if weekly:
+        return None  # Known exhausted or malformed weekly quota is not promoted.
+    if credit_expiry < now.timestamp() + EXPIRY_HORIZON.total_seconds():
+        return (1, credit_expiry, float("inf"), 0)
+    return None
 
 
 def management(method, path, key, payload=None):
@@ -209,14 +211,6 @@ def clear_redemption_key(state_path, account_id, credit_id):
     os.replace(temporary, path)
 
 
-def has_usable_credit_details(result):
-    reset = result.get("rateLimitResetCredits")
-    if not isinstance(reset, dict):
-        return False
-    credits = reset.get("credits")
-    return isinstance(credits, list) and (bool(credits) or reset.get("availableCount") == 0)
-
-
 def claude_offer_active(expires_on, now):
     """Claude's UI currently exposes only a calendar date for an offer."""
     try:
@@ -226,39 +220,75 @@ def claude_offer_active(expires_on, now):
     return now.astimezone().date() <= expiry_date
 
 
-def apply_claude_offers(args, key, auths, now):
+def claude_weekly_rank(entry, now):
+    """Use recent, observed Claude response headers; never infer a window."""
+    observations = [entry.get("quota") or {}]
+    model_quotas = entry.get("model_quotas")
+    if isinstance(model_quotas, dict):
+        observations.extend(model_quotas.values())
+    candidates = []
+    for observation in observations:
+        if not isinstance(observation, dict):
+            continue
+        signals = observation.get("signals") or {}
+        try:
+            seen = dt.datetime.fromisoformat(observation["observed_at"].replace("Z", "+00:00"))
+            reset_at = float(signals["Anthropic-Ratelimit-Unified-7d-Reset"])
+            used = float(signals["Anthropic-Ratelimit-Unified-7d-Utilization"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (seen.tzinfo is not None and dt.timedelta(0) <= now - seen <= dt.timedelta(days=3)
+                and now.timestamp() < reset_at and 0 <= used <= 1):
+            candidates.append((seen, reset_at, used))
+    if not candidates:
+        return None
+    _, reset_at, used = max(candidates, key=lambda item: item[0])
+    return reset_at, used
+
+
+def apply_claude_priorities(args, key, auths, now):
     path = Path(args.claude_offers_file)
-    if not path.exists():
-        return
-    offers = json.loads(path.read_text()).get("offers", [])
+    offers = json.loads(path.read_text()).get("offers", []) if path.exists() else []
     by_name = {item.get("name"): item for item in auths if item.get("type") == "claude"}
     by_email = {}
     for auth_path in glob.glob(str(Path(args.auth_dir) / "claude-*.json")):
         credential = json.loads(Path(auth_path).read_text())
         by_email[credential.get("email")] = Path(auth_path).name
-    for offer in offers:
-        name = by_email.get(offer.get("email"))
-        entry = by_name.get(name)
-        if not entry or entry.get("disabled"):
+    offer_by_name = {by_email.get(item.get("email")): item for item in offers}
+    ranked = []
+    for name, entry in by_name.items():
+        if entry.get("disabled") or entry.get("status") != "active":
             continue
-        desired = 100 if claude_offer_active(offer.get("expires_on"), now) else 0
+        offer = offer_by_name.get(name) or {}
+        offer_expiry = (dt.date.fromisoformat(offer["expires_on"]).toordinal()
+                        if claude_offer_active(offer.get("expires_on"), now) else float("inf"))
+        weekly = claude_weekly_rank(entry, now)
+        if weekly and weekly[1] < 1:
+            reset_at, used = weekly
+            ranked.append(((0, reset_at, offer_expiry, used), name))
+        elif weekly is None and offer_expiry != float("inf"):
+            ranked.append(((1, offer_expiry, float("inf"), 0), name))
+    ranked.sort()
+    priorities = {name: len(ranked) - index for index, (_, name) in enumerate(ranked)}
+    for name, entry in by_name.items():
+        desired = priorities.get(name, 0)
         current = entry.get("priority") or 0
-        print(f"{name}: Claude {offer.get('kind', 'limit')} reset expires "
-              f"{offer.get('expires_on')}; priority {current} -> {desired}")
-        if current != desired and not args.dry_run:
-            management("PATCH", "/credentials/fields", key, {"name": name, "priority": desired})
+        if current != desired:
+            print(f"{name}: priority {current} -> {desired}")
+            if not args.dry_run:
+                management("PATCH", "/credentials/fields", key, {"name": name, "priority": desired})
 
 
 def run_once(args, now=None):
     now = now or dt.datetime.now(UTC)
     key = Path(args.management_key).read_text().strip()
     auths = management("GET", "/credentials", key).get("files", [])
-    apply_claude_offers(args, key, auths, now)
+    apply_claude_priorities(args, key, auths, now)
     by_name = {item.get("name"): item for item in auths if item.get("type") == "codex"}
     observations = []
     for path in sorted(glob.glob(str(Path(args.auth_dir) / "codex-*.json"))):
         name = Path(path).name
-        if name not in by_name or by_name[name].get("disabled"):
+        if name not in by_name or by_name[name].get("disabled") or by_name[name].get("status") != "active":
             continue
         credential = json.loads(Path(path).read_text())
         try:
@@ -280,15 +310,22 @@ def run_once(args, now=None):
             ranked.append((rank, name))
     ranked.sort(key=lambda item: item[0])
     priorities = {name: len(ranked) - index for index, (_, name) in enumerate(ranked)}
+    active_names = {name for name, entry in by_name.items()
+                    if not entry.get("disabled") and entry.get("status") == "active"}
+    observed_names = {name for name, _, _ in observations}
+    # Keep the last complete ordering when a transient account read fails.
+    reprioritize = active_names == observed_names
+    if not reprioritize:
+        print("Codex limits incomplete; keeping existing priorities", file=sys.stderr)
     for name, credential, result in observations:
-        if not has_usable_credit_details(result):
-            continue
         desired = priorities.get(name, 0)
         current = by_name[name].get("priority") or 0
-        if current != desired:
+        if reprioritize and current != desired:
             print(f"{name}: priority {current} -> {desired}")
             if not args.dry_run:
                 management("PATCH", "/credentials/fields", key, {"name": name, "priority": desired})
+        if args.priority_only:
+            continue
         credit = should_redeem(result, now)
         if credit is None:
             continue
@@ -324,6 +361,8 @@ def main():
     parser.add_argument("--state-file", default=str(state_root / "cliproxy-reset-router" / "state.json"))
     parser.add_argument("--claude-offers-file", default=str(state_root / "cliproxy-reset-router" / "claude-offers.json"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--priority-only", action="store_true",
+                        help="Update priorities without attempting a manual reset")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--interval", type=int, default=900)
     args = parser.parse_args()

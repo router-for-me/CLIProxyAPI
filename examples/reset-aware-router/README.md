@@ -1,38 +1,39 @@
-# Codex earned reset aware routing
+# Renewal and reset aware routing companion
 
-This local companion checks each CLIProxyAPI Codex OAuth credential through the
-official Codex app-server account API. It prefers accounts whose earned reset
-credits expire within seven days, ordering by earliest expiry, then by weekly
-usage. CLIProxyAPI's normal priority and cooldown handling still decides which
-credential can serve a request. The companion does not create artificial model
-requests to spend usage.
+This optional local companion updates CLIProxyAPI credential priorities. For
+accounts with usable weekly quota, it prefers the earliest upcoming weekly
+renewal, so unused capacity is spent before that window closes. An earned
+manual reset expiry breaks ties, followed by the amount of unused weekly quota.
+CLIProxyAPI still checks model support and cooldowns before serving a request.
 
-Run `python3 reset_router.py --once --dry-run` to inspect the proposed changes.
-Run `python3 reset_router.py --once` to apply priorities once, or omit `--once`
-to check every 15 minutes. It needs `codex` on `PATH`, local CLIProxyAPI at
-`127.0.0.1:8317`, the management key, and local Codex OAuth credential files.
-Use `--auth-dir`, `--management-key`, and `--state-file` for other locations.
+Codex weekly limits and earned reset credits come from the Codex app-server
+account API. Claude weekly limits come from recent quota headers already
+observed by CLIProxyAPI and exposed through its v8 management API. Claude
+observations older than three days, expired windows, and credentials with an
+error status are not promoted. The companion does not send artificial model
+requests or repeatedly probe Claude's quota endpoint. If any active Codex
+account cannot be read, that pass keeps the previous Codex ordering.
 
-An earned reset is attempted only when its expiry is within 24 hours, the
-weekly window renews after that expiry, and weekly usage is at least 90%.
-During the last hour, the threshold drops to 10%, since the reset would soon
-expire. The provider may return `nothingToReset`; in that case no credit is
-spent. After successful redemption, the companion clears CLIProxyAPI's local
-cooldown through `reset-quota`. It records an idempotency key before every
-attempt and reuses it after a timeout.
+Run `python3 reset_router.py --once --dry-run --priority-only` to inspect the
+proposed priority changes. Run `python3 reset_router.py --once --priority-only`
+to apply priorities without attempting a manual reset. Omit `--once` to check
+every 15 minutes. It needs `codex` on `PATH`, local CLIProxyAPI at
+`127.0.0.1:8317`, the management key, and local OAuth credential files. Use
+`--auth-dir`, `--management-key`, and `--state-file` for other locations.
 
-If the account API omits individual credit expiry details, the companion
-cannot make an expiry-aware decision for that account. If this process is not
-running, CLIProxyAPI keeps its last assigned priorities. This program changes
-Codex credential priorities, so manual priorities for those credentials will
-be overwritten while it runs. Claude credentials are touched only when a
-separate verified-offer file is present.
+The existing Codex earned reset policy is separate from priority selection.
+Without `--priority-only`, it attempts redemption only when a credit expires
+within 24 hours, the weekly window renews later, and weekly usage is at least
+90%. During the final hour, that threshold becomes 10%. The provider may
+return `nothingToReset`; no credit is spent in that case. After confirmed
+redemption, the companion clears CLIProxyAPI's local cooldown. It records an
+idempotency key before each attempt and reuses it after an uncertain outcome.
 
-## Claude limit-reset offers
+## Claude limit reset offers
 
-Anthropic exposes earned limit-reset offers in Claude web/Desktop under
+Anthropic exposes earned limit reset offers in Claude web/Desktop under
 Settings > Usage. There is no documented account API for reading or redeeming
-them. To prioritize an account with a verified offer, provide a local JSON file
+them. To record a verified offer, provide a local JSON file
 at `~/.local/state/cliproxy-reset-router/claude-offers.json` (or use
 `--claude-offers-file`):
 
@@ -40,7 +41,10 @@ at `~/.local/state/cliproxy-reset-router/claude-offers.json` (or use
 {"offers": [{"email": "you@example.com", "kind": "full", "expires_on": "2026-10-22"}]}
 ```
 
-The companion gives that Claude credential priority 100 through the listed
-calendar date, then restores priority 0. It cannot redeem the Claude offer;
-open Claude Settings > Usage and select **Reset for free** yourself when the
-available capacity makes it worthwhile. It never clicks that button for a test.
+The offer expiry is a secondary routing signal. When no usable weekly window
+is observed, a currently valid offer can promote the account until its
+calendar expiry. This companion never redeems a Claude offer; open Claude
+Settings > Usage and select **Reset for free** yourself when appropriate.
+
+This example changes credential priorities through the v8 management API. A
+stopped companion leaves its last assigned priorities in place.
