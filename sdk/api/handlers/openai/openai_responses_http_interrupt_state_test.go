@@ -91,21 +91,74 @@ func TestResponsesLocalInterruptRejectsUnobservedResponses(t *testing.T) {
 	local.end()
 }
 
-func TestResponsesLocalInterruptRetainsConnectionHistory(t *testing.T) {
-	local := newResponsesLocalInterrupt()
-	for index := 0; index < 256; index++ {
-		local.begin()
-		local.observeCreated(fmt.Sprintf("r%d", index))
-		local.observeTerminal("")
-		local.end()
+func TestResponsesLocalInterruptBoundsTerminalHistory(t *testing.T) {
+	for _, path := range []string{"completion", "end", "claim", "prewarm"} {
+		t.Run(path, func(t *testing.T) {
+			local := newResponsesLocalInterrupt()
+			const historyLimit = 256
+			const turns = 3*historyLimit + 17
+			interrupt := func(index int) []byte {
+				return []byte(fmt.Sprintf(`{"type":"response.interrupt","response_id":"r%d"}`, index))
+			}
+			for index := 0; index < turns; index++ {
+				id := fmt.Sprintf("r%d", index)
+				if path == "prewarm" {
+					// Synthetic prewarms finish without starting an upstream turn.
+					local.observeTerminal(id)
+				} else {
+					local.begin()
+					local.observeCreated(id)
+					switch path {
+					case "completion":
+						local.observeTerminal("")
+					case "claim":
+						if local.deliver(interrupt(index)) != responsesLocalInterruptQueued {
+							t.Fatal("current interrupt was rejected")
+						}
+						if got := local.claim(<-local.framesChan()); got != id {
+							t.Fatalf("claimed %q, want %q", got, id)
+						}
+					}
+					local.end()
+				}
+				// Duplicate terminal events must not consume history slots.
+				local.observeTerminal(id)
+				if got := len(local.terminalIDs); got > historyLimit {
+					t.Fatalf("turn %d: retained %d terminal IDs, limit %d", index, got, historyLimit)
+				}
+				if index == historyLimit-1 && local.deliver(interrupt(0)) != responsesLocalInterruptAlreadyTerminal {
+					t.Fatal("history evicted a response before reaching capacity")
+				}
+			}
+			// Repeated observations of an older retained ID must not evict recent IDs.
+			for index := 0; index < 2*historyLimit; index++ {
+				local.observeTerminal(fmt.Sprintf("r%d", turns-historyLimit))
+			}
+			local.begin()
+			defer local.end()
+			local.observeCreated("current")
+			for index := 0; index < turns; index++ {
+				want := responsesLocalInterruptRejected
+				if index >= turns-historyLimit {
+					want = responsesLocalInterruptAlreadyTerminal
+				}
+				if got := local.deliver(interrupt(index)); got != want {
+					t.Fatalf("response r%d: delivery = %v, want %v", index, got, want)
+				}
+				if got := local.claim(interrupt(index)); got != "" {
+					t.Fatalf("old response claimed %q", got)
+				}
+			}
+			current := []byte(`{"type":"response.interrupt","response_id":"current"}`)
+			if local.deliver(current) != responsesLocalInterruptQueued {
+				t.Fatal("old interrupts prevented a valid current interrupt")
+			}
+			if got := local.claim(<-local.framesChan()); got != "current" {
+				t.Fatalf("claimed %q, want current response", got)
+			}
+			if local.deliver(current) != responsesLocalInterruptAlreadyTerminal {
+				t.Fatal("interrupted response was not recorded as terminal")
+			}
+		})
 	}
-	local.begin()
-	local.observeCreated("current")
-	if local.deliver([]byte(`{"type":"response.interrupt","response_id":"r0"}`)) != responsesLocalInterruptAlreadyTerminal {
-		t.Fatal("older completed response was forgotten during the same connection")
-	}
-	if got := local.claim([]byte(`{"type":"response.interrupt","response_id":"r0"}`)); got != "" {
-		t.Fatalf("old response claimed %q", got)
-	}
-	local.end()
 }

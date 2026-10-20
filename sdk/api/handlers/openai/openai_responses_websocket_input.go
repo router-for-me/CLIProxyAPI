@@ -27,14 +27,19 @@ const (
 	responsesLocalInterruptAlreadyTerminal
 )
 
+// Keep recent late interrupts idempotent without growing with connection lifetime.
+const responsesLocalInterruptHistoryLimit = 256
+
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
 // does not use it; that interrupt is written to the existing socket instead.
 type responsesLocalInterrupt struct {
-	mu          sync.Mutex
-	active      bool
-	responseID  string
-	terminalIDs map[string]struct{}
-	frames      chan []byte
+	mu            sync.Mutex
+	active        bool
+	responseID    string
+	terminalIDs   map[string]struct{}
+	terminalOrder [responsesLocalInterruptHistoryLimit]string
+	terminalNext  int
+	frames        chan []byte
 }
 
 func newResponsesLocalInterrupt() *responsesLocalInterrupt {
@@ -59,9 +64,7 @@ func (s *responsesLocalInterrupt) end() {
 		return
 	}
 	s.mu.Lock()
-	if s.responseID != "" {
-		s.terminalIDs[s.responseID] = struct{}{}
-	}
+	s.recordTerminalLocked(s.responseID)
 	s.active = false
 	s.responseID = ""
 	s.drainLocked()
@@ -89,7 +92,7 @@ func (s *responsesLocalInterrupt) observeTerminal(responseID string) {
 		responseID = s.responseID
 	}
 	if responseID != "" {
-		s.terminalIDs[responseID] = struct{}{}
+		s.recordTerminalLocked(responseID)
 		if s.responseID == responseID {
 			s.responseID = ""
 			s.drainLocked()
@@ -130,10 +133,23 @@ func (s *responsesLocalInterrupt) claim(payload []byte) string {
 		return ""
 	}
 	responseID := s.responseID
-	s.terminalIDs[responseID] = struct{}{}
+	s.recordTerminalLocked(responseID)
 	s.responseID = ""
 	s.drainLocked()
 	return responseID
+}
+
+func (s *responsesLocalInterrupt) recordTerminalLocked(responseID string) {
+	if responseID == "" {
+		return
+	}
+	if _, exists := s.terminalIDs[responseID]; exists {
+		return
+	}
+	delete(s.terminalIDs, s.terminalOrder[s.terminalNext])
+	s.terminalIDs[responseID] = struct{}{}
+	s.terminalOrder[s.terminalNext] = responseID
+	s.terminalNext = (s.terminalNext + 1) % responsesLocalInterruptHistoryLimit
 }
 
 func (s *responsesLocalInterrupt) drainLocked() {
