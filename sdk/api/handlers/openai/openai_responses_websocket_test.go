@@ -2687,6 +2687,80 @@ func TestForwardResponsesWebsocketTreatsResponseDoneAsTerminalWithoutRewriting(t
 	}
 }
 
+// response.failed ends the turn like completed and incomplete: a clean stream
+// close afterwards must not be reported as a timeout or close the client socket,
+// so the client can send a follow-up request on the same connection.
+func TestForwardResponsesWebsocketTreatsResponseFailedAsTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"type":"response.failed","response":{"id":"resp-f","status":"failed","error":{"code":"context_length_exceeded","message":"context window filled"},"output":[{"type":"message","id":"out-f"}]}}`)
+		close(data)
+		close(errCh)
+
+		completedOutput, completedResponseID, _, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			newResponsesWebsocketWriter(conn),
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-failed",
+		)
+		if err != nil {
+			serverErrCh <- fmt.Errorf("forward returned %v, want nil (socket kept open)", err)
+			return
+		}
+		if errMsg != nil {
+			serverErrCh <- fmt.Errorf("unexpected websocket error message: %v", errMsg.Error)
+			return
+		}
+		if completedResponseID != "resp-f" || gjson.GetBytes(completedOutput, "0.id").String() != "out-f" {
+			serverErrCh <- fmt.Errorf("failed response not recorded as the turn end: id=%q output=%s", completedResponseID, completedOutput)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read websocket message: %v", errRead)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.failed" {
+		t.Fatalf("payload type = %s, want response.failed; payload=%s", got, payload)
+	}
+	// The timeout only guards against a hang: without the fix the forwarder takes
+	// the "closed before response.completed" path and never reports back.
+	select {
+	case errServer := <-serverErrCh:
+		if errServer != nil {
+			t.Fatalf("server error: %v", errServer)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("forwarder did not finish after response.failed")
+	}
+}
+
 func TestShouldExposeResponsesUpstreamError(t *testing.T) {
 	tests := []struct {
 		status int

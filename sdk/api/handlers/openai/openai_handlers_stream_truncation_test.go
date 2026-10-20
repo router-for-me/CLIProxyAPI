@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -125,6 +126,60 @@ func TestChatCompletionsStreamTerminalErrorChunkIsTheOnlyError(t *testing.T) {
 			}
 			if strings.Contains(out, `"finish_reason":"`) || strings.Contains(out, `"usage"`) {
 				t.Fatalf("success finish or usage emitted: %q", out)
+			}
+		})
+	}
+}
+
+// The legacy /v1/completions stream must carry a translated terminal error
+// (context_length_exceeded) as the only error, not replace it with the generic
+// missing finish_reason error.
+func TestCompletionsStreamTerminalErrorChunkIsTheOnlyError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+	}{
+		{"after content", []string{
+			`{"choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+			`{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+		}},
+		{"first chunk", []string{
+			`{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			executor := &mockStreamExecutor{chunks: tc.chunks}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			authID := "legacy-terminal-error-" + strings.ReplaceAll(tc.name, " ", "-")
+			auth := &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}
+			if _, err := manager.Register(context.Background(), auth); err != nil {
+				t.Fatalf("register auth: %v", err)
+			}
+			model := "legacy-terminal-error-model-" + strings.ReplaceAll(tc.name, " ", "-")
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+			defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+
+			h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+			router := gin.New()
+			router.POST("/v1/completions", h.Completions)
+			request := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(`{"model":"`+model+`","prompt":"hi","stream":true}`))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			out := recorder.Body.String()
+
+			if got := strings.Count(out, `"error":`); got != 1 {
+				t.Fatalf("error objects = %d, want 1: %q", got, out)
+			}
+			if !strings.Contains(out, `"code":"context_length_exceeded"`) {
+				t.Fatalf("terminal error missing: %q", out)
+			}
+			// Same contract as Chat Completions: the error is the only terminal
+			// chunk, no successful finish_reason and no synthetic truncation error.
+			if regexp.MustCompile(`"finish_reason":"[a-z]`).MatchString(out) || strings.Contains(out, "upstream stream closed before") {
+				t.Fatalf("success finish or synthetic truncation error emitted: %q", out)
 			}
 		})
 	}

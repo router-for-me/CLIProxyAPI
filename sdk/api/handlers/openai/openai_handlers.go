@@ -349,6 +349,13 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	root := gjson.ParseBytes(chunkData)
 
+	// A translated terminal error (for example Claude's
+	// model_context_window_exceeded mapped to context_length_exceeded) has no
+	// choices; pass it through so the client receives it as the stream's end.
+	if !root.Get("choices").Exists() && root.Get("error").IsObject() {
+		return bytes.Clone(chunkData)
+	}
+
 	// Check if this chunk has any meaningful content
 	hasContent := false
 	hasUsage := root.Get("usage").Exists()
