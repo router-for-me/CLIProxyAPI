@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,56 +26,64 @@ func (f codexDeviceAuthenticatorFunc) Login(ctx context.Context, cfg *config.Con
 
 func TestStartOAuthV8CodexDeviceFlowReturnsCodeAndUsesSessionStatusAndCancel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	cancelled := make(chan struct{})
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
-	h.codexDeviceAuthenticator = codexDeviceAuthenticatorFunc(func(ctx context.Context, _ *config.Config, opts *sdkAuth.LoginOptions) (*coreauth.Auth, error) {
-		opts.OnDeviceCode(sdkAuth.DeviceCodeInfo{UserCode: "ABCD-EFGH", VerificationURL: "https://auth.openai.com/codex/device", ExpiresIn: 900})
-		<-ctx.Done()
-		close(cancelled)
-		return nil, ctx.Err()
-	})
-	router := gin.New()
-	router.GET("/v8/management/oauth/auth-url", h.StartOAuthV8)
-	router.GET("/v8/management/oauth/status", h.GetAuthStatus)
-	router.DELETE("/v8/management/oauth/session", h.CancelAuthSession)
+	synctest.Test(t, func(t *testing.T) {
+		cancelled := make(chan struct{})
+		h := &Handler{cfg: &config.Config{AuthDir: t.TempDir()}}
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		h.codexDeviceAuthenticator = codexDeviceAuthenticatorFunc(func(ctx context.Context, _ *config.Config, opts *sdkAuth.LoginOptions) (*coreauth.Auth, error) {
+			opts.OnDeviceCode(sdkAuth.DeviceCodeInfo{UserCode: "ABCD-EFGH", VerificationURL: "https://auth.openai.com/codex/device", ExpiresIn: 900})
+			select {
+			case <-ctx.Done():
+				close(cancelled)
+			case <-release:
+			}
 
-	start := httptest.NewRecorder()
-	router.ServeHTTP(start, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?provider=codex&flow=device", nil))
-	if start.Code != http.StatusOK {
-		t.Fatalf("start status = %d, body=%s", start.Code, start.Body.String())
-	}
-	var response map[string]any
-	if err := json.Unmarshal(start.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if response["flow"] != "device" || response["user_code"] != "ABCD-EFGH" || response["url"] != "https://auth.openai.com/codex/device" {
-		t.Fatalf("device login response = %s", start.Body.String())
-	}
-	state, _ := response["state"].(string)
-	if state == "" {
-		t.Fatalf("missing state: %s", start.Body.String())
-	}
-	for _, secret := range []string{"private-device-auth-id", "access_token", "refresh_token", "authorization_code", "code_verifier"} {
-		if strings.Contains(start.Body.String(), secret) {
-			t.Fatalf("response leaked %q: %s", secret, start.Body.String())
+			return nil, ctx.Err()
+		})
+		router := gin.New()
+		router.GET("/v8/management/oauth/auth-url", h.StartOAuthV8)
+		router.GET("/v8/management/oauth/status", h.GetAuthStatus)
+		router.DELETE("/v8/management/oauth/session", h.CancelAuthSession)
+
+		start := httptest.NewRecorder()
+		router.ServeHTTP(start, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?provider=codex&flow=device", nil))
+		if start.Code != http.StatusOK {
+			t.Fatalf("start status = %d, body=%s", start.Code, start.Body.String())
 		}
-	}
-	status := httptest.NewRecorder()
-	router.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/status?state="+state, nil))
-	if status.Code != http.StatusOK || strings.TrimSpace(status.Body.String()) != `{"status":"wait"}` {
-		t.Fatalf("pending status = %d %s", status.Code, status.Body.String())
-	}
+		var response map[string]any
+		if err := json.Unmarshal(start.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response["flow"] != "device" || response["user_code"] != "ABCD-EFGH" || response["url"] != "https://auth.openai.com/codex/device" {
+			t.Fatalf("device login response = %s", start.Body.String())
+		}
+		state, _ := response["state"].(string)
+		if state == "" {
+			t.Fatalf("missing state: %s", start.Body.String())
+		}
+		for _, secret := range []string{"private-device-auth-id", "access_token", "refresh_token", "authorization_code", "code_verifier"} {
+			if strings.Contains(start.Body.String(), secret) {
+				t.Fatalf("response leaked %q: %s", secret, start.Body.String())
+			}
+		}
+		status := httptest.NewRecorder()
+		router.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/status?state="+state, nil))
+		if status.Code != http.StatusOK || strings.TrimSpace(status.Body.String()) != `{"status":"wait"}` {
+			t.Fatalf("pending status = %d %s", status.Code, status.Body.String())
+		}
 
-	cancel := httptest.NewRecorder()
-	router.ServeHTTP(cancel, httptest.NewRequest(http.MethodDelete, "/v8/management/oauth/session?state="+state, nil))
-	if cancel.Code != http.StatusOK {
-		t.Fatalf("cancel status = %d, body=%s", cancel.Code, cancel.Body.String())
-	}
-	select {
-	case <-cancelled:
-	case <-time.After(3 * time.Second):
-		t.Fatal("device login context was not cancelled")
-	}
+		cancel := httptest.NewRecorder()
+		router.ServeHTTP(cancel, httptest.NewRequest(http.MethodDelete, "/v8/management/oauth/session?state="+state, nil))
+		if cancel.Code != http.StatusOK {
+			t.Fatalf("cancel status = %d, body=%s", cancel.Code, cancel.Body.String())
+		}
+		select {
+		case <-cancelled:
+		case <-time.After(3 * time.Second):
+			t.Fatal("device login context was not cancelled")
+		}
+	})
 }
 
 func TestStartOAuthV8CodexDeviceFlowSavesThroughManagementAuthHook(t *testing.T) {
