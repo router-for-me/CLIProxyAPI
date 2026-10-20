@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -538,6 +539,275 @@ func TestSIWCBindRejectsReplacedAccount(t *testing.T) {
 			}
 			if disk["account_id"] != "account-b" || disk["use_siwc"] == true || disk["siwc"] != nil {
 				t.Fatalf("binding mixed SIWC tokens into replaced account on disk: %#v", disk)
+			}
+		})
+	}
+}
+
+type siwcCommitWindowContext struct {
+	context.Context
+	errCalls atomic.Int32
+	onCall   int32
+	hook     func()
+}
+
+func (c *siwcCommitWindowContext) Err() error {
+	if c.errCalls.Add(1) == c.onCall && c.hook != nil {
+		c.hook()
+	}
+	return c.Context.Err()
+}
+
+type siwcUploadProgressContext struct {
+	context.Context
+	valueOnce sync.Once
+	valueCh   chan struct{}
+	doneOnce  sync.Once
+	doneCh    chan struct{}
+}
+
+func (c *siwcUploadProgressContext) Value(key any) any {
+	c.valueOnce.Do(func() {
+		close(c.valueCh)
+	})
+	return c.Context.Value(key)
+}
+
+func (c *siwcUploadProgressContext) Done() <-chan struct{} {
+	c.doneOnce.Do(func() {
+		close(c.doneCh)
+	})
+	return c.Context.Done()
+}
+
+func TestSIWCBindLegacyUploadDuringCommitWindow(t *testing.T) {
+	f := setupSIWCFlow(t, false)
+	f.router.POST("/legacy", f.h.UploadAuthFile)
+	state, flow := f.start(t)
+
+	uploadedBody := map[string]any{
+		"type":          "codex",
+		"access_token":  "uploaded-outer",
+		"refresh_token": "uploaded-refresh",
+		"account_id":    "account",
+		"note":          "uploaded-during-commit",
+	}
+	rawBody, errMarshal := json.Marshal(uploadedBody)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+
+	reachedMutation := make(chan struct{})
+	reachedUpsert := make(chan struct{})
+	uploadDone := make(chan *httptest.ResponseRecorder, 1)
+
+	flow.mu.Lock()
+	flow.ctx = &siwcCommitWindowContext{
+		Context: flow.ctx,
+		onCall:  6,
+		hook: func() {
+			go func() {
+				req := httptest.NewRequest(http.MethodPost, "/legacy?name=codex.json", strings.NewReader(string(rawBody)))
+				req.Header.Set("Content-Type", "application/json")
+				req = req.WithContext(&siwcUploadProgressContext{
+					Context: req.Context(),
+					valueCh: reachedMutation,
+					doneCh:  reachedUpsert,
+				})
+				w := httptest.NewRecorder()
+				f.router.ServeHTTP(w, req)
+				uploadDone <- w
+			}()
+			<-reachedMutation
+			for range 500 {
+				select {
+				case <-reachedUpsert:
+					return
+				default:
+					runtime.Gosched()
+				}
+			}
+		},
+	}
+	flow.mu.Unlock()
+
+	w := siwcRequest(t, f.router, http.MethodPost, "/callback", map[string]any{"provider": "codex", "redirect_url": siwcCallbackURL(state)})
+	if w.Code != http.StatusOK {
+		t.Fatalf("callback: %d %s", w.Code, w.Body.String())
+	}
+	waitSIWCExchange(t, flow)
+	if status := performOAuthStatusRequest(t, f.router, state); status.Status != "ok" {
+		t.Fatalf("expected bind commit to finish before locked upload replaced file, got %#v", status)
+	}
+
+	var wUpload *httptest.ResponseRecorder
+	select {
+	case wUpload = <-uploadDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("legacy upload did not finish")
+	}
+	if wUpload.Code != http.StatusOK {
+		t.Fatalf("legacy upload status = %d, body = %s", wUpload.Code, wUpload.Body.String())
+	}
+
+	diskData, errRead := os.ReadFile(f.path)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	var disk map[string]any
+	if errJSON := json.Unmarshal(diskData, &disk); errJSON != nil {
+		t.Fatal(errJSON)
+	}
+	got, ok := f.manager.GetByID(f.auth.ID)
+	if !ok || got == nil {
+		t.Fatal("missing auth in manager after upload")
+	}
+	if disk["note"] != "uploaded-during-commit" || disk["access_token"] != "uploaded-outer" {
+		t.Fatalf("SIWC bind overwrote legacy upload on disk: %#v", disk)
+	}
+	if got.Metadata["note"] != "uploaded-during-commit" || got.Metadata["access_token"] != "uploaded-outer" {
+		t.Fatalf("unexpected in-memory metadata after upload: %#v", got.Metadata)
+	}
+	if disk["use_siwc"] != got.Metadata["use_siwc"] {
+		t.Fatalf("disk and memory disagree on use_siwc: disk=%v memory=%v", disk["use_siwc"], got.Metadata["use_siwc"])
+	}
+}
+
+func TestWriteAuthFileWaitsForCodexFileLock(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		useSymlink   bool
+		uploadedBody map[string]any
+	}{
+		{
+			name:       "codex_upload",
+			useSymlink: false,
+			uploadedBody: map[string]any{
+				"type":          "codex",
+				"access_token":  "uploaded-outer",
+				"refresh_token": "uploaded-refresh",
+				"account_id":    "account",
+				"note":          "after-lock",
+			},
+		},
+		{
+			name:       "non_codex_replacing_existing_codex",
+			useSymlink: false,
+			uploadedBody: map[string]any{
+				"type":          "claude",
+				"access_token":  "claude-access",
+				"refresh_token": "claude-refresh",
+				"note":          "replaced-provider",
+			},
+		},
+		{
+			name:       "symlinked_auth_dir_alias",
+			useSymlink: true,
+			uploadedBody: map[string]any{
+				"type":          "codex",
+				"access_token":  "uploaded-outer",
+				"refresh_token": "uploaded-refresh",
+				"account_id":    "account",
+				"note":          "via-symlink-dir",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupSIWCFlow(t, false)
+			f.router.POST("/legacy", f.h.UploadAuthFile)
+
+			lockPath := f.path
+			if tc.useSymlink {
+				aliasDir := filepath.Join(t.TempDir(), "auths-link")
+				if errSymlink := os.Symlink(filepath.Dir(f.path), aliasDir); errSymlink != nil {
+					t.Skipf("symlinks unavailable: %v", errSymlink)
+				}
+				f.h.cfg.AuthDir = aliasDir
+				if realPath, errEval := filepath.EvalSymlinks(f.path); errEval == nil {
+					lockPath = realPath
+				}
+			}
+
+			rawBody, errMarshal := json.Marshal(tc.uploadedBody)
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+
+			locked := make(chan struct{})
+			releaseLock := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() {
+				releaseOnce.Do(func() {
+					close(releaseLock)
+				})
+			}
+			t.Cleanup(release)
+			lockDone := make(chan error, 1)
+			go func() {
+				lockDone <- codex.WithFileLock(lockPath, func() error {
+					close(locked)
+					<-releaseLock
+					return nil
+				})
+			}()
+			<-locked
+
+			reachedMutation := make(chan struct{})
+			reachedUpsert := make(chan struct{})
+			uploadDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				req := httptest.NewRequest(http.MethodPost, "/legacy?name=codex.json", strings.NewReader(string(rawBody)))
+				req.Header.Set("Content-Type", "application/json")
+				req = req.WithContext(&siwcUploadProgressContext{
+					Context: req.Context(),
+					valueCh: reachedMutation,
+					doneCh:  reachedUpsert,
+				})
+				w := httptest.NewRecorder()
+				f.router.ServeHTTP(w, req)
+				uploadDone <- w
+			}()
+			<-reachedMutation
+			for range 200 {
+				runtime.Gosched()
+			}
+			select {
+			case <-reachedUpsert:
+				t.Fatal("writeAuthFile bypassed codex.WithFileLock and reached upsertAuthRecord while lock was held")
+			default:
+			}
+			diskWhileLocked, errRead := os.ReadFile(f.path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if strings.Contains(string(diskWhileLocked), tc.uploadedBody["note"].(string)) {
+				t.Fatalf("writeAuthFile modified disk while codex.WithFileLock was held: %s", string(diskWhileLocked))
+			}
+
+			release()
+			select {
+			case errLock := <-lockDone:
+				if errLock != nil {
+					t.Fatal(errLock)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("file lock holder did not finish")
+			}
+			var wUpload *httptest.ResponseRecorder
+			select {
+			case wUpload = <-uploadDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("legacy upload did not finish")
+			}
+			if wUpload.Code != http.StatusOK {
+				t.Fatalf("legacy upload status = %d, body = %s", wUpload.Code, wUpload.Body.String())
+			}
+			diskAfter, errReadAfter := os.ReadFile(f.path)
+			if errReadAfter != nil {
+				t.Fatal(errReadAfter)
+			}
+			if !strings.Contains(string(diskAfter), tc.uploadedBody["note"].(string)) {
+				t.Fatalf("expected uploaded content after lock release, got: %s", string(diskAfter))
 			}
 		})
 	}

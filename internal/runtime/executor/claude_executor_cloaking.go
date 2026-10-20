@@ -368,7 +368,7 @@ func isValidClaudeCacheControl(cc gjson.Result) bool {
 func collectForwardedClaudeSystemPromptBlocksWithCache(system gjson.Result) []forwardedClaudeSystemPromptBlock {
 	var blocks []forwardedClaudeSystemPromptBlock
 	appendBlock := func(text string, cc *claudeCacheControl, rawCC string) {
-		if strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) || text == claudeCodeCLIIdentity {
+		if strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) || isClaudeCodeIdentitySystemText(text) {
 			return
 		}
 		blocks = append(blocks, forwardedClaudeSystemPromptBlock{Text: text, CacheControl: cc, RawCC: rawCC})
@@ -1585,6 +1585,7 @@ type claudeWirePolicy struct {
 	ConfirmedClaudeCode  bool
 	Cloak                bool
 	Uncloak              bool
+	ExplicitNever        bool
 }
 
 type claudeCloakSettings struct {
@@ -1596,7 +1597,18 @@ type claudeCloakSettings struct {
 func isClaudeCodeIdentitySystemText(text string) bool {
 	trimmed := strings.TrimSpace(text)
 	return trimmed == claudeCodeCLIIdentity ||
+		trimmed == "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK." ||
 		trimmed == "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+}
+
+func isEffectiveConfirmedClaudeCode(detection helps.ClaudeCodeRequestDetection, policy claudeWirePolicy) bool {
+	if policy.Uncloak {
+		return false
+	}
+	if detection.Confirmed {
+		return true
+	}
+	return !policy.Cloak && policy.ExplicitNever && detection.ConfirmedShape
 }
 
 func stripClaudeCodeSystemBlocks(payload []byte) []byte {
@@ -1706,12 +1718,14 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
 	trimmedMode := strings.ToLower(strings.TrimSpace(cloakMode))
 	uncloak := !fp.ProfileClaudeCodeCLI && (explicitMode == "never" || explicitMode == "uncloak")
+	explicitNever := trimmedMode == "never" && !uncloak
 	policy := claudeWirePolicy{
 		OAuth:                fp.AuthIsOAuthToken,
 		ProfileClaudeCodeCLI: fp.ProfileClaudeCodeCLI,
 		ConfirmedClaudeCode:  confirmedClaudeCode,
 		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode && !uncloak,
 		Uncloak:              uncloak,
+		ExplicitNever:        explicitNever,
 	}
 	if confirmedClaudeCode {
 		// Native Claude Code is always a passthrough client unless the

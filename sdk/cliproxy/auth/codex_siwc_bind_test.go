@@ -476,3 +476,62 @@ func TestBindCodexSIWCRejectsReplacedAccount(t *testing.T) {
 		t.Fatalf("failed binding mutated replaced account on disk: %#v", disk)
 	}
 }
+
+type bindCommitHookContext struct {
+	context.Context
+	errCalls int
+	onCall   int
+	hook     func()
+}
+
+func (c *bindCommitHookContext) Err() error {
+	c.errCalls++
+	if c.errCalls == c.onCall && c.hook != nil {
+		c.hook()
+	}
+	return c.Context.Err()
+}
+
+func TestBindCodexSIWCRejectsInPlaceRewriteDuringCommit(t *testing.T) {
+	m, base, path, hook := setupSIWCBinding(t, "auth.json")
+	rewritten := map[string]any{
+		"type":          "codex",
+		"access_token":  "uploaded-outer",
+		"refresh_token": "uploaded-refresh",
+		"account_id":    "account",
+		"notes":         "in-place-upload",
+		"disabled":      false,
+	}
+	rewrittenBytes, errMarshal := json.Marshal(rewritten)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	beforeInfo, errStat := os.Lstat(path)
+	if errStat != nil {
+		t.Fatal(errStat)
+	}
+	ctx := &bindCommitHookContext{
+		Context: context.Background(),
+		onCall:  3,
+		hook: func() {
+			if errWrite := os.WriteFile(path, rewrittenBytes, 0o600); errWrite != nil {
+				t.Errorf("in-place write failed: %v", errWrite)
+			}
+			afterInfo, errAfter := os.Lstat(path)
+			if errAfter != nil || !os.SameFile(beforeInfo, afterInfo) {
+				t.Errorf("expected in-place write to preserve file identity, err=%v", errAfter)
+			}
+		},
+	}
+	_, errBind := m.BindCodexSIWC(ctx, base.ID, base.RegistrationEpoch, "account", bindingTokens("bound"))
+	if errBind == nil {
+		t.Fatal("binding unexpectedly succeeded and overwrote in-place file update")
+	}
+	if hook.updates != 0 {
+		t.Fatalf("failed binding published update: updates=%d", hook.updates)
+	}
+	disk := readBindingDisk(t, path)
+	if disk["notes"] != "in-place-upload" || disk["access_token"] != "uploaded-outer" || disk["use_siwc"] == true {
+		t.Fatalf("binding overwrote in-place file rewrite on disk: %#v", disk)
+	}
+}

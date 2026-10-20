@@ -860,6 +860,30 @@ type HostAuthSaveResponse struct {
 	Path string `json:"path"`
 }
 
+// HostAuthModelsRequest asks the host for the models registered for one or all credentials.
+type HostAuthModelsRequest struct {
+	// AuthIndex identifies the credential index; empty requests all credentials.
+	AuthIndex string `json:"auth_index,omitempty"`
+}
+
+// HostAuthModelsResponse returns the models registered for each matching credential.
+type HostAuthModelsResponse struct {
+	// Credentials lists the credentials and their registered models.
+	Credentials []HostAuthModels `json:"credentials"`
+}
+
+// HostAuthModels describes the models registered for one credential.
+type HostAuthModels struct {
+	// ID identifies the credential record.
+	ID string `json:"id"`
+	// AuthIndex is the stable runtime credential index.
+	AuthIndex string `json:"auth_index"`
+	// Provider is the credential provider key.
+	Provider string `json:"provider"`
+	// Models lists the model identifiers registered for this credential in the global registry.
+	Models []string `json:"models"`
+}
+
 // Host affinity lookup status outcomes.
 const (
 	HostAffinityStatusBound       = "bound"

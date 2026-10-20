@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -85,12 +86,16 @@ func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch ui
 		}
 		out["siwc"] = json.RawMessage(siwc)
 		out["use_siwc"] = true
+		if errCtx := ctx.Err(); errCtx != nil {
+			return errCtx
+		}
 		latestInfo, errStat := os.Lstat(path)
 		if errStat != nil || !os.SameFile(info, latestInfo) {
 			return fmt.Errorf("bind SIWC: backing file changed during binding")
 		}
-		if errCtx := ctx.Err(); errCtx != nil {
-			return errCtx
+		latestData, errReadLatest := os.ReadFile(path)
+		if errReadLatest != nil || !bytes.Equal(data, latestData) {
+			return fmt.Errorf("bind SIWC: backing file changed during binding")
 		}
 		if errWrite := codex.WriteJSONFileAtomic(path, out); errWrite != nil {
 			return fmt.Errorf("bind SIWC: persist binding: %w", errWrite)

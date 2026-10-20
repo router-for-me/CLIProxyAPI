@@ -77,6 +77,12 @@ func TestVertexOpenAPIBaseURLBuilders(t *testing.T) {
 	if got := VertexServiceAccountOpenAPIBaseURL("", "v1", "my-proj", "us-central1"); got != "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1/endpoints/openapi" {
 		t.Fatalf("VertexServiceAccountOpenAPIBaseURL(us-central1) = %q", got)
 	}
+	if got := VertexServiceAccountOpenAPIBaseURL("https://us-central1-aiplatform.googleapis.com", "v1", "my-proj", "global"); got != "https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global/endpoints/openapi" {
+		t.Fatalf("VertexServiceAccountOpenAPIBaseURL(regional short host -> global) = %q", got)
+	}
+	if got := VertexServiceAccountOpenAPIBaseURL("https://relay.example.com", "v1", "my-proj", "global"); got != "https://relay.example.com/v1/projects/my-proj/locations/global/endpoints/openapi" {
+		t.Fatalf("VertexServiceAccountOpenAPIBaseURL(third-party short host -> global) = %q", got)
+	}
 	if got := VertexAPIKeyOpenAPIBaseURL("https://example.com/v1/projects/my-proj/locations/global", "v1", "", ""); got != "https://example.com/v1/projects/my-proj/locations/global/endpoints/openapi" {
 		t.Fatalf("VertexAPIKeyOpenAPIBaseURL(project/location URL) = %q", got)
 	}

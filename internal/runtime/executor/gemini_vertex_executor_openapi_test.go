@@ -851,3 +851,116 @@ func TestGeminiVertexOpenAPI_ExplicitOptIn_GeminiClientStreamToolCallThoughtSign
 		t.Fatalf("Turn 2 stream upstream tool_calls.0.extra_content.google.thought_signature = %q, want SIG_STREAM_OPENAPI; body=%s", got, string(upstreamBodies[1]))
 	}
 }
+
+func TestGeminiVertexOpenAPI_PerModelOptInAndOverride(t *testing.T) {
+	var mu sync.Mutex
+	var gotPaths []string
+	var gotModels []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"mock-vertex-sa-token","token_type":"Bearer","expires_in":3600}`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotPaths = append(gotPaths, r.URL.Path)
+		gotModels = append(gotModels, gjson.GetBytes(body, "model").String())
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-per-model","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"openapi route"},"finish_reason":"stop"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"responseId":"resp-native","candidates":[{"content":{"parts":[{"text":"native route"}]},"finishReason":"STOP"}]}`))
+	}))
+	defer server.Close()
+
+	targetURL, errParse := url.Parse(server.URL)
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	t.Cleanup(transport.CloseIdleConnections)
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", issue6258RedirectTransport{
+		target: targetURL,
+		base:   transport,
+	})
+
+	var sa map[string]any
+	if errUnmarshal := json.Unmarshal(testVertexServiceAccountJSON(t, server.URL+"/token"), &sa); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "vertex-sa-per-model-openapi",
+		Provider: "vertex",
+		Metadata: map[string]any{
+			"project_id": "proxy-test",
+			"location":   "global",
+			"models": []any{
+				map[string]any{"name": "gemini-2.5-pro", "alias": "gemini-openapi", "openapi": true},
+				map[string]any{"name": "deepseek-ai/deepseek-v4.1-flash-maas", "alias": "ds-native", "openapi": false},
+			},
+			"service_account": sa,
+		},
+	}
+
+	exec := NewGeminiVertexExecutor(&config.Config{})
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		ResponseFormat:  sdktranslator.FormatOpenAI,
+		OriginalRequest: []byte(`{"model":"gemini-openapi","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	if _, errExec := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-pro",
+		Payload: []byte(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`),
+	}, opts); errExec != nil {
+		t.Fatalf("Execute(gemini-openapi) error = %v", errExec)
+	}
+
+	// Same upstream model requested without the openapi-enabled alias stays on native generateContent
+	if _, errExec := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-flash",
+		Payload: []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+	}); errExec != nil {
+		t.Fatalf("Execute(gemini-2.5-flash) error = %v", errExec)
+	}
+
+	// Explicit per-model openapi: false overrides automatic slash detection
+	if _, errExec := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "deepseek-ai/deepseek-v4.1-flash-maas",
+		Payload: []byte(`{"model":"deepseek-ai/deepseek-v4.1-flash-maas","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		ResponseFormat:  sdktranslator.FormatOpenAI,
+		OriginalRequest: []byte(`{"model":"ds-native","messages":[{"role":"user","content":"hi"}]}`),
+	}); errExec != nil {
+		t.Fatalf("Execute(ds-native) error = %v", errExec)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotPaths) != 3 {
+		t.Fatalf("expected 3 upstream calls, got %d (%v)", len(gotPaths), gotPaths)
+	}
+	wantPath0 := "/v1/projects/proxy-test/locations/global/endpoints/openapi/chat/completions"
+	if gotPaths[0] != wantPath0 || gotModels[0] != "google/gemini-2.5-pro" {
+		t.Fatalf("call 0 = (%q, %q), want (%q, google/gemini-2.5-pro)", gotPaths[0], gotModels[0], wantPath0)
+	}
+	wantPath1 := "/v1/projects/proxy-test/locations/global/publishers/google/models/gemini-2.5-flash:generateContent"
+	if gotPaths[1] != wantPath1 {
+		t.Fatalf("call 1 path = %q, want %q", gotPaths[1], wantPath1)
+	}
+	wantPath2 := "/v1/projects/proxy-test/locations/global/publishers/google/models/deepseek-ai/deepseek-v4.1-flash-maas:generateContent"
+	if gotPaths[2] != wantPath2 {
+		t.Fatalf("call 2 path = %q, want %q", gotPaths[2], wantPath2)
+	}
+}

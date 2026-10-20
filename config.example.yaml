@@ -455,7 +455,7 @@ upstream:
     #
     # Shared Claude CLI fingerprint defaults. Update only after measuring a new Claude Code release.
     # Unconfirmed clients use this CLI baseline. Verified native Claude Code CLI, sdk-cli,
-    # and VSCode requests preserve their measured entrypoint when the Claude Code version is a
+    # sdk-ts, and VSCode requests preserve their measured entrypoint when the Claude Code version is a
     # patch release in the configured major/minor line at or above this baseline. Older versions
     # and newer major/minor lines fall back to the baseline until measured. In legacy mode,
     # timeout is a fallback and

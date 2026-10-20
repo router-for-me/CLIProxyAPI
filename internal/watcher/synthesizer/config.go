@@ -435,6 +435,12 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		if hash := diff.ComputeVertexCompatModelsHash(compat.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
+		if compat.OpenAPI != nil {
+			attrs["openapi"] = strconv.FormatBool(*compat.OpenAPI)
+		}
+		if loc := strings.TrimSpace(compat.OpenAPILocation); loc != "" {
+			attrs["openapi_location"] = loc
+		}
 		if compat.Interactions != nil && *compat.Interactions {
 			attrs["interactions"] = "true"
 		}

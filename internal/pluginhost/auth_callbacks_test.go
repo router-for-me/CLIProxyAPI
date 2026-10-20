@@ -936,3 +936,230 @@ func TestHostAuthSaveRelativeAuthDirPreservesIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestHostAuthModelsCallbackReturnsAllCredentialsIncludingConfigBacked(t *testing.T) {
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "file-codex.json")
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"codex@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	fileAuth := &coreauth.Auth{
+		ID:       "file-codex.json",
+		Provider: "codex",
+		FileName: "file-codex.json",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":   filePath,
+			"source": filePath,
+		},
+	}
+	configAuth := &coreauth.Auth{
+		ID:       "claude:apikey:cfg-1",
+		Provider: "claude",
+		Label:    "claude-apikey",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"source":       "config:claude[cfg-1]",
+			"config_index": "0",
+			"api_key":      "sk-ant-config-1",
+		},
+	}
+	runtimeAuth := &coreauth.Auth{
+		ID:       "aistudio-ws-1",
+		Provider: "aistudio",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	ctx := coreauth.WithSkipPersist(context.Background())
+	for _, a := range []*coreauth.Auth{fileAuth, configAuth, runtimeAuth} {
+		registered, errRegister := manager.Register(ctx, a)
+		if errRegister != nil {
+			t.Fatalf("register auth %s: %v", a.ID, errRegister)
+		}
+		a.Index = registered.Index
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(fileAuth.ID, "codex", []*registry.ModelInfo{
+		{ID: "codex/gpt-5.6-sol"},
+		{ID: "codex/gpt-6-astra"},
+	})
+	reg.RegisterClient(configAuth.ID, "claude", []*registry.ModelInfo{
+		{ID: "claude-sonnet-5-5"},
+	})
+	reg.UnregisterClient(runtimeAuth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(fileAuth.ID)
+		reg.UnregisterClient(configAuth.ID)
+		reg.UnregisterClient(runtimeAuth.ID)
+	})
+
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	host.SetAuthManager(manager)
+
+	// Verify all credentials (including config-backed API key) are returned when AuthIndex is empty.
+	rawAll, errCallAll := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthModels, nil)
+	if errCallAll != nil {
+		t.Fatalf("callFromPlugin(host.auth.models, nil) error = %v", errCallAll)
+	}
+	respAll, errDecodeAll := decodeRPCEnvelope[pluginapi.HostAuthModelsResponse](rawAll)
+	if errDecodeAll != nil {
+		t.Fatalf("decode response: %v", errDecodeAll)
+	}
+	if len(respAll.Credentials) != 3 {
+		t.Fatalf("credentials len = %d (%#v), want 3", len(respAll.Credentials), respAll.Credentials)
+	}
+
+	byID := make(map[string]pluginapi.HostAuthModels, len(respAll.Credentials))
+	for _, cred := range respAll.Credentials {
+		byID[cred.ID] = cred
+	}
+
+	gotConfig, okConfig := byID[configAuth.ID]
+	if !okConfig {
+		t.Fatalf("missing config-backed credential %q in %#v", configAuth.ID, respAll.Credentials)
+	}
+	if gotConfig.AuthIndex != configAuth.Index || gotConfig.Provider != "claude" || len(gotConfig.Models) != 1 || gotConfig.Models[0] != "claude-sonnet-5-5" {
+		t.Fatalf("config credential = %#v, want index=%q provider=claude models=[claude-sonnet-5-5]", gotConfig, configAuth.Index)
+	}
+
+	gotFile, okFile := byID[fileAuth.ID]
+	if !okFile {
+		t.Fatalf("missing file-backed credential %q in %#v", fileAuth.ID, respAll.Credentials)
+	}
+	if gotFile.AuthIndex != fileAuth.Index || gotFile.Provider != "codex" || len(gotFile.Models) != 2 || gotFile.Models[0] != "codex/gpt-5.6-sol" || gotFile.Models[1] != "codex/gpt-6-astra" {
+		t.Fatalf("file credential = %#v, want index=%q provider=codex models=[codex/gpt-5.6-sol codex/gpt-6-astra]", gotFile, fileAuth.Index)
+	}
+
+	gotRuntime, okRuntime := byID[runtimeAuth.ID]
+	if !okRuntime {
+		t.Fatalf("missing runtime-only credential %q in %#v", runtimeAuth.ID, respAll.Credentials)
+	}
+	if gotRuntime.AuthIndex != runtimeAuth.Index || gotRuntime.Provider != "aistudio" || gotRuntime.Models == nil || len(gotRuntime.Models) != 0 {
+		t.Fatalf("runtime credential = %#v, want index=%q provider=aistudio non-nil empty models", gotRuntime, runtimeAuth.Index)
+	}
+
+	// Verify filtering by AuthIndex for a config-backed credential.
+	reqFiltered, errMarshal := json.Marshal(pluginapi.HostAuthModelsRequest{AuthIndex: configAuth.Index})
+	if errMarshal != nil {
+		t.Fatalf("marshal filter request: %v", errMarshal)
+	}
+	rawFiltered, errCallFiltered := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthModels, reqFiltered)
+	if errCallFiltered != nil {
+		t.Fatalf("callFromPlugin(host.auth.models, filtered) error = %v", errCallFiltered)
+	}
+	respFiltered, errDecodeFiltered := decodeRPCEnvelope[pluginapi.HostAuthModelsResponse](rawFiltered)
+	if errDecodeFiltered != nil {
+		t.Fatalf("decode filtered response: %v", errDecodeFiltered)
+	}
+	if len(respFiltered.Credentials) != 1 || respFiltered.Credentials[0].ID != configAuth.ID || respFiltered.Credentials[0].AuthIndex != configAuth.Index {
+		t.Fatalf("filtered credentials = %#v, want single entry for %q", respFiltered.Credentials, configAuth.ID)
+	}
+
+	// Verify host.auth.models is callable from response.intercept_after via rpcPluginAdapter.InterceptResponse.
+	loader := newTestSymbolLoader()
+	loader.lookups["catalog-filter"] = newTestSymbolLookup(&testPlugin{
+		registerResult: pluginapi.Plugin{
+			Metadata: pluginapi.Metadata{
+				Name:             "catalog-filter",
+				Version:          "1.0.0",
+				Author:           "test",
+				GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			},
+			Capabilities: pluginapi.Capabilities{
+				ResponseInterceptor: responseInterceptorFunc{
+					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						rawModelsResp, errModels := host.callFromPlugin(ctx, pluginabi.MethodHostAuthModels, nil)
+						if errModels != nil {
+							return pluginapi.ResponseInterceptResponse{}, errModels
+						}
+						modelsResp, errDecode := decodeRPCEnvelope[pluginapi.HostAuthModelsResponse](rawModelsResp)
+						if errDecode != nil {
+							return pluginapi.ResponseInterceptResponse{}, errDecode
+						}
+						allowed := make(map[string]bool)
+						for _, cred := range modelsResp.Credentials {
+							if cred.Provider == "codex" {
+								for _, m := range cred.Models {
+									allowed[m] = true
+								}
+							}
+						}
+						var catalog struct {
+							Data []struct {
+								ID string `json:"id"`
+							} `json:"data"`
+						}
+						if errUnmarshal := json.Unmarshal(req.Body, &catalog); errUnmarshal != nil {
+							return pluginapi.ResponseInterceptResponse{}, errUnmarshal
+						}
+						filtered := catalog.Data[:0]
+						for _, item := range catalog.Data {
+							if allowed[item.ID] {
+								filtered = append(filtered, item)
+							}
+						}
+						catalog.Data = filtered
+						out, errMarshalOut := json.Marshal(catalog)
+						if errMarshalOut != nil {
+							return pluginapi.ResponseInterceptResponse{}, errMarshalOut
+						}
+						return pluginapi.ResponseInterceptResponse{Body: out}, nil
+					},
+				},
+			},
+		},
+	})
+	host.loader = loader
+	host.ApplyConfig(context.Background(), &config.Config{
+		AuthDir: authDir,
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "catalog-filter"),
+			Configs: enabledPluginConfigs("catalog-filter"),
+		},
+	})
+	intercepted := host.InterceptResponse(context.Background(), pluginapi.ResponseInterceptRequest{
+		SourceFormat: "openai",
+		Body:         []byte(`{"data":[{"id":"codex/gpt-5.6-sol"},{"id":"claude-sonnet-5-5"}]}`),
+	})
+	if string(intercepted.Body) != `{"data":[{"id":"codex/gpt-5.6-sol"}]}` {
+		t.Fatalf("intercepted catalog body = %s, want codex-only filtered catalog", string(intercepted.Body))
+	}
+}
+
+func TestHostAuthModelsCallbackValidationAndEmptyManager(t *testing.T) {
+	hostNoManager := New()
+	rawEmpty, errCallEmpty := hostNoManager.callFromPlugin(context.Background(), pluginabi.MethodHostAuthModels, []byte(`{}`))
+	if errCallEmpty != nil {
+		t.Fatalf("callFromPlugin with nil authManager and empty auth_index error = %v, want nil", errCallEmpty)
+	}
+	respEmpty, errDecodeEmpty := decodeRPCEnvelope[pluginapi.HostAuthModelsResponse](rawEmpty)
+	if errDecodeEmpty != nil {
+		t.Fatalf("decode empty response: %v", errDecodeEmpty)
+	}
+	if respEmpty.Credentials == nil || len(respEmpty.Credentials) != 0 {
+		t.Fatalf("empty manager credentials = %#v, want non-nil empty slice", respEmpty.Credentials)
+	}
+
+	reqMissingManager, _ := json.Marshal(pluginapi.HostAuthModelsRequest{AuthIndex: "idx-1"})
+	if _, errCall := hostNoManager.callFromPlugin(context.Background(), pluginabi.MethodHostAuthModels, reqMissingManager); errCall == nil {
+		t.Fatal("expected error when filtering by auth_index without auth manager, got nil")
+	}
+
+	host := New()
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthModels, []byte("{invalid-json")); errCall == nil {
+		t.Fatal("expected error on invalid JSON request, got nil")
+	}
+	reqUnknown, _ := json.Marshal(pluginapi.HostAuthModelsRequest{AuthIndex: "unknown-index"})
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthModels, reqUnknown); errCall == nil {
+		t.Fatal("expected error for unknown auth_index, got nil")
+	}
+}

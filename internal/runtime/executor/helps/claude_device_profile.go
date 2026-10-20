@@ -221,6 +221,52 @@ func plausibleClaudeCLIVersion(candidate, baseline claudeCLIVersion) bool {
 		candidate.patch >= baseline.patch
 }
 
+func parseClaudeSemver(raw string) (claudeCLIVersion, bool) {
+	parts := strings.Split(strings.TrimSpace(raw), ".")
+	if len(parts) != 3 {
+		return claudeCLIVersion{}, false
+	}
+	major, errMajor := strconv.Atoi(parts[0])
+	if errMajor != nil {
+		return claudeCLIVersion{}, false
+	}
+	minor, errMinor := strconv.Atoi(parts[1])
+	if errMinor != nil {
+		return claudeCLIVersion{}, false
+	}
+	patch, errPatch := strconv.Atoi(parts[2])
+	if errPatch != nil {
+		return claudeCLIVersion{}, false
+	}
+	return claudeCLIVersion{major: major, minor: minor, patch: patch}, true
+}
+
+func plausibleClaudePackageVersion(candidate, baseline string) bool {
+	candidate = strings.TrimSpace(candidate)
+	if !claudePackageVersionPattern.MatchString(candidate) {
+		return false
+	}
+	candVer, okCand := parseClaudeSemver(candidate)
+	baseVer, okBase := parseClaudeSemver(baseline)
+	if !okCand || !okBase {
+		return candidate == strings.TrimSpace(baseline)
+	}
+	return candVer.Compare(baseVer) >= 0
+}
+
+func plausibleClaudeRuntimeVersion(candidate, baseline string) bool {
+	candidate = strings.TrimSpace(candidate)
+	if !claudeRuntimeVersionPattern.MatchString(candidate) {
+		return false
+	}
+	candVer, okCand := parseClaudeSemver(strings.TrimPrefix(candidate, "v"))
+	baseVer, okBase := parseClaudeSemver(strings.TrimPrefix(strings.TrimSpace(baseline), "v"))
+	if !okCand || !okBase {
+		return candidate == strings.TrimSpace(baseline)
+	}
+	return candVer.Compare(baseVer) >= 0
+}
+
 func meetsClaudeDeviceProfileBaseline(candidate, baseline ClaudeDeviceProfile) bool {
 	if candidate.UserAgent == "" || !candidate.hasVersion {
 		return false
@@ -619,8 +665,20 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	}
 
 	if confirmedClaudeCode {
-		miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, func(value string) bool { return value == profile.RuntimeVersion })
-		miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, func(value string) bool { return value == profile.PackageVersion })
+		validRuntime := func(value string) bool {
+			if cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion) != "" {
+				return value == profile.RuntimeVersion
+			}
+			return plausibleClaudeRuntimeVersion(value, profile.RuntimeVersion)
+		}
+		validPackage := func(value string) bool {
+			if cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion) != "" {
+				return value == profile.PackageVersion
+			}
+			return plausibleClaudePackageVersion(value, profile.PackageVersion)
+		}
+		miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, validRuntime)
+		miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, validPackage)
 		miscEnsure("X-Stainless-Os", mapStainlessOS(), nil)
 		miscEnsure("X-Stainless-Arch", mapStainlessArch(), nil)
 		if clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent")); plausibleClaudeCodeUserAgent(clientUA, cfg) {

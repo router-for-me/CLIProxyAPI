@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
@@ -164,6 +165,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 					}
 				}
 				coreauth.SetOAuthModelAliasesAttribute(auth, perAccountModelAliases)
+				applyVertexOpenAPISettingsAttribute(auth, metadata)
 				ApplyAuthExcludedModelsMeta(auth, perAccountExcluded, "oauth")
 				coreauth.ApplyCustomHeadersFromMetadata(auth)
 				applyFingerprintProfileAttribute(auth, metadata)
@@ -246,6 +248,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
 	applyOpenAPIModelsAttribute(a, metadata)
+	applyVertexOpenAPISettingsAttribute(a, metadata)
 	ApplyAuthExcludedModelsMeta(a, perAccountExcluded, "oauth")
 	applyFingerprintProfileAttribute(a, metadata)
 	// For Kimi auth files, preserve domain and base_url attributes.
@@ -330,11 +333,17 @@ func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAut
 		if errMarshal != nil {
 			continue
 		}
-		var aliases []config.OAuthModelAlias
-		if errUnmarshal := json.Unmarshal(data, &aliases); errUnmarshal != nil {
+		var items []json.RawMessage
+		if errUnmarshal := json.Unmarshal(data, &items); errUnmarshal != nil {
 			continue
 		}
-		combined = append(combined, aliases...)
+		for _, item := range items {
+			var alias config.OAuthModelAlias
+			if errUnmarshal := json.Unmarshal(item, &alias); errUnmarshal != nil {
+				continue
+			}
+			combined = append(combined, alias)
+		}
 	}
 	if len(combined) == 0 {
 		return nil
@@ -346,6 +355,76 @@ func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAut
 	}
 	cfg.SanitizeOAuthModelAlias()
 	return cfg.OAuthModelAlias["auth"]
+}
+
+func applyVertexOpenAPISettingsAttribute(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil || auth.Provider != "vertex" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	switch value := metadata["openapi"].(type) {
+	case bool:
+		auth.Attributes["openapi"] = strconv.FormatBool(value)
+	case string:
+		if parsed, errParse := strconv.ParseBool(strings.TrimSpace(strings.ToLower(value))); errParse == nil {
+			auth.Attributes["openapi"] = strconv.FormatBool(parsed)
+		}
+	}
+	for _, key := range []string{"openapi_location", "openapi-location"} {
+		if location, ok := metadata[key].(string); ok && strings.TrimSpace(location) != "" {
+			auth.Attributes["openapi_location"] = strings.TrimSpace(location)
+			break
+		}
+	}
+	var rules []config.OAuthModelAlias
+	seenAlias := make(map[string]struct{})
+	seenNameOnly := make(map[string]struct{})
+	for _, key := range []string{"model_aliases", "model-aliases", "models"} {
+		data, errMarshal := json.Marshal(metadata[key])
+		if errMarshal != nil {
+			continue
+		}
+		var items []json.RawMessage
+		if errUnmarshal := json.Unmarshal(data, &items); errUnmarshal != nil {
+			continue
+		}
+		for _, item := range items {
+			var rule config.OAuthModelAlias
+			if errUnmarshal := json.Unmarshal(item, &rule); errUnmarshal != nil {
+				continue
+			}
+			rule.Name = strings.TrimSpace(rule.Name)
+			rule.Alias = strings.TrimSpace(rule.Alias)
+			if rule.Name == "" {
+				continue
+			}
+			if rule.Alias != "" && !strings.EqualFold(rule.Name, rule.Alias) {
+				aliasKey := strings.ToLower(rule.Alias)
+				if _, exists := seenAlias[aliasKey]; exists {
+					continue
+				}
+				seenAlias[aliasKey] = struct{}{}
+			} else if rule.OpenAPI != nil {
+				nameKey := strings.ToLower(rule.Name)
+				if _, exists := seenNameOnly[nameKey]; exists {
+					continue
+				}
+				seenNameOnly[nameKey] = struct{}{}
+			} else {
+				continue
+			}
+			if rule.OpenAPI != nil {
+				rules = append(rules, rule)
+			}
+		}
+	}
+	if len(rules) > 0 {
+		if data, errMarshal := json.Marshal(rules); errMarshal == nil {
+			auth.Attributes["vertex_model_openapi"] = string(data)
+		}
+	}
 }
 
 func applyOpenAPIModelsAttribute(auth *coreauth.Auth, metadata map[string]any) {
