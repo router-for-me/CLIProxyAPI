@@ -196,6 +196,9 @@ type ThinkingSupport struct {
 	ZeroAllowed bool
 	// DynamicAllowed reports whether automatic reasoning budget selection is supported.
 	DynamicAllowed bool
+	// DisableType is the Claude thinking.type that turns thinking off for this
+	// model. Empty means "disabled"; claude-sonnet-5-5 needs "between_tools".
+	DisableType string
 	// Levels lists supported named reasoning levels.
 	Levels []string
 }
@@ -374,6 +377,8 @@ type AuthRefreshResponse struct {
 }
 
 // ModelRegistrar registers plugin-provided models with the host.
+// Without an Executor, these models are published only through matching credentials
+// after applying their model exclusions.
 type ModelRegistrar interface {
 	RegisterModels(context.Context, ModelRegistrationRequest) (ModelRegistrationResponse, error)
 }
@@ -393,6 +398,7 @@ type ModelRegistrationResponse struct {
 }
 
 // ModelProvider contributes provider-native static and per-auth model metadata.
+// StaticModels alone does not make models available without an Executor or matching credentials.
 type ModelProvider interface {
 	StaticModels(context.Context, StaticModelRequest) (ModelResponse, error)
 	ModelsForAuth(context.Context, AuthModelRequest) (ModelResponse, error)

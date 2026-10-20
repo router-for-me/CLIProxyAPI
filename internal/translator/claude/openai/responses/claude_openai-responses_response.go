@@ -19,7 +19,10 @@ type claudeToResponsesState struct {
 	translatorcommon.ApplyPatchErrorState
 	ApplyPatchCalls map[string]*translatorcommon.ApplyPatchCallState
 	// ToolSearch is upstream.claude.tool-search as pinned for this response.
-	ToolSearch              bool
+	ToolSearch bool
+	// RequestJSON is the validated request body picked once per stream;
+	// the per-chunk path reuses it instead of re-validating the full body.
+	RequestJSON             []byte
 	ToolWinners             map[string]responsesToolDescriptor
 	ToolNames               claudeToolNames
 	FuncItemAdded           map[int]bool
@@ -638,6 +641,7 @@ func newClaudeToResponsesState(requestJSON []byte, toolSearch bool) *claudeToRes
 	winners := responsesToolWinners(root, toolSearch)
 	return &claudeToResponsesState{
 		ToolSearch:              toolSearch,
+		RequestJSON:             requestJSON,
 		ToolWinners:             winners,
 		ToolNames:               buildClaudeToolNamesWithWinners(root, winners, toolSearch),
 		ApplyPatchCalls:         make(map[string]*translatorcommon.ApplyPatchCallState),
@@ -675,7 +679,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 	root := gjson.ParseBytes(rawJSON)
-	requestForToolMetadata := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
+	requestForToolMetadata := st.RequestJSON
 	ev := root.Get("type").String()
 	var out [][]byte
 
@@ -1009,7 +1013,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		}
 		// Inject original request fields into response as per docs/response.completed.json
 
-		reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
+		reqBytes := st.RequestJSON
 		if len(reqBytes) > 0 {
 			req := gjson.ParseBytes(reqBytes)
 			if v := req.Get("instructions"); v.Exists() {

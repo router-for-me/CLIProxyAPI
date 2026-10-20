@@ -5,8 +5,15 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"math"
+	"strconv"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
@@ -126,6 +133,214 @@ type CodexClientConfig struct {
 	// EnableApplyPatch advertises freeform apply_patch only for supported models.
 	// Default false clears the capability regardless of template metadata.
 	EnableApplyPatch bool `yaml:"enable-apply-patch" json:"enable-apply-patch"`
+
+	// WebSearchResultCache configures caching of upstream web search results for
+	// Codex Responses clients that drop search results from replayed history.
+	WebSearchResultCache CodexWebSearchResultCacheConfig `yaml:"web-search-result-cache" json:"web-search-result-cache"`
+}
+
+const (
+	// DefaultCodexWebSearchResultCacheTTL is the default lifetime of cached web search results.
+	DefaultCodexWebSearchResultCacheTTL = 24 * time.Hour
+
+	// DefaultCodexWebSearchResultCacheLimit is the default maximum number of cached web search result entries.
+	DefaultCodexWebSearchResultCacheLimit = 1024
+
+	maxCodexWebSearchResultCacheTTLSeconds = int64(math.MaxInt64 / time.Second)
+)
+
+// CodexWebSearchResultCacheConfig configures the session-scoped web search result cache.
+type CodexWebSearchResultCacheConfig struct {
+	// Enabled controls whether web search results are cached and restored for Codex Responses requests.
+	// Default is false (disabled).
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// TTL specifies how long cached web search results remain valid (e.g. 1800, "30m", "24h").
+	// Pure numbers are interpreted as seconds. Defaults to "24h" when unset.
+	TTL string `yaml:"ttl" json:"ttl"`
+
+	// Limit specifies the maximum number of entries retained in the web search result cache.
+	// Defaults to 1024 when unset or zero.
+	Limit int `yaml:"limit" json:"limit"`
+}
+
+// Validate checks that the configured TTL and entry limit are valid.
+func (c CodexWebSearchResultCacheConfig) Validate() error {
+	if _, err := parseCodexWebSearchResultCacheTTL(c.TTL); err != nil {
+		return err
+	}
+	if c.Limit < 0 {
+		return fmt.Errorf("client.codex.web-search-result-cache.limit must not be negative")
+	}
+	return nil
+}
+
+// EffectiveTTL returns the parsed cache TTL, or DefaultCodexWebSearchResultCacheTTL when unset or zero.
+func (c CodexWebSearchResultCacheConfig) EffectiveTTL() time.Duration {
+	d, err := parseCodexWebSearchResultCacheTTL(c.TTL)
+	if err != nil || d <= 0 {
+		return DefaultCodexWebSearchResultCacheTTL
+	}
+	return d
+}
+
+// EffectiveLimit returns the configured entry limit, or DefaultCodexWebSearchResultCacheLimit when unset or non-positive.
+func (c CodexWebSearchResultCacheConfig) EffectiveLimit() int {
+	if c.Limit > 0 {
+		return c.Limit
+	}
+	return DefaultCodexWebSearchResultCacheLimit
+}
+
+func (c *CodexWebSearchResultCacheConfig) UnmarshalYAML(value *yaml.Node) error {
+	if c == nil {
+		return nil
+	}
+	if value == nil || value.Kind == 0 || value.Tag == "!!null" {
+		*c = CodexWebSearchResultCacheConfig{}
+		return nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("client.codex.web-search-result-cache must be a mapping")
+	}
+	var next CodexWebSearchResultCacheConfig
+	seen := make(map[string]bool, len(value.Content)/2)
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		keyNode := value.Content[i]
+		valNode := value.Content[i+1]
+		if keyNode == nil || valNode == nil {
+			continue
+		}
+		if seen[keyNode.Value] {
+			return fmt.Errorf("client.codex.web-search-result-cache: duplicate field %q", keyNode.Value)
+		}
+		seen[keyNode.Value] = true
+		switch keyNode.Value {
+		case "enabled":
+			if valNode.Tag == "!!null" {
+				next.Enabled = false
+				continue
+			}
+			if valNode.Kind != yaml.ScalarNode || valNode.Tag != "!!bool" {
+				return fmt.Errorf("client.codex.web-search-result-cache.enabled must be a boolean")
+			}
+			var enabled bool
+			if errDecode := valNode.Decode(&enabled); errDecode != nil {
+				return fmt.Errorf("client.codex.web-search-result-cache.enabled: %w", errDecode)
+			}
+			next.Enabled = enabled
+		case "ttl":
+			if valNode.Tag == "!!null" {
+				next.TTL = ""
+				continue
+			}
+			if valNode.Kind != yaml.ScalarNode || (valNode.Tag != "!!str" && valNode.Tag != "!!int") {
+				return fmt.Errorf("client.codex.web-search-result-cache.ttl must be a duration string or integer seconds")
+			}
+			next.TTL = strings.TrimSpace(valNode.Value)
+		case "limit":
+			if valNode.Tag == "!!null" {
+				next.Limit = 0
+				continue
+			}
+			if valNode.Kind != yaml.ScalarNode || valNode.Tag != "!!int" {
+				return fmt.Errorf("client.codex.web-search-result-cache.limit must be an integer")
+			}
+			var limit int
+			if errDecode := valNode.Decode(&limit); errDecode != nil {
+				return fmt.Errorf("client.codex.web-search-result-cache.limit: %w", errDecode)
+			}
+			next.Limit = limit
+		default:
+			return fmt.Errorf("client.codex.web-search-result-cache: unknown field %q", keyNode.Value)
+		}
+	}
+	if errValidate := next.Validate(); errValidate != nil {
+		return errValidate
+	}
+	*c = next
+	return nil
+}
+
+func (c *CodexWebSearchResultCacheConfig) UnmarshalJSON(data []byte) error {
+	if c == nil {
+		return nil
+	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*c = CodexWebSearchResultCacheConfig{}
+		return nil
+	}
+	var raw struct {
+		Enabled bool            `json:"enabled"`
+		TTL     json.RawMessage `json:"ttl"`
+		Limit   int             `json:"limit"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if errDecode := decoder.Decode(&raw); errDecode != nil {
+		return errDecode
+	}
+	ttl, errTTL := parseCodexWebSearchResultCacheTTLJSON(raw.TTL)
+	if errTTL != nil {
+		return errTTL
+	}
+	next := CodexWebSearchResultCacheConfig{
+		Enabled: raw.Enabled,
+		TTL:     ttl,
+		Limit:   raw.Limit,
+	}
+	if errValidate := next.Validate(); errValidate != nil {
+		return errValidate
+	}
+	*c = next
+	return nil
+}
+
+func parseCodexWebSearchResultCacheTTLJSON(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if errUnmarshal := json.Unmarshal(trimmed, &s); errUnmarshal != nil {
+			return "", fmt.Errorf("client.codex.web-search-result-cache.ttl: %w", errUnmarshal)
+		}
+		return strings.TrimSpace(s), nil
+	}
+	var n int64
+	if errUnmarshal := json.Unmarshal(trimmed, &n); errUnmarshal != nil {
+		return "", fmt.Errorf("client.codex.web-search-result-cache.ttl must be a duration string or integer seconds")
+	}
+	return strconv.FormatInt(n, 10), nil
+}
+
+func parseCodexWebSearchResultCacheTTL(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "0" {
+		return DefaultCodexWebSearchResultCacheTTL, nil
+	}
+	if secs, errParseInt := strconv.ParseInt(raw, 10, 64); errParseInt == nil {
+		if secs < 0 {
+			return 0, fmt.Errorf("client.codex.web-search-result-cache.ttl must not be negative")
+		}
+		if secs > maxCodexWebSearchResultCacheTTLSeconds {
+			return 0, fmt.Errorf("client.codex.web-search-result-cache.ttl overflows duration")
+		}
+		return time.Duration(secs) * time.Second, nil
+	}
+	d, errParseDuration := time.ParseDuration(raw)
+	if errParseDuration != nil {
+		return 0, fmt.Errorf("client.codex.web-search-result-cache.ttl %q is invalid: %w", raw, errParseDuration)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("client.codex.web-search-result-cache.ttl must not be negative")
+	}
+	if d == 0 {
+		return DefaultCodexWebSearchResultCacheTTL, nil
+	}
+	return d, nil
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.

@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -304,4 +305,109 @@ func TestObserveResponsesTokenEvent_FirstPacketFallback(t *testing.T) {
 	if !reporter.IsFirstPacketSet() {
 		t.Fatalf("expected IsFirstPacketSet() == true")
 	}
+}
+
+func TestIsResponsesTokenEvent_CompletedReasoning(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{
+			name:    "summary text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]}}`,
+			want:    true,
+		},
+		{
+			name:    "content text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"thinking"}]}}`,
+			want:    true,
+		},
+		{
+			name:    "later summary part",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":""},{"text":"thinking"}]}}`,
+			want:    true,
+		},
+		{
+			name:    "empty summary with content text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":""}],"content":[{"text":"thinking"}]}}`,
+			want:    true,
+		},
+		{
+			name:    "whitespace text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":" "}]}}`,
+			want:    true,
+		},
+		{
+			name:    "SSE text",
+			payload: `data: {"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":"thinking"}]}}`,
+			want:    true,
+		},
+		{
+			name:    "empty arrays",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[],"content":[]}}`,
+			want:    false,
+		},
+		{
+			name:    "empty text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":""}],"content":[{"text":""}]}}`,
+			want:    false,
+		},
+		{
+			name:    "missing text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"type":"summary_text"}],"content":[{}]}}`,
+			want:    false,
+		},
+		{
+			name:    "null text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":null}]}}`,
+			want:    false,
+		},
+		{
+			name:    "missing parts",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning"}}`,
+			want:    false,
+		},
+		{
+			name:    "encrypted only",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[],"encrypted_content":"opaque"}}`,
+			want:    false,
+		},
+		{
+			name:    "malformed numeric text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":123}]}}`,
+			want:    false,
+		},
+		{
+			name:    "malformed object text",
+			payload: `{"type":"response.output_item.done","item":{"type":"reasoning","content":[{"text":{"value":"thinking"}}]}}`,
+			want:    false,
+		},
+		{
+			name:    "added stays metadata",
+			payload: `{"type":"response.output_item.added","item":{"type":"reasoning","summary":[{"text":"thinking"}]}}`,
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsResponsesTokenEvent([]byte(tt.payload)); got != tt.want {
+				t.Fatalf("IsResponsesTokenEvent = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestObserveResponsesTokenEvent_CompletedReasoningKeepsFirstTokenTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reporter := NewUsageReporter(context.Background(), "meta", "muse-spark-1.3", nil)
+		reporter.StartResponseTTFT()
+		time.Sleep(100 * time.Millisecond)
+		ObserveResponsesTokenEvent(reporter, []byte(`{"type":"response.reasoning_summary_text.delta","delta":"thinking"}`))
+		time.Sleep(time.Second)
+		ObserveResponsesTokenEvent(reporter, []byte(`{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"text":"thinking"}]}}`))
+		if got := reporter.ttftDuration(); got != 100*time.Millisecond {
+			t.Fatalf("TTFT = %v, want 100ms", got)
+		}
+	})
 }

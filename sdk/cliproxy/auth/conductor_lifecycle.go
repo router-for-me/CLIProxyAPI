@@ -138,6 +138,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
+	auth.ClearFileSnapshot()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.notifyAuthChangeLocked(auth.ID)
@@ -186,6 +187,53 @@ func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return m.updateInternal(ctx, nil, auth, updateModeReplace)
+}
+
+// Modify loads the latest auth for id while holding the per-auth mutation gate,
+// applies edit to a clone of that auth, and commits the result through the
+// standard persistence and publication path. It returns (nil, false, nil) if
+// the auth is not present when the gate is acquired.
+func (m *Manager) Modify(ctx context.Context, id string, expectedEpoch uint64, edit func(*Auth) error) (*Auth, bool, error) {
+	id = strings.TrimSpace(id)
+	if m == nil || id == "" || edit == nil {
+		return nil, false, nil
+	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, id)
+	if errMutation != nil {
+		return nil, false, errMutation
+	}
+	defer releaseMutation()
+
+	m.mu.RLock()
+	existing, ok := m.auths[id]
+	var current *Auth
+	var currentEpoch uint64
+	if ok && existing != nil {
+		current = existing.Clone()
+		currentEpoch = existing.RegistrationEpoch
+		if m.authEpochs != nil && m.authEpochs[id] > currentEpoch {
+			currentEpoch = m.authEpochs[id]
+		}
+	}
+	m.mu.RUnlock()
+	if current == nil {
+		return nil, false, nil
+	}
+	if expectedEpoch != 0 && expectedEpoch < currentEpoch {
+		return nil, false, fmt.Errorf("update auth %s: stale registration epoch %d < %d", id, expectedEpoch, currentEpoch)
+	}
+	if errEdit := edit(current); errEdit != nil {
+		return nil, false, errEdit
+	}
+	if expectedEpoch != 0 {
+		current.RegistrationEpoch = expectedEpoch
+	}
+	committedAuth, didCommit, persistCooldown, errUpdate := m.updateInternalLocked(ctx, nil, current, updateModeReplace)
+	releaseMutation()
+	if errUpdate == nil && didCommit && committedAuth != nil {
+		m.finishAuthUpdate(ctx, committedAuth, persistCooldown)
+	}
+	return committedAuth, errUpdate == nil && didCommit && committedAuth != nil, errUpdate
 }
 
 func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
@@ -240,6 +288,22 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	NormalizeCredentialMetadata(auth.Metadata)
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, false, false, fmt.Errorf("update auth: %w", errWeight)
+	}
+	if mode == updateModeReplace && auth.HasFileSnapshot() {
+		m.mu.RLock()
+		existing, ok := m.auths[auth.ID]
+		m.mu.RUnlock()
+		if !ok || existing == nil {
+			return nil, false, false, nil
+		}
+		// Validate file snapshot freshness under the per-auth mutation gate
+		// without holding m.mu across filesystem I/O.
+		if !auth.FileSnapshotMatchesDisk() {
+			m.mu.RLock()
+			current := m.auths[auth.ID].Clone()
+			m.mu.RUnlock()
+			return current, false, false, nil
+		}
 	}
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
@@ -332,10 +396,20 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		} else {
 			auth.RejectedAccessToken = existing.RejectedAccessToken
 		}
-		if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
+		// A refresh that confirms quota restoration (issue #6690) releases the
+		// credential-wide cooldown early; otherwise the active credential
+		// quota below is preserved exactly as before.
+		devinQuotaRestored := mode == updateModeRefresh && applyDevinQuotaRestoration(auth, existing, time.Now())
+		if devinQuotaRestored {
+			cooldownStateChanged = true
+		} else if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
 			auth.Unavailable = existing.Unavailable
 			auth.NextRetryAfter = existing.NextRetryAfter
+			// Preserve cooldown fields; keep the newest observation snapshot.
+			observation := mergeQuotaObservation(auth.Quota, existing.Quota)
 			auth.Quota = existing.Quota
+			auth.Quota.ObservedAt = observation.ObservedAt
+			auth.Quota.Signals = observation.Signals
 			if auth.Status == StatusActive {
 				auth.Status = existing.Status
 			}
@@ -377,6 +451,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if existing.Generation >= auth.Generation {
 		auth.Generation = existing.Generation + 1
 	}
+	auth.ClearFileSnapshot()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.notifyAuthChangeLocked(auth.ID)

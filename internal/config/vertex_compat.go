@@ -29,8 +29,11 @@ type VertexCompatKey struct {
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
 	// BaseURL optionally overrides the Vertex-compatible API endpoint.
-	// The executor will append "/v1/publishers/google/models/{model}:action" to this.
-	// When empty, requests fall back to the default Vertex API base URL.
+	// When it contains a "/publishers/" segment it is used as the full resource
+	// prefix (e.g. "https://aiplatform.googleapis.com/v1/projects/{p}/locations/{l}/publishers/google/models")
+	// and the executor only appends "/{model}:{action}". Otherwise "/v1" is
+	// inserted if absent, then "/publishers/google/models" is appended; a
+	// trailing version segment like "/v1" or "/v1beta1" is never duplicated.
 	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
 
 	// ProxyURL optionally overrides the global proxy for this API key.
@@ -110,12 +113,12 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 
-		// Sanitize models: remove entries without valid alias
+		// Sanitize models: remove entries without valid model name
 		sanitizedModels := make([]VertexCompatModel, 0, len(entry.Models))
 		for _, model := range entry.Models {
 			model.Alias = strings.TrimSpace(model.Alias)
 			model.Name = strings.TrimSpace(model.Name)
-			if model.Alias != "" && model.Name != "" {
+			if model.Name != "" {
 				sanitizedModels = append(sanitizedModels, model)
 			}
 		}

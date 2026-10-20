@@ -496,6 +496,11 @@ func claudeJSONObjectHasKeys(raw []byte, want []string) bool {
 	return errClosing == nil && closing == json.Delim('}') && keyIndex == len(want)
 }
 
+// IsClaudeCodeUserAgent reports whether userAgent identifies a Claude Code CLI client.
+func IsClaudeCodeUserAgent(userAgent string) bool {
+	return claudeCodeUserAgentPattern.MatchString(strings.TrimSpace(userAgent))
+}
+
 func plausibleClaudeCodeUserAgent(userAgent string, cfg *config.Config) bool {
 	userAgent = strings.TrimSpace(userAgent)
 	if !claudeCodeUserAgentPattern.MatchString(userAgent) || !claudeCodeNativeUserAgentPattern.MatchString(userAgent) {

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -26,6 +28,20 @@ func validOpenAIResponsesReasoningEncryptedContentForTest() string {
 		payload[i] = byte(i)
 	}
 	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+// validMetaReasoningEncryptedContentForTest builds a shape-valid synthetic
+// Meta envelope: "Q-PaDgE" pins the observed five-byte header, and 1426
+// unpadded base64url chars decode to 45 + 1024 bytes. No captured signature
+// is embedded in tests.
+func validMetaReasoningEncryptedContentForTest() string {
+	return "Q-PaDgE" + strings.Repeat("A", 1419)
+}
+
+// routedMetaReasoningEncryptedContentForTest appends a synthetic
+// OpenRouter-style suffix: one '.' plus 67 alphanumeric characters.
+func routedMetaReasoningEncryptedContentForTest() string {
+	return validMetaReasoningEncryptedContentForTest() + "." + strings.Repeat("Ab3", 23)[:67]
 }
 
 func TestSanitizeOpenAIResponsesReasoningEncryptedContent_StripsOrphanIDsWhenStoreDisabled(t *testing.T) {
@@ -257,6 +273,272 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign_Issue6450(t
 	// rs_orphan: missing signature, id dropped when store=false
 	if gjson.GetBytes(got, "input.3.id").Exists() {
 		t.Fatalf("orphan reasoning id should be dropped: %s", got)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentForMeta_PreservesRecognizedMuse(t *testing.T) {
+	// Synthetic shape-valid Meta envelope: "Q-PaDgE" pins the observed
+	// five-byte header, and 1426 unpadded base64url chars decode to
+	// 45 + 1024 bytes. No captured signature is embedded in tests.
+	metaSig := "Q-PaDgE" + strings.Repeat("A", 1419)
+	const unknownSig = "Q-PaDg-mock-muse-spark-encrypted-reasoning-payload"
+	body := []byte(`{"store":false,"input":[` +
+		`{"id":"rs_meta","type":"reasoning","summary":[],"content":null,"encrypted_content":"` + metaSig + `"},` +
+		`{"id":"rs_unknown","type":"reasoning","summary":[],"content":null,"encrypted_content":"` + unknownSig + `"},` +
+		`{"id":"rs_claude","type":"reasoning","summary":[],"content":null,"encrypted_content":"` + testClaudeCAISSample + `"} ` +
+		`]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContentForMeta(context.Background(), "test", body)
+
+	// The Meta target is native-only: the recognized Meta envelope survives,
+	// while unknown-format and known-foreign values are both stripped so no
+	// wrong signature can reach the Meta upstream.
+	if gotSig := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotSig != metaSig {
+		t.Fatalf("recognized Meta encrypted_content not preserved; body=%s", got)
+	}
+	if gjson.GetBytes(got, "input.1.encrypted_content").Exists() {
+		t.Fatalf("unknown-format encrypted_content should be stripped on Meta target: %s", got)
+	}
+	if gjson.GetBytes(got, "input.2.encrypted_content").Exists() {
+		t.Fatalf("Claude signature should be stripped on Meta target: %s", got)
+	}
+
+	// The generic keepForeign path has no Meta allowance: once Muse is a
+	// positively recognized family, its envelope is known-foreign there and
+	// must be stripped instead of riding the unknown-format exemption.
+	generic := sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(context.Background(), "test", body)
+	if gjson.GetBytes(generic, "input.0.encrypted_content").Exists() {
+		t.Fatalf("recognized Meta signature should be stripped by generic keepForeign: %s", generic)
+	}
+	if gotSig := gjson.GetBytes(generic, "input.1.encrypted_content").String(); gotSig != unknownSig {
+		t.Fatalf("unknown-format encrypted_content should remain preserved by generic keepForeign; body=%s", generic)
+	}
+
+	// The compat path preserves a recognized Meta envelope only when its
+	// target model is itself a Meta-family model (cascaded/third-party
+	// compat endpoints serving muse-*); other compat targets strip it.
+	compatMeta := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(context.Background(), "test", body, true, "muse-spark-1.3")
+	if gotSig := gjson.GetBytes(compatMeta, "input.0.encrypted_content").String(); gotSig != metaSig {
+		t.Fatalf("compat Meta-model target should preserve recognized Meta signature; body=%s", compatMeta)
+	}
+	if gjson.GetBytes(compatMeta, "input.1.encrypted_content").Exists() {
+		t.Fatalf("compat Meta-model target should strip unknown-format signature: %s", compatMeta)
+	}
+	compatOther := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(context.Background(), "test", body, true, "deepseek-v4")
+	if gjson.GetBytes(compatOther, "input.0.encrypted_content").Exists() {
+		t.Fatalf("compat non-Meta target should strip recognized Meta signature: %s", compatOther)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentForMeta_StripsRouterSuffixed(t *testing.T) {
+	native := validMetaReasoningEncryptedContentForTest()
+	routed := routedMetaReasoningEncryptedContentForTest()
+	body := []byte(`{"store":false,"input":[` +
+		`{"type":"reasoning","summary":[],"encrypted_content":"` + native + `"},` +
+		`{"type":"reasoning","summary":[],"encrypted_content":"` + routed + `"}` +
+		`]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContentForMeta(context.Background(), "test", body)
+
+	// The native Meta upstream is fail-closed on the router suffix: the
+	// unsuffixed envelope survives while the routed form is stripped.
+	if gotSig := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotSig != native {
+		t.Fatalf("native Meta encrypted_content not preserved; body=%s", got)
+	}
+	if gjson.GetBytes(got, "input.1.encrypted_content").Exists() {
+		t.Fatalf("router-suffixed Meta encrypted_content should be stripped on native Meta target: %s", got)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel_RoutedMetaTarget(t *testing.T) {
+	native := validMetaReasoningEncryptedContentForTest()
+	routed := routedMetaReasoningEncryptedContentForTest()
+	gptSig := validOpenAIResponsesReasoningEncryptedContentForTest()
+	const unknownSig = "opaque-encrypted-reasoning-token-xyz"
+	buildBody := func() []byte {
+		return []byte(`{"store":false,"input":[` +
+			`{"type":"reasoning","summary":[],"encrypted_content":"` + native + `"},` +
+			`{"type":"reasoning","summary":[],"encrypted_content":"` + routed + `"},` +
+			`{"type":"reasoning","summary":[],"encrypted_content":"` + gptSig + `"},` +
+			`{"type":"reasoning","summary":[],"encrypted_content":"` + unknownSig + `"},` +
+			`{"type":"reasoning","summary":[],"encrypted_content":"` + testClaudeCAISSample + `"}` +
+			`]}`)
+	}
+	assertRoutedTarget := func(t *testing.T, got []byte) {
+		t.Helper()
+		if gotSig := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotSig != native {
+			t.Fatalf("native Meta encrypted_content not preserved; body=%s", got)
+		}
+		if gotSig := gjson.GetBytes(got, "input.1.encrypted_content").String(); gotSig != routed {
+			t.Fatalf("routed Meta encrypted_content = %q, want verbatim; body=%s", gotSig, got)
+		}
+		for index, item := range gjson.GetBytes(got, "input").Array() {
+			if index < 2 {
+				continue
+			}
+			if item.Get("encrypted_content").Exists() {
+				t.Fatalf("input[%d] foreign encrypted_content should be stripped on Meta target; body=%s", index, got)
+			}
+		}
+	}
+
+	// A Meta-family model name on an OpenRouter baseURL preserves routed
+	// envelopes verbatim regardless of the compat flag, while non-OpenRouter
+	// third-party baseURLs strip OpenRouter's private suffix down to the
+	// native Meta envelope.
+	for _, isCompat := range []bool{false, true} {
+		got := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(context.Background(), "test", buildBody(), isCompat, "meta/muse-wonder", "https://openrouter.ai/api/v1")
+		assertRoutedTarget(t, got)
+	}
+
+	// Namespaced router model IDs resolve to their Meta tail segment.
+	got := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(context.Background(), "test", buildBody(), false, "openrouter/meta/muse-wonder", "https://openrouter.ai/api/v1")
+	assertRoutedTarget(t, got)
+
+	otherProviderMeta := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(context.Background(), "test", buildBody(), false, "meta/muse-wonder", "https://example-proxy.internal/v1")
+	if gotSig := gjson.GetBytes(otherProviderMeta, "input.1.encrypted_content").String(); gotSig != native {
+		t.Fatalf("non-OpenRouter provider should strip OpenRouter suffix to native Meta envelope, got %q want %q", gotSig, native)
+	}
+
+	// OpenRouter Meta executor baseURL preserves routed Meta envelopes while
+	// native api.meta.ai drops router-suffixed envelopes completely.
+	routedMetaURL := sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(context.Background(), "test", buildBody(), "https://openrouter.ai/api/v1")
+	assertRoutedTarget(t, routedMetaURL)
+
+	nativeMetaURL := sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(context.Background(), "test", buildBody(), "https://api.meta.ai/api/v1")
+	if gotSig := gjson.GetBytes(nativeMetaURL, "input.0.encrypted_content").String(); gotSig != native {
+		t.Fatalf("native Meta URL should preserve native envelope; body=%s", nativeMetaURL)
+	}
+	if gjson.GetBytes(nativeMetaURL, "input.1.encrypted_content").Exists() {
+		t.Fatalf("native Meta URL should strip router-suffixed envelope; body=%s", nativeMetaURL)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel_StripsMetaForNonMetaTargets(t *testing.T) {
+	native := validMetaReasoningEncryptedContentForTest()
+	routed := routedMetaReasoningEncryptedContentForTest()
+	body := []byte(`{"store":false,"input":[` +
+		`{"type":"reasoning","summary":[],"encrypted_content":"` + native + `"},` +
+		`{"type":"reasoning","summary":[],"encrypted_content":"` + routed + `"}` +
+		`]}`)
+
+	for _, tc := range []struct {
+		model    string
+		isCompat bool
+	}{
+		{"gpt-5.4", false},
+		{"deepseek-v4", true},
+	} {
+		got := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(context.Background(), "test", body, tc.isCompat, tc.model)
+		for index, item := range gjson.GetBytes(got, "input").Array() {
+			if item.Get("encrypted_content").Exists() {
+				t.Fatalf("model=%s isCompat=%v: input[%d] Meta encrypted_content should be stripped; body=%s", tc.model, tc.isCompat, index, got)
+			}
+		}
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContent_StripsRouterSuffixOnNonOpenRouterUpstreams(t *testing.T) {
+	gptNative := validOpenAIResponsesReasoningEncryptedContentForTest()
+	suffix := strings.Repeat("Ab3", 27)[:79]
+	gptRouted := gptNative + "." + suffix
+
+	body := []byte(`{"store":false,"input":[{"type":"reasoning","summary":[],"encrypted_content":"` + gptRouted + `"}]}`)
+
+	// Official Codex / non-OpenRouter upstreams must strip the private OpenRouter suffix.
+	gotOfficial := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(
+		context.Background(),
+		"test",
+		body,
+		false,
+		"gpt-5.4",
+		"https://chatgpt.com/backend-api/codex",
+	)
+	if gotSig := gjson.GetBytes(gotOfficial, "input.0.encrypted_content").String(); gotSig != gptNative {
+		t.Fatalf("official Codex encrypted_content = %q, want stripped native %q", gotSig, gptNative)
+	}
+
+	// OpenRouter upstream preserves its router suffix verbatim.
+	gotOpenRouter := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(
+		context.Background(),
+		"test",
+		body,
+		false,
+		"openrouter/openai/o4-mini",
+		"https://openrouter.ai/api/v1",
+	)
+	if gotSig := gjson.GetBytes(gotOpenRouter, "input.0.encrypted_content").String(); gotSig != gptRouted {
+		t.Fatalf("OpenRouter encrypted_content = %q, want verbatim %q", gotSig, gptRouted)
+	}
+
+	// Foreign GPT encrypted_content must be stripped when targeting a non-GPT family (e.g. Grok or Gemini on OpenRouter).
+	for _, model := range []string{"openrouter/x-ai/grok-4.7", "openrouter/google/gemini-3.8-flash"} {
+		gotForeign := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(
+			context.Background(),
+			"test",
+			body,
+			true,
+			model,
+			"https://openrouter.ai/api/v1",
+		)
+		if gjson.GetBytes(gotForeign, "input.0.encrypted_content").Exists() {
+			t.Fatalf("model=%s: foreign GPT encrypted_content should be stripped; body=%s", model, gotForeign)
+		}
+	}
+
+	// Cache-prefixed compatible signatures (e.g. "swe#sealed.v1.sig" or "gpt#...")
+	// must be rewritten to their normalized unprefixed form in encrypted_content.
+	prefixedSWEBody := []byte(`{"store":false,"input":[{"type":"reasoning","summary":[],"encrypted_content":"swe#sealed.v1.token"}]}`)
+	gotSWE := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(
+		context.Background(),
+		"test",
+		prefixedSWEBody,
+		true,
+		"devin/swe-2",
+		"https://openrouter.ai/api/v1",
+	)
+	if gotSig := gjson.GetBytes(gotSWE, "input.0.encrypted_content").String(); gotSig != "sealed.v1.token" {
+		t.Fatalf("prefixed SWE encrypted_content = %q, want normalized %q", gotSig, "sealed.v1.token")
+	}
+
+	// Gemini carrier wrapping a Meta signature must never be misclassified as a
+	// Devin sealed signature.
+	metaCarrier := base64.StdEncoding.EncodeToString([]byte("cpa-codex-gemini-carrier-v1:Q-PaDgE" + strings.Repeat("A", 1419)))
+	if sigBytes, sigType := parseSignatureBytes(metaCarrier); len(sigBytes) != 0 || sigType != "" {
+		t.Fatalf("parseSignatureBytes(metaCarrier) = (%q, %q), want empty", sigBytes, sigType)
+	}
+
+	// Replay cache backfill + channel switch: a routed signature cached from
+	// OpenRouter is preserved on OpenRouter and stripped to native on official Codex.
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+	const sessionKey = "execution:test-channel-switch"
+	internalcache.CacheCodexReasoningReplayItem("o4-mini", sessionKey, []byte(`{"type":"reasoning","summary":[],"encrypted_content":"`+gptRouted+`"}`))
+	replayReq := cliproxyexecutor.Request{
+		Model:   "o4-mini",
+		Payload: []byte(`{"model":"o4-mini","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`),
+	}
+	replayOpts := cliproxyexecutor.Options{
+		SourceFormat: "claude",
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "test-channel-switch",
+		},
+	}
+	injected, _, errReplay := applyCodexReasoningReplayCacheRequired(context.Background(), "claude", replayReq, replayOpts, replayReq.Payload)
+	if errReplay != nil {
+		t.Fatalf("applyCodexReasoningReplayCacheRequired error = %v", errReplay)
+	}
+	sanitizedOpenRouter := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(
+		context.Background(), "test", injected, false, "o4-mini", "https://openrouter.ai/api/v1",
+	)
+	if gotSig := gjson.GetBytes(sanitizedOpenRouter, "input.0.encrypted_content").String(); gotSig != gptRouted {
+		t.Fatalf("replay cache -> OpenRouter encrypted_content = %q, want routed %q", gotSig, gptRouted)
+	}
+	sanitizedOfficial := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(
+		context.Background(), "test", injected, false, "o4-mini", "https://chatgpt.com/backend-api/codex",
+	)
+	if gotSig := gjson.GetBytes(sanitizedOfficial, "input.0.encrypted_content").String(); gotSig != gptNative {
+		t.Fatalf("replay cache -> official Codex encrypted_content = %q, want stripped native %q", gotSig, gptNative)
 	}
 }
 

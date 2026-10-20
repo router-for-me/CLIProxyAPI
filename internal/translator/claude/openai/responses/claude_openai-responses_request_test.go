@@ -2136,6 +2136,11 @@ func TestConvertOpenAIResponsesRequestToClaude_UnsupportedPrefillModelsStripTrai
 		"claude-opus-5.1",
 		"claude-sonnet-4-6-20260217",
 		" ANTHROPIC/CLAUDE-OPUS-5-THINKING ",
+		"claude-haiku-5-5",
+		"claude-haiku-5",
+		"claude-haiku-5.5",
+		"haiku-5-5",
+		"anthropic/claude-haiku-5-5",
 	}
 	for _, model := range unsupportedModels {
 		t.Run(model, func(t *testing.T) {
@@ -2165,6 +2170,8 @@ func TestConvertOpenAIResponsesRequestToClaude_SupportedPrefillModelsPreserveAss
 	supportedModels := []string{
 		"claude-sonnet-4-5",
 		"claude-haiku-4-5",
+		"claude-haiku-5foo",
+		"claude-haiku-20260217",
 		"claude-3-opus-20240229",
 		"claude-opus-20240229",
 		"claude-sonnet-4-20260217",

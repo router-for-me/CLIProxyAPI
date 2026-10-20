@@ -112,9 +112,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -142,9 +141,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -233,9 +231,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
-        "zero_allowed": true,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -263,9 +260,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
-        "zero_allowed": true,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -296,7 +292,7 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "zero_allowed": true,
+        "zero_allowed": false,
         "dynamic_allowed": true,
         "levels": [
           "low",
@@ -330,6 +326,7 @@
       "thinking": {
         "zero_allowed": true,
         "dynamic_allowed": true,
+        "disable_type": "between_tools",
         "levels": [
           "low",
           "medium",

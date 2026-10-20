@@ -325,6 +325,12 @@ client:
     # Default false. Applies to both OAuth and API-key credentials across providers.
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
+    # Cache upstream web search results per session so replayed Codex web_search_call items
+    # that omit results still retain search results in later turns.
+    web-search-result-cache:
+      enabled: false
+      ttl: "24h"
+      limit: 1024
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
@@ -421,6 +427,11 @@ upstream:
     # credential serving it supports native tool search.
     # Default false keeps the translation and catalog behavior that predate tool_search support.
     tool-search: false
+
+    # Days to retain the cloaked currentDate pin per session, so an idle gap or a credential
+    # switch cannot re-anchor the date and invalidate earlier thinking signatures and the
+    # prompt cache. Default 7; an explicit 0 keeps the continuity-scoped pin (1h lifetime).
+    session-date-pin-days: 7
 
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
     # system prompt replacement), so the original system prompt is passed through to Claude as-is.
@@ -717,7 +728,7 @@ upstream:
 #           cloak:                         # optional: explicitly enable request cloaking for non-Claude-Code clients
 #             mode: "auto"                 # "auto" (default inside this block): cloak only when client is not Claude Code
 #                                          # "always": cloak every unconfirmed client; confirmed native Claude Code still passes through
-#                                          # "never": never apply cloaking
+#                                          # "never" / "uncloak": never apply cloaking; on non-CLI API keys, also strip incoming Claude Code identity/billing attribution
 #             # This "cloak" block applies to this api-keys.claude key entry only. For Claude OAuth
 #             # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
 #             # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id".
@@ -979,6 +990,11 @@ oauth:
   #       max-context-length: 1048576
 
   # OAuth provider excluded models
+  # Applies to OAuth/file-backed credentials of each provider.
+  # A credential's own non-empty "excluded_models" list (set in its auth JSON file) takes priority
+  # over these rules for that credential and is not merged with them. Credentials without their own
+  # list (missing, empty, or null) inherit the current rules here; changes to these rules
+  # take effect for them on config reload.
   # excluded-models:
   #   vertex:
   #     - "gemini-3-pro-preview"
