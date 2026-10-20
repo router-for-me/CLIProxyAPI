@@ -85,6 +85,9 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, fmt.Errorf("codex device flow did not return required fields")
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, codexDeviceTimeout)
+	defer cancel()
+
 	pollInterval := parseCodexDevicePollInterval(userCodeResp.Interval)
 
 	fmt.Println("Starting Codex device authentication...")
