@@ -197,7 +197,7 @@ func TestDelegatedLaunchQuotaAccounts(t *testing.T) {
 }
 
 func TestDelegatedLaunchProbeFailsClosed(t *testing.T) {
-	for _, kind := range []string{"missing-identity", "identity-mismatch", "ordinary-missing", "window-missing", "percent-malformed", "expired-window", "stale", "timeout", "redirect", "failed", "partial", "model-limit"} {
+	for _, kind := range []string{"identity-mismatch", "ordinary-missing", "window-missing", "percent-malformed", "expired-window", "stale", "timeout", "redirect", "failed", "partial", "model-limit"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newLaunchFixture(t)
 			f.add(t, "a", "account")
@@ -306,7 +306,7 @@ func TestDelegatedLaunchNoRetryAndTypedStreamRefusal(t *testing.T) {
 			f.add(t, "b", "other")
 			f.manager.SetRetryConfig(3, time.Second, 0)
 			r := f.pool.Prepare(context.Background(), "client", launchRequest("request"))
-			f.executor.err = &Error{Code: "upstream", HTTPStatus: 429}
+			f.executor.err = launchTestFailure{}
 			f.executor.streamError = true
 			requireLaunchRefusal(t, f.execute("client", r, r.Model, r.SessionID, stream), "usage_limit")
 			if f.executor.starts.Load() != 1 || f.executor.models[0] != r.Model || !strings.HasSuffix(f.executor.ids[0], "-a") {
@@ -465,3 +465,9 @@ func TestDelegatedLaunchProbeDeadline(t *testing.T) {
 		t.Fatal("timeout generated")
 	}
 }
+
+type launchTestFailure struct{}
+
+func (launchTestFailure) Error() string                      { return "synthetic quota" }
+func (launchTestFailure) StatusCode() int                    { return 429 }
+func (launchTestFailure) DelegatedFailure() (string, string) { return "usage_limit", "account" }

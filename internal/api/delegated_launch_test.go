@@ -53,16 +53,22 @@ type delegatedHTTPFixture struct {
 	engine      *gin.Engine
 	cfg         *config.Config
 	generations atomic.Int32
+	compactions atomic.Int32
 	probes      atomic.Int32
+	clock       atomic.Int64
 	allowed     atomic.Bool
 	quota       atomic.Bool
+	mode        atomic.Value
+	cacheKey    atomic.Value
 }
 
 func newDelegatedHTTPFixture(t *testing.T) *delegatedHTTPFixture {
 	t.Helper()
 	f := &delegatedHTTPFixture{cfg: &config.Config{}}
 	f.allowed.Store(true)
+	f.clock.Store(time.Now().UnixNano())
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", time.Unix(0, f.clock.Load()).UTC().Format(http.TimeFormat))
 		if r.Header.Get("Chatgpt-Account-Id") != "synthetic-account" || r.Header.Get("Authorization") != "Bearer synthetic-token" {
 			t.Error("wrong bound credentials")
 		}
@@ -72,7 +78,11 @@ func newDelegatedHTTPFixture(t *testing.T) *delegatedHTTPFixture {
 			if r.Method != "GET" {
 				t.Error("probe generated")
 			}
-			_, _ = fmt.Fprintf(w, `{"account_id":"synthetic-account","rate_limit":{"allowed":%t,"primary_window":{"used_percent":12,"reset_at":%d,"limit_window_seconds":18000},"secondary_window":{"used_percent":12,"reset_at":%d,"limit_window_seconds":604800}}}`, f.allowed.Load(), time.Now().Add(time.Hour).Unix(), time.Now().Add(24*time.Hour).Unix())
+			_, _ = fmt.Fprintf(w, `{"account_id":"synthetic-account","rate_limit":{"allowed":%t,"limit_reached":false,"primary_window":{"used_percent":12,"reset_at":%d,"limit_window_seconds":18000},"secondary_window":{"used_percent":12,"reset_at":%d,"limit_window_seconds":604800}}}`, f.allowed.Load(), time.Unix(0, f.clock.Load()).Add(time.Hour).Unix(), time.Unix(0, f.clock.Load()).Add(24*time.Hour).Unix())
+		case "/backend-api/codex/responses/compact":
+			f.compactions.Add(1)
+			f.generations.Add(1)
+			_, _ = fmt.Fprint(w, `{"id":"compact_synthetic","object":"response.compaction","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
 		case "/backend-api/codex/responses":
 			f.generations.Add(1)
 			if r.Method != "POST" {
@@ -81,17 +91,41 @@ func newDelegatedHTTPFixture(t *testing.T) *delegatedHTTPFixture {
 			body, _ := io.ReadAll(r.Body)
 			var request struct {
 				Model string `json:"model"`
+				Cache string `json:"prompt_cache_key"`
 			}
 			_ = json.Unmarshal(body, &request)
+			f.cacheKey.Store(request.Cache)
 			if request.Model != "gpt-6.1-sol" {
 				t.Errorf("wrong final model: %s", request.Model)
 			}
+			if mode, _ := f.mode.Load().(string); mode == "redirect" {
+				w.Header().Set("Location", "https://chatgpt.com/backend-api/codex/redirected")
+				w.WriteHeader(302)
+				return
+			}
 			if f.quota.Load() {
 				w.WriteHeader(429)
-				_, _ = w.Write([]byte(`{"error":{"code":"usage_limit_reached"}}`))
+				_, _ = w.Write([]byte(`{"error":{"type":"usage_limit_reached"}}`))
 				return
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
+			mode, _ := f.mode.Load().(string)
+			if mode == "sse-quota" || mode == "throttle" || mode == "capacity" || (mode == "tool-quota" && f.generations.Load() > 1) {
+				code := "usage_limit_reached"
+				if mode == "throttle" {
+					code = "rate_limit_exceeded"
+				}
+				if mode == "capacity" {
+					code = "model_at_capacity"
+				}
+				_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic\",\"status\":\"in_progress\",\"output\":[]}}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":%q,\"code\":%q}}}\n\n", code, code)
+				return
+			}
+			if mode == "tool-quota" {
+				item := `{"type":"function_call","id":"fc_synthetic","call_id":"call_synthetic","name":"control","arguments":"{}"}`
+				_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":%s}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic\",\"status\":\"completed\",\"output\":[%s]}}\n\n", item, item)
+				return
+			}
 			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-6.1-sol\",\"output\":[]}}\n\n")
 		default:
 			t.Errorf("unexpected upstream path %s", r.URL.Path)
@@ -116,7 +150,7 @@ func newDelegatedHTTPFixture(t *testing.T) *delegatedHTTPFixture {
 	f.engine = gin.New()
 	v1 := f.engine.Group("/v1")
 	v1.Use(AuthMiddleware(accessManager))
-	registerDelegatedLaunch(v1, auth.NewLaunchPool(m))
+	registerDelegatedLaunch(v1, auth.NewLaunchPoolWithClock(m, func() time.Time { return time.Unix(0, f.clock.Load()) }))
 	return f
 }
 func (f *delegatedHTTPFixture) call(method, path, principal, body string) *httptest.ResponseRecorder {
@@ -156,7 +190,7 @@ func TestDelegatedLaunchHTTPRealExecutor(t *testing.T) {
 	}
 }
 func TestDelegatedLaunchHTTPDenied(t *testing.T) {
-	for _, kind := range []string{"principal", "session", "model", "ordinary-false", "websocket", "unauthenticated", "session-body", "payload-rule"} {
+	for _, kind := range []string{"principal", "session", "model", "ordinary-false", "websocket", "unauthenticated", "payload-rule"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newDelegatedHTTPFixture(t)
 			r := f.prepare(t)
@@ -203,9 +237,78 @@ func TestDelegatedLaunchHTTPQuotaRaceNoReplay(t *testing.T) {
 			w := f.call("POST", r.BasePath+"/responses", "client", fmt.Sprintf(`{"model":"gpt-6.1-sol","input":"hello","stream":%t}`, stream))
 			var refusal struct{ Error auth.LaunchRefusal }
 			_ = json.Unmarshal(w.Body.Bytes(), &refusal)
-			if w.Code != 409 || refusal.Error.Code != "usage_limit" || refusal.Error.BindingID != r.BindingID || refusal.Error.QuotaScope != "account" || f.generations.Load() != 1 {
+			if w.Code != 429 || refusal.Error.Code != "usage_limit" || refusal.Error.BindingID != r.BindingID || refusal.Error.QuotaScope != "account" || f.generations.Load() != 1 {
 				t.Fatalf("race: %d %s count=%d", w.Code, w.Body.String(), f.generations.Load())
 			}
 		})
+	}
+}
+
+func TestDelegatedLaunchCacheAffinityIsNotIdentity(t *testing.T) {
+	for _, key := range []string{"", `,"prompt_cache_key":"native-generated-uuid"`, `,"prompt_cache_key":"custom-affinity"`} {
+		f := newDelegatedHTTPFixture(t)
+		r := f.prepare(t)
+		w := f.call("POST", r.BasePath+"/responses", "client", `{"model":"gpt-6.1-sol"`+key+`}`)
+		if w.Code != 200 || f.generations.Load() != 1 {
+			t.Fatalf("cache key denied: %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestDelegatedLaunchCompactPin(t *testing.T) {
+	for _, kind := range []string{"healthy", "principal", "session", "model", "payload-rule"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newDelegatedHTTPFixture(t)
+			r := f.prepare(t)
+			path, principal, body := r.BasePath+"/responses/compact", "client", `{"model":"gpt-6.1-sol","input":[]}`
+			switch kind {
+			case "principal":
+				principal = "attacker"
+			case "session":
+				path = strings.Replace(path, "/sessions/session/", "/sessions/other/", 1)
+			case "model":
+				body = `{"model":"gpt-6-astra","input":[]}`
+			case "payload-rule":
+				f.cfg.Payload.Override = []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: map[string]any{"model": "gpt-6-astra"}}}
+			}
+			w := f.call("POST", path, principal, body)
+			if kind == "healthy" {
+				if w.Code != 200 || f.generations.Load() != 1 || !strings.Contains(w.Body.String(), "compact_synthetic") {
+					t.Fatalf("compact=%d %s", w.Code, w.Body.String())
+				}
+			} else if w.Code < 400 || f.generations.Load() != 0 {
+				t.Fatalf("denied compact ran: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestDelegatedLaunchControlIsolation(t *testing.T) {
+	f := newDelegatedHTTPFixture(t)
+	r := f.prepare(t)
+	if w := f.call("GET", r.BasePath+"/state", "attacker", ""); !strings.Contains(w.Body.String(), `"state":"invalid"`) {
+		t.Fatal(w.Body.String())
+	}
+	_ = f.call("POST", r.BasePath+"/release", "attacker", "")
+	if w := f.call("GET", r.BasePath+"/state", "client", ""); !strings.Contains(w.Body.String(), `"state":"pending"`) {
+		t.Fatal(w.Body.String())
+	}
+	for i := 0; i < 2; i++ {
+		if w := f.call("POST", r.BasePath+"/release", "client", ""); w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+	}
+	if w := f.call("POST", r.BasePath+"/responses", "client", `{"model":"gpt-6.1-sol"}`); w.Code < 400 || f.generations.Load() != 0 {
+		t.Fatal("released binding ran")
+	}
+}
+
+func TestDelegatedLaunchExecutionRedirectRefused(t *testing.T) {
+	f := newDelegatedHTTPFixture(t)
+	r := f.prepare(t)
+	f.mode.Store("redirect")
+	w := f.call("POST", r.BasePath+"/responses", "client", `{"model":"gpt-6.1-sol"}`)
+	if w.Code < 400 || f.generations.Load() != 1 {
+		t.Fatalf("redirect followed: %d %s", w.Code, w.Body.String())
 	}
 }

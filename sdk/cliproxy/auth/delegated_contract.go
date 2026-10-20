@@ -2,6 +2,8 @@ package auth
 
 import "time"
 
+const LaunchProtocolVersion = 1
+
 // PrepareLaunchRequest is version 1 of the pool-owned admission protocol.
 type PrepareLaunchRequest struct {
 	ClientRequestID     string   `json:"clientRequestId"`
@@ -19,6 +21,7 @@ type LaunchWindow struct {
 
 // LaunchResult never contains credential material. A binding is not a reservation.
 type LaunchResult struct {
+	ProtocolVersion      int            `json:"protocolVersion"`
 	Status               string         `json:"status"` // ready, waiting, unverified
 	Code                 string         `json:"code,omitempty"`
 	QuotaScope           string         `json:"quotaScope,omitempty"`
@@ -42,5 +45,30 @@ type LaunchRefusal struct {
 	BindingID    string   `json:"bindingId,omitempty"`
 }
 
-func (e *LaunchRefusal) Error() string   { return e.Code }
-func (e *LaunchRefusal) StatusCode() int { return 409 }
+func (e *LaunchRefusal) Error() string { return e.Code }
+func (e *LaunchRefusal) StatusCode() int {
+	switch e.Code {
+	case "usage_limit", "model_quota", "quota_unverified", "throttled", "model_capacity":
+		return 429
+	}
+	return 409
+}
+
+// LaunchBindingState is authenticated control-plane metadata, never error prose.
+type LaunchBindingState struct {
+	ProtocolVersion  int            `json:"protocolVersion"`
+	State            string         `json:"state"`
+	Active           bool           `json:"active"`
+	ExecutorAttempts int            `json:"executorAttempts"`
+	Refusal          *LaunchRefusal `json:"refusal,omitempty"`
+}
+
+// ResumeLaunchRequest acknowledges only the inspected execution epoch.
+type ResumeLaunchRequest struct {
+	ExpectedExecutorAttempts *int `json:"expectedExecutorAttempts"`
+}
+
+// CancelLaunchRequest cancels preparation in the authenticated request-ID scope.
+type CancelLaunchRequest struct {
+	ClientRequestID string `json:"clientRequestId"`
+}

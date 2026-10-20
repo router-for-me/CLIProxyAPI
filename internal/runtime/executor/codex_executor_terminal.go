@@ -322,7 +322,9 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
+	code, scope := codexDelegatedFailure(body, modelLevelCooling)
 	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped}
+	err.delegatedCode, err.delegatedScope = code, scope
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
@@ -631,4 +633,24 @@ func isCodexOverloadBootstrapFailure(body []byte) bool {
 	default:
 		return false
 	}
+}
+
+// codexDelegatedFailure reads upstream structured fields. Prose-only capacity
+// normalization to HTTP429 does not establish subscription exhaustion.
+func codexDelegatedFailure(body []byte, modelLevel bool) (string, string) {
+	values := []string{gjson.GetBytes(body, "error.type").String(), gjson.GetBytes(body, "error.code").String(), gjson.GetBytes(body, "type").String(), gjson.GetBytes(body, "code").String()}
+	for _, v := range values {
+		switch v {
+		case "usage_limit_reached", "insufficient_quota":
+			if modelLevel {
+				return "quota_unverified", "unknown"
+			}
+			return "usage_limit", "account"
+		case "rate_limit_exceeded", "rate_limit_error", "slow_down":
+			return "throttled", "transient"
+		case "model_at_capacity", "model_is_at_capacity", "server_is_overloaded":
+			return "model_capacity", "model"
+		}
+	}
+	return "", ""
 }

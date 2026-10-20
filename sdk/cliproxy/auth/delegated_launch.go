@@ -21,6 +21,7 @@ import (
 )
 
 const launchTTL = 30 * time.Second
+const launchIdleTTL = 30 * time.Minute
 const launchLimit = 256
 const usageURL = "https://chatgpt.com/backend-api/wham/usage"
 
@@ -35,13 +36,19 @@ type DelegatedLaunchExecutor interface {
 var exactLaunchModel = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
 
 type launchEntry struct {
-	request   PrepareLaunchRequest
-	principal string
-	result    LaunchResult
-	authID    string
-	revision  [32]byte
-	done      chan struct{}
-	expires   time.Time
+	request       PrepareLaunchRequest
+	principal     string
+	result        LaunchResult
+	authID        string
+	revision      [32]byte
+	done          chan struct{}
+	expires       time.Time
+	established   bool
+	revoked       bool
+	active        context.CancelFunc
+	prepareCancel context.CancelFunc
+	attempts      int
+	lastRefusal   *LaunchRefusal
 }
 
 // LaunchPool owns admission and dispatch. All state is bounded and process-local;
@@ -56,15 +63,28 @@ type LaunchPool struct {
 }
 
 func NewLaunchPool(manager *Manager) *LaunchPool {
-	return &LaunchPool{manager: manager, now: time.Now, entries: make(map[[32]byte]*launchEntry), bindings: make(map[string]*launchEntry), probes: make(chan struct{}, 4)}
+	return NewLaunchPoolWithClock(manager, time.Now)
+}
+
+// NewLaunchPoolWithClock permits deterministic embedded integration tests. The
+// server uses NewLaunchPool; neither HTTP nor configuration can override time.
+func NewLaunchPoolWithClock(manager *Manager, now func() time.Time) *LaunchPool {
+	if now == nil {
+		now = time.Now
+	}
+	return &LaunchPool{manager: manager, now: now, entries: make(map[[32]byte]*launchEntry), bindings: make(map[string]*launchEntry), probes: make(chan struct{}, 4)}
 }
 
 func launchRefusal(code, binding string, domains []string) *LaunchRefusal {
-	return &LaunchRefusal{Code: code, BindingID: binding, QuotaScope: "account", QuotaDomains: append([]string{}, domains...)}
+	scope := "unknown"
+	if code == "usage_limit" {
+		scope = "account"
+	}
+	return &LaunchRefusal{Code: code, BindingID: binding, QuotaScope: scope, QuotaDomains: append([]string{}, domains...)}
 }
 
 func unverifiedLaunch(code string) LaunchResult {
-	return LaunchResult{Status: "unverified", Code: code, QuotaScope: "unknown", QuotaDomains: []string{}}
+	return LaunchResult{ProtocolVersion: LaunchProtocolVersion, Status: "unverified", Code: code, QuotaScope: "unknown", QuotaDomains: []string{}}
 }
 
 func validLaunchRequest(r PrepareLaunchRequest) bool {
@@ -102,20 +122,30 @@ func (p *LaunchPool) Prepare(ctx context.Context, principal string, r PrepareLau
 		case <-ctx.Done():
 			return unverifiedLaunch("prepare_cancelled")
 		case <-old.done:
-			return cloneLaunchResult(old.result)
+			p.mu.Lock()
+			result := cloneLaunchResult(old.result)
+			if old.revoked {
+				result = unverifiedLaunch("binding_released")
+			}
+			p.mu.Unlock()
+			return result
 		}
 	}
 	if len(p.entries) >= launchLimit {
 		p.mu.Unlock()
 		return unverifiedLaunch("pool_busy")
 	}
-	entry := &launchEntry{request: r, principal: principal, done: make(chan struct{}), expires: p.now().Add(launchTTL)}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	entry := &launchEntry{prepareCancel: cancel, request: r, principal: principal, done: make(chan struct{}), expires: p.now().Add(launchTTL)}
 	p.entries[key] = entry
 	p.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	result, authID, revision := p.prepare(ctx, r)
 	p.mu.Lock()
+	if entry.revoked || ctx.Err() != nil {
+		result = unverifiedLaunch("prepare_cancelled")
+	}
+	entry.prepareCancel = nil
 	entry.result, entry.authID, entry.revision = result, authID, revision
 	entry.expires = p.now().Add(launchTTL)
 	if result.Status == "ready" {
@@ -128,6 +158,7 @@ func (p *LaunchPool) Prepare(ctx context.Context, principal string, r PrepareLau
 }
 
 func cloneLaunchResult(r LaunchResult) LaunchResult {
+	r.ProtocolVersion = LaunchProtocolVersion
 	r.QuotaDomains = append([]string{}, r.QuotaDomains...)
 	r.Windows = append([]LaunchWindow(nil), r.Windows...)
 	return r
@@ -137,7 +168,7 @@ func (p *LaunchPool) pruneLocked() {
 	for k, e := range p.entries {
 		select {
 		case <-e.done:
-			if !p.now().Before(e.expires) {
+			if e.active == nil && !p.now().Before(e.expires) {
 				delete(p.entries, k)
 				delete(p.bindings, e.result.BindingID)
 			}
@@ -322,7 +353,13 @@ func decodeLaunchUsage(body []byte, account string, now time.Time) LaunchResult 
 		Seconds *int64   `json:"limit_window_seconds"`
 	}
 	var raw struct {
-		Account    string          `json:"account_id"`
+		Account *string `json:"account_id"`
+		Spend   *struct {
+			Reached *bool `json:"reached"`
+		} `json:"spend_control"`
+		ReachedType *struct {
+			Type string `json:"type"`
+		} `json:"rate_limit_reached_type"`
 		Additional json.RawMessage `json:"additional_rate_limits"`
 		Rate       struct {
 			Allowed   *bool   `json:"allowed"`
@@ -331,7 +368,7 @@ func decodeLaunchUsage(body []byte, account string, now time.Time) LaunchResult 
 			Secondary *window `json:"secondary_window"`
 		} `json:"rate_limit"`
 	}
-	if json.Unmarshal(body, &raw) != nil || raw.Account != account || raw.Rate.Allowed == nil {
+	if json.Unmarshal(body, &raw) != nil || (raw.Account != nil && *raw.Account != account) || raw.Rate.Allowed == nil || raw.Rate.Reached == nil {
 		return unknown
 	}
 	// Extra model-specific limits have no proven normalization in this protocol.
@@ -339,9 +376,22 @@ func decodeLaunchUsage(body []byte, account string, now time.Time) LaunchResult 
 	if extra := strings.TrimSpace(string(raw.Additional)); extra != "" && extra != "null" && extra != "[]" {
 		return unknown
 	}
-	r := LaunchResult{Status: "ready", QuotaDomains: []string{quotaDomain(account)}, CheckedAt: now, ExpiresAt: now.Add(launchTTL), OrdinaryUsageAllowed: *raw.Rate.Allowed}
+	if raw.Spend != nil && raw.Spend.Reached == nil {
+		return unknown
+	}
+	if raw.ReachedType != nil {
+		switch raw.ReachedType.Type {
+		case "rate_limit_reached", "workspace_owner_credits_depleted", "workspace_member_credits_depleted", "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached":
+		default:
+			return unknown
+		}
+	}
+	r := LaunchResult{ProtocolVersion: LaunchProtocolVersion, Status: "ready", QuotaDomains: []string{quotaDomain(account)}, CheckedAt: now, ExpiresAt: now.Add(launchTTL), OrdinaryUsageAllowed: *raw.Rate.Allowed}
 	for i, w := range []*window{raw.Rate.Primary, raw.Rate.Secondary} {
-		if w == nil || w.Used == nil || w.Reset == nil || w.Seconds == nil || *w.Seconds <= 0 || *w.Used < 0 || *w.Used > 100 || !time.Unix(*w.Reset, 0).After(now) {
+		if w == nil {
+			continue
+		}
+		if w.Used == nil || w.Reset == nil || w.Seconds == nil || *w.Seconds <= 0 || *w.Used < 0 || *w.Used > 100 || !time.Unix(*w.Reset, 0).After(now) {
 			return unknown
 		}
 		id := []string{"primary", "secondary"}[i]
@@ -353,8 +403,11 @@ func decodeLaunchUsage(body []byte, account string, now time.Time) LaunchResult 
 			r.ExpiresAt = reset
 		}
 	}
-	if !r.OrdinaryUsageAllowed || (raw.Rate.Reached != nil && *raw.Rate.Reached) {
+	if !r.OrdinaryUsageAllowed || *raw.Rate.Reached || raw.ReachedType != nil || (raw.Spend != nil && *raw.Spend.Reached) {
 		r.Status = "waiting"
+	}
+	if len(r.Windows) == 0 && r.Status == "ready" {
+		return unknown
 	}
 	if r.Status == "waiting" {
 		r.Code = "usage_limit"
@@ -363,15 +416,24 @@ func decodeLaunchUsage(body []byte, account string, now time.Time) LaunchResult 
 	return r
 }
 
-// authorize revalidates the exact auth and returns an immutable execution
-// snapshot. A concurrent replacement cannot make dispatch use new credentials.
-func (p *LaunchPool) authorize(ctx context.Context, principal, binding, session, model string) (*Auth, ProviderExecutor, *LaunchRefusal) {
+// authorize linearizes admission under manager-read + pool locks. Auth changes
+// after this point do not replace the immutable active request's credential.
+func (p *LaunchPool) authorize(ctx context.Context, cancel context.CancelFunc, principal, binding, session, model string) (*Auth, ProviderExecutor, *LaunchRefusal) {
 	p.mu.Lock()
 	p.pruneLocked()
 	e := p.bindings[binding]
-	if e == nil || e.principal != principal || principal == "" || e.request.SessionID != session || e.request.Model != model || !p.now().Before(e.expires) {
+	if e == nil || e.revoked || e.principal != principal || principal == "" || e.request.SessionID != session || e.request.Model != model || (e.active == nil && !p.now().Before(e.expires)) {
 		p.mu.Unlock()
 		return nil, nil, launchRefusal("binding_invalid", binding, nil)
+	}
+	if e.active != nil {
+		p.mu.Unlock()
+		return nil, nil, launchRefusal("binding_busy", binding, nil)
+	}
+	if e.lastRefusal != nil {
+		r := cloneLaunchRefusal(e.lastRefusal)
+		p.mu.Unlock()
+		return nil, nil, r
 	}
 	authID, revision, domains := e.authID, e.revision, append([]string{}, e.result.QuotaDomains...)
 	p.mu.Unlock()
@@ -387,34 +449,148 @@ func (p *LaunchPool) authorize(ctx context.Context, principal, binding, session,
 	quota := p.probe(ctx, a)
 	<-p.probes
 	if quota.Status != "ready" {
-		code := quota.Code
-		if code == "" {
-			code = "capacity_unverified"
-		}
-		return nil, nil, launchRefusal(code, binding, domains)
+		r := launchRefusal(quota.Code, binding, domains)
+		r.QuotaScope = quota.QuotaScope
+		return nil, nil, r
 	}
 	p.manager.mu.RLock()
-	current := p.manager.auths[authID]
-	ex := p.manager.executors["codex"]
-	valid := current != nil && launchRevision(current) == revision && registry.GetGlobalRegistry().ClientSupportsModel(authID, model)
-	if valid {
-		a = current.Clone()
-	}
-	p.manager.mu.RUnlock()
-	if !valid || ex == nil || ctx.Err() != nil || !p.now().Before(e.expires) {
+	defer p.manager.mu.RUnlock()
+	current, ex := p.manager.auths[authID], p.manager.executors["codex"]
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if current == nil || launchRevision(current) != revision || launchAccount(current) == "" || !registry.GetGlobalRegistry().ClientSupportsModel(authID, model) || ex == nil || ctx.Err() != nil || e.revoked || p.bindings[binding] != e || !p.now().Before(e.expires) {
 		return nil, nil, launchRefusal("binding_changed", binding, domains)
 	}
-	return a, ex, nil
+	if e.active != nil {
+		return nil, nil, launchRefusal("binding_busy", binding, nil)
+	}
+	if e.lastRefusal != nil {
+		return nil, nil, cloneLaunchRefusal(e.lastRefusal)
+	}
+	e.established, e.active = true, cancel
+	return current.Clone(), ex, nil
+}
+
+func cloneLaunchRefusal(r *LaunchRefusal) *LaunchRefusal {
+	if r == nil {
+		return nil
+	}
+	copy := *r
+	copy.QuotaDomains = append([]string{}, r.QuotaDomains...)
+	return &copy
+}
+
+// Release is authenticated and idempotent, including unknown/expired bindings.
+// Unknown and wrong-principal bindings disclose no state and affect no work.
+func (p *LaunchPool) Release(principal, binding, session string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e := p.bindings[binding]; e != nil && principal != "" && e.principal == principal && e.request.SessionID == session {
+		p.revokeLocked(e)
+	}
+	p.pruneLocked()
+}
+func (p *LaunchPool) CancelPrepare(principal, requestID string) {
+	key := sha256.Sum256([]byte(principal + "\x00" + requestID))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e := p.entries[key]; e != nil && principal != "" && e.principal == principal {
+		p.revokeLocked(e)
+	}
+	p.pruneLocked()
+}
+func (p *LaunchPool) revokeLocked(e *launchEntry) {
+	e.revoked = true
+	e.expires = p.now().Add(launchTTL)
+	if e.prepareCancel != nil {
+		e.prepareCancel()
+	}
+	if e.active != nil {
+		e.active()
+	}
+}
+
+// Inspect is the supported metadata channel when native transports compress errors.
+func (p *LaunchPool) Inspect(principal, binding, session string) LaunchBindingState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pruneLocked()
+	e := p.bindings[binding]
+	if e == nil || principal == "" || e.principal != principal || e.request.SessionID != session {
+		return LaunchBindingState{ProtocolVersion: LaunchProtocolVersion, State: "invalid"}
+	}
+	state := "pending"
+	if e.established {
+		state = "established"
+	}
+	if e.revoked {
+		state = "released"
+	}
+	return LaunchBindingState{ProtocolVersion: LaunchProtocolVersion, State: state, Active: e.active != nil, ExecutorAttempts: e.attempts, Refusal: cloneLaunchRefusal(e.lastRefusal)}
+}
+
+// Touch is an explicit consumer heartbeat during long tool work. It renews
+// storage activity only, never quota freshness, auth revision or execution rights.
+func (p *LaunchPool) Touch(principal, binding, session string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pruneLocked()
+	e := p.bindings[binding]
+	if e == nil || e.revoked || !e.established || principal == "" || e.principal != principal || e.request.SessionID != session {
+		return false
+	}
+	e.expires = p.now().Add(launchIdleTTL)
+	return true
+}
+
+// Resume acknowledges a terminal refusal without changing the pin. Consumers
+// must never use this as startup replay after useful work. The attempt counter
+// prevents a stale acknowledgement from clearing a newer refusal.
+func (p *LaunchPool) Resume(principal, binding, session string, expectedAttempts int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pruneLocked()
+	e := p.bindings[binding]
+	if e == nil || e.revoked || principal == "" || e.principal != principal || e.request.SessionID != session || e.active != nil || e.attempts != expectedAttempts {
+		return false
+	}
+	e.lastRefusal = nil
+	return true
+}
+
+func (p *LaunchPool) finish(binding string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e := p.bindings[binding]; e != nil {
+		e.active = nil
+		if !e.revoked {
+			e.expires = p.now().Add(launchIdleTTL)
+		}
+	}
 }
 
 // ExecuteBound has exactly one credential/model attempt. It deliberately bypasses
 // model routing, preview-model retries, Home and ordinary affinity/failover.
 func (p *LaunchPool) ExecuteBound(ctx context.Context, principal, binding, session string, req execution.Request, opts execution.Options) (execution.Response, *execution.StreamResult, error) {
-	a, ex, refusal := p.authorize(ctx, principal, binding, session, req.Model)
+	ctx, cancel := context.WithCancel(ctx)
+	a, ex, refusal := p.authorize(ctx, cancel, principal, binding, session, req.Model)
 	if refusal != nil {
+		p.mu.Lock()
+		if e := p.bindings[binding]; e != nil && principal != "" && e.principal == principal && e.request.SessionID == session && e.request.Model == req.Model && !e.revoked && refusal.Code != "binding_busy" {
+			e.lastRefusal = cloneLaunchRefusal(refusal)
+		}
+		p.mu.Unlock()
+		cancel()
 		return execution.Response{}, nil, refusal
 	}
-	if execution.ValidateBoundModel(execution.WithBoundModel(ctx, req.Model), req.Payload) != nil || opts.Alt != "" {
+	async := false
+	defer func() {
+		if !async {
+			cancel()
+			p.finish(binding)
+		}
+	}()
+	if execution.ValidateBoundModel(execution.WithBoundModel(ctx, req.Model), req.Payload) != nil || opts.Alt != "" && opts.Alt != "responses/compact" {
 		return execution.Response{}, nil, launchRefusal("model_mismatch", binding, nil)
 	}
 	ctx = execution.WithBoundModel(ctx, req.Model)
@@ -427,14 +603,20 @@ func (p *LaunchPool) ExecuteBound(ctx context.Context, principal, binding, sessi
 	if !ok {
 		return execution.Response{}, nil, launchRefusal("capacity_unverified", binding, nil)
 	}
+	p.mu.Lock()
+	p.bindings[binding].attempts++
+	p.mu.Unlock()
 	response, stream, err := boundExecutor.ExecuteDelegatedLaunch(ctx, a, req, opts)
 	if opts.Stream {
 		if err == nil && stream != nil {
+			async = true
 			original := stream.Chunks
 			chunks := make(chan execution.StreamChunk)
 			stream = &execution.StreamResult{Headers: stream.Headers, Chunks: chunks}
 			go func() {
 				defer close(chunks)
+				defer cancel()
+				defer p.finish(binding)
 				for {
 					select {
 					case <-ctx.Done():
@@ -461,14 +643,31 @@ func (p *LaunchPool) ExecuteBound(ctx context.Context, principal, binding, sessi
 	return response, nil, p.boundError(err, binding, a)
 }
 
-// BoundError maps only structured HTTP status; upstream prose is never parsed.
+// boundError accepts execution-owned structured classification, never status or prose.
 func (p *LaunchPool) boundError(err error, binding string, a *Auth) error {
+	if errors.Is(err, execution.ErrBoundAuthChanged) {
+		return launchRefusal("binding_changed", binding, nil)
+	}
 	if errors.Is(err, execution.ErrBoundModelChanged) {
-		return launchRefusal("model_mismatch", binding, []string{quotaDomain(launchAccount(a))})
+		return launchRefusal("model_mismatch", binding, nil)
 	}
-	var status interface{ StatusCode() int }
-	if errors.As(err, &status) && status.StatusCode() == http.StatusTooManyRequests {
-		return launchRefusal("usage_limit", binding, []string{quotaDomain(launchAccount(a))})
+	var classified interface{ DelegatedFailure() (string, string) }
+	if !errors.As(err, &classified) {
+		return err
 	}
-	return err
+	code, scope := classified.DelegatedFailure()
+	if code == "" {
+		return err
+	}
+	r := launchRefusal(code, binding, nil)
+	r.QuotaScope = scope
+	if scope == "account" {
+		r.QuotaDomains = []string{quotaDomain(launchAccount(a))}
+	}
+	p.mu.Lock()
+	if e := p.bindings[binding]; e != nil {
+		e.lastRefusal = cloneLaunchRefusal(r)
+	}
+	p.mu.Unlock()
+	return r
 }

@@ -124,6 +124,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	if errBound := cliproxyexecutor.ValidateBoundCodexHTTP(ctx, httpClient, httpReq); errBound != nil {
+		return nil, errBound
+	}
 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {

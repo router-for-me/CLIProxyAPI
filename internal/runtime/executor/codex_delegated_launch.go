@@ -12,10 +12,13 @@ import (
 // Final business-payload model validation happens in buildCacheRequest after
 // user payload rules. No websocket transport/session or selection retry is used.
 func (e *CodexAutoExecutor) ExecuteDelegatedLaunch(ctx context.Context, a *auth.Auth, req execution.Request, opts execution.Options) (execution.Response, *execution.StreamResult, error) {
-	if e == nil || e.httpExec == nil || codexUseSIWC(a) || opts.Alt != "" {
+	if e == nil || e.httpExec == nil || a == nil || codexUseSIWC(a) || (opts.Alt != "" && opts.Alt != "responses/compact") {
 		return execution.Response{}, nil, errors.New("delegated launch unsupported")
 	}
 	ctx = execution.WithBoundModel(ctx, req.Model)
+	token, _ := a.Metadata["access_token"].(string)
+	account, _ := a.Metadata["account_id"].(string)
+	ctx = execution.WithBoundAuth(ctx, token, account)
 	if opts.Stream {
 		stream, err := e.httpExec.ExecuteStream(ctx, a, req, opts)
 		return execution.Response{}, stream, err
