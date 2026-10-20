@@ -72,7 +72,7 @@ func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 
 func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	for state, session := range s.sessions {
-		if !session.SIWCCommitting && !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
+		if !session.Saving && !session.SIWCCommitting && !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
 			if session.SIWC != nil {
 				session.SIWC.cancel()
 			}
@@ -151,6 +151,7 @@ func (s *oauthSessionStore) SetError(state, message string) {
 		return
 	}
 	session.Status = message
+	session.Saving = false
 	session.SIWCCommitting = false
 	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
@@ -173,6 +174,7 @@ func (s *oauthSessionStore) Complete(state string) {
 	}
 	session.Status = ""
 	session.Metadata = nil
+	session.Saving = false
 	session.SIWCCommitting = false
 	session.Completed = true
 	session.ExpiresAt = now.Add(s.completedTTL)
@@ -193,7 +195,7 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if session.SIWC == nil && !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
+		if session.SIWC == nil && !session.Saving && !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
 			session.Status = ""
 			session.Metadata = nil
 			session.Completed = true
@@ -272,7 +274,8 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 }
 
 // BeginSave atomically claims a pending session before persistence begins.
-// Once claimed, Cancel returns false because persistence may have side effects.
+// Until Complete or SetError releases the claim, cancellation and expiry cannot
+// discard the result because persistence may already have side effects.
 func (s *oauthSessionStore) BeginSave(state, provider string) bool {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
