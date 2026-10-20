@@ -485,6 +485,13 @@ upstream:
     #   # UUID per request (a confirmed Claude Code client keeps its own), "passthrough" forwards only
     #   # the caller's value and never synthesizes one, "off" never sends the header.
     #   client-request-id: "on"
+    #   # Optional, default false. When true, a confirmed native Claude Code caller keeps its own
+    #   # metadata.user_id (device_id/account_uuid/session_id) instead of the per-credential
+    #   # identity. Requests whose identity is missing, duplicated, or not bound to both the
+    #   # incoming X-Claude-Code-Session-Id and the outbound session keep the per-credential
+    #   # identity. Intended for setups where the Claude Code user owns the credentials it is
+    #   # routed to.
+    #   preserve-native-identity: false
 
   xai:
     # When true, inject the native x_search tool when the request does not declare it.
