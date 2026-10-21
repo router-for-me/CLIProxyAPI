@@ -71,10 +71,23 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		defer keepAliveTicker.Stop()
 		keepAliveC = keepAliveTicker.C
 	}
+	// localInterruptActive marks a turn that can still be cancelled locally. It is
+	// cleared as soon as a terminal event is delivered: an interrupt arriving after
+	// the client has observed the terminal event must not be answered with a second
+	// (spurious) response.incomplete for that turn.
+	localInterruptActive := false
+	endLocalInterrupt := func() {
+		if opts.localInterrupt == nil || !localInterruptActive {
+			return
+		}
+		localInterruptActive = false
+		opts.localInterrupt.end()
+	}
 	if opts.localInterrupt != nil {
 		opts.localInterrupt.begin()
-		defer opts.localInterrupt.end()
+		localInterruptActive = true
 	}
+	defer endLocalInterrupt()
 	localFrames := opts.localInterrupt.framesChan()
 
 	for {
@@ -105,6 +118,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
 			}
 			markAPIResponseTimestamp(c)
+			endLocalInterrupt()
 			if matched, errClose := writer.closeForUpstreamError(errMsg.Error); matched {
 				cancel(errMsg.Error)
 				if errClose != nil {
@@ -199,9 +213,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
+					// The turn is over before the terminal event reaches the client.
+					endLocalInterrupt()
 				}
 				markAPIResponseTimestamp(c)
 				if payloadErrMsg != nil {
+					endLocalInterrupt()
 					if matched, errClose := writer.closeForUpstreamError(payloadErrMsg.Error); matched {
 						cancel(payloadErrMsg.Error)
 						if errClose != nil {
