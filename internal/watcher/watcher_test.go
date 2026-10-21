@@ -1749,6 +1749,56 @@ func TestAuthEqualIgnoresTemporalFields(t *testing.T) {
 	}
 }
 
+func TestAuthEqualIgnoresRuntimeAssignedVersionFields(t *testing.T) {
+	runtimeAuth := &coreauth.Auth{
+		ID:                  "x",
+		Generation:          7,
+		RegistrationEpoch:   2,
+		CredentialVersion:   3,
+		Index:               "idx",
+		Success:             4,
+		Failed:              1,
+		RefreshFailures:     2,
+		RejectedAccessToken: "rejected",
+	}
+	fileSnapshot := &coreauth.Auth{
+		ID:    "x",
+		Label: "user@example.com",
+		Attributes: map[string]string{
+			coreauth.AttributeAuthKind: "oauth",
+			"plan_type":                "team",
+		},
+	}
+	runtimeAuth.Attributes = map[string]string{"plan_type": "team"}
+	if !authEqual(runtimeAuth, fileSnapshot) {
+		t.Fatal("expected authEqual to ignore runtime-assigned state and derived fields")
+	}
+
+	fileSnapshot.Attributes["plan_type"] = "plus"
+	if authEqual(runtimeAuth, fileSnapshot) {
+		t.Fatal("expected authEqual to report an attribute content change")
+	}
+}
+
+func TestPrepareAuthUpdatesSkipsRuntimeVersionOnlyChanges(t *testing.T) {
+	w := &Watcher{
+		currentAuths: map[string]*coreauth.Auth{
+			"a": {ID: "a", Provider: "codex", Prefix: "pfx", Generation: 9, RegistrationEpoch: 2, CredentialVersion: 4, Index: "idx"},
+		},
+		authQueue: make(chan AuthUpdate, 4),
+	}
+
+	updates := w.prepareAuthUpdatesLocked([]*coreauth.Auth{{ID: "a", Provider: "codex", Prefix: "pfx"}}, false)
+	if len(updates) != 0 {
+		t.Fatalf("expected no update for unchanged file content, got %+v", updates)
+	}
+
+	updates = w.prepareAuthUpdatesLocked([]*coreauth.Auth{{ID: "a", Provider: "codex", Prefix: "next"}}, false)
+	if len(updates) != 1 || updates[0].Action != AuthUpdateActionModify {
+		t.Fatalf("expected modify for real content change, got %+v", updates)
+	}
+}
+
 func TestDispatchLoopExitsWhenQueueNilAndContextCanceled(t *testing.T) {
 	w := &Watcher{
 		dispatchCond:   nil,

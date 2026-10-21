@@ -333,6 +333,37 @@ func (a *Auth) Clone() *Auth {
 	return &copyAuth
 }
 
+// NormalizeForComparison returns a deep clone with manager-assigned versions,
+// stable indices, in-memory counters, runtime handles, and volatile timestamps
+// cleared. Callers compare the result to decide whether two auth records carry
+// different persisted content, without treating runtime bookkeeping as changes.
+func (a *Auth) NormalizeForComparison() *Auth {
+	if a == nil {
+		return nil
+	}
+	clone := a.Clone()
+	clone.RegistrationEpoch = 0
+	clone.CredentialVersion = 0
+	clone.Generation = 0
+	clone.Index = ""
+	clone.indexAssigned = false
+	clone.Storage = nil
+	clone.CodexRefreshPatch = nil
+	clone.Runtime = nil
+	clone.RejectedAccessToken = ""
+	clone.Success = 0
+	clone.Failed = 0
+	clone.RefreshFailures = 0
+	clone.cooldownRecordedSeq = 0
+	clone.recentRequests = recentRequestRing{}
+	clone.CreatedAt = time.Time{}
+	clone.UpdatedAt = time.Time{}
+	clone.LastRefreshedAt = time.Time{}
+	clone.NextRefreshAfter = time.Time{}
+	clone.Quota.NextRecoverAt = time.Time{}
+	return clone
+}
+
 func cloneMetadataMap(src map[string]any) map[string]any {
 	if src == nil {
 		return nil

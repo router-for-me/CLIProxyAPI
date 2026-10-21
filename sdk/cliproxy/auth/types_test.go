@@ -367,6 +367,63 @@ func TestAuth_ExpirationTime_JWTExp(t *testing.T) {
 	}
 }
 
+func TestAuthNormalizeForComparisonClearsRuntimeState(t *testing.T) {
+	now := time.Now()
+	orig := &Auth{
+		ID:                "a",
+		RegistrationEpoch: 3,
+		CredentialVersion: 4,
+		Generation:        9,
+		Index:             "idx",
+		Provider:          "codex",
+		Status:            StatusActive,
+		Attributes:        map[string]string{AttributeAuthKind: "oauth"},
+		Metadata:          map[string]any{"email": "user@example.com"},
+		Quota:             QuotaState{Exceeded: true, NextRecoverAt: now},
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		LastRefreshedAt:   now,
+		NextRefreshAfter:  now,
+		Success:           5,
+		Failed:            1,
+		RefreshFailures:   2,
+		Storage:           &dummyMetadataStorage{},
+	}
+	orig.indexAssigned = true
+	orig.cooldownRecordedSeq = 7
+	orig.recordRecentRequest(now, true)
+
+	normalized := orig.NormalizeForComparison()
+	if normalized == nil {
+		t.Fatal("NormalizeForComparison() returned nil")
+	}
+	if normalized.Generation != 0 || normalized.RegistrationEpoch != 0 || normalized.CredentialVersion != 0 {
+		t.Fatalf("version fields not cleared: %+v", normalized)
+	}
+	if normalized.Index != "" || normalized.indexAssigned {
+		t.Fatalf("index not cleared: index=%q assigned=%v", normalized.Index, normalized.indexAssigned)
+	}
+	if normalized.Success != 0 || normalized.Failed != 0 || normalized.RefreshFailures != 0 || normalized.cooldownRecordedSeq != 0 {
+		t.Fatalf("runtime counters not cleared: %+v", normalized)
+	}
+	if normalized.recentRequests != (recentRequestRing{}) {
+		t.Fatal("recent request ring not cleared")
+	}
+	if normalized.Storage != nil || normalized.CreatedAt != (time.Time{}) || normalized.UpdatedAt != (time.Time{}) ||
+		normalized.LastRefreshedAt != (time.Time{}) || normalized.NextRefreshAfter != (time.Time{}) ||
+		!normalized.Quota.NextRecoverAt.IsZero() {
+		t.Fatal("runtime handles or volatile timestamps not cleared")
+	}
+	if normalized.Provider != orig.Provider || normalized.Status != orig.Status ||
+		normalized.Attributes[AttributeAuthKind] != "oauth" || normalized.Metadata["email"] != "user@example.com" ||
+		!normalized.Quota.Exceeded {
+		t.Fatal("persisted content was cleared")
+	}
+	if orig.Generation != 9 || orig.Index != "idx" || !orig.indexAssigned {
+		t.Fatal("NormalizeForComparison mutated the original auth")
+	}
+}
+
 func TestAuthClone_EmptyMapsIsolation(t *testing.T) {
 	orig := &Auth{
 		Attributes:  map[string]string{},

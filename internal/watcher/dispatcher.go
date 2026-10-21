@@ -355,13 +355,21 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	if a == nil {
 		return nil
 	}
-	clone := a.Clone()
-	clone.CreatedAt = time.Time{}
-	clone.UpdatedAt = time.Time{}
-	clone.LastRefreshedAt = time.Time{}
-	clone.NextRefreshAfter = time.Time{}
-	clone.Runtime = nil
-	clone.Quota.NextRecoverAt = time.Time{}
+	// Runtime bookkeeping (manager-assigned versions, stable indices, request
+	// counters, handles) differs between synthesized file snapshots and cached
+	// runtime clones even when the persisted content is identical. Comparing it
+	// would report unchanged file events as modifications, bumping the manager
+	// generation past genuinely newer persisted updates and making those updates
+	// look stale.
+	clone := a.NormalizeForComparison()
+	// Label and auth_kind are derived from file content (or config) by the
+	// synthesizer, so file snapshots always carry them while runtime auths
+	// created by other paths may not. Their sources (metadata email/type and
+	// the attributes computed from config) are compared instead.
+	clone.Label = ""
+	if clone.Attributes != nil {
+		delete(clone.Attributes, coreauth.AttributeAuthKind)
+	}
 	if clone.Metadata != nil {
 		delete(clone.Metadata, "antigravity_capability_hints")
 	}
