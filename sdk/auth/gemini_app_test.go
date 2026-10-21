@@ -99,3 +99,43 @@ func TestGeminiAppImportRequiresStableAccount(t *testing.T) {
 		t.Fatalf("expected account-name validation before reading credentials, got %v", err)
 	}
 }
+
+func TestGeminiAppImportPersistsRotatedCookies(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.json")
+	if err := os.WriteFile(path, []byte(`{"__Secure-1PSID":"old","__Secure-1PSIDTS":"old"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	authenticator := NewGeminiAppAuthenticator()
+	authenticator.client = &http.Client{Transport: geminiAppAuthTransport(func(req *http.Request) (*http.Response, error) {
+		header := http.Header{"Set-Cookie": {
+			"__Secure-1PSID=rotated-session; Domain=.google.com; Path=/; Secure; HttpOnly",
+			"__Secure-1PSIDTS=rotated-timestamp; Domain=.google.com; Path=/; Secure; HttpOnly",
+			"SID=unrelated-secret; Path=/; Secure",
+		}}
+		return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(`{"SNlM0e":"private-csrf"}`))}, nil
+	})}
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	manager := NewManager(store, authenticator)
+	_, saved, err := manager.Login(context.Background(), "gemini-app", &config.Config{AuthDir: dir}, &LoginOptions{Metadata: map[string]string{"cookie-file": path, "account": "personal"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		Cookies map[string]string `json:"cookies"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.Cookies) != 2 || metadata.Cookies["__Secure-1PSID"] != "rotated-session" || metadata.Cookies["__Secure-1PSIDTS"] != "rotated-timestamp" {
+		t.Fatal("import persisted cookies from before session validation")
+	}
+	if strings.Contains(string(data), "private-csrf") || strings.Contains(string(data), "unrelated-secret") {
+		t.Fatal("import persisted transient or unrelated credentials")
+	}
+}

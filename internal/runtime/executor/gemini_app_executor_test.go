@@ -91,7 +91,7 @@ func TestGeminiAppExecutorProtocolResponses(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%t", test.format, stream), func(t *testing.T) {
 				ctx := geminiAppTestContext(t, ")]}'\n\n"+geminiAppTestFrame("Hel", false)+geminiAppTestFrame("Hello 🌏", true), nil)
-				e := NewGeminiAppExecutor(&config.Config{})
+				e := NewGeminiAppExecutor(&config.Config{}, nil)
 				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(test.body)}
 				opts := cliproxyexecutor.Options{SourceFormat: test.format, OriginalRequest: req.Payload}
 				var output string
@@ -170,7 +170,7 @@ func TestGeminiAppPayloadRulesAreFinal(t *testing.T) {
 			})
 			req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"original"}]}]}`)}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
-			e := NewGeminiAppExecutor(cfg)
+			e := NewGeminiAppExecutor(cfg, nil)
 			if stream {
 				result, err := e.ExecuteStream(ctx, geminiAppTestAuth(), req, opts)
 				if err != nil {
@@ -207,7 +207,7 @@ func TestGeminiAppDefaultPayloadRulesOverrideBuiltins(t *testing.T) {
 			})
 			req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"original"}]}]}`)}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, OriginalRequest: req.Payload}
-			e := NewGeminiAppExecutor(cfg)
+			e := NewGeminiAppExecutor(cfg, nil)
 			if stream {
 				result, err := e.ExecuteStream(ctx, geminiAppTestAuth(), req, opts)
 				if err != nil {
@@ -227,7 +227,7 @@ func TestGeminiAppDefaultPayloadRulesOverrideBuiltins(t *testing.T) {
 
 func TestGeminiAppTruncatedStreamFails(t *testing.T) {
 	ctx := geminiAppTestContext(t, geminiAppTestFrame("partial", false), nil)
-	e := NewGeminiAppExecutor(&config.Config{})
+	e := NewGeminiAppExecutor(&config.Config{}, nil)
 	req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
 	if _, err := e.Execute(ctx, geminiAppTestAuth(), req, opts); err == nil {
@@ -249,7 +249,7 @@ func TestGeminiAppTruncatedStreamFails(t *testing.T) {
 func TestGeminiAppStreamCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(geminiAppTestContext(t, geminiAppTestFrame("first", false)+geminiAppTestFrame("first second", true), nil))
 	defer cancel()
-	e := NewGeminiAppExecutor(&config.Config{})
+	e := NewGeminiAppExecutor(&config.Config{}, nil)
 	req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)}
 	result, err := e.ExecuteStream(ctx, geminiAppTestAuth(), req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
 	if err != nil {
@@ -276,7 +276,7 @@ func TestGeminiAppRejectsUnsupportedRequestsBeforeUpstream(t *testing.T) {
 		t.Fatal("unsupported input reached upstream")
 		return nil, nil
 	})))
-	e := NewGeminiAppExecutor(&config.Config{})
+	e := NewGeminiAppExecutor(&config.Config{}, nil)
 	for _, input := range []string{
 		`{"contents":[{"parts":[{"inlineData":{"mimeType":"image/png","data":"AA=="}}]}]}`,
 		`{"tools":[{"functionDeclarations":[{"name":"tool"}]}],"contents":[{"parts":[{"text":"Hello"}]}]}`,
@@ -302,6 +302,7 @@ func TestGeminiAppRejectsStructuredOutputBeforeUpstream(t *testing.T) {
 		format sdktranslator.Format
 		body   string
 	}{
+		{"Claude schema", sdktranslator.FormatClaude, `{"messages":[{"role":"user","content":"Hello"}],"max_tokens":100,"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}}`},
 		{"OpenAI schema", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"response_format":{"type":"json_schema","json_schema":{"name":"result","schema":{"type":"object"}}}}`},
 		{"OpenAI JSON", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"response_format":{"type":"json_object"}}`},
 		{"Responses schema", sdktranslator.FormatOpenAIResponse, `{"input":"Hello","text":{"format":{"type":"json_schema","name":"result","schema":{"type":"object"}}}}`},
@@ -317,7 +318,7 @@ func TestGeminiAppRejectsStructuredOutputBeforeUpstream(t *testing.T) {
 					return nil, nil
 				})))
 				ctx = cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
-				e := NewGeminiAppExecutor(&config.Config{})
+				e := NewGeminiAppExecutor(&config.Config{}, nil)
 				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(test.body)}
 				opts := cliproxyexecutor.Options{SourceFormat: test.format}
 				var err error
@@ -339,6 +340,39 @@ func TestGeminiAppRejectsStructuredOutputBeforeUpstream(t *testing.T) {
 	}
 }
 
+func TestGeminiAppRejectsClaudeFormatFromEitherBuffer(t *testing.T) {
+	plain := []byte(`{"messages":[{"role":"user","content":"Hello"}],"max_tokens":100}`)
+	structured := []byte(`{"messages":[{"role":"user","content":"Hello"}],"max_tokens":100,"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}}`)
+	for _, originalHasFormat := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("original=%t/stream=%t", originalHasFormat, stream), func(t *testing.T) {
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(geminiAppTransport(func(*http.Request) (*http.Response, error) {
+					t.Fatal("Claude structured-output request reached upstream")
+					return nil, nil
+				})))
+				payload, original := structured, plain
+				if originalHasFormat {
+					payload, original = plain, structured
+				}
+				e := NewGeminiAppExecutor(&config.Config{}, nil)
+				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: payload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: original}
+				var err error
+				if stream {
+					_, err = e.ExecuteStream(ctx, geminiAppTestAuth(), req, opts)
+				} else {
+					_, err = e.Execute(ctx, geminiAppTestAuth(), req, opts)
+				}
+				var scoped cliproxyexecutor.RequestScopedError
+				var status interface{ StatusCode() int }
+				if !errors.As(err, &scoped) || !scoped.IsRequestScoped() || !errors.As(err, &status) || status.StatusCode() != http.StatusBadRequest {
+					t.Fatalf("expected request-scoped 400, got %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestGeminiAppMarksFailedUpstreamAttempts(t *testing.T) {
 	for _, failSession := range []bool{false, true} {
 		for _, stream := range []bool{false, true} {
@@ -354,7 +388,7 @@ func TestGeminiAppMarksFailedUpstreamAttempts(t *testing.T) {
 					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"SNlM0e":"token"}`))}, nil
 				})))
 				ctx = cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
-				e := NewGeminiAppExecutor(&config.Config{})
+				e := NewGeminiAppExecutor(&config.Config{}, nil)
 				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)}
 				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
 				var err error
@@ -391,7 +425,7 @@ func TestGeminiAppTTFTExcludesSessionFetch(t *testing.T) {
 				})
 				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 				ctx = coreusage.WithRequestedModelAlias(ctx, capture.alias)
-				e := NewGeminiAppExecutor(&config.Config{})
+				e := NewGeminiAppExecutor(&config.Config{}, nil)
 				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)}
 				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
 				if stream {

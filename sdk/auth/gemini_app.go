@@ -49,6 +49,10 @@ func (a *GeminiAppAuthenticator) Login(ctx context.Context, cfg *config.Config, 
 	if _, err = geminiapp.FetchSession(ctx, client); err != nil {
 		return nil, err
 	}
+	cookies = geminiapp.SessionCookies(client)
+	if cookies[geminiapp.CookiePSID] == "" {
+		return nil, fmt.Errorf("gemini-app: session cookie was removed during validation; re-import cookies")
+	}
 	// A caller-owned account name survives cookie rotation and safely replaces
 	// the same account's expired credential through the existing token store.
 	digest := sha256.Sum256([]byte(account))

@@ -328,7 +328,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "meta":
 		s.coreManager.RegisterExecutor(executor.NewMetaExecutor(cfg))
 	case "gemini-app":
-		s.coreManager.RegisterExecutor(executor.NewGeminiAppExecutor(cfg))
+		s.coreManager.RegisterExecutor(executor.NewGeminiAppExecutor(cfg, s.coreManager))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {

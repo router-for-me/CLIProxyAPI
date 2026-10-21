@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,10 +23,17 @@ import (
 )
 
 // GeminiAppExecutor exposes the signed-in Gemini App's default text model.
-type GeminiAppExecutor struct{ cfg *config.Config }
+type GeminiAppExecutor struct {
+	cfg         *config.Config
+	authManager *cliproxyauth.Manager
+}
 
-func NewGeminiAppExecutor(cfg *config.Config) *GeminiAppExecutor { return &GeminiAppExecutor{cfg: cfg} }
-func (*GeminiAppExecutor) Identifier() string                    { return geminiapp.Provider }
+// NewGeminiAppExecutor uses manager to merge and persist upstream cookie rotations.
+func NewGeminiAppExecutor(cfg *config.Config, manager *cliproxyauth.Manager) *GeminiAppExecutor {
+	return &GeminiAppExecutor{cfg: cfg, authManager: manager}
+}
+
+func (*GeminiAppExecutor) Identifier() string { return geminiapp.Provider }
 func (*GeminiAppExecutor) RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format {
 	return sdktranslator.FormatGemini
 }
@@ -70,7 +78,9 @@ func (e *GeminiAppExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 	}
 	httpReq.Header.Del("Cookie") // The isolated jar supplies these exactly once.
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
-	return geminiapp.NewClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), cookies).Do(httpReq)
+	client := geminiapp.NewClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), cookies)
+	defer e.persistCookies(ctx, auth, cookies, client)
+	return client.Do(httpReq)
 }
 
 func (*GeminiAppExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -172,6 +182,11 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	if len(opts.OriginalRequest) > 0 {
 		original = opts.OriginalRequest
 	}
+	// Claude-to-Gemini translation does not preserve output_config.format.
+	// Inspect both inbound buffers before translation can drop the contract.
+	if opts.SourceFormat == sdktranslator.FormatClaude && (gjson.GetBytes(original, "output_config.format").Exists() || gjson.GetBytes(req.Payload, "output_config.format").Exists()) {
+		return nil, nil, helps.NewGeminiAppRequestError(http.StatusBadRequest, "gemini-app: structured output is not supported")
+	}
 	translatedOriginal, translated, err := helps.TranslateRequestPairReturningError(ctx, opts.Headers, e.cfg, opts.SourceFormat, sdktranslator.FormatGemini, req.Model, original, req.Payload, opts.Stream, false)
 	if err != nil {
 		return nil, nil, err
@@ -193,10 +208,17 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 		return nil, nil, err
 	}
 	client := geminiapp.NewClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), cookies)
+	// Persist generation-header rotations on success or failure, including
+	// streaming execution, without retaining transient page tokens.
+	defer func() { e.persistCookies(ctx, auth, cookies, client) }()
 	// Session acquisition is an upstream attempt, but its response is not a
 	// generation token and must not start or satisfy generation TTFT.
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	session, err := geminiapp.FetchSession(ctx, client)
+	// Publish session rotations before starting a possibly slow generation so
+	// another request can acquire the account with the new cookies immediately.
+	auth = e.persistCookies(ctx, auth, cookies, client)
+	cookies = geminiapp.SessionCookies(client)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -239,6 +261,30 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 		return nil, nil, statusErr{code: status, msg: fmt.Sprintf("gemini-app: generation returned HTTP %d", httpResp.StatusCode)}
 	}
 	return httpResp, translated, nil
+}
+
+func (e *GeminiAppExecutor) persistCookies(ctx context.Context, auth *cliproxyauth.Auth, initial map[string]string, client *http.Client) *cliproxyauth.Auth {
+	if e.authManager == nil || auth == nil {
+		return auth
+	}
+	cookies := geminiapp.SessionCookies(client)
+	if maps.Equal(initial, cookies) {
+		return auth
+	}
+	updated := auth.Clone()
+	stored := make(map[string]any, len(cookies))
+	for name, value := range cookies {
+		stored[name] = value
+	}
+	updated.Metadata["cookies"] = stored
+	// Preserve concurrent metadata edits and replacement credentials. Do not
+	// let downstream cancellation discard cookies already rotated by Google.
+	if _, errUpdate := e.authManager.UpdatePreparedAuth(context.WithoutCancel(ctx), auth, updated); errUpdate != nil {
+		log.Errorf("gemini-app: persist session cookies failed (%T)", errUpdate)
+	}
+	// Keep this client's own cookie snapshot as the next merge base. Adopting
+	// a concurrent replacement here would let a later rotation overwrite it.
+	return updated
 }
 
 func geminiAppCookies(auth *cliproxyauth.Auth) (map[string]string, error) {

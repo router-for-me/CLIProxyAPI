@@ -103,7 +103,8 @@ func TestSessionCookieRotationReplacesImportedCookies(t *testing.T) {
 						t.Fatalf("stale cookie survived rotation: %s", cookie.Name)
 					}
 				}
-				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: http.NoBody}, nil
+				deleted := (&http.Cookie{Name: CookiePSIDTS, Domain: domain, Path: "/", Secure: true, MaxAge: -1}).String()
+				return &http.Response{StatusCode: 200, Header: http.Header{"Set-Cookie": {deleted}}, Body: http.NoBody}, nil
 			})}
 			client := NewClient(base, map[string]string{CookiePSID: "old", CookiePSIDTS: "old"})
 			if _, err := FetchSession(context.Background(), client); err != nil {
@@ -115,6 +116,9 @@ func TestSessionCookieRotationReplacesImportedCookies(t *testing.T) {
 			}
 			if errClose := resp.Body.Close(); errClose != nil {
 				t.Fatal(errClose)
+			}
+			if cookies := SessionCookies(client); len(cookies) != 1 || cookies[CookiePSID] != "rotated" {
+				t.Fatal("cookie snapshot lost the rotation or retained a deleted cookie")
 			}
 			for _, origin := range []string{"https://accounts.google.com", "https://other.gemini.google.com", "http://gemini.google.com"} {
 				endpoint, err := url.Parse(origin)

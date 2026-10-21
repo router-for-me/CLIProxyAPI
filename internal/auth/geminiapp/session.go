@@ -132,6 +132,22 @@ func NewClient(base *http.Client, cookies map[string]string) *http.Client {
 	return &client
 }
 
+// SessionCookies snapshots only the current Gemini session cookies, including
+// rotations and deletions received while validating or using the session.
+func SessionCookies(client *http.Client) map[string]string {
+	result := make(map[string]string)
+	if client == nil || client.Jar == nil {
+		return result
+	}
+	endpoint, _ := url.Parse(BaseURL)
+	for _, cookie := range client.Jar.Cookies(endpoint) {
+		if cookie.Name == CookiePSID || cookie.Name == CookiePSIDTS {
+			result[cookie.Name] = cookie.Value
+		}
+	}
+	return result
+}
+
 // FetchSession obtains fresh CSRF and page routing tokens without logging page contents.
 func FetchSession(ctx context.Context, client *http.Client) (Session, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, BaseURL+"/app", nil)
