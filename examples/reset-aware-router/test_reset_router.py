@@ -1,10 +1,11 @@
 import datetime as dt
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 spec = importlib.util.spec_from_file_location("reset_router", Path(__file__).with_name("reset_router.py"))
@@ -20,6 +21,7 @@ class PolicyTests(unittest.TestCase):
 
     def limits(self, used=92, expiry=None, reset=None):
         return {
+            "ordinaryUsageAllowed": True,
             "rateLimits": {"primary": {"usedPercent": 20, "windowDurationMins": 300}},
             "rateLimitsByLimitId": {"codex": {
                 "primary": {"usedPercent": 20, "windowDurationMins": 300},
@@ -71,6 +73,12 @@ class PolicyTests(unittest.TestCase):
     def test_exhausted_weekly_quota_is_not_promoted(self):
         self.assertIsNone(router.account_rank(self.limits(used=100), self.now))
 
+    def test_ordinary_usage_must_be_explicitly_allowed(self):
+        for allowed in (False, None):
+            result = self.limits(used=10)
+            result["ordinaryUsageAllowed"] = allowed
+            self.assertIsNone(router.account_rank(result, self.now))
+
     def test_missing_weekly_and_credit_details_has_no_rank(self):
         result = {"rateLimitResetCredits": {"availableCount": 1, "credits": None}}
         self.assertIsNone(router.account_rank(result, self.now))
@@ -84,10 +92,64 @@ class PolicyTests(unittest.TestCase):
             router.clear_redemption_key(path, "account", "earned-1")
             self.assertNotEqual(first, router.redemption_key(path, "account", "earned-1"))
 
+    def test_confirmed_redemption_does_not_wait_for_a_refresh(self):
+        proc = MagicMock()
+        with patch.object(router.subprocess, "Popen", return_value=proc), \
+             patch.object(router.threading, "Thread"), \
+             patch.object(router.tempfile, "mkdtemp", return_value="temporary-home"), \
+             patch.object(router.shutil, "rmtree"), \
+             patch.object(router, "rpc", side_effect=[{}, {}, self.limits(), {"outcome": "reset"}]) as rpc:
+            _, outcome = router.app_server({"access_token": "test", "account_id": "test"},
+                                           consume={"creditId": "earned-1"})
+        self.assertEqual(outcome, "reset")
+        self.assertEqual([call.args[2] for call in rpc.call_args_list],
+                         ["initialize", "account/login/start", "account/rateLimits/read",
+                          "account/rateLimitResetCredit/consume"])
+
+    def test_cooldown_clear_is_retried_after_transient_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "state.json"
+            router.queue_cooldown_reset(state_file, "index-1")
+            with patch.object(router, "management", side_effect=RuntimeError("offline")):
+                router.retry_cooldown_resets(state_file, "unused")
+            self.assertEqual(router.load_state(state_file)["pending_cooldowns"], ["index-1"])
+            with patch.object(router, "management", return_value={"status": "ok"}) as send:
+                router.retry_cooldown_resets(state_file, "unused")
+            self.assertNotIn("pending_cooldowns", router.load_state(state_file))
+            self.assertEqual(send.call_args.args[:3],
+                             ("POST", "/routing/cooldown/reset", "unused"))
+
+    def test_management_key_can_come_from_environment(self):
+        with patch.dict(router.os.environ, {"CLIPROXY_MANAGEMENT_KEY": "test-key"}):
+            self.assertEqual(router.read_management_key(SimpleNamespace()), "test-key")
+
     def test_claude_date_only_offer_expires_after_its_calendar_day(self):
         self.assertTrue(router.claude_offer_active("2026-10-22", self.now))
         self.assertFalse(router.claude_offer_active("2026-10-15", self.now))
         self.assertFalse(router.claude_offer_active("invalid", self.now))
+
+    def test_claude_reset_timestamp_formats(self):
+        for raw in (str(self.weekly_reset), "2026-10-21T00:00:00Z",
+                    "Wed, 21 Oct 2026 00:00:00 GMT"):
+            self.assertEqual(router.parse_reset_timestamp(raw), self.weekly_reset)
+
+    def test_ambiguous_claude_offer_requires_credential_name(self):
+        auths = [{"id": identity, "name": name, "type": "claude", "email": "shared@example.com",
+                  "status": "active", "priority": 0}
+                 for identity, name in (("one", "renamed.json"), ("two", "nested.json"))]
+        with tempfile.TemporaryDirectory() as directory:
+            offer_file = Path(directory) / "offers.json"
+            args = SimpleNamespace(claude_offers_file=str(offer_file), dry_run=False)
+            offer_file.write_text(json.dumps({"offers": [
+                {"email": "shared@example.com", "expires_on": "2026-10-22"}]}))
+            with patch.object(router, "management") as send:
+                router.apply_claude_priorities(args, "unused", auths, self.now)
+                send.assert_not_called()
+            offer_file.write_text(json.dumps({"offers": [
+                {"name": "renamed.json", "expires_on": "2026-10-22"}]}))
+            with patch.object(router, "management") as send:
+                router.apply_claude_priorities(args, "unused", auths, self.now)
+            self.assertEqual(send.call_args.args[3], {"name": "one", "priority": 1})
 
     def test_claude_uses_nearest_observed_weekly_renewal(self):
         def entry(name, days, status="active", priority=0):
@@ -127,11 +189,12 @@ class PolicyTests(unittest.TestCase):
             for name in ("first.json", "second.json"):
                 (root / name).write_text('{"account_id":"test"}')
             auths = [{"name": name, "type": "codex", "status": "active",
-                      "priority": priority}
+                      "priority": priority, "path": str(root / name)}
                      for name, priority in (("first.json", 2), ("second.json", 1))]
             args = SimpleNamespace(auth_dir=directory,
                                    management_key=str(root / "management-key"),
                                    claude_offers_file=str(root / "offers.json"),
+                                   state_file=str(root / "state.json"),
                                    dry_run=False, priority_only=True)
             calls = []
             def management(method, path, key, payload=None):
@@ -141,6 +204,59 @@ class PolicyTests(unittest.TestCase):
                  patch.object(router, "app_server", side_effect=[(self.limits(), None), RuntimeError("offline")]):
                 router.run_once(args, self.now)
             self.assertEqual(calls, [("GET", "/credentials")])
+
+    def test_nonstandard_codex_path_uses_management_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential = root / "nested" / "oauth.json"
+            credential.parent.mkdir()
+            credential.write_text('{"account_id":"test"}')
+            (root / "management-key").write_text("unused")
+            entry = {"id": "unique-id", "name": "oauth.json", "path": str(credential),
+                     "type": "codex", "status": "active", "priority": 0}
+            args = SimpleNamespace(management_key_file=str(root / "management-key"),
+                                   claude_offers_file=str(root / "offers.json"),
+                                   state_file=str(root / "state.json"),
+                                   dry_run=False, priority_only=True)
+            def management(method, path, key, payload=None):
+                if method == "GET":
+                    return {"files": [entry]}
+                writes.append(payload)
+                return {"status": "ok"}
+            writes = []
+            with patch.object(router, "management", side_effect=management), \
+                 patch.object(router, "app_server", return_value=(self.limits(used=10), None)):
+                router.run_once(args, self.now)
+            self.assertEqual(writes, [{"name": "unique-id", "priority": 1}])
+
+    def test_cooldowned_codex_account_is_still_checked_for_redemption(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential = root / "oauth.json"
+            credential.write_text('{"account_id":"test"}')
+            (root / "management-key").write_text("unused")
+            entry = {"id": "unique-id", "name": "oauth.json", "path": str(credential),
+                     "type": "codex", "status": "error", "unavailable": True,
+                     "next_retry_after": (now + dt.timedelta(hours=2)).isoformat(),
+                     "cooldowns": [{"reason": "quota"}],
+                     "auth_index": "index-1", "priority": 0}
+            result = self.limits(used=95,
+                                 expiry=int((now + dt.timedelta(hours=12)).timestamp()),
+                                 reset=int((now + dt.timedelta(days=2)).timestamp()))
+            args = SimpleNamespace(management_key_file=str(root / "management-key"),
+                                   claude_offers_file=str(root / "offers.json"),
+                                   state_file=str(root / "state.json"),
+                                   dry_run=False, priority_only=False)
+            def management(method, path, key, payload=None):
+                return {"files": [entry]} if method == "GET" else {"status": "ok"}
+            with patch.object(router, "management", side_effect=management), \
+                 patch.object(router, "app_server", side_effect=[
+                     (result, None), (result, None), (result, "reset")]) as read:
+                router.run_once(args, now)
+            self.assertEqual(read.call_count, 3)
+            self.assertIn("consume", read.call_args.kwargs)
+            self.assertNotIn("pending_cooldowns", router.load_state(args.state_file))
 
 
 if __name__ == "__main__":
