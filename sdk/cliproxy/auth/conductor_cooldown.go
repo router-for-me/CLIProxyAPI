@@ -2230,7 +2230,114 @@ func isCredentialScopedError(err error) bool {
 		IsCredentialScoped() bool
 	}
 	var csp credentialScopedProvider
-	return errors.As(err, &csp) && csp != nil && csp.IsCredentialScoped()
+	if errors.As(err, &csp) && csp != nil {
+		// Executors that classify their own failures (Claude, Codex, meta, OpenAI
+		// compatible) stay authoritative in both directions: an explicit false keeps
+		// the cooldown scoped to the requested model.
+		return csp.IsCredentialScoped()
+	}
+	// Executors and native plugins that do not implement the interface still report an
+	// account-wide usage window as a 429 whose body names it. Such a window consumes
+	// every model served by the credential, so recording it as a per-model cooldown
+	// leaves the credential selectable for its other models and lets session affinity
+	// pin recurring workloads to a key that is already exhausted.
+	return isCredentialUsageLimitError(err)
+}
+
+// credentialUsageLimitMarkers identify account- or credential-wide usage windows:
+// the upstream refused the whole credential, not one model. Only explicit
+// account/credential scoping counts here, so a model-scoped refusal never matches.
+var credentialUsageLimitMarkers = [...]string{
+	"usagelimiterror",             // opencode-go: {"error":{"type":"GoUsageLimitError",...}}
+	"usage_limit_reached",         // Codex/OpenAI account window
+	"insufficient_quota",          // OpenAI account quota code
+	"exceeded your current quota", // OpenAI account quota message
+	"account quota",
+	"account-level",
+	"account usage limit",
+	"account rate limit",
+	"credential quota",
+	"organization quota",
+	"org quota",
+	"plan quota",
+	"subscription quota",
+	"billing quota",
+}
+
+// credentialUsageLimitScopedExceptions describe refusals that must stay scoped to the
+// requested model even when the body mentions a limit or a quota: per-minute token or
+// request limits, and any wording that names a model. They win over the markers above,
+// so "quota exceeded for model foo" never takes an entire credential offline.
+var credentialUsageLimitScopedExceptions = [...]string{
+	"tokens per min",
+	"tokens per minute",
+	"requests per min",
+	"requests per minute",
+	"per-minute",
+	"tpm limit",
+	"rpm limit",
+	"for model",
+	"per model",
+	"per-model",
+	"model-scoped",
+	"this model",
+	"model quota",
+}
+
+// IsCredentialUsageLimit reports whether an upstream refusal carrying this HTTP status
+// and message describes an account- or credential-wide usage window rather than a
+// per-model rate limit. Such a window consumes every model the credential serves, so
+// selection must treat the credential as unavailable for all of them and session
+// affinity must release the bindings pinned to it. Matching stays deliberately narrow:
+// account-wide wording is required, and model-scoped wording always disqualifies.
+func IsCredentialUsageLimit(statusCode int, message string) bool {
+	if statusCode != http.StatusTooManyRequests {
+		return false
+	}
+	lower := strings.ToLower(message)
+	if lower == "" {
+		return false
+	}
+	for _, exception := range credentialUsageLimitScopedExceptions {
+		if strings.Contains(lower, exception) {
+			return false
+		}
+	}
+	for _, marker := range credentialUsageLimitMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// errorCodeProvider exposes a machine-readable error code carried outside the human
+// message, such as the plugin ABI envelope code preserved by rpcError.
+type errorCodeProvider interface {
+	ErrorCode() string
+}
+
+// isCredentialUsageLimitError is the error-shaped form of IsCredentialUsageLimit.
+func isCredentialUsageLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if IsCredentialUsageLimit(status, err.Error()) {
+		return true
+	}
+	// A plugin ABI failure keeps its machine code outside Error(): the message can be a
+	// plain sentence ("plan limit reached") while the classified code lives in the
+	// envelope, so the code has to be classified too.
+	var coded errorCodeProvider
+	if !errors.As(err, &coded) || coded == nil {
+		return false
+	}
+	code := strings.TrimSpace(coded.ErrorCode())
+	if code == "" {
+		return false
+	}
+	return IsCredentialUsageLimit(status, code+" "+err.Error())
 }
 
 func statusCodeFromResult(err *Error) int {
