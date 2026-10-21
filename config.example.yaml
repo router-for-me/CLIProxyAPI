@@ -164,7 +164,11 @@ routing:
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind
   # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
-  # maximizing Prompt/KV Cache reuse and minimizing TTFT.
+  # for the same model, maximizing Prompt/KV Cache reuse and minimizing TTFT.
+  # Guardian reviews (X-Openai-Subagent: guardian) may inherit across models from the
+  # parent's most recent selection on the same real provider, if that credential is eligible.
+  # This includes mixed-provider pools; result-driven TTL refreshes do not reorder selections.
+  # Existing child bindings take precedence. Parent lookups do not extend the parent's TTL.
   # When false, subagents are distributed across the credential pool via the fallback selector
   # for maximum parallel concurrency.
   # Ignored when routing.session-affinity is false.
