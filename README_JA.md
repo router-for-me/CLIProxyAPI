@@ -96,10 +96,6 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td>PatewayAI は、経験豊富な AI 開発者向けの API リレーサービスプロバイダーで、Claude および Codex シリーズのモデルを完全にサポートしています。すべてのモデルは高品質な公式チャネルから提供され、希釈や偽装は一切なく、課金明細も透明で確認可能です。エコノミーモードは公式価格のわずか5%から利用できます。<a href="https://pateway.ai/?ch=jjvdb">こちらのリンク</a>から登録するとトライアルクレジットを受け取れるほか、不定期のキャンペーンで無料クレジットを獲得できます。また、エンタープライズ級の同時接続、専用管理ダッシュボード、正式な契約書と請求書に対応し、双方に最大150米ドルが付与される紹介特典も提供しています。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://agentmarket.fluxapay.xyz/marketplace/tokenplans"><img src="./assets/fluxa-baidu-ai-cloud.png" alt="FluxA &amp; Baidu AI Cloud" width="150"></a></td>
-<td>FluxA &amp; Baidu AI Cloud による本プロジェクトへのご支援に感謝します！FluxA と百度智能雲が共同で提供する AgenticPlan は、AI Agent がモデル、API、ツールを自律的に購入・管理・利用できるようにします。百度千帆 TokenPlan が含まれ、通常価格の60%という低価格から DeepSeek V4、GLM 5.2、Kimi などのフラッグシップモデルを利用できます。さらに FluxA AgentMarket API の呼び出しクレジットが付与され、検索、データスクレイピング、ソーシャルメディア、金融、暗号資産、画像生成、動画など、1,000以上の有料 API を利用できます。<br><br>ユーザーの承認のもと、AI Agent は公式 Visa カード決済を利用してリソースを自律的に調達し、API Key の管理、使用量の監視、更新計画の策定も行えます。これにより Agent は「自律的にタスクを完了する」段階から、真に「予算を自律的に計画し、タスクを完了する」段階へ進化できます。<a href="https://agentmarket.fluxapay.xyz/marketplace/tokenplans">AgenticPlan の詳細を見る</a>。</td>
-</tr>
-<tr>
 <td width="180"><a href="https://www.openlux.ai/register?channel=c_6axb1q5n"><img src="./assets/openlux.png" alt="OpenLux" width="150"></a></td>
 <td>OpenLux による本プロジェクトへのご支援に感謝します！<br><br>OpenLux は、世界の主要プロバイダーが提供する主流の大規模 AI モデルを集約した、企業向けのワンストップ AI プラットフォームです。迅速で安定したサービスと適時の技術サポートを提供しています。Claude、OpenAI、Gemini シリーズのモデルの基本料金は、それぞれ公式料金の8.82%、4%、8%からご利用いただけます。<br><br>CLI Proxy API ユーザー限定特典：専用リンクから登録すると、チャージ時に最大7.5%の割引を受けられます！<br><br>今すぐ OpenLux を試す → <a href="https://www.openlux.ai/register?channel=c_6axb1q5n">https://www.openlux.ai/register?channel=c_6axb1q5n</a></td>
 </tr>
