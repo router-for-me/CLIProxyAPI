@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -28,7 +30,9 @@ import (
 // providers that require browser-like TLS. The HTTP version follows ALPN. Each
 // request gets a dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
-	dialer proxy.Dialer
+	dialer     proxy.Dialer
+	proxyLabel string         // redacted proxy endpoint for diagnostics, empty when direct
+	rootCAs    *x509.CertPool // nil uses the system roots; set by tests
 }
 
 type closeConnectionBody struct {
@@ -56,46 +60,90 @@ func (b *closeConnectionBody) Close() error {
 	return b.err
 }
 
+// countedConn counts the plaintext bytes carried above TLS.
+type countedConn struct {
+	net.Conn
+	written atomic.Uint64
+	read    atomic.Uint64
+}
+
+func (c *countedConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.read.Add(uint64(n))
+	return n, err
+}
+
+func (c *countedConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.written.Add(uint64(n))
+	return n, err
+}
+
+// utlsDiagnostics is what a failed attempt reports. It holds no request data.
+type utlsDiagnostics struct {
+	dial time.Duration
+	tls  time.Duration
+	alpn string
+	conn *countedConn // nil when the connection was never established
+}
+
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
+	var proxyLabel string
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
+			if mode == proxyutil.ModeProxy {
+				proxyLabel = proxyutil.Redact(proxyURL)
+			}
 		}
 	}
-	return &utlsRoundTripper{dialer: dialer}
+	return &utlsRoundTripper{dialer: dialer, proxyLabel: proxyLabel}
 }
 
 func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*tls.UConn, error) {
+	tlsConn, _, errConnect := t.establishConnection(ctx, host, addr)
+	return tlsConn, errConnect
+}
+
+func (t *utlsRoundTripper) establishConnection(ctx context.Context, host, addr string) (*tls.UConn, *utlsDiagnostics, error) {
+	diag := &utlsDiagnostics{}
 	contextDialer, ok := t.dialer.(proxy.ContextDialer)
 	if !ok {
-		return nil, fmt.Errorf("utls: dialer does not support context cancellation")
+		return nil, diag, fmt.Errorf("utls: dialer does not support context cancellation")
 	}
+	dialStarted := time.Now()
 	conn, errDial := contextDialer.DialContext(ctx, "tcp", addr)
+	diag.dial = time.Since(dialStarted)
 	if errDial != nil {
-		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
+		return nil, diag, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
+	tlsConfig := &tls.Config{ServerName: host, RootCAs: t.rootCAs}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	handshakeCtx, cancelHandshake := handshakeContext(ctx)
 	defer cancelHandshake()
-	if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
+	tlsStarted := time.Now()
+	errHandshake := tlsConn.HandshakeContext(handshakeCtx)
+	diag.tls = time.Since(tlsStarted)
+	if errHandshake != nil {
 		errHandshake = classifyHandshakeError(ctx, handshakeCtx, errHandshake)
 		if errors.Is(errHandshake, context.Canceled) || errors.Is(errHandshake, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
+			return nil, diag, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 		}
 		if errClose := conn.Close(); errClose != nil {
-			return nil, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
+			return nil, diag, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
 		}
-		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
+		return nil, diag, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 	}
 
-	return tlsConn, nil
+	diag.alpn = tlsConn.ConnectionState().NegotiatedProtocol
+	diag.conn = &countedConn{Conn: tlsConn}
+	return tlsConn, diag, nil
 }
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -106,16 +154,47 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	tlsConn, err := t.createConnection(req.Context(), hostname, addr)
-	if err != nil {
-		return nil, err
+	started := time.Now()
+	tlsConn, diag, err := t.establishConnection(req.Context(), hostname, addr)
+	if err == nil {
+		var resp *http.Response
+		resp, err = roundTripUtlsConnectionOnConn(req, tlsConn, diag.conn)
+		if err == nil {
+			return resp, nil
+		}
 	}
-	return roundTripUtlsConnection(req, tlsConn)
+	// A request the client canceled is not a transport failure.
+	if req.Context().Err() == nil {
+		t.logFailure(req, hostname, started, diag, err)
+	}
+	return nil, err
+}
+
+// logFailure reports one failed attempt. The values go into the message because
+// the gateway formatter prints only whitelisted fields. It never includes
+// headers, payload or credentials.
+func (t *utlsRoundTripper) logFailure(req *http.Request, host string, started time.Time, diag *utlsDiagnostics, err error) {
+	var written, read uint64
+	if diag.conn != nil {
+		written, read = diag.conn.written.Load(), diag.conn.read.Load()
+	}
+	proxyLabel := t.proxyLabel
+	if proxyLabel == "" {
+		proxyLabel = "direct"
+	}
+	LogWithRequestID(req.Context()).WithField("error", logging.SafeErrorDiagnostic(err)).Warnf(
+		"utls: transport attempt failed host=%s proxy=%s alpn=%s dial_ms=%d tls_ms=%d elapsed_ms=%d app_bytes_written=%d app_bytes_read=%d request_bytes=%d",
+		logging.SafeDiagnosticForLog(host), logging.SafeDiagnosticForLog(proxyLabel), diag.alpn, diag.dial.Milliseconds(), diag.tls.Milliseconds(), time.Since(started).Milliseconds(), written, read, req.ContentLength)
 }
 
 // roundTripUtlsConnection selects the HTTP protocol before sending the request.
 // Empty ALPN is HTTP/1.1, including when a TLS-inspecting proxy omits ALPN.
 func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Response, error) {
+	return roundTripUtlsConnectionOnConn(req, tlsConn, tlsConn)
+}
+
+// roundTripUtlsConnectionOnConn speaks HTTP over appConn, which wraps tlsConn.
+func roundTripUtlsConnectionOnConn(req *http.Request, tlsConn *tls.UConn, appConn net.Conn) (*http.Response, error) {
 	closeConnection := func() error {
 		// The HTTP/1.1 transport may already have closed its non-pooled
 		// connection after reading the response or canceling the request.
@@ -128,7 +207,7 @@ func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Respo
 	var err error
 	switch protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol {
 	case "h2":
-		h2Conn, errClientConn := (&http2.Transport{}).NewClientConn(tlsConn)
+		h2Conn, errClientConn := (&http2.Transport{}).NewClientConn(appConn)
 		if errClientConn != nil {
 			err = fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
 			break
@@ -142,7 +221,7 @@ func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Respo
 		transport := &http.Transport{
 			DisableKeepAlives: true,
 			DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
-				return tlsConn, nil
+				return appConn, nil
 			},
 		}
 		resp, err = transport.RoundTrip(req)
