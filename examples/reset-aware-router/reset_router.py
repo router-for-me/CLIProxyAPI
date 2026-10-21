@@ -202,6 +202,20 @@ def routing_signal_known(result, now):
             and weekly["usedPercent"] >= 100)
 
 
+def uses_siwc(credential):
+    """SIWC traffic uses a different token from the outer Codex credential."""
+    value = credential.get("use_siwc")
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str) and value.strip().lower() in ("1", "t", "true")
+
+
+def quota_cooldown_entry(entry):
+    return entry.get("status") == "error" and any(
+        isinstance(cooldown, dict) and cooldown.get("reason") in ("quota", "credential_quota")
+        for cooldown in (entry.get("cooldowns") or []))
+
+
 def management(method, path, key, payload=None):
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(
@@ -393,16 +407,19 @@ def run_once(args, now=None):
     by_identity = {item.get("id") or item.get("name"): item
                    for item in auths if item.get("type") == "codex"}
     observations = []
+    skipped_siwc = set()
     for identity, entry in sorted(by_identity.items()):
         path = entry.get("path")
-        quota_cooldown = (entry.get("status") == "error" and any(
-            isinstance(cooldown, dict) and cooldown.get("reason") in ("quota", "credential_quota")
-            for cooldown in (entry.get("cooldowns") or [])))
+        quota_cooldown = quota_cooldown_entry(entry)
         if (entry.get("disabled") or not path
                 or (entry.get("status") != "active" and not quota_cooldown)):
             continue
         try:
             credential = json.loads(Path(path).read_text())
+            if uses_siwc(credential):
+                skipped_siwc.add(identity)
+                print(f"{entry.get('name')}: SIWC credential skipped", file=sys.stderr)
+                continue
             result, _ = app_server(credential)
         except Exception as exc:
             print(f"{entry.get('name')}: unable to read limits ({exc})", file=sys.stderr)
@@ -433,7 +450,7 @@ def run_once(args, now=None):
     if not reprioritize:
         print("Codex limits incomplete; keeping existing priorities", file=sys.stderr)
     for identity, entry in by_identity.items():
-        if entry.get("disabled"):
+        if entry.get("disabled") or identity in skipped_siwc or quota_cooldown_entry(entry):
             continue
         desired = priorities.get(identity, 0)
         current = entry.get("priority") or 0
@@ -446,30 +463,33 @@ def run_once(args, now=None):
         entry = by_identity[identity]
         if args.priority_only:
             continue
-        credit = should_redeem(result, now)
-        if credit is None:
-            continue
-        print(f"{entry.get('name')}: earned reset {credit['id']} eligible for expiry check")
-        if args.dry_run:
-            continue
-        # Re-read before spending; the provider may have changed since ranking.
-        fresh, _ = app_server(credential)
-        credit = should_redeem(fresh, dt.datetime.now(UTC))
-        if credit is None:
-            continue
-        attempt = {
-            "idempotencyKey": redemption_key(args.state_file, credential["account_id"], credit["id"]),
-            "creditId": credit["id"],
-        }
-        _, outcome = app_server(credential, consume=attempt)
-        print(f"{entry.get('name')}: reset outcome={outcome}")
-        if outcome in ("reset", "alreadyRedeemed"):
-            index = entry.get("auth_index")
-            if index:
-                queue_cooldown_reset(args.state_file, index)
-                retry_cooldown_resets(args.state_file, key)
-        elif outcome in ("nothingToReset", "noCredit"):
-            clear_redemption_key(args.state_file, credential["account_id"], credit["id"])
+        try:
+            credit = should_redeem(result, now)
+            if credit is None:
+                continue
+            print(f"{entry.get('name')}: earned reset {credit['id']} eligible for expiry check")
+            if args.dry_run:
+                continue
+            # Re-read before spending; the provider may have changed since ranking.
+            fresh, _ = app_server(credential)
+            credit = should_redeem(fresh, dt.datetime.now(UTC))
+            if credit is None:
+                continue
+            attempt = {
+                "idempotencyKey": redemption_key(args.state_file, credential["account_id"], credit["id"]),
+                "creditId": credit["id"],
+            }
+            _, outcome = app_server(credential, consume=attempt)
+            print(f"{entry.get('name')}: reset outcome={outcome}")
+            if outcome in ("reset", "alreadyRedeemed"):
+                index = entry.get("auth_index")
+                if index:
+                    queue_cooldown_reset(args.state_file, index)
+                    retry_cooldown_resets(args.state_file, key)
+            elif outcome in ("nothingToReset", "noCredit"):
+                clear_redemption_key(args.state_file, credential["account_id"], credit["id"])
+        except Exception as exc:
+            print(f"{entry.get('name')}: reset attempt failed ({exc})", file=sys.stderr)
 
 
 def main():

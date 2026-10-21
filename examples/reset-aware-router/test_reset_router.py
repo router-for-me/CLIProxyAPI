@@ -79,6 +79,12 @@ class PolicyTests(unittest.TestCase):
             result["ordinaryUsageAllowed"] = allowed
             self.assertIsNone(router.account_rank(result, self.now))
 
+    def test_siwc_flag_matches_codex_boolean_forms(self):
+        for enabled in (True, "true", "1", "T"):
+            self.assertTrue(router.uses_siwc({"use_siwc": enabled}))
+        for disabled in (False, "false", None):
+            self.assertFalse(router.uses_siwc({"use_siwc": disabled}))
+
     def test_missing_weekly_and_credit_details_has_no_rank(self):
         result = {"rateLimitResetCredits": {"availableCount": 1, "credits": None}}
         self.assertIsNone(router.account_rank(result, self.now))
@@ -252,6 +258,54 @@ class PolicyTests(unittest.TestCase):
                 router.run_once(args, self.now)
             self.assertEqual(writes, [{"name": "unique-id", "priority": 1}])
 
+    def test_siwc_account_is_never_read_or_reprioritized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential = root / "oauth.json"
+            credential.write_text('{"use_siwc":true,"access_token":"outer"}')
+            (root / "management-key").write_text("unused")
+            entry = {"id": "siwc-id", "name": "oauth.json", "path": str(credential),
+                     "type": "codex", "status": "active", "priority": 7}
+            args = SimpleNamespace(management_key_file=str(root / "management-key"),
+                                   claude_offers_file=str(root / "offers.json"),
+                                   state_file=str(root / "state.json"),
+                                   dry_run=False, priority_only=False)
+            with patch.object(router, "management", return_value={"files": [entry]}) as send, \
+                 patch.object(router, "app_server") as read:
+                router.run_once(args, self.now)
+            read.assert_not_called()
+            self.assertEqual([call.args[0] for call in send.call_args_list], ["GET"])
+
+    def test_redemption_failure_does_not_skip_later_account(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "management-key").write_text("unused")
+            entries = []
+            for identity in ("first", "second"):
+                credential = root / (identity + ".json")
+                credential.write_text(json.dumps({"account_id": identity}))
+                entries.append({"id": identity, "name": credential.name, "path": str(credential),
+                                "type": "codex", "status": "active", "priority": 0,
+                                "auth_index": identity + "-index"})
+            result = self.limits(used=95,
+                                 expiry=int((now + dt.timedelta(hours=12)).timestamp()),
+                                 reset=int((now + dt.timedelta(days=2)).timestamp()))
+            args = SimpleNamespace(management_key_file=str(root / "management-key"),
+                                   claude_offers_file=str(root / "offers.json"),
+                                   state_file=str(root / "state.json"),
+                                   dry_run=False, priority_only=False)
+            def management(method, path, key, payload=None):
+                return {"files": entries} if method == "GET" else {"status": "ok"}
+            with patch.object(router, "management", side_effect=management), \
+                 patch.object(router, "app_server", side_effect=[
+                     (result, None), (result, None), (result, None),
+                     RuntimeError("first consume failed"), (result, None), (result, "reset")]) as read:
+                router.run_once(args, now)
+            self.assertEqual(read.call_count, 6)
+            self.assertIn("first:earned-1", router.load_state(args.state_file))
+            self.assertNotIn("pending_cooldowns", router.load_state(args.state_file))
+
     def test_cooldowned_codex_account_is_still_checked_for_redemption(self):
         now = dt.datetime.now(dt.timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
@@ -263,7 +317,7 @@ class PolicyTests(unittest.TestCase):
                      "type": "codex", "status": "error", "unavailable": True,
                      "next_retry_after": (now + dt.timedelta(hours=2)).isoformat(),
                      "cooldowns": [{"reason": "quota"}],
-                     "auth_index": "index-1", "priority": 0}
+                     "auth_index": "index-1", "priority": 5}
             result = self.limits(used=95,
                                  expiry=int((now + dt.timedelta(hours=12)).timestamp()),
                                  reset=int((now + dt.timedelta(days=2)).timestamp()))
@@ -271,7 +325,9 @@ class PolicyTests(unittest.TestCase):
                                    claude_offers_file=str(root / "offers.json"),
                                    state_file=str(root / "state.json"),
                                    dry_run=False, priority_only=False)
+            methods = []
             def management(method, path, key, payload=None):
+                methods.append(method)
                 return {"files": [entry]} if method == "GET" else {"status": "ok"}
             with patch.object(router, "management", side_effect=management), \
                  patch.object(router, "app_server", side_effect=[
@@ -280,6 +336,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(read.call_count, 3)
             self.assertIn("consume", read.call_args.kwargs)
             self.assertNotIn("pending_cooldowns", router.load_state(args.state_file))
+            self.assertEqual(methods, ["GET", "POST"])
 
 
 if __name__ == "__main__":

@@ -10,7 +10,10 @@ CLIProxyAPI still checks model support and cooldowns before serving a request.
 Codex weekly limits and earned reset credits come from the Codex app-server
 account API. Accounts are promoted only when that API explicitly allows
 ordinary usage. A Codex credential in a CLIProxyAPI quota cooldown is still
-inspected for an eligible earned reset. Claude weekly limits come from recent
+inspected for an eligible earned reset, while its previous priority is kept
+until it recovers. SIWC-backed credentials are excluded because their request
+token differs from the outer Codex token; if an active one is present, Codex
+priorities are left unchanged. Claude weekly limits come from recent
 quota headers already observed by CLIProxyAPI and exposed through its v8
 management API. Claude observations older than three days, expired windows,
 and credentials with an
@@ -18,6 +21,9 @@ error status are not promoted. The companion does not send artificial model
 requests or repeatedly probe Claude's quota endpoint. If any active Codex
 account cannot be read or its routing data is incomplete, that pass keeps the
 previous Codex ordering.
+
+CLIProxyAPIHome mode is unsupported: the server disables its management
+endpoints in that mode, so this companion cannot change Home's routing order.
 
 Run `python3 reset_router.py --once --dry-run --priority-only` to inspect the
 proposed priority changes. Run `python3 reset_router.py --once --priority-only`
@@ -39,6 +45,8 @@ idempotency key before each attempt and reuses it after an uncertain outcome.
 If cooldown clearing fails after a confirmed redemption, it records the
 pending operation and retries it on later runs. `--priority-only` never
 redeems a credit; it can still finish a previously pending local cooldown clear.
+An error while checking or redeeming one Codex credential is logged and does
+not prevent later credentials from being checked in that pass.
 
 ## Claude limit reset offers
 
