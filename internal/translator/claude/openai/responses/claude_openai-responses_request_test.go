@@ -2998,3 +2998,45 @@ func TestConvertOpenAIResponsesRequestToClaude_IncompleteToolOutputIsError(t *te
 		t.Fatalf("tool_result is_error should be true for status incomplete. Output: %s", string(result))
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_DropsEmptyAndWhitespaceText(t *testing.T) {
+	// Minimal repro from issue #6820: trailing empty input_text in Responses API
+	inputJSON := `{
+		"model": "claude-3-7-sonnet-20250219",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Reply with exactly OK."},
+					{"type": "input_text", "text": ""},
+					{"type": "input_text", "text": "   \n\t  "}
+				]
+			}
+		]
+	}`
+
+	result, err := ConvertOpenAIResponsesRequestToClaude("claude-3-7-sonnet-20250219", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequestToClaude error: %v", err)
+	}
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages count = %d, want 1; output: %s", len(messages), string(result))
+	}
+	content := messages[0].Get("content")
+	if content.Type == gjson.String {
+		if content.String() != "Reply with exactly OK." {
+			t.Fatalf("content = %q, want %q", content.String(), "Reply with exactly OK.")
+		}
+	} else {
+		parts := content.Array()
+		if len(parts) != 1 {
+			t.Fatalf("content parts count = %d, want 1; output: %s", len(parts), string(result))
+		}
+		if parts[0].Get("text").String() != "Reply with exactly OK." {
+			t.Fatalf("part text = %q, want %q", parts[0].Get("text").String(), "Reply with exactly OK.")
+		}
+	}
+}
