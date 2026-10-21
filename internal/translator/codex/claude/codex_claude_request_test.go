@@ -1001,7 +1001,6 @@ func TestConvertClaudeRequestToCodex_OutputConfigFormat(t *testing.T) {
 	t.Run("output_config with effort only", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "gpt-5.4",
-			"thinking": {"type": "adaptive"},
 			"output_config": {"effort": "high"},
 			"messages": [
 				{"role": "user", "content": "hello"}
