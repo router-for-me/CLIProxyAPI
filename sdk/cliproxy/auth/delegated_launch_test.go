@@ -471,3 +471,107 @@ type launchTestFailure struct{}
 func (launchTestFailure) Error() string                      { return "synthetic quota" }
 func (launchTestFailure) StatusCode() int                    { return 429 }
 func (launchTestFailure) DelegatedFailure() (string, string) { return "usage_limit", "account" }
+
+func TestDelegatedLaunchSIWCSelectorAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		metadata         any
+		present          bool
+		attribute        string
+		attributePresent bool
+		admit            bool
+	}{
+		{name: "absent", admit: true},
+		{name: "metadata-bool-false", metadata: false, present: true, admit: true},
+		{name: "metadata-string-false", metadata: " false ", present: true, admit: true},
+		{name: "metadata-string-zero", metadata: "0", present: true, admit: true},
+		{name: "attribute-false", attribute: " false ", attributePresent: true, admit: true},
+		{name: "both-false", metadata: false, present: true, attribute: "false", attributePresent: true, admit: true},
+		{name: "metadata-true", metadata: true, present: true},
+		{name: "metadata-string-true", metadata: "true", present: true},
+		{name: "attribute-true", attribute: "true", attributePresent: true},
+		{name: "metadata-malformed", metadata: "unknown", present: true},
+		{name: "attribute-malformed", attribute: "unknown", attributePresent: true},
+		{name: "metadata-null", present: true},
+		{name: "metadata-empty", metadata: "", present: true},
+		{name: "attribute-empty", attributePresent: true},
+		{name: "metadata-numeric-zero", metadata: float64(0), present: true},
+		{name: "metadata-numeric-one", metadata: float64(1), present: true},
+		{name: "attribute-false-metadata-true", metadata: true, present: true, attribute: "false", attributePresent: true},
+		{name: "attribute-true-metadata-false", metadata: false, present: true, attribute: "true", attributePresent: true},
+		{name: "attribute-malformed-metadata-false", metadata: false, present: true, attribute: "unknown", attributePresent: true},
+		{name: "attribute-false-metadata-malformed", metadata: "unknown", present: true, attribute: "false", attributePresent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaunchFixture(t)
+			f.add(t, "a", "account")
+			a, _ := f.manager.GetByID(t.Name() + "-a")
+			if tc.present {
+				a.Metadata["use_siwc"] = tc.metadata
+			}
+			if tc.attributePresent {
+				a.Attributes = map[string]string{"use_siwc": tc.attribute}
+			}
+			if _, err := f.manager.Update(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			r := f.pool.Prepare(context.Background(), "client", launchRequest("request"))
+			if tc.admit {
+				if r.Status != "ready" {
+					t.Fatalf("explicit disabled OAuth excluded: %+v", r)
+				}
+				if err := f.execute("client", r, r.Model, r.SessionID, false); err != nil {
+					t.Fatal(err)
+				}
+				if f.executor.starts.Load() != 1 {
+					t.Fatal("missing dispatch")
+				}
+			} else {
+				if r.Status != "unverified" || r.BindingID != "" || f.probes.Load() != 0 || f.executor.starts.Load() != 0 {
+					t.Fatalf("ambiguous/SIWC identity admitted: %+v probes=%d starts=%d", r, f.probes.Load(), f.executor.starts.Load())
+				}
+			}
+		})
+	}
+}
+
+func TestDelegatedLaunchSIWCFalseBindingInvalidation(t *testing.T) {
+	for _, kind := range []string{"token", "metadata-true", "metadata-malformed", "attribute-true", "attribute-malformed", "false-representation"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newLaunchFixture(t)
+			f.add(t, "a", "account")
+			id := t.Name() + "-a"
+			a, _ := f.manager.GetByID(id)
+			a.Metadata["use_siwc"] = false
+			if _, err := f.manager.Update(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			r := f.pool.Prepare(context.Background(), "client", launchRequest("request"))
+			if r.Status != "ready" {
+				t.Fatalf("false excluded: %+v", r)
+			}
+			a, _ = f.manager.GetByID(id)
+			switch kind {
+			case "token":
+				a.Metadata["access_token"] = "synthetic-replacement"
+			case "metadata-true":
+				a.Metadata["use_siwc"] = true
+			case "metadata-malformed":
+				a.Metadata["use_siwc"] = "unknown"
+			case "attribute-true":
+				a.Attributes = map[string]string{"use_siwc": "true"}
+			case "attribute-malformed":
+				a.Attributes = map[string]string{"use_siwc": "unknown"}
+			case "false-representation":
+				a.Metadata["use_siwc"] = "false"
+			}
+			if _, err := f.manager.Update(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			err := f.execute("client", r, r.Model, r.SessionID, false)
+			if err == nil || f.executor.starts.Load() != 0 {
+				t.Fatalf("stale identity dispatched: %v starts=%d", err, f.executor.starts.Load())
+			}
+		})
+	}
+}

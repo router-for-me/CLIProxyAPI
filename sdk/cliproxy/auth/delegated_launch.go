@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -192,10 +193,10 @@ func launchAccount(a *Auth) string {
 	if a.Metadata["type"] != "codex" {
 		return ""
 	}
-	if _, ok := a.Metadata["use_siwc"]; ok {
+	if value, ok := a.Metadata["use_siwc"]; ok && !launchExplicitFalse(value) {
 		return ""
 	}
-	if a.Attributes["use_siwc"] != "" {
+	if value, ok := a.Attributes["use_siwc"]; ok && !launchExplicitFalse(value) {
 		return ""
 	}
 	token, _ := a.Metadata["access_token"].(string)
@@ -204,6 +205,21 @@ func launchAccount(a *Auth) string {
 		return ""
 	}
 	return id
+}
+
+// Every present SIWC selector must explicitly disable SIWC. The executor accepts
+// bool/string metadata and ParseBool attribute strings, with true precedence.
+// Do not infer outer OAuth identity from malformed, conflicting or numeric flags.
+func launchExplicitFalse(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return !v
+	case string:
+		enabled, err := strconv.ParseBool(strings.TrimSpace(v))
+		return err == nil && !enabled
+	default:
+		return false
+	}
 }
 
 func launchRevision(a *Auth) [32]byte {

@@ -17,11 +17,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtime "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	access "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -64,7 +67,7 @@ type delegatedHTTPFixture struct {
 	cacheKey    atomic.Value
 }
 
-func newDelegatedHTTPFixture(t *testing.T) *delegatedHTTPFixture {
+func newDelegatedHTTPFixture(t *testing.T, configure ...func(*auth.Auth)) *delegatedHTTPFixture {
 	t.Helper()
 	f := &delegatedHTTPFixture{cfg: &config.Config{}}
 	f.allowed.Store(true)
@@ -141,7 +144,11 @@ func newDelegatedHTTPFixture(t *testing.T) *delegatedHTTPFixture {
 	target, _ := url.Parse(upstream.URL)
 	m.SetRoundTripperProvider(delegatedHTTPTransport{target, upstream.Client().Transport})
 	id := t.Name()
-	_, err := m.Register(context.Background(), &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Metadata: map[string]any{"type": "codex", "account_id": "synthetic-account", "access_token": "synthetic-token"}})
+	credential := &auth.Auth{ID: id, Provider: "codex", Status: auth.StatusActive, Metadata: map[string]any{"type": "codex", "account_id": "synthetic-account", "access_token": "synthetic-token"}}
+	for _, apply := range configure {
+		apply(credential)
+	}
+	_, err := m.Register(context.Background(), credential)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +157,16 @@ func newDelegatedHTTPFixture(t *testing.T) *delegatedHTTPFixture {
 	accessManager := access.NewManager()
 	accessManager.SetProviders([]access.Provider{delegatedAccess{}})
 	f.engine = gin.New()
+	f.engine.Use((&Server{cfg: f.cfg}).maxRequestBodyBytesMiddleware())
+	// Ordinary reader oracle shares the production request-size middleware.
+	f.engine.POST("/ordinary-body", func(c *gin.Context) {
+		body, err := handlers.ReadRequestBody(c)
+		if err != nil {
+			c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: fmt.Sprintf("Invalid request: %v", err), Type: "invalid_request_error"}})
+			return
+		}
+		c.Data(200, "application/json", body)
+	})
 	v1 := f.engine.Group("/v1")
 	v1.Use(AuthMiddleware(accessManager))
 	registerDelegatedLaunch(v1, auth.NewLaunchPoolWithClock(m, func() time.Time { return time.Unix(0, f.clock.Load()) }))
@@ -397,6 +414,162 @@ func TestDelegatedLaunchAttemptIdentityContract(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, mode+".json"), b, 0600); err != nil {
 					t.Fatal(err)
 				}
+			}
+		})
+	}
+}
+
+func TestDelegatedLaunchHTTPBodyPolicy(t *testing.T) {
+	large := []byte(`{"model":"gpt-6.1-sol","input":"` + strings.Repeat("x", (2<<20)+1) + `"}`)
+	small := []byte(`{"model":"gpt-6.1-sol","input":"hello"}`)
+	encoder, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer encoder.Close()
+	for _, endpoint := range []string{"/responses", "/responses/compact"} {
+		for _, tc := range []struct {
+			name     string
+			body     []byte
+			encoding string
+			limit    int64
+			chunked  bool
+			status   int
+		}{
+			{name: "default-large", body: large, status: 200},
+			{name: "configured-large", body: large, limit: 4 << 20, status: 200},
+			{name: "zstd", body: encoder.EncodeAll(small, nil), encoding: "zstd", status: 200},
+			{name: "zstd-large", body: encoder.EncodeAll(large, nil), encoding: "zstd", status: 200},
+			{name: "zstd-configured-large", body: encoder.EncodeAll(large, nil), encoding: "zstd", limit: 4 << 20, status: 200},
+			{name: "wire-limit", body: large, limit: 1024, status: 413},
+			{name: "chunked-limit", body: large, limit: 1024, chunked: true, status: 413},
+			{name: "decoded-limit", body: encoder.EncodeAll(large, nil), encoding: "zstd", limit: 1024, status: 413},
+			{name: "unsupported", body: []byte("not-json"), encoding: "gzip", status: 400},
+			{name: "malformed-zstd", body: []byte("not-zstd"), encoding: "zstd", status: 400},
+			{name: "unsupported-json-fallback", body: small, encoding: "gzip", status: 200},
+			{name: "zstd-json-fallback", body: small, encoding: "zstd", status: 200},
+		} {
+			t.Run(endpoint+"/"+tc.name, func(t *testing.T) {
+				f := newDelegatedHTTPFixture(t)
+				binding := f.prepare(t)
+				f.cfg.MaxRequestBodyBytes = tc.limit
+				call := func(path string) *httptest.ResponseRecorder {
+					req := httptest.NewRequest("POST", path, bytes.NewReader(tc.body))
+					req.Header.Set("X-Test-Principal", "client")
+					req.Header.Set("Content-Encoding", tc.encoding)
+					if tc.chunked {
+						req.ContentLength = -1
+					}
+					w := httptest.NewRecorder()
+					f.engine.ServeHTTP(w, req)
+					return w
+				}
+				ordinary := call("/ordinary-body")
+				bound := call(binding.BasePath + endpoint)
+				if ordinary.Code != tc.status || bound.Code != tc.status {
+					t.Fatalf("ordinary=%d bound=%d want=%d bound body=%.500s", ordinary.Code, bound.Code, tc.status, bound.Body.String())
+				}
+				if tc.status == 200 {
+					if f.generations.Load() != 1 {
+						t.Fatal("accepted body did not generate exactly once")
+					}
+				} else {
+					if f.generations.Load() != 0 {
+						t.Fatal("invalid body generated")
+					}
+					if ordinary.Body.String() != bound.Body.String() {
+						t.Fatalf("error semantics differ: ordinary=%s bound=%s", ordinary.Body.String(), bound.Body.String())
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestDelegatedLaunchHTTPEncodedGuards(t *testing.T) {
+	encoder, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer encoder.Close()
+	for _, endpoint := range []string{"/responses", "/responses/compact"} {
+		for _, kind := range []string{"principal", "unauthenticated", "binding", "session", "model"} {
+			t.Run(endpoint+"/"+kind, func(t *testing.T) {
+				f := newDelegatedHTTPFixture(t)
+				binding := f.prepare(t)
+				path := binding.BasePath + endpoint
+				principal := "client"
+				model := "gpt-6.1-sol"
+				switch kind {
+				case "principal":
+					principal = "attacker"
+				case "unauthenticated":
+					principal = ""
+				case "binding":
+					path = strings.Replace(path, binding.BindingID, "unknown", 1)
+				case "session":
+					path = strings.Replace(path, "/sessions/session/", "/sessions/other/", 1)
+				case "model":
+					model = "gpt-6-astra"
+				}
+				body := encoder.EncodeAll([]byte(fmt.Sprintf(`{"model":%q,"input":"hello"}`, model)), nil)
+				req := httptest.NewRequest("POST", path, bytes.NewReader(body))
+				req.Header.Set("X-Test-Principal", principal)
+				req.Header.Set("Content-Encoding", "zstd")
+				w := httptest.NewRecorder()
+				f.engine.ServeHTTP(w, req)
+				if w.Code < 400 || f.generations.Load() != 0 {
+					t.Fatalf("guard bypass: %d generations=%d", w.Code, f.generations.Load())
+				}
+			})
+		}
+	}
+}
+
+func TestDelegatedLaunchHTTPControlBodyCaps(t *testing.T) {
+	f := newDelegatedHTTPFixture(t)
+	binding := f.prepare(t)
+	for _, tc := range []struct{ path, body string }{
+		{"/v1/delegated-launch/prepare", `{"clientRequestId":"` + strings.Repeat("x", 16<<10) + `"}`},
+		{"/v1/delegated-launch/cancel", `{"clientRequestId":"` + strings.Repeat("x", 1024) + `"}`},
+		{binding.BasePath + "/resume", `{"expectedRefusalVersion":1` + strings.Repeat(" ", 1024) + `}`},
+	} {
+		if w := f.call("POST", tc.path, "client", tc.body); w.Code != 400 {
+			t.Fatalf("control cap %s: %d", tc.path, w.Code)
+		}
+	}
+	if f.generations.Load() != 0 {
+		t.Fatal("control request generated")
+	}
+}
+
+func TestDelegatedLaunchHTTPExplicitSIWCFalse(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		metadata  any
+		attribute string
+	}{
+		{"bool", false, ""}, {"string", " false ", ""}, {"attribute", nil, "false"}, {"both", false, "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDelegatedHTTPFixture(t, func(a *auth.Auth) {
+				if tc.metadata != nil {
+					a.Metadata["use_siwc"] = tc.metadata
+				}
+				if tc.attribute != "" {
+					a.Attributes = map[string]string{"use_siwc": tc.attribute}
+				}
+				a.Metadata["siwc"] = map[string]any{"access_token": "synthetic-nested-must-not-be-used"}
+			})
+			binding := f.prepare(t)
+			for _, endpoint := range []string{"/responses", "/responses/compact"} {
+				w := f.call("POST", binding.BasePath+endpoint, "client", `{"model":"gpt-6.1-sol","input":"hello"}`)
+				if w.Code != 200 {
+					t.Fatalf("outer OAuth dispatch: %d %s", w.Code, w.Body.String())
+				}
+			}
+			if f.generations.Load() != 2 {
+				t.Fatal("expected both outer OAuth requests")
 			}
 		})
 	}

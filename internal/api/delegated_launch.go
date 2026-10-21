@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	execution "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -114,12 +117,18 @@ func dispatchBoundResponse(c *gin.Context, pool *auth.LaunchPool) {
 		writeBoundError(c, &auth.LaunchRefusal{Code: "transport_unsupported", QuotaScope: "unknown", QuotaDomains: []string{}})
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 2<<20))
+	body, err := handlers.ReadRequestBody(c)
+	if err != nil {
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{Error: handlers.ErrorDetail{
+			Message: fmt.Sprintf("Invalid request: %v", err), Type: "invalid_request_error",
+		}})
+		return
+	}
 	var request struct {
 		Model  string `json:"model"`
 		Stream bool   `json:"stream"`
 	}
-	if err != nil || json.Unmarshal(body, &request) != nil {
+	if json.Unmarshal(body, &request) != nil {
 		writeBoundError(c, &auth.LaunchRefusal{Code: "invalid_request", QuotaScope: "unknown", QuotaDomains: []string{}})
 		return
 	}
