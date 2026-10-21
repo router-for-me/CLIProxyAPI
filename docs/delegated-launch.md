@@ -85,6 +85,25 @@ revocation checks. Missing, stale and already-consumed acknowledgements refuse.
 Two quota-probe refusals at zero executor attempts must reject the first version.
 Acknowledgement never authorizes dispatch: fresh auth/quota/model checks remain.
 
+## F2 local contention threat rationale (before gate changes)
+
+Local probe saturation supplies no evidence about upstream identity or quota.
+An established binding must not retain a refusal merely because all four probe
+slots are occupied. Reserve its single active owner before queueing; duplicates
+must neither probe nor latch a refusal. Waiting has a three-second ceiling plus
+the caller's earlier cancellation/deadline, at most one waiter per binding and
+256 bindings total. Release cancels queued ownership. Preparation still uses
+nonblocking shared slots and its existing five-second lifetime; no new queue or
+retry goroutine is introduced. Acquisition never authorizes generation: fresh
+authoritative quota and the final credential/model/revocation checks remain.
+
+The owner latches genuine probe/auth refusals and drops failed ownership together
+under the pool lock, so resume cannot acknowledge a refusal before its producer
+finishes. Local wait expiry or caller cancellation drops ownership without a latch
+or refusal-version change. No executor request is replayed. Required fixtures:
+mixed prepare/authorize saturation, duplicate ownership, queued cancellation,
+deadline/release, fresh exhaustion/identity denial after waiting, and stale resume.
+
 ## Source provenance
 
 Implementation base: fetched router-for-me/CLIProxyAPI main
@@ -147,7 +166,12 @@ long tool delays, and re-probe quota before each request. No blind child relaunc
 or replacement binding is required. Idle expiry is 30 minutes after completion;
 an active HTTP/SSE request has no imposed lifetime and is not evicted. At most
 256 records, one active executor per binding, four concurrent usage probes and
-32 distinct candidate accounts per preparation are allowed. Saturation fails closed.
+32 distinct candidate accounts per preparation are allowed. Prepare saturation
+fails closed. Bound authorization waits at most three seconds for a shared probe
+slot, subject to earlier caller cancellation/deadline. Wait expiry returns
+capacity_unverified without latching; caller cancellation also never latches.
+Neither case starts an executor or changes the binding. Consumers own waiting;
+the proxy performs no automatic generation retry.
 No locks span network probes. Probe deadlines are three seconds; prepare is five.
 
 Control endpoints relative to `basePath`, all using the same authentication:

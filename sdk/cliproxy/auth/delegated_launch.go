@@ -432,7 +432,7 @@ func decodeLaunchUsage(body []byte, account string, now time.Time) LaunchResult 
 
 // authorize linearizes admission under manager-read + pool locks. Auth changes
 // after this point do not replace the immutable active request's credential.
-func (p *LaunchPool) authorize(ctx context.Context, cancel context.CancelFunc, principal, binding, session, model string) (*Auth, ProviderExecutor, *LaunchRefusal) {
+func (p *LaunchPool) authorize(ctx context.Context, cancel context.CancelFunc, principal, binding, session, model string) (_ *Auth, _ ProviderExecutor, refusal *LaunchRefusal) {
 	p.mu.Lock()
 	p.pruneLocked()
 	e := p.bindings[binding]
@@ -449,19 +449,40 @@ func (p *LaunchPool) authorize(ctx context.Context, cancel context.CancelFunc, p
 		p.mu.Unlock()
 		return nil, nil, r
 	}
+	// Own the binding throughout admission, not only after its probe. This bounds
+	// waiting to one caller per binding and makes release cancel queued work.
+	e.active = cancel
+	latch := true
+	defer func() {
+		if refusal != nil {
+			p.mu.Lock()
+			if latch && ctx.Err() == nil && !e.revoked {
+				e.latchRefusal(refusal)
+			}
+			e.active = nil
+			p.mu.Unlock()
+		}
+	}()
 	authID, revision, domains := e.authID, e.revision, append([]string{}, e.result.QuotaDomains...)
 	p.mu.Unlock()
 	a, ok := p.manager.GetByID(authID)
 	if !ok || launchRevision(a) != revision || launchAccount(a) == "" {
 		return nil, nil, launchRefusal("binding_changed", binding, domains)
 	}
+	waitCtx, waitCancel := context.WithTimeout(ctx, 3*time.Second)
 	select {
 	case p.probes <- struct{}{}:
-	default:
+		waitCancel()
+	case <-waitCtx.Done():
+		waitCancel()
+		latch = false // Local contention is not authoritative quota evidence.
 		return nil, nil, launchRefusal("capacity_unverified", binding, domains)
 	}
 	quota := p.probe(ctx, a)
 	<-p.probes
+	if ctx.Err() != nil {
+		return nil, nil, launchRefusal("binding_changed", binding, domains)
+	}
 	if quota.Status != "ready" {
 		r := launchRefusal(quota.Code, binding, domains)
 		r.QuotaScope = quota.QuotaScope
@@ -474,9 +495,6 @@ func (p *LaunchPool) authorize(ctx context.Context, cancel context.CancelFunc, p
 	defer p.mu.Unlock()
 	if current == nil || launchRevision(current) != revision || launchAccount(current) == "" || !registry.GetGlobalRegistry().ClientSupportsModel(authID, model) || ex == nil || ctx.Err() != nil || e.revoked || p.bindings[binding] != e || !p.now().Before(e.expires) {
 		return nil, nil, launchRefusal("binding_changed", binding, domains)
-	}
-	if e.active != nil {
-		return nil, nil, launchRefusal("binding_busy", binding, nil)
 	}
 	if e.lastRefusal != nil {
 		return nil, nil, cloneLaunchRefusal(e.lastRefusal)
@@ -598,11 +616,6 @@ func (p *LaunchPool) ExecuteBound(ctx context.Context, principal, binding, sessi
 	ctx, cancel := context.WithCancel(ctx)
 	a, ex, refusal := p.authorize(ctx, cancel, principal, binding, session, req.Model)
 	if refusal != nil {
-		p.mu.Lock()
-		if e := p.bindings[binding]; e != nil && principal != "" && e.principal == principal && e.request.SessionID == session && e.request.Model == req.Model && !e.revoked && refusal.Code != "binding_busy" {
-			e.latchRefusal(refusal)
-		}
-		p.mu.Unlock()
 		cancel()
 		return execution.Response{}, nil, refusal
 	}
