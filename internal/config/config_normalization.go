@@ -34,6 +34,54 @@ func (cfg *Config) NormalizePluginsConfig() {
 	}
 }
 
+// NormalizeUsageAPIConfig trims allow-list entries, removes duplicates, and
+// applies the cache lifetime defaults.
+func (c *UsageAPIConfig) Normalize() {
+	if c == nil {
+		return
+	}
+	c.Providers = normalizeUsageAPIList(c.Providers, true)
+	c.Credentials = normalizeUsageAPIList(c.Credentials, false)
+	c.CacheSeconds = c.EffectiveCacheSeconds()
+}
+
+// EffectiveCacheSeconds returns the bounded cache lifetime for usage reports.
+func (c *UsageAPIConfig) EffectiveCacheSeconds() int {
+	if c == nil || c.CacheSeconds <= 0 {
+		return DefaultUsageAPICacheSeconds
+	}
+	if c.CacheSeconds > MaxUsageAPICacheSeconds {
+		return MaxUsageAPICacheSeconds
+	}
+	return c.CacheSeconds
+}
+
+func normalizeUsageAPIList(values []string, lower bool) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if lower {
+			value = strings.ToLower(value)
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // NormalizeClaudeConfig applies default Claude provider configuration values.
 func (cfg *Config) NormalizeClaudeConfig() {
 	if cfg == nil {

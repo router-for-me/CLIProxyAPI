@@ -105,6 +105,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	cfg.NormalizePluginsConfig()
 	cfg.NormalizeClaudeConfig()
+	cfg.UsageAPI.Normalize()
 	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
 		return nil, errResolvePluginsDir
 	}

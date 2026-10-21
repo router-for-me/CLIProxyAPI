@@ -398,6 +398,29 @@ type RemoteManagement struct {
 	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
 }
 
+// UsageAPIConfig configures the user-facing upstream usage endpoint.
+// The endpoint reports provider quota limits to clients that authenticate with
+// a proxy API key. It is disabled unless Enabled is true and at least one
+// provider is listed.
+type UsageAPIConfig struct {
+	// Enabled toggles the user-facing usage endpoint.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Providers is the strict provider allow-list exposed by the endpoint.
+	// Provider keys are matched case-insensitively against credential provider
+	// and compatibility names. An empty list keeps the endpoint disabled.
+	Providers []string `yaml:"providers,omitempty" json:"providers,omitempty"`
+
+	// Credentials optionally narrows the endpoint to specific credentials.
+	// Entries match the runtime auth index, the auth file name, or the auth ID.
+	// An empty list exposes every credential of the allowed providers.
+	Credentials []string `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+
+	// CacheSeconds is how long fetched usage reports are cached.
+	// Values <= 0 use the default of 60 seconds; values above 3600 are clamped.
+	CacheSeconds int `yaml:"cache-seconds,omitempty" json:"cache-seconds,omitempty"`
+}
+
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
 // It provides configuration options for automatic failover mechanisms.
 type QuotaExceeded struct {

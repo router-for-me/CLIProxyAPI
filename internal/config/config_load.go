@@ -164,6 +164,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 				cfg.NormalizePluginsConfig()
 				cfg.NormalizeClaudeConfig()
+				cfg.UsageAPI.Normalize()
 				return cfg, nil
 			}
 		}
@@ -175,6 +176,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 		cfg.NormalizePluginsConfig()
 		cfg.NormalizeClaudeConfig()
+		cfg.UsageAPI.Normalize()
 		return cfg, nil
 	}
 
@@ -183,6 +185,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 			cfgOptional.NormalizePluginsConfig()
 			cfgOptional.NormalizeClaudeConfig()
+			cfgOptional.UsageAPI.Normalize()
 			return cfgOptional, nil
 		}
 		return nil, errValidate
@@ -215,6 +218,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 			cfgOptional.NormalizePluginsConfig()
 			cfgOptional.NormalizeClaudeConfig()
+			cfgOptional.UsageAPI.Normalize()
 			return cfgOptional, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
@@ -285,6 +289,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	cfg.NormalizePluginsConfig()
 	cfg.NormalizeClaudeConfig()
+	cfg.UsageAPI.Normalize()
 	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
 		return nil, errResolvePluginsDir
 	}

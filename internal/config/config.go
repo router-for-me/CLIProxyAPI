@@ -79,6 +79,10 @@ type Config struct {
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
 
+	// UsageAPI configures the user-facing upstream usage endpoint.
+	// It is disabled by default and always requires a proxy API key.
+	UsageAPI UsageAPIConfig `yaml:"usage-api" json:"usage-api"`
+
 	// DisableCooling disables auth/model cooldown scheduling when true unless a credential or provider overrides it.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
