@@ -1218,4 +1218,37 @@ func TestClaudeMCPAliasResolverBareToolComponentAmbiguousWithPassthrough(t *test
 	if got, matched, err := ambiguous.resolve(passthrough); err != nil || matched || got != "" {
 		t.Fatalf("resolve(%s) = %q, %v, %v; want passthrough forwarded as is", passthrough, got, matched, err)
 	}
+
+	// A server tool keeps its name, so a generated component that spells it
+	// (tool ID "web", client tool "search") must not capture it either.
+	builtin := newClaudeMCPAliasResolver(map[string]string{"mcp__brave_lemon__web_search": "search", "web_search": "web_search"})
+	if got, matched, err := builtin.resolve("web_search"); err != nil || matched || got != "" {
+		t.Fatalf("resolve(web_search) = %q, %v, %v; want the server tool forwarded as is", got, matched, err)
+	}
+}
+
+func TestRemapOAuthToolNamesRecordsServerToolsForRestore(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"search","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "server-tool-caller"})
+	if got := gjson.GetBytes(remapped, "tools.0.name").String(); got != "web_search" {
+		t.Fatalf("server tool renamed to %q, want web_search", got)
+	}
+	if original, ok := reverseMap["web_search"]; !ok || original != "web_search" {
+		t.Fatalf("reverse map does not record the server tool as left untouched: %v", reverseMap)
+	}
+	searchAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	response := []byte(fmt.Sprintf(`{"content":[
+		{"type":"tool_reference","tool_name":"web_search"},
+		{"type":"tool_use","id":"toolu_search","name":%q,"input":{}}
+	]}`, searchAlias))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.tool_name").String(); got != "web_search" {
+		t.Fatalf("server tool reference changed to %q, want web_search", got)
+	}
+	if got := gjson.GetBytes(restored, "content.1.name").String(); got != "search" {
+		t.Fatalf("client tool alias restored to %q, want search", got)
+	}
 }
