@@ -2,9 +2,9 @@ package auth
 
 import "time"
 
-const LaunchProtocolVersion = 1
+const LaunchProtocolVersion = 2
 
-// PrepareLaunchRequest is version 1 of the pool-owned admission protocol.
+// PrepareLaunchRequest is version 2 of the pool-owned admission protocol.
 type PrepareLaunchRequest struct {
 	ClientRequestID     string   `json:"clientRequestId"`
 	SessionID           string   `json:"sessionId"`
@@ -39,10 +39,12 @@ type LaunchResult struct {
 
 // LaunchRefusal is machine-readable; consumers must not classify error prose.
 type LaunchRefusal struct {
-	Code         string   `json:"code"`
-	QuotaScope   string   `json:"quotaScope"`
-	QuotaDomains []string `json:"quotaDomains"`
-	BindingID    string   `json:"bindingId,omitempty"`
+	// Authenticated failed-attempt identity; never evidence of depleted quota.
+	AttemptedAccountDomain string   `json:"attemptedAccountDomain,omitempty"`
+	Code                   string   `json:"code"`
+	QuotaScope             string   `json:"quotaScope"`
+	QuotaDomains           []string `json:"quotaDomains"`
+	BindingID              string   `json:"bindingId,omitempty"`
 }
 
 func (e *LaunchRefusal) Error() string { return e.Code }

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -363,5 +365,39 @@ func TestDelegatedLaunchExecutionRedirectRefused(t *testing.T) {
 	w := f.call("POST", r.BasePath+"/responses", "client", `{"model":"gpt-6.1-sol"}`)
 	if w.Code < 400 || f.generations.Load() != 1 {
 		t.Fatalf("redirect followed: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Optional fixture export is consumed by the actual Python wrapper and T3 tests.
+func TestDelegatedLaunchAttemptIdentityContract(t *testing.T) {
+	for _, mode := range []string{"throttle", "capacity"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newDelegatedHTTPFixture(t)
+			r := f.prepare(t)
+			f.mode.Store(mode)
+			f.call("POST", r.BasePath+"/responses", "client", `{"model":"gpt-6.1-sol","input":"hello","stream":true}`)
+			w := f.call("GET", r.BasePath+"/state", "client", "")
+			var state map[string]any
+			if json.Unmarshal(w.Body.Bytes(), &state) != nil {
+				t.Fatal(w.Body.String())
+			}
+			refusal, ok := state["refusal"].(map[string]any)
+			if !ok {
+				t.Fatal(w.Body.String())
+			}
+			if mode == "throttle" {
+				if refusal["code"] != "throttled" || refusal["quotaScope"] != "transient" || len(refusal["quotaDomains"].([]any)) != 0 || refusal["attemptedAccountDomain"] != "codex:credential:synthetic-account" {
+					t.Fatal("lost attempt identity or fabricated depletion:", w.Body.String())
+				}
+			} else if refusal["quotaScope"] != "model" {
+				t.Fatal(w.Body.String())
+			}
+			if dir := os.Getenv("QUOTA_CONTRACT_EXPORT"); dir != "" {
+				b, _ := json.Marshal(map[string]any{"ready": r, "state": state})
+				if err := os.WriteFile(filepath.Join(dir, mode+".json"), b, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }

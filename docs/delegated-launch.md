@@ -116,14 +116,14 @@ the owning upstream API/manager, not that older patched build. Integrating into
 the tracked dotfiles image builder, wrapper and typed T3 consumer requires
 separate changes, review and rollout authority. Existing T3 pool denial remains.
 
-## Protocol v1
+## Protocol v2
 
 `POST /v1/delegated-launch/prepare` uses existing API authentication and takes
 `clientRequestId`, `sessionId`, `provider: "codex"`, exact `model`, and
 `blockedQuotaDomains`. Session/model IDs contain 1–128 ASCII letters, numbers,
 dots, underscores or hyphens. IDs are logical consumer task/session IDs, allocated
 before native `thread/start`; they are not native cache keys. Ready returns
-`protocolVersion:1`, `bindingId`, `basePath`, provider/model/session, `checkedAt`, `expiresAt`, windows,
+`protocolVersion:2`, `bindingId`, `basePath`, provider/model/session, `checkedAt`, `expiresAt`, windows,
 ordinary allowance and quota domains. Waiting/unverified never authorizes generation.
 
 Set the native provider's `base_url` to origin + `basePath`, using the same
@@ -289,3 +289,22 @@ between turns on the same binding. Deterministic Go tests also cover
 idle cleanup, source-backed decoder shapes, control isolation and compact pinning.
 No live endpoint/schema support, deployment, wrapper/T3 enablement or paid probe is
 claimed. Packaging the current patched image and downstream consumer remain separate.
+
+
+### Attempt identity contract (protocol 2)
+
+Refusals may carry `attemptedAccountDomain`, taken from the immutable authenticated
+executor credential. This identifies the failed attempt, not depleted quota.
+A `throttled/transient` refusal keeps empty `quotaDomains`; consumers may exclude
+that attempted account while trying other eligible accounts on the same model.
+`model_capacity/model` remains a candidate-wide capacity signal even with attempt
+identity present. Account depletion retains its authoritative `usage_limit/account`
+scope. No scope is inferred from error prose. Consumers must compare attempt identity
+with the admitted binding domains and refuse malformed/foreign identities.
+
+All result/state `protocolVersion` values are now 2. Version 1 decoders must fail
+closed; deploy all three matching layers only after independent review and approval.
+The authenticated HTTP route namespace remains `/v1/delegated-launch`.
+Offline replay: `QUOTA_CONTRACT_EXPORT=<private-dir> go test ./internal/api
+-run '^TestDelegatedLaunchAttemptIdentityContract$' -count=1` exports actual
+HTTP-executor throttle/capacity states for the wrapper and T3 fixture checks.

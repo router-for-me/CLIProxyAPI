@@ -697,6 +697,9 @@ func (p *LaunchPool) boundError(err error, binding string, a *Auth) error {
 	}
 	r := launchRefusal(code, binding, nil)
 	r.QuotaScope = scope
+	if account := launchAccount(a); account != "" {
+		r.AttemptedAccountDomain = quotaDomain(account)
+	}
 	if scope == "account" {
 		r.QuotaDomains = []string{quotaDomain(launchAccount(a))}
 	}
