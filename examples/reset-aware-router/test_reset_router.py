@@ -60,6 +60,14 @@ class PolicyTests(unittest.TestCase):
         later = self.limits(used=5, expiry=int((self.now + dt.timedelta(days=2)).timestamp()))
         self.assertLess(router.account_rank(earlier, self.now), router.account_rank(later, self.now))
 
+    def test_one_second_renewal_jitter_allows_credit_expiry_tie_break(self):
+        reset = int((self.now + dt.timedelta(days=5, seconds=31)).timestamp())
+        with_credit = self.limits(used=0, reset=reset + 1)
+        no_credit = self.limits(used=0, reset=reset)
+        no_credit["rateLimitResetCredits"] = {"availableCount": 0, "credits": []}
+        self.assertLess(router.account_rank(with_credit, self.now),
+                        router.account_rank(no_credit, self.now))
+
     def test_exhausted_weekly_quota_is_not_promoted(self):
         self.assertIsNone(router.account_rank(self.limits(used=100), self.now))
 

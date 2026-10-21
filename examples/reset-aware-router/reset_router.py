@@ -25,6 +25,11 @@ EXPIRY_HORIZON = dt.timedelta(days=7)
 REDEEM_HORIZON = dt.timedelta(hours=24)
 
 
+def renewal_minute(timestamp):
+    """Ignore second-level jitter between otherwise equal provider windows."""
+    return int((timestamp + 30) // 60)
+
+
 def read_responses(proc, inbox):
     for line in proc.stdout:
         try:
@@ -159,7 +164,7 @@ def account_rank(result, now):
     used = weekly.get("usedPercent")
     if (isinstance(reset_at, (int, float)) and reset_at > now.timestamp()
             and isinstance(used, (int, float)) and 0 <= used < 100):
-        return (0, reset_at, credit_expiry, used)
+        return (0, renewal_minute(reset_at), credit_expiry, used)
     if weekly:
         return None  # Known exhausted or malformed weekly quota is not promoted.
     if credit_expiry < now.timestamp() + EXPIRY_HORIZON.total_seconds():
@@ -265,7 +270,7 @@ def apply_claude_priorities(args, key, auths, now):
         weekly = claude_weekly_rank(entry, now)
         if weekly and weekly[1] < 1:
             reset_at, used = weekly
-            ranked.append(((0, reset_at, offer_expiry, used), name))
+            ranked.append(((0, renewal_minute(reset_at), offer_expiry, used), name))
         elif weekly is None and offer_expiry != float("inf"):
             ranked.append(((1, offer_expiry, float("inf"), 0), name))
     ranked.sort()

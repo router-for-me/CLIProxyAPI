@@ -2,8 +2,9 @@
 
 This optional local companion updates CLIProxyAPI credential priorities. For
 accounts with usable weekly quota, it prefers the earliest upcoming weekly
-renewal, so unused capacity is spent before that window closes. An earned
-manual reset expiry breaks ties, followed by the amount of unused weekly quota.
+renewal, so unused capacity is spent before that window closes. Renewal times
+are compared to the nearest minute to ignore second-level reporting jitter.
+An earned manual reset expiry breaks ties, followed by unused weekly quota.
 CLIProxyAPI still checks model support and cooldowns before serving a request.
 
 Codex weekly limits and earned reset credits come from the Codex app-server
