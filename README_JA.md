@@ -111,6 +111,10 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
 <td>こちらのAIモデル中转サービスはいつでも返金可能で、どのユーザーも無料でインボイスを発行できます。法人のご利用も個人のご利用もどちらも対応可能で、主要なモデルはすべて揃っています。カスタマーサポートは長時間オンラインで皆様のご指示をお待ちしております。何かございましたらお気軽にご指示ください。お客様のご意見をしっかり取り入れるのがモットーです！！！<br><br>Xcode VIPエントランス→ <a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a></td>
 </tr>
+<tr>
+<td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
+<td><a href="https://x.com/chenju_ai">陈局 (Chenju)</a> による本プロジェクトへのご支援に感謝します！おそらくこの欄で唯一、登録リンクもプロモーションコードもない枠です。優れたオープンソースプロジェクトには対価が支払われるべきという想いから、メンテナーに敬意を表して一杯おごります。X の <a href="https://x.com/chenju_ai">@chenju_ai</a> で気軽に雑談しましょう。</td>
+</tr>
 </tbody>
 </table>
 

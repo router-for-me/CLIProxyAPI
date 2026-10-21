@@ -64,7 +64,14 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 		return nil
 	}
 	apiKey, _ := codexCreds(auth)
-	if errSIWC := ensureCodexSIWCCredentials(auth, apiKey); errSIWC != nil {
+	if codexUseSIWC(auth) && req.URL != nil && req.URL.Scheme == "https" &&
+		req.URL.Host == "chatgpt.com" && req.URL.Path == "/backend-api/codex/alpha/search" {
+		// ChatGPT Alpha Search requires the original OAuth partition, not SIWC.
+		apiKey, _ = auth.Metadata["access_token"].(string)
+		if strings.TrimSpace(apiKey) == "" {
+			return statusErr{code: http.StatusUnauthorized, msg: "codex executor: original OAuth access_token is required for ChatGPT Alpha Search"}
+		}
+	} else if errSIWC := ensureCodexSIWCCredentials(auth, apiKey); errSIWC != nil {
 		return errSIWC
 	}
 	if strings.TrimSpace(apiKey) != "" {
