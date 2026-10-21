@@ -1502,3 +1502,37 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchem
 		t.Fatalf("tool_choice.name = %q, want mcp_server_special_get_time. Output: %s", toolChoiceName, result)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_DropsEmptyAndWhitespaceText(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-7-sonnet-20250219",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Reply with exactly OK."},
+					{"type": "text", "text": ""},
+					{"type": "text", "text": "   \t\n  "}
+				]
+			}
+		]
+	}`
+
+	result, err := ConvertOpenAIRequestToClaude("claude-3-7-sonnet-20250219", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIRequestToClaude error: %v", err)
+	}
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages count = %d, want 1; output: %s", len(messages), string(result))
+	}
+	content := messages[0].Get("content")
+	parts := content.Array()
+	if len(parts) != 1 {
+		t.Fatalf("content parts count = %d, want 1; output: %s", len(parts), string(result))
+	}
+	if parts[0].Get("text").String() != "Reply with exactly OK." {
+		t.Fatalf("part text = %q, want %q", parts[0].Get("text").String(), "Reply with exactly OK.")
+	}
+}

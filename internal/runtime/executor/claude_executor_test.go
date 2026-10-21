@@ -10449,3 +10449,70 @@ func TestClaudeExecutor_PayloadFilterRemovesPreservedThinkingInjection(t *testin
 		t.Fatalf("payload filter must remove injected block_binding: %s", seenBody)
 	}
 }
+
+func TestClaudeExecutor_CacheControlSkipsEmptyTextBlocks(t *testing.T) {
+	// Trailing empty text in messages content should walk back to last eligible text block
+	messagesPayload := []byte(`{
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "hello"},
+					{"type": "text", "text": ""},
+					{"type": "text", "text": "   "}
+				]
+			}
+		]
+	}`)
+	injectedMessages := injectMessagesCacheControl(messagesPayload)
+	if got := gjson.GetBytes(injectedMessages, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("expected cache_control on block 0, got %q", got)
+	}
+	if gjson.GetBytes(injectedMessages, "messages.0.content.1.cache_control").Exists() {
+		t.Fatalf("cache_control should not be on empty block 1")
+	}
+	if gjson.GetBytes(injectedMessages, "messages.0.content.2.cache_control").Exists() {
+		t.Fatalf("cache_control should not be on whitespace block 2")
+	}
+
+	// Trailing empty text in system array should walk back to last eligible text block
+	systemPayload := []byte(`{
+		"system": [
+			{"type": "text", "text": "system instructions"},
+			{"type": "text", "text": ""},
+			{"type": "text", "text": "   "}
+		]
+	}`)
+	injectedSystem := injectSystemCacheControl(systemPayload)
+	if got := gjson.GetBytes(injectedSystem, "system.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("expected cache_control on system block 0, got %q", got)
+	}
+	if gjson.GetBytes(injectedSystem, "system.1.cache_control").Exists() {
+		t.Fatalf("cache_control should not be on empty system block 1")
+	}
+	if gjson.GetBytes(injectedSystem, "system.2.cache_control").Exists() {
+		t.Fatalf("cache_control should not be on whitespace system block 2")
+	}
+
+	// Only empty text blocks in messages should be skipped (no cache_control stamped)
+	allEmptyMessages := []byte(`{
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": ""}, {"type": "text", "text": "   "}]}
+		]
+	}`)
+	injectedEmptyMessages := injectMessagesCacheControl(allEmptyMessages)
+	if gjson.GetBytes(injectedEmptyMessages, "messages.0.content.0.cache_control").Exists() ||
+		gjson.GetBytes(injectedEmptyMessages, "messages.0.content.1.cache_control").Exists() {
+		t.Fatalf("cache_control should not be injected when all text blocks are empty")
+	}
+
+	// Only empty text blocks in system should be skipped
+	allEmptySystem := []byte(`{
+		"system": [{"type": "text", "text": ""}, {"type": "text", "text": "   "}]
+	}`)
+	injectedEmptySystem := injectSystemCacheControl(allEmptySystem)
+	if gjson.GetBytes(injectedEmptySystem, "system.0.cache_control").Exists() ||
+		gjson.GetBytes(injectedEmptySystem, "system.1.cache_control").Exists() {
+		t.Fatalf("cache_control should not be injected when all system blocks are empty")
+	}
+}

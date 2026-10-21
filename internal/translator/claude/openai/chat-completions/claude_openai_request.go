@@ -176,7 +176,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			// instructions from the upstream request.
 			case "system", "developer":
 				systemStart := len(systemBlocks)
-				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
+				if contentResult.Exists() && contentResult.Type == gjson.String && strings.TrimSpace(contentResult.String()) != "" {
 					textPart := []byte(`{"type":"text","text":""}`)
 					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
 					textPart = common.AttachCacheControl(textPart, message)
@@ -218,6 +218,14 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					contentBlocks = append(contentBlocks, part)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
+						if part.Type == gjson.String {
+							if strings.TrimSpace(part.String()) != "" {
+								partBytes := []byte(`{"type":"text","text":""}`)
+								partBytes, _ = sjson.SetBytes(partBytes, "text", part.String())
+								contentBlocks = append(contentBlocks, partBytes)
+							}
+							return true
+						}
 						if claudePart := convertOpenAIContentPartToClaudePart(part); claudePart != "" {
 							contentBlocks = append(contentBlocks, []byte(claudePart))
 						} else if partType := part.Get("type").String(); role == "user" && (partType == "file" || partType == "input_audio") {
@@ -482,8 +490,12 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {
 	switch part.Get("type").String() {
 	case "text":
+		text := part.Get("text").String()
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
 		textPart := []byte(`{"type":"text","text":""}`)
-		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+		textPart, _ = sjson.SetBytes(textPart, "text", text)
 		return textPart
 
 	case "image_url":
@@ -556,6 +568,9 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 		claudeParts := make([][]byte, 0, 4)
 		content.ForEach(func(_, part gjson.Result) bool {
 			if part.Type == gjson.String {
+				if strings.TrimSpace(part.String()) == "" {
+					return true
+				}
 				textPart := []byte(`{"type":"text","text":""}`)
 				textPart, _ = sjson.SetBytes(textPart, "text", part.String())
 				claudeParts = append(claudeParts, textPart)
@@ -568,11 +583,11 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 			return true
 		})
 
-		if len(claudeParts) > 0 || len(content.Array()) == 0 {
+		if len(claudeParts) > 0 {
 			return string(common.JoinRawArray(claudeParts)), true
 		}
 
-		return content.Raw, false
+		return "", false
 	}
 
 	if content.IsObject() {
