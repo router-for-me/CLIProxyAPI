@@ -138,6 +138,7 @@ func (s *Service) Snapshot(ctx context.Context) Response {
 			resp.Reports = append(resp.Reports, *report)
 		}
 	}
+	resp.GeneratedAt = s.currentTime().UnixMilli()
 	return resp
 }
 
