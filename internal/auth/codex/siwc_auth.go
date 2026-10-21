@@ -154,9 +154,10 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 	}
 
 	now := time.Now()
-	ttl := time.Duration(tokenResp.ExpiresIn)*time.Second - SIWCExpiryMargin
+	rawTTL := time.Duration(tokenResp.ExpiresIn) * time.Second
+	ttl := rawTTL - SIWCExpiryMargin
 	if ttl <= 0 {
-		ttl = time.Duration(tokenResp.ExpiresIn) * time.Second
+		ttl = rawTTL
 	}
 
 	return &CodexSIWCTokenData{
@@ -167,6 +168,7 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 		Scope:        strings.TrimSpace(tokenResp.Scope),
 		Scopes:       scopes,
 		Expire:       now.Add(ttl).Format(time.RFC3339),
+		ExpiresAt:    now.Add(rawTTL).Format(time.RFC3339),
 		LastRefresh:  now.Format(time.RFC3339),
 		DeviceID:     strings.TrimSpace(deviceID),
 	}, nil

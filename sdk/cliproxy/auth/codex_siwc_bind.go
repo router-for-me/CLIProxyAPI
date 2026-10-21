@@ -127,16 +127,18 @@ func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch ui
 		}
 		now := time.Now()
 		if !updated.Disabled {
-			updated.RejectedAccessToken = ""
-			if hasUnauthorizedAuthFailure(current) || (updated.LastError != nil && isUnauthorizedError(updated.LastError)) {
-				updated.Unavailable = false
-				updated.LastError = nil
-				updated.StatusMessage = ""
-				updated.Status = StatusActive
-				updated.NextRetryAfter = time.Time{}
-				cooldownChanged = true
+			applyPreservedRejectedTokens(current, updated, false)
+			if updated.RejectedAccessToken == "" || authAccessToken(updated) != updated.RejectedAccessToken {
+				if hasUnauthorizedAuthFailure(current) || (updated.LastError != nil && isUnauthorizedError(updated.LastError)) {
+					updated.Unavailable = false
+					updated.LastError = nil
+					updated.StatusMessage = ""
+					updated.Status = StatusActive
+					updated.NextRetryAfter = time.Time{}
+					cooldownChanged = true
+				}
+				clearUnauthorizedModelStates(updated, now)
 			}
-			clearUnauthorizedModelStates(updated, now)
 			// The helper can clear errors while preserving a model quota block.
 			if len(updated.ModelStates) > 0 {
 				cooldownChanged = true

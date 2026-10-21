@@ -49,7 +49,7 @@ func (s *testSIWCOAuth) ExchangeSIWCCodeForTokens(ctx context.Context, code, cli
 	if s.err != nil {
 		return nil, s.err
 	}
-	return &codex.CodexSIWCTokenData{AccessToken: "new-siwc", RefreshToken: "new-siwc-refresh", ClientID: clientID, DeviceID: deviceID, Expire: "2035-01-01T00:00:00Z"}, nil
+	return &codex.CodexSIWCTokenData{AccessToken: "new-siwc", RefreshToken: "new-siwc-refresh", ClientID: clientID, DeviceID: deviceID, Expire: "2035-01-01T00:00:00Z", ExpiresAt: "2035-01-01T00:00:00Z"}, nil
 }
 
 type siwcFixture struct {
@@ -95,6 +95,7 @@ func setupSIWCFlow(t *testing.T, blocked bool) *siwcFixture {
 	h := &Handler{cfg: cfg, authManager: manager, siwcOAuthFactory: func(*config.Config) siwcOAuthService { return service }}
 	router := gin.New()
 	router.POST("/bind", h.StartSIWCBind)
+	router.GET("/siwc-status", h.GetSIWCStatus)
 	router.POST("/callback", h.PostOAuthCallbackV8)
 	router.GET("/callback", h.GetOAuthCallbackV8)
 	router.POST("/legacy-callback", h.PostOAuthCallback)
@@ -219,7 +220,7 @@ func TestSIWCBindCallbackFormsAndSummary(t *testing.T) {
 				t.Fatal("binding corrupted outer credential")
 			}
 			entry := f.h.buildAuthFileEntry(got, authFileQuotaContext{v8: true})
-			if entry["siwc_bound"] != true || entry["use_siwc"] != true || entry["siwc_bind_supported"] != true || entry["siwc_expires_at"] != "2035-01-01T00:00:00Z" {
+			if entry["siwc_bound"] != true || entry["use_siwc"] != true || entry["siwc_status"] != "valid" || entry["siwc_bind_supported"] != true || entry["siwc_expires_at"] != "2035-01-01T00:00:00Z" {
 				t.Fatalf("missing summary: %#v", entry)
 			}
 			encoded, _ := json.Marshal(entry)

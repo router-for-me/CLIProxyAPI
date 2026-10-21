@@ -500,6 +500,102 @@ func authSIWCTokenField(auth *Auth, key string) string {
 	return strings.TrimSpace(val)
 }
 
+func effectiveRejectedSIWCToken(a *Auth) string {
+	if a == nil {
+		return ""
+	}
+	siwcTok := authSIWCTokenField(a, "access_token")
+	if siwcTok == "" {
+		return ""
+	}
+	if a.RejectedSIWCAccessToken != "" && a.RejectedSIWCAccessToken == siwcTok {
+		return siwcTok
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcTok {
+		return siwcTok
+	}
+	return ""
+}
+
+func shouldPreserveRejectedSIWCAccessToken(existing, updated *Auth) (string, bool) {
+	rejectedSIWC := effectiveRejectedSIWCToken(existing)
+	if rejectedSIWC == "" || updated == nil {
+		return "", false
+	}
+	if authSIWCTokenField(updated, "access_token") == rejectedSIWC {
+		return rejectedSIWC, true
+	}
+	return "", false
+}
+
+func applyPreservedRejectedTokens(existing, updated *Auth, isRefresh bool) {
+	if updated == nil {
+		return
+	}
+	if rejectedSIWC, ok := shouldPreserveRejectedSIWCAccessToken(existing, updated); ok {
+		updated.RejectedSIWCAccessToken = rejectedSIWC
+	} else {
+		updated.RejectedSIWCAccessToken = ""
+	}
+	if shouldPreserveRejectedAccessToken(existing, updated, isRefresh) {
+		updated.RejectedAccessToken = existing.RejectedAccessToken
+	} else if IsCodexUseSIWC(updated) && updated.RejectedSIWCAccessToken != "" {
+		updated.RejectedAccessToken = updated.RejectedSIWCAccessToken
+	} else {
+		updated.RejectedAccessToken = ""
+	}
+}
+
+func recordRejectedTokenOnAuth(auth *Auth, failedToken string) bool {
+	if auth == nil {
+		return false
+	}
+	failedToken = strings.TrimSpace(failedToken)
+	if failedToken == "" {
+		return false
+	}
+	changed := false
+	if siwcTok := authSIWCTokenField(auth, "access_token"); siwcTok != "" && siwcTok == failedToken {
+		if auth.RejectedSIWCAccessToken != failedToken {
+			auth.RejectedSIWCAccessToken = failedToken
+			changed = true
+		}
+	}
+	if authAccessToken(auth) == failedToken && auth.RejectedAccessToken != failedToken {
+		auth.RejectedAccessToken = failedToken
+		changed = true
+	}
+	return changed
+}
+
+func shouldPreserveRejectedAccessToken(existing, updated *Auth, isRefresh bool) bool {
+	if existing == nil || updated == nil {
+		return false
+	}
+	rejected := strings.TrimSpace(existing.RejectedAccessToken)
+	if rejected == "" {
+		return false
+	}
+	existingSIWC := authSIWCTokenField(existing, "access_token")
+	if existingSIWC != "" && existingSIWC == rejected {
+		return authSIWCTokenField(updated, "access_token") == rejected
+	}
+	existingOuter := authOuterAccessToken(existing)
+	if existingOuter != "" && existingOuter == rejected {
+		if authOuterAccessToken(updated) != rejected {
+			return false
+		}
+		if !isRefresh {
+			return true
+		}
+		if updated.CodexRefreshPatch != nil {
+			return !updated.CodexRefreshPatch.RefreshedOuter()
+		}
+		return false
+	}
+	return false
+}
+
 // ClearUnauthorizedModelStates resets model states whose last error was an unauthorized failure.
 func ClearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	return clearUnauthorizedModelStates(auth, now)
@@ -711,24 +807,28 @@ func (m *Manager) RefreshHomeSelectionAfterUnauthorized(_ context.Context, selec
 // tryRefreshAfterUnauthorized refreshes local OAuth credentials once after a
 // 401 so the current auth can be retried before fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool) (*Auth, bool) {
-	if m == nil || auth == nil || alreadyTried || execErr == nil {
+	if m == nil || auth == nil || execErr == nil {
 		return auth, false
 	}
 	// Request-scoped failures describe this request, not stale credentials.
 	// Refreshing would turn a direct error response into an implicit retry.
-	if isRequestScopedError(execErr) {
+	if isRequestScopedError(execErr) || !isUnauthorizedError(execErr) {
 		return auth, false
 	}
-	if !isUnauthorizedError(execErr) || !authHasRefreshCredential(auth) {
-		return auth, false
+	failedToken := authAccessToken(auth)
+	if failedToken != "" {
+		m.markRejectedAccessToken(auth.ID, failedToken)
 	}
-	if hasUnauthorizedAuthFailure(auth) {
+	if alreadyTried || !authHasRefreshCredential(auth) || hasUnauthorizedAuthFailure(auth) {
 		return auth, false
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
-	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, authAccessToken(auth))
+	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, failedToken)
 	if errRefresh != nil || refreshed == nil {
 		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
+		return auth, false
+	}
+	if failedToken != "" && authAccessToken(refreshed) == failedToken && refreshed.RejectedAccessToken == failedToken {
 		return auth, false
 	}
 	return refreshed, true
@@ -794,10 +894,9 @@ func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
 	releaseMutation := m.lockAuthMutation(id)
 	defer releaseMutation()
 	m.mu.Lock()
-	if current := m.auths[id]; current != nil && authAccessToken(current) == failedAccessToken && current.RejectedAccessToken != failedAccessToken {
+	if current := m.auths[id]; current != nil && recordRejectedTokenOnAuth(current, failedAccessToken) {
 		current.Generation++
 		current.UpdatedAt = time.Now()
-		current.RejectedAccessToken = failedAccessToken
 		m.auths[id] = current
 		if m.scheduler != nil {
 			m.scheduler.upsertAuth(current.Clone())
@@ -1017,16 +1116,18 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	updated.LastRefreshedAt = now
 	updated.NextRefreshAfter = time.Time{}
-	updated.LastError = nil
-	updated.StatusMessage = ""
-	updated.Unavailable = false
-	updated.RefreshFailures = 0
-	updated.RejectedAccessToken = ""
-	if updated.Status == StatusError || updated.Status == "" {
-		updated.Status = StatusActive
+	applyPreservedRejectedTokens(auth, updated, true)
+	if updated.RejectedAccessToken == "" || authAccessToken(updated) != updated.RejectedAccessToken {
+		updated.LastError = nil
+		updated.StatusMessage = ""
+		updated.Unavailable = false
+		updated.RefreshFailures = 0
+		if updated.Status == StatusError || updated.Status == "" {
+			updated.Status = StatusActive
+		}
+		_ = clearUnauthorizedModelStates(updated, now)
 	}
 	updated.UpdatedAt = now
-	_ = clearUnauthorizedModelStates(updated, now)
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}

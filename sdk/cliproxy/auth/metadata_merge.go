@@ -75,7 +75,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	merged.CodexRefreshPatch = updated.CodexRefreshPatch
 
 	// 1. Refresh Lifecycle Timestamps
-	merged.RejectedAccessToken = updated.RejectedAccessToken
+	applyPreservedRejectedTokens(current, merged, true)
 	if !updated.LastRefreshedAt.IsZero() {
 		merged.LastRefreshedAt = updated.LastRefreshedAt
 	}
@@ -134,7 +134,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
 			merged.StatusMessage = current.StatusMessage
-		} else if updated.Status == StatusActive || updated.Status == "" {
+		} else if (updated.Status == StatusActive || updated.Status == "") && (merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken) {
 			// Successful refresh clears previous auth error and restores active
 			merged.Status = StatusActive
 			merged.Unavailable = false

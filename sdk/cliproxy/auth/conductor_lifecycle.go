@@ -381,20 +381,22 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.ModelStates = existing.ModelStates
 		}
 		if credChanged || mode == updateModeRefresh {
-			auth.RejectedAccessToken = ""
-			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
-				auth.Unavailable = false
-				auth.LastError = nil
-				auth.StatusMessage = ""
-				auth.Status = StatusActive
-				cooldownStateChanged = true
-			}
-			resumed := clearUnauthorizedModelStates(auth, time.Now())
-			if len(resumed) > 0 {
-				cooldownStateChanged = true
+			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+			if auth.RejectedAccessToken == "" || authAccessToken(auth) != auth.RejectedAccessToken {
+				if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
+					auth.Unavailable = false
+					auth.LastError = nil
+					auth.StatusMessage = ""
+					auth.Status = StatusActive
+					cooldownStateChanged = true
+				}
+				resumed := clearUnauthorizedModelStates(auth, time.Now())
+				if len(resumed) > 0 {
+					cooldownStateChanged = true
+				}
 			}
 		} else {
-			auth.RejectedAccessToken = existing.RejectedAccessToken
+			applyPreservedRejectedTokens(existing, auth, false)
 		}
 		// A refresh that confirms quota restoration (issue #6690) releases the
 		// credential-wide cooldown early; otherwise the active credential
@@ -433,6 +435,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	// Save before publication, including the transactional Meta mint path.
 	// Runtime-only changes made during I/O are merged below, never overwritten.
 	existingBeforeSave := existing.Clone()
+	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
 		// A minted Meta key must reach the store before requests can use it.
@@ -448,6 +451,13 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
 	mergeAuthSaveDelta(auth, existingBeforeSave, existing, false)
+	if (auth.RejectedAccessToken == "" && existing.RejectedAccessToken != "") || (auth.RejectedSIWCAccessToken == "" && existing.RejectedSIWCAccessToken != "") {
+		probe := auth.Clone()
+		probe.CodexRefreshPatch = refreshPatchBeforeSave
+		applyPreservedRejectedTokens(existing, probe, mode == updateModeRefresh)
+		auth.RejectedAccessToken = probe.RejectedAccessToken
+		auth.RejectedSIWCAccessToken = probe.RejectedSIWCAccessToken
+	}
 	if existing.Generation >= auth.Generation {
 		auth.Generation = existing.Generation + 1
 	}

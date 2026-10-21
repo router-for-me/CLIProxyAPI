@@ -1439,7 +1439,7 @@ func injectClaudeCodeCurrentDateInternal(payload []byte, date string, isExplicit
 
 	if content.Type == gjson.String {
 		var userCC *claudeCacheControl = &claudeCodeCacheControl
-		if isExplicit {
+		if isExplicit || strings.TrimSpace(content.String()) == "" {
 			userCC = nil
 		}
 		userBlock := buildTextBlock(content.String(), userCC)
@@ -1460,7 +1460,7 @@ func injectClaudeCodeCurrentDateInternal(payload []byte, date string, isExplicit
 			if isClaudeCodeCurrentDateReminder(text) {
 				continue
 			}
-			if !actualTextCached && !isClaudeCodeContextReminder(text) {
+			if !actualTextCached && !isClaudeCodeContextReminder(text) && strings.TrimSpace(text) != "" {
 				if !isExplicit {
 					rawBlocks = append(rawBlocks, withEphemeralCacheControl(block.Raw))
 					actualTextCached = true
@@ -1941,19 +1941,44 @@ func ensureCacheControl(payload []byte) []byte {
 
 // claudePayloadHasCacheableSystem reports whether the payload has a system prompt
 // that injectSystemCacheControl can actually host a breakpoint on. An absent key, an
-// empty array and an empty string all leave the tools prefix uncovered.
+// empty array, an array of only empty/whitespace text blocks, and an empty string
+// all leave the tools prefix uncovered.
 func claudePayloadHasCacheableSystem(payload []byte) bool {
 	system := gjson.GetBytes(payload, "system")
 	switch {
 	case !system.Exists():
 		return false
 	case system.IsArray():
-		return system.Get("#").Int() > 0
+		return lastCacheableClaudeSystemIndex(system) >= 0
 	case system.Type == gjson.String:
 		return strings.TrimSpace(system.String()) != ""
 	default:
 		return false
 	}
+}
+
+func claudeSystemBlockCanHostCacheControl(item gjson.Result) bool {
+	if !item.IsObject() {
+		return false
+	}
+	if typ := item.Get("type").String(); typ != "" && typ != "text" {
+		return false
+	}
+	return strings.TrimSpace(item.Get("text").String()) != ""
+}
+
+func lastCacheableClaudeSystemIndex(system gjson.Result) int {
+	if !system.IsArray() {
+		return -1
+	}
+	lastEligible := -1
+	system.ForEach(func(index, item gjson.Result) bool {
+		if claudeSystemBlockCanHostCacheControl(item) {
+			lastEligible = int(index.Int())
+		}
+		return true
+	})
+	return lastEligible
 }
 
 // upgradeClaudeCacheControlTTL mirrors the native ttl upgrade helper, which only
@@ -2472,9 +2497,9 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	}
 
 	if content.IsArray() {
-		contentCount := int(content.Get("#").Int())
-		if contentCount > 0 {
-			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", lastEligibleIndex, contentCount-1)
+		targetBlockIndex := lastCacheableClaudeMessageContentBlockIndex(messages.Get(fmt.Sprintf("%d", lastEligibleIndex)))
+		if targetBlockIndex >= 0 {
+			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", lastEligibleIndex, targetBlockIndex)
 			result, err := sjson.SetBytes(payload, cacheControlPath, claudeCodeCacheControl)
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
@@ -2482,7 +2507,7 @@ func injectMessagesCacheControl(payload []byte) []byte {
 			}
 			payload = result
 		}
-	} else if content.Type == gjson.String {
+	} else if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
 		newContent := "[" + buildTextBlock(content.String(), &claudeCodeCacheControl) + "]"
 		result, err := sjson.SetRawBytes(payload, contentPath, []byte(newContent))
 		if err != nil {
@@ -2495,28 +2520,64 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	return payload
 }
 
-// claudeMessageEligibleForRollingCache reports whether the native selector would
-// consider this user/assistant turn as a rolling breakpoint host. Native rejects
-// an assistant turn whose last content block is thinking-like, because a thinking
-// block cannot host the marker.
-func claudeMessageEligibleForRollingCache(message gjson.Result) bool {
-	content := message.Get("content")
-	if content.Type == gjson.String {
-		return true
-	}
-	if !content.IsArray() || content.Get("#").Int() == 0 {
+func isEmptyClaudeTextBlock(block gjson.Result) bool {
+	return block.IsObject() &&
+		block.Get("type").String() == "text" &&
+		strings.TrimSpace(block.Get("text").String()) == ""
+}
+
+func claudeContentBlockCanHostCacheControl(block gjson.Result) bool {
+	if !block.IsObject() {
 		return false
 	}
-	if message.Get("role").String() != "assistant" {
-		return true
-	}
-	lastBlock := content.Get(fmt.Sprintf("%d", content.Get("#").Int()-1))
-	switch lastBlock.Get("type").String() {
-	case "thinking", "redacted_thinking":
+	switch block.Get("type").String() {
+	case "", "thinking", "redacted_thinking":
 		return false
+	case "text":
+		return strings.TrimSpace(block.Get("text").String()) != ""
 	default:
 		return true
 	}
+}
+
+func lastCacheableClaudeMessageContentBlockIndex(message gjson.Result) int {
+	content := message.Get("content")
+	if !content.IsArray() {
+		return -1
+	}
+	blocks := content.Array()
+	if len(blocks) == 0 {
+		return -1
+	}
+	isAssistant := message.Get("role").String() == "assistant"
+	for i := len(blocks) - 1; i >= 0; i-- {
+		block := blocks[i]
+		if isEmptyClaudeTextBlock(block) {
+			continue
+		}
+		if isAssistant {
+			switch block.Get("type").String() {
+			case "thinking", "redacted_thinking":
+				return -1
+			}
+		}
+		if claudeContentBlockCanHostCacheControl(block) {
+			return i
+		}
+	}
+	return -1
+}
+
+// claudeMessageEligibleForRollingCache reports whether the native selector would
+// consider this user/assistant turn as a rolling breakpoint host. Native rejects
+// an assistant turn whose last content block is thinking-like, because a thinking
+// block cannot host the marker, and Anthropic rejects cache_control on empty text blocks.
+func claudeMessageEligibleForRollingCache(message gjson.Result) bool {
+	content := message.Get("content")
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String()) != ""
+	}
+	return lastCacheableClaudeMessageContentBlockIndex(message) >= 0
 }
 
 // injectClaudeFinalSystemCacheControl reproduces the native final-system special
@@ -2598,21 +2659,25 @@ func injectSystemCacheControl(payload []byte) []byte {
 			return payload
 		}
 
-		// Check if ANY system element already has cache_control
+		// Check if ANY system element already has cache_control and find the last cacheable element.
 		hasCacheControlInSystem := false
-		system.ForEach(func(_, item gjson.Result) bool {
+		lastEligibleSystemIndex := -1
+		system.ForEach(func(index, item gjson.Result) bool {
 			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				hasCacheControlInSystem = true
 				return false
 			}
+			if claudeSystemBlockCanHostCacheControl(item) {
+				lastEligibleSystemIndex = int(index.Int())
+			}
 			return true
 		})
-		if hasCacheControlInSystem {
+		if hasCacheControlInSystem || lastEligibleSystemIndex < 0 {
 			return payload
 		}
 
-		// Add cache_control to the last system element
-		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
+		// Add cache_control to the last cacheable system element
+		lastSystemPath := fmt.Sprintf("system.%d.cache_control", lastEligibleSystemIndex)
 		result, err := sjson.SetBytes(payload, lastSystemPath, claudeCodeCacheControl)
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)

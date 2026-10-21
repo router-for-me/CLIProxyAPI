@@ -862,9 +862,15 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 	if current == nil {
 		return false
 	}
-	staleVersion := result.CredentialVersion < current.CredentialVersion && (result.CredentialVersion > 0 || current.CredentialVersion > 1)
 	staleEpoch := result.RegistrationEpoch > 0 && result.RegistrationEpoch < current.RegistrationEpoch
-	return staleVersion || staleEpoch
+	if staleEpoch {
+		return true
+	}
+	if result.AccessToken != "" && authAccessToken(current) == result.AccessToken {
+		return false
+	}
+	staleVersion := result.CredentialVersion < current.CredentialVersion && (result.CredentialVersion > 0 || current.CredentialVersion > 1)
+	return staleVersion
 }
 
 // MarkResult records an execution result and notifies hooks.
@@ -895,6 +901,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		if isStaleExecutionResult(result, auth) {
+			staleEpoch := result.RegistrationEpoch > 0 && result.RegistrationEpoch < auth.RegistrationEpoch
+			if !staleEpoch && !result.Success && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error)) && result.AccessToken != "" {
+				if recordRejectedTokenOnAuth(auth, result.AccessToken) {
+					auth.Generation++
+					auth.UpdatedAt = now
+				}
+			}
 			m.mu.Unlock()
 			releaseMutation()
 			m.hook.OnResult(ctx, result)
@@ -1290,15 +1303,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
+		if !result.Success && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error)) {
+			tokenToReject := result.AccessToken
+			if tokenToReject == "" {
+				tokenToReject = authAccessToken(auth)
+			}
+			_ = recordRejectedTokenOnAuth(auth, tokenToReject)
+		}
 		if wasTerminalUnauthorized {
 			auth.Unavailable = true
 			auth.Status = StatusError
 			auth.NextRefreshAfter = time.Time{}
 			auth.NextRetryAfter = time.Time{}
 		} else if !result.Success && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error)) && authHasRefreshCredential(auth) {
-			if currentToken := authAccessToken(auth); currentToken != "" {
-				auth.RejectedAccessToken = currentToken
-			}
 			if auth.NextRefreshAfter.IsZero() {
 				if !auth.LastRefreshedAt.IsZero() && now.Sub(auth.LastRefreshedAt) < refreshFailureBackoff {
 					auth.NextRefreshAfter = now.Add(refreshFailureBackoff)
@@ -1389,6 +1406,9 @@ func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth
 		}
 		if result.RegistrationEpoch == 0 {
 			result.RegistrationEpoch = auth.RegistrationEpoch
+		}
+		if result.AccessToken == "" {
+			result.AccessToken = authAccessToken(auth)
 		}
 	}
 	if !ephemeral {

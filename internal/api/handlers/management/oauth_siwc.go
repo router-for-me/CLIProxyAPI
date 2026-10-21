@@ -135,6 +135,60 @@ func resolveSIWCBindFile(authDir, path string) (string, map[string]any, error) {
 	return realPath, metadata, nil
 }
 
+// GetSIWCStatus returns the read-only local SIWC status ("off", "valid", or "invalid")
+// for a Codex credential without triggering any upstream refresh or verification request.
+func (h *Handler) GetSIWCStatus(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "handler unavailable"})
+		return
+	}
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
+		name = strings.TrimSpace(c.Query("id"))
+	}
+	authIndex := strings.TrimSpace(c.Query("auth_index"))
+	if authIndex == "" {
+		authIndex = strings.TrimSpace(c.Query("authIndex"))
+	}
+	if name == "" && authIndex == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name or auth_index is required"})
+		return
+	}
+	h.mu.Lock()
+	cfg, manager := h.cfg, h.authManager
+	h.mu.Unlock()
+	if manager == nil && (cfg == nil || strings.TrimSpace(cfg.AuthDir) == "") {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager unavailable"})
+		return
+	}
+	var target *coreauth.Auth
+	if manager != nil {
+		if name != "" {
+			target, _ = h.lookupAuthFile(name, authIndex)
+		} else {
+			target = h.authByIndex(authIndex)
+		}
+	} else if name != "" && authIndex == "" && !isUnsafeAuthFileName(name) && strings.HasSuffix(strings.ToLower(name), ".json") {
+		full := filepath.Join(cfg.AuthDir, name)
+		if data, errRead := os.ReadFile(full); errRead == nil {
+			var metadata map[string]any
+			if json.Unmarshal(data, &metadata) == nil && metadata != nil {
+				provider, _ := metadata["type"].(string)
+				target = &coreauth.Auth{ID: name, FileName: name, Provider: strings.TrimSpace(provider), Metadata: metadata}
+			}
+		}
+	}
+	if target == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	if !coreauth.IsCodexAuthRecord(target) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "SIWC status requires a Codex credential"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": string(target.CodexSIWCStatus(time.Now()))})
+}
+
 // StartSIWCBind creates a v8-only OAuth session for an existing Codex credential.
 // Remote browsers complete it by submitting the full loopback callback URL; no
 // listener on the server's port 1455 is required or started by this endpoint.

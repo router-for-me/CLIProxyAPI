@@ -110,6 +110,8 @@ type Auth struct {
 
 	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
 	RejectedAccessToken string `json:"-"`
+	// RejectedSIWCAccessToken tracks the nested SIWC access token rejected by upstream 401 until replaced.
+	RejectedSIWCAccessToken string `json:"-"`
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -841,7 +843,7 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 	}
 	if IsCodexUseSIWC(a) {
 		siwcToken := authSIWCTokenField(a, "access_token")
-		if siwcToken != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken {
+		if a.isSIWCAccessTokenRejected(siwcToken) {
 			return time.Unix(0, 0), true
 		}
 		return a.SIWCExpirationTime()
@@ -857,6 +859,77 @@ const CodexOuterRefreshLead = 96 * time.Hour
 // CodexSIWCRefreshLead is the minimum remaining validity required before refreshing
 // a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
 const CodexSIWCRefreshLead = 5 * time.Minute
+
+// SIWCStatus represents the read-only validity state of a Codex SIWC credential.
+type SIWCStatus string
+
+const (
+	SIWCStatusOff     SIWCStatus = "off"
+	SIWCStatusValid   SIWCStatus = "valid"
+	SIWCStatusInvalid SIWCStatus = "invalid"
+)
+
+// SIWCRealExpirationTime extracts the real (unbuffered) expiration timestamp for the nested
+// "siwc" access token. It reads "expires_at" (saved from OAuth expires_in) or the JWT "exp"
+// claim of "access_token", without using the margin-deducted "expired" field.
+func (a *Auth) SIWCRealExpirationTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false
+	}
+	if ts, okExp := lookupMetadataTime(siwcMap, "expires_at", "expiresAt"); okExp && !ts.IsZero() {
+		return ts, true
+	}
+	if expiresIn, okExpiresIn := parseRelativeExpirySeconds(siwcMap); okExpiresIn {
+		if ts, okTs := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh", "timestamp", "issued_at", "issuedAt"); okTs && !ts.IsZero() {
+			return ts.Add(time.Duration(expiresIn) * time.Second), true
+		}
+	}
+	if rawToken, okTok := siwcMap["access_token"].(string); okTok && strings.TrimSpace(rawToken) != "" {
+		if jwtExp, okJWT := parseJWTExp(rawToken); okJWT && !jwtExp.IsZero() {
+			return jwtExp, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func (a *Auth) isSIWCAccessTokenRejected(siwcToken string) bool {
+	if a == nil {
+		return false
+	}
+	siwcToken = strings.TrimSpace(siwcToken)
+	if siwcToken == "" {
+		return false
+	}
+	return (a.RejectedSIWCAccessToken != "" && a.RejectedSIWCAccessToken == siwcToken) ||
+		(a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken)
+}
+
+// CodexSIWCStatus evaluates the local SIWC credential status ("off", "valid", or "invalid")
+// at the given time without triggering any refresh or upstream request.
+func (a *Auth) CodexSIWCStatus(now time.Time) SIWCStatus {
+	if a == nil || !IsCodexUseSIWC(a) {
+		return SIWCStatusOff
+	}
+	siwcToken := authSIWCTokenField(a, "access_token")
+	if siwcToken == "" {
+		return SIWCStatusInvalid
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	realExp, okExp := a.SIWCRealExpirationTime()
+	if !okExp || realExp.IsZero() || !realExp.After(now) {
+		return SIWCStatusInvalid
+	}
+	if a.isSIWCAccessTokenRejected(siwcToken) {
+		return SIWCStatusInvalid
+	}
+	return SIWCStatusValid
+}
 
 // SIWCExpirationTime extracts the expiration timestamp from the nested "siwc" metadata section.
 func (a *Auth) SIWCExpirationTime() (time.Time, bool) {
@@ -981,7 +1054,7 @@ func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh 
 	if siwcToken == "" {
 		return now, true, true
 	}
-	if a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken {
+	if a.isSIWCAccessTokenRejected(siwcToken) {
 		return now, true, true
 	}
 	expiry, hasExpiry := a.SIWCExpirationTime()
@@ -1012,11 +1085,16 @@ func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
 	if tokenStr == "" {
 		return time.Time{}, false
 	}
-	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+	if (a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr) || (IsCodexUseSIWC(a) && a.isSIWCAccessTokenRejected(tokenStr)) {
 		return time.Unix(0, 0), true
 	}
 	if jwtExp, ok := parseJWTExp(tokenStr); ok {
 		return jwtExp, true
+	}
+	if IsCodexUseSIWC(a) {
+		if realExp, ok := a.SIWCRealExpirationTime(); ok && !realExp.IsZero() {
+			return realExp, true
+		}
 	}
 	return a.ExpirationTime()
 }

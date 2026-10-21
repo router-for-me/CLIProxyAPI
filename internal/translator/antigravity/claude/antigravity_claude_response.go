@@ -62,25 +62,28 @@ func formatClaudeSignatureValue(modelName, signature string) string {
 // This structure tracks the current state of the response translation process to ensure
 // proper sequencing of SSE events and transitions between different content types.
 type Params struct {
-	HasFirstResponse     bool   // Indicates if the initial message_start event has been sent
-	ResponseType         int    // Current response type: 0=none, 1=content, 2=thinking, 3=function
-	ResponseIndex        int    // Index counter for content blocks in the streaming response
-	HasFinishReason      bool   // Tracks whether a finish reason has been observed
-	FinishReason         string // The finish reason string returned by the provider
-	HasUsageMetadata     bool   // Tracks whether usage metadata has been observed
-	PromptTokenCount     int64  // Cached prompt token count from usage metadata
-	CandidatesTokenCount int64  // Cached candidate token count from usage metadata
-	ThoughtsTokenCount   int64  // Cached thinking token count from usage metadata
-	TotalTokenCount      int64  // Cached total token count from usage metadata
-	CachedTokenCount     int64  // Cached content token count (indicates prompt caching)
-	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
-	HasToolUse           bool   // Indicates if tool use was observed in the stream
-	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
-	HasSemanticContent   bool
-	LastSemanticKind     string
-	HasWebSearchTool     bool
-	WebSearchRequests    int64
-	WebSearchTextBuffer  strings.Builder
+	ModelName               string // Resolved once from the translated request
+	WebSearchStreamMode     bool   // Resolved once from both request formats
+	RequestMetadataResolved bool   // Also caches empty model names and disabled web search
+	HasFirstResponse        bool   // Indicates if the initial message_start event has been sent
+	ResponseType            int    // Current response type: 0=none, 1=content, 2=thinking, 3=function
+	ResponseIndex           int    // Index counter for content blocks in the streaming response
+	HasFinishReason         bool   // Tracks whether a finish reason has been observed
+	FinishReason            string // The finish reason string returned by the provider
+	HasUsageMetadata        bool   // Tracks whether usage metadata has been observed
+	PromptTokenCount        int64  // Cached prompt token count from usage metadata
+	CandidatesTokenCount    int64  // Cached candidate token count from usage metadata
+	ThoughtsTokenCount      int64  // Cached thinking token count from usage metadata
+	TotalTokenCount         int64  // Cached total token count from usage metadata
+	CachedTokenCount        int64  // Cached content token count (indicates prompt caching)
+	HasSentFinalEvents      bool   // Indicates if final content/message events have been sent
+	HasToolUse              bool   // Indicates if tool use was observed in the stream
+	HasContent              bool   // Tracks whether any content (text, thinking, or tool use) has been output
+	HasSemanticContent      bool
+	LastSemanticKind        string
+	HasWebSearchTool        bool
+	WebSearchRequests       int64
+	WebSearchTextBuffer     strings.Builder
 
 	// Signature caching support
 	CurrentThinkingText   strings.Builder // Accumulates thinking text for signature caching
@@ -132,9 +135,15 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 			ToolNameMap:      util.DisambiguatedToolNameMap(originalRequestRawJSON),
 		}
 	}
-	modelName := gjson.GetBytes(requestRawJSON, "model").String()
-
 	params := (*param).(*Params)
+	// Request metadata is resolved once per stream; callers pass the same
+	// request bytes for the stream's lifetime.
+	if !params.RequestMetadataResolved {
+		params.ModelName = gjson.GetBytes(requestRawJSON, "model").String()
+		params.WebSearchStreamMode = shouldTranslateWebSearchGrounding(originalRequestRawJSON, requestRawJSON)
+		params.RequestMetadataResolved = true
+	}
+	modelName := params.ModelName
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		output := make([]byte, 0, 256)
@@ -155,7 +164,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
 	}
-	webSearchStreamMode := shouldTranslateWebSearchGrounding(originalRequestRawJSON, requestRawJSON)
+	webSearchStreamMode := params.WebSearchStreamMode
 	appendThinkingSignature := func(signature, direction, targetKind string) {
 		if signature == "" || params.ResponseType != 2 {
 			return
