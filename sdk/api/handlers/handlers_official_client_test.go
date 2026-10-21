@@ -74,8 +74,8 @@ func requestContextWithUserAgent(userAgent string) context.Context {
 	return context.WithValue(context.Background(), "gin", ginCtx)
 }
 
-// Requests reach the selector with their inbound headers, so a credential marked
-// official_client_only must never be used (and the upstream never contacted) for
+// Requests reach the selector with their inbound headers, so a provider restricted by
+// oauth.official-client-only must never be used (and the upstream never contacted) for
 // a client that is not the official Codex CLI.
 func TestOfficialClientOnlyEnforcedThroughHandlers(t *testing.T) {
 	const model = "official-client-e2e-model"
@@ -87,7 +87,6 @@ func TestOfficialClientOnlyEnforcedThroughHandlers(t *testing.T) {
 		ID:       "official-client-e2e-codex",
 		Provider: "codex",
 		Status:   coreauth.StatusActive,
-		Metadata: map[string]any{coreauth.MetadataOfficialClientOnly: true},
 	}
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
@@ -95,8 +94,14 @@ func TestOfficialClientOnlyEnforcedThroughHandlers(t *testing.T) {
 	registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model, Created: time.Now().Unix()}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 
+	var restricted atomic.Bool
+	restricted.Store(true)
+	coreauth.SetOfficialClientRequirement(func(provider string) bool { return provider == "codex" && restricted.Load() })
 	coreauth.SetOfficialClientVerifier(helps.NewOfficialClientVerifier(nil))
-	t.Cleanup(func() { coreauth.SetOfficialClientVerifier(nil) })
+	t.Cleanup(func() {
+		coreauth.SetOfficialClientRequirement(nil)
+		coreauth.SetOfficialClientVerifier(nil)
+	})
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hi"}]}`)
@@ -148,14 +153,10 @@ func TestOfficialClientOnlyEnforcedThroughHandlers(t *testing.T) {
 		}
 	})
 
-	t.Run("lifting the restriction serves any client", func(t *testing.T) {
-		current, _ := manager.GetByID(auth.ID)
-		current.Metadata[coreauth.MetadataOfficialClientOnly] = false
-		if _, errUpdate := manager.Update(context.Background(), current); errUpdate != nil {
-			t.Fatalf("update: %v", errUpdate)
-		}
+	t.Run("switching the restriction off serves any client", func(t *testing.T) {
+		restricted.Store(false)
 		if _, _, errMsg := handler.ExecuteWithAuthManager(requestContextWithUserAgent("curl/8.7.1"), "openai", model, body, ""); errMsg != nil {
-			t.Fatalf("unrestricted credential rejected a client: %v", errMsg.Error)
+			t.Fatalf("unrestricted provider rejected a client: %v", errMsg.Error)
 		}
 	})
 }

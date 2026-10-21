@@ -468,12 +468,6 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 					}
 				}
 			}
-			if coreauth.SupportsOfficialClientOnly(typeValue) {
-				probe := &coreauth.Auth{Provider: typeValue, Metadata: map[string]any{
-					coreauth.MetadataOfficialClientOnly: gjson.GetBytes(data, coreauth.MetadataOfficialClientOnly).Value(),
-				}}
-				fileData[coreauth.MetadataOfficialClientOnly] = probe.OfficialClientOnly()
-			}
 			if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
 				fileData["request_retry"] = requestRetry
 			}
@@ -785,9 +779,6 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
-	}
-	if coreauth.SupportsOfficialClientOnly(auth.Provider) {
-		entry[coreauth.MetadataOfficialClientOnly] = auth.OfficialClientOnly()
 	}
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry

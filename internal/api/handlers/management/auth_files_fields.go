@@ -364,11 +364,6 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "weight does not support nested fields"})
 			return
-		} else if rootAuthFileField(fieldPath) == coreauth.MetadataOfficialClientOnly {
-			if errOfficial := applyOfficialClientOnlyPatch(targetAuth, fieldPath, value); errOfficial != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": errOfficial.Error()})
-				return
-			}
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
@@ -419,27 +414,6 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-// applyOfficialClientOnlyPatch validates and stores the official_client_only toggle.
-// The value must be a strict boolean (or null to clear it): anything else could be
-// misread as "off" and silently lift the restriction.
-func applyOfficialClientOnlyPatch(auth *coreauth.Auth, fieldPath string, value any) error {
-	if fieldPath != coreauth.MetadataOfficialClientOnly {
-		return fmt.Errorf("%s does not support nested fields", coreauth.MetadataOfficialClientOnly)
-	}
-	if !coreauth.SupportsOfficialClientOnly(auth.Provider) {
-		return fmt.Errorf("%s is only supported for claude and codex credentials", coreauth.MetadataOfficialClientOnly)
-	}
-	switch typed := value.(type) {
-	case nil:
-		delete(auth.Metadata, coreauth.MetadataOfficialClientOnly)
-	case bool:
-		auth.Metadata[coreauth.MetadataOfficialClientOnly] = typed
-	default:
-		return fmt.Errorf("%s must be a boolean or null", coreauth.MetadataOfficialClientOnly)
-	}
-	return nil
 }
 
 func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {
