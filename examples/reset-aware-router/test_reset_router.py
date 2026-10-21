@@ -168,6 +168,8 @@ class PolicyTests(unittest.TestCase):
                          self.now + dt.timedelta(hours=5)), (float("inf"), None))
         self.assertEqual(router.claude_offer_expiry({"expires_at": "2026-10-16"}, self.now),
                          (float("inf"), None))
+        self.assertEqual(router.claude_offer_expiry({"expires_at": "inf"}, self.now),
+                         (float("inf"), None))
 
     def test_claude_reset_timestamp_formats(self):
         for raw in (str(self.weekly_reset), "2026-10-21T00:00:00Z",

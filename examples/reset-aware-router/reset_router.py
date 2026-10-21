@@ -316,11 +316,11 @@ def claude_offer_expiry(offer, now):
     if "expires_at" in offer:
         try:
             expiry = parse_reset_timestamp(offer["expires_at"])
-        except (TypeError, ValueError):
+            expiry_date = dt.datetime.fromtimestamp(expiry, UTC).astimezone().date()
+        except (TypeError, ValueError, OverflowError):
             return float("inf"), None
         if expiry <= now.timestamp():
             return float("inf"), None
-        expiry_date = dt.datetime.fromtimestamp(expiry, UTC).astimezone().date()
         return expiry_date.toordinal(), expiry
     if claude_offer_active(offer.get("expires_on"), now):
         return dt.date.fromisoformat(offer["expires_on"]).toordinal(), None
