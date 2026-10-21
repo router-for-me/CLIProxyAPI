@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -2396,7 +2397,8 @@ func authCoolingSummary(auth *Auth, model string, next time.Time, now time.Time)
 	if !next.IsZero() && next.After(now) {
 		remaining = next.Sub(now).Round(time.Second).String()
 	}
-	return fmt.Sprintf("[%s, reason=%s, remaining=%s]", ident, reason, remaining)
+	// The reason can be a raw upstream body: redact credentials, drop line breaks, bound its size.
+	return fmt.Sprintf("[%s, reason=%s, remaining=%s]", ident, logging.SafeDiagnosticForLog(reason), remaining)
 }
 
 func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, err error) {
@@ -2448,7 +2450,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 		totalCandidates++
 		checkModel := m.selectionModelForAuth(candidate, model)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
-		if blocked && reason == blockReasonCooldown {
+		if blocked && reason != blockReasonDisabled {
 			coolingSummaries = append(coolingSummaries, authCoolingSummary(candidate, checkModel, next, now))
 		}
 	}
@@ -2458,9 +2460,9 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 		entry := logEntryWithRequestID(ctx)
 		providerText := strings.Join(providers, ",")
 		if len(providers) == 1 {
-			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (provider=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
+			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (provider=%s) are unavailable: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
 		} else {
-			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (providers=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
+			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (providers=%s) are unavailable: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
 		}
 	}
 }

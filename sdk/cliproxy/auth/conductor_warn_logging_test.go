@@ -234,6 +234,75 @@ func TestWarnLogOnAuthUnavailable_SingleProvider(t *testing.T) {
 	}
 }
 
+// A transient upstream error (for example server_is_overloaded) blocks a credential without
+// setting Quota.Exceeded. When every candidate is blocked that way, the auth_unavailable
+// response must still be explained by one Warn line with the stored reason.
+func TestWarnLogOnAuthUnavailable_TransientUpstreamError(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	m := NewManager(nil, nil, nil)
+
+	now := time.Now()
+	// A raw upstream body: the Warn line must keep the code but not the credential or the line break.
+	overloaded := "{\"error\":{\"type\":\"service_unavailable_error\",\"code\":\"server_is_overloaded\"}}\napi_key=upstream-secret"
+	auth1 := &Auth{
+		ID:             "auth-transient-1",
+		Provider:       "codex",
+		Status:         StatusError,
+		FileName:       "codex-1.json",
+		StatusMessage:  overloaded,
+		Unavailable:    true,
+		NextRetryAfter: now.Add(60 * time.Second),
+	}
+	auth2 := &Auth{
+		ID:             "auth-transient-2",
+		Provider:       "codex",
+		Status:         StatusError,
+		FileName:       "codex-2.json",
+		StatusMessage:  overloaded,
+		Unavailable:    true,
+		NextRetryAfter: now.Add(60 * time.Second),
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: "gpt-transient-test"}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: "gpt-transient-test"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+	for _, a := range []*Auth{auth1, auth2} {
+		if _, err := m.Register(context.Background(), a); err != nil {
+			t.Fatalf("register %s: %v", a.ID, err)
+		}
+	}
+	m.RegisterExecutor(&mockCustomErrorExecutor{identifier: "codex"})
+
+	hook.Reset()
+	_, errExec := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-transient-test"}, cliproxyexecutor.Options{})
+	if errExec == nil || !isAuthUnavailableError(errExec) {
+		t.Fatalf("expected auth_unavailable, got %v", errExec)
+	}
+
+	warnCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "auth unavailable") {
+			warnCount++
+			if !strings.Contains(entry.Message, "2 of 2 candidate(s)") ||
+				!strings.Contains(entry.Message, "codex-1.json") ||
+				!strings.Contains(entry.Message, "codex-2.json") ||
+				!strings.Contains(entry.Message, "server_is_overloaded") ||
+				!strings.Contains(entry.Message, "remaining=") ||
+				strings.Contains(entry.Message, "upstream-secret") ||
+				strings.ContainsAny(entry.Message, "\r\n") {
+				t.Fatalf("unexpected Warn log content: %s", entry.Message)
+			}
+		}
+	}
+	if warnCount != 1 {
+		t.Fatalf("expected exactly 1 Warn log, got %d. Logs: %#v", warnCount, hook.AllEntries())
+	}
+}
+
 func TestWarnLogOnAuthUnavailable_SessionAffinityLegacyPath(t *testing.T) {
 	previousCooldown := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
