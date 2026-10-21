@@ -869,15 +869,18 @@ func TestConvertGeminiResponseToClaudeStream_Issue6409_SplitTrailingSignature(t 
 		t.Fatalf("expected block 0 text stop, got: %s", outputText)
 	}
 
-	// Block 1: trailing carrier thinking block
-	if !strings.Contains(outputText, `{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`) {
-		t.Fatalf("expected block 1 trailing carrier thinking, got: %s", outputText)
+	// A detached signature that follows visible text is not emitted as a trailing
+	// thinking block: thinking after text violates Anthropic block ordering and
+	// makes stream aggregators drop the text (same rule as the antigravity
+	// translator since #5272 / PR #5263).
+	if strings.Contains(outputText, `"content_block":{"type":"thinking"`) {
+		t.Fatalf("trailing thinking carrier must not be emitted after visible text: %s", outputText)
 	}
-	if !strings.Contains(outputText, `{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig-stream-trailing"}}`) {
-		t.Fatalf("expected block 1 signature_delta, got: %s", outputText)
+	if strings.Contains(outputText, `"type":"signature_delta"`) {
+		t.Fatalf("no signature_delta expected once the carrier is dropped: %s", outputText)
 	}
-	if !strings.Contains(outputText, `{"type":"content_block_stop","index":1}`) {
-		t.Fatalf("expected block 1 stop, got: %s", outputText)
+	if got := strings.Count(outputText, `"type":"content_block_stop"`); got != 1 {
+		t.Fatalf("content block stops = %d, want 1 (text only); output=%s", got, outputText)
 	}
 }
 
@@ -1178,5 +1181,46 @@ func TestConvertGeminiResponseToClaude_ParameterlessToolContinuationDoesNotDupli
 	streamBytes = append(streamBytes, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-3-flash", origRequest, origRequest, continuationChunk, &param), nil)...)
 	if got := geminiClaudeInputJSONDeltas(t, string(streamBytes)); got != "{}" {
 		t.Fatalf("expected concatenated partial_json {}, got %q (stream: %s)", got, string(streamBytes))
+	}
+}
+
+// Regression: a detached signature-only part that arrives after visible text must
+// not open a trailing thinking block (Anthropic requires thinking before text;
+// Claude Code's --output-format json derives `result` from the final block and
+// returned "" for every Gemini response). Port of the antigravity fix #5272.
+func TestConvertGeminiResponseToClaude_DetachedSignatureAfterVisibleTextIsNotEmitted(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	textChunk := []byte(`{"candidates":[{"content":{"parts":[{"text":"visible answer"}]}}],"modelVersion":"gemini-test","responseId":"resp-trailing"}`)
+	signatureChunk := []byte(`{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig-trailing"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3,"totalTokenCount":13},"modelVersion":"gemini-test","responseId":"resp-trailing"}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, textChunk, &param), nil)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, signatureChunk, &param), nil)...)
+	output = append(output, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if !strings.Contains(outputText, `"content_block":{"type":"text","text":""}`) {
+		t.Fatalf("missing visible text block: %s", outputText)
+	}
+	if strings.Contains(outputText, `"content_block":{"type":"thinking"`) {
+		t.Fatalf("trailing thinking carrier must not be emitted after visible text: %s", outputText)
+	}
+	if got := strings.Count(outputText, `"type":"content_block_stop"`); got != 1 {
+		t.Fatalf("content block stops = %d, want exactly 1 (text); output=%s", got, outputText)
+	}
+	if !strings.Contains(outputText, `"type":"message_delta"`) || !strings.Contains(outputText, `"type":"message_stop"`) {
+		t.Fatalf("final events missing: %s", outputText)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_DetachedSignatureAfterVisibleTextIsNotEmitted(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`)
+	geminiResponse := []byte(`{"candidates":[{"content":{"parts":[{"text":"visible answer"},{"text":"","thoughtSignature":"sig-trailing"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3},"modelVersion":"gemini-2.5-pro","responseId":"resp-non-stream-trailing-after-text"}`)
+
+	output := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-2.5-pro", requestJSON, requestJSON, geminiResponse, nil)
+	blocks := gjson.ParseBytes(output).Get("content").Array()
+	if len(blocks) != 1 || blocks[0].Get("type").String() != "text" || blocks[0].Get("text").String() != "visible answer" {
+		t.Fatalf("want exactly one text block, got: %s", string(output))
 	}
 }

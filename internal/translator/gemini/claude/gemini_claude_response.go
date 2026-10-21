@@ -154,6 +154,17 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		(*param).(*Params).HasContent = true
 	}
 
+	// A signature-only part that arrives while a visible text block is open is a
+	// detached "previous" carrier for text that has already been streamed. Emitting
+	// a thinking block for it would place thinking after text, which violates
+	// Anthropic block ordering and makes stream aggregators (Claude Code's
+	// --output-format json `result`, Anthropic SDK accumulators) drop the text.
+	// Mirrors the antigravity translator fix (#5272 / PR #5263). Replay does not
+	// need the carrier: the request translator substitutes a validator bypass.
+	trailingSignatureAfterVisibleText := func() bool {
+		return (*param).(*Params).ResponseType == 1
+	}
+
 	appendCarrierThinkingBlock := func(signature string) {
 		if signature == "" {
 			return
@@ -219,6 +230,9 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					appendSignatureDelta(partSig)
 					continue
 				}
+				if trailingSignatureAfterVisibleText() {
+					continue
+				}
 				appendCarrierThinkingBlock(partSig)
 				continue
 			}
@@ -227,7 +241,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				if hasThoughtSignature && (!partTextResult.Exists() || partTextResult.String() == "") {
 					if (*param).(*Params).ResponseType == 2 {
 						appendSignatureDelta(partSig)
-					} else {
+					} else if !trailingSignatureAfterVisibleText() {
 						appendCarrierThinkingBlock(partSig)
 					}
 					continue
@@ -332,6 +346,9 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						appendSignatureDelta(partSig)
 						continue
 					}
+					if trailingSignatureAfterVisibleText() {
+						continue
+					}
 					appendCarrierThinkingBlock(partSig)
 					continue
 				}
@@ -357,6 +374,9 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			}
 
 			if hasThoughtSignature {
+				if trailingSignatureAfterVisibleText() {
+					continue
+				}
 				appendCarrierThinkingBlock(partSig)
 				continue
 			}
@@ -489,6 +509,18 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		thinkingSignature = ""
 	}
 
+	// Same rule as the streaming path: a detached signature that follows visible
+	// text is not emitted as a trailing thinking block (see #5272 / PR #5263).
+	visibleTextEmitted := func() bool {
+		if textBuilder.Len() > 0 {
+			return true
+		}
+		if n := len(blocks); n > 0 && gjson.GetBytes(blocks[n-1], "type").String() == "text" {
+			return true
+		}
+		return false
+	}
+
 	appendCarrierThinkingBlock := func(signature string) {
 		if signature == "" {
 			return
@@ -532,6 +564,9 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 					continue
 				}
 				if partSig != "" {
+					if visibleTextEmitted() {
+						continue
+					}
 					flushThinking()
 					flushText()
 					appendCarrierThinkingBlock(partSig)
@@ -575,6 +610,9 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 			}
 
 			if partSig != "" {
+				if visibleTextEmitted() {
+					continue
+				}
 				flushText()
 				appendCarrierThinkingBlock(partSig)
 				continue
