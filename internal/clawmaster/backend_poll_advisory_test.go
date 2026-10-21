@@ -48,7 +48,7 @@ func TestPolledExhaustionStillSendsTheRequestToAnthropic(t *testing.T) {
 	logs := captureLogs(t, "info")
 	first, second := t.Name()+"-first", t.Name()+"-second"
 	reset := time.Now().Add(48 * time.Hour)
-	selector := &backendSeriesSelector{authIDs: []string{first, second}, provider: "claude", names: map[string]string{first: "claude-colton", second: "claude-thao"}}
+	selector := &backendSeriesSelector{authIDs: []string{first, second}, provider: "claude", names: map[string]string{first: "claude-tertiary", second: "claude-fourth"}}
 	t.Cleanup(selector.Stop)
 	selector.observeQuota(first, backendWeeklyQuota{known: true, used: 1, resetsAt: reset})
 	selector.observeQuota(second, backendWeeklyQuota{known: true, used: 1, resetsAt: reset.Add(time.Hour)})
@@ -87,7 +87,7 @@ func TestPolledExhaustionStillSendsTheRequestToAnthropic(t *testing.T) {
 	if got := strings.Count(out, "Anthropic accepted a request on a subscription the usage poll calls exhausted"); got != 1 {
 		t.Fatalf("acceptance above the poll logged %d times, want once per band:\n%s", got, out)
 	}
-	if !strings.Contains(out, "profile=claude-colton") {
+	if !strings.Contains(out, "profile=claude-tertiary") {
 		t.Fatalf("acceptance line does not name the profile:\n%s", out)
 	}
 

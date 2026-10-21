@@ -43,7 +43,7 @@ func captureLogs(t *testing.T, level string) *safeBuffer {
 func namedSelector(t *testing.T) (*backendSeriesSelector, []*coreauth.Auth, time.Time) {
 	t.Helper()
 	selector := &backendSeriesSelector{authIDs: []string{"profile-a", "profile-b"}, provider: "claude",
-		names: map[string]string{"profile-a": "claude-connor", "profile-b": "claude-ejc3"}}
+		names: map[string]string{"profile-a": "claude-primary", "profile-b": "claude-secondary"}}
 	t.Cleanup(selector.Stop)
 	reset := time.Date(2026, time.October, 2, 0, 0, 0, 0, time.UTC)
 	selector.now = func() time.Time { return reset.Add(-time.Hour) }
@@ -73,8 +73,8 @@ func TestInfoLogSaysWhenAConversationMovesToAnotherAccount(t *testing.T) {
 
 	out := logs.String()
 	for _, want := range []string{
-		"inference account switched", "from=claude-connor", "to=claude-ejc3", "reason=rate_limited",
-		"quota band changed", "profile=claude-connor", "from=ok", "to=reserve", "level=info",
+		"inference account switched", "from=claude-primary", "to=claude-secondary", "reason=rate_limited",
+		"quota band changed", "profile=claude-primary", "from=ok", "to=reserve", "level=info",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the info log is missing %q:\n%s", want, out)
@@ -104,7 +104,7 @@ func TestDebugAddsEveryRoutingDecision(t *testing.T) {
 	selector, auths, _ := namedSelector(t)
 	requireBackendSeriesPickWith(t, selector, plainRequest("debug-session"), auths, "profile-a")
 	out := logs.String()
-	for _, want := range []string{"account chosen", "profile=claude-connor", "conversation bound", "took="} {
+	for _, want := range []string{"account chosen", "profile=claude-primary", "conversation bound", "took="} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the debug log is missing %q:\n%s", want, out)
 		}
@@ -121,7 +121,7 @@ func TestARateLimitAndTheProfileComingBackAreBothLogged(t *testing.T) {
 	result.RetryAfter = &retry
 	selector.OnResult(result)
 	out := logs.String()
-	for _, want := range []string{"profile rate limited", "profile=claude-connor", "status=429", "cooldown=1m30s", `until="2026-10-01T12:01:30Z"`} {
+	for _, want := range []string{"profile rate limited", "profile=claude-primary", "status=429", "cooldown=1m30s", `until="2026-10-01T12:01:30Z"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
@@ -139,7 +139,7 @@ func TestACredentialRejectionIsAWarningWithoutUpstreamText(t *testing.T) {
 	selector.OnResult(coreauth.Result{AuthID: "profile-b", Provider: "claude", CredentialScope: true,
 		Error: &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Message: "token sk-ant-oat01-LEAKME-LEAKME was revoked for alice@example.com"}})
 	out := logs.String()
-	if !strings.Contains(out, "level=warning") || !strings.Contains(out, "profile=claude-ejc3") || !strings.Contains(out, "status=401") {
+	if !strings.Contains(out, "level=warning") || !strings.Contains(out, "profile=claude-secondary") || !strings.Contains(out, "status=401") {
 		t.Fatalf("a rejected login was not a warning:\n%s", out)
 	}
 	for _, secret := range []string{"LEAKME", "alice@example.com", "revoked"} {
@@ -152,7 +152,7 @@ func TestACredentialRejectionIsAWarningWithoutUpstreamText(t *testing.T) {
 func TestTheBackupBeingUsedIsAWarningOncePerMinute(t *testing.T) {
 	logs := captureLogs(t, "info")
 	selector, auths, reset := backendAPIBackupTestSelector(t)
-	selector.names = map[string]string{"subscription-a": "claude-connor", "subscription-b": "claude-ejc3"}
+	selector.names = map[string]string{"subscription-a": "claude-primary", "subscription-b": "claude-secondary"}
 	for _, id := range []string{"subscription-a", "subscription-b"} {
 		exhaustByAnthropic(selector, id, reset)
 	}
@@ -177,8 +177,8 @@ func TestTheQuotaSnapshotNamesEveryProfileAndSummarisesRouting(t *testing.T) {
 	selector.logSnapshot(5 * time.Minute)
 	out := logs.String()
 	for _, want := range []string{
-		"msg=quota", "profile=claude-connor", "used_pct=42.5", "band=ok", "resets_in=1h0m0s",
-		"profile=claude-ejc3", "used_pct=unknown", "msg=\"routing summary\"", "interval=5m0s", "requests_claude-connor=2",
+		"msg=quota", "profile=claude-primary", "used_pct=42.5", "band=ok", "resets_in=1h0m0s",
+		"profile=claude-secondary", "used_pct=unknown", "msg=\"routing summary\"", "interval=5m0s", "requests_claude-primary=2",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("snapshot is missing %q:\n%s", want, out)
@@ -186,7 +186,7 @@ func TestTheQuotaSnapshotNamesEveryProfileAndSummarisesRouting(t *testing.T) {
 	}
 	logs.b.Reset()
 	selector.logSnapshot(5 * time.Minute)
-	if strings.Contains(logs.String(), "requests_claude-connor") {
+	if strings.Contains(logs.String(), "requests_claude-primary") {
 		t.Fatalf("the summary did not reset between snapshots:\n%s", logs.String())
 	}
 }
@@ -222,14 +222,14 @@ func TestTheSnapshotRunsOnItsIntervalAndNegativeTurnsItOff(t *testing.T) {
 func TestNothingSecretOrIdentifyingIsEverLogged(t *testing.T) {
 	logs := captureLogs(t, "debug")
 	selector, auths, reset := namedSelector(t)
-	secrets := []string{"sk-ant-oat01-SECRETSECRETSECRET", "eyJhbGciOiJIUzI1NiJ9.payload.sig", "Bearer abcdefghijklmnop", "ejc3@example.com"}
+	secrets := []string{"sk-ant-oat01-SECRETSECRETSECRET", "eyJhbGciOiJIUzI1NiJ9.payload.sig", "Bearer abcdefghijklmnop", "alice@example.com"}
 	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 0.95, resetsAt: reset})
 	opts := plainRequest("sk-ant-oat01-SECRETSECRETSECRET-as-a-session-id")
 	opts.Headers.Set("Authorization", "Bearer abcdefghijklmnop")
-	opts.OriginalRequest = []byte(`{"metadata":{"user_id":"user_x_account_11111111-2222-3333-4444-555555555555_session_y"},"messages":[{"role":"user","content":"my email is ejc3@example.com"}]}`)
+	opts.OriginalRequest = []byte(`{"metadata":{"user_id":"user_x_account_11111111-2222-3333-4444-555555555555_session_y"},"messages":[{"role":"user","content":"my email is alice@example.com"}]}`)
 	_, _ = selector.Pick(t.Context(), "claude", "", opts, auths)
 	selector.OnResult(coreauth.Result{AuthID: "profile-a", Provider: "claude", CredentialScope: true,
-		Error: &coreauth.Error{HTTPStatus: 429, Message: "Bearer abcdefghijklmnop ejc3@example.com"}})
+		Error: &coreauth.Error{HTTPStatus: 429, Message: "Bearer abcdefghijklmnop alice@example.com"}})
 	selector.logSnapshot(time.Minute)
 	out := logs.String()
 	for _, secret := range append(secrets, "11111111-2222-3333-4444-555555555555", "my email is") {
@@ -244,12 +244,12 @@ func TestNothingSecretOrIdentifyingIsEverLogged(t *testing.T) {
 
 func TestRedactionIsASecondLineOfDefence(t *testing.T) {
 	logs := captureLogs(t, "info")
-	lg().Info("test", "access_token", "whatever", "note", "see sk-ant-api03-ABCDEFGHIJ and eyJhbGciOiJIUzI1NiJ9.x.y", "profile", "claude-connor")
+	lg().Info("test", "access_token", "whatever", "note", "see sk-ant-api03-ABCDEFGHIJ and eyJhbGciOiJIUzI1NiJ9.x.y", "profile", "claude-primary")
 	out := logs.String()
 	if strings.Contains(out, "whatever") || strings.Contains(out, "ABCDEFGHIJ") || strings.Contains(out, "eyJhbGci") {
 		t.Fatalf("a secret-shaped attribute was not redacted:\n%s", out)
 	}
-	if !strings.Contains(out, "profile=claude-connor") || !strings.Contains(out, "[redacted]") {
+	if !strings.Contains(out, "profile=claude-primary") || !strings.Contains(out, "[redacted]") {
 		t.Fatalf("redaction removed too much or marked nothing:\n%s", out)
 	}
 }
@@ -284,9 +284,9 @@ func TestLevelsAndFormats(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { closeFn(); activeLogger.Store(nil) })
-	lg().Info("hello", "profile", "claude-connor")
+	lg().Info("hello", "profile", "claude-primary")
 	var record map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(json1.String())), &record); err != nil || record["profile"] != "claude-connor" || record["msg"] != "hello" {
+	if err := json.Unmarshal([]byte(strings.TrimSpace(json1.String())), &record); err != nil || record["profile"] != "claude-primary" || record["msg"] != "hello" {
 		t.Fatalf("json log = %q (%v)", json1.String(), err)
 	}
 }
@@ -378,7 +378,7 @@ func TestAProfileWithoutANameIsNeverNamedAfterItsEmailBearingFile(t *testing.T) 
 	if safeProfileName("", fileName) != name || name == safeProfileName("", "claude-other.json") {
 		t.Fatal("the fallback must be stable and tell profiles apart")
 	}
-	if safeProfileName("claude-connor", fileName) != "claude-connor" {
+	if safeProfileName("claude-primary", fileName) != "claude-primary" {
 		t.Fatal("a profile's own name must win")
 	}
 	if safeProfileName("not a name!", "claw-master-3-1") != "claw-master-3-1" {

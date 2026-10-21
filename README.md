@@ -1,9 +1,10 @@
 # CLI Proxy API
 
-This fork adds an experimental, account-pinned Claude Code launcher. See
-[Claude master with separate inference profiles](docs/claw-master.md) for its
-architecture, security boundaries, setup, and verification status. The original
-CLIProxyAPI server remains available unchanged.
+This fork adds claw-master: a launcher, a shared server and a desktop agent that route Claude Code
+inference across separately logged-in subscriptions, on Linux, macOS and Windows. See
+[Claw Master](docs/claw-master.md) for its architecture, security boundaries, setup, and
+verification status, and [claw-master on AWS](docs/claw-master-aws.md) for a reference deployment.
+The original CLIProxyAPI server remains available unchanged.
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 

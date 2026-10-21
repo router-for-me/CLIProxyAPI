@@ -67,7 +67,7 @@ func TestAResetCountsDownBetweenRequests(t *testing.T) {
 	limitNow = func() time.Time { return now }
 	t.Cleanup(func() { limitNow = restore })
 	store := newLimitGaugeStore()
-	store.setReset("claude-connor", "7d", "resets_in_seconds", start.Add(100*time.Second))
+	store.setReset("claude-primary", "7d", "resets_in_seconds", start.Add(100*time.Second))
 	read := func() float64 {
 		var got float64 = -1
 		store.each(func(_, _, _ string, v float64) { got = v })

@@ -16,7 +16,7 @@ import (
 type clientCtxKey struct{}
 
 // clientFromContext is the connecting client's name for a request: a certificate name, "tunnel" for the
-// open listener, "local" for a launch's own Claude, or "unknown".
+// open listener ("claw-master launch" for a launch's own Claude, by its certificate), or "unknown".
 func clientFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return "unknown"

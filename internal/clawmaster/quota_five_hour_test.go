@@ -81,7 +81,7 @@ func TestFiveHourWindowReachesTheGaugesFromThePoll(t *testing.T) {
 	registerStateSource(src)
 	t.Cleanup(func() { unregisterStateSource(src) })
 	rm := collect(t, reader)
-	a, b := map[string]string{"profile": "claude-connor"}, map[string]string{"profile": "claude-ejc3"}
+	a, b := map[string]string{"profile": "claude-primary"}, map[string]string{"profile": "claude-secondary"}
 	if v, ok := gaugeOf(rm, "claw_master.quota.five_hour.used_fraction", a); !ok || v != 0.42 {
 		t.Errorf("five_hour.used_fraction = %v (%v), want 0.42", v, ok)
 	}

@@ -170,7 +170,7 @@ func (u *upstream) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func inferenceRequest(account string, stream bool) *http.Request {
 	userID := fmt.Sprintf(`{"device_id":"dev","account_uuid":%q,"session_id":"sess"}`, account)
-	body := fmt.Sprintf(`{"model":"claude-opus-5","stream":%t,"metadata":{"user_id":%q},"messages":[{"role":"user","content":"hello, my email is ejc3@example.com"}]}`, stream, userID)
+	body := fmt.Sprintf(`{"model":"claude-opus-5","stream":%t,"metadata":{"user_id":%q},"messages":[{"role":"user","content":"hello, my email is alice@example.com"}]}`, stream, userID)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Claude-Code-Session-Id", "RAW-SESSION-ID-do-not-export")
@@ -185,9 +185,9 @@ func serve(t *testing.T, backend *Backend, req *http.Request) *httptest.Response
 }
 
 func TestAnInferenceRequestIsMeasuredByProfileAccountAndTiming(t *testing.T) {
-	reader := startMetrics(t, map[string]string{testAccountUUID: "colton"})
+	reader := startMetrics(t, map[string]string{testAccountUUID: "alice"})
 	backend := newBackendNativeResponseFixture(t)
-	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-connor"}
+	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-primary"}
 	reset := strconv.FormatInt(time.Now().Add(36*time.Hour).Unix(), 10)
 	fake := &upstream{delay: 30 * time.Millisecond, headers: http.Header{
 		"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.31"}, "Anthropic-Ratelimit-Unified-7d-Utilization": {"0.62"},
@@ -201,9 +201,9 @@ func TestAnInferenceRequestIsMeasuredByProfileAccountAndTiming(t *testing.T) {
 	rm := collect(t, reader)
 	// One projection per axis, never their product (see TestNoMetricCrossesTheAxes).
 	for name, shape := range map[string]map[string]string{
-		"claw_master.inference.requests":           {"profile": "claude-connor", "status_class": "2xx", "client_account": "colton"},
+		"claw_master.inference.requests":           {"profile": "claude-primary", "status_class": "2xx", "client_account": "alice"},
 		"claw_master.inference.requests.by_model":  {"model": "claude-opus-5", "status_class": "2xx"},
-		"claw_master.inference.requests.by_client": {"client": "unknown", "client_account": "colton"},
+		"claw_master.inference.requests.by_client": {"client": "unknown", "client_account": "alice"},
 		"claw_master.requests.by_client":           {"route": "inference", "client": "unknown"},
 	} {
 		if got := sumOf(rm, name, shape); got != 1 {
@@ -215,18 +215,18 @@ func TestAnInferenceRequestIsMeasuredByProfileAccountAndTiming(t *testing.T) {
 			t.Errorf("%s has %d observations for the model, want 1", name, got)
 		}
 	}
-	if got := sumOf(rm, "claw_master.requests", map[string]string{"route": "inference", "client_account": "colton"}); got != 1 {
+	if got := sumOf(rm, "claw_master.requests", map[string]string{"route": "inference", "client_account": "alice"}); got != 1 {
 		t.Fatalf("requests = %d", got)
 	}
 	for _, name := range []string{"claw_master.inference.duration", "claw_master.inference.ttfb", "claw_master.inference.upstream_ttfb"} {
-		if got := histCount(rm, name, map[string]string{"profile": "claude-connor", "status_class": "2xx"}); got != 1 {
+		if got := histCount(rm, name, map[string]string{"profile": "claude-primary", "status_class": "2xx"}); got != 1 {
 			t.Errorf("%s has %d observations, want 1", name, got)
 		}
 	}
-	if histCount(rm, "claw_master.proxy.overhead", map[string]string{"profile": "claude-connor"}) != 1 {
+	if histCount(rm, "claw_master.proxy.overhead", map[string]string{"profile": "claude-primary"}) != 1 {
 		t.Error("claw-master's own overhead was not measured")
 	}
-	if histCount(rm, "claw_master.inference.request_bytes", map[string]string{"profile": "claude-connor"}) != 1 {
+	if histCount(rm, "claw_master.inference.request_bytes", map[string]string{"profile": "claude-primary"}) != 1 {
 		t.Error("request size was not measured")
 	}
 	// Anthropic's own account and rate-limit state, by window.
@@ -234,7 +234,7 @@ func TestAnInferenceRequestIsMeasuredByProfileAccountAndTiming(t *testing.T) {
 		window, measure string
 		want            float64
 	}{{"5h", "utilization", 0.31}, {"7d", "utilization", 0.62}, {"api", "requests_remaining", 4990}} {
-		got, ok := gaugeOf(rm, "claw_master.anthropic.ratelimit", map[string]string{"profile": "claude-connor", "window": tc.window, "measure": tc.measure})
+		got, ok := gaugeOf(rm, "claw_master.anthropic.ratelimit", map[string]string{"profile": "claude-primary", "window": tc.window, "measure": tc.measure})
 		if !ok || got != tc.want {
 			t.Errorf("ratelimit %s %s = %v (%v), want %v", tc.window, tc.measure, got, ok, tc.want)
 		}
@@ -242,11 +242,11 @@ func TestAnInferenceRequestIsMeasuredByProfileAccountAndTiming(t *testing.T) {
 	if resets, ok := gaugeOf(rm, "claw_master.anthropic.ratelimit", map[string]string{"window": "7d", "measure": "resets_in_seconds"}); !ok || resets < 35*3600 || resets > 36*3600+5 {
 		t.Errorf("the weekly reset is %v seconds away (%v), want about 36 hours", resets, ok)
 	}
-	if got := sumOf(rm, "claw_master.anthropic.ratelimit.state", map[string]string{"profile": "claude-connor", "window": "all", "measure": "status", "value": "allowed_warning"}); got != 1 {
+	if got := sumOf(rm, "claw_master.anthropic.ratelimit.state", map[string]string{"profile": "claude-primary", "window": "all", "measure": "status", "value": "allowed_warning"}); got != 1 {
 		t.Errorf("the rate-limit status word was not counted (%d)", got)
 	}
 	for _, q := range []string{"0.5", "0.95", "0.99"} {
-		if v, ok := gaugeOf(rm, "claw_master.inference.duration_quantile", map[string]string{"profile": "claude-connor", "quantile": q}); !ok || v < 25 {
+		if v, ok := gaugeOf(rm, "claw_master.inference.duration_quantile", map[string]string{"profile": "claude-primary", "quantile": q}); !ok || v < 25 {
 			t.Errorf("p%s latency = %v (%v), want at least the 30 ms the fake upstream took", q, v, ok)
 		}
 	}
@@ -255,11 +255,11 @@ func TestAnInferenceRequestIsMeasuredByProfileAccountAndTiming(t *testing.T) {
 func TestAnErrorFromAnthropicIsCountedByStatus(t *testing.T) {
 	reader := startMetrics(t, nil)
 	backend := newBackendNativeResponseFixture(t)
-	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-ejc3"}
+	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-secondary"}
 	backend.manager.SetRoundTripperProvider(&upstream{status: 529})
 	_ = serve(t, backend, inferenceRequest(testAccountUUID, true))
 	rm := collect(t, reader)
-	if got := sumOf(rm, "claw_master.inference.errors", map[string]string{"profile": "claude-ejc3", "status": "529"}); got != 1 {
+	if got := sumOf(rm, "claw_master.inference.errors", map[string]string{"profile": "claude-secondary", "status": "529"}); got != 1 {
 		t.Fatalf("inference.errors{status=529} = %d", got)
 	}
 	if got := sumOf(rm, "claw_master.inference.requests", map[string]string{"status_class": "5xx"}); got != 1 {
@@ -268,11 +268,11 @@ func TestAnErrorFromAnthropicIsCountedByStatus(t *testing.T) {
 }
 
 func TestTheIncomingAccountIsAKeyNeverTheId(t *testing.T) {
-	startMetrics(t, map[string]string{testAccountUUID: "Colton's Laptop!"})
+	startMetrics(t, map[string]string{testAccountUUID: "Alice's Laptop!"})
 	legacy := `{"metadata":{"user_id":"user_abc123_account_` + testAccountUUID + `_session_9f8e7d"}}`
 	modern := `{"metadata":{"user_id":"{\"device_id\":\"d\",\"account_uuid\":\"` + testAccountUUID + `\",\"session_id\":\"s\"}"}}`
 	for name, body := range map[string]string{"legacy": legacy, "modern": modern} {
-		if got := clientAccountKey([]byte(body)); got != "Colton-s-Laptop-" {
+		if got := clientAccountKey([]byte(body)); got != "Alice-s-Laptop-" {
 			t.Errorf("%s user_id gave %q, want the sanitised label", name, got)
 		}
 	}
@@ -301,14 +301,14 @@ func TestRoutingEventsBecomeMetrics(t *testing.T) {
 	requireBackendSeriesPickWith(t, selector, plainRequest("m-1"), auths, "profile-b")
 	selector.OnResult(backendSeriesQuotaResult("profile-b"))
 	rm := collect(t, reader)
-	if sumOf(rm, "claw_master.routing.picks", map[string]string{"profile": "claude-connor"}) != 1 ||
-		sumOf(rm, "claw_master.routing.picks", map[string]string{"profile": "claude-ejc3"}) != 1 {
+	if sumOf(rm, "claw_master.routing.picks", map[string]string{"profile": "claude-primary"}) != 1 ||
+		sumOf(rm, "claw_master.routing.picks", map[string]string{"profile": "claude-secondary"}) != 1 {
 		t.Error("picks were not counted per profile")
 	}
-	if got := sumOf(rm, "claw_master.routing.switches", map[string]string{"from": "claude-connor", "to": "claude-ejc3", "reason": "weekly_exhausted"}); got != 1 {
+	if got := sumOf(rm, "claw_master.routing.switches", map[string]string{"from": "claude-primary", "to": "claude-secondary", "reason": "weekly_exhausted"}); got != 1 {
 		t.Errorf("the switch was counted %d times", got)
 	}
-	if sumOf(rm, "claw_master.quota.rate_limited", map[string]string{"profile": "claude-ejc3"}) != 1 {
+	if sumOf(rm, "claw_master.quota.rate_limited", map[string]string{"profile": "claude-secondary"}) != 1 {
 		t.Error("the rate limit was not counted")
 	}
 	if histCount(rm, "claw_master.routing.pick_duration", nil) != 2 {
@@ -329,7 +329,7 @@ func TestQuotaGaugesShowTheLiveStateOfEveryProfile(t *testing.T) {
 	registerStateSource(src)
 	t.Cleanup(func() { unregisterStateSource(src) })
 	rm := collect(t, reader)
-	a := map[string]string{"profile": "claude-connor"}
+	a := map[string]string{"profile": "claude-primary"}
 	if v, ok := gaugeOf(rm, "claw_master.quota.used_fraction", a); !ok || v != 0.93 {
 		t.Errorf("used_fraction = %v (%v)", v, ok)
 	}
@@ -339,7 +339,7 @@ func TestQuotaGaugesShowTheLiveStateOfEveryProfile(t *testing.T) {
 	if v, ok := gaugeOf(rm, "claw_master.quota.resets_in_seconds", a); !ok || v != 3600 {
 		t.Errorf("resets_in_seconds = %v (%v), want 3600", v, ok)
 	}
-	b := map[string]string{"profile": "claude-ejc3"}
+	b := map[string]string{"profile": "claude-secondary"}
 	if v, _ := gaugeOf(rm, "claw_master.quota.rate_limited_for_seconds", b); v <= 0 {
 		t.Errorf("a rate-limited profile shows %v seconds of cooldown", v)
 	}
@@ -373,7 +373,7 @@ func TestSplittingAnthropicRateLimitHeaders(t *testing.T) {
 func TestNothingSecretOrIdentifyingIsEverExported(t *testing.T) {
 	reader := startMetrics(t, nil)
 	backend := newBackendNativeResponseFixture(t)
-	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-connor"}
+	backend.seriesSelector.names = map[string]string{backend.authIDs[0]: "claude-primary"}
 	backend.manager.SetRoundTripperProvider(&upstream{headers: http.Header{
 		"Anthropic-Ratelimit-Unified-Status": {"allowed"}, "Anthropic-Ratelimit-Unified-5h-Utilization": {"0.1"},
 		"Authorization": {"Bearer abcdefghijklmnop"}, "Set-Cookie": {"session=SECRETCOOKIE"},
@@ -385,7 +385,7 @@ func TestNothingSecretOrIdentifyingIsEverExported(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := string(encoded)
-	for _, secret := range []string{testAccountUUID, "RAW-SESSION-ID", "ejc3@example.com", "my email", "abcdefghijklmnop", "SECRETCOOKIE", "sk-ant-", "hello"} {
+	for _, secret := range []string{testAccountUUID, "RAW-SESSION-ID", "alice@example.com", "my email", "abcdefghijklmnop", "SECRETCOOKIE", "sk-ant-", "hello"} {
 		if strings.Contains(out, secret) {
 			t.Fatalf("%q was exported:\n%s", secret, out)
 		}
@@ -412,7 +412,7 @@ func TestMetricsReallyLeaveOverOTLPHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observeSwitch("claude-connor", "claude-ejc3", "reserve_reached")
+	observeSwitch("claude-primary", "claude-secondary", "reserve_reached")
 	deadline := time.After(5 * time.Second)
 	for {
 		mu.Lock()
