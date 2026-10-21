@@ -205,6 +205,29 @@ class PolicyTests(unittest.TestCase):
                 router.run_once(args, self.now)
             self.assertEqual(calls, [("GET", "/credentials")])
 
+    def test_incomplete_codex_quota_preserves_priority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential = root / "oauth.json"
+            credential.write_text('{"account_id":"test"}')
+            (root / "management-key").write_text("unused")
+            entry = {"id": "unique-id", "name": "oauth.json", "path": str(credential),
+                     "type": "codex", "status": "active", "priority": 3}
+            args = SimpleNamespace(management_key_file=str(root / "management-key"),
+                                   claude_offers_file=str(root / "offers.json"),
+                                   state_file=str(root / "state.json"),
+                                   dry_run=False, priority_only=True)
+            result = {"ordinaryUsageAllowed": True,
+                      "rateLimitResetCredits": {"availableCount": 1, "credits": None}}
+            calls = []
+            def management(method, path, key, payload=None):
+                calls.append(method)
+                return {"files": [entry]}
+            with patch.object(router, "management", side_effect=management), \
+                 patch.object(router, "app_server", return_value=(result, None)):
+                router.run_once(args, self.now)
+            self.assertEqual(calls, ["GET"])
+
     def test_nonstandard_codex_path_uses_management_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

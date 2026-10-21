@@ -187,6 +187,21 @@ def account_rank(result, now):
     return None
 
 
+def routing_signal_known(result, now):
+    """Do not rewrite an account's priority from an incomplete quota read."""
+    if result.get("ordinaryUsageAllowed") is False:
+        return True
+    if result.get("ordinaryUsageAllowed") is not True:
+        return False
+    if account_rank(result, now) is not None:
+        return True
+    weekly = weekly_window(result) or {}
+    return (isinstance(weekly.get("resetsAt"), (int, float))
+            and weekly["resetsAt"] > now.timestamp()
+            and isinstance(weekly.get("usedPercent"), (int, float))
+            and weekly["usedPercent"] >= 100)
+
+
 def management(method, path, key, payload=None):
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(
@@ -411,8 +426,10 @@ def run_once(args, now=None):
     active_names = {identity for identity, entry in by_identity.items()
                     if not entry.get("disabled") and entry.get("status") == "active"}
     observed_names = {identity for identity, _, _ in observations if identity in active_names}
+    complete_signals = all(routing_signal_known(result, now)
+                           for identity, _, result in observations if identity in active_names)
     # Keep the last complete ordering when a transient account read fails.
-    reprioritize = active_names == observed_names
+    reprioritize = active_names == observed_names and complete_signals
     if not reprioritize:
         print("Codex limits incomplete; keeping existing priorities", file=sys.stderr)
     for identity, entry in by_identity.items():

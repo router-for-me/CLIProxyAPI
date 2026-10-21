@@ -16,7 +16,8 @@ management API. Claude observations older than three days, expired windows,
 and credentials with an
 error status are not promoted. The companion does not send artificial model
 requests or repeatedly probe Claude's quota endpoint. If any active Codex
-account cannot be read, that pass keeps the previous Codex ordering.
+account cannot be read or its routing data is incomplete, that pass keeps the
+previous Codex ordering.
 
 Run `python3 reset_router.py --once --dry-run --priority-only` to inspect the
 proposed priority changes. Run `python3 reset_router.py --once --priority-only`
