@@ -32,6 +32,9 @@ func TestGeminiAppPrompt(t *testing.T) {
 		`{}`, `bad json`, `{"tools":[{"functionDeclarations":[]}]}`,
 		`{"contents":[{"parts":[{"inlineData":{"mimeType":"image/png","data":"AA=="}}]}]}`,
 		`{"contents":[{"parts":[{"functionResponse":{"name":"test"}}]}]}`,
+		`{"generationConfig":{"responseMimeType":"application/json"},"contents":[{"parts":[{"text":"Hello"}]}]}`,
+		`{"generationConfig":{"responseSchema":{"type":"OBJECT"}},"contents":[{"parts":[{"text":"Hello"}]}]}`,
+		`{"generationConfig":{"responseJsonSchema":{"type":"object"}},"contents":[{"parts":[{"text":"Hello"}]}]}`,
 	} {
 		if _, err := GeminiAppPrompt([]byte(input)); err == nil {
 			t.Fatalf("accepted unsupported request: %s", input)

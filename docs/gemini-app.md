@@ -52,8 +52,10 @@ Each request creates a temporary chat and includes the full supplied text
 history, with system, user, and assistant role labels rendered into one prompt.
 System instructions therefore do not have a separate privileged API role.
 Sampling parameters and output token limits are controlled by Gemini App, not
-the API fields. Tool calling, media input/output, token counting, and compact
-responses are unsupported. Token usage is not reported by the App endpoint.
+the API fields. Tool calling, media input/output, structured output (JSON mode or
+response schemas), token counting, and compact responses are unsupported.
+Structured-output requests are rejected before contacting Google.
+Token usage is not reported by the App endpoint.
 
 Cookies do not have OAuth refresh tokens. If authentication expires, sign in
 again and re-import fresh cookies with the same `--gemini-app-account` name.

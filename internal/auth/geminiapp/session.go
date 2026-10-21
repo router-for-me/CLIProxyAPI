@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -80,10 +82,40 @@ func ParseCookies(data []byte) (map[string]string, error) {
 	return result, nil
 }
 
+// sessionCookieJar keeps parent-domain rotations in the same host-only slot as
+// imported cookies, so stale and fresh values cannot be sent together.
+type sessionCookieJar struct{ http.CookieJar }
+
+func (j sessionCookieJar) Cookies(endpoint *url.URL) []*http.Cookie {
+	if endpoint.Scheme != "https" || endpoint.Host != "gemini.google.com" {
+		return nil
+	}
+	return j.CookieJar.Cookies(endpoint)
+}
+
+func (j sessionCookieJar) SetCookies(endpoint *url.URL, cookies []*http.Cookie) {
+	if endpoint.Scheme != "https" || endpoint.Host != "gemini.google.com" {
+		return
+	}
+	for _, cookie := range cookies {
+		if cookie.Name == CookiePSID || cookie.Name == CookiePSIDTS {
+			domain := strings.TrimPrefix(strings.ToLower(cookie.Domain), ".")
+			if domain != "" && domain != "google.com" && domain != endpoint.Hostname() {
+				continue
+			}
+			isolated := *cookie
+			isolated.Domain = ""
+			cookie = &isolated
+		}
+		j.CookieJar.SetCookies(endpoint, []*http.Cookie{cookie})
+	}
+}
+
 // NewClient isolates cookies for one execution and never forwards them to another host.
 func NewClient(base *http.Client, cookies map[string]string) *http.Client {
 	client := *base
-	jar, _ := cookiejar.New(nil)
+	baseJar, _ := cookiejar.New(nil)
+	jar := sessionCookieJar{CookieJar: baseJar}
 	endpoint, _ := url.Parse(BaseURL)
 	for _, name := range []string{CookiePSID, CookiePSIDTS} {
 		if value := cookies[name]; value != "" {
@@ -111,7 +143,12 @@ func FetchSession(ctx context.Context, client *http.Client) (Session, error) {
 	if err != nil {
 		return Session{}, fmt.Errorf("gemini-app: load session: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			// Transport error messages can contain session material.
+			log.Errorf("gemini-app: close session response body failed (%T)", errClose)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		status := resp.StatusCode
 		if status >= 300 && status < 400 {

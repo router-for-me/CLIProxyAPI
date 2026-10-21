@@ -25,6 +25,12 @@ func GeminiAppPrompt(body []byte) (string, error) {
 	if len(root.Get("tools").Array()) > 0 {
 		return "", fmt.Errorf("gemini-app: tool calling is not supported")
 	}
+	if mime := root.Get("generationConfig.responseMimeType").String(); mime != "" && mime != "text/plain" {
+		return "", fmt.Errorf("gemini-app: structured output is not supported")
+	}
+	if root.Get("generationConfig.responseSchema").Exists() || root.Get("generationConfig.responseJsonSchema").Exists() {
+		return "", fmt.Errorf("gemini-app: structured output is not supported")
+	}
 	var prompt strings.Builder
 	appendParts := func(role string, parts gjson.Result) error {
 		var text strings.Builder

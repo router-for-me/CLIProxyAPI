@@ -17,6 +17,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
 
@@ -68,6 +69,7 @@ func (e *GeminiAppExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 		return nil, err
 	}
 	httpReq.Header.Del("Cookie") // The isolated jar supplies these exactly once.
+	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	return geminiapp.NewClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), cookies).Do(httpReq)
 }
 
@@ -87,11 +89,15 @@ func (e *GeminiAppExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	reporter := helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	response := helps.NewGeminiAppResponse(req.Model)
-	httpResp, translated, err := e.open(ctx, auth, req, opts)
+	httpResp, translated, err := e.open(ctx, auth, req, opts, reporter)
 	if err != nil {
 		return resp, err
 	}
-	defer func() { _ = httpResp.Body.Close() }()
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("gemini-app: close generation response body failed (%T)", errClose)
+		}
+	}()
 	text, err := helps.ReadGeminiAppStream(httpResp.Body, func(string) error { return nil })
 	if err != nil {
 		return resp, err
@@ -112,14 +118,18 @@ func (e *GeminiAppExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	reporter := helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	response := helps.NewGeminiAppResponse(req.Model)
-	httpResp, translated, err := e.open(ctx, auth, req, opts)
+	httpResp, translated, err := e.open(ctx, auth, req, opts, reporter)
 	if err != nil {
 		return nil, err
 	}
 	chunks := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(chunks)
-		defer func() { _ = httpResp.Body.Close() }()
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("gemini-app: close generation response body failed (%T)", errClose)
+			}
+		}()
 		var param any
 		send := func(payload []byte) error {
 			if err := ctx.Err(); err != nil {
@@ -154,7 +164,7 @@ func (e *GeminiAppExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
 
-func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*http.Response, []byte, error) {
+func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, reporter *helps.UsageReporter) (*http.Response, []byte, error) {
 	if opts.Alt == "responses/compact" {
 		return nil, nil, helps.NewGeminiAppRequestError(http.StatusNotImplemented, "gemini-app: compact responses are not supported")
 	}
@@ -183,6 +193,9 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 		return nil, nil, err
 	}
 	client := geminiapp.NewClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), cookies)
+	// Session acquisition is an upstream attempt, but its response is not a
+	// generation token and must not start or satisfy generation TTFT.
+	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	session, err := geminiapp.FetchSession(ctx, client)
 	if err != nil {
 		return nil, nil, err
@@ -210,12 +223,14 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 		httpReq.Header.Set("x-goog-ext-525005358-jspb", fmt.Sprintf("[%q,1]", id))
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
-	httpResp, err := client.Do(httpReq)
+	httpResp, err := reporter.TrackHTTPClient(client).Do(httpReq)
 	if err != nil {
 		return nil, nil, err
 	}
 	if httpResp.StatusCode != http.StatusOK {
-		_ = httpResp.Body.Close()
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("gemini-app: close generation error response body failed (%T)", errClose)
+		}
 		// Upstream bodies and headers can contain session material.
 		status := httpResp.StatusCode
 		if status >= 300 && status < 400 {

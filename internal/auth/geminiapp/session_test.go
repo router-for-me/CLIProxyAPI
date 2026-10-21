@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -79,5 +80,51 @@ func TestFetchSessionMissingToken(t *testing.T) {
 	var status interface{ StatusCode() int }
 	if !errors.As(err, &status) || status.StatusCode() != 401 || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("expected sanitized auth error: %v", err)
+	}
+}
+
+func TestSessionCookieRotationReplacesImportedCookies(t *testing.T) {
+	for _, domain := range []string{"", ".google.com", "gemini.google.com"} {
+		t.Run("domain="+domain, func(t *testing.T) {
+			base := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path == "/app" {
+					header := make(http.Header)
+					for _, name := range []string{CookiePSID, CookiePSIDTS} {
+						header.Add("Set-Cookie", (&http.Cookie{Name: name, Value: "rotated", Domain: domain, Path: "/", Secure: true}).String())
+					}
+					return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(`{"SNlM0e":"token"}`))}, nil
+				}
+				cookies := req.Cookies()
+				if len(cookies) != 2 {
+					t.Fatalf("expected exactly two session cookies, got %v", cookies)
+				}
+				for _, cookie := range cookies {
+					if cookie.Value != "rotated" {
+						t.Fatalf("stale cookie survived rotation: %s", cookie.Name)
+					}
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: http.NoBody}, nil
+			})}
+			client := NewClient(base, map[string]string{CookiePSID: "old", CookiePSIDTS: "old"})
+			if _, err := FetchSession(context.Background(), client); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Post(BaseURL+"/generate", "text/plain", strings.NewReader("prompt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if errClose := resp.Body.Close(); errClose != nil {
+				t.Fatal(errClose)
+			}
+			for _, origin := range []string{"https://accounts.google.com", "https://other.gemini.google.com", "http://gemini.google.com"} {
+				endpoint, err := url.Parse(origin)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(client.Jar.Cookies(endpoint)) != 0 {
+					t.Fatalf("session cookies escaped the Gemini HTTPS origin: %s", origin)
+				}
+			}
+		})
 	}
 }
