@@ -57,7 +57,9 @@ func MergeExistingAuthMetadata(target *Auth, existingMap map[string]any) {
 // MergePreparedAuth merges prepared request auth updates into current without modifying
 // refresh lifecycle fields (such as LastRefreshedAt, LastError, or cooldown status).
 func MergePreparedAuth(base, current, updated *Auth) *Auth {
-	return mergeAuthContent(base, current, updated)
+	merged := mergeAuthContent(base, current, updated)
+	mergeGeminiAppPreparedCookies(base, current, updated, merged)
+	return merged
 }
 
 // MergeRefreshedAuth merges the refresh results from updated (derived from base)

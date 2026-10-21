@@ -120,6 +120,8 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+	// geminiAppCookieEpoch distinguishes explicit replacements from upstream rotations.
+	geminiAppCookieEpoch uint64
 }
 
 const (

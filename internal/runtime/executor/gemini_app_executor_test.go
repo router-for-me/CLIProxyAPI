@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -86,6 +87,8 @@ func TestGeminiAppExecutorProtocolResponses(t *testing.T) {
 		{sdktranslator.FormatOpenAIResponse, `{"model":"gemini-app","input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]}]}`},
 		{sdktranslator.FormatClaude, `{"model":"gemini-app","messages":[{"role":"user","content":"Hello"}],"max_tokens":100}`},
 		{sdktranslator.FormatGemini, `{"contents":[{"role":"user","parts":[{"text":"Hello"}]}]}`},
+		{sdktranslator.FormatOpenAI, `{"model":"gemini-app","messages":[{"role":"user","content":"Hello"}],"n":1,"modalities":["text"]}`},
+		{sdktranslator.FormatGemini, `{"contents":[{"role":"user","parts":[{"text":"Hello"}]}],"generationConfig":{"candidateCount":1,"responseModalities":["TEXT"]}}`},
 	}
 	for _, test := range requests {
 		for _, stream := range []bool{false, true} {
@@ -309,6 +312,12 @@ func TestGeminiAppRejectsStructuredOutputBeforeUpstream(t *testing.T) {
 		{"Gemini MIME", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"responseMimeType":"application/json"}}`},
 		{"Gemini schema", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"responseSchema":{"type":"OBJECT"}}}`},
 		{"Gemini JSON schema", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"responseJsonSchema":{"type":"object"}}}`},
+		{"Gemini image", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"responseModalities":["IMAGE"]}}`},
+		{"Gemini mixed modalities", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"responseModalities":["TEXT","AUDIO"]}}`},
+		{"Gemini candidates", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"candidateCount":2}}`},
+		{"OpenAI image", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"modalities":["image"]}`},
+		{"OpenAI audio", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"modalities":["text","audio"]}`},
+		{"OpenAI choices", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"n":2}`},
 	}
 	for _, test := range tests {
 		for _, stream := range []bool{false, true} {
@@ -334,6 +343,85 @@ func TestGeminiAppRejectsStructuredOutputBeforeUpstream(t *testing.T) {
 				}
 				if cliproxyexecutor.UpstreamAttempted(ctx) {
 					t.Fatal("local validation marked an upstream attempt")
+				}
+			})
+		}
+	}
+}
+
+func TestGeminiAppTransportErrorsAreSanitized(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, cause := range []error{io.ErrUnexpectedEOF, context.Canceled, context.DeadlineExceeded} {
+			t.Run(fmt.Sprintf("stream=%t/%v", stream, cause), func(t *testing.T) {
+				capture := &multiProviderUsageCapture{alias: t.Name(), records: make(chan coreusage.Record, 4)}
+				coreusage.RegisterNamedPlugin(t.Name(), capture)
+				t.Cleanup(func() { coreusage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{}) })
+				coreusage.StartDefault(context.Background())
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(geminiAppTransport(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Path == "/app" {
+						return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"SNlM0e":"csrf-secret","cfb2h":"build-secret","FdrFJe":"session-secret"}`))}, nil
+					}
+					return nil, cause
+				})))
+				ctx = coreusage.WithRequestedModelAlias(ctx, capture.alias)
+				e := NewGeminiAppExecutor(&config.Config{}, nil)
+				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+				var err error
+				if stream {
+					_, err = e.ExecuteStream(ctx, geminiAppTestAuth(), req, opts)
+				} else {
+					_, err = e.Execute(ctx, geminiAppTestAuth(), req, opts)
+				}
+				var transportErr *url.Error
+				if !errors.Is(err, cause) || !errors.As(err, &transportErr) {
+					t.Fatalf("lost transport cause: %v", err)
+				}
+				record := capture.await(t)
+				if !record.Failed {
+					t.Fatal("transport failure was not reported")
+				}
+				for _, output := range []string{err.Error(), record.Fail.Body} {
+					for _, secret := range []string{"f.sid", "session-secret", "build-secret", "csrf-secret", "https://"} {
+						if strings.Contains(output, secret) {
+							t.Fatalf("transport error leaked session material: %s", output)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestGeminiAppRejectsOriginalOutputContracts(t *testing.T) {
+	for _, test := range []struct {
+		format          sdktranslator.Format
+		plain, original string
+	}{
+		{sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}]}`, `{"messages":[{"role":"user","content":"Hello"}],"modalities":["audio"]}`},
+		{sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}]}`, `{"messages":[{"role":"user","content":"Hello"}],"n":2}`},
+		{sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}]}`, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"responseModalities":["IMAGE"]}}`},
+		{sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}]}`, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"candidateCount":2}}`},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", test.format, stream), func(t *testing.T) {
+				ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(geminiAppTransport(func(*http.Request) (*http.Response, error) {
+					t.Fatal("unsupported original contract reached upstream")
+					return nil, nil
+				})))
+				e := NewGeminiAppExecutor(&config.Config{}, nil)
+				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(test.plain)}
+				opts := cliproxyexecutor.Options{SourceFormat: test.format, OriginalRequest: []byte(test.original)}
+				var err error
+				if stream {
+					_, err = e.ExecuteStream(ctx, geminiAppTestAuth(), req, opts)
+				} else {
+					_, err = e.Execute(ctx, geminiAppTestAuth(), req, opts)
+				}
+				var status interface{ StatusCode() int }
+				var scoped cliproxyexecutor.RequestScopedError
+				if !errors.As(err, &status) || status.StatusCode() != http.StatusBadRequest || !errors.As(err, &scoped) || !scoped.IsRequestScoped() {
+					t.Fatalf("expected request-scoped 400, got %v", err)
 				}
 			})
 		}

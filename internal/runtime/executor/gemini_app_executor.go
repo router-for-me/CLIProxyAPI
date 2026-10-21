@@ -80,7 +80,11 @@ func (e *GeminiAppExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	client := geminiapp.NewClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), cookies)
 	defer e.persistCookies(ctx, auth, cookies, client)
-	return client.Do(httpReq)
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, geminiapp.NewTransportError("HTTP request", err)
+	}
+	return resp, nil
 }
 
 func (*GeminiAppExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -182,6 +186,11 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	if len(opts.OriginalRequest) > 0 {
 		original = opts.OriginalRequest
 	}
+	for _, input := range [][]byte{original, req.Payload} {
+		if err := helps.ValidateGeminiAppOutput(input); err != nil {
+			return nil, nil, helps.NewGeminiAppRequestError(http.StatusBadRequest, err.Error())
+		}
+	}
 	// Claude-to-Gemini translation does not preserve output_config.format.
 	// Inspect both inbound buffers before translation can drop the contract.
 	if opts.SourceFormat == sdktranslator.FormatClaude && (gjson.GetBytes(original, "output_config.format").Exists() || gjson.GetBytes(req.Payload, "output_config.format").Exists()) {
@@ -247,7 +256,7 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
 	httpResp, err := reporter.TrackHTTPClient(client).Do(httpReq)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, geminiapp.NewTransportError("generation request", err)
 	}
 	if httpResp.StatusCode != http.StatusOK {
 		if errClose := httpResp.Body.Close(); errClose != nil {

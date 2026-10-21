@@ -157,7 +157,7 @@ func FetchSession(ctx context.Context, client *http.Client) (Session, error) {
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	resp, err := client.Do(req)
 	if err != nil {
-		return Session{}, fmt.Errorf("gemini-app: load session: %w", err)
+		return Session{}, NewTransportError("load session", err)
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -174,7 +174,7 @@ func FetchSession(ctx context.Context, client *http.Client) (Session, error) {
 	}
 	page, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return Session{}, fmt.Errorf("gemini-app: read session page: %w", err)
+		return Session{}, NewTransportError("read session page", err)
 	}
 	fields := make(map[string]string)
 	for name, pattern := range pageFields {

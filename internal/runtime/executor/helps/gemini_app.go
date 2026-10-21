@@ -25,11 +25,8 @@ func GeminiAppPrompt(body []byte) (string, error) {
 	if len(root.Get("tools").Array()) > 0 {
 		return "", fmt.Errorf("gemini-app: tool calling is not supported")
 	}
-	if mime := root.Get("generationConfig.responseMimeType").String(); mime != "" && mime != "text/plain" {
-		return "", fmt.Errorf("gemini-app: structured output is not supported")
-	}
-	if root.Get("generationConfig.responseSchema").Exists() || root.Get("generationConfig.responseJsonSchema").Exists() {
-		return "", fmt.Errorf("gemini-app: structured output is not supported")
+	if err := ValidateGeminiAppOutput(body); err != nil {
+		return "", err
 	}
 	var prompt strings.Builder
 	appendParts := func(role string, parts gjson.Result) error {
@@ -75,6 +72,31 @@ func GeminiAppPrompt(body []byte) (string, error) {
 		return "", fmt.Errorf("gemini-app: at least one text message is required")
 	}
 	return strings.TrimSpace(prompt.String()), nil
+}
+
+// ValidateGeminiAppOutput checks both native and OpenAI contracts, including
+// fields that translation may discard rather than preserve in generationConfig.
+func ValidateGeminiAppOutput(body []byte) error {
+	root := gjson.ParseBytes(body)
+	if mime := root.Get("generationConfig.responseMimeType").String(); mime != "" && mime != "text/plain" {
+		return fmt.Errorf("gemini-app: structured output is not supported")
+	}
+	if root.Get("generationConfig.responseSchema").Exists() || root.Get("generationConfig.responseJsonSchema").Exists() {
+		return fmt.Errorf("gemini-app: structured output is not supported")
+	}
+	for _, path := range []string{"n", "generationConfig.candidateCount"} {
+		if root.Get(path).Float() > 1 {
+			return fmt.Errorf("gemini-app: multiple output candidates are not supported")
+		}
+	}
+	for _, path := range []string{"modalities", "generationConfig.responseModalities"} {
+		for _, modality := range root.Get(path).Array() {
+			if !strings.EqualFold(modality.String(), "text") {
+				return fmt.Errorf("gemini-app: only text output is supported")
+			}
+		}
+	}
+	return nil
 }
 
 // GeminiAppPayload builds the business payload before the user's final payload rules.

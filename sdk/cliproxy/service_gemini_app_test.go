@@ -213,3 +213,110 @@ func TestGeminiAppServicePersistsCookieRotations(t *testing.T) {
 		}
 	}
 }
+
+func TestGeminiAppServiceConcurrentCookieRotations(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, scenario := range []string{"rotations", "metadata edit", "reimport"} {
+			t.Run(fmt.Sprintf("stream=%t/%s", stream, scenario), func(t *testing.T) {
+				dir := t.TempDir()
+				store := fileauth.NewFileTokenStore()
+				store.SetBaseDir(dir)
+				manager := coreauth.NewManager(store, nil, nil)
+				auth, err := manager.Register(t.Context(), &coreauth.Auth{
+					ID: "gemini-app-concurrent.json", FileName: "gemini-app-concurrent.json", Provider: "gemini-app", Status: coreauth.StatusActive,
+					Metadata: map[string]any{"type": "gemini-app", "notes": "initial", "cookies": map[string]any{"__Secure-1PSID": "initial-psid", "__Secure-1PSIDTS": "initial-ts"}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				svc := &Service{cfg: &config.Config{AuthDir: dir}, coreManager: manager}
+				svc.ensureExecutorsForAuth(auth)
+				bound, _ := manager.Executor("gemini-app")
+				candidate := make([]any, 9)
+				candidate[1], candidate[8] = []any{"answer"}, []any{2}
+				inner, _ := json.Marshal([]any{nil, nil, nil, nil, []any{candidate}})
+				wire, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(inner)}})
+				arrived, release, done := make(chan struct{}, 2), make(chan struct{}), make(chan error, 2)
+				defer func() {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}()
+				for _, cookie := range []string{"__Secure-1PSID", "__Secure-1PSIDTS"} {
+					ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(geminiAppCookieTransport(func(req *http.Request) (*http.Response, error) {
+						if req.URL.Path == "/app" {
+							return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"SNlM0e":"csrf"}`))}, nil
+						}
+						arrived <- struct{}{}
+						<-release
+						header := http.Header{"Set-Cookie": {cookie + "=rotated; Path=/; Secure"}}
+						return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(string(wire)))}, nil
+					})))
+					go func() {
+						req := coreexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)}
+						opts := coreexecutor.Options{SourceFormat: translator.FormatGemini}
+						var err error
+						if stream {
+							var result *coreexecutor.StreamResult
+							result, err = bound.ExecuteStream(ctx, auth.Clone(), req, opts)
+							if err == nil {
+								for chunk := range result.Chunks {
+									if chunk.Err != nil {
+										err = chunk.Err
+									}
+								}
+							}
+						} else {
+							_, err = bound.Execute(ctx, auth.Clone(), req, opts)
+						}
+						done <- err
+					}()
+				}
+				for range 2 {
+					select {
+					case <-arrived:
+					case err := <-done:
+						t.Fatalf("request ended before generation barrier: %v", err)
+					}
+				}
+				if scenario != "rotations" {
+					edit, _ := manager.GetByID(auth.ID)
+					edit.Metadata["notes"] = "edited concurrently"
+					if scenario == "reimport" {
+						edit.Metadata["cookies"].(map[string]any)["__Secure-1PSID"] = "reimported"
+					}
+					if _, err := manager.Update(t.Context(), edit); err != nil {
+						t.Fatal(err)
+					}
+				}
+				close(release)
+				for range 2 {
+					if err := <-done; err != nil {
+						t.Fatal(err)
+					}
+				}
+				// Reload from disk as well as checking the live manager.
+				reloaded := coreauth.NewManager(store, nil, nil)
+				if err := reloaded.Load(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				for _, source := range []*coreauth.Manager{manager, reloaded} {
+					current, _ := source.GetByID(auth.ID)
+					cookies := current.Metadata["cookies"].(map[string]any)
+					wantPSID, wantTS, wantNotes := "rotated", "rotated", "initial"
+					if scenario != "rotations" {
+						wantNotes = "edited concurrently"
+					}
+					if scenario == "reimport" {
+						wantPSID, wantTS = "reimported", "initial-ts"
+					}
+					if cookies["__Secure-1PSID"] != wantPSID || cookies["__Secure-1PSIDTS"] != wantTS || current.Metadata["notes"] != wantNotes {
+						t.Fatal("concurrent cookies or metadata did not survive persistence")
+					}
+				}
+			})
+		}
+	}
+}
