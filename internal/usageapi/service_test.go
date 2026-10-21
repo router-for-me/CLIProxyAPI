@@ -146,6 +146,22 @@ func TestSnapshotFiltersProvidersAndCredentials(t *testing.T) {
 	}
 }
 
+func TestSnapshotFiltersByAuthIndex(t *testing.T) {
+	quota := &fakeQuotaFetcher{handled: false}
+	claudeAuth := observedAuth("claude", "claude-a.json", map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "0.5"})
+	codexAuth := observedAuth("codex", "codex-a.json", map[string]string{"X-Codex-Primary-Used-Percent": "10"})
+	codexIndex := codexAuth.EnsureIndex()
+	if codexIndex == "" {
+		t.Fatal("codex auth index is empty")
+	}
+	service, _ := newTestService(t, usageConfig(true, []string{"claude", "codex"}, []string{codexIndex}), []*coreauth.Auth{claudeAuth, codexAuth}, quota)
+
+	resp := service.Snapshot(context.Background())
+	if len(resp.Reports) != 1 || resp.Reports[0].Provider != "codex" {
+		t.Fatalf("reports = %#v, want only codex", resp.Reports)
+	}
+}
+
 func TestSnapshotMatchesCompatibilityProviderName(t *testing.T) {
 	quota := &fakeQuotaFetcher{
 		handled: true,
