@@ -450,6 +450,68 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 	}
 }
 
+func TestModelCooldownErrorShowsEarliestRetryAndOpaqueCredential(t *testing.T) {
+	t.Parallel()
+
+	soon := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	later := soon.Add(time.Hour)
+	shard := &modelScheduler{entries: map[string]*scheduledAuth{
+		"later": {
+			auth:        &Auth{ID: "later", Index: "bbbbbbbbbbbbbbbb"},
+			state:       scheduledStateCooldown,
+			nextRetryAt: later,
+		},
+		"soon": {
+			auth: &Auth{
+				ID:       "claude-1234abcd-person@example.com.json",
+				Index:    "aaaaaaaaaaaaaaaa",
+				FileName: "claude-person@example.com.json",
+			},
+			state:       scheduledStateCooldown,
+			nextRetryAt: soon,
+		},
+	}}
+	err := shard.unavailableErrorLocked("claude", "claude-opus-5-5", nil)
+	var payload struct {
+		Error struct {
+			Message       string `json:"message"`
+			NextRetryAt   string `json:"next_retry_at"`
+			NextAuthIndex string `json:"next_auth_index"`
+			NextHint      string `json:"next_credential_hint"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal([]byte(err.Error()), &payload); errUnmarshal != nil {
+		t.Fatalf("cooldown error is not JSON: %v", errUnmarshal)
+	}
+	if got := payload.Error.NextRetryAt; got != soon.Format(time.RFC3339) {
+		t.Fatalf("next_retry_at = %q, want %q", got, soon.Format(time.RFC3339))
+	}
+	if got := payload.Error.NextAuthIndex; got != "aaaaaaaaaaaaaaaa" {
+		t.Fatalf("next_auth_index = %q, want earliest credential", got)
+	}
+	if got := payload.Error.NextHint; got != "claude-1234abcd" {
+		t.Fatalf("next_credential_hint = %q, want safe file prefix", got)
+	}
+	if !strings.Contains(payload.Error.Message, soon.In(time.Local).Format(time.RFC3339)) ||
+		!strings.Contains(payload.Error.Message, "credential claude-1234abcd") {
+		t.Fatalf("message omits the earliest retry detail: %q", payload.Error.Message)
+	}
+	if strings.Contains(payload.Error.Message, "person@example.com") {
+		t.Fatalf("message exposes account email: %q", payload.Error.Message)
+	}
+}
+
+func TestModelCooldownErrorDoesNotExposeUntrustedCredentialIndex(t *testing.T) {
+	t.Parallel()
+
+	err := newModelCooldownError("claude-opus-5-5", "claude", time.Minute).
+		withNextRetry(time.Now().Add(time.Minute), &Auth{ID: "person@example.com", Index: "person@example.com"})
+	if strings.Contains(err.Error(), "person@example.com") || strings.Contains(err.Error(), "next_auth_index") ||
+		strings.Contains(err.Error(), "next_credential_hint") {
+		t.Fatalf("untrusted credential identity leaked: %s", err.Error())
+	}
+}
+
 func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 	t.Parallel()
 
