@@ -1200,3 +1200,22 @@ func TestReverseRemapOAuthToolNamesRecoversBareToolComponent(t *testing.T) {
 		t.Fatalf("streamed bare tool component restored to %q, want edit", got)
 	}
 }
+
+func TestClaudeMCPAliasResolverBareToolComponentAmbiguousWithPassthrough(t *testing.T) {
+	alias := "mcp__brave_lemon__orbit_edit"
+	resolver := newClaudeMCPAliasResolver(map[string]string{alias: "edit"})
+	if got, matched, err := resolver.resolve("orbit_edit"); err != nil || !matched || got != "edit" {
+		t.Fatalf("resolve(orbit_edit) = %q, %v, %v; want edit, true, nil", got, matched, err)
+	}
+
+	// A caller-owned passthrough tool whose tool component is the same bare name
+	// drops its prefix the same way, so the name is ambiguous and stays unchanged.
+	passthrough := "mcp__real__orbit_edit"
+	ambiguous := newClaudeMCPAliasResolver(map[string]string{alias: "edit", passthrough: passthrough})
+	if got, matched, err := ambiguous.resolve("orbit_edit"); err != nil || matched || got != "" {
+		t.Fatalf("resolve(orbit_edit) with passthrough = %q, %v, %v; want unchanged", got, matched, err)
+	}
+	if got, matched, err := ambiguous.resolve(passthrough); err != nil || matched || got != "" {
+		t.Fatalf("resolve(%s) = %q, %v, %v; want passthrough forwarded as is", passthrough, got, matched, err)
+	}
+}

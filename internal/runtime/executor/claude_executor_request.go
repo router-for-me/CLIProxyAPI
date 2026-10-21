@@ -2503,6 +2503,9 @@ func (resolver claudeMCPAliasResolver) restorePassthroughWrapped(tail string) (s
 
 // restoreBareToolComponent maps a name that is exactly the tool component of a
 // generated alias (<toolID>_<semantic>) back to the client tool it stands for.
+// A caller-owned passthrough tool (mcp__<server>__<tool>) loses its prefix the
+// same way, so a name that also equals a passthrough's tool component is
+// ambiguous and is not restored.
 func (resolver claudeMCPAliasResolver) restoreBareToolComponent(name string) (string, bool) {
 	if name == "" {
 		return "", false
@@ -2517,6 +2520,13 @@ func (resolver claudeMCPAliasResolver) restoreBareToolComponent(name string) (st
 	}
 	if matchCount != 1 {
 		return "", false
+	}
+	for _, pt := range resolver.passthroughs {
+		if rest, ok := strings.CutPrefix(pt, "mcp__"); ok {
+			if _, tool, ok := strings.Cut(rest, "__"); ok && tool == name {
+				return "", false
+			}
+		}
 	}
 	return matched, true
 }
