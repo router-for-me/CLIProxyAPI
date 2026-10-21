@@ -13,6 +13,18 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// officialClaudeEntrypoints are the Claude Code entrypoints accepted when a provider is
+// restricted to its official client: the native CLI and VS Code extension plus the
+// Claude Agent SDK (sdk-ts, sdk-py), which embeds Claude Code (used by apps such as T3 Code).
+// This is wider than nativeClaudeEntrypoints on purpose and only affects the restriction.
+var officialClaudeEntrypoints = map[string]bool{
+	"cli":           true,
+	"sdk-cli":       true,
+	"claude-vscode": true,
+	"sdk-ts":        true,
+	"sdk-py":        true,
+}
+
 // NewOfficialClientVerifier returns the verifier that enforces the per-credential
 // official_client_only restriction. It inspects client-supplied headers and body,
 // so it is a policy gate against accidental or casual use of a subscription
@@ -48,7 +60,7 @@ func IsOfficialClaudeCodeRequest(headers http.Header, payload []byte, countToken
 	}
 	userAgent := strings.TrimSpace(headerValue(headers, "User-Agent"))
 	entrypoint, _ := parseClaudeCodeUserAgentDetails(userAgent)
-	if !claudeCodeNativeUserAgentPattern.MatchString(userAgent) || !nativeClaudeEntrypoints[entrypoint] {
+	if !claudeCodeNativeUserAgentPattern.MatchString(userAgent) || !officialClaudeEntrypoints[entrypoint] {
 		return false
 	}
 	if headerValue(headers, "X-App") != "cli" || !headerContainsClaudeCodeBeta(headers) {

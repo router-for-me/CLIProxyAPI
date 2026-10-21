@@ -43,7 +43,11 @@ func TestIsOfficialClaudeCodeRequest(t *testing.T) {
 		{name: "missing claude code beta", headers: without(confirmedClaudeCodeHeaders(), "Anthropic-Beta"), body: payload, want: false},
 		{name: "missing metadata user id", headers: confirmedClaudeCodeHeaders(), body: []byte(`{"messages":[]}`), want: false},
 		{name: "invalid metadata user id", headers: confirmedClaudeCodeHeaders(), body: claudeCodeDetectionPayload("not-a-claude-code-id"), want: false},
-		{name: "agent sdk entrypoint", headers: withUserAgent("claude-cli/2.1.280 (external, sdk-ts)"), body: payload, want: false},
+		{name: "agent sdk typescript", headers: withUserAgent("claude-cli/2.1.306 (external, sdk-ts, agent-sdk/0.3.276)"), body: payload, want: true},
+		{name: "agent sdk python", headers: withUserAgent("claude-cli/2.1.280 (external, sdk-py, agent-sdk/0.1.0)"), body: payload, want: true},
+		{name: "agent sdk without claude code signals", headers: http.Header{"User-Agent": {"claude-cli/2.1.306 (external, sdk-ts, agent-sdk/0.3.276)"}}, body: payload, want: false},
+		{name: "agent sdk missing metadata user id", headers: withUserAgent("claude-cli/2.1.306 (external, sdk-ts, agent-sdk/0.3.276)"), body: []byte(`{"messages":[]}`), want: false},
+		{name: "unknown entrypoint", headers: withUserAgent("claude-cli/2.1.280 (external, sdk-unknown)"), body: payload, want: false},
 		{name: "non native user agent shape", headers: withUserAgent("claude-cli/2.1.280"), body: payload, want: false},
 	}
 	for _, tc := range tests {
