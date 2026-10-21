@@ -13,6 +13,7 @@ import type {
   PrefixProxyEditorState,
 } from '@/features/authFiles/hooks/useAuthFilesPrefixProxyEditor';
 import {
+  supportsAuthFileOfficialClientOnly,
   supportsAuthFileUsingApi,
   supportsAuthFileWebsockets,
 } from '@/features/authFiles/constants';
@@ -270,6 +271,24 @@ export function AuthFileDetailsSheet(props: AuthFileDetailsSheetProps) {
                         ariaLabel={t('auth_files.using_api_label')}
                       />
                       <div className="hint">{t('auth_files.using_api_hint')}</div>
+                    </div>
+                  )}
+                  {supportsAuthFileOfficialClientOnly(editor.providerKey) && (
+                    <div className="form-group">
+                      <label>{t('auth_files.official_client_only_label')}</label>
+                      <ToggleSwitch
+                        checked={editor.officialClientOnly}
+                        onChange={(value) => onChange('officialClientOnly', value)}
+                        disabled={disableControls || editor.saving || !editor.json}
+                        ariaLabel={t('auth_files.official_client_only_label')}
+                      />
+                      <div className="hint">
+                        {t(
+                          editor.providerKey === 'codex'
+                            ? 'auth_files.official_client_only_hint_codex'
+                            : 'auth_files.official_client_only_hint_claude'
+                        )}
+                      </div>
                     </div>
                   )}
                   <AuthFileExcludedModelsField

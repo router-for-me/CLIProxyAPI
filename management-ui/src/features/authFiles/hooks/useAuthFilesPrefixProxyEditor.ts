@@ -14,13 +14,16 @@ import { notifyAuthFilesChanged } from '@/features/authFiles/authFilesEvents';
 import type { AuthFileItem } from '@/types';
 import { useNotificationStore } from '@/stores';
 import {
+  applyAuthFileOfficialClientOnly,
   applyAuthFileWebsockets,
   applyAuthFileUsingApi,
   normalizeProviderKey,
   parsePriorityValue,
   readAuthFileDisableCooling,
+  readAuthFileOfficialClientOnly,
   readAuthFileWebsockets,
   readAuthFileUsingApi,
+  supportsAuthFileOfficialClientOnly,
   supportsAuthFileWebsockets,
   supportsAuthFileUsingApi,
 } from '@/features/authFiles/constants';
@@ -50,6 +53,7 @@ export type PrefixProxyEditorField =
   | 'disableCooling'
   | 'websockets'
   | 'usingApi'
+  | 'officialClientOnly'
   | 'note'
   | 'excludedModelsText'
   | 'headersText';
@@ -79,6 +83,8 @@ export type PrefixProxyEditorState = {
   websocketsTouched: boolean;
   usingApi: boolean;
   usingApiTouched: boolean;
+  officialClientOnly: boolean;
+  officialClientOnlyTouched: boolean;
   note: string;
   noteTouched: boolean;
   excludedModelsText: string;
@@ -374,6 +380,19 @@ export const buildAuthFileFieldsPatch = (
     }
   }
 
+  if (supportsAuthFileOfficialClientOnly(editor.providerKey) && editor.officialClientOnlyTouched) {
+    const originalOfficialClientOnly = readAuthFileOfficialClientOnly(original);
+    const nextOfficialClientOnly = Boolean(editor.officialClientOnly);
+    // A stored value that is present but not a boolean (for example a malformed string, which the
+    // backend treats as on) is rewritten as an explicit boolean when the toggle is saved.
+    const storedValue = original.official_client_only;
+    const needsNormalizing =
+      storedValue !== undefined && storedValue !== null && typeof storedValue !== 'boolean';
+    if (nextOfficialClientOnly !== originalOfficialClientOnly || needsNormalizing) {
+      patch.official_client_only = nextOfficialClientOnly;
+    }
+  }
+
   if (editor.headersTouched) {
     const { value: parsedHeaders, errorKey } = parseHeadersText(editor.headersText);
     if (errorKey) {
@@ -463,6 +482,10 @@ const buildPrefixProxyUpdatedText = (
     next = applyAuthFileUsingApi(next, patch.using_api);
   }
 
+  if (patch.official_client_only !== undefined) {
+    next = applyAuthFileOfficialClientOnly(next, patch.official_client_only);
+  }
+
   return JSON.stringify(next);
 };
 
@@ -537,6 +560,8 @@ export function useAuthFilesPrefixProxyEditor(
       websocketsTouched: false,
       usingApi: false,
       usingApiTouched: false,
+      officialClientOnly: false,
+      officialClientOnlyTouched: false,
       note: '',
       noteTouched: false,
       excludedModelsText: '',
@@ -590,6 +615,9 @@ export function useAuthFilesPrefixProxyEditor(
         ? readAuthFileWebsockets(json)
         : false;
       const usingApi = supportsAuthFileUsingApi(providerKey) ? readAuthFileUsingApi(json) : false;
+      const officialClientOnly = supportsAuthFileOfficialClientOnly(providerKey)
+        ? readAuthFileOfficialClientOnly(json)
+        : false;
       const note = typeof json.note === 'string' ? json.note : '';
       const excludedModelsText = readExcludedModels(json).join('\n');
       const headers = json.headers;
@@ -623,6 +651,8 @@ export function useAuthFilesPrefixProxyEditor(
           websocketsTouched: false,
           usingApi,
           usingApiTouched: false,
+          officialClientOnly,
+          officialClientOnlyTouched: false,
           note,
           noteTouched: false,
           excludedModelsText,
@@ -685,6 +715,9 @@ export function useAuthFilesPrefixProxyEditor(
       }
       if (field === 'usingApi') {
         return { ...prev, usingApi: Boolean(value), usingApiTouched: true };
+      }
+      if (field === 'officialClientOnly') {
+        return { ...prev, officialClientOnly: Boolean(value), officialClientOnlyTouched: true };
       }
       if (field === 'note') return { ...prev, note: String(value), noteTouched: true };
       if (field === 'excludedModelsText') {
