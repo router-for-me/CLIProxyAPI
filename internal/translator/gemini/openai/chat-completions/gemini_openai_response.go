@@ -24,10 +24,11 @@ import (
 type convertGeminiResponseToOpenAIChatParams struct {
 	UnixTimestamp int64
 	// FunctionIndex tracks tool call indices per candidate index to support multiple candidates.
-	FunctionIndex        map[int]int
-	SawToolCall          map[int]bool
-	UpstreamFinishReason map[int]string
-	SanitizedNameMap     map[string]string
+	FunctionIndex            map[int]int
+	SawToolCall              map[int]bool
+	UpstreamFinishReason     map[int]string
+	SanitizedNameMap         map[string]string
+	SanitizedNameMapResolved bool
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -51,11 +52,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	// Initialize parameters if nil.
 	if *param == nil {
 		*param = &convertGeminiResponseToOpenAIChatParams{
-			UnixTimestamp:        0,
-			FunctionIndex:        make(map[int]int),
-			SawToolCall:          make(map[int]bool),
-			UpstreamFinishReason: make(map[int]string),
-			SanitizedNameMap:     util.SanitizedToolNameMap(originalRequestRawJSON),
+			UnixTimestamp:            0,
+			FunctionIndex:            make(map[int]int),
+			SawToolCall:              make(map[int]bool),
+			UpstreamFinishReason:     make(map[int]string),
+			SanitizedNameMap:         util.SanitizedToolNameMap(originalRequestRawJSON),
+			SanitizedNameMapResolved: true,
 		}
 	}
 
@@ -70,8 +72,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	if p.UpstreamFinishReason == nil {
 		p.UpstreamFinishReason = make(map[int]string)
 	}
-	if p.SanitizedNameMap == nil {
-		p.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+	if !p.SanitizedNameMapResolved {
+		if p.SanitizedNameMap == nil {
+			p.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+		}
+		p.SanitizedNameMapResolved = true
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {

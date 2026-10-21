@@ -253,7 +253,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		needOuter = false
 	} else if homeEnabled && !hasOuter {
 		hasOuter = true
-		if outerExp, okExp := auth.OuterExpirationTime(); okExp && !outerExp.IsZero() && !outerExp.After(now.Add(24*time.Hour)) {
+		if outerExp, okExp := auth.OuterExpirationTime(); okExp && !outerExp.IsZero() && !outerExp.After(now.Add(cliproxyauth.CodexOuterRefreshLead)) {
 			needOuter = true
 		}
 	}
@@ -392,6 +392,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 			if mergedSIWC == nil {
 				mergedSIWC = make(map[string]any)
 			}
+			delete(mergedSIWC, "expires_at")
 			for k, v := range siwcTD.ToMap() {
 				mergedSIWC[k] = v
 			}

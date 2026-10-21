@@ -80,6 +80,9 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 			continue
 		}
 		key := name + "->" + aliasVal
+		if alias.OpenAPI != nil {
+			key += fmt.Sprintf("|openapi=%t", *alias.OpenAPI)
+		}
 		if alias.Fork {
 			key += "|fork"
 		}

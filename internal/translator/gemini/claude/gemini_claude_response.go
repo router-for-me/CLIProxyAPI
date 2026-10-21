@@ -87,7 +87,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
-			ToolNameMap:      util.ToolNameMapFromClaudeRequest(originalRequestRawJSON),
+			ToolNameMap:      util.UnambiguousToolNameMapFromClaudeRequest(originalRequestRawJSON),
 			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 			SawToolCall:      false,
 		}
@@ -261,7 +261,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				(*param).(*Params).SawToolCall = true
 				upstreamToolName := functionCallResult.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName((*param).(*Params).SanitizedNameMap, upstreamToolName)
-				clientToolName := util.MapClaudeToolName((*param).(*Params).ToolNameMap, originalRequestRawJSON, upstreamToolName)
+				clientToolName := util.MapToolName((*param).(*Params).ToolNameMap, upstreamToolName)
 
 				if (*param).(*Params).ResponseType == 3 && upstreamToolName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
@@ -439,7 +439,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
-	toolNameMap := util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	toolNameMap := util.UnambiguousToolNameMapFromClaudeRequest(originalRequestRawJSON)
 	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
@@ -552,7 +552,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 				upstreamToolName := functionCall.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName(sanitizedNameMap, upstreamToolName)
-				clientToolName := util.MapClaudeToolName(toolNameMap, originalRequestRawJSON, upstreamToolName)
+				clientToolName := util.MapToolName(toolNameMap, upstreamToolName)
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolBlock, _ = sjson.SetBytes(toolBlock, "id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", clientToolName)

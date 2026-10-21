@@ -106,6 +106,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodHostAuthSave != "host.auth.save" {
 		t.Fatalf("MethodHostAuthSave = %q", MethodHostAuthSave)
 	}
+	if MethodHostAuthModels != "host.auth.models" {
+		t.Fatalf("MethodHostAuthModels = %q", MethodHostAuthModels)
+	}
 	if MethodHostAffinityLookup != "host.affinity.lookup" {
 		t.Fatalf("MethodHostAffinityLookup = %q", MethodHostAffinityLookup)
 	}

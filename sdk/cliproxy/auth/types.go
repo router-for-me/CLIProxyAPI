@@ -1,13 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -107,6 +110,8 @@ type Auth struct {
 
 	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
 	RejectedAccessToken string `json:"-"`
+	// RejectedSIWCAccessToken tracks the nested SIWC access token rejected by upstream 401 until replaced.
+	RejectedSIWCAccessToken string `json:"-"`
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -122,6 +127,98 @@ type Auth struct {
 	indexAssigned  bool              `json:"-"`
 	// geminiAppCookieEpoch distinguishes explicit replacements from upstream rotations.
 	geminiAppCookieEpoch uint64
+	// fileSnapshotPath and fileSnapshotDigest bind an unversioned file-synthesized
+	// Auth snapshot to the source file path and SHA-256 byte digest it observed.
+	// Cleared when committed to a Manager so runtime clones are not treated as
+	// unversioned file snapshots.
+	fileSnapshotPath   string `json:"-"`
+	fileSnapshotDigest string `json:"-"`
+}
+
+var readAuthSnapshotFileFunc = os.ReadFile
+
+func canonicalAuthFileDigest(data []byte) string {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var parsed any
+	if errDecode := decoder.Decode(&parsed); errDecode == nil {
+		var trailing any
+		if errTrailing := decoder.Decode(&trailing); errTrailing == io.EOF {
+			if canonical, errMarshal := json.Marshal(parsed); errMarshal == nil {
+				sum := sha256.Sum256(canonical)
+				return hex.EncodeToString(sum[:])
+			}
+		}
+	}
+	sum := sha256.Sum256(trimmed)
+	return hex.EncodeToString(sum[:])
+}
+
+// BindFileSnapshot binds an unversioned file-synthesized Auth snapshot to the
+// source file path and canonical SHA-256 digest of the bytes from which it was parsed.
+func (a *Auth) BindFileSnapshot(path string, data []byte) {
+	if a == nil || len(data) == 0 {
+		return
+	}
+	digest := canonicalAuthFileDigest(data)
+	if digest == "" {
+		return
+	}
+	a.fileSnapshotPath = strings.TrimSpace(path)
+	a.fileSnapshotDigest = digest
+}
+
+// ClearFileSnapshot removes any unversioned file-observation binding once the
+// Auth is committed to runtime state or normalized for comparison.
+func (a *Auth) ClearFileSnapshot() {
+	if a == nil {
+		return
+	}
+	a.fileSnapshotPath = ""
+	a.fileSnapshotDigest = ""
+}
+
+// HasFileSnapshot reports whether this Auth is an unversioned file-synthesized
+// snapshot bound to a specific file observation digest.
+func (a *Auth) HasFileSnapshot() bool {
+	return a != nil && a.Generation == 0 && a.RegistrationEpoch == 0 && a.fileSnapshotDigest != ""
+}
+
+// SameFileSnapshot reports whether two unversioned file snapshots observed the
+// same canonical file content.
+func (a *Auth) SameFileSnapshot(other *Auth) bool {
+	if !a.HasFileSnapshot() || !other.HasFileSnapshot() {
+		return false
+	}
+	return a.fileSnapshotDigest == other.fileSnapshotDigest && a.fileSnapshotPath == other.fileSnapshotPath
+}
+
+// FileSnapshotMatchesDisk reports whether the backing file on disk still
+// exists, is readable, and matches the canonical digest observed when this
+// snapshot was synthesized.
+func (a *Auth) FileSnapshotMatchesDisk() bool {
+	if !a.HasFileSnapshot() {
+		return true
+	}
+	path := strings.TrimSpace(a.fileSnapshotPath)
+	if path == "" && a.Attributes != nil {
+		path = strings.TrimSpace(a.Attributes[AttributePath])
+		if path == "" {
+			path = strings.TrimSpace(a.Attributes[AttributeSource])
+		}
+	}
+	if path == "" {
+		return false
+	}
+	data, errRead := readAuthSnapshotFileFunc(path)
+	if errRead != nil || len(data) == 0 {
+		return false
+	}
+	return canonicalAuthFileDigest(data) == a.fileSnapshotDigest
 }
 
 const (
@@ -679,6 +776,14 @@ func (a *Auth) AccountInfo() (string, string) {
 					return "oauth", email
 				}
 			}
+			if sa, ok := a.Metadata["service_account"].(map[string]any); ok {
+				if v, okEmail := sa["client_email"].(string); okEmail {
+					email := strings.TrimSpace(v)
+					if email != "" {
+						return "oauth", email
+					}
+				}
+			}
 		}
 		return "oauth", ""
 	case AuthKindAPIKey:
@@ -740,7 +845,7 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 	}
 	if IsCodexUseSIWC(a) {
 		siwcToken := authSIWCTokenField(a, "access_token")
-		if siwcToken != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken {
+		if a.isSIWCAccessTokenRejected(siwcToken) {
 			return time.Unix(0, 0), true
 		}
 		return a.SIWCExpirationTime()
@@ -748,9 +853,85 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 	return a.OuterExpirationTime()
 }
 
+// CodexOuterRefreshLead is the conservative proactive refresh lead time before
+// the nominal 10-day Codex OAuth JWT expiration, refreshing tokens well ahead
+// of early upstream access-token invalidation.
+const CodexOuterRefreshLead = 96 * time.Hour
+
 // CodexSIWCRefreshLead is the minimum remaining validity required before refreshing
 // a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
 const CodexSIWCRefreshLead = 5 * time.Minute
+
+// SIWCStatus represents the read-only validity state of a Codex SIWC credential.
+type SIWCStatus string
+
+const (
+	SIWCStatusOff     SIWCStatus = "off"
+	SIWCStatusValid   SIWCStatus = "valid"
+	SIWCStatusInvalid SIWCStatus = "invalid"
+)
+
+// SIWCRealExpirationTime extracts the real (unbuffered) expiration timestamp for the nested
+// "siwc" access token. It reads "expires_at" (saved from OAuth expires_in) or the JWT "exp"
+// claim of "access_token", without using the margin-deducted "expired" field.
+func (a *Auth) SIWCRealExpirationTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false
+	}
+	if ts, okExp := lookupMetadataTime(siwcMap, "expires_at", "expiresAt"); okExp && !ts.IsZero() {
+		return ts, true
+	}
+	if expiresIn, okExpiresIn := parseRelativeExpirySeconds(siwcMap); okExpiresIn {
+		if ts, okTs := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh", "timestamp", "issued_at", "issuedAt"); okTs && !ts.IsZero() {
+			return ts.Add(time.Duration(expiresIn) * time.Second), true
+		}
+	}
+	if rawToken, okTok := siwcMap["access_token"].(string); okTok && strings.TrimSpace(rawToken) != "" {
+		if jwtExp, okJWT := parseJWTExp(rawToken); okJWT && !jwtExp.IsZero() {
+			return jwtExp, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func (a *Auth) isSIWCAccessTokenRejected(siwcToken string) bool {
+	if a == nil {
+		return false
+	}
+	siwcToken = strings.TrimSpace(siwcToken)
+	if siwcToken == "" {
+		return false
+	}
+	return (a.RejectedSIWCAccessToken != "" && a.RejectedSIWCAccessToken == siwcToken) ||
+		(a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken)
+}
+
+// CodexSIWCStatus evaluates the local SIWC credential status ("off", "valid", or "invalid")
+// at the given time without triggering any refresh or upstream request.
+func (a *Auth) CodexSIWCStatus(now time.Time) SIWCStatus {
+	if a == nil || !IsCodexUseSIWC(a) {
+		return SIWCStatusOff
+	}
+	siwcToken := authSIWCTokenField(a, "access_token")
+	if siwcToken == "" {
+		return SIWCStatusInvalid
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	realExp, okExp := a.SIWCRealExpirationTime()
+	if !okExp || realExp.IsZero() || !realExp.After(now) {
+		return SIWCStatusInvalid
+	}
+	if a.isSIWCAccessTokenRejected(siwcToken) {
+		return SIWCStatusInvalid
+	}
+	return SIWCStatusValid
+}
 
 // SIWCExpirationTime extracts the expiration timestamp from the nested "siwc" metadata section.
 func (a *Auth) SIWCExpirationTime() (time.Time, bool) {
@@ -781,6 +962,11 @@ func CodexOuterNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh
 		return time.Time{}, false, false
 	}
 	hasRefresh = true
+
+	outerToken := authOuterAccessToken(a)
+	if outerToken == "" || (a.RejectedAccessToken != "" && a.RejectedAccessToken == outerToken) {
+		return now, true, true
+	}
 
 	var lastRefresh time.Time
 	if ts, ok := authLastRefreshTimestamp(a); ok && !ts.IsZero() {
@@ -817,7 +1003,7 @@ func CodexOuterNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh
 	}
 	lead := ProviderRefreshLead(provider, a.Runtime)
 	if lead == nil && provider == "codex" {
-		d := 24 * time.Hour
+		d := CodexOuterRefreshLead
 		lead = &d
 	}
 	if lead == nil {
@@ -870,7 +1056,7 @@ func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh 
 	if siwcToken == "" {
 		return now, true, true
 	}
-	if a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken {
+	if a.isSIWCAccessTokenRejected(siwcToken) {
 		return now, true, true
 	}
 	expiry, hasExpiry := a.SIWCExpirationTime()
@@ -901,11 +1087,16 @@ func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
 	if tokenStr == "" {
 		return time.Time{}, false
 	}
-	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+	if (a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr) || (IsCodexUseSIWC(a) && a.isSIWCAccessTokenRejected(tokenStr)) {
 		return time.Unix(0, 0), true
 	}
 	if jwtExp, ok := parseJWTExp(tokenStr); ok {
 		return jwtExp, true
+	}
+	if IsCodexUseSIWC(a) {
+		if realExp, ok := a.SIWCRealExpirationTime(); ok && !realExp.IsZero() {
+			return realExp, true
+		}
 	}
 	return a.ExpirationTime()
 }
@@ -1072,11 +1263,15 @@ func ProviderRefreshLead(provider string, runtime any) *time.Duration {
 	refreshLeadMu.RLock()
 	factory := refreshLeadFactories[provider]
 	refreshLeadMu.RUnlock()
-	if factory == nil {
+	if factory != nil {
+		if lead := factory(); lead != nil && *lead > 0 {
+			return lead
+		}
 		return nil
 	}
-	if lead := factory(); lead != nil && *lead > 0 {
-		return lead
+	if provider == "codex" {
+		d := CodexOuterRefreshLead
+		return &d
 	}
 	return nil
 }

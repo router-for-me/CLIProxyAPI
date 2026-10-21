@@ -72,6 +72,29 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 	if pinned[0].auth.ID != "aa-unknown" {
 		t.Fatalf("pinned[0].auth.ID = %q, want %q", pinned[0].auth.ID, "aa-unknown")
 	}
+
+	// Once the negative hint expires (>= 10 minutes), mm-no should be retried as an unknown candidate.
+	SetAntigravityCreditsHint("mm-no", AntigravityCreditsHint{
+		Known:     true,
+		Available: false,
+		UpdatedAt: time.Now().Add(-10*time.Minute - time.Second),
+	})
+	t.Cleanup(func() {
+		SetAntigravityCreditsHint("zz-credits", AntigravityCreditsHint{})
+		SetAntigravityCreditsHint("mm-no", AntigravityCreditsHint{})
+	})
+
+	afterExpiry, errAfterExpiry := m.findAllAntigravityCreditsCandidateAuths(context.Background(), "claude-sonnet-4-6", opts)
+	if errAfterExpiry != nil {
+		t.Fatalf("findAllAntigravityCreditsCandidateAuths(after expiry) error = %v", errAfterExpiry)
+	}
+	if len(afterExpiry) != 3 {
+		t.Fatalf("afterExpiry candidates len = %d, want 3", len(afterExpiry))
+	}
+	if afterExpiry[0].auth.ID != "zz-credits" || afterExpiry[1].auth.ID != "aa-unknown" || afterExpiry[2].auth.ID != "mm-no" {
+		t.Fatalf("afterExpiry order = [%s, %s, %s], want [zz-credits, aa-unknown, mm-no]",
+			afterExpiry[0].auth.ID, afterExpiry[1].auth.ID, afterExpiry[2].auth.ID)
+	}
 }
 
 func TestFindAllAntigravityCreditsCandidateAuths_HomeKVUnavailableReturnsError(t *testing.T) {
