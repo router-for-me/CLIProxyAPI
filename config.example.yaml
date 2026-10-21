@@ -980,15 +980,7 @@ oauth:
   #     - name: "gpt-6-astra"
   #       max-context-length: 1048576
 
-  # Restrict OAuth credentials of a provider to that provider's official CLI (claude: Claude Code, codex: Codex CLI).
-# Requests from any other client are rejected with 403 official_client_required, even with a valid API key.
-# Detection relies on client-supplied headers/body, so it guards against casual misuse, not deliberate forgery.
-# Can also be toggled in the management panel (Auth Files -> credential details).
-# official-client-only:
-#   claude: true
-#   codex: true
-
-# OAuth provider excluded models
+  # OAuth provider excluded models
   # excluded-models:
   #   vertex:
   #     - "gemini-3-pro-preview"

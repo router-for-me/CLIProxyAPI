@@ -4,56 +4,56 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sync/atomic"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-func TestOfficialClientRequired(t *testing.T) {
-	restricted := map[string]bool{"claude": true, "codex": false, "gemini": true}
-	setOfficialClientRequirementForTest(t, func(provider string) bool { return restricted[provider] })
-
+func TestAuthOfficialClientOnly(t *testing.T) {
 	tests := []struct {
-		name string
-		auth *Auth
-		want bool
+		name     string
+		provider string
+		metadata map[string]any
+		want     bool
 	}{
-		{name: "restricted provider", auth: &Auth{Provider: "claude"}, want: true},
-		{name: "provider casing", auth: &Auth{Provider: " Claude "}, want: true},
-		{name: "provider switched off", auth: &Auth{Provider: "codex"}, want: false},
-		{name: "unsupported provider ignored", auth: &Auth{Provider: "gemini"}, want: false},
-		{name: "nil auth", auth: nil, want: false},
+		{name: "missing", provider: "claude", metadata: map[string]any{}, want: false},
+		{name: "nil metadata", provider: "claude", metadata: nil, want: false},
+		{name: "explicit null", provider: "codex", metadata: map[string]any{MetadataOfficialClientOnly: nil}, want: false},
+		{name: "true", provider: "claude", metadata: map[string]any{MetadataOfficialClientOnly: true}, want: true},
+		{name: "false", provider: "codex", metadata: map[string]any{MetadataOfficialClientOnly: false}, want: false},
+		{name: "string true", provider: "codex", metadata: map[string]any{MetadataOfficialClientOnly: " TRUE "}, want: true},
+		{name: "string false", provider: "codex", metadata: map[string]any{MetadataOfficialClientOnly: "false"}, want: false},
+		{name: "malformed string fails closed", provider: "claude", metadata: map[string]any{MetadataOfficialClientOnly: "yes please"}, want: true},
+		{name: "unexpected type fails closed", provider: "claude", metadata: map[string]any{MetadataOfficialClientOnly: float64(0)}, want: true},
+		{name: "provider casing", provider: " Claude ", metadata: map[string]any{MetadataOfficialClientOnly: true}, want: true},
+		{name: "unsupported provider ignored", provider: "gemini", metadata: map[string]any{MetadataOfficialClientOnly: true}, want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := officialClientRequired(tc.auth); got != tc.want {
-				t.Fatalf("officialClientRequired() = %v, want %v", got, tc.want)
+			auth := &Auth{Provider: tc.provider, Metadata: tc.metadata}
+			if got := auth.OfficialClientOnly(); got != tc.want {
+				t.Fatalf("OfficialClientOnly() = %v, want %v", got, tc.want)
 			}
 		})
 	}
-
-	SetOfficialClientRequirement(nil)
-	if officialClientRequired(&Auth{Provider: "claude"}) {
-		t.Fatal("no lookup installed must leave providers unrestricted")
+	var nilAuth *Auth
+	if nilAuth.OfficialClientOnly() {
+		t.Fatal("nil auth must not be restricted")
 	}
 }
 
-func registerOfficialClientTestAuth(t *testing.T, manager *Manager, id, provider string) {
+func registerOfficialClientTestAuth(t *testing.T, manager *Manager, id, provider string, restricted bool) {
 	t.Helper()
 	auth := &Auth{ID: id, Provider: provider, Status: StatusActive, Metadata: map[string]any{}}
+	if restricted {
+		auth.Metadata[MetadataOfficialClientOnly] = true
+	}
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register %s: %v", id, errRegister)
 	}
 	registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: "official-client-model"}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
-}
-
-func setOfficialClientRequirementForTest(t *testing.T, requirement OfficialClientRequirement) {
-	t.Helper()
-	SetOfficialClientRequirement(requirement)
-	t.Cleanup(func() { SetOfficialClientRequirement(nil) })
 }
 
 func setOfficialClientVerifierForTest(t *testing.T, verifier OfficialClientVerifier) {
@@ -72,17 +72,15 @@ func TestPickNextMixedOfficialClientOnly(t *testing.T) {
 		{name: "legacy_path", selector: nil},
 	} {
 		t.Run(selectorCase.name, func(t *testing.T) {
-			// newManager restricts only the given provider to its official client.
 			newManager := func(t *testing.T, provider string) *Manager {
 				manager := NewManager(nil, selectorCase.selector, nil)
 				manager.RegisterExecutor(schedulerProviderTestExecutor{provider: provider})
-				setOfficialClientRequirementForTest(t, func(p string) bool { return p == provider })
 				return manager
 			}
 
 			t.Run("rejects non official client with 403", func(t *testing.T) {
 				manager := newManager(t, "codex")
-				registerOfficialClientTestAuth(t, manager, "oc-only-"+selectorCase.name, "codex")
+				registerOfficialClientTestAuth(t, manager, "oc-only-"+selectorCase.name, "codex", true)
 				setOfficialClientVerifierForTest(t, func(context.Context, string, cliproxyexecutor.Options) bool { return false })
 
 				_, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "official-client-model", cliproxyexecutor.Options{}, nil)
@@ -97,7 +95,7 @@ func TestPickNextMixedOfficialClientOnly(t *testing.T) {
 
 			t.Run("allows official client", func(t *testing.T) {
 				manager := newManager(t, "codex")
-				registerOfficialClientTestAuth(t, manager, "oc-allowed-"+selectorCase.name, "codex")
+				registerOfficialClientTestAuth(t, manager, "oc-allowed-"+selectorCase.name, "codex", true)
 				var gotProvider string
 				setOfficialClientVerifierForTest(t, func(_ context.Context, provider string, _ cliproxyexecutor.Options) bool {
 					gotProvider = provider
@@ -118,7 +116,7 @@ func TestPickNextMixedOfficialClientOnly(t *testing.T) {
 
 			t.Run("fails closed without verifier", func(t *testing.T) {
 				manager := newManager(t, "claude")
-				registerOfficialClientTestAuth(t, manager, "oc-noverifier-"+selectorCase.name, "claude")
+				registerOfficialClientTestAuth(t, manager, "oc-noverifier-"+selectorCase.name, "claude", true)
 				SetOfficialClientVerifier(nil)
 
 				_, _, _, errPick := manager.pickNextMixed(ctx, []string{"claude"}, "official-client-model", cliproxyexecutor.Options{}, nil)
@@ -128,15 +126,14 @@ func TestPickNextMixedOfficialClientOnly(t *testing.T) {
 				}
 			})
 
-			t.Run("unrestricted provider still serves non official client", func(t *testing.T) {
+			t.Run("unrestricted credential still serves non official client", func(t *testing.T) {
 				manager := newManager(t, "claude")
-				manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "codex"})
-				registerOfficialClientTestAuth(t, manager, "oc-restricted-"+selectorCase.name, "claude")
-				registerOfficialClientTestAuth(t, manager, "oc-open-"+selectorCase.name, "codex")
+				registerOfficialClientTestAuth(t, manager, "oc-restricted-"+selectorCase.name, "claude", true)
+				registerOfficialClientTestAuth(t, manager, "oc-open-"+selectorCase.name, "claude", false)
 				setOfficialClientVerifierForTest(t, func(context.Context, string, cliproxyexecutor.Options) bool { return false })
 
 				for i := 0; i < 4; i++ {
-					picked, _, _, errPick := manager.pickNextMixed(ctx, []string{"claude", "codex"}, "official-client-model", cliproxyexecutor.Options{}, nil)
+					picked, _, _, errPick := manager.pickNextMixed(ctx, []string{"claude"}, "official-client-model", cliproxyexecutor.Options{}, nil)
 					if errPick != nil {
 						t.Fatalf("pick %d failed: %v", i, errPick)
 					}
@@ -148,8 +145,8 @@ func TestPickNextMixedOfficialClientOnly(t *testing.T) {
 
 			t.Run("verifies once per request", func(t *testing.T) {
 				manager := newManager(t, "codex")
-				registerOfficialClientTestAuth(t, manager, "oc-a-"+selectorCase.name, "codex")
-				registerOfficialClientTestAuth(t, manager, "oc-b-"+selectorCase.name, "codex")
+				registerOfficialClientTestAuth(t, manager, "oc-a-"+selectorCase.name, "codex", true)
+				registerOfficialClientTestAuth(t, manager, "oc-b-"+selectorCase.name, "codex", true)
 				calls := 0
 				setOfficialClientVerifierForTest(t, func(context.Context, string, cliproxyexecutor.Options) bool {
 					calls++
@@ -162,22 +159,30 @@ func TestPickNextMixedOfficialClientOnly(t *testing.T) {
 				}
 			})
 
-			t.Run("config change takes effect without re-registering", func(t *testing.T) {
+			t.Run("toggle takes effect on the live credential", func(t *testing.T) {
 				manager := newManager(t, "codex")
-				registerOfficialClientTestAuth(t, manager, "oc-toggle-"+selectorCase.name, "codex")
+				id := "oc-toggle-" + selectorCase.name
+				registerOfficialClientTestAuth(t, manager, id, "codex", false)
 				setOfficialClientVerifierForTest(t, func(context.Context, string, cliproxyexecutor.Options) bool { return false })
-
-				var enabled atomic.Bool
-				setOfficialClientRequirementForTest(t, func(string) bool { return enabled.Load() })
 
 				if _, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "official-client-model", cliproxyexecutor.Options{}, nil); errPick != nil {
 					t.Fatalf("unrestricted pick failed: %v", errPick)
 				}
-				enabled.Store(true)
-				if _, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "official-client-model", cliproxyexecutor.Options{}, nil); errPick == nil {
-					t.Fatal("restricted provider was selected for a non official client")
+
+				current, _ := manager.GetByID(id)
+				current.Metadata[MetadataOfficialClientOnly] = true
+				if _, errUpdate := manager.Update(ctx, current); errUpdate != nil {
+					t.Fatalf("enable restriction: %v", errUpdate)
 				}
-				enabled.Store(false)
+				if _, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "official-client-model", cliproxyexecutor.Options{}, nil); errPick == nil {
+					t.Fatal("restricted credential was selected for a non official client")
+				}
+
+				current, _ = manager.GetByID(id)
+				current.Metadata[MetadataOfficialClientOnly] = false
+				if _, errUpdate := manager.Update(ctx, current); errUpdate != nil {
+					t.Fatalf("disable restriction: %v", errUpdate)
+				}
 				if _, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "official-client-model", cliproxyexecutor.Options{}, nil); errPick != nil {
 					t.Fatalf("pick after disabling restriction failed: %v", errPick)
 				}
@@ -189,8 +194,7 @@ func TestPickNextMixedOfficialClientOnly(t *testing.T) {
 func TestOfficialClientRejectionErrorLeavesOtherErrorsAlone(t *testing.T) {
 	check := newOfficialClientCheck(context.Background(), cliproxyexecutor.Options{})
 	setOfficialClientVerifierForTest(t, func(context.Context, string, cliproxyexecutor.Options) bool { return false })
-	setOfficialClientRequirementForTest(t, func(string) bool { return true })
-	if check.allows(&Auth{Provider: "codex"}) {
+	if check.allows(&Auth{Provider: "codex", Metadata: map[string]any{MetadataOfficialClientOnly: true}}) {
 		t.Fatal("restricted auth allowed")
 	}
 

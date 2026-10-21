@@ -6,12 +6,17 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+// MetadataOfficialClientOnly is the credential metadata key that restricts a
+// Claude or Codex credential to requests issued by that provider's official CLI.
+const MetadataOfficialClientOnly = "official_client_only"
 
 // OfficialClientRequiredCode is the Error code returned when every credential
 // able to serve a request was skipped by the official-client restriction.
@@ -23,26 +28,9 @@ type OfficialClientVerifier func(ctx context.Context, provider string, opts clip
 
 var officialClientVerifier atomic.Pointer[OfficialClientVerifier]
 
-// OfficialClientRequirement reports whether credentials of provider are
-// restricted to that provider's official client.
-type OfficialClientRequirement func(provider string) bool
-
-var officialClientRequirement atomic.Pointer[OfficialClientRequirement]
-
-// SetOfficialClientRequirement installs the process-wide lookup that decides which
-// providers are restricted to their official client (the oauth.official-client-only
-// configuration). Without a lookup no provider is restricted.
-func SetOfficialClientRequirement(requirement OfficialClientRequirement) {
-	if requirement == nil {
-		officialClientRequirement.Store(nil)
-		return
-	}
-	officialClientRequirement.Store(&requirement)
-}
-
 // SetOfficialClientVerifier installs the process-wide verifier consulted for
-// providers restricted to their official client. Without a verifier restricted
-// providers are never selected (fail closed).
+// credentials marked official_client_only. Without a verifier such credentials
+// are never selected (fail closed).
 func SetOfficialClientVerifier(verifier OfficialClientVerifier) {
 	if verifier == nil {
 		officialClientVerifier.Store(nil)
@@ -67,16 +55,24 @@ func officialClientName(provider string) string {
 	}
 }
 
-// officialClientRequired reports whether auth belongs to a provider restricted to its official client.
-func officialClientRequired(auth *Auth) bool {
-	if auth == nil || !SupportsOfficialClientOnly(auth.Provider) {
+// OfficialClientOnly reports whether the credential may only serve requests
+// issued by its provider's official client. A present but unparseable value
+// counts as enabled so a malformed edit never silently lifts the restriction.
+func (a *Auth) OfficialClientOnly() bool {
+	if a == nil || a.Metadata == nil || !SupportsOfficialClientOnly(a.Provider) {
 		return false
 	}
-	requirement := officialClientRequirement.Load()
-	if requirement == nil || *requirement == nil {
+	switch value := a.Metadata[MetadataOfficialClientOnly].(type) {
+	case nil:
 		return false
+	case bool:
+		return value
+	case string:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(value))
+		return errParse != nil || parsed
+	default:
+		return true
 	}
-	return (*requirement)(strings.ToLower(strings.TrimSpace(auth.Provider)))
 }
 
 // officialClientCheck lazily verifies, once per provider, that the current
@@ -117,7 +113,7 @@ func officialClientCheckFromContext(ctx context.Context) *officialClientCheck {
 
 // allows reports whether auth may serve the request under its official-client restriction.
 func (c *officialClientCheck) allows(auth *Auth) bool {
-	if c == nil || !officialClientRequired(auth) {
+	if c == nil || !auth.OfficialClientOnly() {
 		return true
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))

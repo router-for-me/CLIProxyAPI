@@ -181,11 +181,6 @@ type Config struct {
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
-	// OAuthOfficialClientOnly restricts every OAuth credential of a provider to requests issued by that
-	// provider's official CLI (claude: Claude Code, codex: Codex CLI). Requests from any other client are
-	// rejected with 403 even when they carry a valid proxy API key.
-	OAuthOfficialClientOnly map[string]bool `yaml:"oauth-official-client-only,omitempty" json:"oauth-official-client-only,omitempty"`
-
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
 	// vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.

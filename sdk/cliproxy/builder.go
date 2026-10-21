@@ -293,17 +293,12 @@ func (b *Builder) Build() (*Service, error) {
 		appliedRoutingState: appliedRoutingState,
 		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
 	}
-	// Providers listed in oauth.official-client-only are only served for requests this verifier accepts.
-	currentConfig := func() *config.Config {
+	// Credentials marked official_client_only are only selected for requests this verifier accepts.
+	coreauth.SetOfficialClientVerifier(helps.NewOfficialClientVerifier(func() *config.Config {
 		service.cfgMu.RLock()
 		defer service.cfgMu.RUnlock()
 		return service.cfg
-	}
-	coreauth.SetOfficialClientRequirement(func(provider string) bool {
-		cfg := currentConfig()
-		return cfg != nil && cfg.OAuthOfficialClientOnly[provider]
-	})
-	coreauth.SetOfficialClientVerifier(helps.NewOfficialClientVerifier(currentConfig))
+	}))
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}
