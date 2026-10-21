@@ -1,0 +1,4 @@
+[submodule "management-ui"]
+	path = management-ui
+	url = https://github.com/auenkr/Cli-Proxy-API-Management-Center.git
+	branch = feat/official-client-only

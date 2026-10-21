@@ -1,1 +1,0 @@
-export { Skeleton } from './Skeleton';

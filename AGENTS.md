@@ -40,6 +40,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `internal/tui/` — Bubbletea terminal UI (`--tui`, `--standalone`)
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
 - `test/` — Cross-module integration tests
+- `management-ui/` — Management panel source (git submodule of the `auenkr/Cli-Proxy-API-Management-Center` fork). Clone with `--recurse-submodules` or run `git submodule update --init`. Build with `cd management-ui && bun install --frozen-lockfile && bun run build`, then copy `dist/index.html` to `bin/static/management.html`. Commit UI changes inside the submodule first, push them, then commit the updated submodule pointer here. Backend and panel changes that share an API contract must be deployed together.
 
 ## Code Conventions
 - Keep changes small and simple (KISS)
