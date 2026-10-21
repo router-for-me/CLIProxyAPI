@@ -80,6 +80,7 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	officialClient   *officialClientCheck
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -104,6 +105,10 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
 	}
+	eligibility.officialClient = officialClientCheckFromContext(ctx)
+	if eligibility.officialClient == nil {
+		eligibility.officialClient = newOfficialClientCheck(ctx, opts)
+	}
 	return eligibility
 }
 
@@ -115,6 +120,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 		return false
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
+		return false
+	}
+	if !e.officialClient.allows(auth) {
 		return false
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
@@ -2266,7 +2274,16 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	return authCopy, executor, providerKey, nil
 }
 
+// pickNextMixed selects the next auth for a request and, when credentials were
+// skipped by their official-client restriction, reports that as a 403 instead
+// of a generic "no auth available".
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	check := newOfficialClientCheck(ctx, opts)
+	auth, executor, provider, err := m.pickNextMixedEligible(withOfficialClientCheck(ctx, check), providers, model, opts, tried)
+	return auth, executor, provider, check.rejectionError(err)
+}
+
+func (m *Manager) pickNextMixedEligible(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	opts.EnsureMetadata()
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
