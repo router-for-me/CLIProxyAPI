@@ -6,7 +6,10 @@ package logging
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 )
@@ -134,8 +137,14 @@ type StreamingLogWriter interface {
 // FileRequestLogger implements RequestLogger using file-based storage.
 // It provides file-based logging functionality for HTTP requests and responses.
 type FileRequestLogger struct {
+	mu sync.RWMutex
+
 	// enabled indicates whether request logging is currently enabled.
 	enabled bool
+
+	apiKeys []string
+	until   string
+	nowFunc func() time.Time
 
 	// logsDir is the directory where log files are stored.
 	logsDir string
@@ -173,12 +182,91 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 	}
 }
 
+// SetPolicy updates the request logging admission policy.
+func (l *FileRequestLogger) SetPolicy(enabled bool, apiKeys []string, until string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.enabled = enabled
+	l.apiKeys = append([]string(nil), apiKeys...)
+	l.until = until
+}
+
+// SetAPIKeys updates the allowed client API keys.
+func (l *FileRequestLogger) SetAPIKeys(keys []string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.apiKeys = append([]string(nil), keys...)
+}
+
+// SetUntil updates the deadline until which request logging captures occur.
+func (l *FileRequestLogger) SetUntil(until string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.until = until
+}
+
+// SetNowFunc overrides time.Now for deterministic testing.
+func (l *FileRequestLogger) SetNowFunc(fn func() time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.nowFunc = fn
+}
+
+func (l *FileRequestLogger) nowLocked() time.Time {
+	if l.nowFunc != nil {
+		return l.nowFunc()
+	}
+	return time.Now()
+}
+
 // IsEnabled returns whether request logging is currently enabled.
 //
 // Returns:
 //   - bool: True if logging is enabled, false otherwise
 func (l *FileRequestLogger) IsEnabled() bool {
-	return l.enabled
+	if l == nil {
+		return false
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	cfg := &config.SDKConfig{
+		RequestLog:        l.enabled,
+		RequestLogAPIKeys: l.apiKeys,
+		RequestLogUntil:   l.until,
+	}
+	return cfg.RequestLogCaptureActive(false, l.nowLocked())
+}
+
+// IsAdmitted reports whether request logging is admitted for a specific principal.
+func (l *FileRequestLogger) IsAdmitted(principal string) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	cfg := &config.SDKConfig{
+		RequestLog:        l.enabled,
+		RequestLogAPIKeys: l.apiKeys,
+		RequestLogUntil:   l.until,
+	}
+	return cfg.RequestLogAdmitted(false, principal, l.nowLocked())
+}
+
+// IsRequestLogAdmitted reports whether request logging is admitted for a specific principal.
+func (l *FileRequestLogger) IsRequestLogAdmitted(principal string) bool {
+	return l.IsAdmitted(principal)
 }
 
 // SetEnabled updates the request logging enabled state.
@@ -187,6 +275,11 @@ func (l *FileRequestLogger) IsEnabled() bool {
 // Parameters:
 //   - enabled: Whether request logging should be enabled
 func (l *FileRequestLogger) SetEnabled(enabled bool) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.enabled = enabled
 }
 

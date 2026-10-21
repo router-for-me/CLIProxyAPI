@@ -37,6 +37,9 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	logsDir := logging.ResolveLogDirectory(cfg)
 	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
+	if cfg != nil {
+		logger.SetPolicy(cfg.RequestLog && !cfg.CommercialMode, cfg.RequestLogAPIKeys, cfg.RequestLogUntil)
+	}
 	return logger
 }
 

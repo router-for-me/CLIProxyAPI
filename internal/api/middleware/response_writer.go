@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"net/http"
 	"strings"
 	"time"
@@ -49,6 +51,7 @@ type ResponseWriterWrapper struct {
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	ginCtx              *gin.Context               // ginCtx holds the request context for admission and principal extraction.
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -156,6 +159,48 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	return n, err
 }
 
+func extractPrincipalFromGin(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if v, exists := c.Get("userApiKey"); exists && v != nil {
+		switch value := v.(type) {
+		case string:
+			return value
+		case fmt.Stringer:
+			return value.String()
+		default:
+			return fmt.Sprintf("%v", value)
+		}
+	}
+	if c.Request != nil {
+		return coreusage.APIKeyFromContext(c.Request.Context())
+	}
+	return ""
+}
+
+func (w *ResponseWriterWrapper) isAdmitted(c *gin.Context) bool {
+	if w == nil || w.logger == nil || !w.logger.IsEnabled() {
+		return false
+	}
+	ctx := c
+	if ctx == nil {
+		ctx = w.ginCtx
+	}
+	principal := extractPrincipalFromGin(ctx)
+	if policyLogger, ok := w.logger.(interface {
+		IsAdmitted(string) bool
+	}); ok {
+		return policyLogger.IsAdmitted(principal)
+	}
+	if policyLogger, ok := w.logger.(interface {
+		IsRequestLogAdmitted(string) bool
+	}); ok {
+		return policyLogger.IsRequestLogAdmitted(principal)
+	}
+	return w.logger.IsEnabled()
+}
+
 // WriteHeader wraps the underlying ResponseWriter's WriteHeader method.
 // It captures the status code, detects if the response is streaming based on the Content-Type header,
 // and initializes the appropriate logging mechanism (standard or streaming).
@@ -170,7 +215,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	w.isStreaming = w.detectStreaming(contentType)
 
 	// If streaming, initialize streaming log writer
-	if w.isStreaming && w.logger.IsEnabled() {
+	if w.isStreaming && w.isAdmitted(w.ginCtx) {
 		streamWriter, err := w.logger.LogStreamingRequest(
 			w.requestInfo.URL,
 			w.requestInfo.Method,
@@ -292,13 +337,14 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 	}
 
+	admitted := w.isAdmitted(c)
 	hasAPIError := hasActionableError(c, finalStatusCode, slicesAPIResponseError)
-	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+	forceLog := (!admitted || w.logOnErrorOnly) && hasAPIError
 	websocketTimelineSource := w.extractWebsocketTimelineSource(c)
 	apiRequestSource := w.extractAPIRequestSource(c)
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
-	if !w.logger.IsEnabled() && !forceLog {
+	if !admitted && !forceLog {
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil
 	}

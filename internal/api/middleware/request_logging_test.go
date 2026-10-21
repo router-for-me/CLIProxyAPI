@@ -714,3 +714,165 @@ func TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger(t *testing
 		t.Fatalf("streaming request ID version = %d, want 7", parsed.Version())
 	}
 }
+
+func TestRequestLoggingMiddleware_AdmissionPolicy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	countStandardLogs := func(t *testing.T, dir string) int {
+		t.Helper()
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read dir: %v", err)
+		}
+		var count int
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), "error-") && strings.HasSuffix(e.Name(), ".log") {
+				count++
+			}
+		}
+		return count
+	}
+
+	setupRouter := func(logger logging.RequestLogger, setPrincipal string) *gin.Engine {
+		r := gin.New()
+		r.Use(RequestLoggingMiddleware(logger))
+		if setPrincipal != "" {
+			r.Use(func(c *gin.Context) {
+				c.Set("userApiKey", setPrincipal)
+				c.Next()
+			})
+		}
+		r.POST("/v1/chat/completions", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		})
+		r.POST("/v1/stream", func(c *gin.Context) {
+			c.Header("Content-Type", "text/event-stream")
+			c.Writer.WriteHeader(http.StatusOK)
+			_, _ = c.Writer.Write([]byte("data: hello\n\n"))
+		})
+		return r
+	}
+
+	t.Run("allowlisted key writes standard log", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+		logger.SetPolicy(true, []string{"sk-allowed"}, "")
+
+		router := setupRouter(logger, "sk-allowed")
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.Code)
+		}
+		if got := countStandardLogs(t, logsDir); got != 1 {
+			t.Fatalf("expected 1 standard log for allowlisted key, got %d", got)
+		}
+	})
+
+	t.Run("denied key does not write standard log", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+		logger.SetPolicy(true, []string{"sk-allowed"}, "")
+
+		router := setupRouter(logger, "sk-other")
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.Code)
+		}
+		if got := countStandardLogs(t, logsDir); got != 0 {
+			t.Fatalf("expected 0 standard logs for denied key, got %d", got)
+		}
+	})
+
+	t.Run("no principal does not write standard log when allowlist is non-empty", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+		logger.SetPolicy(true, []string{"sk-allowed"}, "")
+
+		router := setupRouter(logger, "") // no principal
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.Code)
+		}
+		if got := countStandardLogs(t, logsDir); got != 0 {
+			t.Fatalf("expected 0 standard logs without principal, got %d", got)
+		}
+	})
+
+	t.Run("expired until deadline does not write standard log", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+		logger.SetPolicy(true, []string{"sk-allowed"}, "2020-01-01T00:00:00Z") // past
+
+		router := setupRouter(logger, "sk-allowed")
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.Code)
+		}
+		if got := countStandardLogs(t, logsDir); got != 0 {
+			t.Fatalf("expected 0 standard logs when until is expired, got %d", got)
+		}
+	})
+
+	t.Run("empty allowlist preserves global logging", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+		logger.SetPolicy(true, nil, "") // empty allowlist
+
+		router := setupRouter(logger, "any-caller")
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.Code)
+		}
+		if got := countStandardLogs(t, logsDir); got != 1 {
+			t.Fatalf("expected 1 standard log for empty allowlist, got %d", got)
+		}
+	})
+
+	t.Run("streaming: allowlisted writes stream log, denied does not", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+		logger.SetPolicy(true, []string{"sk-stream-allowed"}, "")
+
+		// Denied streaming
+		deniedRouter := setupRouter(logger, "sk-stream-denied")
+		reqDenied := httptest.NewRequest(http.MethodPost, "/v1/stream", strings.NewReader(`{"stream":true}`))
+		reqDenied.Header.Set("Content-Type", "application/json")
+		respDenied := httptest.NewRecorder()
+		deniedRouter.ServeHTTP(respDenied, reqDenied)
+
+		if got := countStandardLogs(t, logsDir); got != 0 {
+			t.Fatalf("expected 0 logs for denied streaming key, got %d", got)
+		}
+
+		// Allowed streaming
+		allowedRouter := setupRouter(logger, "sk-stream-allowed")
+		reqAllowed := httptest.NewRequest(http.MethodPost, "/v1/stream", strings.NewReader(`{"stream":true}`))
+		reqAllowed.Header.Set("Content-Type", "application/json")
+		respAllowed := httptest.NewRecorder()
+		allowedRouter.ServeHTTP(respAllowed, reqAllowed)
+
+		if got := countStandardLogs(t, logsDir); got != 1 {
+			t.Fatalf("expected 1 log for allowed streaming key, got %d", got)
+		}
+	})
+}

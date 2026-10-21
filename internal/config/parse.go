@@ -64,6 +64,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if len(cfg.Discovery.Subtypes) == 0 {
 		cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	}
+	if errValidate := cfg.ValidateRequestLog(); errValidate != nil {
+		return nil, errValidate
+	}
 
 	// Hash remote management key if plaintext is detected (nested), but do NOT persist.
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {

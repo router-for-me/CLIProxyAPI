@@ -155,3 +155,83 @@ func TestAPIResponseAttemptsAreSeparated(t *testing.T) {
 		})
 	}
 }
+
+func TestRecordAPINoOpOnDeny(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	makeContext := func(principal string) (context.Context, *gin.Context) {
+		recorder := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(recorder)
+		if principal != "" {
+			ginCtx.Set("userApiKey", principal)
+		}
+		ctx := context.WithValue(context.Background(), "gin", ginCtx)
+		return ctx, ginCtx
+	}
+
+	t.Run("denied key is no-op", func(t *testing.T) {
+		cfg := &config.Config{
+			SDKConfig: config.SDKConfig{
+				RequestLog:        true,
+				RequestLogAPIKeys: []string{"sk-allowed"},
+			},
+		}
+		ctx, ginCtx := makeContext("sk-denied")
+
+		RecordAPIRequest(ctx, cfg, UpstreamRequestLog{URL: "https://example.com", Body: []byte("req")})
+		RecordAPIResponseMetadata(ctx, cfg, 200, http.Header{})
+		AppendAPIResponseChunk(ctx, cfg, []byte("chunk"))
+		RecordAPIResponseError(ctx, cfg, errors.New("err"))
+		RecordAPIWebsocketRequest(ctx, cfg, UpstreamRequestLog{URL: "wss://example.com"})
+		RecordAPIWebsocketHandshake(ctx, cfg, 101, http.Header{})
+		AppendAPIWebsocketResponse(ctx, cfg, []byte("ws-chunk"))
+		RecordAPIWebsocketError(ctx, cfg, "read", errors.New("ws-err"))
+
+		if attempts := getAttempts(ginCtx); len(attempts) != 0 {
+			t.Fatalf("expected 0 attempts on denied key, got %d", len(attempts))
+		}
+		if _, exists := ginCtx.Get(apiWebsocketTimelineKey); exists {
+			t.Fatal("expected no websocket timeline on denied key")
+		}
+	})
+
+	t.Run("expired until deadline is no-op", func(t *testing.T) {
+		cfg := &config.Config{
+			SDKConfig: config.SDKConfig{
+				RequestLog:      true,
+				RequestLogUntil: "2020-01-01T00:00:00Z",
+			},
+		}
+		ctx, ginCtx := makeContext("sk-allowed")
+
+		RecordAPIRequest(ctx, cfg, UpstreamRequestLog{URL: "https://example.com", Body: []byte("req")})
+		RecordAPIResponseMetadata(ctx, cfg, 200, http.Header{})
+		AppendAPIResponseChunk(ctx, cfg, []byte("chunk"))
+		RecordAPIWebsocketRequest(ctx, cfg, UpstreamRequestLog{URL: "wss://example.com"})
+
+		if attempts := getAttempts(ginCtx); len(attempts) != 0 {
+			t.Fatalf("expected 0 attempts on expired until, got %d", len(attempts))
+		}
+		if _, exists := ginCtx.Get(apiWebsocketTimelineKey); exists {
+			t.Fatal("expected no websocket timeline on expired until")
+		}
+	})
+
+	t.Run("admitted key records attempt", func(t *testing.T) {
+		cfg := &config.Config{
+			SDKConfig: config.SDKConfig{
+				RequestLog:        true,
+				RequestLogAPIKeys: []string{"sk-allowed"},
+			},
+		}
+		ctx, ginCtx := makeContext("sk-allowed")
+
+		RecordAPIRequest(ctx, cfg, UpstreamRequestLog{URL: "https://example.com", Body: []byte("req")})
+		RecordAPIResponseMetadata(ctx, cfg, 200, http.Header{})
+		AppendAPIResponseChunk(ctx, cfg, []byte("chunk"))
+
+		if attempts := getAttempts(ginCtx); len(attempts) != 1 {
+			t.Fatalf("expected 1 attempt on admitted key, got %d", len(attempts))
+		}
+	})
+}
