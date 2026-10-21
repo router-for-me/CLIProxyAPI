@@ -1161,3 +1161,42 @@ func TestReverseRemapWrappedCallerMCPToolStaysAnErrorWhenAmbiguous(t *testing.T)
 		t.Fatalf("ambiguous wrapped tool error = %v, want matches multiple declared tools", errReverse)
 	}
 }
+
+func TestReverseRemapOAuthToolNamesRecoversBareToolComponent(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"edit","input_schema":{"type":"object"}},{"name":"write","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "bare-tool-component-caller"})
+	editAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	editParts, ok := parseClaudeMCPAlias(editAlias)
+	if !ok {
+		t.Fatalf("edit alias is invalid: %q", editAlias)
+	}
+
+	// The model answered with the tool component only, the whole
+	// mcp__<server>__ prefix dropped (issue #6848).
+	bareAlias := editParts.toolID + "_" + editParts.semantic
+	response := []byte(fmt.Sprintf(`{"content":[
+		{"type":"tool_use","id":"toolu_edit","name":%q,"input":{}},
+		{"type":"tool_use","id":"toolu_other","name":"orbit_fly","input":{}}
+	]}`, bareAlias))
+
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "edit" {
+		t.Fatalf("bare tool component restored to %q, want edit", got)
+	}
+	// A bare name that matches no declared tool component is still forwarded unchanged.
+	if got := gjson.GetBytes(restored, "content.1.name").String(); got != "orbit_fly" {
+		t.Fatalf("unrelated bare name changed to %q, want orbit_fly", got)
+	}
+
+	streamLine := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_edit","name":%q,"input":{}}}`, bareAlias))
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(streamLine, reverseMap)
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
+	}
+	if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "edit" {
+		t.Fatalf("streamed bare tool component restored to %q, want edit", got)
+	}
+}

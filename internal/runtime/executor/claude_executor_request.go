@@ -2501,6 +2501,26 @@ func (resolver claudeMCPAliasResolver) restorePassthroughWrapped(tail string) (s
 	return "", false
 }
 
+// restoreBareToolComponent maps a name that is exactly the tool component of a
+// generated alias (<toolID>_<semantic>) back to the client tool it stands for.
+func (resolver claudeMCPAliasResolver) restoreBareToolComponent(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	matched := ""
+	matchCount := 0
+	for _, entry := range resolver.aliases {
+		if entry.parts.toolID+"_"+entry.parts.semantic == name {
+			matched = entry.original
+			matchCount++
+		}
+	}
+	if matchCount != 1 {
+		return "", false
+	}
+	return matched, true
+}
+
 func parseClaudeMCPAlias(name string) (claudeMCPAliasParts, bool) {
 	if !helps.IsClaudeMCPToolName(name) {
 		return claudeMCPAliasParts{}, false
@@ -2558,6 +2578,16 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 
 	server := claudeMCPAliasServer(name)
 	if _, known := resolver.servers[server]; !known {
+		if server == "" {
+			// The model dropped the whole mcp__<server>__ prefix and answered with
+			// the tool component alone (e.g. "orbit_edit" for
+			// "mcp__brave_lemon__orbit_edit"). A name with no server carries no
+			// other evidence, so only an exact, unique tool component restores.
+			if original, ok := resolver.restoreBareToolComponent(name); ok {
+				log.Debugf("claude oauth mcp alias: recovered bare tool component %q as %q", name, original)
+				return original, true, nil
+			}
+		}
 		return "", false, nil
 	}
 
