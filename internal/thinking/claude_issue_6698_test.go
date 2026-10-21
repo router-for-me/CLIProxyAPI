@@ -302,3 +302,70 @@ func TestApplyThinking_ClaudeAdaptiveOnlyModelsConvertBudgetAndAuto(t *testing.T
 		})
 	}
 }
+
+// Adaptive thinking rejects budget_tokens ("thinking.adaptive.budget_tokens:
+// Extra inputs are not permitted"), and adaptive-only models reject
+// thinking.type="enabled". A native Claude budget sent with either type must
+// reach these models as adaptive thinking with output_config.effort, keeping
+// the requested display.
+func TestApplyThinking_ClaudeNativeBudgetOnAdaptiveOnlyModels(t *testing.T) {
+	models := []string{
+		"claude-haiku-5-5",
+		"claude-opus-5-5",
+		"claude-sonnet-5-5",
+		"claude-fable-5",
+		"claude-opus-4-7",
+		"claude-opus-4-8",
+	}
+	for _, thinkingType := range []string{"enabled", "adaptive"} {
+		for _, model := range models {
+			t.Run(thinkingType+"/"+model, func(t *testing.T) {
+				body := `{"model":"` + model + `","max_tokens":4096,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"` + thinkingType + `","budget_tokens":1024,"display":"summarized"}}`
+				out, err := thinking.ApplyThinking([]byte(body), model, "claude", "claude", "claude")
+				if err != nil {
+					t.Fatalf("ApplyThinking: %v", err)
+				}
+				if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+					t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, out)
+				}
+				if gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
+					t.Fatalf("thinking.budget_tokens still present: %s", out)
+				}
+				if got := gjson.GetBytes(out, "output_config.effort").String(); got != "low" {
+					t.Fatalf("output_config.effort = %q, want low; body=%s", got, out)
+				}
+				if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
+					t.Fatalf("thinking.display = %q, want summarized; body=%s", got, out)
+				}
+			})
+		}
+	}
+
+	t.Run("adaptive/explicit_effort_wins_over_budget", func(t *testing.T) {
+		body := `{"model":"claude-haiku-5-5","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive","budget_tokens":1024},"output_config":{"effort":"high"}}`
+		out, err := thinking.ApplyThinking([]byte(body), "claude-haiku-5-5", "claude", "claude", "claude")
+		if err != nil {
+			t.Fatalf("ApplyThinking: %v", err)
+		}
+		if got := gjson.GetBytes(out, "thinking").Raw; got != `{"type":"adaptive"}` {
+			t.Fatalf("thinking = %s, want {\"type\":\"adaptive\"}; body=%s", got, out)
+		}
+		if got := gjson.GetBytes(out, "output_config.effort").String(); got != "high" {
+			t.Fatalf("output_config.effort = %q, want high; body=%s", got, out)
+		}
+	})
+
+	t.Run("adaptive/budget_on_hybrid_model_uses_manual_thinking", func(t *testing.T) {
+		body := `{"model":"claude-opus-4-6","max_tokens":32000,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive","budget_tokens":16384}}`
+		out, err := thinking.ApplyThinking([]byte(body), "claude-opus-4-6", "claude", "claude", "claude")
+		if err != nil {
+			t.Fatalf("ApplyThinking: %v", err)
+		}
+		if got := gjson.GetBytes(out, "thinking.type").String(); got != "enabled" {
+			t.Fatalf("thinking.type = %q, want enabled; body=%s", got, out)
+		}
+		if got := gjson.GetBytes(out, "thinking.budget_tokens").Int(); got != 16384 {
+			t.Fatalf("thinking.budget_tokens = %d, want 16384; body=%s", got, out)
+		}
+	})
+}
