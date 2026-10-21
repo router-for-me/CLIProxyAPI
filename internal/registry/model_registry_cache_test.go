@@ -68,6 +68,61 @@ func TestGetAvailableModelsClaudeIncludesTokenLimits(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelsOpenAIFallsBackToProviderTokenLimits(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{
+		{ID: "explicit", ContextLength: 372000, MaxCompletionTokens: 128000, InputTokenLimit: 500000, OutputTokenLimit: 64000},
+		{ID: "fallback", InputTokenLimit: 1048576, OutputTokenLimit: 65536},
+		{ID: "without-limits"},
+	})
+
+	models := r.GetAvailableModels("openai")
+	byID := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		byID[model["id"].(string)] = model
+	}
+
+	if got := byID["explicit"]["context_length"]; got != 372000 {
+		t.Fatalf("explicit context_length = %v, want 372000", got)
+	}
+	if got := byID["explicit"]["max_completion_tokens"]; got != 128000 {
+		t.Fatalf("explicit max_completion_tokens = %v, want 128000", got)
+	}
+	if got := byID["fallback"]["context_length"]; got != 1048576 {
+		t.Fatalf("fallback context_length = %v, want 1048576", got)
+	}
+	if got := byID["fallback"]["max_completion_tokens"]; got != 65536 {
+		t.Fatalf("fallback max_completion_tokens = %v, want 65536", got)
+	}
+	if _, exists := byID["without-limits"]["context_length"]; exists {
+		t.Fatalf("model without limits exposed context_length: %#v", byID["without-limits"])
+	}
+}
+
+func TestGetAvailableModelsOpenAIOmitsInconsistentProviderTokenLimits(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("vertex-client", "vertex", []*ModelInfo{{
+		ID: "shared-model", InputTokenLimit: 1048576, MaxContextLength: 1048576, OutputTokenLimit: 65536,
+	}})
+	r.RegisterClient("aistudio-client", "aistudio", []*ModelInfo{{
+		ID: "shared-model", InputTokenLimit: 1048576, MaxContextLength: 131072, OutputTokenLimit: 8192,
+	}})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", models)
+	}
+	if got := models[0]["context_length"]; got != 1048576 {
+		t.Fatalf("common provider context_length = %v, want 1048576", got)
+	}
+	if _, exists := models[0]["max_completion_tokens"]; exists {
+		t.Fatalf("inconsistent provider max_completion_tokens exposed: %#v", models[0])
+	}
+	if _, exists := models[0]["max_context_length"]; exists {
+		t.Fatalf("inconsistent provider max_context_length exposed: %#v", models[0])
+	}
+}
+
 func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{{ID: "m1", OwnedBy: "team-a", DisplayName: "Model One"}})

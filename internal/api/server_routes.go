@@ -708,10 +708,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 	}
 
 	cfg := s.getConfig()
-	models := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
-		models = append(models, formatHomeCodexModelWithSettings(entry, cfg))
-	}
+	models := homeCodexClientModels(entries, cfg)
 
 	var webSearchCapabilityForModel codexmodels.WebSearchCapabilityForModelFunc
 	if clientVersion == "cpa" {
@@ -740,6 +737,21 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 		return
 	}
 	s.writeModelListResponse(c, "openai", body)
+}
+
+// homeCodexClientModels excludes IDs whose duplicate Home routes disagree about
+// their context limits.  A Codex client catalog requires positive context_window
+// and max_context_window values, so publishing one with a template default would
+// be misleading while omitting those fields would make the catalog invalid.
+func homeCodexClientModels(entries []homeModelEntry, cfg *config.Config) []map[string]any {
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		if entry.contextLengthInconsistent || entry.maxContextLengthInconsistent {
+			continue
+		}
+		models = append(models, formatHomeCodexModelWithSettings(entry, cfg))
+	}
+	return models
 }
 
 // homeApplyPatchCapabilityForModel uses only Home's exact public routing evidence,
@@ -893,16 +905,20 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.Ha
 }
 
 type homeModelEntry struct {
-	id                     string
-	created                int64
-	ownedBy                string
-	displayName            string
-	contextLength          int
-	maxContextLength       int
-	maxCompletionTokens    int
-	thinking               *registry.ThinkingSupport
-	providers              []string
-	nativeCapabilityRoutes []registry.NativeCapabilityRoute
+	id                              string
+	created                         int64
+	ownedBy                         string
+	displayName                     string
+	contextLength                   int
+	maxContextLength                int
+	maxCompletionTokens             int
+	contextLengthInconsistent       bool
+	maxContextLengthInconsistent    bool
+	maxCompletionTokensInconsistent bool
+	displayNameInconsistent         bool
+	thinking                        *registry.ThinkingSupport
+	providers                       []string
+	nativeCapabilityRoutes          []registry.NativeCapabilityRoute
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
@@ -920,7 +936,14 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		return
 	}
 
-	filtered := make([]map[string]any, 0, len(entries))
+	s.writeModelListResponse(c, "openai", gin.H{
+		"object": "list",
+		"data":   formatHomeOpenAIModels(entries),
+	})
+}
+
+func formatHomeOpenAIModels(entries []homeModelEntry) []map[string]any {
+	models := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
 		model := map[string]any{
 			"id":     entry.id,
@@ -932,12 +955,21 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		if entry.ownedBy != "" {
 			model["owned_by"] = entry.ownedBy
 		}
-		filtered = append(filtered, model)
+		if entry.displayName != "" {
+			model["display_name"] = entry.displayName
+		}
+		if entry.contextLength > 0 {
+			model["context_length"] = entry.contextLength
+		}
+		if entry.maxContextLength > 0 {
+			model["max_context_length"] = entry.maxContextLength
+		}
+		if entry.maxCompletionTokens > 0 {
+			model["max_completion_tokens"] = entry.maxCompletionTokens
+		}
+		models = append(models, model)
 	}
-	s.writeModelListResponse(c, "openai", gin.H{
-		"object": "list",
-		"data":   filtered,
-	})
+	return models
 }
 
 func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {
@@ -953,22 +985,26 @@ func formatHomeClaudeModel(entry homeModelEntry) map[string]any {
 	if displayName == "" {
 		displayName = entry.id
 	}
-	maxInput := entry.contextLength
-	if maxInput <= 0 {
-		maxInput = registry.DefaultClaudeMaxInputTokens
-	}
-	maxOutput := entry.maxCompletionTokens
-	if maxOutput <= 0 {
-		maxOutput = registry.DefaultClaudeMaxOutputTokens
-	}
 	model := map[string]any{
-		"id":               entry.id,
-		"object":           "model",
-		"owned_by":         entry.ownedBy,
-		"type":             "model",
-		"display_name":     displayName,
-		"max_input_tokens": maxInput,
-		"max_tokens":       maxOutput,
+		"id":           entry.id,
+		"object":       "model",
+		"owned_by":     entry.ownedBy,
+		"type":         "model",
+		"display_name": displayName,
+	}
+	if !entry.contextLengthInconsistent {
+		maxInput := entry.contextLength
+		if maxInput <= 0 {
+			maxInput = registry.DefaultClaudeMaxInputTokens
+		}
+		model["max_input_tokens"] = maxInput
+	}
+	if !entry.maxCompletionTokensInconsistent {
+		maxOutput := entry.maxCompletionTokens
+		if maxOutput <= 0 {
+			maxOutput = registry.DefaultClaudeMaxOutputTokens
+		}
+		model["max_tokens"] = maxOutput
 	}
 	if entry.created > 0 {
 		model["created_at"] = time.Unix(entry.created, 0).UTC().Format(time.RFC3339)
@@ -1202,6 +1238,8 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				NativeCapabilities: nativeCapabilities,
 			}
 			if index, ok := indexByID[id]; ok {
+				mergeHomeModelTokenMetadata(&out[index], model)
+				mergeHomeModelDisplayName(&out[index], model)
 				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
 				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
 				continue
@@ -1240,6 +1278,56 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 		return nil, fmt.Errorf("home models payload contains no models")
 	}
 	return out, nil
+}
+
+func mergeHomeModelTokenMetadata(entry *homeModelEntry, model map[string]any) {
+	if entry == nil {
+		return
+	}
+	mergeHomeModelTokenLimit(
+		&entry.contextLength,
+		&entry.contextLengthInconsistent,
+		homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens"),
+	)
+	mergeHomeModelTokenLimit(
+		&entry.maxContextLength,
+		&entry.maxContextLengthInconsistent,
+		homeModelInt64Value(model, "max_context_length", "maxContextLength"),
+	)
+	mergeHomeModelTokenLimit(
+		&entry.maxCompletionTokens,
+		&entry.maxCompletionTokensInconsistent,
+		homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens"),
+	)
+}
+
+func mergeHomeModelTokenLimit(current *int, inconsistent *bool, candidate int64) {
+	if *inconsistent {
+		return
+	}
+	if *current <= 0 && candidate <= 0 {
+		return
+	}
+	if *current <= 0 || candidate <= 0 || *current != int(candidate) {
+		*current = 0
+		*inconsistent = true
+	}
+}
+
+func mergeHomeModelDisplayName(entry *homeModelEntry, model map[string]any) {
+	if entry == nil || entry.displayNameInconsistent {
+		return
+	}
+	candidate, _ := model["display_name"].(string)
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		candidate, _ = model["displayName"].(string)
+		candidate = strings.TrimSpace(candidate)
+	}
+	if entry.displayName == "" || candidate == "" || entry.displayName != candidate {
+		entry.displayName = ""
+		entry.displayNameInconsistent = true
+	}
 }
 
 func homeModelNativeCapabilities(model map[string]any) *registry.NativeCapabilities {

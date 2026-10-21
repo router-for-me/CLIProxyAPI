@@ -1421,7 +1421,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		available, registrationExpiresAt := modelRegistrationAvailability(registration, now)
 		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
 			expiresAt = registrationExpiresAt
@@ -1430,13 +1430,63 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			continue
 		}
 
-		model := r.convertModelToMap(registration.Info, handlerType)
+		modelInfo := registration.Info
+		if handlerType == "openai" && registration.Info != nil {
+			modelInfo = cloneModelInfo(registration.Info)
+			modelInfo.ContextLength = r.commonModelTokenLimitLocked(modelID, func(info *ModelInfo) int {
+				if info.ContextLength > 0 {
+					return info.ContextLength
+				}
+				return info.InputTokenLimit
+			})
+			modelInfo.InputTokenLimit = 0
+			modelInfo.MaxContextLength = r.commonModelTokenLimitLocked(modelID, func(info *ModelInfo) int {
+				return info.MaxContextLength
+			})
+			modelInfo.MaxCompletionTokens = r.commonModelTokenLimitLocked(modelID, func(info *ModelInfo) int {
+				if info.MaxCompletionTokens > 0 {
+					return info.MaxCompletionTokens
+				}
+				return info.OutputTokenLimit
+			})
+			modelInfo.OutputTokenLimit = 0
+		}
+
+		model := r.convertModelToMap(modelInfo, handlerType)
 		if model != nil {
 			models = append(models, model)
 		}
 	}
 
 	return models, expiresAt
+}
+
+// commonModelTokenLimitLocked returns a limit only when every registered client
+// for a model reports the same non-zero value.
+func (r *ModelRegistry) commonModelTokenLimitLocked(modelID string, limit func(*ModelInfo) int) int {
+	if r == nil || modelID == "" || limit == nil {
+		return 0
+	}
+
+	common := 0
+	for _, clientModels := range r.clientModelInfos {
+		info := clientModels[modelID]
+		if info == nil {
+			continue
+		}
+		candidate := limit(info)
+		if candidate <= 0 {
+			return 0
+		}
+		if common == 0 {
+			common = candidate
+			continue
+		}
+		if common != candidate {
+			return 0
+		}
+	}
+	return common
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {
@@ -1726,6 +1776,14 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 
 	switch handlerType {
 	case "openai":
+		contextLength := model.ContextLength
+		if contextLength <= 0 {
+			contextLength = model.InputTokenLimit
+		}
+		maxCompletionTokens := model.MaxCompletionTokens
+		if maxCompletionTokens <= 0 {
+			maxCompletionTokens = model.OutputTokenLimit
+		}
 		result := map[string]any{
 			"id":       model.ID,
 			"object":   "model",
@@ -1746,14 +1804,14 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Description != "" {
 			result["description"] = model.Description
 		}
-		if model.ContextLength > 0 {
-			result["context_length"] = model.ContextLength
+		if contextLength > 0 {
+			result["context_length"] = contextLength
 		}
 		if model.MaxContextLength > 0 {
 			result["max_context_length"] = model.MaxContextLength
 		}
-		if model.MaxCompletionTokens > 0 {
-			result["max_completion_tokens"] = model.MaxCompletionTokens
+		if maxCompletionTokens > 0 {
+			result["max_completion_tokens"] = maxCompletionTokens
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)

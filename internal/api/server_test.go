@@ -2814,6 +2814,99 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 }
 
+func TestFormatHomeOpenAIModelsKeepsTokenMetadata(t *testing.T) {
+	models := formatHomeOpenAIModels([]homeModelEntry{
+		{
+			id:                  "gemini-3-pro",
+			displayName:         "Gemini 3 Pro",
+			contextLength:       1048576,
+			maxContextLength:    1048576,
+			maxCompletionTokens: 65536,
+		},
+		{id: "without-limits"},
+	})
+	if got := models[0]["context_length"]; got != 1048576 {
+		t.Fatalf("context_length = %v, want 1048576", got)
+	}
+	if got := models[0]["max_context_length"]; got != 1048576 {
+		t.Fatalf("max_context_length = %v, want 1048576", got)
+	}
+	if got := models[0]["max_completion_tokens"]; got != 65536 {
+		t.Fatalf("max_completion_tokens = %v, want 65536", got)
+	}
+	if got := models[0]["display_name"]; got != "Gemini 3 Pro" {
+		t.Fatalf("display_name = %v, want Gemini 3 Pro", got)
+	}
+	if _, exists := models[1]["context_length"]; exists {
+		t.Fatalf("model without limits exposed context_length: %#v", models[1])
+	}
+}
+
+func TestDecodeHomeModelsOmitsInconsistentDuplicateTokenMetadata(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex": [{"id": "shared-model", "display_name": "Shared Codex", "context_length": 272000, "max_completion_tokens": 64000}],
+		"claude": [{"id": "shared-model", "display_name": "Shared Claude", "context_length": 200000}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels returned error: %v", errDecode)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v, want one merged model", entries)
+	}
+	model := formatHomeOpenAIModels(entries)[0]
+	for _, key := range []string{"context_length", "max_completion_tokens"} {
+		if _, exists := model[key]; exists {
+			t.Fatalf("inconsistent duplicate exposed %s: %#v", key, model)
+		}
+	}
+	if _, exists := model["display_name"]; exists {
+		t.Fatalf("inconsistent duplicate exposed display_name: %#v", model)
+	}
+
+	claude := formatHomeClaudeModel(entries[0])
+	for _, key := range []string{"max_input_tokens", "max_tokens"} {
+		if _, exists := claude[key]; exists {
+			t.Fatalf("inconsistent duplicate exposed Claude %s: %#v", key, claude)
+		}
+	}
+
+	if codex := homeCodexClientModels(entries, nil); len(codex) != 0 {
+		t.Fatalf("inconsistent duplicate must not enter Codex catalog: %#v", codex)
+	}
+
+	// A conflicting entry must not invalidate otherwise usable Codex catalogs.
+	entries = append(entries, homeModelEntry{id: "gpt-5.5"})
+	payload := codexmodels.BuildResponse(homeCodexClientModels(entries, nil), nil, false)
+	body, errMarshal := codexmodels.MarshalCompact(payload)
+	if errMarshal != nil {
+		t.Fatalf("marshal Codex catalog: %v", errMarshal)
+	}
+	if errValidate := registry.ValidateCodexClientModelsJSON(body); errValidate != nil {
+		t.Fatalf("Codex catalog with conflicting Home entry is invalid: %v", errValidate)
+	}
+}
+
+func TestDecodeHomeModelsKeepsClaudeDefaultsForDuplicateModelsWithoutLimits(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex": [{"id": "unknown-limits"}],
+		"claude": [{"id": "unknown-limits"}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels returned error: %v", errDecode)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v, want one merged model", entries)
+	}
+
+	claude := formatHomeClaudeModel(entries[0])
+	if got := claude["max_input_tokens"]; got != registry.DefaultClaudeMaxInputTokens {
+		t.Fatalf("max_input_tokens = %v, want default %d", got, registry.DefaultClaudeMaxInputTokens)
+	}
+	if got := claude["max_tokens"]; got != registry.DefaultClaudeMaxOutputTokens {
+		t.Fatalf("max_tokens = %v, want default %d", got, registry.DefaultClaudeMaxOutputTokens)
+	}
+}
+
 func TestHomeCodexModels_MaxContextLength(t *testing.T) {
 	entries, errDecode := decodeHomeModels([]byte(`{
 		"codex": [
