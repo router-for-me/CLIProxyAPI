@@ -77,6 +77,44 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	}
 	localFrames := opts.localInterrupt.framesChan()
 
+	// handleStreamError ends the turn on an error from errs. It is also used
+	// when a response.failed terminal is followed by a stream error, so that
+	// error is not lost if the data channel is observed closed first.
+	handleStreamError := func(errMsg *interfaces.ErrorMessage) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
+		if errMsg == nil {
+			cancel(nil)
+			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
+		}
+
+		h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+		if opts.suppressError != nil && opts.suppressError(errMsg) {
+			cancel(errMsg.Error)
+			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
+		}
+		markAPIResponseTimestamp(c)
+		if matched, errClose := writer.closeForUpstreamError(errMsg.Error); matched {
+			cancel(errMsg.Error)
+			if errClose != nil {
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
+			}
+			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
+		}
+
+		errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, errMsg, nil)
+		if wrote {
+			log.Infof(
+				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				sessionID,
+				websocket.TextMessage,
+				websocketPayloadEventType(errorPayload),
+				websocketPayloadPreview(errorPayload),
+			)
+		}
+		cancel(errMsg.Error)
+		return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errTerminate
+	}
+	failedTerminal := false
+
 	for {
 		select {
 		case interruptPayload := <-localFrames:
@@ -94,37 +132,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				errs = nil
 				continue
 			}
-			if errMsg == nil {
-				cancel(nil)
-				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
-			}
-
-			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-			if opts.suppressError != nil && opts.suppressError(errMsg) {
-				cancel(errMsg.Error)
-				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
-			}
-			markAPIResponseTimestamp(c)
-			if matched, errClose := writer.closeForUpstreamError(errMsg.Error); matched {
-				cancel(errMsg.Error)
-				if errClose != nil {
-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
-				}
-				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
-			}
-
-			errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, errMsg, nil)
-			if wrote {
-				log.Infof(
-					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
-					sessionID,
-					websocket.TextMessage,
-					websocketPayloadEventType(errorPayload),
-					websocketPayloadPreview(errorPayload),
-				)
-			}
-			cancel(errMsg.Error)
-			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errTerminate
+			return handleStreamError(errMsg)
 		case chunk, ok := <-data:
 			if !ok {
 				if opts.duplexStream != nil && opts.duplexStream() {
@@ -136,6 +144,17 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errClose
 					}
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, websocket.ErrCloseSent
+				}
+				// A producer closes errs before data, so a stream error that
+				// followed a response.failed terminal is already buffered here.
+				if failedTerminal && errs != nil {
+					select {
+					case errMsg, ok := <-errs:
+						if ok && errMsg != nil {
+							return handleStreamError(errMsg)
+						}
+					default:
+					}
 				}
 				if !completed {
 					errMsg := &interfaces.ErrorMessage{
@@ -167,6 +186,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if eventType == "response.created" {
 					responseStarted = true
 					completed = false
+					failedTerminal = false
 					outputItemsByIndex = make(map[int64][]byte)
 					outputItemsFallback = nil
 					pendingToolCallIDs = make(map[string]struct{})
@@ -202,6 +222,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// context_length_exceeded. Closing the client socket here would
 					// block the follow-up request.
 					completed = true
+					failedTerminal = eventType == "response.failed"
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
 				}
