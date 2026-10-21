@@ -1,0 +1,685 @@
+@use '../../styles/mixins' as *;
+
+.container {
+  --log-control-height: 40px;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pageHeader {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  flex: none;
+}
+
+.pageTitle {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 28px;
+  line-height: 1.3;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+}
+
+.tabBar {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+}
+
+.tabItem {
+  @include button-reset;
+  padding: 8px 14px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.tabActive {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px var(--border-color);
+}
+
+.container button:focus-visible,
+.structuredFilters button:focus-visible,
+.logPanel:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: -2px;
+}
+
+.content,
+.viewerArea,
+.errorBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.logCard,
+.errorCard {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-primary);
+  box-shadow: none;
+}
+
+.logCard {
+  position: relative;
+
+  > :global(.error-box),
+  > :global(.status-badge) {
+    flex: none;
+    margin: 8px 12px;
+    max-height: 15vh;
+    overflow: auto;
+  }
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border-color);
+
+  :global(.form-group) {
+    margin: 0;
+  }
+}
+
+.searchWrapper {
+  flex: 1 1 180px;
+  min-width: 120px;
+}
+
+.searchInput:global(.input),
+.levelSelect > button,
+.filterPanelToggle:global(.btn),
+.actionButton:global(.btn) {
+  box-sizing: border-box;
+  height: var(--log-control-height);
+  min-height: var(--log-control-height);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  box-shadow: none;
+}
+
+.searchInput:global(.input) {
+  padding: 0 38px 0 12px;
+}
+
+.levelSelect > button,
+.filterPanelToggle:global(.btn) {
+  padding: 0 12px;
+}
+
+.levelSelect {
+  min-width: 110px;
+}
+
+.searchIcon {
+  color: var(--text-tertiary);
+}
+
+.searchClear {
+  @include button-reset;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.filterPanelHeader {
+  display: flex;
+}
+.filterPanelToggle {
+  white-space: nowrap;
+}
+
+.filterPanelButtonContent,
+.buttonContent,
+.switchLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  svg {
+    flex: none;
+  }
+}
+
+.filterPanelCount {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+  color: var(--primary-color);
+  font-size: 11px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding-left: 4px;
+  flex: none;
+}
+
+.actionButton:global(.btn) {
+  flex: none;
+  width: var(--log-control-height);
+  padding: 0;
+  > span {
+    display: flex;
+  }
+  &[aria-pressed='true'] {
+    color: var(--primary-color);
+    border-color: var(--primary-color);
+    background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+  }
+}
+
+.container :global(.btn) {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .container :global(.btn) {
+    transition: none;
+  }
+}
+
+.structuredFilters {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.displayOptions {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.filterChipGroup {
+  display: grid;
+  gap: 8px;
+}
+.filterChipLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.filterChipList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.filterChipHint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.filterChip {
+  @include button-reset;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+.filterChipActive {
+  color: var(--primary-color);
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+}
+
+.viewerArea {
+  position: relative;
+  overflow: hidden;
+  > :global(.hint) {
+    padding: 24px;
+  }
+}
+
+.logPanel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  background: var(--bg-primary);
+}
+
+.statusBar {
+  order: 3;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 20px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  background: var(--bg-secondary);
+}
+.readStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  flex: none;
+}
+.readStatus[data-live='true'] .statusDot {
+  background: var(--success-color);
+}
+.bufferStatus {
+  text-align: right;
+}
+.notices {
+  flex: none;
+  max-height: 12vh;
+  overflow: auto;
+  padding: 6px 12px;
+  background: var(--warning-bg);
+  &:empty {
+    display: none;
+  }
+}
+.followButton {
+  position: absolute;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  box-shadow: 0 2px 12px var(--border-color);
+  white-space: nowrap;
+}
+
+.loadMoreBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  background: var(--bg-secondary);
+}
+.loadMoreStats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.loadMoreCount {
+  color: var(--text-secondary);
+}
+.logList {
+  padding-block: 8px;
+  width: max-content;
+  min-width: 100%;
+}
+
+.wrapped {
+  .logList {
+    width: auto;
+  }
+  .rowMain {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  .rawLog {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .copyButton:global(.btn) {
+    position: absolute;
+    top: 2px;
+    right: 4px;
+  }
+  .logRow {
+    padding-right: 36px;
+  }
+}
+.rawLog,
+.logRow,
+.errorLogContent {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  font-variant-numeric: tabular-nums;
+}
+.rawLog {
+  margin: 0;
+  padding: 8px 12px;
+  white-space: pre;
+  color: var(--text-primary);
+}
+.logRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 16px;
+  padding: 4px 12px 4px 16px;
+  border-left: 2px solid transparent;
+  color: var(--text-primary);
+  &:nth-child(even) {
+    background: color-mix(in srgb, var(--bg-secondary) 20%, transparent);
+  }
+}
+.rowWarn {
+  border-left-color: var(--warning-color);
+}
+.rowError {
+  border-left-color: var(--error-color);
+}
+.timestamp {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  padding-top: 2px;
+}
+.rowMain {
+  display: flex;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  align-items: center;
+  gap: 3px 8px;
+  min-width: 0;
+}
+.badge,
+.pill {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 20px;
+}
+.badge {
+  padding: 0 5px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.pill {
+  color: var(--text-secondary);
+}
+.source {
+  color: var(--text-secondary);
+  max-width: 220px;
+  @include text-ellipsis;
+}
+.requestIdBadge {
+  font-family: inherit;
+  color: var(--primary-color);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+}
+.statusSuccess {
+  color: var(--success-badge-text);
+  background: var(--success-badge-bg);
+}
+.statusInfo,
+.levelInfo {
+  color: var(--info-color);
+  background: color-mix(in srgb, var(--info-color) 8%, transparent);
+}
+.statusWarn,
+.levelWarn {
+  color: var(--warning-text);
+  background: var(--warning-bg);
+}
+.statusError,
+.levelError {
+  color: var(--failure-badge-text);
+  background: var(--failure-badge-bg);
+}
+.levelDebug,
+.levelTrace {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+}
+.statusBadge {
+  font-variant-numeric: tabular-nums;
+}
+.methodBadge {
+  color: var(--text-primary);
+}
+.path {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.message {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.copyButton:global(.btn) {
+  position: sticky;
+  right: 4px;
+  flex: none;
+  margin-left: auto;
+  background: var(--bg-primary);
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  color: var(--text-secondary);
+  > span {
+    display: flex;
+  }
+}
+
+.errorCard {
+  padding: 16px;
+}
+.errorBody {
+  gap: 12px;
+}
+.errorPanel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  :global(.item-meta) {
+    flex: 1 1 240px;
+    min-width: 0;
+  }
+  :global(.item-title) {
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, monospace;
+    font-size: 13px;
+  }
+  :global(.item-actions) {
+    flex-wrap: wrap;
+  }
+}
+.errorLogViewer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.errorLogViewerMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.errorLogContent {
+  margin: 0;
+  padding: 12px;
+  max-height: 58dvh;
+  overflow: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  white-space: pre;
+}
+
+.logCardFullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: $z-modal - 1;
+  width: 100%;
+  height: 100dvh;
+  border: none;
+  border-radius: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+:global(body.logs-fullscreen-active) :global(.page-transition__layer) {
+  transform: none !important;
+}
+.logPanelFullscreen {
+  min-height: 0;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .logRow:hover {
+    background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+  }
+  .copyButton {
+    opacity: 0;
+  }
+  .logRow:hover .copyButton,
+  .logRow:focus-within .copyButton {
+    opacity: 1;
+  }
+  .tabItem:hover {
+    color: var(--text-primary);
+  }
+  .filterChip:hover:not(:disabled) {
+    border-color: var(--primary-color);
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1100px) {
+  .filterPanelLabel {
+    display: none;
+  }
+  .searchWrapper {
+    flex-basis: 120px;
+  }
+}
+
+@media (max-width: 768px) {
+  .container {
+    --log-control-height: 36px;
+    gap: 16px;
+  }
+  .pageHeader {
+    gap: 8px 12px;
+  }
+  .pageTitle {
+    font-size: 18px;
+  }
+  .tabItem {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  .filters {
+    padding: 12px;
+    gap: 8px;
+  }
+  .searchWrapper {
+    flex-basis: calc(100% - 200px);
+  }
+  .toolbar {
+    gap: 4px;
+    padding-left: 0;
+  }
+  .wrapped .logRow {
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding: 5px 32px 5px 8px;
+  }
+  .wrapped .timestamp {
+    font-size: 10px;
+  }
+  .statusBar {
+    gap: 4px;
+    padding: 6px 8px;
+    flex-wrap: wrap;
+    font-size: 10px;
+  }
+  .readStatus {
+    flex-wrap: wrap;
+  }
+  .bufferStatus {
+    text-align: left;
+  }
+  .errorCard {
+    padding: 12px;
+  }
+}
+
+@media (max-height: 480px) {
+  .container {
+    --log-control-height: 36px;
+    gap: 12px;
+  }
+  .pageHeader {
+    gap: 8px;
+  }
+  .pageTitle {
+    font-size: 18px;
+  }
+  .statusBar {
+    padding-block: 3px;
+  }
+  .filters {
+    padding-block: 4px;
+  }
+}

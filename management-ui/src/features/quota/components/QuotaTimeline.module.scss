@@ -1,0 +1,396 @@
+@use '../../../styles/variables' as *;
+@use '../../../styles/mixins' as *;
+
+// Fixed-width lane column so every row's bars start at the same x — the whole
+// point of the chart is comparing when lanes end relative to each other.
+$lane-width: 210px;
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+}
+
+.title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.range {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+}
+
+.nav,
+.modes {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+
+  button {
+    padding: 4px 12px;
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: all $transition-fast;
+
+    &:hover:not(:disabled) {
+      color: var(--text-primary);
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    &[aria-pressed='true'] {
+      background: var(--floating-surface, var(--bg-primary));
+      border-color: var(--border-hover);
+      color: var(--text-primary);
+    }
+  }
+}
+
+.chart {
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.empty {
+  min-height: 96px;
+  display: grid;
+  place-items: center;
+  padding: $spacing-lg;
+  color: var(--text-quaternary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.axis,
+.lane {
+  display: grid;
+  grid-template-columns: $lane-width 1fr;
+}
+
+.axis {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.axisLabel {
+  padding: 8px 12px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-quaternary);
+  display: flex;
+  align-items: flex-end;
+}
+
+.axisCells {
+  display: flex;
+}
+
+.axisCell {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 6px 2px;
+  border-left: 1px solid var(--border-color);
+
+  &[data-weekend='1'] {
+    background: rgba(255, 255, 255, 0.014);
+  }
+
+  // The current day is the reference point for reading the whole chart.
+  &[data-today='1'] {
+    background: rgba(255, 255, 255, 0.03);
+  }
+}
+
+.axisWeekday {
+  font-size: 10px;
+  color: var(--text-quaternary);
+  min-height: 12px;
+}
+
+.axisDate {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lane {
+  border-top: 1px solid var(--border-color);
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.012);
+  }
+}
+
+.laneHead {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 12px;
+  min-width: 0;
+}
+
+.laneTop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.laneDot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--provider-accent, var(--text-quaternary));
+}
+
+.laneName {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lanePeriod {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--count-badge-text, var(--text-secondary));
+  background: var(--count-badge-bg, var(--bg-tertiary));
+}
+
+.laneLimits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.laneLimit {
+  padding: 1px 6px;
+  border-radius: $radius-sm;
+  font-size: 10.5px;
+  color: var(--text-quaternary);
+  background: var(--bg-tertiary);
+
+  b {
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.track {
+  position: relative;
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+}
+
+.trackGrid {
+  position: absolute;
+  inset: 0;
+  display: flex;
+
+  > span {
+    flex: 1 1 0;
+    border-left: 1px solid var(--border-color);
+
+    &[data-weekend='1'] {
+      background: rgba(255, 255, 255, 0.014);
+    }
+  }
+}
+
+// Vertical "now" marker, above the grid but below the bars so it never hides
+// a label.
+.nowLine {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--text-tertiary, var(--text-quaternary));
+  opacity: 0.8;
+  z-index: 1;
+}
+
+.window {
+  position: relative;
+  z-index: 2;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  font-size: 10.5px;
+  white-space: nowrap;
+  position: absolute;
+}
+
+// Current window: solid, in the provider's colour — the row's focal point.
+.windowLive {
+  background: color-mix(in srgb, var(--provider-accent) 26%, transparent);
+  border: 1px solid color-mix(in srgb, var(--provider-accent) 45%, transparent);
+  color: var(--text-primary);
+}
+
+// Upcoming: dashed outline, nothing consumed yet.
+.windowNext {
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--provider-accent) 32%, transparent);
+  color: var(--text-quaternary);
+}
+
+// Elapsed: recedes.
+.windowPast {
+  background: color-mix(in srgb, var(--provider-accent) 8%, transparent);
+  border: 1px solid transparent;
+  color: var(--text-quaternary);
+}
+
+// Consumed portion of the current window, drawn behind its label.
+.windowFill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--provider-accent) 34%, transparent);
+  pointer-events: none;
+}
+
+.windowLabel {
+  position: relative;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+// A reset credit is use-it-or-lose-it, so its expiry sits above the window bar
+// as a narrow amber tick without competing with the bar's own label.
+.resetCreditTick {
+  position: absolute;
+  z-index: 3;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: var(--amber-color);
+  box-shadow: 0 0 0 1px var(--bg-primary);
+  cursor: help;
+
+  &:hover {
+    width: 4px;
+  }
+}
+
+.laneIdle {
+  position: relative;
+  z-index: 2;
+  padding-left: 10px;
+  font-size: 11px;
+  color: var(--text-quaternary);
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: $spacing-md;
+  font-size: 11px;
+  color: var(--text-quaternary);
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch {
+  width: 22px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.swatchLive {
+  background: color-mix(in srgb, var(--text-tertiary, #888) 34%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-tertiary, #888) 50%, transparent);
+}
+
+.swatchNext {
+  border: 1px dashed color-mix(in srgb, var(--text-tertiary, #888) 45%, transparent);
+}
+
+.swatchPast {
+  background: color-mix(in srgb, var(--text-tertiary, #888) 12%, transparent);
+}
+
+.swatchCredit {
+  width: 2px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--amber-color);
+}
+
+.legendNote {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+@include mobile {
+  // The lane column can't shrink much before names become unreadable, so the
+  // chart scrolls horizontally rather than compressing to illegibility.
+  .chart {
+    overflow-x: auto;
+  }
+
+  .axis,
+  .lane {
+    min-width: 720px;
+  }
+}

@@ -1,0 +1,168 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * OAuth 配置双卡（排除模型 / 模型别名）共用外衣：panel 配方
+ * （16px 圆角 / 1px 边框 / 82% 透感纸面），列表行走 mono 遥测。
+ * ============================================================ */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: clamp(16px, 2vw, 20px);
+  border-radius: 16px;
+  border: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.panelTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.panelExtra {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.panelBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* ---------- 视图切换（列表/图谱） ---------- */
+
+.viewModeSwitch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: $radius-md;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+/* ---------- provider 行 ---------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 45%, transparent);
+  transition:
+    background-color $transition-fast,
+    border-color $transition-fast;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .item:hover {
+    border-color: var(--border-hover);
+    background: color-mix(in srgb, var(--bg-secondary) 80%, transparent);
+  }
+}
+
+.itemInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.itemProvider {
+  font-family: $font-mono;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text-primary);
+  @include text-ellipsis;
+}
+
+.itemCount {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.itemActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ---------- 别名图谱区 ---------- */
+
+.aliasChartSection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.aliasChartHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.aliasChartTitle {
+  margin: 0;
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.aliasChart {
+  min-width: 0;
+}
+
+/* ---------- 按压反馈 ---------- */
+
+.panel :global(.btn) {
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    background-color $transition-fast,
+    border-color $transition-fast,
+    color $transition-fast;
+}
+
+.panel :global(.btn:active:not(:disabled)) {
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel :global(.btn) {
+    transition: none;
+  }
+
+  .panel :global(.btn:active:not(:disabled)) {
+    transform: none;
+  }
+}

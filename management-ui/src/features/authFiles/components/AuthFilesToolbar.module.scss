@@ -1,0 +1,294 @@
+@use '../../../styles/mixins' as *;
+
+/* 工作区工具栏：高频操作区，无入场动画，反馈即时 */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+}
+
+/* ---------- 搜索 ---------- */
+
+.search {
+  flex: 1 1 220px;
+  min-width: 180px;
+  max-width: 340px;
+
+  /* Input 组件外层是 .form-group，去掉其默认下边距 */
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+
+  :global(.input) {
+    height: 36px;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+}
+
+.searchIcon {
+  color: var(--text-quaternary);
+}
+
+/* ---------- 状态分段控件 ---------- */
+
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.segment {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 5px 12px;
+  border-radius: $radius-full;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:active {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .segment:hover:not(.segmentActive) {
+    color: var(--text-primary);
+  }
+}
+
+.segmentActive {
+  color: var(--text-primary);
+  font-weight: 650;
+  background: var(--floating-surface, var(--bg-primary));
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.12),
+    0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.segmentProblem.segmentActive {
+  color: var(--danger-color);
+  background: color-mix(
+    in srgb,
+    var(--danger-color) 12%,
+    var(--floating-surface, var(--bg-primary))
+  );
+  box-shadow:
+    0 1px 3px color-mix(in srgb, var(--danger-color) 20%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* ---------- 排序 ---------- */
+
+.sort {
+  min-width: 120px;
+}
+
+/* ---------- 显示设置 ---------- */
+
+.display {
+  position: relative;
+}
+
+.displayButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:active {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .displayButton:hover {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+  }
+}
+
+.displayButtonActive {
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+  background: var(--bg-primary);
+}
+
+.popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: $z-dropdown;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 216px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--floating-surface);
+  box-shadow: var(--floating-shadow);
+  transform-origin: top right;
+  animation: toolbar-popover-in var(--dur-hover, 200ms) var(--ease-out-strong, ease-out) both;
+}
+
+@keyframes toolbar-popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+
+.popoverRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.pageSizeInput {
+  width: 64px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: $font-mono;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+
+  &:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px var(--primary-10);
+  }
+}
+
+/* ---------- 删除筛选结果（工具栏右端的 ghost danger） ---------- */
+
+.deleteAction {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: $radius-full;
+  border: 1px solid transparent;
+  background: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--danger-color);
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--danger-color);
+    outline-offset: 1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .deleteAction:hover:not(:disabled) {
+    background: var(--destructive-10);
+    border-color: var(--destructive-30);
+  }
+}
+
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 900px) {
+  .search {
+    flex-basis: 100%;
+    max-width: none;
+  }
+
+  .deleteAction {
+    margin-left: 0;
+  }
+}
+
+@include mobile {
+  .segmented {
+    overflow-x: auto;
+    max-width: 100%;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .segment,
+  .displayButton,
+  .deleteAction {
+    transition: none;
+  }
+
+  .segment:active,
+  .displayButton:active,
+  .deleteAction:active:not(:disabled) {
+    transform: none;
+  }
+
+  .popover {
+    animation: none;
+  }
+}

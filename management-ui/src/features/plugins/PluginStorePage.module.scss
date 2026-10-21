@@ -1,0 +1,857 @@
+@use '../../styles/variables' as *;
+@use '../../styles/mixins' as *;
+
+// ─── Page Container ─────────────────────────────────────
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+  width: 100%;
+}
+
+// ─── Header ─────────────────────────────────────────────
+
+.pageHeader {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.description {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+// ─── Alert Boxes ────────────────────────────────────────
+
+.errorBox,
+.warningBox {
+  padding: $spacing-md;
+  border-radius: $radius-md;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.errorBox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+  border: 1px solid var(--danger-color);
+  background: rgba($error-color, 0.1);
+  color: var(--danger-color);
+
+  span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  :global(.btn) {
+    flex-shrink: 0;
+  }
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.warningBox {
+  border: 1px solid color-mix(in srgb, var(--warning-color, #c65746) 42%, var(--border-color));
+  background: color-mix(in srgb, var(--warning-color, #c65746) 9%, var(--bg-secondary));
+  color: var(--text-primary);
+}
+
+.sourceErrorList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+
+  li {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  span {
+    font-weight: 700;
+    overflow-wrap: anywhere;
+  }
+
+  small {
+    color: var(--text-secondary);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+}
+
+// ─── Security Banner (third-party plugin risk) ──────────
+
+.securityBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: $spacing-sm;
+  padding: 12px 14px;
+  border-radius: $radius-md;
+  border: 1px solid color-mix(in srgb, var(--quota-medium-color, #e0aa14) 45%, var(--border-color));
+  background: color-mix(in srgb, var(--quota-medium-color, #e0aa14) 14%, var(--bg-secondary));
+  color: var(--text-primary);
+
+  > svg {
+    flex-shrink: 0;
+    margin-top: 1px;
+    color: var(--quota-medium-color, #e0aa14);
+  }
+}
+
+.securityBannerText {
+  min-width: 0;
+
+  strong {
+    display: block;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+  }
+
+  p {
+    margin: 2px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+  }
+}
+
+// ─── Status Bar ─────────────────────────────────────────
+
+.statusBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 60%, transparent);
+  flex-wrap: wrap;
+}
+
+.statusPill {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: $radius-full;
+  border: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+  background: color-mix(in srgb, var(--bg-primary) 56%, transparent);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.statusDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.statusDotOn {
+  background: $success-color;
+  box-shadow: 0 0 6px rgba($success-color, 0.5);
+}
+
+.statusDotOff {
+  background: var(--text-tertiary);
+}
+
+.statusLabel {
+  color: var(--text-secondary);
+}
+
+.statusValue {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.statusPathValue {
+  display: block;
+  min-width: 0;
+  max-width: min(360px, 58vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusDivider {
+  width: 1px;
+  height: 20px;
+  background: color-mix(in srgb, var(--border-color) 60%, transparent);
+  flex-shrink: 0;
+
+  @include mobile {
+    display: none;
+  }
+}
+
+// ─── Toolbar ────────────────────────────────────────────
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+
+  :global(.form-group) {
+    flex: 1;
+    max-width: 480px;
+    margin: 0;
+  }
+
+  :global(.input) {
+    padding-right: 36px;
+  }
+
+  :global(.btn > span) {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+
+    :global(.form-group) {
+      max-width: none;
+    }
+  }
+}
+
+// ─── Status Filter Chips ────────────────────────────────
+
+.filterChips {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+}
+
+.filterChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  border-radius: $radius-full;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    border-color $transition-fast,
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover {
+    border-color: var(--primary-color);
+    color: var(--text-primary);
+  }
+}
+
+.filterChipActive {
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+  color: var(--text-primary);
+}
+
+.filterChipCount {
+  display: inline-flex;
+  min-width: 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--border-color) 45%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+// ─── Card Grid ──────────────────────────────────────────
+
+.cardGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: $spacing-md;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+// ─── Plugin Card ────────────────────────────────────────
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  padding: $spacing-md;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+  transition:
+    border-color $transition-fast,
+    background-color $transition-fast;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--primary-color) 45%, var(--border-color));
+    background: var(--bg-hover);
+  }
+}
+
+.cardHeader {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: flex-start;
+  column-gap: $spacing-sm;
+  row-gap: 6px;
+}
+
+.logoBox {
+  display: inline-flex;
+  grid-column: 1;
+  grid-row: 1;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+  background: color-mix(in srgb, var(--bg-tertiary) 60%, transparent);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+
+.cardTitleBlock {
+  display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cardTitle {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  @include text-ellipsis-multiline(2);
+}
+
+.cardId {
+  color: var(--text-tertiary);
+  font-family: $font-mono;
+  font-size: 12px;
+  @include text-ellipsis;
+}
+
+.cardBadges {
+  display: flex;
+  grid-column: 2;
+  grid-row: 2;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 5px;
+  min-width: 0;
+
+  &:empty {
+    display: none;
+  }
+}
+
+.badge,
+.badgeSuccess,
+.badgeWarning,
+.badgeUntrusted {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.badge {
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+  color: var(--text-secondary);
+}
+
+.badgeSuccess {
+  background: rgba($success-color, 0.1);
+  border: 1px solid rgba($success-color, 0.2);
+  color: var(--success-color);
+}
+
+.badgeWarning {
+  background: rgba($warning-color, 0.1);
+  border: 1px solid rgba($warning-color, 0.2);
+  color: var(--warning-color);
+}
+
+.badgeUntrusted {
+  gap: 4px;
+  background: rgba($warning-color, 0.12);
+  border: 1px solid rgba($warning-color, 0.4);
+  color: var(--danger-color);
+
+  svg {
+    flex-shrink: 0;
+  }
+}
+
+.cardDesc {
+  display: -webkit-box;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.cardDescBlock {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cardDescExpanded {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: initial;
+}
+
+.cardDescToggle {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+
+  &:hover {
+    color: var(--primary-hover);
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--primary-color) 45%, transparent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+}
+
+.cardMeta {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+}
+
+.metaItem {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: $spacing-sm;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+
+  strong {
+    color: var(--text-secondary);
+    font-weight: 600;
+  }
+}
+
+.metaDot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-tertiary) 50%, transparent);
+  flex-shrink: 0;
+}
+
+.tagRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-color) 40%, transparent);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.cardFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  margin-top: auto;
+  padding-top: $spacing-sm;
+}
+
+.cardActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-sm;
+
+  :global(.btn > span) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+}
+
+.cardLinks {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  flex-shrink: 0;
+}
+
+.iconLink {
+  display: inline-flex;
+  width: 30px;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  text-decoration: none;
+  transition:
+    border-color $transition-fast,
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover {
+    border-color: var(--primary-color);
+    background: var(--bg-hover);
+    color: var(--primary-color);
+  }
+}
+
+// ─── Install Options Dialog ───────────────────────────────
+
+.installOptions {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+}
+
+.installMessage {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.installVersionField {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.installVersionLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.installVersionModes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.installVersionMode {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  border-radius: $radius-md;
+  background: var(--bg-primary);
+  cursor: pointer;
+  transition:
+    border-color $transition-fast,
+    background-color $transition-fast;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--primary-color) 45%, var(--border-color));
+    background: var(--bg-hover);
+  }
+
+  input {
+    margin-top: 2px;
+    flex: 0 0 auto;
+  }
+}
+
+.installVersionModeActive {
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+}
+
+.installVersionModeDisabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.installVersionModeText {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+
+  strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  small {
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+}
+
+.installVersionPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: $radius-md;
+  border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 65%, transparent);
+
+  :global(.form-group) {
+    margin: 0;
+  }
+}
+
+.installVersionHint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.installVersionWarning {
+  margin: 0;
+  color: var(--warning-color);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.installVersionCheckbox {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+
+  input {
+    flex: 0 0 auto;
+  }
+}
+
+.installReleaseLink {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+  text-decoration: none;
+
+  &:hover {
+    color: var(--primary-hover);
+    text-decoration: underline;
+  }
+
+  svg {
+    flex: 0 0 auto;
+  }
+}
+
+.installDialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: $spacing-sm;
+  margin-top: $spacing-sm;
+
+  @include mobile {
+    flex-direction: column-reverse;
+  }
+}
+
+// ─── Skeleton ───────────────────────────────────────────
+
+.skeletonCard {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  padding: $spacing-md;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+}
+
+.skeletonHeader {
+  display: flex;
+  align-items: center;
+  gap: $spacing-md;
+}
+
+.skeletonAvatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--bg-secondary) 86%, transparent) 25%,
+    color-mix(in srgb, var(--bg-hover) 70%, transparent) 37%,
+    color-mix(in srgb, var(--bg-secondary) 86%, transparent) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeletonPulse 1.35s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.skeletonText {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.skeletonLine {
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--bg-secondary) 86%, transparent) 25%,
+    color-mix(in srgb, var(--bg-hover) 70%, transparent) 37%,
+    color-mix(in srgb, var(--bg-secondary) 86%, transparent) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeletonPulse 1.35s ease-in-out infinite;
+
+  &:first-child {
+    width: 45%;
+  }
+
+  &:last-child {
+    width: 70%;
+    height: 10px;
+  }
+}
+
+.skeletonBody {
+  height: 56px;
+  border-radius: $radius-md;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--bg-secondary) 86%, transparent) 25%,
+    color-mix(in srgb, var(--bg-hover) 70%, transparent) 37%,
+    color-mix(in srgb, var(--bg-secondary) 86%, transparent) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeletonPulse 1.35s ease-in-out infinite;
+}
+
+// ─── Animation ──────────────────────────────────────────
+
+@keyframes skeletonPulse {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+// ─── Mobile Overrides ───────────────────────────────────
+
+@include mobile {
+  .page {
+    gap: $spacing-md;
+  }
+}

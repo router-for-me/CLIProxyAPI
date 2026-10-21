@@ -1,0 +1,187 @@
+@use '../../../styles/mixins' as *;
+@use '../../../styles/variables' as *;
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  align-self: start;
+}
+
+.aside {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 12px;
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 4px 8px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  color: var(--text-primary);
+  transition:
+    background-color $transition-fast,
+    border-color $transition-fast,
+    color $transition-fast;
+  min-width: 0;
+
+  &:hover:not(.active) {
+    background: color-mix(in srgb, var(--accent-bg) 50%, transparent);
+    border-color: var(--border-color);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+
+  &.active {
+    border-color: var(--primary-30);
+    background: var(--primary-10);
+    color: var(--primary-color);
+  }
+}
+
+.itemKimi {
+  &.active {
+    border-color: color-mix(in srgb, #1783ff 30%, transparent);
+    background: color-mix(in srgb, #1783ff 10%, var(--bg-primary));
+    color: color-mix(in srgb, #1783ff 82%, var(--text-primary));
+
+    .itemSubtitle {
+      color: color-mix(in srgb, #1783ff 82%, var(--text-primary));
+    }
+  }
+}
+
+.itemLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.logo {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-md);
+  flex-shrink: 0;
+  object-fit: contain;
+  background: var(--bg-tertiary);
+  padding: 2px;
+}
+
+.logoTransparent {
+  background: transparent;
+}
+
+.logoThemeSurface {
+  box-sizing: border-box;
+  background: #000;
+  padding: 5px;
+
+  [data-theme='dark'] & {
+    background: #fff;
+  }
+}
+
+.logoThemeDark {
+  display: none;
+
+  [data-theme='dark'] & {
+    display: block;
+  }
+}
+
+.logoThemeLight {
+  [data-theme='dark'] & {
+    display: none;
+  }
+}
+
+.logoInvertOnDark {
+  [data-theme='dark'] & {
+    filter: invert(1) hue-rotate(180deg);
+  }
+}
+
+.itemText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.itemTitle {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.itemSubtitle {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin-top: 2px;
+  font-weight: 400;
+
+  .active & {
+    color: var(--primary-color);
+    opacity: 0.85;
+  }
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  padding: 2px 9px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+.badgeAmber {
+  background: var(--amber-10);
+  border-color: var(--amber-30);
+  color: var(--amber-text);
+}
+
+.badgeKimi {
+  background: color-mix(in srgb, #1783ff 14%, var(--bg-primary));
+  border-color: color-mix(in srgb, #1783ff 48%, var(--border-color));
+  color: color-mix(in srgb, #1783ff 82%, var(--text-primary));
+}

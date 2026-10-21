@@ -1,0 +1,106 @@
+/* ============================================================
+ * 令牌成本分布 — 输入(未缓存/缓存读/缓存写) + 输出(非推理/思考)。
+ * 颜色只承载分段语义，数字一律 mono + tabular-nums。
+ * ============================================================ */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 2px;
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.total {
+  font-family: $font-mono;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.bar {
+  display: flex;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+}
+
+.segment {
+  height: 100%;
+  min-width: 2px;
+  transition: width var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+.toneInput {
+  background: var(--primary-color);
+}
+
+.toneCacheRead {
+  background: var(--success-color);
+}
+
+.toneCacheWrite {
+  background: var(--warning-color);
+}
+
+.toneOutput {
+  background: var(--info-color);
+}
+
+.toneThinking {
+  background: var(--quota-medium-color);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.legendLabel {
+  color: var(--text-tertiary);
+}
+
+.legendValue {
+  font-family: $font-mono;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.compact .legend {
+  display: none;
+}

@@ -1,0 +1,310 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 额度卡片 — 继承凭证卡 statTile 配方（14px 圆角 / 1px 边框 / 82% 透感纸面）。
+ * 提供商身份只由图标承载（混合网格下五色渐变卡底会互相打架，已退役）。
+ * 遥测内容一律 mono + tabular-nums。
+ * ============================================================ */
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 15px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  transition:
+    transform var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .card:hover {
+    transform: translateY(-2px);
+    border-color: var(--border-hover);
+    box-shadow: 0 12px 26px -14px rgb(0 0 0 / 0.16);
+  }
+}
+
+/* 首次数据到达时的一次性级联入场；切 tab / 翻页 / 刷新不重播 */
+.cardEnter {
+  animation: quota-card-in 0.45s var(--ease-out-strong, ease-out) both;
+  animation-delay: var(--card-delay, 0s);
+}
+
+@keyframes quota-card-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0);
+  }
+}
+
+/* ---------- 头部：品牌图标 + 文件名 ---------- */
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.iconWrap {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-tertiary) 60%, transparent);
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  display: block;
+}
+
+.iconFallback {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.fileName {
+  min-width: 0;
+  font-family: $font-mono;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+  @include text-ellipsis;
+}
+
+/* ---------- body 容器 ---------- */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+}
+
+/* ---------- idle：整块 body 即点击加载的落点 ---------- */
+
+.idleBody {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 76px;
+  padding: 12px 10px;
+  cursor: pointer;
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  background: none;
+  color: var(--text-tertiary);
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .idleBody:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--primary-color) 35%, var(--border-color));
+    border-style: solid;
+    color: var(--text-secondary);
+  }
+}
+
+.idleGlyph {
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.idleHint {
+  font-family: $font-mono;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* ---------- loading：双幽灵行骨架 ---------- */
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 4px 0 2px;
+}
+
+.skeletonRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 骨架：底色 + 一道 1.2s 匀速扫光（linear —— 环境性匀速运动的唯一例外） */
+.skeletonLabel,
+.skeletonTrack {
+  display: block;
+  border-radius: $radius-full;
+  background-color: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  background-image: linear-gradient(
+    90deg,
+    transparent 20%,
+    color-mix(in srgb, var(--text-primary) 6%, transparent) 50%,
+    transparent 80%
+  );
+  background-repeat: no-repeat;
+  background-size: 220% 100%;
+  animation: quota-skeleton-sweep 1.2s linear infinite;
+}
+
+@keyframes quota-skeleton-sweep {
+  from {
+    background-position: -110% 0;
+  }
+  to {
+    background-position: 210% 0;
+  }
+}
+
+.skeletonLabel {
+  width: 40%;
+  height: 10px;
+}
+
+.skeletonTrack {
+  width: 100%;
+  height: 6px;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- error ---------- */
+
+.errorStrip {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--viz-failure);
+  background: color-mix(in srgb, var(--viz-failure) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--viz-failure) 32%, transparent);
+  border-radius: 9px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- footer 动作 ---------- */
+
+.actionRow {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* 安静描边药丸（与凭证卡图标动作同族：hover 才显色块） */
+.actionPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-full;
+  background: none;
+  padding: 5px 11px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .actionPill:hover:not(:disabled) {
+    border-color: var(--border-hover);
+    background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+    color: var(--text-primary);
+  }
+}
+
+.spinning {
+  animation: quota-card-spin 0.8s linear infinite;
+}
+
+@keyframes quota-card-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .idleBody,
+  .actionPill {
+    transition: none;
+  }
+
+  .idleBody:active:not(:disabled),
+  .actionPill:active:not(:disabled) {
+    transform: none;
+  }
+
+  .cardEnter,
+  .skeletonLabel,
+  .skeletonTrack,
+  .spinning {
+    animation: none;
+  }
+}

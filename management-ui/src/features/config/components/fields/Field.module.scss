@@ -1,0 +1,404 @@
+@use '../../../../styles/mixins' as *;
+
+/* 字段原语：设置行（开关 / 输入 / 下拉 / 区块编辑器共用一副骨架）+ 区块编辑器的 scoped 覆盖。
+   交互反馈一律引用全局动效 tokens（--dur-* / --ease-out-strong）。 */
+
+/* ---------- 表单控件宿主（区块编辑器内 :global 控件的统一几何） ---------- */
+
+.fieldsRoot {
+  :global(.form-group) {
+    gap: 7px;
+    margin-bottom: 0;
+  }
+
+  :global(.form-group > label) {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  /* 设置行与区块编辑器里的输入框同一副几何：36px 高、8px 圆角、纸色底。 */
+  :global(.input) {
+    min-height: 36px;
+    padding: 7px 11px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    border-color: var(--border-color);
+    box-shadow: none;
+    font-size: 13.5px;
+    transition:
+      border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+      background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+      box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+  }
+
+  :global(.input:focus) {
+    background: var(--bg-primary);
+    border-color: var(--text-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-primary) 12%, transparent);
+  }
+
+  :global(.input[aria-invalid='true']) {
+    border-color: var(--error-color);
+  }
+
+  :global(.input:disabled) {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  :global(textarea.input) {
+    min-height: 112px;
+  }
+
+  :global(.hint) {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+
+  :global(.error-box) {
+    border-radius: 8px;
+  }
+}
+
+/* ---------- 设置组：组标题 + 圆角列表容器 ---------- */
+
+/* 组本身是容器查询的宿主：列数与行内堆叠都看「这一组有多宽」，
+   而不是视口——侧栏收起、折叠组缩进都会自然生效。 */
+.group {
+  container: setting-list / inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.groupHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 2px;
+}
+
+.groupTitle {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.groupDescription {
+  margin: 0;
+  max-width: 80ch;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 55%, transparent);
+  /* 裁掉分隔线越界的部分 + 圆角；下拉菜单走 portal，不受影响。 */
+  overflow: hidden;
+}
+
+@container setting-list (min-width: 880px) {
+  .list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ---------- 设置行 ---------- */
+
+.row {
+  --setting-control: auto;
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--setting-control);
+  align-items: center;
+  gap: 10px 24px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 14px 18px;
+  box-sizing: border-box;
+  /* 发丝分隔线：向右、向下各投 1px，越出列表的部分被 overflow 裁掉，只剩行间与列间的线。 */
+  box-shadow:
+    1px 0 0 var(--border-color),
+    0 1px 0 var(--border-color);
+  scroll-margin-top: calc(var(--header-height, 64px) + 16px);
+}
+
+/* 控件槽宽度分三档；百分比兜底保证标题列永远有一半以上的位置。 */
+.size_sm {
+  --setting-control: min(136px, 42%);
+}
+
+.size_md {
+  --setting-control: min(280px, 50%);
+}
+
+.size_lg {
+  --setting-control: min(420px, 58%);
+}
+
+.rowWide {
+  grid-column: 1 / -1;
+}
+
+/* 区块编辑器行：标题区在上，编辑器独占下方整行。 */
+.rowBlock {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+/* 自带标题区的区块单元格（API 密钥等）。 */
+.rowCell {
+  display: block;
+  padding: 16px 18px;
+}
+
+.rowCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.rowLabel {
+  color: var(--text-primary);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* 开关行的标题同样是 <label htmlFor>：点标题即切换。 */
+.rowToggle .rowLabel {
+  cursor: pointer;
+}
+
+.rowDescription {
+  max-width: 72ch;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.rowError {
+  color: var(--error-color);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.rowControl {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.rowControl > :global(.input) {
+  width: 100%;
+}
+
+.rowBlock .rowControl {
+  display: block;
+}
+
+/* 下拉触发器对齐输入框几何（Select 自带 40px + 投影，这里收成同一套）。 */
+.selectControl > button[aria-haspopup='listbox'] {
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: none;
+  font-size: 13.5px;
+  transition: border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:focus-visible,
+  &[aria-expanded='true'] {
+    border-color: var(--text-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-primary) 12%, transparent);
+  }
+
+  &[aria-invalid='true'] {
+    border-color: var(--error-color);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+/* 输入框内右侧的状态标记（keepalive「已禁用」）。 */
+.rowControl > :global(.input).inputWithAdornment {
+  padding-right: 64px;
+}
+
+.adornment {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 窄组（手机、深层折叠）：输入行改为上下堆叠，开关始终留在右侧。 */
+@container setting-list (max-width: 520px) {
+  .row {
+    padding: 12px 14px;
+  }
+
+  .row:not(.rowToggle) {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .rowCell {
+    padding: 14px;
+  }
+}
+
+/* ---------- 代理 URL 的赞助跳转（作为行说明渲染） ---------- */
+
+/* 与正文融为一体的高亮链接：同字号，复用全站金色（amber）badge 配方，hover 底色加深。 */
+.fieldSponsorLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 5px;
+  border: 1px solid var(--amber-30);
+  border-radius: 5px;
+  background: var(--amber-10);
+  color: var(--amber-text);
+  font-weight: 600;
+  text-decoration: none;
+  vertical-align: baseline;
+  transition: background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:hover {
+    text-decoration: none;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .fieldSponsorLink:hover {
+    background: var(--amber-30);
+  }
+}
+
+.fieldSponsorLogo {
+  display: block;
+  width: auto;
+  height: 13px;
+}
+
+/* ---------- 搜索锚点与脉冲高亮 ---------- */
+
+.fieldAnchor {
+  display: block;
+  min-width: 0;
+  border-radius: var(--radius-md, 8px);
+  scroll-margin-top: calc(var(--header-height, 64px) + 16px);
+}
+
+/* 内描边 + 淡底色：行位于 overflow:hidden 的列表里，外扩的 box-shadow 会被裁掉，
+   且行的分隔线本身就是 box-shadow，所以脉冲改走 outline（向内偏移）。 */
+.fieldHighlightActive {
+  animation: config-field-highlight 1.8s var(--ease-out-strong, ease-out);
+}
+
+@keyframes config-field-highlight {
+  0% {
+    outline: 2px solid color-mix(in srgb, var(--text-primary) 55%, transparent);
+    outline-offset: -2px;
+    background-color: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  }
+  55% {
+    outline: 2px solid color-mix(in srgb, var(--text-primary) 32%, transparent);
+    outline-offset: -2px;
+    background-color: color-mix(in srgb, var(--text-primary) 3%, transparent);
+  }
+  100% {
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+    background-color: transparent;
+  }
+}
+
+/* ---------- 区块编辑器内部布局原语 ---------- */
+
+.fieldGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+
+  @include mobile {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.fieldStack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.fieldShell {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.fieldHint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* ---------- 无障碍 ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .fieldsRoot :global(.input),
+  .selectControl > button[aria-haspopup='listbox'],
+  .fieldSponsorLink {
+    transition: none;
+  }
+
+  .fieldHighlightActive {
+    animation: none;
+    outline: 2px solid color-mix(in srgb, var(--text-primary) 32%, transparent);
+    outline-offset: -2px;
+  }
+}

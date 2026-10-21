@@ -1,0 +1,76 @@
+@use '../../../styles/mixins' as *;
+
+/* 可视化/源码 segmented：与认证文件工具栏分段控件同语汇 */
+
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  flex-shrink: 0;
+}
+
+.segment {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 5px 12px;
+  border-radius: $radius-full;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -1px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .segment:hover:not(:disabled):not(.segmentActive) {
+    color: var(--text-primary);
+  }
+}
+
+.segmentActive {
+  color: var(--text-primary);
+  font-weight: 650;
+  background: var(--floating-surface, var(--bg-primary));
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.12),
+    0 1px 2px rgba(0, 0, 0, 0.08);
+
+  /* 整体禁用（保存/加载中）时激活段仍保持完整对比度 —— 当前模式本身是有效信息 */
+  &:disabled {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .segment {
+    transition: none;
+  }
+
+  .segment:active:not(:disabled) {
+    transform: none;
+  }
+}

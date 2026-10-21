@@ -1,0 +1,75 @@
+.root {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-sm;
+  cursor: pointer;
+}
+
+.labelLeft {
+  .label {
+    order: -1;
+  }
+}
+
+.disabled {
+  cursor: not-allowed;
+}
+
+.root input {
+  width: 0;
+  height: 0;
+  opacity: 0;
+  position: absolute;
+}
+
+.track {
+  width: 44px;
+  height: 24px;
+  background: var(--border-color);
+  border-radius: $radius-full;
+  position: relative;
+  transition: background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+/* 隐藏的原生 checkbox 仍是焦点载体：键盘聚焦时把焦点环画到轨道上。 */
+.root input:focus-visible + .track {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 2px;
+}
+
+.disabled .track {
+  opacity: 0.5;
+}
+
+.thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  background: #fff;
+  border-radius: $radius-full;
+  box-shadow: $shadow-sm;
+  transition: transform var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+.root input:checked + .track {
+  background: var(--primary-color);
+}
+
+.root input:checked + .track .thumb {
+  transform: translateX(20px);
+}
+
+.label {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .track,
+  .thumb {
+    transition: none;
+  }
+}

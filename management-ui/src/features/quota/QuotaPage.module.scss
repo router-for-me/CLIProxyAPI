@@ -1,0 +1,220 @@
+@use '../../styles/mixins' as *;
+
+/* ============================================================
+ * 额度页壳层：纯布局，视觉细节都在各组件的 colocated 模块里。
+ * ============================================================ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  min-width: 0;
+}
+
+/* ---------- 工作区（tabs + 网格 + 分页） ---------- */
+
+.workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* 提供商导航独占一行，保留原生横向滚动。 */
+
+.tabsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+
+  > :first-child {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  min-width: 0;
+}
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 340px;
+  min-width: 0;
+  height: 36px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+
+  &:focus-within {
+    border-color: var(--border-hover);
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+.searchIcon {
+  position: absolute;
+  left: 11px;
+  pointer-events: none;
+}
+
+.searchInput {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  padding: 0 42px 0 35px;
+  border: 0;
+  border-radius: inherit;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  appearance: none;
+
+  &::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  &::-webkit-search-cancel-button,
+  &::-webkit-search-decoration {
+    appearance: none;
+  }
+}
+
+.clearSearch {
+  position: absolute;
+  right: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+}
+
+.sort {
+  flex: 0 0 auto;
+  min-width: 148px;
+  max-width: 100%;
+
+  button[aria-haspopup='listbox'] {
+    height: 36px;
+    border-color: transparent;
+    border-radius: 10px;
+    background: transparent;
+    box-shadow: none;
+    color: var(--text-secondary);
+
+    &:focus-visible,
+    &[aria-expanded='true'] {
+      outline: 2px solid var(--primary-color);
+      outline-offset: 2px;
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+    }
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .clearSearch:hover,
+  .sort button[aria-haspopup='listbox']:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clearSearch:active {
+    transform: none;
+  }
+}
+
+@include mobile {
+  .search {
+    flex: 1 1 220px;
+    height: 40px;
+  }
+
+  .clearSearch {
+    width: 36px;
+    height: 36px;
+  }
+
+  .sort button[aria-haspopup='listbox'] {
+    height: 40px;
+  }
+}
+
+.errorBanner {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--danger-color);
+  background: var(--bg-error-light);
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 卡片网格 ----------
+ * 列宽由 CSS 决定（不再用 JS 测量）：额度卡承载水位条，取 340px 下限，
+ * 与认证文件页配额模式（.gridQuota）同一档。 */
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+  align-items: stretch;
+}
+
+/* ---------- 分页 ---------- */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.pageInfo {
+  font-family: $font-mono;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+@include mobile {
+  .page {
+    gap: 16px;
+  }
+}

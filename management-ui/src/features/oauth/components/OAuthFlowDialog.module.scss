@@ -1,0 +1,754 @@
+@use '../../../styles/mixins' as *;
+@use '../sponsor' as *;
+
+/* ============================================================
+ * 授权对话框：品牌头 → 步骤（打开授权页 / 设备码 / 回调）→ 底部实时状态条。
+ * 主操作是墨色药丸；次操作描边药丸；遥测（链接、设备码、状态）一律 mono。
+ * ============================================================ */
+
+/* ---------- 壳层：局部改写全局 modal 的头/体/脚与动效 ---------- */
+
+:global(.modal).dialog {
+  border-radius: 18px;
+  transform-origin: 50% 45%;
+
+  /* 全局 modal 是回弹放大 + 收缩到 0；这里换成 Premium 档：无回弹、退出更快 */
+  &:global(.modal-entering) {
+    animation: oauth-dialog-in 280ms var(--ease-out-strong, ease-out) both;
+  }
+
+  &:global(.modal-closing) {
+    animation: oauth-dialog-out 180ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
+  :global(.modal-header) {
+    padding: 22px 64px 6px 24px;
+    border-bottom: 0;
+  }
+
+  :global(.modal-body) {
+    padding: 14px 24px 24px;
+    max-height: 70vh;
+  }
+
+  :global(.modal-footer) {
+    display: block;
+    padding: 0;
+    border-top: 1px solid var(--border-color);
+    background: color-mix(in srgb, var(--bg-secondary) 60%, var(--bg-primary));
+  }
+}
+
+@keyframes oauth-dialog-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes oauth-dialog-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+/* ---------- 品牌头 ---------- */
+
+.heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.headingGlyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.headingImage {
+  display: block;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
+.headingText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.headingTitle {
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  color: var(--text-primary);
+  @include text-ellipsis;
+}
+
+.headingCaption {
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
+}
+
+/* ---------- 视图切换：容器先落定，内容随后 60ms 淡入（次级运动） ---------- */
+
+.view {
+  animation: oauth-view-in 220ms var(--ease-out-strong, ease-out) 60ms backwards;
+}
+
+@keyframes oauth-view-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.signUpPrompt {
+  color: var(--text-tertiary);
+}
+
+.inlineLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 2px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--text-primary) 30%, transparent);
+  text-underline-offset: 3px;
+  border-radius: 4px;
+  transition: text-decoration-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+.alert {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--viz-failure) 28%, transparent);
+  background: color-mix(in srgb, var(--viz-failure) 8%, transparent);
+  color: color-mix(in srgb, var(--viz-failure) 82%, var(--text-primary));
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 步骤：mono 序号 + 细竖轨 ---------- */
+
+.steps {
+  counter-reset: oauth-step;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.step {
+  position: relative;
+  counter-increment: oauth-step;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 14px;
+  padding-bottom: 20px;
+
+  &:last-child {
+    padding-bottom: 0;
+  }
+
+  /* 竖轨连到下一个序号 */
+  &:not(:last-child)::before {
+    content: '';
+    position: absolute;
+    left: 10.5px;
+    top: 28px;
+    bottom: 6px;
+    width: 1px;
+    background: var(--border-color);
+  }
+}
+
+.stepIndex {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  font-family: $font-mono;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-secondary);
+
+  &::before {
+    content: counter(oauth-step);
+  }
+}
+
+.stepBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.stepHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+
+.stepTitle {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.optional {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.stepHint {
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 授权链接 ---------- */
+
+.urlField {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 4px 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  min-width: 0;
+}
+
+.urlText {
+  flex: 1;
+  min-width: 0;
+  font-family: $font-mono;
+  font-size: 12px;
+  line-height: 1;
+  @include text-ellipsis;
+}
+
+.urlHost {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.urlRest {
+  color: var(--text-tertiary);
+}
+
+.urlSkeleton {
+  flex: 1;
+  height: 10px;
+  margin-right: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-tertiary) 0%,
+    color-mix(in srgb, var(--bg-tertiary) 40%, var(--bg-secondary)) 50%,
+    var(--bg-tertiary) 100%
+  );
+  background-size: 200% 100%;
+  animation: oauth-skeleton 1.2s linear infinite;
+}
+
+@keyframes oauth-skeleton {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* ---------- 设备码 ---------- */
+
+.codeRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.code {
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--border-primary);
+  background: var(--bg-secondary);
+  font-family: $font-mono;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.14em;
+  color: var(--text-primary);
+  user-select: all;
+}
+
+/* ---------- 回调 ---------- */
+
+.callbackRow {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.callbackInput {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-family: $font-mono;
+  font-size: 12px;
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+}
+
+.feedbackError,
+.feedbackSuccess {
+  margin: -2px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.feedbackError {
+  color: var(--viz-failure);
+}
+
+.feedbackSuccess {
+  color: var(--viz-success);
+}
+
+/* ---------- 按钮 ---------- */
+
+%pill {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex-shrink: 0;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:focus {
+    outline: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+}
+
+/* 墨色药丸（深色主题自动反相） */
+.primary {
+  @extend %pill;
+  background: var(--text-primary);
+  color: var(--bg-secondary);
+}
+
+.secondary {
+  @extend %pill;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.ghost {
+  @extend %pill;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-secondary));
+    box-shadow: 0 10px 22px -10px color-mix(in srgb, var(--text-primary) 45%, transparent);
+  }
+
+  .secondary:hover:not(:disabled) {
+    border-color: var(--border-hover);
+    background: var(--bg-tertiary);
+  }
+
+  .ghost:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  .inlineLink:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
+.spinning {
+  animation: oauth-spin 0.8s linear infinite;
+}
+
+@keyframes oauth-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- 底部状态条 ---------- */
+
+.statusBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  padding: 8px 14px 8px 24px;
+}
+
+.statusText {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  margin: 0;
+  font-family: $font-mono;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+
+.statusLabel {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.statusDot {
+  position: relative;
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+
+  /* 轮询中的呼吸环：说明系统正在等，而不是卡住 */
+  &::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 1px solid currentColor;
+    opacity: 0;
+    animation: oauth-ring 1.8s var(--ease-out-strong, ease-out) infinite;
+  }
+}
+
+@keyframes oauth-ring {
+  0% {
+    opacity: 0.55;
+    transform: scale(0.5);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.4);
+  }
+}
+
+.statusBar[data-tone='error'] .statusText {
+  color: var(--viz-failure);
+}
+
+.statusBar[data-tone='error'] .statusDot::after {
+  animation: none;
+}
+
+.statusAside {
+  flex-shrink: 0;
+  padding-right: 10px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: right;
+}
+
+/* ---------- 成功 ---------- */
+
+.result {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 0 2px;
+  text-align: center;
+}
+
+.successMark {
+  width: 52px;
+  height: 52px;
+  margin-bottom: 8px;
+  overflow: visible;
+}
+
+.successRing {
+  fill: color-mix(in srgb, var(--viz-success) 12%, transparent);
+  stroke: color-mix(in srgb, var(--viz-success) 55%, transparent);
+  stroke-width: 1.5;
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: oauth-ring-in 320ms var(--ease-out-strong, ease-out) backwards;
+}
+
+.successCheck {
+  fill: none;
+  stroke: var(--viz-success);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 34;
+  stroke-dashoffset: 0;
+  animation: oauth-check-draw 360ms var(--ease-out-strong, ease-out) 160ms backwards;
+}
+
+@keyframes oauth-ring-in {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+}
+
+@keyframes oauth-check-draw {
+  from {
+    stroke-dashoffset: 34;
+  }
+}
+
+.resultTitle {
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.resultHint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.resultActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ---------- 赞助商对话框（Kimi）：延续卡片的品牌蓝 ---------- */
+
+:global(.modal).sponsorDialog {
+  background:
+    radial-gradient(90% 60% at 100% 0%, sponsor-tint(12%), transparent 60%), var(--bg-primary);
+
+  /* 与赞助卡一致：图标自带圆角方块，直接铺满，不再套一层描边容器 */
+  .headingGlyph {
+    border: 0;
+    background: none;
+    overflow: hidden;
+  }
+
+  .headingImage {
+    width: 44px;
+    height: 44px;
+  }
+
+  .primary {
+    background: #{$sponsor-blue-strong};
+    color: #fff;
+  }
+
+  .primary:focus-visible,
+  .inlineLink:focus-visible {
+    outline-color: #{$sponsor-blue};
+  }
+
+  .inlineLink {
+    color: sponsor-ink();
+    text-decoration-color: sponsor-tint(40%);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :global(.modal).sponsorDialog .primary:hover:not(:disabled) {
+    background: #{$sponsor-blue-strong-hover};
+    box-shadow: 0 10px 22px -10px sponsor-tint(70%);
+  }
+}
+
+/* ---------- 窄屏 ---------- */
+
+@include mobile {
+  :global(.modal).dialog {
+    :global(.modal-header) {
+      padding: 18px 56px 4px 18px;
+    }
+
+    :global(.modal-body) {
+      padding: 12px 18px 20px;
+    }
+  }
+
+  .statusBar {
+    padding-left: 18px;
+  }
+
+  .statusAside {
+    display: none;
+  }
+
+  .callbackRow {
+    flex-direction: column;
+  }
+
+  /* 纵向堆叠时 flex: 1 会沿主轴压扁输入框 */
+  .callbackInput {
+    flex: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :global(.modal).dialog {
+    &:global(.modal-entering) {
+      animation: oauth-fade-in 160ms ease both;
+    }
+
+    &:global(.modal-closing) {
+      animation: oauth-fade-out 140ms ease both;
+    }
+  }
+
+  .view,
+  .successRing,
+  .successCheck,
+  .urlSkeleton,
+  .statusDot::after {
+    animation: none;
+  }
+
+  .spinning {
+    animation-duration: 1.6s;
+  }
+
+  .primary,
+  .secondary,
+  .ghost {
+    transition: none;
+  }
+
+  .primary:active:not(:disabled),
+  .secondary:active:not(:disabled),
+  .ghost:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+@keyframes oauth-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes oauth-fade-out {
+  to {
+    opacity: 0;
+  }
+}

@@ -1,0 +1,102 @@
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 5px 4px 9px;
+  border-radius: $radius-full;
+  color: var(--text-primary);
+  font-family: $font-mono;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+/* 显式勾选：实线 + primary 染色，读起来是「我选的」。 */
+.exact {
+  border: 1px solid color-mix(in srgb, var(--primary-color) 45%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+}
+
+/* 规则派生：虚线 = 「不是逐个挑的，是某条规则算出来的」。 */
+.wildcard {
+  border: 1px dashed color-mix(in srgb, var(--primary-color) 38%, var(--border-color));
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+/* 目录外的精确规则：同样虚线，但更弱——它指向一个我们无法确认存在的模型。 */
+.unknown {
+  border: 1px dashed var(--border-color);
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.remove {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:active:not(:disabled) {
+    transform: scale(0.9);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover:not(:disabled) {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .remove {
+    transition: none;
+  }
+
+  .remove:active:not(:disabled) {
+    transform: none;
+  }
+}

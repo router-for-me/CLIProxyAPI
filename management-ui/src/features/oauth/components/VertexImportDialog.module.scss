@@ -1,0 +1,169 @@
+@use '../../../styles/mixins' as *;
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.label {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 选文件 + 拖放落点：虚线 → 悬停/拖入变实线（与额度卡 idle 落点同语汇） */
+.dropZone {
+  @include button-reset;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 12px 14px;
+  border: 1px dashed var(--border-primary);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  text-align: left;
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:focus {
+    outline: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+
+  &:active {
+    transform: scale(0.99);
+  }
+
+  &[data-dragging='true'] {
+    border-style: solid;
+    border-color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+
+  &[data-filled='true'] {
+    border-style: solid;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dropZone:hover {
+    border-style: solid;
+    border-color: var(--border-hover);
+  }
+}
+
+.dropGlyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.dropText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dropTitle {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.fileName {
+  font-family: $font-mono;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  @include text-ellipsis;
+}
+
+.dropHint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.locationField {
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+
+  :global(.input) {
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 10px;
+    font-family: $font-mono;
+    font-size: 12.5px;
+  }
+
+  :global(.form-group label) {
+    font-size: 13.5px;
+  }
+
+  :global(.hint) {
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+}
+
+/* 导入结果：发丝分隔的键值行 */
+.facts {
+  width: 100%;
+  margin: 12px 0 0;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  text-align: left;
+  overflow: hidden;
+}
+
+.fact {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  padding: 9px 14px;
+
+  & + & {
+    border-top: 1px solid var(--border-color);
+  }
+
+  dt {
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  dd {
+    margin: 0;
+    font-family: $font-mono;
+    font-size: 12px;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dropZone {
+    transition: none;
+  }
+
+  .dropZone:active {
+    transform: none;
+  }
+}

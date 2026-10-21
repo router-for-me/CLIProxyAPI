@@ -1,0 +1,51 @@
+.editor {
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  input,
+  select,
+  textarea {
+    min-width: 0;
+  }
+}
+
+.ruleFields {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(0, 2fr);
+  gap: 8px;
+}
+
+.matchRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.matchInput {
+  height: auto;
+  min-height: 36px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.removeMatch {
+  margin-top: 22px;
+  min-height: 32px;
+}
+
+@media (max-width: 520px) {
+  .ruleFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .matchRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+
+    > :first-child {
+      grid-column: 1 / -1;
+    }
+  }
+}

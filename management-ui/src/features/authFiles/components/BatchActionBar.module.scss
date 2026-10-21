@@ -1,0 +1,85 @@
+@use '../../../styles/mixins' as *;
+
+/* 悬浮批量操作条：底部居中的玻璃工具栏（--content-center-x 对齐内容列中心） */
+
+.container {
+  position: fixed;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  left: var(--content-center-x, 50%);
+  transform: translateX(-50%);
+  width: min(960px, calc(100vw - 24px));
+  z-index: $z-dropdown;
+  pointer-events: none;
+}
+
+.bar {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 14px;
+  border-radius: 16px;
+  --glass-blur: 14px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-backdrop-filter);
+  box-shadow: var(--shadow-lg);
+}
+
+.left,
+.right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.count {
+  font-family: $font-mono;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  padding-right: 4px;
+  white-space: nowrap;
+}
+
+.bar :global(.btn) {
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    background-color $transition-fast,
+    border-color $transition-fast,
+    color $transition-fast;
+}
+
+.bar :global(.btn:active:not(:disabled)) {
+  transform: scale(0.96);
+}
+
+@include mobile {
+  .container {
+    width: calc(100vw - 16px);
+  }
+
+  .bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .left,
+  .right {
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar :global(.btn) {
+    transition: none;
+  }
+
+  .bar :global(.btn:active:not(:disabled)) {
+    transform: none;
+  }
+}
