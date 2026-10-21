@@ -669,6 +669,11 @@ type MerklePrefixMatcher struct {
 	prefixCount   int
 	accessCounter uint64
 	operations    uint64
+	// invalidatedSessions remembers, per session released by InvalidateSession,
+	// the access generation at release time so a late success from a request
+	// routed before the release cannot re-create the binding, however long that
+	// request ran. Bounded by maxGroups; the oldest releases are dropped first.
+	invalidatedSessions map[string]uint64
 }
 
 type lcpNamespace struct {
@@ -935,6 +940,14 @@ func (m *MerklePrefixMatcher) TouchFingerprints(namespace string, fingerprints [
 
 // TouchFingerprintsWithContext refreshes or binds a precomputed request sequence with explicit tail and environment context.
 func (m *MerklePrefixMatcher) TouchFingerprintsWithContext(namespace string, fingerprints, tailFingerprints []string, envDigest string, minPrefixLength int, authID string) bool {
+	return m.TouchSessionFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, authID, "", 0)
+}
+
+// TouchSessionFingerprintsWithContext is TouchFingerprintsWithContext for a request
+// that was routed through LCP session sessionID at access generation generation.
+// If that session was released by InvalidateSession after the request was routed,
+// the touch is ignored so a late success cannot restore the released binding.
+func (m *MerklePrefixMatcher) TouchSessionFingerprintsWithContext(namespace string, fingerprints, tailFingerprints []string, envDigest string, minPrefixLength int, authID, sessionID string, generation uint64) bool {
 	if m == nil || strings.TrimSpace(namespace) == "" || strings.TrimSpace(authID) == "" {
 		return false
 	}
@@ -951,7 +964,49 @@ func (m *MerklePrefixMatcher) TouchFingerprintsWithContext(namespace string, fin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.prepareLocked()
+	if m.sessionInvalidatedSinceLocked(sessionID, generation) {
+		return false
+	}
 	return m.touchLocked(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, strings.TrimSpace(authID), m.now())
+}
+
+// SessionReleasedSince reports whether InvalidateSession released sessionID after
+// access generation generation was observed.
+func (m *MerklePrefixMatcher) SessionReleasedSince(sessionID string, generation uint64) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sessionInvalidatedSinceLocked(sessionID, generation)
+}
+
+func (m *MerklePrefixMatcher) sessionInvalidatedSinceLocked(sessionID string, generation uint64) bool {
+	if sessionID == "" || generation == 0 || len(m.invalidatedSessions) == 0 {
+		return false
+	}
+	releasedAt, ok := m.invalidatedSessions[sessionID]
+	return ok && generation <= releasedAt
+}
+
+func (m *MerklePrefixMatcher) recordSessionInvalidationLocked(sessionID string) {
+	if m.invalidatedSessions == nil {
+		m.invalidatedSessions = make(map[string]uint64)
+	}
+	m.invalidatedSessions[sessionID] = m.accessCounter
+	limit := m.maxGroups
+	if limit <= 0 {
+		limit = defaultMatcherMaxGroups
+	}
+	for len(m.invalidatedSessions) > limit {
+		oldestID, oldest := "", uint64(0)
+		for id, releasedAt := range m.invalidatedSessions {
+			if oldestID == "" || releasedAt < oldest || (releasedAt == oldest && id < oldestID) {
+				oldestID, oldest = id, releasedAt
+			}
+		}
+		delete(m.invalidatedSessions, oldestID)
+	}
 }
 
 // Remove removes the exact request sequence when it is still bound to authID.
@@ -1044,6 +1099,34 @@ func (m *MerklePrefixMatcher) InvalidateAuth(authID string) {
 			}
 		}
 	}
+}
+
+// InvalidateSession removes every LCP binding whose derived session identifier
+// equals sessionID and reports how many groups were dropped.
+//
+// LCP session identifiers are minted by the matcher itself (see bindLocked), so
+// this is the counterpart of InvalidateAuth for callers that want to release a
+// single conversation instead of an entire credential.
+func (m *MerklePrefixMatcher) InvalidateSession(sessionID string) int {
+	if m == nil || sessionID == "" {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	removed := 0
+	for _, namespace := range m.groups {
+		for _, group := range namespace.groups {
+			if group.sessionID == sessionID {
+				m.removeGroupLocked(group)
+				removed++
+			}
+		}
+	}
+	// Record the release even when no group exists yet: a derived (fork or
+	// divergent) session can be routed before its first group is inserted on
+	// success, and that success must not create it on the released auth.
+	m.recordSessionInvalidationLocked(sessionID)
+	return removed
 }
 
 // Clear removes all remembered prefix bindings.
