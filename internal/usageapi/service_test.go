@@ -224,6 +224,13 @@ func TestSnapshotPrefersQuotaProvider(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal response: %v", errMarshal)
 	}
+	var envelope map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
+		t.Fatalf("decode envelope: %v", errUnmarshal)
+	}
+	if len(envelope) != 2 || envelope["generatedAt"] == nil || envelope["reports"] == nil {
+		t.Fatalf("envelope = %s, want exactly generatedAt and reports", raw)
+	}
 	for _, secret := range []string{"super-secret-token", "user@example.com"} {
 		if strings.Contains(string(raw), secret) {
 			t.Fatalf("response leaked %q: %s", secret, raw)

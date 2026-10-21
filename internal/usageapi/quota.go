@@ -79,12 +79,17 @@ func reportFromQuota(provider string, quota pluginapi.QuotaFetchResponse, fetche
 				},
 				Status: percentStatus(usedFraction, false),
 			}
-			if windowID != "" {
-				limit.Window = &Window{ID: windowID, Label: humanWindowLabel(windowID)}
-				if duration := windowDurationMs(windowID); duration != nil {
+			resetsAt := parseResetTime(bucket.ResetTime)
+			if windowID != "" || resetsAt > 0 {
+				effectiveWindowID := windowID
+				if effectiveWindowID == "" {
+					effectiveWindowID = "limit"
+				}
+				limit.Window = &Window{ID: effectiveWindowID, Label: humanWindowLabel(effectiveWindowID)}
+				if duration := windowDurationMs(effectiveWindowID); duration != nil {
 					limit.Window.DurationMs = duration
 				}
-				if resetsAt := parseResetTime(bucket.ResetTime); resetsAt > 0 {
+				if resetsAt > 0 {
 					limit.Window.ResetsAt = resetsAt
 				}
 			}
