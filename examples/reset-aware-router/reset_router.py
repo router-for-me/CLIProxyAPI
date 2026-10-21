@@ -24,6 +24,7 @@ from pathlib import Path
 
 UTC = dt.timezone.utc
 EXPIRY_HORIZON = dt.timedelta(days=7)
+URGENT_EXPIRY_HORIZON = dt.timedelta(hours=5)
 REDEEM_HORIZON = dt.timedelta(hours=24)
 
 
@@ -165,7 +166,7 @@ def should_redeem(result, now):
 
 
 def account_rank(result, now):
-    """Rank natural weekly renewal first; an expiring credit breaks ties.
+    """Use credits expiring within five hours, then rank weekly renewal.
 
     An exhausted weekly bucket cannot serve a request until a reset is redeemed,
     so do not promote it merely because its renewal is close.
@@ -179,9 +180,13 @@ def account_rank(result, now):
     used = weekly.get("usedPercent")
     if (isinstance(reset_at, (int, float)) and reset_at > now.timestamp()
             and isinstance(used, (int, float)) and 0 <= used < 100):
+        if credit_expiry - now.timestamp() <= URGENT_EXPIRY_HORIZON.total_seconds():
+            return (-1, credit_expiry, renewal_minute(reset_at), used)
         return (0, renewal_minute(reset_at), credit_expiry, used)
     if weekly:
         return None  # Known exhausted or malformed weekly quota is not promoted.
+    if credit_expiry - now.timestamp() <= URGENT_EXPIRY_HORIZON.total_seconds():
+        return (-1, credit_expiry, float("inf"), 0)
     if credit_expiry < now.timestamp() + EXPIRY_HORIZON.total_seconds():
         return (1, credit_expiry, float("inf"), 0)
     return None
@@ -306,6 +311,22 @@ def claude_offer_active(expires_on, now):
     return now.astimezone().date() <= expiry_date
 
 
+def claude_offer_expiry(offer, now):
+    """Return an active offer's date rank and optional exact expiry time."""
+    if "expires_at" in offer:
+        try:
+            expiry = parse_reset_timestamp(offer["expires_at"])
+        except (TypeError, ValueError):
+            return float("inf"), None
+        if expiry <= now.timestamp():
+            return float("inf"), None
+        expiry_date = dt.datetime.fromtimestamp(expiry, UTC).astimezone().date()
+        return expiry_date.toordinal(), expiry
+    if claude_offer_active(offer.get("expires_on"), now):
+        return dt.date.fromisoformat(offer["expires_on"]).toordinal(), None
+    return float("inf"), None
+
+
 def parse_reset_timestamp(raw):
     if not isinstance(raw, str):
         raise ValueError("reset timestamp is not text")
@@ -377,14 +398,22 @@ def apply_claude_priorities(args, key, auths, now):
         if entry.get("disabled") or entry.get("status") != "active":
             continue
         offer = offer_by_name.get(identity) or {}
-        offer_expiry = (dt.date.fromisoformat(offer["expires_on"]).toordinal()
-                        if claude_offer_active(offer.get("expires_on"), now) else float("inf"))
+        offer_expiry, exact_expiry = claude_offer_expiry(offer, now)
         weekly = claude_weekly_rank(entry, now)
         if weekly and weekly[1] < 1:
             reset_at, used = weekly
-            ranked.append(((0, renewal_minute(reset_at), offer_expiry, used), identity))
+            if (exact_expiry is not None and exact_expiry - now.timestamp()
+                    <= URGENT_EXPIRY_HORIZON.total_seconds()):
+                rank = (-1, exact_expiry, renewal_minute(reset_at), used)
+            else:
+                rank = (0, renewal_minute(reset_at), offer_expiry, used)
+            ranked.append((rank, identity))
         elif weekly is None and offer_expiry != float("inf"):
-            ranked.append(((1, offer_expiry, float("inf"), 0), identity))
+            if (exact_expiry is not None and exact_expiry - now.timestamp()
+                    <= URGENT_EXPIRY_HORIZON.total_seconds()):
+                ranked.append(((-1, exact_expiry, float("inf"), 0), identity))
+            else:
+                ranked.append(((1, offer_expiry, float("inf"), 0), identity))
     ranked.sort()
     priorities = {identity: len(ranked) - index for index, (_, identity) in enumerate(ranked)}
     for identity, entry in by_name.items():

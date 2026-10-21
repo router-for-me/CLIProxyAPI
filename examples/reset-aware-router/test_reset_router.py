@@ -62,6 +62,32 @@ class PolicyTests(unittest.TestCase):
         later = self.limits(used=5, expiry=int((self.now + dt.timedelta(days=2)).timestamp()))
         self.assertLess(router.account_rank(earlier, self.now), router.account_rank(later, self.now))
 
+    def test_final_five_hours_override_earlier_weekly_renewal(self):
+        urgent = self.limits(used=20, expiry=int((self.now + dt.timedelta(hours=5)).timestamp()))
+        earlier_weekly = self.limits(used=20,
+                                     reset=int((self.now + dt.timedelta(days=1)).timestamp()))
+        earlier_weekly["rateLimitResetCredits"] = {"availableCount": 0, "credits": []}
+        self.assertLess(router.account_rank(urgent, self.now),
+                        router.account_rank(earlier_weekly, self.now))
+        just_outside = self.limits(used=20,
+                                   expiry=int((self.now + dt.timedelta(hours=5, seconds=1)).timestamp()))
+        self.assertLess(router.account_rank(earlier_weekly, self.now),
+                        router.account_rank(just_outside, self.now))
+
+    def test_urgent_credit_does_not_promote_unusable_account(self):
+        urgent_expiry = int((self.now + dt.timedelta(hours=1)).timestamp())
+        self.assertIsNone(router.account_rank(self.limits(used=100, expiry=urgent_expiry), self.now))
+        expired = self.limits(used=20, expiry=int((self.now - dt.timedelta(seconds=1)).timestamp()))
+        self.assertEqual(router.account_rank(expired, self.now)[0], 0)
+
+    def test_urgent_credit_with_unknown_weekly_window_goes_first(self):
+        urgent = self.limits(expiry=int((self.now + dt.timedelta(hours=2)).timestamp()))
+        urgent["rateLimitsByLimitId"] = {}
+        urgent["rateLimits"] = {}
+        ordinary = self.limits()
+        self.assertLess(router.account_rank(urgent, self.now),
+                        router.account_rank(ordinary, self.now))
+
     def test_one_second_renewal_jitter_allows_credit_expiry_tie_break(self):
         reset = int((self.now + dt.timedelta(days=5, seconds=31)).timestamp())
         with_credit = self.limits(used=0, reset=reset + 1)
@@ -134,6 +160,15 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(router.claude_offer_active("2026-10-15", self.now))
         self.assertFalse(router.claude_offer_active("invalid", self.now))
 
+    def test_claude_exact_offer_expires_at_known_instant(self):
+        offer = {"expires_at": (self.now + dt.timedelta(hours=5)).isoformat()}
+        self.assertEqual(router.claude_offer_expiry(offer, self.now)[1],
+                         (self.now + dt.timedelta(hours=5)).timestamp())
+        self.assertEqual(router.claude_offer_expiry(offer,
+                         self.now + dt.timedelta(hours=5)), (float("inf"), None))
+        self.assertEqual(router.claude_offer_expiry({"expires_at": "2026-10-16"}, self.now),
+                         (float("inf"), None))
+
     def test_claude_reset_timestamp_formats(self):
         for raw in (str(self.weekly_reset), "2026-10-21T00:00:00Z",
                     "Wed, 21 Oct 2026 00:00:00 GMT"):
@@ -179,6 +214,35 @@ class PolicyTests(unittest.TestCase):
                 router.apply_claude_priorities(args, "unused", auths, self.now)
         self.assertEqual([(call[3]["name"], call[3]["priority"]) for call in writes],
                          [("soon.json", 2), ("later.json", 1), ("invalid.json", 0)])
+
+    def test_claude_exact_offer_final_five_hours_overrides_weekly_order(self):
+        def entry(name, days):
+            return {"name": name, "type": "claude", "status": "active", "priority": 0,
+                    "quota": {"observed_at": self.now.isoformat(), "signals": {
+                        "Anthropic-Ratelimit-Unified-7d-Reset": str(int(
+                            (self.now + dt.timedelta(days=days)).timestamp())),
+                        "Anthropic-Ratelimit-Unified-7d-Utilization": "0.2"}}}
+
+        auths = [entry("early.json", 1), entry("offer.json", 3)]
+        with tempfile.TemporaryDirectory() as directory:
+            offer_file = Path(directory) / "offers.json"
+            args = SimpleNamespace(claude_offers_file=str(offer_file), dry_run=False)
+
+            def priorities(offer):
+                offer_file.write_text(json.dumps({"offers": [offer]}))
+                with patch.object(router, "management") as send:
+                    router.apply_claude_priorities(args, "unused", auths, self.now)
+                return {call.args[3]["name"]: call.args[3]["priority"]
+                        for call in send.call_args_list}
+
+            self.assertEqual(priorities({"name": "offer.json", "expires_at":
+                                        (self.now + dt.timedelta(hours=5)).isoformat()}),
+                             {"early.json": 1, "offer.json": 2})
+            self.assertEqual(priorities({"name": "offer.json", "expires_at":
+                                        (self.now + dt.timedelta(hours=5, seconds=1)).isoformat()}),
+                             {"early.json": 2, "offer.json": 1})
+            self.assertEqual(priorities({"name": "offer.json", "expires_on": "2026-10-16"}),
+                             {"early.json": 2, "offer.json": 1})
 
     def test_stale_claude_observation_is_not_ranked(self):
         entry = {"quota": {"observed_at": (self.now - dt.timedelta(days=4)).isoformat(),

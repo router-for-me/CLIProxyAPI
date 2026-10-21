@@ -5,6 +5,11 @@ accounts with usable weekly quota, it prefers the earliest upcoming weekly
 renewal, so unused capacity is spent before that window closes. Renewal times
 are compared to the nearest minute to ignore second-level reporting jitter.
 An earned manual reset expiry breaks ties, followed by unused weekly quota.
+During the final five hours before a known earned reset credit expires, an
+account that can serve ordinary requests takes priority over accounts with
+earlier weekly renewals. Among these urgent accounts, the earliest credit
+expiry goes first. This changes request routing; it does not automatically
+redeem a reset credit or guarantee that traffic will consume the balance.
 CLIProxyAPI still checks model support and cooldowns before serving a request.
 
 Codex weekly limits and earned reset credits come from the Codex app-server
@@ -60,9 +65,14 @@ at `~/.local/state/cliproxy-reset-router/claude-offers.json` (or use
 {"offers": [{"name": "claude-account.json", "kind": "full", "expires_on": "2026-10-22"}]}
 ```
 
-The offer expiry is a secondary routing signal. When no usable weekly window
-is observed, a currently valid offer can promote the account until its
-calendar expiry. You can use `email` instead of `name` when exactly one loaded
+The offer expiry is normally a secondary routing signal. If Claude shows an
+exact expiry time, use `"expires_at": "2026-10-22T18:00:00+03:00"` instead
+of `expires_on`. An active offer with a known expiry within five hours takes
+priority over other Claude accounts with earlier weekly renewals, provided
+its weekly quota is usable or unknown. A date-only `expires_on` never triggers
+the five-hour override because the exact expiry time is unknown. When no
+usable weekly window is observed, a currently valid offer can promote the
+account until its recorded expiry. You can use `email` instead of `name` when exactly one loaded
 Claude credential has that email. Ambiguous emails are skipped; use the exact
 credential name in that case. This companion never redeems a Claude offer;
 open Claude Settings > Usage and select **Reset for free** yourself when
