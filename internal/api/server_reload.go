@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/access"
@@ -64,16 +65,34 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		_ = yaml.Unmarshal(oldConfigYaml, &oldCfg)
 	}
 
-	// Update request logger enabled state if it has changed
+	// Update request logger admission policy if it has changed
 	previousRequestLog := false
+	var previousRequestLogAPIKeys []string
+	var previousRequestLogUntil string
+	previousCommercialMode := false
 	if oldCfg != nil {
 		previousRequestLog = oldCfg.RequestLog
+		previousRequestLogAPIKeys = oldCfg.RequestLogAPIKeys
+		previousRequestLogUntil = oldCfg.RequestLogUntil
+		previousCommercialMode = oldCfg.CommercialMode
 	}
-	if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
-		if s.loggerToggle != nil {
-			s.loggerToggle(cfg.RequestLog)
+	policyChanged := oldCfg == nil ||
+		previousRequestLog != cfg.RequestLog ||
+		previousRequestLogUntil != cfg.RequestLogUntil ||
+		!slices.Equal(previousRequestLogAPIKeys, cfg.RequestLogAPIKeys) ||
+		previousCommercialMode != cfg.CommercialMode
+
+	if s.requestLogger != nil && policyChanged {
+		enabled := cfg.RequestLog && !cfg.CommercialMode
+		if setter, ok := s.requestLogger.(interface {
+			SetPolicy(enabled bool, apiKeys []string, until string)
+		}); ok {
+			setter.SetPolicy(enabled, cfg.RequestLogAPIKeys, cfg.RequestLogUntil)
 		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
-			toggler.SetEnabled(cfg.RequestLog)
+			toggler.SetEnabled(enabled)
+		}
+		if s.loggerToggle != nil {
+			s.loggerToggle(enabled)
 		}
 	}
 

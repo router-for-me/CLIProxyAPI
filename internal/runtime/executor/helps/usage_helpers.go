@@ -780,9 +780,9 @@ func APIKeyFromContext(ctx context.Context) string {
 	}
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil {
-		return ""
+		return usage.APIKeyFromContext(ctx)
 	}
-	if v, exists := ginCtx.Get("userApiKey"); exists {
+	if v, exists := ginCtx.Get("userApiKey"); exists && v != nil {
 		switch value := v.(type) {
 		case string:
 			return value
@@ -792,7 +792,7 @@ func APIKeyFromContext(ctx context.Context) string {
 			return fmt.Sprintf("%v", value)
 		}
 	}
-	return ""
+	return usage.APIKeyFromContext(ctx)
 }
 
 // AccessProviderFromContext extracts the client authentication provider identifier from the context.

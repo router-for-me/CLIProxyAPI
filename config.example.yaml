@@ -1171,6 +1171,15 @@ observability:
     # Record proxy request/response logs. Management requests are excluded.
     request-log: false
 
+    # Optional list of client API keys to log. When empty, all requests are logged.
+    # When non-empty, only requests authenticated with an exact-matching API key are logged.
+    # request-log-api-keys:
+    #   - "sk-..."
+
+    # Optional RFC3339 timestamp until which new request logs are captured (e.g. 2026-12-31T23:59:59Z).
+    # After this deadline, new captures stop automatically without deleting existing logs.
+    # request-log-until: ""
+
   usage:
     # When false, disable in-memory usage statistics aggregation
     usage-statistics-enabled: false

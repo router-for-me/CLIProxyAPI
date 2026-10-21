@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -282,7 +283,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	codexResponseSteering := false
 	if h != nil {
 		if cfg := h.CurrentConfig(); cfg != nil {
-			requestLogEnabled = cfg.RequestLog
+			principal := websocketCallerPrincipal(c)
+			requestLogEnabled = cfg.RequestLogAdmitted(false, principal, time.Now())
 			codexResponseSteering = cfg.CodexResponseSteering
 		}
 	}
@@ -922,4 +924,24 @@ func responsesWebsocketPreviousResponseNotFoundError() *interfaces.ErrorMessage 
 			`{"error":{"message":"Previous response is not available on this websocket; resend the full conversation input without previous_response_id","type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}`,
 		),
 	}
+}
+
+func websocketCallerPrincipal(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if v, exists := c.Get("userApiKey"); exists && v != nil {
+		switch value := v.(type) {
+		case string:
+			return value
+		case fmt.Stringer:
+			return value.String()
+		default:
+			return fmt.Sprintf("%v", value)
+		}
+	}
+	if c.Request != nil {
+		return coreusage.APIKeyFromContext(c.Request.Context())
+	}
+	return ""
 }

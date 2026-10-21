@@ -84,6 +84,12 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
+	// RequestLogAPIKeys restricts request logging to specific client API keys.
+	RequestLogAPIKeys []string `yaml:"request-log-api-keys" json:"request-log-api-keys"`
+
+	// RequestLogUntil sets an optional RFC3339 deadline until which new request logs are captured.
+	RequestLogUntil string `yaml:"request-log-until" json:"request-log-until"`
+
 	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
 	CodexOrphanDelegationCompatibility bool `yaml:"-" json:"-"`
 

@@ -57,8 +57,25 @@ type upstreamAttempt struct {
 	trailingNewlines     int
 }
 
-func requestLogCaptureEnabled(cfg *config.Config) bool {
-	return cfg != nil && cfg.RequestLog && !cfg.CommercialMode
+var requestLogNowFunc = time.Now
+
+func requestLogCaptureEnabled(ctx context.Context, cfg *config.Config) bool {
+	if cfg == nil || !cfg.RequestLog || cfg.CommercialMode {
+		return false
+	}
+	principal := APIKeyFromContext(ctx)
+	return cfg.RequestLogAdmitted(principal, requestLogNowFunc())
+}
+
+// SetRequestLogNowFuncForTest overrides the evaluation clock for testing.
+func SetRequestLogNowFuncForTest(fn func() time.Time) func() {
+	prev := requestLogNowFunc
+	if fn == nil {
+		requestLogNowFunc = time.Now
+	} else {
+		requestLogNowFunc = fn
+	}
+	return func() { requestLogNowFunc = prev }
 }
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -70,7 +87,7 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	if ginCtx == nil {
 		return
 	}
-	if !cfg.RequestLog {
+	if !requestLogCaptureEnabled(ctx, cfg) {
 		deferAPIRequest(ginCtx, info)
 		return
 	}
@@ -190,7 +207,7 @@ func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
-	if !requestLogCaptureEnabled(cfg) {
+	if !requestLogCaptureEnabled(ctx, cfg) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -218,7 +235,7 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if !requestLogCaptureEnabled(cfg) || err == nil {
+	if !requestLogCaptureEnabled(ctx, cfg) || err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -243,7 +260,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
-	if !requestLogCaptureEnabled(cfg) {
+	if !requestLogCaptureEnabled(ctx, cfg) {
 		return
 	}
 	data := bytes.TrimSpace(chunk)
@@ -287,7 +304,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
-	if !requestLogCaptureEnabled(cfg) {
+	if !requestLogCaptureEnabled(ctx, cfg) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -320,7 +337,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
-	if !requestLogCaptureEnabled(cfg) {
+	if !requestLogCaptureEnabled(ctx, cfg) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -344,7 +361,7 @@ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status
 // RecordAPIWebsocketUpgradeRejection stores a rejected websocket upgrade as an HTTP attempt.
 func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, info UpstreamRequestLog, status int, headers http.Header, body []byte) {
 	logging.SetResponseHeaders(ctx, headers)
-	if !requestLogCaptureEnabled(cfg) {
+	if !requestLogCaptureEnabled(ctx, cfg) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -378,7 +395,7 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
-	if !requestLogCaptureEnabled(cfg) {
+	if !requestLogCaptureEnabled(ctx, cfg) {
 		return
 	}
 	data := bytes.TrimSpace(payload)
@@ -409,7 +426,7 @@ func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, pa
 
 // RecordAPIWebsocketError stores an upstream websocket error event in Gin context.
 func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage string, err error) {
-	if !requestLogCaptureEnabled(cfg) || err == nil {
+	if !requestLogCaptureEnabled(ctx, cfg) || err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)

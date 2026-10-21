@@ -2084,6 +2084,62 @@ func TestWebsocketTimelineLogFallsBackToMemoryWithoutSource(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketTimelineLog_AdmissionGate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("admitted key enables timeline log", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Set("userApiKey", "sk-ws-allowed")
+
+		cfg := &internalconfig.SDKConfig{
+			RequestLog:        true,
+			RequestLogAPIKeys: []string{"sk-ws-allowed"},
+		}
+		principal := websocketCallerPrincipal(c)
+		enabled := cfg.RequestLogAdmitted(false, principal, time.Now())
+		timeline := newWebsocketTimelineLog(enabled, nil)
+		if !timeline.enabled {
+			t.Fatal("expected timeline to be enabled for admitted key")
+		}
+	})
+
+	t.Run("denied key disables timeline log", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Set("userApiKey", "sk-ws-denied")
+
+		cfg := &internalconfig.SDKConfig{
+			RequestLog:        true,
+			RequestLogAPIKeys: []string{"sk-ws-allowed"},
+		}
+		principal := websocketCallerPrincipal(c)
+		enabled := cfg.RequestLogAdmitted(false, principal, time.Now())
+		timeline := newWebsocketTimelineLog(enabled, nil)
+		if timeline.enabled {
+			t.Fatal("expected timeline to be disabled for denied key")
+		}
+	})
+
+	t.Run("expired until disables timeline log", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Set("userApiKey", "sk-ws-allowed")
+
+		cfg := &internalconfig.SDKConfig{
+			RequestLog:        true,
+			RequestLogAPIKeys: []string{"sk-ws-allowed"},
+			RequestLogUntil:   "2020-01-01T00:00:00Z",
+		}
+		principal := websocketCallerPrincipal(c)
+		enabled := cfg.RequestLogAdmitted(false, principal, time.Now())
+		timeline := newWebsocketTimelineLog(enabled, nil)
+		if timeline.enabled {
+			t.Fatal("expected timeline to be disabled for expired until deadline")
+		}
+	})
+}
+
 func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"

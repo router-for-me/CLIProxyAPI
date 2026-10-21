@@ -104,6 +104,8 @@ func buildV8Paths() []configPath {
 		{"video-result-auth-cache-ttl", "multimedia.video-result-auth-cache-ttl"},
 		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},
 		{"logs-max-total-size-mb", "observability.logs.logs-max-total-size-mb"}, {"request-log", "observability.logs.request-log"},
+		{"request-log-api-keys", "observability.logs.request-log-api-keys"},
+		{"request-log-until", "observability.logs.request-log-until"},
 		{"error-logs-max-files", "observability.logs.error-logs-max-files"},
 		{"usage-statistics-enabled", "observability.usage.usage-statistics-enabled"},
 		{"redis-usage-queue-retention-seconds", "observability.usage.redis-usage-queue-retention-seconds"}, {"pprof", "observability.pprof"},
@@ -913,6 +915,9 @@ func ValidateV8Config(data []byte) error {
 	var cfg legacyConfig
 	if errDecode := decoder.Decode(&cfg); errDecode != nil {
 		return errDecode
+	}
+	if errValidate := cfg.ValidateRequestLog(); errValidate != nil {
+		return errValidate
 	}
 	return cfg.Models.Validate()
 }
