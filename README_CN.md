@@ -134,6 +134,18 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
+### HTTP、SSE 与 WebSocket
+
+`POST /v1/responses` 支持非流式 JSON 和 `stream: true` 的 SSE 增量输出；`GET /v1/responses` 支持标准 RFC 6455 WebSocket。Responses WebSocket 支持 `response.create`、`response.append` 及按上游能力选择的增量续接。Realtime 使用单独的 `/v1/realtime` 路由。
+
+HTTP 也支持跨请求增量续接：将已完成响应的 `id` 作为 `previous_response_id`，只提交新增 `input`。JSON 与 SSE 可以交替使用，也可以引用较早的响应分叉会话。省略模型时沿用上一请求的模型；指令、工具和其他参数只取当前请求，不继承旧值。代理保存规范化的输入与输出，并为无状态上游恢复完整历史；因此客户端请求是增量的，但不代表上游原生支持续接或上游请求变小。恢复后的正文仍受请求大小限制及最终 payload 配置约束。
+
+- 省略 `store` 时默认保存；`store: false` 可以引用已有状态，但不保存本次响应。只保存成功完成的响应，最终响应的 `store` 字段反映实际保存结果。超出缓存限制或未选中凭据的插件响应不会保存。
+- 状态按已认证客户端隔离，后续请求绑定原上游凭据；凭据不可用时不会悄悄切换账号，无法遵守绑定的插件路由返回 503。关闭客户端认证时，共用一个匿名作用域。
+- 缓存在单个代理进程内，有效期 30 分钟，最多 1,024 条、总计 64 MiB、单条 8 MiB（含正文和元数据）。多实例部署需要实例粘连；过期、淘汰或重启后需要重发完整上下文。未知或其他客户端的 ID 返回 HTTP 400 / `previous_response_not_found`，不会带着缺失历史继续请求上游。
+
+WebSocket 续接仍以连接为作用域，HTTP 缓存不会迁移 WebSocket 会话，也不提供 SSE `Last-Event-ID` 断线事件重放。Codex 上游 SSE 支持 LF、CRLF、CR 及跨网络读取拆分的换行；翻译和验证过程会保留空行分隔符，纯 `data:` 事件不再等待下一事件才能发送。
+
 ## 新手入门
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)

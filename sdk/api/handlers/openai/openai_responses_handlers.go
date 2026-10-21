@@ -74,6 +74,7 @@ type responsesSSEFramer struct {
 	dataFrames           int
 	writeErr             error
 	canComplete          func() bool
+	responsePayload      func([]byte, string) []byte
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -217,16 +218,20 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		f.terminalEvent = eventType
 	}
 
+	originalPayload := payload
 	switch eventType {
 	case "response.output_item.done":
 		f.recordOutputItem(payload)
 	case "response.completed":
-		repaired := f.repairCompletedPayload(payload)
-		if !bytes.Equal(repaired, payload) {
-			return responsesSSEFrameWithData(frame, repaired)
-		}
+		payload = f.repairCompletedPayload(payload)
 	}
-	return frame
+	if f.responsePayload != nil {
+		payload = f.responsePayload(payload, eventType)
+	}
+	if bytes.Equal(originalPayload, payload) {
+		return frame
+	}
+	return responsesSSEFrameWithData(frame, payload)
 }
 
 func responsesSSEPayloadErrorMessage(payload []byte) *interfaces.ErrorMessage {
@@ -528,6 +533,7 @@ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
+	httpContinuations responsesHTTPContinuationStore
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
@@ -635,6 +641,10 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		})
 		return
 	}
+	rawJSON, ok := h.prepareResponsesHTTP(c, rawJSON)
+	if !ok {
+		return
+	}
 
 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
@@ -707,6 +717,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = responsesHTTPState(c).executionContext(cliCtx)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
@@ -717,6 +728,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	resp = responsesHTTPState(c).response(resp, true)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -746,6 +758,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	deliveryCtx, finishDelivery := usage.WithStreamDelivery(context.Background())
 	defer finishDelivery(context.Canceled)
 	cliCtx, cancelExecution := h.GetContextWithCancel(h, c, deliveryCtx)
+	cliCtx = responsesHTTPState(c).executionContext(cliCtx)
 	cliCancel := func(err error) {
 		finishDelivery(err)
 		cancelExecution(err)
@@ -794,7 +807,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	if isCodexClient {
 		failureEvent = "response.failed"
 	}
-	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
+	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }, responsePayload: responsesHTTPState(c).streamPayload}
 	var initialOutput bytes.Buffer
 
 	// Peek at the first complete SSE data frame.

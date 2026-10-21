@@ -29,6 +29,12 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 }
 
 func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if pinnedAuthIDFromContext(ctx) != "" {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing cannot honor a pinned credential")}
+		close(errChan)
+		return nil, nil, errChan
+	}
 	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
@@ -782,6 +788,7 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	}
 
 	if len(bytes.TrimSpace(s.pending)) == 0 {
+		output = append(output, s.pending...)
 		s.pending = s.pending[:0]
 		return output, nil
 	}

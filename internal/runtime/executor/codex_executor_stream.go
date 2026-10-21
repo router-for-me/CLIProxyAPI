@@ -304,6 +304,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			// Native Responses translators yield physical SSE lines. Preserve the
+			// separator even when translation rewrites a line or the line is empty.
+			if responseFormat == sdktranslator.FormatOpenAIResponse || responseFormat == sdktranslator.FormatCodex {
+				for i := range chunks {
+					if len(chunks[i]) == 0 || chunks[i][len(chunks[i])-1] != '\n' {
+						chunks[i] = append(chunks[i], '\n')
+					}
+				}
+			}
 			if isHandshake && !terminalSuccess {
 				rawLineCount := scanner.RawLines()
 				frameBytes := scanner.RawBytes()
@@ -481,6 +490,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			if responseFormat == sdktranslator.FormatOpenAIResponse || responseFormat == sdktranslator.FormatCodex {
+				for i := range chunks {
+					if len(chunks[i]) == 0 || chunks[i][len(chunks[i])-1] != '\n' {
+						chunks[i] = append(chunks[i], '\n')
+					}
+				}
+			}
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
