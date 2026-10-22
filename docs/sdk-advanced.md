@@ -9,6 +9,17 @@ The examples use Go 1.24+ and the v6 module path.
 
 ## Concepts
 
+Response normalizers receive the full original and translated request by default.
+For plugins that only inspect response fragments and the requested model, set
+`Capabilities.ResponseNormalizerOmitRequestBody` in Go, or register the RPC
+capability `response_normalizer_omit_request_body: true`. Both before- and
+after-translation normalizers then receive nil request bodies and a
+`ResponseTransformRequest.RequestedModel` containing the original client model,
+including its provider prefix. If it is unavailable, the field falls back to
+`Model`. This applies to streaming and non-streaming responses. Existing plugins
+retain their payloads unless they explicitly opt in. The opt-out avoids copying
+and base64-encoding the entire conversation for every streamed fragment.
+
 - Provider executor: a runtime component implementing `auth.ProviderExecutor` that performs outbound calls for a given provider key (e.g., `gemini`, `claude`, `codex`). Executors can also implement `RequestPreparer` to inject credentials on raw HTTP requests.
 - Translator registry: schema conversion functions routed by `sdk/translator`. The built‑in handlers translate between OpenAI/Gemini/Claude/Codex formats; you can register new ones.
 - Model registry: publishes the list of available models per client/provider to power `/v1/models` and routing hints.
