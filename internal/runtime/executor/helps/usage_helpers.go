@@ -282,22 +282,41 @@ func (r *UsageReporter) warnModelSubstitution(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	served := r.ResponseModel()
-	expectedModel := r.UpstreamModel()
-	if expectedModel == "" {
-		expectedModel = r.model
-	}
-	if served == "" || !IsModelSubstituted(expectedModel, served) {
-		return
-	}
-	if r.model != "" && !IsModelSubstituted(r.model, served) {
-		return
-	}
 	providerName := strings.TrimSpace(r.provider)
 	if providerName == "" {
 		providerName = "unknown"
 	}
+	served := r.ResponseModel()
+	compareServed := served
+	expectedModel := r.UpstreamModel()
+	if expectedModel == "" {
+		expectedModel = r.model
+	}
+	if strings.EqualFold(providerName, "xai") {
+		// xAI serves the "-build" variant under the requested model ID
+		// (for example grok-4.7 -> grok-4.7-build). That naming difference is
+		// not a silent model substitution.
+		compareServed = trimXAIResponseBuildSuffix(compareServed)
+		expectedModel = trimXAIResponseBuildSuffix(expectedModel)
+	}
+	if compareServed == "" || !IsModelSubstituted(expectedModel, compareServed) {
+		return
+	}
+	if r.model != "" && !IsModelSubstituted(r.model, compareServed) {
+		return
+	}
 	LogWithRequestID(ctx).Warnf("%s executor: upstream served model %q for requested model %q (auth_index=%s)", providerName, served, r.model, r.authIndexForLog())
+}
+
+// trimXAIResponseBuildSuffix removes the "-build" channel suffix xAI appends
+// to the model ID in responses. Faster tiers keep a distinct suffix (for
+// example "-build-fast"), so only the exact "-build" suffix is removed.
+func trimXAIResponseBuildSuffix(model string) string {
+	model = strings.TrimSpace(model)
+	if len(model) >= len("-build") && strings.EqualFold(model[len(model)-len("-build"):], "-build") {
+		return model[:len(model)-len("-build")]
+	}
+	return model
 }
 
 // authIndexForLog labels the credential without exposing its file name or account.
