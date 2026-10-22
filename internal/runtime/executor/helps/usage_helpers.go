@@ -26,36 +26,37 @@ import (
 )
 
 type UsageReporter struct {
-	requestID           string
-	traceID             string
-	provider            string
-	baseURL             string
-	executorType        string
-	model               string
-	alias               string
-	authID              string
-	authIndex           string
-	authMu              sync.RWMutex
-	accessTokenHash     string
-	authType            string
-	apiKey              string
-	accessProvider      string
-	isNativeKey         bool
-	sessionID           string
-	parentSessionID     string
-	source              string
-	reasoning           string
-	serviceTier         string
-	generate            bool
-	stream              bool
-	requestedAt         time.Time
-	ttftMu              sync.RWMutex
-	ttft                time.Duration
-	firstPacketDuration time.Duration
-	firstPacketSet      bool
-	ttftStart           time.Time
-	ttftSet             bool
-	once                sync.Once
+	requestID            string
+	traceID              string
+	provider             string
+	baseURL              string
+	executorType         string
+	model                string
+	alias                string
+	authID               string
+	authIndex            string
+	authMu               sync.RWMutex
+	accessTokenHash      string
+	authType             string
+	apiKey               string
+	accessProvider       string
+	isNativeKey          bool
+	sessionID            string
+	parentSessionID      string
+	source               string
+	reasoning            string
+	serviceTier          string
+	effectiveServiceTier string
+	generate             bool
+	stream               bool
+	requestedAt          time.Time
+	ttftMu               sync.RWMutex
+	ttft                 time.Duration
+	firstPacketDuration  time.Duration
+	firstPacketSet       bool
+	ttftStart            time.Time
+	ttftSet              bool
+	once                 sync.Once
 
 	responseModelMu sync.RWMutex
 	// responseModel holds the latest model name reported by the upstream response.
@@ -343,11 +344,34 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 	r.publishRecord(ctx, record)
 }
 
-func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+// SetTranslatedRequestMetadata captures usage-relevant values from the final
+// outbound payload after translation and payload defaults or overrides.
+func (r *UsageReporter) SetTranslatedRequestMetadata(payload []byte, format string) {
 	if r == nil {
 		return
 	}
 	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+	r.effectiveServiceTier = extractEffectiveServiceTier(payload)
+}
+
+// SetTranslatedReasoningEffort is retained for existing executor call sites.
+// It captures all post-translation request metadata used by usage records.
+func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+	r.SetTranslatedRequestMetadata(payload, format)
+}
+
+func extractEffectiveServiceTier(payload []byte) string {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return ""
+	}
+	for _, path := range []string{"service_tier", "request.service_tier", "interaction.service_tier"} {
+		if node := gjson.GetBytes(payload, path); node.Type == gjson.String {
+			if tier := strings.TrimSpace(node.String()); tier != "" {
+				return tier
+			}
+		}
+	}
+	return ""
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -637,35 +661,36 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		responseModel = r.ResponseModel()
 	}
 	return usage.Record{
-		RequestID:           r.requestID,
-		TraceID:             r.traceID,
-		Provider:            r.provider,
-		BaseURL:             r.baseURL,
-		ExecutorType:        r.executorType,
-		Model:               model,
-		Alias:               r.alias,
-		Source:              r.source,
-		APIKey:              r.apiKey,
-		IsNativeKey:         r.isNativeKey,
-		AccessProvider:      r.accessProvider,
-		SessionID:           r.sessionID,
-		ParentSessionID:     r.parentSessionID,
-		AuthID:              r.authID,
-		AuthIndex:           r.authIndex,
-		AccessTokenSHA256:   r.accessTokenFingerprint(),
-		AuthType:            r.authType,
-		ReasoningEffort:     r.reasoning,
-		ServiceTier:         r.serviceTier,
-		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
-		ResponseModel:       responseModel,
-		Generate:            usage.GenerateFlag(r.generate),
-		Stream:              r.stream,
-		RequestedAt:         r.requestedAt,
-		Latency:             r.latency(),
-		TTFT:                r.ttftDuration(),
-		Failed:              failed,
-		Fail:                fail,
-		Detail:              detail,
+		RequestID:            r.requestID,
+		TraceID:              r.traceID,
+		Provider:             r.provider,
+		BaseURL:              r.baseURL,
+		ExecutorType:         r.executorType,
+		Model:                model,
+		Alias:                r.alias,
+		Source:               r.source,
+		APIKey:               r.apiKey,
+		IsNativeKey:          r.isNativeKey,
+		AccessProvider:       r.accessProvider,
+		SessionID:            r.sessionID,
+		ParentSessionID:      r.parentSessionID,
+		AuthID:               r.authID,
+		AuthIndex:            r.authIndex,
+		AccessTokenSHA256:    r.accessTokenFingerprint(),
+		AuthType:             r.authType,
+		ReasoningEffort:      r.reasoning,
+		ServiceTier:          r.serviceTier,
+		EffectiveServiceTier: r.effectiveServiceTier,
+		ResponseServiceTier:  strings.TrimSpace(detail.ResponseServiceTier),
+		ResponseModel:        responseModel,
+		Generate:             usage.GenerateFlag(r.generate),
+		Stream:               r.stream,
+		RequestedAt:          r.requestedAt,
+		Latency:              r.latency(),
+		TTFT:                 r.ttftDuration(),
+		Failed:               failed,
+		Fail:                 fail,
+		Detail:               detail,
 	}
 }
 

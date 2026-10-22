@@ -470,6 +470,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				if inst := gjson.GetBytes(current.clientBody, "instructions"); inst.Exists() {
 					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "instructions", []byte(inst.Raw))
 				}
+				if serviceTier := gjson.GetBytes(current.clientBody, "service_tier"); serviceTier.Exists() {
+					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "service_tier", []byte(serviceTier.Raw))
+				}
 				responseSettings[responseID] = &snapshot
 				responseOrder = append(responseOrder, responseID)
 				if len(responseOrder) > 16 {

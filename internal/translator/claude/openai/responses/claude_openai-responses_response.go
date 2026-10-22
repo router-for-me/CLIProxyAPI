@@ -191,10 +191,11 @@ func claudeStopReasonPauseTurn(stopReason string) bool {
 	return strings.EqualFold(strings.TrimSpace(stopReason), "pause_turn")
 }
 
-// claudeResponsesWebSearchStatus keeps a paused search that never received its
-// result in_progress, so the next request can send it back without a result.
+// claudeResponsesWebSearchStatus keeps a paused or tool_use-deferred search
+// that never received its result in_progress, so the next request can send it
+// back without a result.
 func claudeResponsesWebSearchStatus(stopReason, status string, hasResults bool) string {
-	if claudeStopReasonPauseTurn(stopReason) && !hasResults {
+	if !hasResults && (claudeStopReasonPauseTurn(stopReason) || strings.EqualFold(strings.TrimSpace(stopReason), "tool_use")) {
 		return "in_progress"
 	}
 	return status

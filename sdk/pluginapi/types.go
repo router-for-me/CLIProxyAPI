@@ -1554,8 +1554,11 @@ type UsageRecord struct {
 	Source string
 	// ReasoningEffort records the requested reasoning effort.
 	ReasoningEffort string
-	// ServiceTier records the requested or reported service tier.
+	// ServiceTier records the tier requested by the original client.
 	ServiceTier string
+	// EffectiveServiceTier records the tier in the final outbound request after
+	// protocol translation and payload defaults or overrides.
+	EffectiveServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
 	// ResponseModel stores the model name reported by the upstream response, empty when unknown.

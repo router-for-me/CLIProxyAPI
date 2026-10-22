@@ -182,6 +182,46 @@ func (w *Watcher) refreshAuthState(force bool) {
 			}
 		}
 	}
+	incompletePathOrDir := func(rawPath string, checkDir bool) bool {
+		if len(incompletePaths) == 0 {
+			return false
+		}
+		target := rawPath
+		if checkDir {
+			if strings.TrimSpace(rawPath) == "" {
+				return false
+			}
+			target = filepath.Dir(rawPath)
+		}
+		normalized := w.normalizeAuthPath(target)
+		if normalized == "" {
+			return false
+		}
+		if _, ok := incompletePaths[normalized]; ok {
+			return true
+		}
+		if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
+			if _, ok := incompletePaths[w.normalizeAuthPath(abs)]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	if len(incompletePaths) > 0 {
+		for knownPath := range w.lastAuthHashes {
+			if !incompletePathOrDir(knownPath, true) {
+				continue
+			}
+			var knownAbs string
+			if abs, errAbs := filepath.Abs(knownPath); errAbs == nil {
+				knownAbs = w.normalizeAuthPath(abs)
+			}
+			if previousFiles[knownPath] == w.fileObservations[knownPath] &&
+				(knownAbs == "" || previousFiles[knownAbs] == w.fileObservations[knownAbs]) {
+				w.lastAuthHashes[knownPath] = ""
+			}
+		}
+	}
 	authPath := func(auth *coreauth.Auth) string {
 		path := auth.Attributes[coreauth.AttributePath]
 		if path == "" {
@@ -197,22 +237,11 @@ func (w *Watcher) refreshAuthState(force bool) {
 			previousFiles[normalized] != w.fileObservations[normalized]
 	}
 	incompleteDuringScan := func(auth *coreauth.Auth) bool {
-		if len(incompletePaths) == 0 {
-			return false
-		}
-		normalized := authPath(auth)
-		if normalized == "" {
-			return false
-		}
-		if _, ok := incompletePaths[normalized]; ok {
+		if incompletePathOrDir(authPath(auth), false) {
 			return true
 		}
-		if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
-			if _, ok := incompletePaths[w.normalizeAuthPath(abs)]; ok {
-				return true
-			}
-		}
-		return false
+		// An unreadable auth directory is recorded as incomplete for every file in it.
+		return incompletePathOrDir(auth.Attributes[coreauth.AttributePath], true)
 	}
 	isFileBackedAuth := func(auth *coreauth.Auth) bool {
 		if auth == nil || len(auth.Attributes) == 0 {

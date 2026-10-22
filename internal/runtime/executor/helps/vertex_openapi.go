@@ -377,19 +377,30 @@ func parseVertexOpenAPIBool(raw any) (bool, bool) {
 }
 
 // IsGoogleVertexHost reports whether baseURL is empty or points to Google's
-// official aiplatform.googleapis.com domain.
+// official aiplatform.googleapis.com or Regional Endpoint (REP) domain.
 func IsGoogleVertexHost(baseURL string) bool {
 	trimmed := strings.TrimSpace(baseURL)
 	if trimmed == "" {
 		return true
 	}
 	parsed, errParse := url.Parse(trimmed)
+	if (errParse != nil || parsed.Host == "") && !strings.Contains(trimmed, "://") {
+		parsed, errParse = url.Parse("https://" + strings.TrimLeft(trimmed, "/"))
+	}
 	if errParse != nil || parsed.Host == "" {
 		lower := strings.ToLower(trimmed)
 		return strings.Contains(lower, "aiplatform.googleapis.com")
 	}
 	host := strings.ToLower(parsed.Hostname())
-	return host == "aiplatform.googleapis.com" || strings.HasSuffix(host, "-aiplatform.googleapis.com") || strings.HasSuffix(host, ".aiplatform.googleapis.com")
+	return host == "aiplatform.googleapis.com" || strings.HasSuffix(host, "-aiplatform.googleapis.com") || strings.HasSuffix(host, ".aiplatform.googleapis.com") || isGoogleVertexREPHost(host)
+}
+
+func isGoogleVertexREPHost(host string) bool {
+	if !strings.HasPrefix(host, "aiplatform.") || !strings.HasSuffix(host, ".rep.googleapis.com") {
+		return false
+	}
+	loc := strings.TrimSuffix(strings.TrimPrefix(host, "aiplatform."), ".rep.googleapis.com")
+	return loc != "" && !strings.Contains(loc, ".")
 }
 
 // VertexExplicitOpenAPILocation returns an explicitly configured OpenAPI location
@@ -474,13 +485,15 @@ func VertexAuthProjectID(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-// VertexOpenAPIHostBaseURL returns the Vertex regional or global host URL.
+// VertexOpenAPIHostBaseURL returns the Vertex regional, multi-region REP, or global host URL.
 func VertexOpenAPIHostBaseURL(location string) string {
 	loc := strings.TrimSpace(location)
 	if loc == "" {
 		loc = "us-central1"
 	} else if strings.EqualFold(loc, "global") {
 		return "https://aiplatform.googleapis.com"
+	} else if strings.EqualFold(loc, "us") || strings.EqualFold(loc, "eu") {
+		return fmt.Sprintf("https://aiplatform.%s.rep.googleapis.com", strings.ToLower(loc))
 	}
 	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
 }

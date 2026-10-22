@@ -88,6 +88,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		}
 		newFileAuthsByPath := make(map[string]map[string]*coreauth.Auth)
 		var incompleteRescanPaths map[string]struct{}
+		var incompleteRescanDir string
 
 		w.clientsMutex.RLock()
 		parser := w.pluginAuthParser
@@ -98,6 +99,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		} else if resolvedAuthDir != "" {
 			entries, errReadDir := os.ReadDir(resolvedAuthDir)
 			if errReadDir != nil {
+				if !errors.Is(errReadDir, fs.ErrNotExist) {
+					incompleteRescanDir = resolvedAuthDir
+				}
 				log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
 			} else {
 				for _, entry := range entries {
@@ -155,6 +159,23 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 			}
 		}
 		w.clientsMutex.Lock()
+		if incompleteRescanDir != "" {
+			markDirMemberIncomplete := func(trackedPath string) {
+				if !w.sameNormalizedAuthPath(filepath.Dir(trackedPath), incompleteRescanDir) {
+					return
+				}
+				if incompleteRescanPaths == nil {
+					incompleteRescanPaths = make(map[string]struct{})
+				}
+				incompleteRescanPaths[trackedPath] = struct{}{}
+			}
+			for trackedPath := range w.lastAuthHashes {
+				markDirMemberIncomplete(trackedPath)
+			}
+			for trackedPath := range w.fileAuthsByPath {
+				markDirMemberIncomplete(trackedPath)
+			}
+		}
 		for normalizedPath := range incompleteRescanPaths {
 			if _, ok := w.lastAuthHashes[normalizedPath]; ok {
 				newAuthHashes[normalizedPath] = ""
@@ -251,6 +272,24 @@ func (w *Watcher) rereadDiscardedFileSnapshot(auth *coreauth.Auth) {
 	w.clientsMutex.Unlock()
 
 	w.addOrUpdateClientLocked(path)
+}
+
+func (w *Watcher) sameNormalizedAuthPath(pathA, pathB string) bool {
+	normA := w.normalizeAuthPath(pathA)
+	normB := w.normalizeAuthPath(pathB)
+	if normA == "" || normB == "" {
+		return false
+	}
+	if normA == normB {
+		return true
+	}
+	if absA, errAbsA := filepath.Abs(normA); errAbsA == nil {
+		normA = w.normalizeAuthPath(absA)
+	}
+	if absB, errAbsB := filepath.Abs(normB); errAbsB == nil {
+		normB = w.normalizeAuthPath(absB)
+	}
+	return normA != "" && normA == normB
 }
 
 func (w *Watcher) invalidateAuthFileHashLocked(path string) string {

@@ -273,7 +273,7 @@ func TestRepeatedWebSearchIDsAcrossTurnsAreNotMerged(t *testing.T) {
 	}
 }
 
-// A paused search followed by a tool output is not a continuation pair: the
+// A paused search followed by a user turn is not a continuation pair: the
 // later item with the same id is not merged into it.
 func TestPausedSearchContinuationRequiresSameAssistantRun(t *testing.T) {
 	paused := `{"id":"` + responsesWebSearchCallID("srvtoolu_p") + `","type":"web_search_call","status":"in_progress","action":{"type":"search","query":"paused"}}`
@@ -442,5 +442,58 @@ func TestPauseTurnAfterCompletedSearchPreservedOnPrefillRejectingModel(t *testin
 	blocks := claudeAssistantBlocks(t, claudeRequest)
 	if got, want := blockTypes(blocks), "server_tool_use,web_search_tool_result"; got != want {
 		t.Fatalf("assistant blocks = %s, want %s: %s", got, want, claudeRequest)
+	}
+}
+
+func deferredSearchChunks() [][]byte {
+	return [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_d1","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_deferred","name":"web_search","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"deferred query\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_exec","name":"exec","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"uname\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+}
+
+var execOutput = gjson.Parse(`{"output":[{"type":"function_call_output","call_id":"toolu_exec","output":"Linux"}]}`)
+
+func TestDeferredSearchReplaysWithoutResultAlongsideToolOutput(t *testing.T) {
+	_, response := streamTerminal(t, deferredSearchChunks())
+	if search := response.Get("output.0"); search.Get("status").String() != "in_progress" || search.Get("results").Exists() {
+		t.Fatalf("deferred search item = %s", search.Raw)
+	}
+	nonStream := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(
+		context.Background(), "claude-test", nil, nil, bytes.Join(deferredSearchChunks(), []byte("\n")), nil))
+	if search := nonStream.Get("output.0"); search.Get("status").String() != "in_progress" || search.Get("results").Exists() {
+		t.Fatalf("non-stream deferred search item = %s", search.Raw)
+	}
+	claudeRequest, errTranslate := ConvertOpenAIResponsesRequestToClaude("claude-test", codexHistoryRequest(t, response, execOutput), true)
+	if errTranslate != nil {
+		t.Fatal(errTranslate)
+	}
+	if got := blockTypes(claudeAssistantBlocks(t, claudeRequest)); got != "server_tool_use,tool_use" {
+		t.Fatalf("assistant blocks = %s", got)
+	}
+}
+
+func TestDeferredSearchContinuationEmitsSinglePair(t *testing.T) {
+	_, deferred := streamTerminal(t, deferredSearchChunks())
+	_, continued := streamTerminal(t, continuationChunks("msg_d2", "srvtoolu_deferred", "end_turn"))
+	request := codexHistoryRequest(t, deferred, execOutput, continued)
+	request, _ = sjson.SetRawBytes(request, "input.-1", []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":"thanks"}]}`))
+	claudeRequest, errTranslate := ConvertOpenAIResponsesRequestToClaude("claude-test", request, true)
+	if errTranslate != nil {
+		t.Fatal(errTranslate)
+	}
+	blocks := claudeAssistantBlocks(t, claudeRequest)
+	if got := blockTypes(blocks); got != "tool_use,server_tool_use,web_search_tool_result,text" {
+		t.Fatalf("assistant blocks = %s", got)
+	}
+	if got := blocks[1].Get("input.query").String(); got != "deferred query" {
+		t.Fatalf("replayed server_tool_use query = %q, want deferred query: %s", got, blocks[1].Raw)
 	}
 }

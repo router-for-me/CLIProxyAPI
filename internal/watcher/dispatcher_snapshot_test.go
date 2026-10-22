@@ -666,6 +666,191 @@ func TestRefreshAuthStatePreservesUnreadableFile(t *testing.T) {
 	}
 }
 
+func TestFullScanPreservesAuthsInUnreadableDir(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires Unix file permissions and a non-root user")
+	}
+	for _, mode := range []string{"refresh_unchanged", "refresh_updated", "refresh_removed", "reload_unchanged", "reload_identical", "reload_updated", "affected_oauth_provider"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "account.json")
+			if errWrite := os.WriteFile(path, []byte(`{"type":"codex","prefix":"initial"}`), 0o600); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			t.Cleanup(func() {
+				if errChmod := os.Chmod(dir, 0o700); errChmod != nil && !os.IsNotExist(errChmod) {
+					t.Error(errChmod)
+				}
+			})
+			w := &Watcher{
+				authDir:   dir,
+				config:    &config.Config{AuthDir: dir},
+				authQueue: make(chan AuthUpdate, 16),
+			}
+			w.reloadClients(true, nil, false)
+			if _, okBatch := w.nextPendingBatch(context.Background()); !okBatch || w.currentAuths["account.json"] == nil {
+				t.Fatal("expected initial scan to add the credential")
+			}
+			normalized := w.normalizeAuthPath(path)
+			if w.lastAuthHashes[normalized] == "" {
+				t.Fatal("expected initial content hash")
+			}
+
+			if errChmod := os.Chmod(dir, 0); errChmod != nil {
+				t.Fatal(errChmod)
+			}
+
+			switch mode {
+			case "reload_unchanged", "reload_identical", "reload_updated":
+				w.reloadClients(true, nil, false)
+				if hash, ok := w.lastAuthHashes[normalized]; !ok || hash != "" {
+					t.Errorf("expected retained hash entry cleared for unreadable auth dir, got hash=%q, present=%v", hash, ok)
+				}
+			case "affected_oauth_provider":
+				w.reloadClients(false, []string{"codex"}, false)
+			default:
+				w.refreshAuthState(false)
+				if hash, ok := w.lastAuthHashes[normalized]; !ok || hash != "" {
+					t.Errorf("expected retained hash entry cleared for unreadable auth dir, got hash=%q, present=%v", hash, ok)
+				}
+			}
+			if current := w.currentAuths["account.json"]; current == nil || current.Prefix != "initial" {
+				t.Fatalf("scan of unreadable auth dir unregistered credential: current=%#v, pending=%#v", current, w.pendingUpdates)
+			}
+			if _, ok := w.fileAuthsByPath[normalized]["account.json"]; !ok {
+				t.Fatal("expected credential in unreadable auth dir to remain indexed by file path")
+			}
+			if mode == "affected_oauth_provider" {
+				for _, update := range w.pendingUpdates {
+					if update.Action == AuthUpdateActionDelete {
+						t.Fatalf("expected no delete during provider reload, got %+v", update)
+					}
+				}
+				if len(w.pendingOrder) > 0 {
+					if _, okBatch := w.nextPendingBatch(context.Background()); !okBatch {
+						t.Fatal("expected provider reload batch")
+					}
+				}
+			} else if len(w.pendingOrder) != 0 {
+				t.Fatalf("expected no updates while auth dir is unreadable, got %#v", w.pendingUpdates)
+			}
+
+			if errChmod := os.Chmod(dir, 0o700); errChmod != nil {
+				t.Fatal(errChmod)
+			}
+
+			switch mode {
+			case "refresh_unchanged":
+				w.refreshAuthState(false)
+				if len(w.pendingOrder) != 0 {
+					t.Fatalf("expected no updates once auth dir is readable again, got %#v", w.pendingUpdates)
+				}
+			case "reload_unchanged":
+				w.reloadClients(true, nil, false)
+				if len(w.pendingOrder) != 0 {
+					t.Fatalf("expected no updates once auth dir is readable again, got %#v", w.pendingUpdates)
+				}
+			case "refresh_updated", "reload_updated":
+				if errWrite := os.WriteFile(path, []byte(`{"type":"codex","prefix":"updated"}`), 0o600); errWrite != nil {
+					t.Fatal(errWrite)
+				}
+				if mode == "refresh_updated" {
+					w.refreshAuthState(false)
+				} else {
+					w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Write})
+				}
+				if current := w.currentAuths["account.json"]; current == nil || current.Prefix != "updated" {
+					t.Fatalf("expected restored file update, got %#v", current)
+				}
+				if update := w.pendingUpdates["account.json"]; update.Action != AuthUpdateActionModify {
+					t.Fatalf("expected modify after restoring permissions, got %+v", update)
+				}
+				if _, okBatch := w.nextPendingBatch(context.Background()); !okBatch {
+					t.Fatal("expected restored file update batch")
+				}
+			case "reload_identical":
+				w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Write})
+				if w.lastAuthHashes[normalized] == "" {
+					t.Fatal("expected identical content write to be processed and hash restored")
+				}
+				if current := w.currentAuths["account.json"]; current == nil || current.Prefix != "initial" {
+					t.Fatalf("expected unchanged credential after restoring permissions, got %#v", current)
+				}
+				if len(w.pendingOrder) != 0 {
+					t.Fatalf("expected identical content to produce no auth updates, got %#v", w.pendingUpdates)
+				}
+			}
+
+			if errRemove := os.Remove(path); errRemove != nil {
+				t.Fatal(errRemove)
+			}
+			switch mode {
+			case "affected_oauth_provider":
+				w.reloadClients(false, []string{"codex"}, false)
+			case "refresh_unchanged", "refresh_updated", "refresh_removed":
+				w.refreshAuthState(false)
+			default:
+				w.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Remove})
+			}
+			if w.currentAuths["account.json"] != nil {
+				t.Fatal("expected removed file to unregister credential")
+			}
+			if update := w.pendingUpdates["account.json"]; update.Action != AuthUpdateActionDelete {
+				t.Fatalf("expected delete after actual removal, got %+v", update)
+			}
+		})
+	}
+
+	t.Run("dot_auth_dir_still_removes_deleted_config_credential", func(t *testing.T) {
+		dir := t.TempDir()
+		origWD, errGetwd := os.Getwd()
+		if errGetwd != nil {
+			t.Fatal(errGetwd)
+		}
+		if errChdir := os.Chdir(dir); errChdir != nil {
+			t.Fatal(errChdir)
+		}
+		t.Cleanup(func() {
+			if errChmod := os.Chmod(dir, 0o700); errChmod != nil && !os.IsNotExist(errChmod) {
+				t.Error(errChmod)
+			}
+			if errRestoreWD := os.Chdir(origWD); errRestoreWD != nil {
+				t.Error(errRestoreWD)
+			}
+		})
+		if errWrite := os.WriteFile("account.json", []byte(`{"type":"codex","prefix":"initial"}`), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		cfg := &config.Config{
+			AuthDir: ".",
+			GeminiKey: []config.GeminiKey{
+				{APIKey: "AIzaSyTestKey1234567890"},
+			},
+		}
+		w := &Watcher{
+			authDir:   ".",
+			config:    cfg,
+			authQueue: make(chan AuthUpdate, 16),
+		}
+		w.refreshAuthState(false)
+		if _, okBatch := w.nextPendingBatch(context.Background()); !okBatch || len(w.currentAuths) != 2 {
+			t.Fatalf("expected initial scan to register file and config auths, got %#v", w.currentAuths)
+		}
+
+		if errChmod := os.Chmod(dir, 0); errChmod != nil {
+			t.Fatal(errChmod)
+		}
+		cfg.GeminiKey = nil
+		w.refreshAuthState(false)
+		if w.currentAuths["account.json"] == nil {
+			t.Fatalf("expected file credential in unreadable '.' dir to be preserved, got %#v", w.currentAuths)
+		}
+		if len(w.currentAuths) != 1 {
+			t.Fatalf("expected removed config credential to be deleted despite unreadable '.' auth dir, got %#v", w.currentAuths)
+		}
+	})
+}
+
 func TestRefreshAuthStatePreservesIncompleteFileDuringInPlaceWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

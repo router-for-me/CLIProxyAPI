@@ -475,9 +475,9 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
-	reporter.SetTranslatedReasoningEffort(body, "gemini")
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "gemini", opts.SourceFormat.String(), "", body, originalTranslated, helps.PayloadRequestedModel(opts, req.Model), helps.PayloadRequestPath(opts), opts.Headers)
+	reporter.SetTranslatedReasoningEffort(body, "gemini")
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
 		return resp, errNewReq
@@ -624,9 +624,9 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
-	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
 		return resp, errNewReq
@@ -753,9 +753,9 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		}
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
-	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
 		return nil, errNewReq
@@ -964,9 +964,9 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		}
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
-	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
 		return nil, errNewReq
@@ -1434,8 +1434,10 @@ func vertexBaseURL(location string) string {
 	loc := strings.TrimSpace(location)
 	if loc == "" {
 		loc = "us-central1"
-	} else if loc == "global" {
+	} else if strings.EqualFold(loc, "global") {
 		return "https://aiplatform.googleapis.com"
+	} else if strings.EqualFold(loc, "us") || strings.EqualFold(loc, "eu") {
+		return fmt.Sprintf("https://aiplatform.%s.rep.googleapis.com", strings.ToLower(loc))
 	}
 	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
 }
@@ -1553,6 +1555,7 @@ func (e *GeminiVertexExecutor) executeInteractions(ctx context.Context, auth *cl
 	url := vertexInteractionsURL(baseURL, projectID, false)
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedRequestMetadata(body, "interactions")
 
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errRequest != nil {
@@ -1682,6 +1685,7 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 	url := vertexInteractionsURL(baseURL, projectID, true)
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedRequestMetadata(body, "interactions")
 
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errRequest != nil {

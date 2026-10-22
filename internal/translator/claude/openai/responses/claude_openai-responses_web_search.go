@@ -143,18 +143,18 @@ func convertResponsesWebSearchCallToClaudeBlocksWithQuery(item gjson.Result, fal
 }
 
 // responsesWebSearchHistory indexes web_search_call items of one request so a
-// search paused by pause_turn replays faithfully:
-//   - while the paused turn is the tail of the history, the search is sent back
-//     as a server_tool_use without a result, unchanged, as Anthropic requires;
+// search paused by pause_turn or deferred by tool_use replays faithfully:
+//   - while the open search turn is the tail of the history, the search is sent
+//     back as a server_tool_use without a result, unchanged, as Anthropic requires;
 //   - when the continuation delivered the result under the same id within the
-//     same assistant run (no user turn or tool output in between), the paused
-//     item is skipped and the continuation item emits the full pair, keeping the
-//     query recorded by the paused item.
+//     same assistant run (no user turn in between), the open item is skipped and
+//     the continuation item emits the full pair, keeping the query recorded by
+//     the open item.
 //
 // Every other web_search_call, including repeated ids across separate turns,
 // keeps its previous one-pair-per-item replay.
 type responsesWebSearchHistory struct {
-	// boundaryAfter[i] reports whether a user turn or a tool output follows index i.
+	// boundaryAfter[i] reports whether a user turn follows index i.
 	boundaryAfter []bool
 	// skip marks paused items that a later continuation item replaces.
 	skip map[int]bool
@@ -168,19 +168,15 @@ func responsesWebSearchItemIsPaused(item gjson.Result) bool {
 		!item.Get("results").Exists()
 }
 
+// responsesItemIsTurnBoundary reports a user turn. Tool outputs do not end the
+// assistant turn: Anthropic runs a deferred search right after them.
 func responsesItemIsTurnBoundary(item gjson.Result) bool {
 	typ := item.Get("type").String()
 	role := item.Get("role").String()
 	if typ == "" && role != "" {
 		typ = "message"
 	}
-	switch typ {
-	case "message":
-		return role != "assistant"
-	case "function_call_output", "custom_tool_call_output", "tool_search_output":
-		return true
-	}
-	return false
+	return typ == "message" && role != "assistant"
 }
 
 func scanResponsesWebSearchHistory(items []gjson.Result) responsesWebSearchHistory {

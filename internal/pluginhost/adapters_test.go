@@ -2511,12 +2511,13 @@ func TestUsageAdapterPropagatesResponseModelServiceTierAndStream(t *testing.T) {
 	}
 
 	adapter.HandleUsage(context.Background(), coreusage.Record{
-		Provider:            "provider",
-		Model:               "gpt-5.4",
-		ResponseModel:       "gpt-5.6-luna",
-		ServiceTier:         "default",
-		ResponseServiceTier: "priority",
-		Stream:              true,
+		Provider:             "provider",
+		Model:                "gpt-5.4",
+		ResponseModel:        "gpt-5.6-luna",
+		ServiceTier:          "auto",
+		EffectiveServiceTier: "priority",
+		ResponseServiceTier:  "default",
+		Stream:               true,
 	})
 	if gotRecord.Model != "gpt-5.4" {
 		t.Fatalf("plugin Model = %q, want gpt-5.4", gotRecord.Model)
@@ -2524,11 +2525,14 @@ func TestUsageAdapterPropagatesResponseModelServiceTierAndStream(t *testing.T) {
 	if gotRecord.ResponseModel != "gpt-5.6-luna" {
 		t.Fatalf("plugin ResponseModel = %q, want gpt-5.6-luna", gotRecord.ResponseModel)
 	}
-	if gotRecord.ServiceTier != "default" {
-		t.Fatalf("plugin ServiceTier = %q, want default", gotRecord.ServiceTier)
+	if gotRecord.ServiceTier != "auto" {
+		t.Fatalf("plugin ServiceTier = %q, want auto", gotRecord.ServiceTier)
 	}
-	if gotRecord.ResponseServiceTier != "priority" {
-		t.Fatalf("plugin ResponseServiceTier = %q, want priority", gotRecord.ResponseServiceTier)
+	if gotRecord.EffectiveServiceTier != "priority" {
+		t.Fatalf("plugin EffectiveServiceTier = %q, want priority", gotRecord.EffectiveServiceTier)
+	}
+	if gotRecord.ResponseServiceTier != "default" {
+		t.Fatalf("plugin ResponseServiceTier = %q, want default", gotRecord.ResponseServiceTier)
 	}
 	if !gotRecord.Stream {
 		t.Fatalf("plugin Stream = %v, want true", gotRecord.Stream)
@@ -2545,6 +2549,9 @@ func TestUsageAdapterPropagatesResponseModelServiceTierAndStream(t *testing.T) {
 	}
 	if gotRecord.ResponseModel != "" {
 		t.Fatalf("plugin ResponseModel = %q, want empty", gotRecord.ResponseModel)
+	}
+	if gotRecord.EffectiveServiceTier != "" {
+		t.Fatalf("plugin EffectiveServiceTier = %q, want empty", gotRecord.EffectiveServiceTier)
 	}
 	if gotRecord.ResponseServiceTier != "" {
 		t.Fatalf("plugin ResponseServiceTier = %q, want empty", gotRecord.ResponseServiceTier)
