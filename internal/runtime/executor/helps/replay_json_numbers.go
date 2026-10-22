@@ -33,8 +33,25 @@ func normalizeReplayJSONNumber(number json.Number) json.Number {
 	}
 	var exponent big.Int
 	if index := strings.IndexAny(mantissa, "eE"); index >= 0 {
-		if _, ok := exponent.SetString(mantissa[index+1:], 10); !ok {
+		exponentText := mantissa[index+1:]
+		negative := strings.HasPrefix(exponentText, "-")
+		if negative || strings.HasPrefix(exponentText, "+") {
+			exponentText = exponentText[1:]
+		}
+		exponentText = strings.TrimLeft(exponentText, "0")
+		// Leave pathological exponents unchanged so replay comparisons fail closed
+		// without constructing an unbounded big integer from client input.
+		if len(exponentText) > 64 {
 			return number
+		}
+		if exponentText == "" {
+			exponentText = "0"
+		}
+		if _, ok := exponent.SetString(exponentText, 10); !ok {
+			return number
+		}
+		if negative {
+			exponent.Neg(&exponent)
 		}
 		mantissa = mantissa[:index]
 	}
