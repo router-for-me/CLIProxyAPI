@@ -197,6 +197,17 @@ routing:
     # rounds, while an omitted or negative override inherits this global setting.
     request-retry: 3
 
+    # Additional attempts on the same credential and actual upstream model before
+    # model/credential failover, in each retry round. Applies to transient HTTP
+    # errors (408/500/502/503/504/520-526) and retryable connection failures.
+    # Retries immediately, retaining session affinity and deferring cooldown until
+    # these attempts are exhausted. Does not retry 401/403/429 or request faults;
+    # explicit request-scoped error rules take precedence. Streaming retries stop
+    # after the first payload. Set to 0 or below to disable (default: 0).
+    # In Home mode, retries keep the selected dispatch scope until recovery or
+    # exhaustion; fresh selection recovery shares this budget within the round.
+    same-upstream-retry: 0
+
     # Maximum number of different credentials to try in each credential retry round
     # after per-credential round filtering. Set to 0 to try all available
     # credentials. Credentials skipped by this cap still age with the global round,

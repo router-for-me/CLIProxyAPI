@@ -162,7 +162,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	} else {
 		dialCtx = cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
-		conn, closer, respHS, errDial = e.ensureUpstreamConn(dialCtx, auth, sess, authID, wsURL, wsHeaders)
+		conn, closer, respHS, errDial = e.ensureUpstreamConn(dialCtx, auth, sess, authID, wsURL, wsHeaders, opts)
 	}
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
@@ -234,7 +234,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// Retry once with a fresh websocket connection. This is mainly to handle
 			// upstream closing the socket between sequential requests within the same
 			// execution session.
-			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders, opts)
 			if errDialRetry == nil && connRetry != nil {
 				previousConn, previousReadCh := conn, readCh
 				conn = connRetry

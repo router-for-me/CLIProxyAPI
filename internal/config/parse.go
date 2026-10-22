@@ -102,6 +102,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+	if cfg.SameUpstreamRetry < 0 {
+		cfg.SameUpstreamRetry = 0
+	}
 
 	cfg.NormalizePluginsConfig()
 	cfg.NormalizeClaudeConfig()

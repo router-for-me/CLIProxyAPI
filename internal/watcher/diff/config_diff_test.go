@@ -162,6 +162,11 @@ func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetailsSameUpstreamRetry(t *testing.T) {
+	details := BuildConfigChangeDetails(&config.Config{}, &config.Config{SameUpstreamRetry: 2})
+	expectContains(t, details, "same-upstream-retry: 0 -> 2")
+}
+
 func TestBuildConfigChangeDetails_CodexLiveMediaRelay(t *testing.T) {
 	oldCfg := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
 		Enabled:     false,

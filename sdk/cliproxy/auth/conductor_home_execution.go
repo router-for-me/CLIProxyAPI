@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -74,6 +75,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	retryBudgets := make(map[sameUpstreamRetryKey]*atomic.Int64)
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
@@ -229,19 +231,19 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return effectiveAuth.Clone(), AccessTokenSHA256(effectiveAuth)
 			}
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
-			executorCtx := execCtx
-			if countTokens {
-				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
-			}
 			executor := executorForAuth(selection.Executor, preparedAuth)
-			execute := func() (cliproxyexecutor.Response, error) {
+			execute := func(attemptCtx context.Context) (cliproxyexecutor.Response, error) {
 				if countTokens {
+					executorCtx := withAccessTokenFingerprintObserver(attemptCtx, setEffectiveAuth)
 					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
 				}
-				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+				return executor.Execute(attemptCtx, preparedAuth, execReq, execOpts)
 			}
 			startHomeExec := time.Now()
-			response, errExecute = execute()
+			remainingRetries := m.sameUpstreamRetryBudget(retryBudgets, preparedAuth.ID, execReq.Model, true)
+			finishUpstreamFailures := m.deferUpstreamFailures(execCtx, preparedAuth, &execOpts, remainingRetries)
+			response, execCtx, errExecute = executeWithSameUpstreamRetry(execCtx, m, preparedAuth, remainingRetries, execute)
+			finishUpstreamFailures()
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
 			if countTokens {

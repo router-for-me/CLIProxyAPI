@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
@@ -496,6 +497,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 	}
 	attempted := make(map[string]struct{})
+	retryBudgets := make(map[sameUpstreamRetryKey]*atomic.Int64)
 	var lastErr error
 	var upstreamErr error
 	for {
@@ -591,9 +593,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
-			executionSeq := m.nextExecutionSeq()
+			var executionSeq uint64
 			startExec := time.Now()
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			remainingRetries := m.sameUpstreamRetryBudget(retryBudgets, auth.ID, execReq.Model, true)
+			finishUpstreamFailures := m.deferUpstreamFailures(execCtx, auth, &execOpts, remainingRetries)
+			defer finishUpstreamFailures()
+			resp, execCtx, errExec := executeWithSameUpstreamRetry(execCtx, m, auth, remainingRetries, func(attemptCtx context.Context) (cliproxyexecutor.Response, error) {
+				executionSeq = m.nextExecutionSeq()
+				return executor.Execute(attemptCtx, auth, execReq, execOpts)
+			})
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -609,9 +617,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					didRefreshOnUnauthorized = true
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
-					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					resp, execCtx, errExec = executeWithSameUpstreamRetry(execCtx, m, auth, remainingRetries, func(attemptCtx context.Context) (cliproxyexecutor.Response, error) {
+						executionSeq = m.nextExecutionSeq()
+						return executor.Execute(attemptCtx, auth, execReq, execOpts)
+					})
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -627,6 +637,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationExec, errExec)
 				}
 			}
+			finishUpstreamFailures()
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
@@ -710,6 +721,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 	}
 	attempted := make(map[string]struct{})
+	retryBudgets := make(map[sameUpstreamRetryKey]*atomic.Int64)
 	var lastErr error
 	var upstreamErr error
 	for {
@@ -805,9 +817,15 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
-			executionSeq := m.nextExecutionSeq()
+			var executionSeq uint64
 			startExec := time.Now()
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			remainingRetries := m.sameUpstreamRetryBudget(retryBudgets, auth.ID, execReq.Model, true)
+			finishUpstreamFailures := m.deferUpstreamFailures(execCtx, auth, &execOpts, remainingRetries)
+			defer finishUpstreamFailures()
+			resp, execCtx, errExec := executeWithSameUpstreamRetry(execCtx, m, auth, remainingRetries, func(attemptCtx context.Context) (cliproxyexecutor.Response, error) {
+				executionSeq = m.nextExecutionSeq()
+				return executor.CountTokens(attemptCtx, auth, execReq, execOpts)
+			})
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -823,9 +841,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					didRefreshOnUnauthorized = true
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
-					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					resp, execCtx, errExec = executeWithSameUpstreamRetry(execCtx, m, auth, remainingRetries, func(attemptCtx context.Context) (cliproxyexecutor.Response, error) {
+						executionSeq = m.nextExecutionSeq()
+						return executor.CountTokens(attemptCtx, auth, execReq, execOpts)
+					})
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -841,6 +861,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationExec, errExec)
 				}
 			}
+			finishUpstreamFailures()
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
@@ -933,6 +954,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
+	retryBudgets := make(map[sameUpstreamRetryKey]*atomic.Int64)
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
@@ -1179,7 +1201,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, retryBudgets)
 		if errStream != nil {
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream

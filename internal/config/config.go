@@ -96,6 +96,10 @@ type Config struct {
 	// RequestRetry defines the number of additional credential retry rounds after
 	// the first round has exhausted its eligible credentials.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
+	// SameUpstreamRetry defines additional attempts on the same credential and model
+	// for transient HTTP or connection failures, before model or credential failover.
+	// Non-positive values disable these retries.
+	SameUpstreamRetry int `yaml:"same-upstream-retry" json:"same-upstream-retry"`
 	// MaxRetryCredentials defines the maximum number of different credentials to
 	// try in each credential retry round.
 	// Set to 0 or a negative value to keep trying all available credentials (legacy behavior).

@@ -145,7 +145,7 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 				return func(runOpts cliproxyexecutor.Options) error {
 					if !primed {
 						wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/responses"
-						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{})
+						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{}, cliproxyexecutor.Options{})
 						if errEnsure != nil {
 							return errEnsure
 						}
@@ -170,7 +170,7 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 				return func(runOpts cliproxyexecutor.Options) error {
 					if !primed {
 						wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/responses"
-						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{})
+						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{}, cliproxyexecutor.Options{})
 						if errEnsure != nil {
 							return errEnsure
 						}
@@ -203,7 +203,7 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 				return func(runOpts cliproxyexecutor.Options) error {
 					if !primed {
 						wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/responses"
-						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{})
+						conn, _, _, errEnsure := executor.ensureUpstreamConn(context.Background(), auth, executor.getOrCreateSession("retry-bind"), auth.ID, wsURL, http.Header{}, cliproxyexecutor.Options{})
 						if errEnsure != nil {
 							return errEnsure
 						}
@@ -408,7 +408,7 @@ func TestWebsocketTargetReplacementPhysicallyClosesOwnedConnectionOnce(t *testin
 			serverB, _ := newWebsocketTargetServer(t)
 			defer serverB.Close()
 
-			var ensure func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error)
+			var ensure func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header, cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error)
 			var closeSession func(string)
 			var sess *codexWebsocketSession
 			switch test.name {
@@ -442,7 +442,7 @@ func TestWebsocketTargetReplacementPhysicallyClosesOwnedConnectionOnce(t *testin
 				t.Fatalf("bind execution lifecycle: %v", errBind)
 			}
 
-			if _, _, _, errEnsure := ensure(context.Background(), &cliproxyauth.Auth{ID: "auth-b"}, sess, "auth-b", wsURLB, nil); errEnsure != nil {
+			if _, _, _, errEnsure := ensure(context.Background(), &cliproxyauth.Auth{ID: "auth-b"}, sess, "auth-b", wsURLB, nil, cliproxyexecutor.Options{}); errEnsure != nil {
 				t.Fatalf("replace websocket target: %v", errEnsure)
 			}
 			if got := physical.closes.Load(); got != 1 {
@@ -529,7 +529,7 @@ func testWebsocketExecutorReconnectsWhenSessionTargetChanges(
 	t *testing.T,
 	disconnectChan func(string) <-chan error,
 	getSession func(string) *codexWebsocketSession,
-	ensureConn func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error),
+	ensureConn func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header, cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error),
 	closeSession func(string),
 ) {
 	t.Helper()
@@ -591,7 +591,7 @@ func testWebsocketExecutorReconnectsWhenSessionTargetChanges(
 
 func ensureWebsocketTargetConn(
 	t *testing.T,
-	ensureConn func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error),
+	ensureConn func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header, cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error),
 	auth *cliproxyauth.Auth,
 	sess *codexWebsocketSession,
 	authID string,
@@ -599,7 +599,7 @@ func ensureWebsocketTargetConn(
 ) *websocket.Conn {
 	t.Helper()
 	headers := http.Header{"X-Test-Auth": []string{authID}}
-	conn, _, resp, errEnsure := ensureConn(context.Background(), auth, sess, authID, wsURL, headers)
+	conn, _, resp, errEnsure := ensureConn(context.Background(), auth, sess, authID, wsURL, headers, cliproxyexecutor.Options{})
 	if resp != nil && resp.Body != nil {
 		defer func() {
 			if errClose := resp.Body.Close(); errClose != nil {
@@ -842,12 +842,12 @@ func TestHomeSelectionRegistryDrainClosesRealWebsocketSessions(t *testing.T) {
 	tests := []struct {
 		name        string
 		provider    string
-		newExecutor func() (cliproxyauth.ProviderExecutor, func(string) *codexWebsocketSession, func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error))
+		newExecutor func() (cliproxyauth.ProviderExecutor, func(string) *codexWebsocketSession, func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header, cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error))
 	}{
 		{
 			name:     "Codex",
 			provider: "codex",
-			newExecutor: func() (cliproxyauth.ProviderExecutor, func(string) *codexWebsocketSession, func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error)) {
+			newExecutor: func() (cliproxyauth.ProviderExecutor, func(string) *codexWebsocketSession, func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header, cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error)) {
 				executor := NewCodexWebsocketsExecutor(&config.Config{})
 				executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 				return executor, executor.getOrCreateSession, executor.ensureUpstreamConn
@@ -856,7 +856,7 @@ func TestHomeSelectionRegistryDrainClosesRealWebsocketSessions(t *testing.T) {
 		{
 			name:     "xAI",
 			provider: "xai",
-			newExecutor: func() (cliproxyauth.ProviderExecutor, func(string) *codexWebsocketSession, func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error)) {
+			newExecutor: func() (cliproxyauth.ProviderExecutor, func(string) *codexWebsocketSession, func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header, cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error)) {
 				executor := NewXAIWebsocketsExecutor(&config.Config{})
 				executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 				return executor, executor.getOrCreateSession, executor.ensureUpstreamConn
@@ -1049,7 +1049,7 @@ func TestWebsocketRegistryDrainClosesAndEndsRetainedSession(t *testing.T) {
 	tests := []struct {
 		name       string
 		getSession func(string) *codexWebsocketSession
-		ensureConn func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error)
+		ensureConn func(context.Context, *cliproxyauth.Auth, *codexWebsocketSession, string, string, http.Header, cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error)
 	}{
 		{
 			name: "Codex",
@@ -1058,9 +1058,9 @@ func TestWebsocketRegistryDrainClosesAndEndsRetainedSession(t *testing.T) {
 				executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 				return executor.getOrCreateSession(sessionID)
 			},
-			ensureConn: func(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
+			ensureConn: func(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID, wsURL string, headers http.Header, opts cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
 				executor := NewCodexWebsocketsExecutor(&config.Config{})
-				return executor.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, headers)
+				return executor.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, headers, opts)
 			},
 		},
 		{
@@ -1070,9 +1070,9 @@ func TestWebsocketRegistryDrainClosesAndEndsRetainedSession(t *testing.T) {
 				executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 				return executor.getOrCreateSession(sessionID)
 			},
-			ensureConn: func(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
+			ensureConn: func(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID, wsURL string, headers http.Header, opts cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
 				executor := NewXAIWebsocketsExecutor(&config.Config{})
-				return executor.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, headers)
+				return executor.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, headers, opts)
 			},
 		},
 	}

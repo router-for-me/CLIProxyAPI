@@ -103,6 +103,11 @@ func TestConfigV8MigrationAndLegacyAPI(t *testing.T) {
 	if err != nil || loaded.ProxyURL != "direct" {
 		t.Fatalf("path update failed: %v", err)
 	}
+	request(http.MethodPut, "/v8/management/config/routing/retry/same-upstream-retry", `2`, 200)
+	loaded, err = config.LoadConfig(path)
+	if err != nil || loaded.SameUpstreamRetry != 2 {
+		t.Fatalf("same-upstream-retry path update failed: %v", err)
+	}
 	request(http.MethodPut, "/v8/management/config/server/unknown-option", `true`, 400)
 	request(http.MethodPut, "/v8/management/config/credentials/concurrency/lifecycle-config-revision", `999`, 400)
 	select {

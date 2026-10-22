@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestHomeDispatchSelectionReleasesAttemptCancelTokensWithoutGrowingResources(t *testing.T) {
@@ -103,5 +105,39 @@ func TestHomeDispatchSelectionAttemptReleaseRacesDrainExactlyOnce(t *testing.T) 
 	}
 	if errDrain := registry.Drain(context.Background()); errDrain != nil {
 		t.Fatalf("Drain() error = %v", errDrain)
+	}
+}
+
+func TestHomeUpstreamRetryDeferralDoesNotBlockScopeCancellation(t *testing.T) {
+	registry := executionregistry.New()
+	pending, errBegin := registry.BeginDispatch()
+	if errBegin != nil {
+		t.Fatal(errBegin)
+	}
+	scope, errInstall := registry.Install(pending, executionregistry.ScopeSpec{})
+	if errInstall != nil {
+		t.Fatal(errInstall)
+	}
+	selection, errSelection := newHomeDispatchSelection(&Auth{ID: "home-auth"}, nil, "home", scope)
+	if errSelection != nil {
+		t.Fatal(errSelection)
+	}
+	attemptCtx, release, errAttempt := selection.AttemptContext(context.Background())
+	if errAttempt != nil {
+		t.Fatal(errAttempt)
+	}
+	defer release()
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{SameUpstreamRetry: 2})
+	budgets := make(map[sameUpstreamRetryKey]*atomic.Int64)
+	remaining := manager.sameUpstreamRetryBudget(budgets, selection.Auth.ID, "model", true)
+	opts := cliproxyexecutor.Options{ExecutionLifecycle: selection}
+	finish := manager.deferUpstreamFailures(attemptCtx, selection.Auth, &opts, remaining)
+	defer finish()
+	if errClose := registry.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	if attemptCtx.Err() != context.Canceled {
+		t.Fatalf("attempt context error = %v, want immediate cancellation", attemptCtx.Err())
 	}
 }

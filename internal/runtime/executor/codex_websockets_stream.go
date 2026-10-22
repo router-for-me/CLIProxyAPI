@@ -102,7 +102,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	} else {
 		dialCtx = cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
-		conn, closer, respHS, errDial = e.ensureUpstreamConn(dialCtx, auth, sess, authID, wsURL, wsHeaders)
+		conn, closer, respHS, errDial = e.ensureUpstreamConn(dialCtx, auth, sess, authID, wsURL, wsHeaders, opts)
 	}
 	var upstreamHeaders http.Header
 	if respHS != nil {
@@ -174,7 +174,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			// Retry once with a new websocket connection for the same execution session.
-			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders, opts)
 			if errDialRetry != nil || connRetry == nil {
 				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
@@ -505,6 +505,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if bootstrapTerminalErr != nil {
 		chanCapacity++
 	}
+	if len(bufferedChunks)+len(initialChunks) > 0 && opts.UpstreamFailureHandler != nil {
+		opts.UpstreamFailureHandler.Commit()
+	}
 	out := make(chan cliproxyexecutor.StreamChunk, chanCapacity)
 	for _, chunk := range bufferedChunks {
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
@@ -560,6 +563,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}()
 
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if len(chunk.Payload) > 0 && opts.UpstreamFailureHandler != nil {
+				opts.UpstreamFailureHandler.Commit()
+			}
 			if ctx == nil {
 				out <- chunk
 				return true
@@ -627,20 +633,20 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// cancel the request context, so it must follow delivery of the error to the
 				// conductor; otherwise the cancellation can drop the error and its cooldown.
 				if sess != nil {
-					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
+					if notifyDisconnect := e.invalidateUpstreamConnForStreamError(sess, conn, "upstream_error", wsErr); notifyDisconnect != nil {
+						defer notifyDisconnect()
+					}
 				}
 				if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
 					terminateErr = errClearReplay
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 					reporter.PublishFailure(ctx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
-					sess.notifyUpstreamDisconnect(wsErr)
 					return
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
-				sess.notifyUpstreamDisconnect(wsErr)
 				return
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
@@ -650,20 +656,20 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				// upstream error branch above.
 				if sess != nil {
 					unlockStreamSession()
-					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "terminal_failure", streamErr)
+					if notifyDisconnect := e.invalidateUpstreamConnForStreamError(sess, conn, "terminal_failure", streamErr); notifyDisconnect != nil {
+						defer notifyDisconnect()
+					}
 				}
 				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 					terminateErr = errClearReplay
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 					reporter.PublishFailure(ctx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
-					sess.notifyUpstreamDisconnect(streamErr)
 					return
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
 				reporter.PublishFailure(ctx, streamErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: streamErr})
-				sess.notifyUpstreamDisconnect(streamErr)
 				return
 			}
 

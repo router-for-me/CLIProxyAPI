@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -227,9 +228,12 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult, routing *apiKeyModelRoutingSnapshot, allowRetry bool, ephemeralResult bool) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult, routing *apiKeyModelRoutingSnapshot, allowRetry bool, ephemeralResult bool, retryBudgets map[sameUpstreamRetryKey]*atomic.Int64) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	if retryBudgets == nil {
+		retryBudgets = make(map[sameUpstreamRetryKey]*atomic.Int64)
 	}
 	executor = executorForAuth(executor, auth)
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
@@ -261,9 +265,16 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
-		executionSeq := m.nextExecutionSeq()
+		var executionSeq uint64
 		startStream := time.Now()
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+		remainingRetries := m.sameUpstreamRetryBudget(retryBudgets, auth.ID, execReq.Model, allowRetry)
+		finishUpstreamFailures := m.deferUpstreamFailures(ctx, auth, &execOpts, remainingRetries)
+		defer finishUpstreamFailures()
+		executeStream := func(attemptCtx context.Context) (*cliproxyexecutor.StreamResult, error) {
+			executionSeq = m.nextExecutionSeq()
+			return executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
+		}
+		streamResult, ctx, errStream := executeWithSameUpstreamRetry(ctx, m, auth, remainingRetries, executeStream)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
 			upstreamErr = errStream
@@ -283,9 +294,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					didRefreshOnUnauthorized = true
 					ctx = newUpstreamAttemptContext(ctx)
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
-					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					streamResult, ctx, errStream = executeWithSameUpstreamRetry(ctx, m, auth, remainingRetries, executeStream)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
 						upstreamErr = errStream
@@ -342,7 +352,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		streamResult, buffered, closed, ctx, bootstrapErr := m.readBootstrapWithSameUpstreamRetry(ctx, auth, remainingRetries, streamResult, executeStream)
 		bootstrapErr = markUpstreamExecutionAttemptFromContext(ctx, bootstrapErr)
 		if hasUpstreamExecutionAttempt(bootstrapErr) {
 			upstreamErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
@@ -362,9 +372,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					ctx = newUpstreamAttemptContext(ctx)
-					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					retryStream, retryCtx, retryErr := executeWithSameUpstreamRetry(ctx, m, auth, remainingRetries, executeStream)
+					ctx = retryCtx
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
@@ -378,7 +388,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						streamResult = &cliproxyexecutor.StreamResult{}
 					} else {
 						streamResult = retryStream
-						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks)
+						streamResult, buffered, closed, ctx, bootstrapErr = m.readBootstrapWithSameUpstreamRetry(ctx, auth, remainingRetries, streamResult, executeStream)
 						bootstrapErr = markUpstreamExecutionAttemptFromContext(ctx, bootstrapErr)
 						if bootstrapErr != nil {
 							warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startRetry), bootstrapErr)

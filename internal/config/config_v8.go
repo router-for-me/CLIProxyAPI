@@ -77,6 +77,7 @@ func buildV8Paths() []configPath {
 		{"credential-concurrency", "credentials.concurrency"}, {"credential-in-flight", "credentials.in-flight"},
 		{"force-model-prefix", "routing.force-model-prefix"},
 		{"request-retry", "routing.retry.request-retry"}, {"max-retry-credentials", "routing.retry.max-retry-credentials"},
+		{"same-upstream-retry", "routing.retry.same-upstream-retry"},
 		{"max-retry-interval", "routing.retry.max-retry-interval"},
 		{"disable-cooling", "routing.cooldown.disable-cooling"}, {"save-cooldown-status", "routing.cooldown.save-cooldown-status"},
 		{"transient-error-cooldown-seconds", "routing.cooldown.transient-error-cooldown-seconds"},

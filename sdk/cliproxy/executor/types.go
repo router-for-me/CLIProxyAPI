@@ -220,6 +220,8 @@ type Options struct {
 	WebSocketResponseObserver WebSocketResponseObserver
 	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
 	ExecutionLifecycle ExecutionLifecycle
+	// UpstreamFailureHandler defers session termination during pre-payload recovery.
+	UpstreamFailureHandler UpstreamFailureHandler
 	// ProxyURL overrides the credential and global proxy for this execution only.
 	// Credential refresh and token exchange must ignore it.
 	ProxyURL string

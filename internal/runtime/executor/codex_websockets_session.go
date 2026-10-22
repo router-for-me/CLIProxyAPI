@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -66,6 +67,7 @@ type codexWebsocketSession struct {
 	lifecycleBindMu           sync.Mutex
 	lifecycle                 cliproxyexecutor.ExecutionLifecycle
 	lifecycleModel            string
+	upstreamFailureHandler    cliproxyexecutor.UpstreamFailureHandler
 
 	writeMu sync.Mutex
 
@@ -337,6 +339,11 @@ func (s *codexWebsocketSession) bindExecutionLifecycle(opts cliproxyexecutor.Opt
 	if s == nil {
 		return cliproxyexecutor.BindExecutionResource(opts, closer)
 	}
+	s.connMu.Lock()
+	if s.conn == conn {
+		s.upstreamFailureHandler = opts.UpstreamFailureHandler
+	}
+	s.connMu.Unlock()
 	lifecycle := opts.ExecutionLifecycle
 	if lifecycle == nil || conn == nil {
 		return nil
@@ -367,6 +374,12 @@ func (s *codexWebsocketSession) bindExecutionLifecycle(opts cliproxyexecutor.Opt
 	s.connMu.Lock()
 	if s.conn != conn || s.connCloser != closer {
 		s.connMu.Unlock()
+		if opts.UpstreamFailureHandler != nil {
+			if errDisconnect := s.upstreamDisconnectError(conn); errDisconnect != nil {
+				return errDisconnect
+			}
+			return fmt.Errorf("codex websockets executor: websocket connection closed during lifecycle bind: %w", io.ErrUnexpectedEOF)
+		}
 		return fmt.Errorf("codex websockets executor: websocket connection closed during lifecycle bind")
 	}
 	previous := s.lifecycle
@@ -377,6 +390,15 @@ func (s *codexWebsocketSession) bindExecutionLifecycle(opts cliproxyexecutor.Opt
 		previous.End("target_replaced")
 	}
 	return nil
+}
+
+// prepareUpstreamFailureHandlerLocked installs recovery before the reader can fail.
+// The caller must hold connMu.
+func (s *codexWebsocketSession) prepareUpstreamFailureHandlerLocked(opts cliproxyexecutor.Options) {
+	if opts.UpstreamFailureHandler != nil {
+		opts.UpstreamFailureHandler.Recovered()
+		s.upstreamFailureHandler = opts.UpstreamFailureHandler
+	}
 }
 
 func (s *codexWebsocketSession) closeBoundConnection(conn *websocket.Conn, closer *websocketConnectionCloser, lifecycle cliproxyexecutor.ExecutionLifecycle) error {
@@ -660,7 +682,7 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-cha
 	return sess.upstreamDisconnectCh
 }
 
-func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
+func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header, opts cliproxyexecutor.Options) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
 	if sess == nil {
 		conn, closer, resp, err := e.dialCodexWebsocket(ctx, auth, wsURL, headers)
 		if conn != nil {
@@ -687,6 +709,9 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	conn := sess.conn
 	closer := sess.connCloser
 	readerConn := sess.readerConn
+	if conn != nil {
+		sess.prepareUpstreamFailureHandlerLocked(opts)
+	}
 	sess.connMu.Unlock()
 	if conn != nil {
 		if readerConn != conn {
@@ -710,6 +735,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	if sess.conn != nil {
 		previous := sess.conn
 		previousCloser := sess.connCloser
+		sess.prepareUpstreamFailureHandlerLocked(opts)
 		sess.connMu.Unlock()
 		if errClose := closer.Close(); errClose != nil {
 			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
@@ -726,6 +752,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.authID = authID
 	sess.proxyURL = dialProxyURL
 	sess.readerConn = conn
+	sess.prepareUpstreamFailureHandlerLocked(opts)
 	sess.connMu.Unlock()
 
 	sess.configureConn(conn)
@@ -746,10 +773,13 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			invalidate := func() {
 				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			}
-			invalidated := false
+			invalidated := e.invalidateUpstreamConnWithNotify(sess, conn, "upstream_disconnected", errRead, true, true)
+			if invalidated {
+				invalidate = nil
+			}
 			ch, done := sess.activeForConn(conn)
 			if ch != nil {
-				invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead}, invalidate)
+				invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead}, invalidate) || invalidated
 				if sess.clearActive(conn, ch) {
 					close(ch)
 				}
@@ -767,10 +797,13 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				invalidate := func() {
 					e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				}
-				invalidated := false
+				invalidated := e.invalidateUpstreamConnWithNotify(sess, conn, "unexpected_binary", errBinary, true, true)
+				if invalidated {
+					invalidate = nil
+				}
 				ch, done := sess.activeForConn(conn)
 				if ch != nil {
-					invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errBinary}, invalidate)
+					invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errBinary}, invalidate) || invalidated
 					if sess.clearActive(conn, ch) {
 						close(ch)
 					}
@@ -813,16 +846,28 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 }
 
 func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
-	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, true)
+	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, true, false)
 }
 
 func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithoutDisconnectNotify(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
-	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, false)
+	e.invalidateUpstreamConnWithNotify(sess, conn, reason, err, false, false)
 }
 
-func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error, notify bool) {
+func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error, notify, recoveryOnly bool) bool {
+	deferred, _ := e.invalidateUpstreamConnWithNotifyTiming(sess, conn, reason, err, notify, recoveryOnly, false)
+	return deferred
+}
+
+// invalidateUpstreamConnForStreamError registers recovery before error delivery.
+// Its returned notification must run after the error is sent to the conductor.
+func (e *CodexWebsocketsExecutor) invalidateUpstreamConnForStreamError(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) func() {
+	_, notify := e.invalidateUpstreamConnWithNotifyTiming(sess, conn, reason, err, true, false, true)
+	return notify
+}
+
+func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotifyTiming(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error, notify, recoveryOnly, notifyAfterDelivery bool) (bool, func()) {
 	if sess == nil || conn == nil {
-		return
+		return false, nil
 	}
 
 	sess.connMu.Lock()
@@ -832,9 +877,25 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	sessionID := sess.sessionID
 	if current == nil || current != conn {
 		sess.connMu.Unlock()
-		return
+		return false, nil
 	}
 	lifecycle := sess.lifecycle
+	finishFailure := func() {
+		if notify {
+			sess.notifyUpstreamDisconnect(err)
+		}
+		if lifecycle != nil {
+			lifecycle.End(reason)
+		}
+	}
+	failureHandler := sess.upstreamFailureHandler
+	deferFailure := failureHandler != nil && failureHandler.Defer(err, finishFailure)
+	if recoveryOnly && !deferFailure {
+		sess.connMu.Unlock()
+		return false, nil
+	}
+	sess.setUpstreamDisconnectError(conn, err)
+	sess.upstreamFailureHandler = nil
 	closer := sess.connCloser
 	sess.lifecycle = nil
 	sess.lifecycleModel = ""
@@ -850,17 +911,25 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 
 	lastEvent := sess.getLastEventType(conn)
 	logCodexWebsocketDisconnectedWithLastEvent(sess, sessionID, authID, wsURL, reason, lastEvent, err)
-	if notify {
-		sess.notifyUpstreamDisconnect(err)
+
+	var delayedNotify func()
+	if notify && !deferFailure {
+		if notifyAfterDelivery {
+			delayedNotify = func() { sess.notifyUpstreamDisconnect(err) }
+		} else {
+			sess.notifyUpstreamDisconnect(err)
+		}
 	}
+
 	if closer != nil {
 		if errClose := closer.Close(); errClose != nil {
 			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
 		}
 	}
-	if lifecycle != nil {
+	if lifecycle != nil && !deferFailure {
 		lifecycle.End(reason)
 	}
+	return deferFailure, delayedNotify
 }
 
 func (e *CodexWebsocketsExecutor) sessionStore() *codexWebsocketSessionStore {
