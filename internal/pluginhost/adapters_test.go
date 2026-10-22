@@ -4254,3 +4254,111 @@ func TestExecutorAdapterRefresh_MergesAttributesAndPreservesPath_Issue6119(t *te
 		t.Errorf("refreshed priority attribute = %q, want 2", got)
 	}
 }
+
+// TestResponseTransformRequestBodiesBySchemaVersion locks the request-body
+// delivery rules for response normalize/translate hooks.
+//
+// The host invokes these hooks once per SSE frame. Shipping the client and
+// upstream request bodies on every frame made the cost of one stream
+// O(frames * request size), which dominated CPU time for long contexts.
+// Plugins that opt into schema_version >= 7 must therefore see empty bodies on
+// streaming calls while still receiving them on non-streaming calls, and
+// legacy plugins must keep the previous behaviour on both paths.
+func TestResponseTransformRequestBodiesBySchemaVersion(t *testing.T) {
+	cases := []struct {
+		name           string
+		schemaVersion  uint32
+		stream         bool
+		wantOriginal   string
+		wantTranslated string
+	}{
+		{
+			name:           "schema 7 streaming omits request bodies",
+			schemaVersion:  pluginabi.SchemaVersionResponseTransformOmitRequestBodies,
+			stream:         true,
+			wantOriginal:   "",
+			wantTranslated: "",
+		},
+		{
+			name:           "schema 7 non-streaming keeps request bodies",
+			schemaVersion:  pluginabi.SchemaVersionResponseTransformOmitRequestBodies,
+			stream:         false,
+			wantOriginal:   "original",
+			wantTranslated: "translated",
+		},
+		{
+			name:           "legacy streaming keeps request bodies",
+			schemaVersion:  pluginabi.SchemaVersionResponseTransformOmitRequestBodies - 1,
+			stream:         true,
+			wantOriginal:   "original",
+			wantTranslated: "translated",
+		},
+		{
+			name:           "legacy non-streaming keeps request bodies",
+			schemaVersion:  pluginabi.SchemaVersionResponseTransformOmitRequestBodies - 1,
+			stream:         false,
+			wantOriginal:   "original",
+			wantTranslated: "translated",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got pluginapi.ResponseTransformRequest
+			host := newHostWithRecords(capabilityRecord{
+				id: "normalizer",
+				plugin: pluginapi.Plugin{
+					SchemaVersion: tc.schemaVersion,
+					Capabilities: pluginapi.Capabilities{
+						ResponseBeforeTranslator: responseNormalizerFunc(func(_ context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
+							got = req
+							return pluginapi.PayloadResponse{Body: req.Body}, nil
+						}),
+					},
+				},
+			})
+
+			host.NormalizeResponseBefore(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), []byte("translated"), []byte("body"), tc.stream)
+
+			if string(got.OriginalRequest) != tc.wantOriginal {
+				t.Errorf("OriginalRequest = %q, want %q", got.OriginalRequest, tc.wantOriginal)
+			}
+			if string(got.TranslatedRequest) != tc.wantTranslated {
+				t.Errorf("TranslatedRequest = %q, want %q", got.TranslatedRequest, tc.wantTranslated)
+			}
+		})
+	}
+}
+
+// TestResponseTranslatorRequestBodiesBySchemaVersion mirrors the normalizer
+// coverage for the response translator hook, which shares the same per-frame
+// cost profile.
+func TestResponseTranslatorRequestBodiesBySchemaVersion(t *testing.T) {
+	var got pluginapi.ResponseTransformRequest
+	host := newHostWithRecords(capabilityRecord{
+		id: "translator",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionResponseTransformOmitRequestBodies,
+			Capabilities: pluginapi.Capabilities{
+				ResponseTranslator: responseTranslatorFunc(func(_ context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
+					got = req
+					return pluginapi.PayloadResponse{Body: req.Body}, nil
+				}),
+			},
+		},
+	})
+
+	if _, ok := host.TranslateResponse(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), []byte("translated"), []byte("body"), true); !ok {
+		t.Fatal("TranslateResponse() must report a successful translation")
+	}
+	if len(got.OriginalRequest) != 0 || len(got.TranslatedRequest) != 0 {
+		t.Fatalf("streaming translation must omit request bodies, got original=%q translated=%q", got.OriginalRequest, got.TranslatedRequest)
+	}
+
+	if _, ok := host.TranslateResponse(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), []byte("translated"), []byte("body"), false); !ok {
+		t.Fatal("TranslateResponse() must report a successful translation")
+	}
+	if string(got.OriginalRequest) != "original" || string(got.TranslatedRequest) != "translated" {
+		t.Fatalf("non-streaming translation must keep request bodies, got original=%q translated=%q", got.OriginalRequest, got.TranslatedRequest)
+	}
+}

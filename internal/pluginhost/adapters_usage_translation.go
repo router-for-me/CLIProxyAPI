@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
@@ -279,6 +280,27 @@ func (h *Host) TranslateRequest(ctx context.Context, from, to sdktranslator.Form
 	return bytes.Clone(body), false
 }
 
+// responseTransformRequestBodies returns the request bodies to hand to a
+// response normalize/translate hook.
+//
+// The host calls these hooks once per SSE frame, so shipping the client and
+// upstream request bodies on every frame made the cost of one stream
+// O(frames * request size): with a multi-megabyte context the host re-cloned
+// and re-base64-encoded both bodies for hundreds of frames, which dominated
+// CPU time for plugins that only inspect the response payload.
+//
+// Plugins that declare schema_version >= SchemaVersionResponseTransformOmitRequestBodies
+// therefore receive empty bodies on streaming calls. Non-streaming calls run
+// once per response, so they keep carrying both bodies: a converter may
+// legitimately need the request there. Legacy plugins (schema_version < 7) keep
+// the previous behaviour on both paths.
+func responseTransformRequestBodies(record capabilityRecord, stream bool, original, translated []byte) (originalBody, translatedBody []byte) {
+	if stream && record.plugin.SchemaVersion >= pluginabi.SchemaVersionResponseTransformOmitRequestBodies {
+		return nil, nil
+	}
+	return bytes.Clone(original), bytes.Clone(translated)
+}
+
 func (h *Host) NormalizeResponseBefore(ctx context.Context, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, body []byte, stream bool) []byte {
 	current := bytes.Clone(body)
 	for _, record := range h.activeRecords() {
@@ -379,13 +401,14 @@ func (h *Host) callResponseNormalizer(ctx context.Context, record capabilityReco
 			ok = false
 		}
 	}()
+	originalBody, translatedBody := responseTransformRequestBodies(record, stream, originalRequestRawJSON, requestRawJSON)
 	resp, errNormalizeResponse := normalizer.NormalizeResponse(ctx, pluginapi.ResponseTransformRequest{
 		FromFormat:        from.String(),
 		ToFormat:          to.String(),
 		Model:             model,
 		Stream:            stream,
-		OriginalRequest:   bytes.Clone(originalRequestRawJSON),
-		TranslatedRequest: bytes.Clone(requestRawJSON),
+		OriginalRequest:   originalBody,
+		TranslatedRequest: translatedBody,
 		Body:              bytes.Clone(body),
 	})
 	if errNormalizeResponse != nil || len(resp.Body) == 0 {
@@ -405,13 +428,14 @@ func (h *Host) callResponseTranslator(ctx context.Context, record capabilityReco
 			ok = false
 		}
 	}()
+	originalBody, translatedBody := responseTransformRequestBodies(record, stream, originalRequestRawJSON, requestRawJSON)
 	resp, errTranslateResponse := translator.TranslateResponse(ctx, pluginapi.ResponseTransformRequest{
 		FromFormat:        from.String(),
 		ToFormat:          to.String(),
 		Model:             model,
 		Stream:            stream,
-		OriginalRequest:   bytes.Clone(originalRequestRawJSON),
-		TranslatedRequest: bytes.Clone(requestRawJSON),
+		OriginalRequest:   originalBody,
+		TranslatedRequest: translatedBody,
 		Body:              bytes.Clone(body),
 	})
 	if errTranslateResponse != nil || len(resp.Body) == 0 {
