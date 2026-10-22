@@ -464,6 +464,11 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			toolItems = append(toolItems, codeExecutionNodes...)
 			toolItems = append(toolItems, urlContextNodes...)
 			out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
+			// Gemini rejects built-in tools combined with functionDeclarations
+			// unless server-side tool invocations are declared.
+			if len(functionDeclarations) > 0 && (len(googleSearchNodes) > 0 || len(codeExecutionNodes) > 0 || len(urlContextNodes) > 0) {
+				out, _ = sjson.SetBytes(out, "toolConfig.includeServerSideToolInvocations", true)
+			}
 		}
 	}
 

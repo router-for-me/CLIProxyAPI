@@ -5263,3 +5263,45 @@ func TestConvertGeminiResponseToOpenAIResponsesStream_CitationAnnotationAddedTim
 		assertAnnotationMatches(t, eventTypes, byType, "https://weather.example.com/paris", "Paris Weather", 0, 5, true)
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_MixedWebSearchAndFunctions(t *testing.T) {
+	modelID := "gemini-search-mixed"
+	registerTestWebSearchModel(t, "client-mixed", "antigravity", modelID, true)
+
+	req := []byte(`{
+		"model": "gemini-search-mixed",
+		"input": "weather in Paris",
+		"tools": [
+			{"type": "web_search"},
+			{"type": "function", "name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}
+		],
+		"tool_choice": "auto"
+	}`)
+
+	out, err := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if !gjson.GetBytes(out, "toolConfig.includeServerSideToolInvocations").Bool() {
+		t.Fatalf("expected includeServerSideToolInvocations for mixed tools, got: %s", out)
+	}
+	if !gjson.GetBytes(out, "tools.0.googleSearch").Exists() {
+		t.Fatalf("expected googleSearch tool, got: %s", out)
+	}
+	if !gjson.GetBytes(out, "tools.1.functionDeclarations.0.name").Exists() {
+		t.Fatalf("expected functionDeclarations, got: %s", out)
+	}
+
+	searchOnly := []byte(`{
+		"model": "gemini-search-mixed",
+		"input": "weather in Paris",
+		"tools": [{"type": "web_search"}]
+	}`)
+	searchOnlyOut, err := ConvertOpenAIResponsesRequestToGemini(modelID, searchOnly, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if gjson.GetBytes(searchOnlyOut, "toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("includeServerSideToolInvocations must only be set for mixed tools, got: %s", searchOnlyOut)
+	}
+}
