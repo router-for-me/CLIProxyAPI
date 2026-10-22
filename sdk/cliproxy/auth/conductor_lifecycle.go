@@ -384,12 +384,13 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		// Runtime state belongs to the credential: a snapshot that swaps it (another
 		// provider, new tokens, another account) starts clean.
 		carryRuntime := isFileSnapshot && !credChanged && strings.EqualFold(existing.Provider, auth.Provider)
+		replacementSnapshot := isFileSnapshot && !carryRuntime
 		if carryRuntime {
 			auth.ModelStates = existing.ModelStates
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
 			auth.RefreshFailures = existing.RefreshFailures
-		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+		} else if !replacementSnapshot && len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
 		if carryRuntime {
@@ -436,7 +437,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		devinQuotaRestored := mode == updateModeRefresh && applyDevinQuotaRestoration(auth, existing, time.Now())
 		if devinQuotaRestored {
 			cooldownStateChanged = true
-		} else if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
+		} else if !replacementSnapshot && existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
 			auth.Unavailable = existing.Unavailable
 			auth.NextRetryAfter = existing.NextRetryAfter
 			// Preserve cooldown fields; keep the newest observation snapshot.

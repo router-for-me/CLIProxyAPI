@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -58,6 +59,9 @@ func TestFileSnapshotForAnotherProviderStartsClean(t *testing.T) {
 	if got.Provider != "codex" || got.Unavailable || got.Quota.Exceeded || !got.NextRetryAfter.IsZero() || got.LastError != nil {
 		t.Fatalf("provider change kept the old cooldown: provider=%q unavailable=%v quota=%+v retry=%v last=%v",
 			got.Provider, got.Unavailable, got.Quota, got.NextRetryAfter, got.LastError)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(got, "m", time.Now()); blocked {
+		t.Fatalf("provider change kept the old model cooldown: %+v", got.ModelStates)
 	}
 }
 
@@ -302,5 +306,60 @@ func TestFileSnapshotForOpaqueStorageChangeStartsClean(t *testing.T) {
 	if got.Status != StatusActive || got.Unavailable || got.LastError != nil || !got.NextRetryAfter.IsZero() {
 		t.Fatalf("storage replacement kept runtime failure: status=%q unavailable=%v last=%v retry=%v",
 			got.Status, got.Unavailable, got.LastError, got.NextRetryAfter)
+	}
+}
+
+// An active credential-scoped quota belongs to the old token; a relogin snapshot starts clean.
+func TestFileSnapshotForCredentialChangeDropsCredentialQuota(t *testing.T) {
+	ctx := WithSkipPersist(context.Background())
+	manager := NewManager(nil, nil, nil)
+	const authID = "snapshot-credential-quota-change"
+	if _, errRegister := manager.Register(ctx, &Auth{
+		ID: authID, Provider: "claude", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "old-access-token"},
+	}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	retry := 3 * time.Hour
+	manager.MarkResult(ctx, Result{
+		AuthID: authID, Provider: "claude", Model: "m", RetryAfter: &retry, CredentialScope: true,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage limit"},
+	})
+	cooled, _ := manager.GetByID(authID)
+	if cooled.Quota.Reason != "credential_quota" || !cooled.Unavailable {
+		t.Fatalf("expected a credential_quota cooldown, got %+v", cooled.Quota)
+	}
+
+	snapshot := bindTestSnapshot(t, authID, "claude", []byte(`{"type":"claude"}`), map[string]string{})
+	snapshot.Metadata = map[string]any{"access_token": "new-access-token"}
+	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+		t.Fatalf("snapshot rejected: %v", errUpdate)
+	}
+	got, _ := manager.GetByID(authID)
+	if got.Unavailable || got.Quota.Exceeded || !got.NextRetryAfter.IsZero() {
+		t.Fatalf("relogin kept the old credential quota: unavailable=%v quota=%+v retry=%v", got.Unavailable, got.Quota, got.NextRetryAfter)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(got, "m", time.Now()); blocked {
+		t.Fatalf("relogin kept the old model cooldown: %+v", got.ModelStates)
+	}
+}
+
+// Plugin RawJSON merges Auth.Metadata, so a routing edit such as priority is not a
+// credential change; storage that cannot be inspected (login storage) is ignored.
+func TestCredentialsChangedStorageIgnoresMetadataAndOpaqueStorage(t *testing.T) {
+	pluginAuth := func(priority int) *Auth {
+		return &Auth{
+			Provider: "plugin-provider",
+			Metadata: map[string]any{"priority": priority},
+			Storage:  &rawJSONTestStorage{raw: []byte(fmt.Sprintf(`{"token":"same","priority":%d}`, priority))},
+		}
+	}
+	if CredentialsChanged(pluginAuth(1), pluginAuth(5)) {
+		t.Fatal("a priority edit counted as a plugin credential change")
+	}
+	login := &Auth{Provider: "codex", Metadata: map[string]any{"access_token": "t"}, Storage: &dummyMetadataStorage{}}
+	reread := &Auth{Provider: "codex", Metadata: map[string]any{"access_token": "t"}}
+	if CredentialsChanged(login, reread) {
+		t.Fatal("storage without RawJSON counted as a credential change")
 	}
 }

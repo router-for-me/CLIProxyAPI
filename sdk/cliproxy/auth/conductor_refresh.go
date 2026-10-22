@@ -522,12 +522,11 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingHasUseSIWC != incomingHasUseSIWC || existingUseSIWC != incomingUseSIWC {
 		return true
 	}
-	existingStorage, existingHasStorage := authStorageIdentity(existing)
-	incomingStorage, incomingHasStorage := authStorageIdentity(incoming)
-	if existing.Storage != nil || incoming.Storage != nil {
-		if !existingHasStorage || !incomingHasStorage || !bytes.Equal(existingStorage, incomingStorage) {
-			return true
-		}
+	existingStorage, existingInspectable := authStorageIdentity(existing)
+	incomingStorage, incomingInspectable := authStorageIdentity(incoming)
+	if (existingInspectable || incomingInspectable) &&
+		(existingInspectable != incomingInspectable || !bytes.Equal(existingStorage, incomingStorage)) {
+		return true
 	}
 	return false
 }
@@ -562,6 +561,10 @@ func vertexProjectIdentity(auth *Auth) (string, bool) {
 	}
 	return "", false
 }
+
+// authStorageIdentity returns the credential part of storage that exposes RawJSON
+// (plugin storage). Its RawJSON merges Auth.Metadata, so metadata keys are dropped:
+// they are routing or compared elsewhere. Storage without RawJSON is not inspectable.
 func authStorageIdentity(auth *Auth) ([]byte, bool) {
 	if auth == nil || auth.Storage == nil {
 		return nil, false
@@ -571,16 +574,19 @@ func authStorageIdentity(auth *Auth) ([]byte, bool) {
 		return nil, false
 	}
 	raw := bytes.TrimSpace(rawProvider.RawJSON())
-	if len(raw) == 0 {
-		return nil, false
-	}
 	var value any
 	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
-		return nil, false
+		return raw, true
+	}
+	if fields, isObject := value.(map[string]any); isObject {
+		for key := range auth.Metadata {
+			delete(fields, key)
+		}
+		delete(fields, "type")
 	}
 	canonical, errMarshal := json.Marshal(value)
 	if errMarshal != nil {
-		return nil, false
+		return raw, true
 	}
 	return canonical, true
 }
