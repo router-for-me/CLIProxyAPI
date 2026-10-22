@@ -84,3 +84,22 @@ func TestIsCodexTerminalEmptyIncomplete(t *testing.T) {
 		t.Fatal("expected false for response.completed")
 	}
 }
+
+func TestIsCodexTerminalEmptyIncompleteReasons(t *testing.T) {
+	for _, testCase := range []struct {
+		reason string
+		want   bool
+	}{
+		{reason: "interrupted", want: false},
+		{reason: "max_output_tokens", want: true},
+		{reason: "content_filter", want: true},
+		{reason: "unknown", want: true},
+	} {
+		t.Run(testCase.reason, func(t *testing.T) {
+			payload := []byte(`{"type":"response.incomplete","response":{"id":"r1","incomplete_details":{"reason":"` + testCase.reason + `"},"output":[],"usage":{"output_tokens":0}}}`)
+			if got := IsCodexTerminalEmptyIncomplete(payload, 0, false); got != testCase.want {
+				t.Fatalf("empty incomplete for reason %q = %t, want %t", testCase.reason, got, testCase.want)
+			}
+		})
+	}
+}

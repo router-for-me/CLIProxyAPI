@@ -32,8 +32,17 @@ import (
 // the same socket accepts the next response.create. Idle, malformed, and disabled-auth
 // interrupts must fail locally without opening or writing that socket.
 func TestResponsesInterruptInFlight(t *testing.T) {
-	for _, steering := range []bool{false, true} {
-		t.Run(fmt.Sprintf("steering_%t", steering), func(t *testing.T) {
+	for _, testCase := range []struct {
+		steering     bool
+		outputTokens int
+	}{
+		{steering: false, outputTokens: 0},
+		{steering: false, outputTokens: 7},
+		{steering: true, outputTokens: 0},
+		{steering: true, outputTokens: 7},
+	} {
+		steering := testCase.steering
+		t.Run(fmt.Sprintf("steering_%t/output_tokens_%d", steering, testCase.outputTokens), func(t *testing.T) {
 			interrupt := []byte(`{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items","extension":"keep"}`)
 			var connections atomic.Int32
 			upstreamDone := make(chan struct{})
@@ -70,7 +79,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 					t.Errorf("interrupt changed: %s", payload)
 					return
 				}
-				write(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"output_tokens":7},"output":[]}}`)
+				write(fmt.Sprintf(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"input_tokens":11,"output_tokens":%d,"total_tokens":%d},"output":[]}}`, testCase.outputTokens, 11+testCase.outputTokens))
 				if payload := read(); gjson.GetBytes(payload, "type").String() != "response.create" {
 					t.Errorf("expected follow-up response.create, got %s", payload)
 					return
@@ -123,7 +132,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 					t.Fatal(errSend)
 				}
 			}
-			expect := func(event string) {
+			expect := func(event string) []byte {
 				t.Helper()
 				_, payload, errRead := client.ReadMessage()
 				if errRead != nil {
@@ -132,6 +141,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 				if got := gjson.GetBytes(payload, "type").String(); got != event {
 					t.Fatalf("expected %s, got %s", event, payload)
 				}
+				return payload
 			}
 
 			send([]byte(`{"type":"response.interrupt"}`))
@@ -158,7 +168,18 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 				t.Fatal(errUpdate)
 			}
 			send(interrupt)
-			expect("response.incomplete")
+			interrupted := expect("response.incomplete")
+			if gjson.GetBytes(interrupted, "response.id").String() != "r1" ||
+				gjson.GetBytes(interrupted, "response.status").String() != "incomplete" ||
+				gjson.GetBytes(interrupted, "response.incomplete_details.reason").String() != "interrupted" {
+				t.Fatalf("interrupted response changed: %s", interrupted)
+			}
+			usage := gjson.GetBytes(interrupted, "response.usage")
+			outputTokens := usage.Get("output_tokens")
+			if outputTokens.Type != gjson.Number || outputTokens.Num != float64(testCase.outputTokens) ||
+				usage.Get("input_tokens").Int() != 11 || usage.Get("total_tokens").Int() != int64(11+testCase.outputTokens) {
+				t.Fatalf("interrupted usage changed: %s", interrupted)
+			}
 			send([]byte(fmt.Sprintf(`{"type":"response.create","model":%q,"previous_response_id":"r1","input":[]}`, model)))
 			expect("response.created")
 			expect("response.completed")
@@ -271,7 +292,7 @@ func (e *homeInterruptExecutor) InterruptExecutionSession(ctx context.Context, s
 
 type blockingHTTPInterruptExecutor struct {
 	calls    atomic.Int32
-	canceled atomic.Bool
+	canceled chan struct{}
 }
 
 func (*blockingHTTPInterruptExecutor) Identifier() string { return "codex" }
@@ -292,7 +313,7 @@ func (e *blockingHTTPInterruptExecutor) ExecuteStream(ctx context.Context, _ *co
 		}
 		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.created","response":{"id":"r-http"}}`)}
 		<-ctx.Done()
-		e.canceled.Store(true)
+		close(e.canceled)
 	}()
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -317,7 +338,7 @@ func (*blockingHTTPInterruptExecutor) InterruptExecutionSession(context.Context,
 // cancels an HTTP upstream turn and lets the same socket continue.
 func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	executor := &blockingHTTPInterruptExecutor{}
+	executor := &blockingHTTPInterruptExecutor{canceled: make(chan struct{})}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(&config.Config{})
 	manager.RegisterExecutor(executor)
@@ -372,7 +393,9 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if got := gjson.GetBytes(interrupted, "response.incomplete_details.reason").String(); got != "interrupted" {
 		t.Fatalf("interrupt reason = %q, payload %s", got, interrupted)
 	}
-	if !executor.canceled.Load() {
+	select {
+	case <-executor.canceled:
+	case <-time.After(5 * time.Second):
 		t.Fatal("http upstream was not canceled")
 	}
 	if errSend := client.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"previous_response_id":"r-http","input":[]}`, model))); errSend != nil {
