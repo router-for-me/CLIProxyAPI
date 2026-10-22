@@ -504,7 +504,9 @@ const codexBootstrapMaxBufferedBytes = 1 << 20
 // unrecognised frame therefore releases the stream.
 //
 // Beyond the handshake preamble the list covers what upstream interleaves before the first token:
-// keepalive heartbeats, and the *.added frames that announce an item or part with no content yet.
+// keepalive heartbeats, prompt moderation metadata, and the *.added frames that announce an item or
+// part with no content yet. response.metadata contains no generated output and may precede an
+// in-stream capacity rejection.
 func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 	// An empty data: frame is the SSE heartbeat idiom and carries nothing at all, which is how the
 	// websocket loop already treats an empty message. Without this it would fall through to the
@@ -513,7 +515,7 @@ func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
 		return true
 	}
 	switch eventType {
-	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata", "keepalive":
+	case "response.created", "response.in_progress", "response.metadata", "codex.rate_limits", "codex.response.metadata", "keepalive":
 		return true
 	case "response.output_item.added":
 		return isCodexBufferableOutputItem(payload)
