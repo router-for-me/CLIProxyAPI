@@ -470,6 +470,10 @@ type FrontendAuthResponse struct {
 	Principal string
 	// Metadata carries plugin-defined identity attributes for downstream use.
 	Metadata map[string]string
+	// DenyStatusCode optionally specifies an HTTP status code when denying the request.
+	DenyStatusCode int
+	// DenyMessage optionally specifies an error message when denying the request.
+	DenyMessage string
 }
 
 const (

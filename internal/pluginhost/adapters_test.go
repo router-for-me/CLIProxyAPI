@@ -2982,6 +2982,21 @@ func TestAccessAdapterAuthenticateFailures(t *testing.T) {
 			wantCalled: true,
 		},
 		{
+			name:     "denied with status and message",
+			pluginID: "auth-plugin",
+			method:   http.MethodPost,
+			url:      "http://example.test/v1/responses",
+			authenticate: func(t *testing.T, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {
+				return pluginapi.FrontendAuthResponse{
+					Authenticated:  false,
+					DenyStatusCode: http.StatusTooManyRequests,
+					DenyMessage:    "quota exhausted",
+				}, nil
+			},
+			wantCode:   sdkaccess.AuthErrorCodeDenied,
+			wantCalled: true,
+		},
+		{
 			name:     "panic",
 			pluginID: "auth-panic",
 			method:   http.MethodGet,
