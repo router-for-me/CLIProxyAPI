@@ -37,6 +37,63 @@ func TestGetContextWithCancelCapturesClientRequestMetadata(t *testing.T) {
 	if metadata.UserAgent != "test-client/1.0" {
 		t.Fatalf("UserAgent = %q", metadata.UserAgent)
 	}
+	if metadata.ClientTag != "" {
+		t.Fatalf("ClientTag = %q, want empty when usage-client-tag-header is unset", metadata.ClientTag)
+	}
+}
+
+func TestGetContextWithCancelCapturesUsageClientTag(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newGin := func() *gin.Context {
+		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		ginCtx.Request.Header.Set("X-Client-Tag", "  team-a  ")
+		ginCtx.Request.Header.Set("X-Claude-Code-Session-Id", "sess-1")
+		return ginCtx
+	}
+
+	t.Run("configured header is copied and trimmed", func(t *testing.T) {
+		handler := &BaseAPIHandler{Cfg: &config.SDKConfig{UsageClientTagHeader: "X-Client-Tag"}}
+		ctx, cancel := handler.GetContextWithCancel(nil, newGin(), context.Background())
+		defer cancel()
+		if got := logging.GetClientRequestMetadata(ctx).ClientTag; got != "team-a" {
+			t.Fatalf("ClientTag = %q, want %q", got, "team-a")
+		}
+	})
+
+	t.Run("header name is case-insensitive", func(t *testing.T) {
+		handler := &BaseAPIHandler{Cfg: &config.SDKConfig{UsageClientTagHeader: "x-client-tag"}}
+		ctx, cancel := handler.GetContextWithCancel(nil, newGin(), context.Background())
+		defer cancel()
+		if got := logging.GetClientRequestMetadata(ctx).ClientTag; got != "team-a" {
+			t.Fatalf("ClientTag = %q, want %q", got, "team-a")
+		}
+	})
+
+	t.Run("missing header yields empty tag", func(t *testing.T) {
+		handler := &BaseAPIHandler{Cfg: &config.SDKConfig{UsageClientTagHeader: "X-Other"}}
+		ctx, cancel := handler.GetContextWithCancel(nil, newGin(), context.Background())
+		defer cancel()
+		if got := logging.GetClientRequestMetadata(ctx).ClientTag; got != "" {
+			t.Fatalf("ClientTag = %q, want empty", got)
+		}
+	})
+
+	t.Run("tag survives session hierarchy enrichment", func(t *testing.T) {
+		handler := &BaseAPIHandler{Cfg: &config.SDKConfig{UsageClientTagHeader: "X-Client-Tag"}}
+		ginCtx := newGin()
+		ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+		defer cancel()
+		ctx = enrichContextWithSessionHierarchy(ctx, ginCtx.Request.Header, []byte(`{"metadata":{"agent_id":"worker"}}`), nil)
+		meta := logging.GetClientRequestMetadata(ctx)
+		if meta.ClientTag != "team-a" {
+			t.Fatalf("ClientTag after enrichment = %q, want %q", meta.ClientTag, "team-a")
+		}
+		if meta.SessionID == "" {
+			t.Fatal("session enrichment did not run")
+		}
+	})
 }
 
 func TestGetContextWithCancelCapturesResolvedClientIP(t *testing.T) {

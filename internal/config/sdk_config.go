@@ -97,6 +97,13 @@ type SDKConfig struct {
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
 
+	// UsageClientTagHeader names a client request header whose first value is
+	// trimmed and recorded on every usage record as `client_tag`. Operators that put
+	// many clients behind one proxy key can attribute usage per client without
+	// reverse-mapping session IDs. Empty disables tagging. The value is only
+	// recorded; it does not affect routing or credential selection.
+	UsageClientTagHeader string `yaml:"usage-client-tag-header,omitempty" json:"usage-client-tag-header,omitempty"`
+
 	// Streaming configures server-side streaming behavior (keep-alives and safe bootstrap retries).
 	Streaming StreamingConfig `yaml:"streaming" json:"streaming"`
 

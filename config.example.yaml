@@ -242,6 +242,12 @@ requests:
   # Default is false (disabled).
   passthrough-headers: false
 
+  # Name of a client request header whose value is recorded on each usage record
+  # as `client_tag`, so many clients behind one proxy key can be attributed
+  # without reverse-mapping session IDs. The value is only recorded; it does not
+  # affect routing or credential selection. Empty (default) disables tagging.
+  # usage-client-tag-header: "X-Client-Tag"
+
   # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
   nonstream-keepalive-interval: 0
 
