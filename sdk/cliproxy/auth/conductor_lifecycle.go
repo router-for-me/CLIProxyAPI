@@ -384,12 +384,17 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	} else {
 		auth.accountVersion = existing.accountVersion
 	}
+	// Runtime state belongs to the credential: a snapshot that swaps it (another
+	// provider, new tokens, another account) starts clean.
+	carryRuntime := isFileSnapshot && !credChanged
+	replacementSnapshot := isFileSnapshot && !carryRuntime
 	cooldownStateChanged := false
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		// Runtime state belongs to the credential: a snapshot that swaps it (another
-		// provider, new tokens, another account) starts clean.
-		carryRuntime := isFileSnapshot && !credChanged && strings.EqualFold(existing.Provider, auth.Provider)
-		replacementSnapshot := isFileSnapshot && !carryRuntime
+		if replacementSnapshot && (len(existing.ModelStates) > 0 || existing.Unavailable || existing.Quota.Exceeded ||
+			!existing.NextRetryAfter.IsZero() || existing.LastError != nil) {
+			// The dropped state may be persisted: rewrite the cooldown store.
+			cooldownStateChanged = true
+		}
 		if carryRuntime {
 			auth.ModelStates = existing.ModelStates
 			auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -417,7 +422,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
 		}
 		if credChanged || mode == updateModeRefresh {
-			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+			if !replacementSnapshot {
+				// A token rejected for the previous account says nothing about the new one.
+				applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+			}
 			if auth.RejectedAccessToken == "" || authAccessToken(auth) != auth.RejectedAccessToken {
 				if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
 					auth.Unavailable = false
@@ -490,7 +498,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
 	mergeAuthSaveDelta(auth, existingBeforeSave, existing, false)
-	if (auth.RejectedAccessToken == "" && existing.RejectedAccessToken != "") || (auth.RejectedSIWCAccessToken == "" && existing.RejectedSIWCAccessToken != "") {
+	if !replacementSnapshot && ((auth.RejectedAccessToken == "" && existing.RejectedAccessToken != "") || (auth.RejectedSIWCAccessToken == "" && existing.RejectedSIWCAccessToken != "")) {
 		probe := auth.Clone()
 		probe.CodexRefreshPatch = refreshPatchBeforeSave
 		applyPreservedRejectedTokens(existing, probe, mode == updateModeRefresh)

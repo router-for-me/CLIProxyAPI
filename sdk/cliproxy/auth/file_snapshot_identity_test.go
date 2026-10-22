@@ -439,3 +439,97 @@ func TestResultAfterNonAccountCredentialChangeStillCounts(t *testing.T) {
 		t.Fatal("a result under an unchanged access token was fenced out by an unrelated credential change")
 	}
 }
+
+// A 401 rejects the access token for the account it was sent for. The same token under
+// another account must not stay marked as rejected.
+func TestSnapshotForAccountSwitchDropsRejectedToken(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	const authID = "account-switch-rejected-token"
+	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "codex", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "same-token", "account_id": "account-a"}}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	current, _ := manager.GetByID(authID)
+	manager.MarkResult(ctx, Result{AuthID: authID, Provider: "codex", Model: "m", AccessToken: "same-token",
+		CredentialVersion: current.CredentialVersion, RegistrationEpoch: current.RegistrationEpoch,
+		Error: &Error{Message: "unauthorized", HTTPStatus: http.StatusUnauthorized}})
+	rejected, _ := manager.GetByID(authID)
+	if rejected.RejectedAccessToken != "same-token" {
+		t.Fatalf("a 401 did not mark the token rejected: %q", rejected.RejectedAccessToken)
+	}
+
+	snapshot := bindTestSnapshot(t, authID, "codex", []byte(`{"type":"codex","access_token":"same-token","account_id":"account-b"}`), map[string]string{})
+	snapshot.Metadata = map[string]any{"access_token": "same-token", "account_id": "account-b"}
+	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+		t.Fatalf("snapshot rejected: %v", errUpdate)
+	}
+	got, _ := manager.GetByID(authID)
+	if got.RejectedAccessToken != "" {
+		t.Fatalf("the new account inherited the rejected token %q", got.RejectedAccessToken)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(got, "m", time.Now()); blocked {
+		t.Fatal("the rejected-token marker still blocks the new account")
+	}
+}
+
+// With cooldown persistence on, dropping the old state must rewrite the store, or a
+// restart restores it for the replacement.
+func TestSnapshotReplacementRewritesPersistedCooldowns(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	store := &recordingCooldownStateStore{}
+	manager.SetCooldownStateStore(store)
+	const authID = "replacement-persisted-cooldown"
+	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "claude", Status: StatusActive}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	retryAfter := time.Hour
+	manager.MarkResult(ctx, Result{AuthID: authID, Provider: "claude", Model: "m", RetryAfter: &retryAfter,
+		Error: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests}})
+	hasRecord := func() bool {
+		for _, record := range store.savedRecords() {
+			if record.AuthID == authID {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasRecord() {
+		t.Fatal("the model cooldown was not persisted before the replacement")
+	}
+
+	snapshot := bindTestSnapshot(t, authID, "codex", []byte(`{"type":"codex"}`), map[string]string{})
+	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+		t.Fatalf("snapshot rejected: %v", errUpdate)
+	}
+	if hasRecord() {
+		t.Fatal("the replaced credential's cooldown is still in the persisted store")
+	}
+}
+
+// A provider change under the same access token is a replacement too: a late result of
+// the old provider must not land on the new one.
+func TestResultFromPreviousProviderIsIgnoredAfterProviderChange(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	const authID = "provider-switch-inflight"
+	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "claude", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "same-token"}}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	inflight, _ := manager.GetByID(authID)
+
+	snapshot := bindTestSnapshot(t, authID, "codex", []byte(`{"type":"codex","access_token":"same-token"}`), map[string]string{})
+	snapshot.Metadata = map[string]any{"access_token": "same-token"}
+	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+		t.Fatalf("snapshot rejected: %v", errUpdate)
+	}
+	manager.MarkResult(ctx, Result{AuthID: authID, Provider: "claude", Model: "m", AccessToken: "same-token",
+		CredentialVersion: inflight.CredentialVersion, RegistrationEpoch: inflight.RegistrationEpoch,
+		Error: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests}})
+	got, _ := manager.GetByID(authID)
+	if got.Unavailable || got.LastError != nil || got.Quota.Exceeded {
+		t.Fatalf("old-provider failure landed on the new provider: unavailable=%v last=%v quota=%+v", got.Unavailable, got.LastError, got.Quota)
+	}
+}

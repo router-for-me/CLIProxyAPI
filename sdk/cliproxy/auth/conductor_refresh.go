@@ -513,6 +513,9 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 // although its OAuth tokens may be the same: another Codex account, Vertex project or
 // service account, or other plugin storage.
 func accountIdentityChanged(existing, incoming *Auth) bool {
+	if !strings.EqualFold(strings.TrimSpace(existing.Provider), strings.TrimSpace(incoming.Provider)) {
+		return true
+	}
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
 		existingAccountID, existingHasAccountID := existing.Metadata["account_id"]
 		incomingAccountID, incomingHasAccountID := incoming.Metadata["account_id"]
