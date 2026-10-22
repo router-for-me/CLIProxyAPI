@@ -866,7 +866,10 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 	if staleEpoch {
 		return true
 	}
-	if result.AccessToken != "" && authMatchesTokenPartition(current, result.AccessToken) {
+	// An unchanged access token (in either token partition) vouches for the result unless the credential has since
+	// switched to another account under it.
+	accountReplaced := result.CredentialVersion > 0 && result.CredentialVersion < current.accountVersion
+	if !accountReplaced && result.AccessToken != "" && authMatchesTokenPartition(current, result.AccessToken) {
 		return false
 	}
 	staleVersion := result.CredentialVersion < current.CredentialVersion && (result.CredentialVersion > 0 || current.CredentialVersion > 1)
@@ -904,7 +907,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		if isStaleExecutionResult(result, auth) {
 			staleEpoch := result.RegistrationEpoch > 0 && result.RegistrationEpoch < auth.RegistrationEpoch
-			if !staleEpoch && rejectsToken && result.AccessToken != "" {
+			if !staleEpoch && rejectsToken && result.AccessToken != "" && !authMatchesTokenPartition(auth, result.AccessToken) {
 				if recordRejectedTokenOnAuth(auth, result.AccessToken) {
 					auth.Generation++
 					auth.UpdatedAt = now

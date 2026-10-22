@@ -475,24 +475,8 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingIDToken != incomingIDToken {
 		return true
 	}
-	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
-		existingAccountID, existingHasAccountID := existing.Metadata["account_id"]
-		incomingAccountID, incomingHasAccountID := incoming.Metadata["account_id"]
-		if existingHasAccountID != incomingHasAccountID || (existingHasAccountID && !reflect.DeepEqual(existingAccountID, incomingAccountID)) {
-			return true
-		}
-	}
-	if strings.EqualFold(strings.TrimSpace(existing.Provider), "vertex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "vertex") {
-		existingServiceAccount, existingHasServiceAccount := vertexServiceAccountIdentity(existing)
-		incomingServiceAccount, incomingHasServiceAccount := vertexServiceAccountIdentity(incoming)
-		if existingHasServiceAccount != incomingHasServiceAccount || (existingHasServiceAccount && !reflect.DeepEqual(existingServiceAccount, incomingServiceAccount)) {
-			return true
-		}
-		existingProjectID, existingHasProjectID := vertexProjectIdentity(existing)
-		incomingProjectID, incomingHasProjectID := vertexProjectIdentity(incoming)
-		if existingHasProjectID != incomingHasProjectID || existingProjectID != incomingProjectID {
-			return true
-		}
+	if accountIdentityChanged(existing, incoming) {
+		return true
 	}
 	existingKey := ""
 	if existing.Attributes != nil {
@@ -522,13 +506,36 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingHasUseSIWC != incomingHasUseSIWC || existingUseSIWC != incomingUseSIWC {
 		return true
 	}
+	return false
+}
+
+// accountIdentityChanged reports whether the credential now targets another account
+// although its OAuth tokens may be the same: another Codex account, Vertex project or
+// service account, or other plugin storage.
+func accountIdentityChanged(existing, incoming *Auth) bool {
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
+		existingAccountID, existingHasAccountID := existing.Metadata["account_id"]
+		incomingAccountID, incomingHasAccountID := incoming.Metadata["account_id"]
+		if existingHasAccountID != incomingHasAccountID || (existingHasAccountID && !reflect.DeepEqual(existingAccountID, incomingAccountID)) {
+			return true
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "vertex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "vertex") {
+		existingServiceAccount, existingHasServiceAccount := vertexServiceAccountIdentity(existing)
+		incomingServiceAccount, incomingHasServiceAccount := vertexServiceAccountIdentity(incoming)
+		if existingHasServiceAccount != incomingHasServiceAccount || (existingHasServiceAccount && !reflect.DeepEqual(existingServiceAccount, incomingServiceAccount)) {
+			return true
+		}
+		existingProjectID, existingHasProjectID := vertexProjectIdentity(existing)
+		incomingProjectID, incomingHasProjectID := vertexProjectIdentity(incoming)
+		if existingHasProjectID != incomingHasProjectID || existingProjectID != incomingProjectID {
+			return true
+		}
+	}
 	existingStorage, existingInspectable := authStorageIdentity(existing)
 	incomingStorage, incomingInspectable := authStorageIdentity(incoming)
-	if (existingInspectable || incomingInspectable) &&
-		(existingInspectable != incomingInspectable || !bytes.Equal(existingStorage, incomingStorage)) {
-		return true
-	}
-	return false
+	return (existingInspectable || incomingInspectable) &&
+		(existingInspectable != incomingInspectable || !bytes.Equal(existingStorage, incomingStorage))
 }
 func vertexServiceAccountIdentity(auth *Auth) (any, bool) {
 	if auth == nil || auth.Metadata == nil {

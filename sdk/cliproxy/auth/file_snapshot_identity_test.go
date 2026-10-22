@@ -363,3 +363,79 @@ func TestCredentialsChangedStorageIgnoresMetadataAndOpaqueStorage(t *testing.T) 
 		t.Fatal("storage without RawJSON counted as a credential change")
 	}
 }
+
+// A request dispatched for the previous Codex account can finish after the file switched
+// to another account under the same access token. Its failure belongs to the old account.
+func TestResultFromPreviousAccountIsIgnoredAfterSameTokenSwitch(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	const authID = "account-switch-inflight"
+	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "codex", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "same-token", "account_id": "account-a"}}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	inflight, _ := manager.GetByID(authID)
+
+	snapshot := bindTestSnapshot(t, authID, "codex", []byte(`{"type":"codex","access_token":"same-token","account_id":"account-b"}`), map[string]string{})
+	snapshot.Metadata = map[string]any{"access_token": "same-token", "account_id": "account-b"}
+	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+		t.Fatalf("snapshot rejected: %v", errUpdate)
+	}
+	switched, _ := manager.GetByID(authID)
+	if switched.CredentialVersion <= inflight.CredentialVersion {
+		t.Fatalf("account switch did not advance the credential version: %d -> %d", inflight.CredentialVersion, switched.CredentialVersion)
+	}
+	// A later update that does not change the credential must keep the account marker.
+	relabeled := switched.Clone()
+	relabeled.Label = "relabeled"
+	if _, errUpdate := manager.Update(ctx, relabeled); errUpdate != nil {
+		t.Fatalf("relabel rejected: %v", errUpdate)
+	}
+	late := func(status int) Result {
+		return Result{AuthID: authID, Provider: "codex", Model: "m", AccessToken: "same-token",
+			CredentialVersion: inflight.CredentialVersion, RegistrationEpoch: inflight.RegistrationEpoch,
+			Error: &Error{Message: "failed", HTTPStatus: status}}
+	}
+
+	manager.MarkResult(ctx, late(http.StatusTooManyRequests))
+	manager.MarkResult(ctx, late(http.StatusUnauthorized))
+	got, _ := manager.GetByID(authID)
+	if got.Unavailable || got.LastError != nil || got.Quota.Exceeded || got.RejectedAccessToken != "" {
+		t.Fatalf("old-account failure landed on the new account: unavailable=%v last=%v quota=%+v rejected=%q",
+			got.Unavailable, got.LastError, got.Quota, got.RejectedAccessToken)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(got, "m", time.Now()); blocked {
+		t.Fatalf("old-account failure blocked the new account: %+v", got.ModelStates)
+	}
+
+	fresh := late(http.StatusTooManyRequests)
+	fresh.CredentialVersion = switched.CredentialVersion
+	manager.MarkResult(ctx, fresh)
+	if got, _ = manager.GetByID(authID); !got.Unavailable {
+		t.Fatal("a failure of the new account was fenced out")
+	}
+}
+
+// A credential version advanced by something other than an account switch (here the id
+// token) keeps the access-token fast path: the late result still counts.
+func TestResultAfterNonAccountCredentialChangeStillCounts(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	const authID = "id-token-change-inflight"
+	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "codex", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "same-token", "id_token": "id-1", "account_id": "account-a"}}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	inflight, _ := manager.GetByID(authID)
+	updated := inflight.Clone()
+	updated.Metadata["id_token"] = "id-2"
+	if _, errUpdate := manager.Update(ctx, updated); errUpdate != nil {
+		t.Fatalf("update rejected: %v", errUpdate)
+	}
+	manager.MarkResult(ctx, Result{AuthID: authID, Provider: "codex", Model: "m", AccessToken: "same-token",
+		CredentialVersion: inflight.CredentialVersion, RegistrationEpoch: inflight.RegistrationEpoch,
+		Error: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests}})
+	if got, _ := manager.GetByID(authID); !got.Unavailable {
+		t.Fatal("a result under an unchanged access token was fenced out by an unrelated credential change")
+	}
+}

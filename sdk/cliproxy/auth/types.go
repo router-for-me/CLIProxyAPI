@@ -123,6 +123,11 @@ type Auth struct {
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
 	cooldownRecordedSeq uint64 `json:"-"`
+	// accountVersion is the CredentialVersion at which the credential last switched to
+	// another account (see accountIdentityChanged). Results of executions dispatched
+	// before it belong to the previous account even when the access token is unchanged.
+	// Runtime only.
+	accountVersion uint64 `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`

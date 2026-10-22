@@ -379,6 +379,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	} else {
 		auth.CredentialVersion = existingVersion
 	}
+	if accountIdentityChanged(existing, auth) {
+		auth.accountVersion = auth.CredentialVersion
+	} else {
+		auth.accountVersion = existing.accountVersion
+	}
 	cooldownStateChanged := false
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		// Runtime state belongs to the credential: a snapshot that swaps it (another
