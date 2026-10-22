@@ -431,6 +431,41 @@ func TestParseClaudeStreamUsage_MessageStart(t *testing.T) {
 	}
 }
 
+func TestParseClaudeUsageReportsSpeedAsResponseServiceTier(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"usage":{"input_tokens":10,"output_tokens":5,"speed":"fast"}}`, "fast"},
+		{`{"usage":{"input_tokens":10,"output_tokens":5,"speed":"standard"}}`, "standard"},
+		{`{"usage":{"input_tokens":10,"output_tokens":5}}`, ""},
+	} {
+		if got := ParseClaudeUsage([]byte(tc.body)).ResponseServiceTier; got != tc.want {
+			t.Errorf("%s: ResponseServiceTier = %q, want %q", tc.body, got, tc.want)
+		}
+	}
+}
+
+// The speed can arrive on message_start while message_delta carries only the
+// final output count; the merged stream usage must keep it.
+func TestStreamUsageBufferObserveClaudeStream_KeepsSpeedAcrossDelta(t *testing.T) {
+	for _, tc := range []struct{ start, delta, want string }{
+		{`"speed":"fast"`, ``, "fast"},
+		{``, `,"speed":"fast"`, "fast"},
+		{``, ``, ""},
+	} {
+		var buffer StreamUsageBuffer
+		start := `data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5","usage":{"input_tokens":20,"output_tokens":1`
+		if tc.start != "" {
+			start += "," + tc.start
+		}
+		buffer.ObserveClaudeStream([]byte(start + `}}}`))
+		buffer.ObserveClaudeStream([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15` + tc.delta + `}}`))
+		detail, ok := buffer.Detail()
+		if !ok || detail.ResponseServiceTier != tc.want || detail.OutputTokens != 15 || detail.InputTokens != 20 {
+			t.Errorf("start %q delta %q: got tier %q in=%d out=%d ok=%v, want tier %q in=20 out=15",
+				tc.start, tc.delta, detail.ResponseServiceTier, detail.InputTokens, detail.OutputTokens, ok, tc.want)
+		}
+	}
+}
+
 func TestParseClaudeUsageFallsBackToTopLevelThinkingTokens(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":3,"output_tokens":10,"thinking_tokens":4}}`)
 	detail := ParseClaudeUsage(data)

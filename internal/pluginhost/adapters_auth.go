@@ -4,12 +4,90 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
+
+// Decoding runs before authentication, so what it allocates, produces and runs at once is bounded.
+// 8 MiB of window covers every zstd level up to 19; a larger declared window is allocated up front.
+const (
+	maxAuthZstdWindowBytes  = 8 << 20
+	maxAuthDecodedBodyBytes = 64 << 20
+	// maxAuthSpeechBodyBytes is the speech handlers' own decoded cap (maxXAISpeechBody).
+	maxAuthSpeechBodyBytes = 1 << 20
+	// maxAuthContentCodings bounds the decoder layers run before authentication; a longer
+	// Content-Encoding list is left to the handler and the plugin gets no DecodedBody.
+	maxAuthContentCodings = 2
+)
+
+var (
+	authDecodeSlots     = make(chan struct{}, 2)
+	errAuthBodyTooLarge = errors.New("request body too large")
+)
+
+// decodeAuthBody decodes a Content-Encoding list the way handlers.ReadRequestBody does (zstd,
+// last to first), but with the window bound the handler's decoder lacks and a decoded size of at
+// most limit bytes.
+func decodeAuthBody(body []byte, encoding string, limit int64) ([]byte, error) {
+	parts := strings.Split(encoding, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		switch enc := strings.ToLower(strings.TrimSpace(parts[i])); enc {
+		case "", "identity":
+		case "zstd":
+			decoder, errNewReader := zstd.NewReader(bytes.NewReader(body), zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(maxAuthZstdWindowBytes))
+			if errNewReader != nil {
+				return nil, errNewReader
+			}
+			out, errReadAll := io.ReadAll(io.LimitReader(decoder, limit+1))
+			decoder.Close()
+			if errors.Is(errReadAll, zstd.ErrWindowSizeExceeded) || errors.Is(errReadAll, zstd.ErrDecoderSizeExceeded) || int64(len(out)) > limit {
+				return nil, errAuthBodyTooLarge
+			}
+			if errReadAll != nil {
+				return nil, errReadAll
+			}
+			body = out
+		default:
+			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
+		}
+	}
+	return body, nil
+}
+
+// handlerDecodesBody reports whether the route's handler reads the body through
+// handlers.ReadRequestBody. Other handlers read the raw bytes, and a plugin judging a
+// decoded body there could approve a model the handler never runs. Only POST is decoded:
+// GET on the responses routes is a websocket upgrade whose body the handler never reads.
+// NOTE: keep in step with the ReadRequestBody callers.
+func handlerDecodesBody(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	switch r.URL.Path {
+	case "/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/responses/compact",
+		"/backend-api/codex/responses", "/backend-api/codex/responses/compact",
+		"/v1/images/generations", "/v1/audio/speech", "/v1/tts",
+		"/v1/videos", "/v1/videos/generations", "/v1/videos/edits", "/v1/videos/extensions":
+		return true
+	case "/v1/images/edits": // only the JSON branch; multipart is parsed raw
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "application/json")
+	case "/openai/v1/videos": // forms are read raw
+		contentType := r.Header.Get("Content-Type")
+		if i := strings.IndexAny(contentType, " ;"); i >= 0 {
+			contentType = contentType[:i]
+		}
+		contentType = strings.ToLower(strings.TrimSpace(contentType))
+		return contentType != "multipart/form-data" && contentType != "application/x-www-form-urlencoded"
+	}
+	return false
+}
 
 func (h *Host) RegisterFrontendAuthProviders() {
 	if h == nil {
@@ -132,12 +210,48 @@ func (a *accessAdapter) Authenticate(ctx context.Context, r *http.Request) (resu
 		}
 		return nil, sdkaccess.NewInternalAuthError("failed to read plugin auth request body", errReadAll)
 	}
+	headers := cloneHeader(r.Header)
+	var decodedBody []byte
+	cfg := a.host.currentRuntimeConfig()
+	// With image generation disabled the image handlers answer 404 before reading the body.
+	imagesOff := cfg != nil && cfg.DisableImageGeneration == config.DisableImageGenerationAll && strings.HasPrefix(r.URL.Path, "/v1/images/")
+	if encoding := strings.TrimSpace(headers.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") && strings.Count(encoding, ",") < maxAuthContentCodings && !imagesOff && handlerDecodesBody(r) {
+		// Decoding runs before authentication, so it is bounded; a slot is held until the plugin call finishes.
+		var releaseSlot func()
+		select {
+		case authDecodeSlots <- struct{}{}:
+			ctx, releaseSlot = withPluginCallFinish(ctx, func() { <-authDecodeSlots })
+			defer releaseSlot()
+		case <-ctx.Done():
+			return nil, sdkaccess.NewInternalAuthError("plugin auth request canceled", ctx.Err())
+		}
+		// The server middleware limits only compressed bytes; ReadRequestBody applies the configured
+		// limit to decoded bytes after authentication, so apply it here too.
+		limit := int64(maxAuthDecodedBodyBytes)
+		if cfg != nil && cfg.MaxRequestBodyBytes > 0 && cfg.MaxRequestBodyBytes < limit {
+			limit = cfg.MaxRequestBodyBytes
+		}
+		if (r.URL.Path == "/v1/audio/speech" || r.URL.Path == "/v1/tts") && limit > maxAuthSpeechBodyBytes {
+			limit = maxAuthSpeechBodyBytes
+		}
+		decoded, errDecode := decodeAuthBody(body, encoding, limit)
+		if errors.Is(errDecode, errAuthBodyTooLarge) {
+			return nil, sdkaccess.NewRequestEntityTooLargeError(errDecode)
+		}
+		// Any other failure leaves DecodedBody unset; the handler falls back to the raw body or rejects it.
+		if errDecode == nil {
+			decodedBody = decoded
+		} else {
+			releaseSlot()
+		}
+	}
 	resp, errAuthenticate := a.provider.Authenticate(ctx, pluginapi.FrontendAuthRequest{
-		Method:  r.Method,
-		Path:    r.URL.Path,
-		Headers: cloneHeader(r.Header),
-		Query:   cloneValues(r.URL.Query()),
-		Body:    bytes.Clone(body),
+		Method:      r.Method,
+		Path:        r.URL.Path,
+		Headers:     headers,
+		Query:       cloneValues(r.URL.Query()),
+		Body:        bytes.Clone(body),
+		DecodedBody: decodedBody,
 	})
 	if errAuthenticate != nil {
 		return nil, sdkaccess.NewNotHandledError()

@@ -1231,6 +1231,13 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
 	}
+	// Anthropic reports the speed a response was served and billed at in
+	// usage.speed ("fast" or "standard"): fast mode costs more, and a
+	// fast request on a model without it runs, and is billed, at standard.
+	// Carried as the response tier so usage sinks can price it.
+	if speed := strings.TrimSpace(usageNode.Get("speed").String()); speed != "" {
+		detail.ResponseServiceTier = speed
+	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}

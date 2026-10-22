@@ -458,8 +458,11 @@ type FrontendAuthRequest struct {
 	Headers http.Header
 	// Query contains inbound query parameters.
 	Query url.Values
-	// Body contains the raw request body.
+	// Body contains the raw request body as received, before any Content-Encoding decoding.
 	Body []byte
+	// DecodedBody contains the request body after Content-Encoding decoding. It is set only when
+	// the body was content-encoded and the route's handler decodes it, and is nil otherwise.
+	DecodedBody []byte
 }
 
 // FrontendAuthResponse reports the authentication decision and identity metadata.
