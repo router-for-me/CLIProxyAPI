@@ -58,7 +58,7 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		if authenticator == nil {
 			authenticator = sdkAuth.NewCodexAuthenticator()
 		}
-		record, errLogin := authenticator.Login(ctx, h.cfg, &sdkAuth.LoginOptions{
+		record, errLogin := authenticator.Login(ctx, h.configSnapshot(), &sdkAuth.LoginOptions{
 			NoBrowser: true,
 			Metadata:  map[string]string{"codex_login_mode": "device"},
 			OnDeviceCode: func(info sdkAuth.DeviceCodeInfo) {
