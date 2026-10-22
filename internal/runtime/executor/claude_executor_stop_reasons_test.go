@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -127,7 +126,7 @@ func TestClaudeExecutorPauseTurnContinuationRestoresFinishedSearchAndKeepsPaused
 	}
 }
 
-func TestClaudeExecutorChatContextWindowExceededIsHTTP400(t *testing.T) {
+func TestClaudeExecutorChatContextWindowExceededMapsToLength(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"model\":\"claude-opus-5-5\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n" +
@@ -141,15 +140,20 @@ func TestClaudeExecutorChatContextWindowExceededIsHTTP400(t *testing.T) {
 
 	auth := &cliproxyauth.Auth{ID: "ctx-window", Attributes: map[string]string{"api_key": "sk-ant-test", "base_url": server.URL}}
 	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hello"}]}`)
-	_, errExecute := NewClaudeExecutor(&config.Config{}).Execute(context.Background(), auth, cliproxyexecutor.Request{
+	resp, errExecute := NewClaudeExecutor(&config.Config{}).Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model: "claude-opus-5-5", Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, OriginalRequest: payload})
-	var status interface{ StatusCode() int }
-	if !errors.As(errExecute, &status) || status.StatusCode() != http.StatusBadRequest {
-		t.Fatalf("err = %v, want HTTP 400", errExecute)
+	if errExecute != nil {
+		t.Fatalf("Execute err = %v, want nil", errExecute)
 	}
-	if code := gjson.Get(errExecute.Error(), "error.code").String(); code != "context_length_exceeded" {
-		t.Fatalf("error body = %s", errExecute.Error())
+	if got := gjson.GetBytes(resp.Payload, "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("finish_reason = %q, want length: %s", got, resp.Payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "cut" {
+		t.Fatalf("content = %q, want cut: %s", got, resp.Payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "usage.completion_tokens").Int(); got != 2 {
+		t.Fatalf("completion_tokens = %d, want 2: %s", got, resp.Payload)
 	}
 }
 

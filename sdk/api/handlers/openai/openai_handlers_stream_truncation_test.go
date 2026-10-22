@@ -108,9 +108,8 @@ func TestChatCompletionsStreamWithoutFinishReasonIsReportedAsError(t *testing.T)
 	}
 }
 
-// A translated terminal error chunk (Claude model_context_window_exceeded ->
-// context_length_exceeded) ends the stream on its own: the handler must not add
-// a second "closed before finish_reason" error after it.
+// A translated terminal error chunk ends the stream on its own: the handler
+// must not add a second "closed before finish_reason" error after it.
 func TestChatCompletionsStreamTerminalErrorChunkIsTheOnlyError(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
