@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,39 @@ import (
 
 	"golang.org/x/sync/singleflight"
 )
+
+type xaiRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f xaiRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestResolveTokenEndpointPrefersDiscovery(t *testing.T) {
+	auth := &XAIAuth{httpClient: &http.Client{Transport: xaiRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != DiscoveryURL {
+			t.Fatalf("request URL = %s, want %s", r.URL, DiscoveryURL)
+		}
+		body := `{"device_authorization_endpoint":"https://auth.x.ai/oauth2/device/code","token_endpoint":"https://auth.x.ai/oauth2/token"}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}}
+	got := auth.ResolveTokenEndpoint(context.Background(), "https://auth.x.ai/oauth/token")
+	if got != "https://auth.x.ai/oauth2/token" {
+		t.Fatalf("endpoint = %q, want discovered endpoint", got)
+	}
+}
+
+func TestResolveTokenEndpointFallsBackToStored(t *testing.T) {
+	auth := &XAIAuth{httpClient: &http.Client{Transport: xaiRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	})}}
+	got := auth.ResolveTokenEndpoint(context.Background(), " https://auth.x.ai/oauth/old ")
+	if got != "https://auth.x.ai/oauth/old" {
+		t.Fatalf("endpoint = %q, want trimmed stored endpoint", got)
+	}
+}
 
 func resetXAIRefreshGroupForTest() {
 	xaiRefreshGroup = singleflight.Group{}
