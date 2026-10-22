@@ -1458,6 +1458,9 @@ func TestNormalizeCodexToolSchemas_PreservesNumericBoundStrength(t *testing.T) {
 							"floor_x": {"type": "number", "exclusiveMinimum": -1e100},
 							"capped": {"type": "number", "exclusiveMaximum": 1e100},
 							"dominated": {"type": "number", "maximum": 100, "exclusiveMaximum": 1e100},
+							"frac_cap": {"type": "number", "maximum": 100000000000000000000.5, "exclusiveMaximum": 9223372036854775808},
+							"frac_floor": {"type": "number", "minimum": -100000000000000000000.5, "exclusiveMinimum": -9223372036854775809},
+							"tiny_floor": {"type": "number", "minimum": 1.1e-9223372036854775808, "exclusiveMinimum": -1e100},
 							"impossible_max": {"type": "integer", "minimum": 0, "maximum": -1e100},
 							"impossible_min": {"type": "number", "minimum": 1e100, "exclusiveMinimum": 2e100},
 							"typeless": {"maximum": 1e100},
@@ -1517,6 +1520,29 @@ func TestNormalizeCodexToolSchemas_PreservesNumericBoundStrength(t *testing.T) {
 	}
 	if props.Get("dominated.exclusiveMaximum").Exists() {
 		t.Fatalf("redundant tautological exclusiveMaximum must be dropped")
+	}
+	// A retained out-of-range fractional keyword is looser than the int64 edge,
+	// so the exclusive rewrite must install the edge instead of deferring to it
+	// (codex review on a9147fa5) — otherwise the schema re-admits the very
+	// out-of-int64 integers the original contract rejected.
+	if got := props.Get("frac_cap.maximum").Raw; got != "9223372036854775807" {
+		t.Fatalf("fractional maximum must yield to the tighter int64 edge, got %s", got)
+	}
+	if props.Get("frac_cap.exclusiveMaximum").Exists() {
+		t.Fatalf("rewritten exclusiveMaximum must not keep the exclusive keyword")
+	}
+	if got := props.Get("frac_floor.minimum").Raw; got != "-9223372036854775808" {
+		t.Fatalf("fractional minimum must yield to the tighter int64 edge, got %s", got)
+	}
+	if props.Get("frac_floor.exclusiveMinimum").Exists() {
+		t.Fatalf("rewritten exclusiveMinimum must not keep the exclusive keyword")
+	}
+	// An underflowed (≈0) minimum is stricter than the MinInt64 edge and stays.
+	if got := props.Get("tiny_floor.minimum").Raw; got != "1.1e-9223372036854775808" {
+		t.Fatalf("underflowed minimum is the stricter bound and must stay, got %s", got)
+	}
+	if props.Get("tiny_floor.exclusiveMinimum").Exists() {
+		t.Fatalf("tautological exclusiveMinimum under a stricter minimum must be dropped")
 	}
 	if got := props.Get("typeless.maximum").Raw; got != "9223372036854775807" {
 		t.Fatalf("type-less schemas must clamp conservatively, got %s", got)

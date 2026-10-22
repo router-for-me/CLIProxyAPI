@@ -454,11 +454,27 @@ func sanitizeCodexNumericBounds(schema map[string]any) bool {
 // rewriteCodexExclusiveBound rewrites an out-of-int64 exclusive bound on a numeric
 // schema to the non-exclusive int64 edge: the tautological bound admits the edge
 // value, so an exclusive rewrite would reject a value the original contract allows.
-// A non-exclusive keyword already present dominates the tautology, so the exclusive
-// keyword is just removed.
+// When a non-exclusive keyword is already present the stricter of the two stays:
+// an in-range keyword sits at or inside the edge and dominates the tautology, but
+// a retained out-of-range one (fractional) is looser than the edge and would
+// re-admit values the original contract rejected. A bound that cannot be parsed
+// (an exponent out of big.Float's range) stays untouched — overwriting an
+// unknown constraint risks widening the contract.
 func rewriteCodexExclusiveBound(schema map[string]any, edgeKey, exclusiveKey, edgeLiteral string) {
 	delete(schema, exclusiveKey)
-	if _, exists := schema[edgeKey]; !exists {
+	existing, ok := schema[edgeKey].(json.Number)
+	if !ok {
+		schema[edgeKey] = json.Number(edgeLiteral)
+		return
+	}
+	existingVal, parses := new(big.Float).SetPrec(512).SetString(string(existing))
+	edgeVal, _ := new(big.Float).SetPrec(512).SetString(edgeLiteral)
+	if !parses || existingVal == nil || edgeVal == nil {
+		return
+	}
+	looser := (edgeKey == "maximum" && existingVal.Cmp(edgeVal) > 0) ||
+		(edgeKey == "minimum" && existingVal.Cmp(edgeVal) < 0)
+	if looser {
 		schema[edgeKey] = json.Number(edgeLiteral)
 	}
 }
