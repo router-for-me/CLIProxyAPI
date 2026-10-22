@@ -241,6 +241,24 @@ func TestIsRequestFault(t *testing.T) {
 			want:   false,
 		},
 		{
+			name:   "SIWC user not eligible is credential failure",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"error":{"message":"The ChatGPT user is not eligible for subscription sharing.","type":"invalid_request_error","param":null,"code":"subscription_sharing_user_not_eligible"}}`),
+			want:   false,
+		},
+		{
+			name:   "SIWC invalid user is credential failure",
+			status: http.StatusUnauthorized,
+			err:    errors.New(`{"error":{"message":"invalid user","type":"invalid_request_error","code":"subscription_sharing_invalid_user"}}`),
+			want:   false,
+		},
+		{
+			name:   "SIWC unsupported capability stays request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"message":"unsupported","type":"invalid_request_error","param":"input","code":"subscription_sharing_unsupported_capability"}}`),
+			want:   true,
+		},
+		{
 			name:   "rate limit status overrides generic request error code",
 			status: http.StatusTooManyRequests,
 			err:    errors.New(`{"error":{"message":"Rate Limit Reached","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),

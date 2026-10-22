@@ -34,6 +34,16 @@ var requestFaultTypes = map[string]struct{}{
 	"invalid_prompt":        {},
 }
 
+// credentialFaultCodes are upstream error codes that reject the selected
+// credential even though the body carries a generic request-fault type.
+// Sign in with ChatGPT (SIWC) returns these when the subscriber behind the
+// credential cannot use ChatGPT plan sharing; another credential can still
+// serve the same request.
+var credentialFaultCodes = map[string]struct{}{
+	"subscription_sharing_user_not_eligible": {},
+	"subscription_sharing_invalid_user":      {},
+}
+
 // HTTPStatusFromError extracts an HTTP status from err.
 // Explicit StatusCode() values win. Otherwise context.Canceled maps to 499
 // and context.DeadlineExceeded maps to 504. Returns 0 when unknown.
@@ -104,6 +114,10 @@ func IsRequestFault(status int, err error) bool {
 	// Model not found indicates a credential-model capability mismatch rather than
 	// a caller request error. Preserve rotation and cooldown for the model.
 	if hasModelNotFoundErrorBody(err) {
+		return false
+	}
+	// SIWC subscriber rejections belong to the credential, not the request.
+	if hasCredentialFaultCode(err) {
 		return false
 	}
 	if hasRequestFaultBody(err) {
@@ -192,6 +206,23 @@ func hasAuthenticationErrorBody(err error) bool {
 	}
 	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
 		if errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); errType == "authentication_error" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCredentialFaultCode(err error) bool {
+	if err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		if _, ok := credentialFaultCodes[code]; ok {
 			return true
 		}
 	}
