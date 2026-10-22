@@ -191,6 +191,35 @@ func TestApplyClaudeLegacyDeviceHeadersAcceptsConfiguredMeasuredBaseline(t *test
 	}
 }
 
+func TestApplyClaudeLegacyDeviceHeadersKeepNewerVersionsUsesConfiguredBaseline(t *testing.T) {
+	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+		UserAgent:      "claude-cli/2.2.0 (external, cli)",
+		PackageVersion: "0.95.0",
+		RuntimeVersion: "v26.4.0",
+		OS:             "MacOS",
+		Arch:           "arm64",
+	}}
+	incoming := claudeDeviceHeaders("claude-cli/2.2.5 (external, cli)")
+	incoming.Set("X-Stainless-Package-Version", "0.128.0")
+	incoming.Set("X-Stainless-Runtime-Version", "v26.5.0")
+
+	ApplyClaudeLegacyDeviceHeaders(request, incoming, cfg, true, true)
+
+	if got := request.Header.Get("User-Agent"); got != "claude-cli/2.2.5 (external, cli)" {
+		t.Fatalf("User-Agent = %q, want claude-cli/2.2.5 (external, cli)", got)
+	}
+	if got := request.Header.Get("X-Stainless-Package-Version"); got != "0.128.0" {
+		t.Fatalf("X-Stainless-Package-Version = %q, want 0.128.0", got)
+	}
+	if got := request.Header.Get("X-Stainless-Runtime-Version"); got != "v26.5.0" {
+		t.Fatalf("X-Stainless-Runtime-Version = %q, want v26.5.0", got)
+	}
+}
+
 func TestResolveClaudeDeviceProfileRequiredHomeReadWithoutCandidate(t *testing.T) {
 	client := newFakeClaudeDeviceProfileKVClient()
 	auth := &cliproxyauth.Auth{ID: "auth-1"}

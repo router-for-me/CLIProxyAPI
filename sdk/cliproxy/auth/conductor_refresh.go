@@ -815,6 +815,10 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if isRequestScopedError(execErr) || !isUnauthorizedError(execErr) {
 		return auth, false
 	}
+	// A 401 matched by a configured request-scoped rule is the rule's to handle: no rejection, no refresh.
+	if _, ruleMatched := matchRequestScopedErrorAction(auth, execErr, m.runtimeConfigSnapshot()); ruleMatched {
+		return auth, false
+	}
 	failedToken := authAccessToken(auth)
 	if failedToken != "" {
 		m.markRejectedAccessToken(auth.ID, failedToken)

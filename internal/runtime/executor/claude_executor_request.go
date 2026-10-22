@@ -1627,7 +1627,7 @@ func applyClaudeHeadersWithNativeProfile(
 	// Unconfirmed clients always receive the CLI baseline instead of being
 	// allowed to populate or reuse another client's software profile.
 	if wirePolicy.ExplicitNever && confirmedClaudeCode {
-		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, nil, true)
+		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, true, true)
 	} else if stabilizeDeviceProfile {
 		if confirmedClaudeCode {
 			var errDeviceProfile error

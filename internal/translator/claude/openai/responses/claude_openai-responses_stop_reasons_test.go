@@ -303,7 +303,7 @@ func runStopReasonErrorsKeepOutput(t *testing.T) {
 		event  string
 	}{
 		{"refusal", "response.incomplete"},
-		{"model_context_window_exceeded", "response.failed"},
+		{"model_context_window_exceeded", "response.incomplete"},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			chunks := [][]byte{
@@ -331,6 +331,12 @@ func runStopReasonErrorsKeepOutput(t *testing.T) {
 			}
 			if got := strings.Join(order, "|"); got != "message_done:Some text.|"+tc.event {
 				t.Fatalf("event order = %s", got)
+			}
+			if terminal.Get("status").String() != "incomplete" {
+				t.Fatalf("status = %q, want incomplete", terminal.Get("status").String())
+			}
+			if errNode := terminal.Get("error"); errNode.Exists() && errNode.Type != gjson.Null {
+				t.Fatalf("unexpected error = %s", errNode.Raw)
 			}
 			if terminal.Get("usage.input_tokens").Int() != 10 || terminal.Get("usage.input_tokens_details.cached_tokens").Int() != 3 || terminal.Get("usage.output_tokens").Int() != 4 {
 				t.Fatalf("usage = %s", terminal.Get("usage").Raw)
@@ -371,7 +377,7 @@ func TestResponsesParallelToolCallsFalseMapsToDisableParallelToolUse(t *testing.
 	}
 }
 
-func TestContextWindowExceededNonStreamIsFailedWithError(t *testing.T) {
+func TestContextWindowExceededNonStreamIsIncompleteMaxOutputTokens(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_c","usage":{"input_tokens":5,"output_tokens":0}}}`),
 		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
@@ -381,8 +387,14 @@ func TestContextWindowExceededNonStreamIsFailedWithError(t *testing.T) {
 		[]byte(`data: {"type":"message_stop"}`),
 	}
 	output := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil))
-	if output.Get("status").String() != "failed" || output.Get("error.code").String() != "context_length_exceeded" {
+	if output.Get("status").String() != "incomplete" || output.Get("incomplete_details.reason").String() != "max_output_tokens" {
 		t.Fatalf("response = %s", output.Raw)
+	}
+	if errNode := output.Get("error"); errNode.Exists() && errNode.Type != gjson.Null {
+		t.Fatalf("unexpected error = %s", errNode.Raw)
+	}
+	if output.Get("output.0.status").String() != "incomplete" || output.Get("output.0.content.0.text").String() != "cut" {
+		t.Fatalf("output = %s", output.Get("output").Raw)
 	}
 	if output.Get("usage.output_tokens").Int() != 2 || output.Get("usage.input_tokens").Int() != 5 {
 		t.Fatalf("usage = %s", output.Get("usage").Raw)

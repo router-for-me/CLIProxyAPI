@@ -171,7 +171,7 @@ func (u claudeResponsesUsageTokens) OpenAIResponsesUsage() (inputTokens, outputT
 
 func claudeResponsesIncompleteDetails(stopReason string) ([]byte, bool) {
 	switch strings.ToLower(strings.TrimSpace(stopReason)) {
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
 		return []byte(`{"reason":"max_output_tokens"}`), true
 	case "refusal":
 		// Safety classifiers stop the turn with a normal 200. Responses clients
@@ -182,13 +182,6 @@ func claudeResponsesIncompleteDetails(stopReason string) ([]byte, bool) {
 	return nil, false
 }
 
-// claudeStopReasonContextWindowExceeded reports the stop reason Anthropic uses
-// when the response filled the model's context window. Responses clients expect
-// that condition as a failed response with code context_length_exceeded.
-func claudeStopReasonContextWindowExceeded(stopReason string) bool {
-	return strings.EqualFold(strings.TrimSpace(stopReason), "model_context_window_exceeded")
-}
-
 // claudeStopReasonPauseTurn reports Anthropic's server-tool iteration pause.
 // The turn is unfinished but valid: the client continues it by sending the
 // paused assistant content back unchanged, so Responses ends the response as
@@ -196,12 +189,6 @@ func claudeStopReasonContextWindowExceeded(stopReason string) bool {
 // https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause_turn
 func claudeStopReasonPauseTurn(stopReason string) bool {
 	return strings.EqualFold(strings.TrimSpace(stopReason), "pause_turn")
-}
-
-// claudeResponsesContextWindowError is the Responses error object for
-// model_context_window_exceeded.
-func claudeResponsesContextWindowError() []byte {
-	return []byte(`{"code":"context_length_exceeded","message":"Claude stopped because the conversation filled the model context window (stop_reason: model_context_window_exceeded)."}`)
 }
 
 // claudeResponsesWebSearchStatus keeps a paused search that never received its
@@ -214,16 +201,13 @@ func claudeResponsesWebSearchStatus(stopReason, status string, hasResults bool) 
 }
 
 func claudeResponsesOutputStatus(stopReason string) string {
-	if _, incomplete := claudeResponsesIncompleteDetails(stopReason); incomplete || claudeStopReasonContextWindowExceeded(stopReason) {
+	if _, incomplete := claudeResponsesIncompleteDetails(stopReason); incomplete {
 		return "incomplete"
 	}
 	return "completed"
 }
 
 func claudeResponsesTerminalState(stopReason string) (eventType, status string, incompleteDetails []byte) {
-	if claudeStopReasonContextWindowExceeded(stopReason) {
-		return "response.failed", "failed", nil
-	}
 	incompleteDetails, incomplete := claudeResponsesIncompleteDetails(stopReason)
 	if incomplete {
 		return "response.incomplete", "incomplete", incompleteDetails
@@ -1271,9 +1255,6 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if len(incompleteDetails) > 0 {
 			completed, _ = sjson.SetRawBytes(completed, "response.incomplete_details", incompleteDetails)
 		}
-		if claudeStopReasonContextWindowExceeded(st.StopReason) {
-			completed, _ = sjson.SetRawBytes(completed, "response.error", claudeResponsesContextWindowError())
-		}
 		if claudeStopReasonPauseTurn(st.StopReason) {
 			completed, _ = sjson.SetBytes(completed, "response.end_turn", false)
 		}
@@ -1677,9 +1658,6 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, _ stri
 	if len(incompleteDetails) > 0 {
 		out, _ = sjson.SetRawBytes(out, "incomplete_details", incompleteDetails)
 	}
-	if claudeStopReasonContextWindowExceeded(stopReason) {
-		out, _ = sjson.SetRawBytes(out, "error", claudeResponsesContextWindowError())
-	}
 	if claudeStopReasonPauseTurn(stopReason) {
 		out, _ = sjson.SetBytes(out, "end_turn", false)
 	}
@@ -1697,7 +1675,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, _ stri
 	outputs := make([][]byte, 0, len(outputItems))
 	for i, outputItem := range outputItems {
 		itemStatus := "completed"
-		if (responseStatus == "incomplete" || responseStatus == "failed") && i == len(outputItems)-1 {
+		if responseStatus == "incomplete" && i == len(outputItems)-1 {
 			itemStatus = "incomplete"
 		}
 		var item []byte

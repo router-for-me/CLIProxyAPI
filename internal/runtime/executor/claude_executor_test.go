@@ -1427,6 +1427,85 @@ func TestClaudeExecutor_CloakModeNeverPreservesConfirmedShapeClaudeCodeCallerHea
 	}
 }
 
+func TestClaudeExecutor_CloakModeNeverUsesConfiguredHeaderDefaultsBaseline(t *testing.T) {
+	helps.ResetClaudeDeviceProfileCache()
+	var seenHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	const sessionID = "55555555-6666-4777-8888-999999999999"
+	const userID = `{"account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","device_id":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","session_id":"55555555-6666-4777-8888-999999999999"}`
+	const callerUA = "claude-cli/2.2.5 (external, cli)"
+	payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":1024,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.2.5.179; cc_entrypoint=cli;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}],"tools":[],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `}}`)
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:      "claude-cli/2.2.0 (external, cli)",
+			PackageVersion: "0.95.0",
+			RuntimeVersion: "v26.4.0",
+			OS:             "MacOS",
+			Arch:           "arm64",
+		},
+	}
+	deviceIDs := []string{"0000000000000000000000000000000000000000000000000000000000000000"}
+	executor := NewClaudeExecutor(cfg)
+	auth := &cliproxyauth.Auth{
+		ID: "auth-cloak-never-configured-baseline",
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-cloak-never-cfg",
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"claude_device_ids": deviceIDs,
+			"cloak_mode":        "never",
+		},
+	}
+
+	incomingPlausible := http.Header{
+		"User-Agent":     {callerUA},
+		"X-App":          {"cli"},
+		"Anthropic-Beta": {"claude-code-20250219,interleaved-thinking-2025-05-14"},
+		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
+		"X-Claude-Code-Session-Id":                  {sessionID},
+		"X-Stainless-Package-Version":               {"0.128.0"},
+		"X-Stainless-Runtime-Version":               {"v26.5.0"},
+		"X-Stainless-Os":                            {"MacOS"},
+		"X-Stainless-Arch":                          {"arm64"},
+	}
+	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Headers:         incomingPlausible,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() plausible headers error = %v", errExecute)
+	}
+	assertClaudeFingerprint(t, seenHeaders, callerUA, "0.128.0", "v26.5.0", "MacOS", "arm64")
+
+	incomingFallback := incomingPlausible.Clone()
+	incomingFallback.Set("X-Stainless-Package-Version", "0.80.0")
+	incomingFallback.Del("X-Stainless-Runtime-Version")
+	_, errExecute = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Headers:         incomingFallback,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() fallback headers error = %v", errExecute)
+	}
+	assertClaudeFingerprint(t, seenHeaders, callerUA, "0.95.0", "v26.4.0", "MacOS", "arm64")
+}
+
 func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {
 	if helps.ClaudeDeviceProfileStabilizationEnabled(nil) {
 		t.Fatal("expected nil config to default to disabled stabilization")
