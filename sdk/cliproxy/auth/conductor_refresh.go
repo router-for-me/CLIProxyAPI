@@ -1,16 +1,19 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	vertexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/vertex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -472,6 +475,25 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingIDToken != incomingIDToken {
 		return true
 	}
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
+		existingAccountID, existingHasAccountID := existing.Metadata["account_id"]
+		incomingAccountID, incomingHasAccountID := incoming.Metadata["account_id"]
+		if existingHasAccountID != incomingHasAccountID || (existingHasAccountID && !reflect.DeepEqual(existingAccountID, incomingAccountID)) {
+			return true
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "vertex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "vertex") {
+		existingServiceAccount, existingHasServiceAccount := vertexServiceAccountIdentity(existing)
+		incomingServiceAccount, incomingHasServiceAccount := vertexServiceAccountIdentity(incoming)
+		if existingHasServiceAccount != incomingHasServiceAccount || (existingHasServiceAccount && !reflect.DeepEqual(existingServiceAccount, incomingServiceAccount)) {
+			return true
+		}
+		existingProjectID, existingHasProjectID := vertexProjectIdentity(existing)
+		incomingProjectID, incomingHasProjectID := vertexProjectIdentity(incoming)
+		if existingHasProjectID != incomingHasProjectID || existingProjectID != incomingProjectID {
+			return true
+		}
+	}
 	existingKey := ""
 	if existing.Attributes != nil {
 		existingKey = existing.Attributes[AttributeAPIKey]
@@ -500,7 +522,67 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingHasUseSIWC != incomingHasUseSIWC || existingUseSIWC != incomingUseSIWC {
 		return true
 	}
+	existingStorage, existingHasStorage := authStorageIdentity(existing)
+	incomingStorage, incomingHasStorage := authStorageIdentity(incoming)
+	if existing.Storage != nil || incoming.Storage != nil {
+		if !existingHasStorage || !incomingHasStorage || !bytes.Equal(existingStorage, incomingStorage) {
+			return true
+		}
+	}
 	return false
+}
+func vertexServiceAccountIdentity(auth *Auth) (any, bool) {
+	if auth == nil || auth.Metadata == nil {
+		return nil, false
+	}
+	value, ok := auth.Metadata["service_account"]
+	if !ok {
+		return nil, false
+	}
+	sa, ok := value.(map[string]any)
+	if !ok {
+		return value, true
+	}
+	if normalized, errNormalize := vertexauth.NormalizeServiceAccountMap(sa); errNormalize == nil {
+		return normalized, true
+	}
+	return sa, true
+}
+
+func vertexProjectIdentity(auth *Auth) (string, bool) {
+	if auth == nil || auth.Metadata == nil {
+		return "", false
+	}
+	for _, key := range []string{"project_id", "project"} {
+		if value, ok := auth.Metadata[key].(string); ok {
+			if projectID := strings.TrimSpace(value); projectID != "" {
+				return projectID, true
+			}
+		}
+	}
+	return "", false
+}
+func authStorageIdentity(auth *Auth) ([]byte, bool) {
+	if auth == nil || auth.Storage == nil {
+		return nil, false
+	}
+	rawProvider, ok := auth.Storage.(interface{ RawJSON() []byte })
+	if !ok {
+		return nil, false
+	}
+	raw := bytes.TrimSpace(rawProvider.RawJSON())
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var value any
+	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
+		return nil, false
+	}
+	canonical, errMarshal := json.Marshal(value)
+	if errMarshal != nil {
+		return nil, false
+	}
+	return canonical, true
 }
 
 func authSIWCTokenField(auth *Auth, key string) string {

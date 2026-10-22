@@ -381,7 +381,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	}
 	cooldownStateChanged := false
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if isFileSnapshot {
+		// Runtime state belongs to the credential: a snapshot that swaps it (another
+		// provider, new tokens, another account) starts clean.
+		carryRuntime := isFileSnapshot && !credChanged && strings.EqualFold(existing.Provider, auth.Provider)
+		if carryRuntime {
 			auth.ModelStates = existing.ModelStates
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
@@ -389,7 +392,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
-		if isFileSnapshot {
+		if carryRuntime {
 			if (auth.Status == "" || auth.Status == StatusActive) && existing.Status != "" {
 				auth.Status = existing.Status
 			}
