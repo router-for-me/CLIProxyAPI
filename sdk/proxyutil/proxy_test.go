@@ -398,6 +398,92 @@ func TestBuildDialerHTTPProxyCONNECTCancellation(t *testing.T) {
 	}
 }
 
+func TestBuildDialerProxyCONNECTRejectionDoesNotWaitForBody(t *testing.T) {
+	t.Parallel()
+
+	for _, scheme := range []string{"http", "https"} {
+		for _, tc := range []struct {
+			name          string
+			status        int
+			contentLength string
+		}{
+			{name: "auth_required_content_length", status: http.StatusProxyAuthRequired, contentLength: "128"},
+			{name: "bad_gateway_chunked", status: http.StatusBadGateway},
+			{name: "forbidden_empty", status: http.StatusForbidden, contentLength: "0"},
+		} {
+			t.Run(scheme+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				headersSent := make(chan struct{})
+				connectionClosed := make(chan struct{})
+				proxyServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					defer close(connectionClosed)
+					if r.Method != http.MethodConnect {
+						t.Errorf("proxy request method = %s, want CONNECT", r.Method)
+					}
+					if tc.contentLength != "" {
+						w.Header().Set("Content-Length", tc.contentLength)
+					}
+					w.WriteHeader(tc.status)
+					w.(http.Flusher).Flush()
+					close(headersSent)
+					// Leave the body unfinished until the dialer closes the rejected connection.
+					<-r.Context().Done()
+				}))
+				if scheme == "https" {
+					proxyServer.StartTLS()
+				} else {
+					proxyServer.Start()
+				}
+				t.Cleanup(proxyServer.Close)
+				t.Cleanup(proxyServer.CloseClientConnections)
+
+				dialer, mode, errBuild := BuildDialer(proxyServer.URL)
+				if errBuild != nil || mode != ModeProxy {
+					t.Fatalf("BuildDialer mode=%d error=%v", mode, errBuild)
+				}
+				connectDialer := dialer.(*httpConnectDialer)
+				if scheme == "https" {
+					connectDialer.tlsConfig = proxyServer.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				dialDone := make(chan error, 1)
+				go func() {
+					conn, errDial := connectDialer.DialContext(ctx, "tcp", "target.example.com:443")
+					if conn != nil {
+						if errClose := conn.Close(); errClose != nil {
+							t.Errorf("close unexpected tunnel: %v", errClose)
+						}
+						t.Error("rejected CONNECT returned a connection")
+					}
+					dialDone <- errDial
+				}()
+
+				select {
+				case <-headersSent:
+				case <-time.After(5 * time.Second):
+					t.Fatal("proxy did not send rejection headers")
+				}
+				select {
+				case errDial := <-dialDone:
+					want := fmt.Sprintf("proxy CONNECT returned status %d %s", tc.status, http.StatusText(tc.status))
+					if errDial == nil || errDial.Error() != want {
+						t.Fatalf("CONNECT error = %v, want %q", errDial, want)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("rejected CONNECT waited for the unfinished response body")
+				}
+				select {
+				case <-connectionClosed:
+				case <-time.After(5 * time.Second):
+					t.Fatal("rejected CONNECT left the proxy connection open")
+				}
+			})
+		}
+	}
+}
+
 func TestRedactProxyURL(t *testing.T) {
 	t.Parallel()
 
