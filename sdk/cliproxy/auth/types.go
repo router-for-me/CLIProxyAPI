@@ -170,6 +170,8 @@ func (a *Auth) BindFileSnapshot(path string, data []byte) {
 	a.fileSnapshotDigest = digest
 }
 
+const invalidatedFileSnapshotDigest = "invalidated"
+
 // ClearFileSnapshot removes any unversioned file-observation binding once the
 // Auth is committed to runtime state or normalized for comparison.
 func (a *Auth) ClearFileSnapshot() {
@@ -180,16 +182,43 @@ func (a *Auth) ClearFileSnapshot() {
 	a.fileSnapshotDigest = ""
 }
 
+// InvalidateFileSnapshot marks an unversioned file snapshot as discarded so a
+// subsequent re-read of identical or reformatted file content is not suppressed.
+func (a *Auth) InvalidateFileSnapshot() {
+	if !a.HasFileSnapshot() {
+		return
+	}
+	a.fileSnapshotDigest = invalidatedFileSnapshotDigest
+}
+
 // HasFileSnapshot reports whether this Auth is an unversioned file-synthesized
 // snapshot bound to a specific file observation digest.
 func (a *Auth) HasFileSnapshot() bool {
 	return a != nil && a.Generation == 0 && a.RegistrationEpoch == 0 && a.fileSnapshotDigest != ""
 }
 
+// FileSnapshotPath returns the backing file path bound to this file snapshot.
+func (a *Auth) FileSnapshotPath() string {
+	if a == nil {
+		return ""
+	}
+	path := strings.TrimSpace(a.fileSnapshotPath)
+	if path == "" && a.Attributes != nil {
+		path = strings.TrimSpace(a.Attributes[AttributePath])
+		if path == "" {
+			path = strings.TrimSpace(a.Attributes[AttributeSource])
+		}
+	}
+	return path
+}
+
 // SameFileSnapshot reports whether two unversioned file snapshots observed the
 // same canonical file content.
 func (a *Auth) SameFileSnapshot(other *Auth) bool {
 	if !a.HasFileSnapshot() || !other.HasFileSnapshot() {
+		return false
+	}
+	if a.fileSnapshotDigest == invalidatedFileSnapshotDigest || other.fileSnapshotDigest == invalidatedFileSnapshotDigest {
 		return false
 	}
 	return a.fileSnapshotDigest == other.fileSnapshotDigest && a.fileSnapshotPath == other.fileSnapshotPath
@@ -202,13 +231,7 @@ func (a *Auth) FileSnapshotMatchesDisk() bool {
 	if !a.HasFileSnapshot() {
 		return true
 	}
-	path := strings.TrimSpace(a.fileSnapshotPath)
-	if path == "" && a.Attributes != nil {
-		path = strings.TrimSpace(a.Attributes[AttributePath])
-		if path == "" {
-			path = strings.TrimSpace(a.Attributes[AttributeSource])
-		}
-	}
+	path := a.FileSnapshotPath()
 	if path == "" {
 		return false
 	}

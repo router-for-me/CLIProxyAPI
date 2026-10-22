@@ -109,6 +109,7 @@ func (w *Watcher) dispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (b
 		return false, 0
 	}
 	clone := update.Auth.Clone()
+	clone.ClearFileSnapshot()
 	w.clientsMutex.Lock()
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
@@ -259,6 +260,8 @@ func (w *Watcher) refreshAuthState(force bool) {
 			}
 		}
 	}
+	var rereadPaths []string
+	rereadSeen := make(map[string]struct{})
 	for _, auth := range w.currentAuths {
 		if auth == nil {
 			continue
@@ -268,6 +271,19 @@ func (w *Watcher) refreshAuthState(force bool) {
 		}
 		if isFileBackedAuth(auth) {
 			w.indexFileBackedAuthLocked(auth)
+			if changedDuringScan(auth) && !incompleteDuringScan(auth) && !auth.HasFileSnapshot() {
+				rawPath := auth.Attributes[coreauth.AttributePath]
+				if rawPath == "" {
+					rawPath = auth.Attributes[coreauth.AttributeSource]
+				}
+				normalized := w.invalidateAuthFileHashLocked(rawPath)
+				if normalized != "" {
+					if _, exists := rereadSeen[normalized]; !exists {
+						rereadSeen[normalized] = struct{}{}
+						rereadPaths = append(rereadPaths, rawPath)
+					}
+				}
+			}
 		}
 		auths = append(auths, auth.Clone())
 	}
@@ -281,6 +297,9 @@ func (w *Watcher) refreshAuthState(force bool) {
 	updates := w.prepareAuthUpdatesLocked(auths, force)
 	w.clientsMutex.Unlock()
 	w.dispatchAuthUpdates(updates)
+	for _, path := range rereadPaths {
+		w.addOrUpdateClient(path)
+	}
 }
 
 func (w *Watcher) indexFileBackedAuthLocked(auth *coreauth.Auth) {

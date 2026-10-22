@@ -220,6 +220,58 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	w.addOrUpdateClientLocked(path)
 }
 
+func (w *Watcher) rereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	if w == nil || auth == nil || !auth.HasFileSnapshot() {
+		return
+	}
+	path := auth.FileSnapshotPath()
+	if path == "" {
+		return
+	}
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+
+	w.clientsMutex.Lock()
+	existing := w.currentAuths[auth.ID]
+	if existing == nil || !existing.SameFileSnapshot(auth) {
+		w.clientsMutex.Unlock()
+		return
+	}
+	normalized := w.invalidateAuthFileHashLocked(path)
+	if normalized == "" {
+		w.clientsMutex.Unlock()
+		return
+	}
+	existing.InvalidateFileSnapshot()
+	for id := range w.fileAuthsByPath[normalized] {
+		if sibling := w.currentAuths[id]; sibling != nil && sibling.SameFileSnapshot(auth) {
+			sibling.InvalidateFileSnapshot()
+		}
+	}
+	w.clientsMutex.Unlock()
+
+	w.addOrUpdateClientLocked(path)
+}
+
+func (w *Watcher) invalidateAuthFileHashLocked(path string) string {
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return ""
+	}
+	if w.lastAuthHashes == nil {
+		w.lastAuthHashes = make(map[string]string)
+	}
+	w.lastAuthHashes[normalized] = ""
+	if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
+		if normalizedAbs := w.normalizeAuthPath(abs); normalizedAbs != "" {
+			if _, known := w.lastAuthHashes[normalizedAbs]; known {
+				w.lastAuthHashes[normalizedAbs] = ""
+			}
+		}
+	}
+	return normalized
+}
+
 func (w *Watcher) addOrUpdateClientLocked(path string) {
 	w.observeAuthFile(path)
 	data, errRead := os.ReadFile(path)
