@@ -940,3 +940,52 @@ func TestQuotaBucketZeroRemainingFractionPreserved(t *testing.T) {
 		t.Fatalf("expected remainingFraction 0 to be preserved, got %f", bucket.RemainingFraction)
 	}
 }
+
+func TestHostAuthModelsTypes(t *testing.T) {
+	emptyReqData, errMarshalEmpty := json.Marshal(HostAuthModelsRequest{})
+	if errMarshalEmpty != nil {
+		t.Fatalf("marshal empty request: %v", errMarshalEmpty)
+	}
+	if string(emptyReqData) != "{}" {
+		t.Fatalf("marshaled empty request = %s, want {}", string(emptyReqData))
+	}
+
+	req := HostAuthModelsRequest{AuthIndex: "idx-codex-1"}
+	reqData, errMarshalReq := json.Marshal(req)
+	if errMarshalReq != nil {
+		t.Fatalf("marshal request: %v", errMarshalReq)
+	}
+	var decodedReq HostAuthModelsRequest
+	if errUnmarshalReq := json.Unmarshal(reqData, &decodedReq); errUnmarshalReq != nil {
+		t.Fatalf("unmarshal request: %v", errUnmarshalReq)
+	}
+	if decodedReq != req {
+		t.Fatalf("decoded request = %#v, want %#v", decodedReq, req)
+	}
+
+	resp := HostAuthModelsResponse{
+		Credentials: []HostAuthModels{
+			{
+				ID:        "codex-auth-1",
+				AuthIndex: "idx-codex-1",
+				Provider:  "codex",
+				Models:    []string{"codex/gpt-5.6-sol", "codex/gpt-6-astra"},
+			},
+		},
+	}
+	respData, errMarshalResp := json.Marshal(resp)
+	if errMarshalResp != nil {
+		t.Fatalf("marshal response: %v", errMarshalResp)
+	}
+	var decodedResp HostAuthModelsResponse
+	if errUnmarshalResp := json.Unmarshal(respData, &decodedResp); errUnmarshalResp != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshalResp)
+	}
+	if len(decodedResp.Credentials) != 1 ||
+		decodedResp.Credentials[0].ID != "codex-auth-1" ||
+		decodedResp.Credentials[0].AuthIndex != "idx-codex-1" ||
+		decodedResp.Credentials[0].Provider != "codex" ||
+		len(decodedResp.Credentials[0].Models) != 2 {
+		t.Fatalf("decoded response = %#v, want %#v", decodedResp, resp)
+	}
+}

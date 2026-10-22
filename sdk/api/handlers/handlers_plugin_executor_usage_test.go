@@ -550,9 +550,13 @@ func TestHandlerPluginExecutorPublishesStreamCancellation(t *testing.T) {
 	handler.SetModelRouterHost(mockHost)
 
 	dataChan, _, _ := handler.ExecuteStreamWithAuthManager(ctx, "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, originalModel)), "")
-	// Receive first chunk then cancel context
+	// Receive the first chunk, then cancel. The chunk channel stays open until the stream
+	// goroutine has exited: closed early, it races ctx.Done() in nextStreamChunk's select and the
+	// stream can end as a normal completion (about 1 in 1000 runs under -race).
 	<-dataChan
 	cancel()
+	for range dataChan {
+	}
 	close(chunks)
 
 	record := plugin.waitRecord(t)

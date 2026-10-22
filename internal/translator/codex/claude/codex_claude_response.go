@@ -28,21 +28,26 @@ const codexThinkingSummaryPartSeparator = "\n\n"
 
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
-	HasEmittedToolUse      bool
-	BlockIndex             int
-	HasTextDelta           bool
-	TextBlockOpen          bool
-	ThinkingBlockOpen      bool
-	ThinkingSignature      string
-	ThinkingSummarySeen    bool
-	WebSearchToolUseIDs    map[string]struct{}
-	WebSearchToolResultIDs map[string]struct{}
-	LastWebSearchToolUseID string
-	FunctionCalls          map[string]*codexFunctionCallStream
-	FunctionCallQueue      []*codexFunctionCallStream
-	ActiveFunctionCall     *codexFunctionCallStream
-	LastFunctionCall       *codexFunctionCallStream
-	DeferredStreamEvents   [][]byte
+	// ShortToOriginalToolNames maps shortened upstream tool names back to the
+	// client-declared names. It is resolved once per stream on first tool use;
+	// callers pass the same request bytes for the stream's lifetime.
+	ShortToOriginalToolNames map[string]string
+	ToolNamesResolved        bool
+	HasEmittedToolUse        bool
+	BlockIndex               int
+	HasTextDelta             bool
+	TextBlockOpen            bool
+	ThinkingBlockOpen        bool
+	ThinkingSignature        string
+	ThinkingSummarySeen      bool
+	WebSearchToolUseIDs      map[string]struct{}
+	WebSearchToolResultIDs   map[string]struct{}
+	LastWebSearchToolUseID   string
+	FunctionCalls            map[string]*codexFunctionCallStream
+	FunctionCallQueue        []*codexFunctionCallStream
+	ActiveFunctionCall       *codexFunctionCallStream
+	LastFunctionCall         *codexFunctionCallStream
+	DeferredStreamEvents     [][]byte
 }
 
 type codexFunctionCallStream struct {
@@ -624,11 +629,11 @@ func updateCodexFunctionCallArguments(call *codexFunctionCallStream, arguments s
 	}
 }
 
-func appendCodexFunctionCallStart(output []byte, originalRequestRawJSON []byte, callID, name string, blockIndex int) []byte {
+func appendCodexFunctionCallStart(output []byte, params *ConvertCodexResponseToClaudeParams, originalRequestRawJSON []byte, callID, name string, blockIndex int) []byte {
 	template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`)
 	template, _ = sjson.SetBytes(template, "index", blockIndex)
 	template, _ = sjson.SetBytes(template, "content_block.id", shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(callID)))
-	template, _ = sjson.SetBytes(template, "content_block.name", resolveCodexClaudeToolUseName(originalRequestRawJSON, name))
+	template, _ = sjson.SetBytes(template, "content_block.name", params.resolveToolUseName(originalRequestRawJSON, name))
 	return translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
 }
 
@@ -691,7 +696,7 @@ func appendCodexFunctionCallQueue(output []byte, params *ConvertCodexResponseToC
 		}
 
 		call.BlockIndex = params.BlockIndex
-		output = appendCodexFunctionCallStart(output, originalRequestRawJSON, call.CallID, call.Name, call.BlockIndex)
+		output = appendCodexFunctionCallStart(output, params, originalRequestRawJSON, call.CallID, call.Name, call.BlockIndex)
 		if call.EmitInitialEmptyDelta {
 			output = appendCodexFunctionCallArgumentDelta(output, "", call.BlockIndex)
 		}
@@ -771,6 +776,22 @@ func clearCodexFunctionCalls(params *ConvertCodexResponseToClaudeParams) {
 	params.FunctionCallQueue = nil
 	params.ActiveFunctionCall = nil
 	params.LastFunctionCall = nil
+}
+
+// resolveToolUseName restores the client-declared tool name using the reverse
+// map cached on first use for this stream.
+func (p *ConvertCodexResponseToClaudeParams) resolveToolUseName(originalRequestRawJSON []byte, name string) string {
+	if p == nil {
+		return resolveCodexClaudeToolUseName(originalRequestRawJSON, name)
+	}
+	if !p.ToolNamesResolved {
+		p.ShortToOriginalToolNames = buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
+		p.ToolNamesResolved = true
+	}
+	if orig, ok := p.ShortToOriginalToolNames[name]; ok {
+		return orig
+	}
+	return name
 }
 
 func resolveCodexClaudeToolUseName(originalRequestRawJSON []byte, name string) string {

@@ -1144,7 +1144,7 @@ func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
 	return !hasAPIKeyAttr
 }
 
-func copyClaudeCallerFingerprintHeaders(dst, src http.Header, confirmedClaudeCode bool) {
+func copyClaudeCallerFingerprintHeaders(dst, src http.Header, confirmedClaudeCode, uncloak bool) {
 	if dst == nil || src == nil {
 		return
 	}
@@ -1162,6 +1162,21 @@ func copyClaudeCallerFingerprintHeaders(dst, src http.Header, confirmedClaudeCod
 		}
 		if !confirmedClaudeCode && (strings.HasPrefix(lowerName, "x-claude-code-") || strings.HasPrefix(lowerName, "x-claude-remote-")) {
 			continue
+		}
+		if uncloak {
+			if lowerName == "x-app" ||
+				lowerName == "x-client-request-id" ||
+				lowerName == "x-client-app" ||
+				lowerName == "x-anthropic-additional-protection" ||
+				lowerName == "anthropic-dangerous-direct-browser-access" ||
+				strings.HasPrefix(lowerName, "x-stainless-") ||
+				strings.HasPrefix(lowerName, "x-claude-code-") ||
+				strings.HasPrefix(lowerName, "x-claude-remote-") {
+				continue
+			}
+			if lowerName == "user-agent" && len(values) > 0 && helps.IsClaudeCodeUserAgent(values[0]) {
+				continue
+			}
 		}
 		dst.Del(name)
 		for _, value := range values {
@@ -1221,6 +1236,11 @@ func applyClaudeHeadersWithNativeProfile(
 	useAPIKey := !credentialUsesBearer
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
 	wirePolicy, _ := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
+	if wirePolicy.Uncloak {
+		confirmedClaudeCode = false
+		helperProfile = false
+		sessionIDs = nil
+	}
 	applyCLIFingerprint := fp.ProfileClaudeCodeCLI || wirePolicy.Cloak
 	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
 	useOAuthBetas := fp.UseOAuthBetas
@@ -1246,16 +1266,16 @@ func applyClaudeHeadersWithNativeProfile(
 	}
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
-	if stabilizeDeviceProfile && confirmedClaudeCode {
-		var errDeviceProfile error
-		deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, incomingHeaders, cfg)
-		if errDeviceProfile != nil {
-			return errDeviceProfile
-		}
-	}
 
 	incomingBetas := strings.TrimSpace(strings.Join(helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
+	if !confirmedClaudeCode && !wirePolicy.Cloak && wirePolicy.ExplicitNever && !wirePolicy.Uncloak {
+		det := helps.DetectClaudeCodeRequest(incomingHeaders, body, countTokens, cfg)
+		if det.ConfirmedShape {
+			confirmedClaudeCode = true
+			helperProfile = helperProfile || (!det.BetasPresent && !countTokens)
+		}
+	}
 	requestedMap := claudeRequestedBetas(incomingBetas, extraBetas)
 	advisorNeeded := requestedMap[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body)
 
@@ -1274,17 +1294,19 @@ func applyClaudeHeadersWithNativeProfile(
 		if advisorNeeded {
 			baseBetas = withClaudeAdvisorToolBeta(baseBetas)
 		}
-		// Measured Haiku helper requests already carry the exact credential
-		// beta profile and intentionally omit extended-cache-ttl.
+		// Measured Haiku helper requests already carry their own cache-ttl beta
+		// choice (omitting extended-cache-ttl on 2.1.220/2.1.280 probes/title
+		// helpers), while helpers arriving via ANTHROPIC_BASE_URL still need
+		// oauth-2025-04-20 when CPA authenticates upstream with OAuth.
 		// Native Claude Code subagents and probes also omit extended-cache-ttl.
-		if useOAuthBetas && !helperProfile {
+		if useOAuthBetas {
 			if countTokens {
 				baseBetas = withClaudeCountTokensOAuthBeta(baseBetas)
 			} else {
 				isSubagent := helps.IsClaudeSubagentRequest(incomingHeaders, body)
 				isProbe := helps.IsClaudeProbeOrHelperRequest(body)
 				subagent1h := isSubagent && helps.ClaudeSubagentRequests1h(incomingHeaders, body)
-				includeExtendedCacheTTL := (!isSubagent || subagent1h) && !isProbe
+				includeExtendedCacheTTL := !helperProfile && (!isSubagent || subagent1h) && !isProbe
 				baseBetas = withClaudeOAuthCredentialBetas(baseBetas, includeExtendedCacheTTL)
 			}
 		}
@@ -1356,6 +1378,21 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 	}
 	applyBetaHeader := func() {
+		if wirePolicy.Uncloak {
+			baseBetas = withoutClaudeBeta(baseBetas, claudeCodeBeta)
+			baseBetas = withoutClaudeBeta(baseBetas, claudeOAuthBeta)
+			baseBetas = withoutClaudeBeta(baseBetas, claudeRedactThinkingBeta)
+			baseBetas = withoutClaudeBeta(baseBetas, claudeAFKModeBeta)
+			if !gjson.GetBytes(body, "diagnostics").Exists() {
+				baseBetas = withoutClaudeBeta(baseBetas, claudeCacheDiagnosisBeta)
+			}
+			if !gjson.GetBytes(body, "fallback_credit_token").Exists() {
+				baseBetas = withoutClaudeBeta(baseBetas, claudeFallbackCreditBeta)
+			}
+			if !helps.ClaudePayloadHas1hTTL(body) {
+				baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
+			}
+		}
 		// Enforce strict native Claude Code 2.1.280 model & turn beta gating:
 		if !claudeRequestSupportsEffort(body, nil) {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
@@ -1412,7 +1449,7 @@ func applyClaudeHeadersWithNativeProfile(
 			defaultAccept = "text/event-stream"
 			defaultAcceptEncoding = "identity"
 		}
-		copyClaudeCallerFingerprintHeaders(r.Header, incomingHeaders, confirmedClaudeCode)
+		copyClaudeCallerFingerprintHeaders(r.Header, incomingHeaders, confirmedClaudeCode, wirePolicy.Uncloak)
 		if hd.ClientRequestID == config.ClaudeClientRequestIDOff {
 			r.Header.Del("X-Client-Request-Id")
 		}
@@ -1423,7 +1460,11 @@ func applyClaudeHeadersWithNativeProfile(
 		// sent none must not fall through to Go's transport default
 		// ("Go-http-client/1.1"), which upstreams read as a bot signature. Identify
 		// as CPA instead: honest about the hop, and not a fabricated client.
-		misc.EnsureHeader(r.Header, incomingHeaders, "User-Agent", "CLIProxyAPI/"+buildinfo.Version)
+		uaSourceHeaders := incomingHeaders
+		if wirePolicy.Uncloak && helps.IsClaudeCodeUserAgent(helps.HeaderValueCaseInsensitive(incomingHeaders, "User-Agent")) {
+			uaSourceHeaders = nil
+		}
+		misc.EnsureHeader(r.Header, uaSourceHeaders, "User-Agent", "CLIProxyAPI/"+buildinfo.Version)
 		applyBetaHeader()
 		sessionID := ""
 		for _, candidate := range sessionIDs {
@@ -1585,8 +1626,15 @@ func applyClaudeHeadersWithNativeProfile(
 	// Confirmed Claude Code requests may contribute their real software profile.
 	// Unconfirmed clients always receive the CLI baseline instead of being
 	// allowed to populate or reuse another client's software profile.
-	if stabilizeDeviceProfile {
+	if wirePolicy.ExplicitNever && confirmedClaudeCode {
+		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, true, true)
+	} else if stabilizeDeviceProfile {
 		if confirmedClaudeCode {
+			var errDeviceProfile error
+			deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, incomingHeaders, cfg)
+			if errDeviceProfile != nil {
+				return errDeviceProfile
+			}
 			helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 		} else {
 			helps.ApplyClaudeDefaultDeviceProfileHeaders(r, cfg)

@@ -159,7 +159,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	messageBlocks := common.NewRawArrayItems(messageCapacity)
 	systemBlocks := make([][]byte, 0, 4)
 	appendSystemText := func(text string, cacheSource gjson.Result) {
-		if text == "" {
+		if strings.TrimSpace(text) == "" {
 			return
 		}
 		block := []byte(`{"type":"text","text":""}`)
@@ -185,7 +185,17 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				content.ForEach(func(_, part gjson.Result) bool {
 					switch part.Get("type").String() {
 					case "input_text", "output_text", "text":
-						appendSystemText(part.Get("text").String(), part)
+						txt := part.Get("text").String()
+						if strings.TrimSpace(txt) == "" {
+							if part.Get("cache_control").Exists() && len(systemBlocks) > startIdx {
+								prevIdx := len(systemBlocks) - 1
+								if !gjson.GetBytes(systemBlocks[prevIdx], "cache_control").Exists() {
+									systemBlocks[prevIdx] = common.AttachCacheControl(systemBlocks[prevIdx], part)
+								}
+							}
+							return true
+						}
+						appendSystemText(txt, part)
 					default:
 						if block := responsesSystemUnsupportedBlock(part); len(block) > 0 {
 							systemBlocks = append(systemBlocks, block)
@@ -312,7 +322,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if input := root.Get("input"); input.Exists() {
 		if input.IsArray() {
 			inputItems = common.NormalizeResponsesToolCallOutputs(input.Array())
-		} else if input.Type == gjson.String {
+		} else if input.Type == gjson.String && strings.TrimSpace(input.String()) != "" {
 			contentPart := []byte(`{"type":"text","text":""}`)
 			contentPart, _ = sjson.SetBytes(contentPart, "text", input.String())
 			appendParts("user", contentPart)
@@ -332,8 +342,9 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	emittedToolResults := map[string]struct{}{}
 	emittedRawToolUses := map[string]struct{}{}
 	unmappedItemTypes := map[string]int{}
+	webSearchHistory := scanResponsesWebSearchHistory(inputItems)
 
-	for _, item := range inputItems {
+	for itemIndex, item := range inputItems {
 		// System-level items already became top-level system blocks.
 		if isResponsesSystemLevelRole(item.Get("role").String()) {
 			continue
@@ -348,6 +359,15 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			var role string
 			var partsJSON [][]byte
 			var droppedPartType string
+			attachCacheControlToPrecedingPart := func(src gjson.Result) {
+				if !src.Get("cache_control").Exists() || len(partsJSON) == 0 {
+					return
+				}
+				prevIdx := len(partsJSON) - 1
+				if !gjson.GetBytes(partsJSON[prevIdx], "cache_control").Exists() {
+					partsJSON[prevIdx] = common.AttachCacheControl(partsJSON[prevIdx], src)
+				}
+			}
 			if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 				parts.ForEach(func(_, part gjson.Result) bool {
 					ptype := part.Get("type").String()
@@ -355,11 +375,15 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					case "input_text", "output_text":
 						if t := part.Get("text"); t.Exists() {
 							txt := t.String()
-							contentPart := []byte(`{"type":"text","text":""}`)
-							contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
-							contentPart = attachClaudeCitations(contentPart, part.Get("annotations"))
-							contentPart = common.AttachCacheControl(contentPart, part)
-							partsJSON = append(partsJSON, contentPart)
+							if strings.TrimSpace(txt) != "" {
+								contentPart := []byte(`{"type":"text","text":""}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+								contentPart = attachClaudeCitations(contentPart, part.Get("annotations"))
+								contentPart = common.AttachCacheControl(contentPart, part)
+								partsJSON = append(partsJSON, contentPart)
+							} else {
+								attachCacheControlToPrecedingPart(part)
+							}
 						}
 						if ptype == "input_text" {
 							role = "user"
@@ -368,11 +392,16 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						}
 					case "refusal":
 						// Claude has no refusal block; the text keeps the turn intact.
-						if t := part.Get("refusal"); t.Exists() && t.String() != "" {
-							contentPart := []byte(`{"type":"text","text":""}`)
-							contentPart, _ = sjson.SetBytes(contentPart, "text", t.String())
-							contentPart = common.AttachCacheControl(contentPart, part)
-							partsJSON = append(partsJSON, contentPart)
+						if t := part.Get("refusal"); t.Exists() {
+							txt := t.String()
+							if strings.TrimSpace(txt) != "" {
+								contentPart := []byte(`{"type":"text","text":""}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+								contentPart = common.AttachCacheControl(contentPart, part)
+								partsJSON = append(partsJSON, contentPart)
+							} else {
+								attachCacheControlToPrecedingPart(part)
+							}
 						}
 						role = "assistant"
 					case "input_image":
@@ -444,7 +473,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 					return true
 				})
-			} else if parts.Type == gjson.String && parts.String() != "" {
+			} else if parts.Type == gjson.String && strings.TrimSpace(parts.String()) != "" {
 				contentPart := []byte(`{"type":"text","text":""}`)
 				contentPart, _ = sjson.SetBytes(contentPart, "text", parts.String())
 				partsJSON = append(partsJSON, contentPart)
@@ -479,7 +508,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		case "web_search_call":
 			// Rebuild the Claude server-side search pair so the replayed turn
 			// still shows the search and its hits.
-			if blocks := convertResponsesWebSearchCallToClaudeBlocks(item); len(blocks) > 0 {
+			if blocks := webSearchHistory.claudeBlocks(itemIndex, item); len(blocks) > 0 {
 				appendParts("assistant", blocks...)
 			}
 
@@ -686,6 +715,8 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	// Map tool_choice similar to Chat Completions translator (optional in docs, safe to handle)
+	toolChoiceNone := false
+	forcedToolFilteredOut := false
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		switch toolChoice.Type {
 		case gjson.String:
@@ -694,14 +725,19 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 			case "none":
 				// Leave unset; implies no tools
+				toolChoiceNone = true
 			case "required":
 				if len(includedToolNames) > 0 {
 					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+				} else {
+					forcedToolFilteredOut = true
 				}
 			}
 		case gjson.JSON:
-			choiceType := toolChoice.Get("type").String()
-			if choiceType == "function" || choiceType == "custom" {
+			choiceType := strings.TrimSpace(toolChoice.Get("type").String())
+			if choiceType == "none" {
+				toolChoiceNone = true
+			} else if choiceType == "function" || choiceType == "custom" {
 				fn := toolChoice.Get("function.name").String()
 				if fn == "" {
 					fn = toolChoice.Get("custom.name").String()
@@ -726,10 +762,30 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
 					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", names.claudeName(fn))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				} else {
+					forcedToolFilteredOut = true
+				}
+			} else if choiceType != "" && choiceType != "auto" {
+				if _, ok := includedToolNames[choiceType]; !ok {
+					forcedToolFilteredOut = true
 				}
 			}
 		default:
 
+		}
+	}
+
+	// parallel_tool_calls=false maps to Anthropic's disable_parallel_tool_use,
+	// mirroring the Chat Completions translator. It is not added when the
+	// effective choice is none, when no tool survived conversion, or when a
+	// forced tool was filtered out (no tool_choice was produced for it).
+	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Type == gjson.False && !toolChoiceNone && !forcedToolFilteredOut && len(toolItems) > 0 {
+		if choice := gjson.GetBytes(out, "tool_choice"); choice.Exists() {
+			if choice.Get("type").String() != "none" {
+				out, _ = sjson.SetBytes(out, "tool_choice.disable_parallel_tool_use", true)
+			}
+		} else {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto","disable_parallel_tool_use":true}`))
 		}
 	}
 
@@ -769,7 +825,9 @@ func isResponsesSystemLevelRole(role string) bool {
 
 // dropUnsupportedClaudeAssistantPrefill removes a trailing assistant message for
 // Claude model families that reject assistant message prefill (e.g., Fable,
-// Opus 5, Sonnet 4.6, Haiku 5.5).
+// Opus 5, Sonnet 4.6, Haiku 5.5), except when the message ends on a server-tool
+// block (server_tool_use or web_search_tool_result) from a pause_turn response
+// that the continuation must send back.
 func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) [][]byte {
 	if !claudeModelRejectsAssistantPrefill(modelName) || len(messages) == 0 {
 		return messages
@@ -778,7 +836,27 @@ func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) 
 	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
 		return messages
 	}
+	if claudeAssistantMessageEndsWithPausedServerTool(last) {
+		return messages
+	}
 	return messages[:len(messages)-1]
+}
+
+func claudeAssistantMessageEndsWithPausedServerTool(message gjson.Result) bool {
+	content := message.Get("content")
+	if !content.IsArray() {
+		return false
+	}
+	parts := content.Array()
+	if len(parts) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(parts[len(parts)-1].Get("type").String())) {
+	case "server_tool_use", "web_search_tool_result":
+		return true
+	default:
+		return false
+	}
 }
 
 // stripTrailingClaudeThinkingBlocks removes trailing thinking and
@@ -992,8 +1070,13 @@ func applyResponsesToolResultContent(toolResult []byte, output gjson.Result) []b
 		var partsJSON [][]byte
 		hasImage := false
 		hasFile := false
+		droppedEmptyPart := false
 		output.ForEach(func(_, part gjson.Result) bool {
 			if partJSON := convertResponsesContentPartToClaude(part); len(partJSON) > 0 {
+				if !contentPartHasVisibleContent(partJSON) {
+					droppedEmptyPart = true
+					return true
+				}
 				partsJSON = append(partsJSON, partJSON)
 				partType := gjson.ParseBytes(partJSON).Get("type").String()
 				if partType == "image" {
@@ -1006,6 +1089,10 @@ func applyResponsesToolResultContent(toolResult []byte, output gjson.Result) []b
 			return true
 		})
 		if len(partsJSON) == 0 {
+			if droppedEmptyPart {
+				toolResult, _ = sjson.SetBytes(toolResult, "content", "")
+				return toolResult
+			}
 			toolResult, _ = sjson.SetBytes(toolResult, "content", output.Raw)
 			return toolResult
 		}

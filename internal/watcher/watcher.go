@@ -204,6 +204,12 @@ func (w *Watcher) DispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (b
 	return w.dispatchPersistedAuthUpdateWithRevision(update)
 }
 
+// RereadDiscardedFileSnapshot invalidates watcher caches for a file snapshot
+// discarded by the manager's digest fence and re-reads the backing file.
+func (w *Watcher) RereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	w.rereadDiscardedFileSnapshot(auth)
+}
+
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.
 func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RLock()

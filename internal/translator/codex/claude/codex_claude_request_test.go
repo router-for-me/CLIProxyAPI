@@ -791,6 +791,36 @@ func TestConvertClaudeRequestToCodex_AssistantRoutedMetaSignatureToReasoningItem
 	}
 }
 
+func TestConvertClaudeRequestToCodex_ResolvesReplayTargetModelOncePerRequest(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("allocation budgets are not meaningful with race detector instrumentation")
+	}
+
+	const thinkingBlocks = 64
+	var body strings.Builder
+	body.WriteString(`{"messages":[{"role":"assistant","content":[`)
+	for i := 0; i < thinkingBlocks; i++ {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		body.WriteString(`{"type":"thinking","thinking":"step","signature":"x"}`)
+	}
+	body.WriteString(`,{"type":"text","text":"done"}]}],"model":"MY-DEPLOYMENT"}`)
+	payload := []byte(body.String())
+
+	mappedAllocs := testing.AllocsPerRun(20, func() {
+		_, _ = ConvertClaudeRequestToCodex("gpt-5", payload, false)
+	})
+	unmappedAllocs := testing.AllocsPerRun(20, func() {
+		_, _ = ConvertClaudeRequestToCodex("my-deployment", payload, false)
+	})
+
+	extraAllocs := unmappedAllocs - mappedAllocs
+	if extraAllocs > 4 {
+		t.Fatalf("unmapped model allocated %v more times than mapped model across %d thinking blocks (unmapped=%v, mapped=%v); expected O(1) target model resolution per request", extraAllocs, thinkingBlocks, unmappedAllocs, mappedAllocs)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_IgnoresGrokSignatureForNonGrokTargets(t *testing.T) {
 	signature := "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X"
 	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
@@ -975,7 +1005,6 @@ func TestConvertClaudeRequestToCodex_OutputConfigFormat(t *testing.T) {
 	t.Run("output_config with effort only", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "gpt-5.4",
-			"thinking": {"type": "adaptive"},
 			"output_config": {"effort": "high"},
 			"messages": [
 				{"role": "user", "content": "hello"}

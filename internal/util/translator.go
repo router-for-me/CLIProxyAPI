@@ -251,6 +251,19 @@ func CanonicalToolName(name string) string {
 // ToolNameMapFromClaudeRequest returns a canonical-name -> original-name map extracted from a Claude request.
 // It is used to restore exact tool name casing for clients that require strict tool name matching (e.g. Claude Code).
 func ToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
+	return toolNameMapFromClaudeRequest(rawJSON, false)
+}
+
+// UnambiguousToolNameMapFromClaudeRequest precomputes the legacy Claude mapper's
+// collision policy so response chunks only need MapToolName, not the request body.
+// Ambiguous canonical keys are stored with an empty value, so the returned map is
+// only meaningful with MapToolName (which keeps the upstream name for empty
+// values); do not index it directly.
+func UnambiguousToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
+	return toolNameMapFromClaudeRequest(rawJSON, true)
+}
+
+func toolNameMapFromClaudeRequest(rawJSON []byte, rejectAmbiguous bool) map[string]string {
 	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
 		return nil
 	}
@@ -274,8 +287,12 @@ func ToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
 		if key == "" {
 			return true
 		}
-		if _, exists := out[key]; !exists {
+		if previous, exists := out[key]; !exists {
 			out[key] = name
+		} else if rejectAmbiguous && previous != name {
+			// An empty value preserves the upstream name for every spelling of
+			// an ambiguous canonical key, including exact declared names.
+			out[key] = ""
 		}
 		return true
 	})
@@ -298,6 +315,8 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 
 // MapClaudeToolName restores the client-facing tool name while preferring an exact
 // declared name over canonical (case/leading-underscore-insensitive) restoration.
+// It re-scans the request body on every call; hot paths should precompute with
+// UnambiguousToolNameMapFromClaudeRequest and use MapToolName instead.
 // This prevents distinct tools such as "Read" and "read" from being collapsed to
 // the first declaration when the upstream already returned an exact name.
 func MapClaudeToolName(toolNameMap map[string]string, originalRequestRawJSON []byte, name string) string {

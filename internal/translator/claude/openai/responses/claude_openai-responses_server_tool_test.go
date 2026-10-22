@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -332,21 +333,45 @@ func TestUnmappedServerToolProducesNoItem(t *testing.T) {
 	}
 }
 
-func TestWebSearchResultWithoutMatchingUseIsIgnored(t *testing.T) {
+// A result block whose server_tool_use arrived in an earlier response is the
+// continuation of a search paused by pause_turn. It surfaces under the same id
+// so the client keeps the result in its history.
+func TestWebSearchResultWithoutMatchingUseKeepsContinuationResult(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_ws","usage":{"input_tokens":1,"output_tokens":0}}}`),
-		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_missing","content":[]}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_paused","content":[{"type":"web_search_result","url":"https://example.com","title":"Example","encrypted_content":"ENC_P"}]}}`),
 		[]byte(`data: {"type":"content_block_stop","index":0}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
-	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
-	for _, o := range outputs {
-		if event, data := parseClaudeResponsesSSEEvent(t, o); event == "response.completed" {
-			if got := data.Get("response.output.#").Int(); got != 0 {
-				t.Fatalf("orphan result produced %d output items, want 0", got)
-			}
+	check := func(t *testing.T, response gjson.Result) {
+		t.Helper()
+		if got := response.Get("output.#").Int(); got != 1 {
+			t.Fatalf("output items = %d, want 1: %s", got, response.Get("output").Raw)
+		}
+		item := response.Get("output.0")
+		if item.Get("type").String() != "web_search_call" || item.Get("id").String() != responsesWebSearchCallID("srvtoolu_paused") {
+			t.Fatalf("continuation item = %s", item.Raw)
+		}
+		if got := item.Get("results.0.encrypted_content").String(); got != "ENC_P" {
+			t.Fatalf("continuation result = %q", got)
+		}
+		if got := item.Get("status").String() != "completed"; got {
+			t.Fatalf("continuation status = %q", item.Get("status").String())
 		}
 	}
+	completed := 0
+	for _, o := range translateClaudeResponsesStreamThroughRegistry(chunks) {
+		if event, data := parseClaudeResponsesSSEEvent(t, o); event == "response.completed" {
+			completed++
+			check(t, data.Get("response"))
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("completed events = %d", completed)
+	}
+	output := ConvertClaudeResponseToOpenAIResponsesNonStream(
+		context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil)
+	check(t, gjson.ParseBytes(output))
 }
 
 // Native OpenAI clients emit `queries` alongside `query`, and use an `open_page`

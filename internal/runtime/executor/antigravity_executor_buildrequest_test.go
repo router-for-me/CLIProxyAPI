@@ -35,9 +35,21 @@ func TestResolveAntigravityRequestBaseURL(t *testing.T) {
 	})
 }
 
-func TestAntigravityLoadCodeAssistBaseURLRemainsProdByDefault(t *testing.T) {
-	if got := antigravityLoadCodeAssistBaseURL(&cliproxyauth.Auth{}); got != antigravityBaseURLProd {
-		t.Fatalf("loadCodeAssist base URL = %q, want %q", got, antigravityBaseURLProd)
+func TestAntigravityLoadCodeAssistBaseURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want string
+	}{
+		{"default daily", &cliproxyauth.Auth{}, antigravityBaseURLDaily},
+		{"custom attribute", &cliproxyauth.Auth{Attributes: map[string]string{"base_url": antigravityBaseURLProd + "/"}}, antigravityBaseURLProd},
+		{"custom metadata", &cliproxyauth.Auth{Metadata: map[string]any{"base_url": "https://enterprise.example.com/"}}, "https://enterprise.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := antigravityLoadCodeAssistBaseURL(tc.auth); got != tc.want {
+				t.Fatalf("loadCodeAssist base URL = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -268,7 +280,7 @@ func TestAntigravityPrepareRequestAuth_FetchesMissingProjectID(t *testing.T) {
 		"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
 	}}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected project discovery request: %s", req.URL.String())
 		}
 		if got := req.Header.Get("X-Goog-Api-Client"); got != "" {

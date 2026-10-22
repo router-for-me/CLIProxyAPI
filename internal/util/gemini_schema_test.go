@@ -4293,3 +4293,120 @@ func geminiSchemaDiamondInput() string {
 	sb.WriteString(`}}`)
 	return sb.String()
 }
+
+// TestCleanJSONSchema_RemovesReadOnlyWriteOnlyKeywords_Issue6778 covers Issue #6778:
+// JSON Schema annotation keywords "readOnly" and "writeOnly" (common in Google Discovery-derived
+// MCP tools such as Firestore) are rejected by the Gemini/Antigravity backend with 400
+// INVALID_ARGUMENT ("Unknown name \"readOnly\" ... Cannot find field") and must be stripped
+// while preserving legitimate tool properties named "readOnly" or "writeOnly".
+func TestCleanJSONSchema_RemovesReadOnlyWriteOnlyKeywords_Issue6778(t *testing.T) {
+	input := `{
+		"type": "object",
+		"$schema": "http://json-schema.org/draft-04/schema#",
+		"readOnly": false,
+		"writeOnly": false,
+		"properties": {
+			"parent": { "type": "string", "description": "Parent resource name" },
+			"database": {
+				"type": "object",
+				"properties": {
+					"name":       { "type": "string", "description": "Database resource name", "readOnly": true },
+					"uid":        { "type": "string", "readOnly": true },
+					"createTime": { "type": "string", "readOnly": true },
+					"etag":       { "type": "string", "writeOnly": true },
+					"locationId": { "type": "string" }
+				}
+			},
+			"itemsList": {
+				"type": "array",
+				"items": {
+					"type": "string",
+					"readOnly": true,
+					"writeOnly": false
+				}
+			},
+			"unionField": {
+				"anyOf": [
+					{ "type": "string", "readOnly": true },
+					{ "type": "integer", "writeOnly": true }
+				]
+			},
+			"readOnly": {
+				"type": "boolean",
+				"readOnly": true,
+				"description": "Legitimate property named readOnly"
+			},
+			"writeOnly": {
+				"type": "boolean",
+				"writeOnly": true,
+				"description": "Legitimate property named writeOnly"
+			}
+		},
+		"required": ["parent"]
+	}`
+
+	cleaners := map[string]func(string) string{
+		"Antigravity":           CleanJSONSchemaForAntigravity,
+		"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, false) },
+		"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+		"Gemini":                CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			parsed := gjson.Parse(got)
+
+			for _, forbiddenPath := range []string{
+				"readOnly",
+				"writeOnly",
+				"properties.database.properties.name.readOnly",
+				"properties.database.properties.uid.readOnly",
+				"properties.database.properties.createTime.readOnly",
+				"properties.database.properties.etag.writeOnly",
+				"properties.itemsList.items.readOnly",
+				"properties.itemsList.items.writeOnly",
+				"properties.unionField.readOnly",
+				"properties.unionField.writeOnly",
+				"properties.unionField.anyOf.0.readOnly",
+				"properties.unionField.anyOf.1.writeOnly",
+				"properties.readOnly.readOnly",
+				"properties.writeOnly.writeOnly",
+			} {
+				if parsed.Get(forbiddenPath).Exists() {
+					t.Errorf("[%s] %s was not removed: %s", name, forbiddenPath, got)
+				}
+			}
+
+			for _, keptField := range []string{
+				"name",
+				"uid",
+				"createTime",
+				"etag",
+				"locationId",
+			} {
+				if gotType := parsed.Get("properties.database.properties." + keptField + ".type").String(); gotType != "string" {
+					t.Errorf("[%s] properties.database.properties.%s.type = %q, want \"string\": %s", name, keptField, gotType, got)
+				}
+			}
+			if gotDesc := parsed.Get("properties.database.properties.name.description").String(); gotDesc != "Database resource name" {
+				t.Errorf("[%s] properties.database.properties.name.description = %q, want %q: %s", name, gotDesc, "Database resource name", got)
+			}
+
+			if gotType := parsed.Get("properties.readOnly.type").String(); gotType != "boolean" {
+				t.Errorf("[%s] legitimate property \"readOnly\" lost its type (%q): %s", name, gotType, got)
+			}
+			if gotDesc := parsed.Get("properties.readOnly.description").String(); gotDesc != "Legitimate property named readOnly" {
+				t.Errorf("[%s] legitimate property \"readOnly\" lost its description (%q): %s", name, gotDesc, got)
+			}
+			if gotType := parsed.Get("properties.writeOnly.type").String(); gotType != "boolean" {
+				t.Errorf("[%s] legitimate property \"writeOnly\" lost its type (%q): %s", name, gotType, got)
+			}
+			if gotDesc := parsed.Get("properties.writeOnly.description").String(); gotDesc != "Legitimate property named writeOnly" {
+				t.Errorf("[%s] legitimate property \"writeOnly\" lost its description (%q): %s", name, gotDesc, got)
+			}
+		})
+	}
+}

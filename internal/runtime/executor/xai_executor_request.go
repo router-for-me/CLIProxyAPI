@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -324,8 +325,20 @@ func logXAIResolvedBaseURL(ctx context.Context, baseURL string) {
 	helps.LogWithRequestID(ctx).Infof("xai: using base_url=%s source=%s", baseURL, xaiBaseURLSource(baseURL))
 }
 
+func xaiDefaultUserAgent() string {
+	return "xai-grok-workspace/" + xaiClientVersion()
+}
+
+func ensureXAIUserAgent(r *http.Request, clientHeaders ...http.Header) {
+	if r == nil {
+		return
+	}
+	misc.EnsureHeader(r.Header, util.ResolveClientHeaders(r, clientHeaders...), "User-Agent", xaiDefaultUserAgent())
+}
+
 func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, clientHeaders ...http.Header) {
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
+	ensureXAIUserAgent(r, clientHeaders...)
 	applyXAICustomHeaders(r, auth, clientHeaders...)
 }
 
@@ -356,24 +369,23 @@ func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth, clientHeade
 }
 
 // applyXAIChatHeaders applies standard xAI headers for non-image/video chat
-// requests. When using_api is true, this matches the standard
-// applyXAIHeaders behavior. CLI chat-proxy identity headers are only attached
-// when using_api is false and the resolved chat base URL is the official CLI
-// chat-proxy endpoint.
+// requests. When using_api is true or a custom non-CLI-proxy base URL is used,
+// this matches the standard applyXAIHeaders behavior (forwarding the downstream
+// User-Agent or falling back to the Grok workspace User-Agent). CLI chat-proxy
+// identity headers are only attached when using_api is false and the resolved
+// chat base URL is the official CLI chat-proxy endpoint.
 func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, clientHeaders ...http.Header) {
-	if xaiUsingAPI(auth) {
+	if xaiUsingAPI(auth) || !xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
 		applyXAIHeaders(r, auth, token, stream, sessionID, clientHeaders...)
 		return
 	}
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
-	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
-		clientVer := xaiClientVersion()
-		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
-		r.Header.Set(xaiClientVersionHeader, clientVer)
-		r.Header.Set("User-Agent", "xai-grok-workspace/"+clientVer)
-		r.Header.Set(xaiClientIdentifierHeader, xaiClientIdentifierValue)
-		r.Header.Set(xaiAuthenticateResponseHeader, xaiAuthenticateResponseValue)
-	}
+	clientVer := xaiClientVersion()
+	r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
+	r.Header.Set(xaiClientVersionHeader, clientVer)
+	r.Header.Set("User-Agent", "xai-grok-workspace/"+clientVer)
+	r.Header.Set(xaiClientIdentifierHeader, xaiClientIdentifierValue)
+	r.Header.Set(xaiAuthenticateResponseHeader, xaiAuthenticateResponseValue)
 	applyXAICustomHeaders(r, auth, clientHeaders...)
 }
 

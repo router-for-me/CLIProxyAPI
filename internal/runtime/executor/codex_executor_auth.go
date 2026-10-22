@@ -392,6 +392,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 			if mergedSIWC == nil {
 				mergedSIWC = make(map[string]any)
 			}
+			delete(mergedSIWC, "expires_at")
 			for k, v := range siwcTD.ToMap() {
 				mergedSIWC[k] = v
 			}

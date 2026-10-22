@@ -166,10 +166,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	body = normalizeKimiTools(body)
 	body = normalizeKimiTemperature(body)
-	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiChatURL(auth)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
@@ -308,10 +308,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	body = normalizeKimiTools(body)
 	body = normalizeKimiTemperature(body)
-	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiChatURL(auth)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -425,6 +425,12 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "kimi"); errExpand != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.HasResponsesCompactionTriggerRequest(req, opts) {
+		return e.executeKimiResponsesCompaction(ctx, auth, req, opts)
+	}
 
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -464,10 +470,10 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	}
 	body = normalizeKimiTools(body)
 	body = normalizeKimiTemperature(body)
-	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiResponsesURL(auth)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 	httpReq, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewRequest != nil {
 		return resp, errNewRequest
@@ -557,6 +563,12 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
+	if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "kimi"); errExpand != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.HasResponsesCompactionTriggerRequest(req, opts) {
+		return e.executeKimiResponsesCompactionStream(ctx, auth, req, opts)
+	}
 
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -596,10 +608,10 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	}
 	body = normalizeKimiTools(body)
 	body = normalizeKimiTemperature(body)
-	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiResponsesURL(auth)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 	httpReq, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewRequest != nil {
 		return nil, errNewRequest
@@ -763,9 +775,66 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
+func (e *KimiExecutor) executeKimiResponsesCompaction(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	var resp cliproxyexecutor.Response
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	summaryPayload := helps.PrepareAntigravityCompactionSummaryPayload(helps.ResponsesCompactionSourcePayload(req, opts), baseModel)
+	summaryReq := cliproxyexecutor.Request{
+		Model:    req.Model,
+		Payload:  summaryPayload,
+		Metadata: req.Metadata,
+	}
+	summaryOpts := opts
+	summaryOpts.Alt = ""
+	summaryOpts.Stream = false
+	summaryOpts.OriginalRequest = nil
+	summaryOpts.SourceFormat = sdktranslator.FormatOpenAIResponse
+	summaryOpts.ResponseFormat = sdktranslator.FormatOpenAIResponse
+
+	summaryResp, errSummary := e.executeResponses(ctx, auth, summaryReq, summaryOpts)
+	if errSummary != nil {
+		return resp, errSummary
+	}
+	respPayload, errBuild := helps.BuildResponsesCompactionResponseFromSummary(baseModel, summaryResp.Payload)
+	if errBuild != nil {
+		return resp, statusErr{code: http.StatusBadGateway, msg: errBuild.Error()}
+	}
+	return cliproxyexecutor.Response{
+		Payload: respPayload,
+		Headers: summaryResp.Headers,
+	}, nil
+}
+
+func (e *KimiExecutor) executeKimiResponsesCompactionStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	summaryResp, errSummary := e.executeKimiResponsesCompaction(ctx, auth, req, opts)
+	if errSummary != nil {
+		return nil, errSummary
+	}
+	chunks, errChunks := helps.BuildResponsesCompactionStreamChunksFromResponse(baseModel, summaryResp.Payload)
+	if errChunks != nil {
+		return nil, statusErr{code: http.StatusBadGateway, msg: errChunks.Error()}
+	}
+	out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+	}
+	close(out)
+
+	headers := summaryResp.Headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	headers.Set("Content-Type", "text/event-stream")
+	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+}
+
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse {
+		if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "kimi"); errExpand != nil {
+			return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+		}
 		var errNormalize error
 		req.Payload, errNormalize = helps.NormalizeApplyPatchResponsesRequest(req.Payload)
 		if errNormalize != nil {

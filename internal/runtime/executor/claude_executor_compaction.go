@@ -12,7 +12,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -22,66 +21,19 @@ type claudeCompactionSummaryContextKey struct{}
 // expandClaudeResponsesCompaction rewrites sealed compaction items into context
 // before translation. Unrecognized capsules fail the request instead of being dropped.
 func expandClaudeResponsesCompaction(req *cliproxyexecutor.Request, opts *cliproxyexecutor.Options) error {
-	if req != nil {
-		req.Payload = dropForeignClaudeCompactionItems(req.Payload)
-		if helps.HasResponsesCompactionItem(req.Payload) {
-			expanded, errExpand := helps.ExpandAntigravityCompactionCapsules(req.Payload)
-			if errExpand != nil {
-				return errExpand
-			}
-			req.Payload = expanded
-		}
-	}
-	if opts != nil {
-		opts.OriginalRequest = dropForeignClaudeCompactionItems(opts.OriginalRequest)
-		if helps.HasResponsesCompactionItem(opts.OriginalRequest) {
-			expanded, errExpand := helps.ExpandAntigravityCompactionCapsules(opts.OriginalRequest)
-			if errExpand != nil {
-				return errExpand
-			}
-			opts.OriginalRequest = expanded
-		}
-	}
-	return nil
+	return helps.ExpandResponsesCompactionCapsules(req, opts, "claude")
 }
 
 func dropForeignClaudeCompactionItems(payload []byte) []byte {
-	input := gjson.GetBytes(payload, "input")
-	if !input.IsArray() {
-		return payload
-	}
-	dropped := 0
-	items := make([]string, 0, len(input.Array()))
-	for _, item := range input.Array() {
-		if item.Get("type").String() == "compaction" && !helps.RecognizedAntigravityCompactionCapsule(item.Get("encrypted_content").String()) {
-			dropped++
-			continue
-		}
-		items = append(items, item.Raw)
-	}
-	if dropped == 0 {
-		return payload
-	}
-	log.Warnf("claude compaction: dropped %d non-CPA compaction item(s)", dropped)
-	out, _ := sjson.SetRawBytes(payload, "input", []byte("["+strings.Join(items, ",")+"]"))
-	return out
+	return helps.DropForeignResponsesCompactionItems(payload, "claude")
 }
 
 func claudeResponsesCompactionRequested(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
-	return opts.Alt == "responses/compact" ||
-		helps.HasResponsesCompactionTrigger(req.Payload) ||
-		helps.HasResponsesCompactionTrigger(opts.OriginalRequest)
+	return opts.Alt == "responses/compact" || helps.HasResponsesCompactionTriggerRequest(req, opts)
 }
 
 func claudeCompactionSourcePayload(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) []byte {
-	payload := req.Payload
-	if !helps.HasResponsesCompactionTrigger(payload) && helps.HasResponsesCompactionTrigger(opts.OriginalRequest) {
-		payload = opts.OriginalRequest
-	}
-	if len(payload) == 0 && len(opts.OriginalRequest) > 0 {
-		payload = opts.OriginalRequest
-	}
-	return payload
+	return helps.ResponsesCompactionSourcePayload(req, opts)
 }
 
 func (e *ClaudeExecutor) executeClaudeCompaction(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

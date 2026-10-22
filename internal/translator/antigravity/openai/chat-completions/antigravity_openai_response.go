@@ -178,9 +178,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				toolCallsResult := gjson.GetBytes(template, "choices.0.delta.tool_calls")
 				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
 				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
-				if toolCallsResult.Exists() && toolCallsResult.IsArray() {
-					functionCallIndex = len(toolCallsResult.Array())
-				} else {
+				if !toolCallsResult.IsArray() {
 					template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
 				}
 

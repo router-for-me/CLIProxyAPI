@@ -243,6 +243,9 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						} else {
 							toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", "{}")
 						}
+						if thoughtSig := geminiFunctionCallThoughtSignature(part); thoughtSig != "" {
+							toolCall, _ = sjson.SetBytes(toolCall, "extra_content.google.thought_signature", thoughtSig)
+						}
 
 						toolCallItems = append(toolCallItems, toolCall)
 					}
@@ -375,6 +378,21 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 func deterministicToolCallID(kind string, msgIdx, partIdx int, name, payload string) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d|%s|%s", kind, msgIdx, partIdx, name, payload)))
 	return "call_" + hex.EncodeToString(sum[:12])
+}
+
+func geminiFunctionCallThoughtSignature(part gjson.Result) string {
+	for _, path := range []string{
+		"thoughtSignature",
+		"thought_signature",
+		"functionCall.thoughtSignature",
+		"functionCall.thought_signature",
+		"extra_content.google.thought_signature",
+	} {
+		if sig := part.Get(path); sig.Exists() && sig.String() != "" {
+			return sig.String()
+		}
+	}
+	return ""
 }
 
 func explicitGeminiToolID(node gjson.Result) string {
