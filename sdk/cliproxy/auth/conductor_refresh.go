@@ -73,6 +73,8 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 // StopAutoRefresh cancels the background refresh loop, if running.
 // It also stops the selector if it implements StoppableSelector.
 func (m *Manager) StopAutoRefresh() {
+	m.selectorMu.Lock()
+	defer m.selectorMu.Unlock()
 	m.mu.Lock()
 	cancel := m.refreshCancel
 	m.refreshCancel = nil

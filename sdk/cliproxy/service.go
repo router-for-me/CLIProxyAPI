@@ -37,6 +37,7 @@ type Service struct {
 
 	// configRuntimeMu orders side-effecting runtime application after config commits.
 	configRuntimeMu        sync.Mutex
+	configRuntimeStopped   bool // Guarded by configRuntimeMu.
 	executorRegistrationMu sync.Mutex
 	authUpdateMu           sync.Mutex
 	authRevisions          map[string]uint64

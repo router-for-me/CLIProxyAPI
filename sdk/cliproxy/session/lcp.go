@@ -668,6 +668,7 @@ type MerklePrefixMatcher struct {
 	groupCount    int
 	prefixCount   int
 	accessCounter uint64
+	revision      uint64
 	operations    uint64
 }
 
@@ -1057,6 +1058,7 @@ func (m *MerklePrefixMatcher) Clear() {
 	m.lruElements = make(map[*lcpGroup]*list.Element)
 	m.groupCount = 0
 	m.prefixCount = 0
+	m.revision++
 	// Do NOT reset accessCounter to 0. Keeping accessCounter monotonically increasing
 	// across Clear() ensures that in-flight requests with pre-clear generations cannot
 	// accidentally evict newly created post-clear bindings.
@@ -1347,6 +1349,7 @@ func (m *MerklePrefixMatcher) removeGroupLocked(group *lcpGroup) {
 	if group == nil {
 		return
 	}
+	m.revision++
 	ns := m.groups[group.namespace]
 	if ns != nil {
 		if current := ns.groups[group.key]; current == group {
@@ -1675,6 +1678,7 @@ func newestMatchingGroup(bucket map[string]*lcpGroup, fingerprints []string, now
 }
 
 func (m *MerklePrefixMatcher) nextAccessNumberLocked() uint64 {
+	m.revision++
 	m.accessCounter++
 	return m.accessCounter
 }

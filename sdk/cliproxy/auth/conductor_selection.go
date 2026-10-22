@@ -432,23 +432,45 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.selectorMu.Lock()
 	defer m.selectorMu.Unlock()
 
-	m.mu.Lock()
+	m.mu.RLock()
 	oldSelector := m.selector
 	if isSameSelector(oldSelector, selector) {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 		return
 	}
-	m.selector = selector
-	m.mu.Unlock()
+	m.mu.RUnlock()
+
+	if previous, ok := oldSelector.(*SessionAffinitySelector); ok && previous != nil {
+		if next, okNext := selector.(*SessionAffinitySelector); okNext && next != nil {
+			previous.transferCache(next)
+		}
+	}
 
 	if oldSelector != nil {
 		if stoppable, ok := oldSelector.(StoppableSelector); ok {
 			stoppable.Stop()
 		}
 	}
+	m.mu.Lock()
+	m.selector = selector
+	m.mu.Unlock()
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+// ConfigureSessionAffinityPersistence sets the local snapshot file, or disables it
+// with an empty path. Restore is used only for initial startup; live changes keep
+// the current memory state. Failures are logged and do not stop request routing.
+func (m *Manager) ConfigureSessionAffinityPersistence(path string, restore bool) {
+	if m == nil {
+		return
+	}
+	m.selectorMu.Lock()
+	defer m.selectorMu.Unlock()
+	if selector, ok := m.Selector().(*SessionAffinitySelector); ok && selector != nil && selector.cache != nil {
+		selector.cache.configurePersistence(path, restore)
 	}
 }
 

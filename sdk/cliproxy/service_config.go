@@ -2,10 +2,12 @@ package cliproxy
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -59,6 +61,7 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	persistencePath          string
 	sessionAffinityRebindOn  string
 }
 
@@ -80,6 +83,13 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-first"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
+	if state.sessionAffinity && cfg.Routing.SessionAffinityPersistence && !cfg.Home.Enabled {
+		if dir, errResolve := util.ResolveAuthDir(cfg.AuthDir); errResolve == nil {
+			state.persistencePath = filepath.Join(dir, ".runtime", "session-affinity.cache")
+		} else {
+			log.WithError(errResolve).Warn("failed to resolve session affinity snapshot directory; using memory cache")
+		}
+	}
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
@@ -181,7 +191,7 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	}
 	s.configRuntimeMu.Lock()
 	defer s.configRuntimeMu.Unlock()
-	if !s.configCommitCurrent(commit) {
+	if s.configRuntimeStopped || !s.configCommitCurrent(commit) {
 		return false
 	}
 	if ctx == nil {
@@ -257,10 +267,16 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
-	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
+	previous := s.appliedRoutingState
+	if previous == nil || previous.strategy != routingState.strategy ||
+		previous.sessionAffinity != routingState.sessionAffinity ||
+		previous.sessionAffinityTTL != routingState.sessionAffinityTTL ||
+		previous.sessionAffinitySubagents != routingState.sessionAffinitySubagents ||
+		previous.sessionAffinityRebindOn != routingState.sessionAffinityRebindOn {
 		s.coreManager.SetSelector(newRoutingSelector(routingState))
-		s.appliedRoutingState = &routingState
 	}
+	s.coreManager.ConfigureSessionAffinityPersistence(routingState.persistencePath, previous == nil)
+	s.appliedRoutingState = &routingState
 	s.applyRetryConfig(commit.cfg)
 	store := s.resolveCooldownStateStore(commit.cfg)
 	if !s.coreManager.ApplyConfigWithCooldownStateStore(ctx, commit.cfg, store) {

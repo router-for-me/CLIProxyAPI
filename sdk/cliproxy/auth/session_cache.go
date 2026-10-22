@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
 const (
@@ -36,6 +38,11 @@ type SessionCache struct {
 	evictionElements map[string]*list.Element
 	maxEntries       int
 	ttl              time.Duration
+	revision         uint64
+	persistenceMu    sync.Mutex
+	persistence      *sessionCachePersistence
+	matcher          *cliproxysession.MerklePrefixMatcher
+	stopped          bool
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 	sessionGroups    map[string]map[string]struct{}
@@ -226,6 +233,7 @@ func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Ti
 		c.entries[alias] = entry
 	}
 	c.evictionElements[primaryKey] = c.evictionOrder.PushBack(primaryKey)
+	c.revision++
 	if c.maxEntries > 0 && len(c.entries) > c.maxEntries {
 		c.evictExcessLocked()
 	}
@@ -253,8 +261,10 @@ func (c *SessionCache) removeAliasGroupLocked(entry sessionEntry) {
 		return
 	}
 	primaryKey := entry.aliases[0]
+	removed := false
 	if currentGroup, ok := c.groups[primaryKey]; ok && sameSessionEntryGroup(currentGroup, entry) {
 		delete(c.groups, primaryKey)
+		removed = true
 		if groups := c.sessionGroups[entry.binding.sessionID]; groups != nil {
 			delete(groups, primaryKey)
 			if len(groups) == 0 {
@@ -273,6 +283,10 @@ func (c *SessionCache) removeAliasGroupLocked(entry sessionEntry) {
 			continue
 		}
 		delete(c.entries, alias)
+		removed = true
+	}
+	if removed {
+		c.revision++
 	}
 }
 
@@ -462,10 +476,17 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	}
 }
 
-// Stop terminates the background cleanup goroutine.
+// Stop terminates background workers and saves mutations completed before its snapshot.
 func (c *SessionCache) Stop() {
 	if c == nil {
 		return
+	}
+	c.persistenceMu.Lock()
+	defer c.persistenceMu.Unlock()
+	c.stopped = true
+	if c.persistence != nil {
+		c.persistence.stop()
+		c.persistence = nil
 	}
 	c.stopOnce.Do(func() {
 		if c.stopCh != nil {
@@ -475,7 +496,9 @@ func (c *SessionCache) Stop() {
 }
 
 func (c *SessionCache) cleanupLoop() {
+	c.mu.RLock()
 	interval := c.ttl / 2
+	c.mu.RUnlock()
 	if interval < time.Millisecond {
 		interval = time.Millisecond
 	}
@@ -506,6 +529,10 @@ func (c *SessionCache) cleanup() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
+	c.cleanupLocked(now)
+}
+
+func (c *SessionCache) cleanupLocked(now time.Time) {
 	for _, group := range c.groups {
 		if !now.Before(group.expiresAt) {
 			c.removeAliasGroupLocked(group)

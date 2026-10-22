@@ -160,6 +160,17 @@ routing:
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: false # default: false
+  # Save session-ID bindings and LCP matching state in <auth-dir>/.runtime/session-affinity.cache.
+  # Requires session-affinity. Default: false. Ignored in Home mode.
+  # Changed state is saved every 5 seconds and when routing workers stop after
+  # API listeners and gateways close. Forced termination can lose recent changes;
+  # late result callbacks after the final snapshot are excluded.
+  # Keep auth-dir on a persistent volume for container recreation. Use one service
+  # instance per snapshot file. Upstream WebSocket state is not saved.
+  # Restored expiry is capped at the current session-affinity-ttl.
+  # Guardian parent selection history is saved too. Older snapshots restore exact
+  # bindings only, until a new parent request records its selection history.
+  session-affinity-persistence: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind
