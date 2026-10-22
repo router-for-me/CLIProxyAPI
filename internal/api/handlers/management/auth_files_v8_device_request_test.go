@@ -174,3 +174,65 @@ func TestStartOAuthV8CodexDeviceFlowDiscardsFailedResponse(t *testing.T) {
 		}
 	}
 }
+
+type disconnectOnDeviceStartFlush struct {
+	*httptest.ResponseRecorder
+	disconnect context.CancelFunc
+}
+
+func (w disconnectOnDeviceStartFlush) FlushError() error {
+	w.ResponseRecorder.Flush()
+	w.disconnect()
+	return nil
+}
+
+func TestStartOAuthV8CodexDeviceFlowKeepsSessionWhenClientLeavesAfterFlush(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, completeLogin := range []bool{false, true} {
+		name := "polling"
+		if completeLogin {
+			name = "authenticated"
+		}
+		t.Run(name, func(t *testing.T) {
+			sessions := newOAuthSessionStore(time.Minute)
+			replaceOAuthSessionStoreForTest(t, sessions)
+			requestCtx, disconnect := context.WithCancel(context.Background())
+			defer disconnect()
+			release := make(chan struct{})
+			workerContext := make(chan context.Context, 1)
+			store := &memoryAuthStore{}
+			h := &Handler{cfg: &config.Config{AuthDir: t.TempDir()}, tokenStore: store}
+			h.codexDeviceAuthenticator = codexDeviceAuthenticatorFunc(func(ctx context.Context, _ *config.Config, opts *sdkAuth.LoginOptions) (*coreauth.Auth, error) {
+				workerContext <- ctx
+				opts.OnDeviceCode(sdkAuth.DeviceCodeInfo{UserCode: "ABCD-EFGH", VerificationURL: "https://auth.openai.com/codex/device", ExpiresIn: 900})
+				if !completeLogin {
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				}
+				return &coreauth.Auth{ID: "codex-device.json", FileName: "codex-device.json", Provider: "codex"}, ctx.Err()
+			})
+			router := gin.New()
+			router.GET("/start", h.StartOAuthV8)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(disconnectOnDeviceStartFlush{response, disconnect}, httptest.NewRequest(http.MethodGet, "/start?provider=codex&flow=device", nil).WithContext(requestCtx))
+			ctx := <-workerContext
+			close(release)
+			<-ctx.Done()
+			if response.Code != http.StatusOK {
+				t.Fatalf("start status = %d, body=%s", response.Code, response.Body.String())
+			}
+			var result struct{ State string }
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if session, ok := sessions.Get(result.State); !ok || !session.Completed {
+				t.Fatalf("disconnect after successful flush prevented login completion: %#v", session)
+			}
+			if len(store.items) != 1 {
+				t.Fatalf("saved %d auth records after successful flush, want 1", len(store.items))
+			}
+		})
+	}
+}

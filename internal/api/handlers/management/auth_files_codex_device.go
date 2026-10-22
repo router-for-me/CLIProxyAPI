@@ -58,7 +58,10 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		if authenticator == nil {
 			authenticator = sdkAuth.NewCodexAuthenticator()
 		}
-		record, errLogin := authenticator.Login(ctx, h.configSnapshot(), &sdkAuth.LoginOptions{
+		h.mu.Lock()
+		cfg := h.cfg.CloneForRuntime()
+		h.mu.Unlock()
+		record, errLogin := authenticator.Login(ctx, cfg, &sdkAuth.LoginOptions{
 			NoBrowser: true,
 			Metadata:  map[string]string{"codex_login_mode": "device"},
 			OnDeviceCode: func(info sdkAuth.DeviceCodeInfo) {
@@ -108,6 +111,10 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "invalid device authorization response"})
 			return
 		}
+		// Once writing starts, delivery is decided by the write and flush results.
+		if !stopRequestCancel() || requestCtx.Err() != nil {
+			return
+		}
 		responseErrors := len(c.Errors)
 		c.JSON(http.StatusOK, gin.H{
 			"status":     "ok",
@@ -121,9 +128,6 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			return
 		}
 		if errFlush := httpwire.FlushResponse(c.Writer); errFlush != nil {
-			return
-		}
-		if requestCtx.Err() != nil || !stopRequestCancel() {
 			return
 		}
 		handedOff = true
