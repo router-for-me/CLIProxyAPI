@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -124,6 +125,50 @@ def account_change(record, credentials, previous_by_provider):
     return None
 
 
+def read_latest(path):
+    try:
+        value = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("invalid latest-account file")
+    return value
+
+
+def write_latest(path, latest):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".usage-watch-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(latest, stream)
+            stream.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def show_latest(path, provider):
+    try:
+        latest = read_latest(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"usage-watch: {exc}", file=sys.stderr)
+        return 1
+    providers = (provider,) if provider else ("claude", "codex")
+    found = False
+    for name in providers:
+        entry = latest.get(name)
+        if (not isinstance(entry, dict) or not isinstance(entry.get("observed_at"), str)
+                or not isinstance(entry.get("line"), str)):
+            continue
+        print(f"Last observed {name} request at {entry['observed_at']}: {entry['line']}")
+        found = True
+    if not found:
+        print("No completed proxy request has been observed yet.")
+        return 1
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8317")
@@ -131,7 +176,15 @@ def main(argv=None):
     parser.add_argument("--interval", type=float, default=1, help="poll interval in seconds")
     parser.add_argument("--provider", choices=("claude", "codex"))
     parser.add_argument("--once", action="store_true", help="read the current queue once and exit")
+    parser.add_argument("--latest-file", type=Path,
+                        help="store the last observed request per provider in a private JSON file")
+    parser.add_argument("--show-last", action="store_true",
+                        help="print the last observed request from --latest-file without contacting the proxy")
     args = parser.parse_args(argv)
+    if args.show_last:
+        if not args.latest_file:
+            parser.error("--show-last requires --latest-file")
+        return show_latest(args.latest_file, args.provider)
     if args.interval <= 0:
         parser.error("--interval must be positive")
     key = args.key_file.read_text().strip() if args.key_file else os.environ.get("CLIPROXY_MANAGEMENT_KEY", "").strip()
@@ -148,6 +201,7 @@ def main(argv=None):
             credentials = get_json(args.base_url, key, "/credentials").get("files", [])
             if not isinstance(credentials, list) or any(not isinstance(item, dict) for item in credentials):
                 raise ValueError("invalid credential list")
+            latest = read_latest(args.latest_file) if args.latest_file else None
             records = get_json(args.base_url, key, "/observability/usage/queue?" + urlencode({"count": 100}))
             if records:
                 for record in records:
@@ -156,8 +210,16 @@ def main(argv=None):
                     change = account_change(record, credentials, previous_by_provider)
                     if change:
                         print(change, flush=True)
-                    print(format_record(record, credentials), flush=True)
-        except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+                    line = format_record(record, credentials)
+                    print(line, flush=True)
+                    if latest is not None and record.get("provider") in ("claude", "codex"):
+                        latest[record["provider"]] = {
+                            "observed_at": datetime.now(timezone.utc).isoformat(),
+                            "line": line,
+                        }
+                if latest is not None:
+                    write_latest(args.latest_file, latest)
+        except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
             print(f"usage-watch: {exc}", file=sys.stderr, flush=True)
             if args.once:
                 return 1

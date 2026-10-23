@@ -1,5 +1,9 @@
 import importlib.util
+import io
+import os
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +55,43 @@ class WatchTests(unittest.TestCase):
                 self.assertEqual(watch.main(["--once"]), 1)
         self.assertEqual(get_json.call_count, 1)
         self.assertEqual(get_json.call_args.args[2], "/credentials")
+
+    def test_last_observed_account_is_private_and_does_not_need_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            watch.write_latest(path, {"claude": {
+                "observed_at": "2026-10-23T00:14:33+00:00",
+                "line": "claude | claude-opus-5-5 | account@example.com | ok",
+            }})
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            output = io.StringIO()
+            with redirect_stdout(output), mock.patch.dict(watch.os.environ, {"CLIPROXY_MANAGEMENT_KEY": ""}):
+                self.assertEqual(watch.main(["--show-last", "--provider", "claude",
+                                             "--latest-file", str(path)]), 0)
+            self.assertIn("Last observed claude request", output.getvalue())
+            self.assertIn("account@example.com", output.getvalue())
+
+    def test_watcher_saves_selected_credential_without_raw_source(self):
+        record = {"provider": "claude", "model": "claude-opus-5-5",
+                  "auth_index": "opaque-123", "source": "sk-secret-upstream-key"}
+        credentials = [{"provider": "claude", "auth_index": "opaque-123",
+                        "email": "account@example.com"}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            with mock.patch.object(watch, "get_json", side_effect=[
+                {"files": credentials}, [record],
+            ]), mock.patch.dict(watch.os.environ, {"CLIPROXY_MANAGEMENT_KEY": "test-key"}):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(watch.main(["--once", "--latest-file", str(path)]), 0)
+            self.assertIn("account@example.com", path.read_text())
+            self.assertNotIn("sk-secret-upstream-key", path.read_text())
+
+    def test_missing_last_observation_does_not_guess_an_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(watch.show_latest(Path(directory) / "missing.json", "claude"), 1)
+            self.assertIn("No completed proxy request", output.getvalue())
 
 
 if __name__ == "__main__":
