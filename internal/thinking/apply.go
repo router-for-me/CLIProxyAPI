@@ -985,6 +985,13 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 				return ThinkingConfig{Mode: ModeBudget, Budget: val}
 			}
 		}
+		// A thinking object that names no recognized activation leaves the request
+		// unchanged: output_config.effort is not read on its behalf.
+		switch strings.ToLower(strings.TrimSpace(thinkingObj.Get("type").String())) {
+		case "enabled", "adaptive", "auto":
+		default:
+			return ThinkingConfig{}
+		}
 	}
 	if outEffort := gjson.GetBytes(body, "output_config.effort"); outEffort.Exists() && outEffort.Type == gjson.String {
 		value := strings.ToLower(strings.TrimSpace(outEffort.String()))
