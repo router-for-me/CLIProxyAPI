@@ -413,8 +413,8 @@ func TestCredentialsChangedBaseURL(t *testing.T) {
 		}
 		return &Auth{Provider: "xai", Metadata: metadata}
 	}
-	if !CredentialsChanged(xai("https://a.example/v1"), xai("https://b.example/v1")) || !accountIdentityChanged(xai("https://a.example/v1"), xai("https://b.example/v1")) {
-		t.Fatal("another upstream base URL did not count as a change and an account switch")
+	if !CredentialsChanged(xai("https://a.example/v1"), xai("https://b.example/v1")) {
+		t.Fatal("another upstream base URL did not count as a change")
 	}
 	if CredentialsChanged(xai("https://a.example/v1"), xai(" https://A.example/v1/ ")) {
 		t.Fatal("a padded, differently cased or slash-terminated base URL counted as a change")
@@ -606,5 +606,30 @@ func TestResultFromPreviousProviderIsIgnoredAfterProviderChange(t *testing.T) {
 	got, _ := manager.GetByID(authID)
 	if got.Unavailable || got.LastError != nil || got.Quota.Exceeded {
 		t.Fatalf("old-provider failure landed on the new provider: unavailable=%v last=%v quota=%+v", got.Unavailable, got.LastError, got.Quota)
+	}
+}
+
+// A request sent to the previous endpoint can finish after the file moved to another endpoint under the same tokens.
+func TestResultFromPreviousEndpointIsIgnoredAfterBaseURLChange(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	const authID = "endpoint-switch-inflight"
+	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "xai", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "same-token", "base_url": "https://a.example/v1"}}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	inflight, _ := manager.GetByID(authID)
+
+	snapshot := bindTestSnapshot(t, authID, "xai", []byte(`{"type":"xai","access_token":"same-token"}`), map[string]string{})
+	snapshot.Metadata = map[string]any{"access_token": "same-token", "base_url": "https://b.example/v1"}
+	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+		t.Fatalf("snapshot rejected: %v", errUpdate)
+	}
+	manager.MarkResult(ctx, Result{AuthID: authID, Provider: "xai", Model: "m", AccessToken: "same-token",
+		CredentialVersion: inflight.CredentialVersion, RegistrationEpoch: inflight.RegistrationEpoch,
+		Error: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests}})
+	got, _ := manager.GetByID(authID)
+	if got.Unavailable || got.LastError != nil || got.Quota.Exceeded {
+		t.Fatalf("old-endpoint failure landed on the new endpoint: unavailable=%v last=%v quota=%+v", got.Unavailable, got.LastError, got.Quota)
 	}
 }
