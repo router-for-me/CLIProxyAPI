@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -330,5 +331,59 @@ func TestCodexStructuredModelNotFound_DisableCooling(t *testing.T) {
 	}
 	if !state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
+	}
+}
+
+// A structured 404 names the alias-resolved upstream URL model, which reaches
+// neither the route key (Model) nor the final wire model (UpstreamModel) when a
+// payload rule rewrote the body model in between (#5476 review on 4d654dc0).
+// The alias-resolved name is part of the attempted set and must classify as an
+// explicit model-not-found so the model keeps the 12-hour support cooldown.
+func TestCodexStructuredModelNotFound_NamesAliasResolvedUpstreamModel(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		CodexKey: []internalconfig.CodexKey{{
+			APIKey: "codex-key",
+			Models: []internalconfig.CodexModel{{Name: "glm-5.2", Alias: "sonnet-route"}},
+		}},
+	})
+
+	auth := &Auth{ID: "auth-codex-alias", Provider: "codex", Attributes: map[string]string{"api_key": "codex-key"}}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Structured 404 with a not-found type but no model_not_found code: the
+	// URL model name only matches from the message, so the classification must
+	// come from comparing the attempted model names against that message.
+	resultErr := &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"type":"not_found_error","message":"model glm-5.2 was not found"}`,
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:        auth.ID,
+		Provider:      auth.Provider,
+		Model:         "sonnet-route",
+		UpstreamModel: "gpt-5.5-override",
+		Success:       false,
+		Error:         resultErr,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth to be registered")
+	}
+	state := updated.ModelStates["sonnet-route"]
+	if state == nil || !state.Unavailable {
+		t.Fatalf("expected model state to be unavailable, got %#v", state)
+	}
+	remaining := time.Until(state.NextRetryAfter)
+	if remaining < 11*time.Hour || remaining > 13*time.Hour {
+		t.Fatalf("404 naming the alias-resolved model must give ~12h cooldown, got remaining=%v", remaining)
 	}
 }

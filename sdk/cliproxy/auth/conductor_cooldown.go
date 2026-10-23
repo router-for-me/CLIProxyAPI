@@ -1112,11 +1112,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = time.Time{}
 							} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
 								state.NextRetryAfter = now.Add(*result.RetryAfter)
-							} else if isExplicitModelNotFoundForState(result.Error, modelKey, result.UpstreamModel) {
+							} else if isExplicitModelNotFoundForState(result.Error, modelKey, result.UpstreamModel, m.lookupAPIKeyUpstreamModel(auth.ID, modelKey)) {
 								// A 404 that explicitly names this model as unsupported is
 								// demonstrably persistent and keeps the long cooldown. The
 								// structured message names the upstream identifier, which
-								// differs from the route alias under alias mapping.
+								// under API-key alias mapping can be the URL model the
+								// alias expanded to — a third name distinct from both the
+								// route key and the wire model the payload override left
+								// behind (#5514 review).
 								state.NextRetryAfter = now.Add(modelSupportCooldown)
 							} else {
 								// Concurrent in-flight failures complete in any order: a
@@ -2021,21 +2024,27 @@ func resultErrorFromError(err error) *Error {
 }
 
 // isExplicitModelNotFoundForState reports whether a 404 result explicitly
-// names the attempted model — by route key or by the alias-resolved upstream
-// identifier, since structured provider errors quote the upstream name — as
+// names the attempted model — by route key, by the reported wire model, or by
+// any additional attempted name such as the alias-resolved upstream identifier,
+// since structured provider errors quote whichever name their URL carried — as
 // unsupported (#5476 review).
-func isExplicitModelNotFoundForState(err *Error, modelKey, upstreamModel string) bool {
+func isExplicitModelNotFoundForState(err *Error, modelKey, upstreamModel string, extraNames ...string) bool {
 	if err == nil {
 		return false
 	}
 	if isExplicitModelNotFoundError(err, thinking.ParseSuffix(modelKey).ModelName) {
 		return true
 	}
-	upstream := strings.TrimSpace(upstreamModel)
-	if upstream == "" || strings.EqualFold(upstream, modelKey) {
-		return false
+	for _, candidate := range append([]string{upstreamModel}, extraNames...) {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "" || strings.EqualFold(trimmed, modelKey) {
+			continue
+		}
+		if isExplicitModelNotFoundError(err, thinking.ParseSuffix(trimmed).ModelName) {
+			return true
+		}
 	}
-	return isExplicitModelNotFoundError(err, thinking.ParseSuffix(upstream).ModelName)
+	return false
 }
 
 // shouldSkipCredentialCooldown reports failures that must not mark auth/model cooling.
