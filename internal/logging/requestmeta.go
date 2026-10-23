@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type endpointKey struct{}
@@ -30,8 +31,9 @@ type responseStatusHolder struct {
 }
 
 type responseHeadersHolder struct {
-	mu      sync.RWMutex
-	headers http.Header
+	mu         sync.RWMutex
+	headers    http.Header
+	observedAt time.Time
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -123,6 +125,10 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneHTTPHeader(headers)
+	holder.observedAt = time.Time{}
+	if len(holder.headers) > 0 {
+		holder.observedAt = time.Now()
+	}
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
@@ -147,6 +153,7 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 		}
 		holder.headers[canonicalKey] = append([]string(nil), values...)
 	}
+	holder.observedAt = time.Now()
 }
 
 func GetResponseStatus(ctx context.Context) int {
@@ -161,16 +168,23 @@ func GetResponseStatus(ctx context.Context) int {
 }
 
 func GetResponseHeaders(ctx context.Context) http.Header {
+	headers, _ := GetResponseHeadersSnapshot(ctx)
+	return headers
+}
+
+// GetResponseHeadersSnapshot returns headers and their receipt time atomically.
+// Reading or completing a request must not make old quota data appear newer.
+func GetResponseHeadersSnapshot(ctx context.Context) (http.Header, time.Time) {
 	if ctx == nil {
-		return nil
+		return nil, time.Time{}
 	}
 	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
 	if !ok || holder == nil {
-		return nil
+		return nil, time.Time{}
 	}
 	holder.mu.RLock()
 	defer holder.mu.RUnlock()
-	return cloneHTTPHeader(holder.headers)
+	return cloneHTTPHeader(holder.headers), holder.observedAt
 }
 
 func cloneHTTPHeader(src http.Header) http.Header {
