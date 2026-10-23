@@ -810,6 +810,32 @@ func TestLoadConfigDataWriteBackHoldsConfigWriteLock(t *testing.T) {
 	}
 }
 
+// A whole-file write (the management PUT) takes the same lock as the checked
+// write-back, so it cannot land between the write-back's check and its write.
+func TestWriteConfigFileHoldsConfigWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := beforeConfigFileWrite
+	t.Cleanup(func() { beforeConfigFileWrite = original })
+	wrote := false
+	beforeConfigFileWrite = func() {
+		wrote = true
+		if configWriteMu.TryLock() {
+			configWriteMu.Unlock()
+			t.Error("WriteConfigFile writes without the config write lock")
+		}
+	}
+	data := []byte("port: 9999\n")
+	if err := WriteConfigFile(path, data); err != nil {
+		t.Fatal(err)
+	}
+	if !wrote {
+		t.Fatal("WriteConfigFile never wrote")
+	}
+	if saved, _ := os.ReadFile(path); !bytes.Equal(saved, data) {
+		t.Fatalf("saved = %q, want %q", saved, data)
+	}
+}
+
 // A write-back that cannot write (a read-only mount) leaves the plaintext in the
 // file, so remote stores keep their previous copy; that must not be silent.
 func TestLoadConfigDataWarnsWhenSecretWriteBackFails(t *testing.T) {

@@ -21,6 +21,32 @@ var configWriteMu sync.Mutex
 // replace it.
 var beforeConfigWriteBack = func() {}
 
+// beforeConfigFileWrite runs inside WriteConfigFile, under the lock; tests replace it.
+var beforeConfigFileWrite = func() {}
+
+// WriteConfigFile replaces the config file's bytes under the lock every config save
+// takes, so a write such as a management PUT cannot land between a hot-reload
+// write-back's check and its write and then be overwritten by it. It writes in
+// place, as the other saves do, so bind-mounted config files keep working.
+func WriteConfigFile(path string, data []byte) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+	beforeConfigFileWrite()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, errWrite := f.Write(data); errWrite != nil {
+		_ = f.Close()
+		return errWrite
+	}
+	if errSync := f.Sync(); errSync != nil {
+		_ = f.Close()
+		return errSync
+	}
+	return f.Close()
+}
+
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 // Existing v8 documents are saved in the latest layout. Successful migration
