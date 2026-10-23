@@ -4410,3 +4410,65 @@ func TestCleanJSONSchema_RemovesReadOnlyWriteOnlyKeywords_Issue6778(t *testing.T
 		})
 	}
 }
+
+// TestIssue6897_RefSiblingKeepsStricterConstraint verifies that a validation keyword declared
+// next to a "$ref" narrows the referenced definition instead of replacing it. Draft 2019-09 and
+// later apply keywords adjacent to a reference in addition to the referenced schema, so the
+// inlined result must satisfy both.
+func TestIssue6897_RefSiblingKeepsStricterConstraint(t *testing.T) {
+	tests := []struct {
+		name     string
+		target   string
+		sibling  string
+		path     string
+		expected string
+	}{
+		{"lower bound from target", `"type":"string","minLength":5`, `"minLength":1`, "minLength", "5"},
+		{"lower bound from sibling", `"type":"string","minLength":5`, `"minLength":9`, "minLength", "9"},
+		{"upper bound from target", `"type":"string","maxLength":10`, `"maxLength":50`, "maxLength", "10"},
+		{"upper bound from sibling", `"type":"integer","maximum":10`, `"maximum":4`, "maximum", "4"},
+		{"item count from target", `"type":"array","minItems":3`, `"minItems":1`, "minItems", "3"},
+		{"uniqueness from target", `"type":"array","uniqueItems":true`, `"uniqueItems":false`, "uniqueItems", "true"},
+		{"required is the union", `"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}},"required":["a"]`, `"required":["b"]`, "required", `["a","b"]`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{"A":{` + tc.target +
+				`}},"type":"object","properties":{"x":{"$ref":"#/$defs/A",` + tc.sibling + `}}}`
+
+			got := CleanJSONSchemaForGeminiJSONSchema(input)
+			value := gjson.Get(got, "properties.x."+tc.path)
+			if !value.Exists() {
+				t.Fatalf("properties.x.%s is missing: %s", tc.path, got)
+			}
+			if value.Raw != tc.expected {
+				t.Errorf("properties.x.%s = %s, want %s: %s", tc.path, value.Raw, tc.expected, got)
+			}
+		})
+	}
+}
+
+// TestIssue6897_RootRefSiblingKeepsStricterConstraint covers the same conjunction on a
+// root-level reference, which is merged on its own path.
+func TestIssue6897_RootRefSiblingKeepsStricterConstraint(t *testing.T) {
+	input := `{"$ref":"#/$defs/A","minProperties":1,"$defs":{"A":{"type":"object","minProperties":2}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	if minProperties := gjson.Get(got, "minProperties").Int(); minProperties != 2 {
+		t.Errorf("root reference sibling weakened minProperties to %d, want 2: %s", minProperties, got)
+	}
+}
+
+// TestIssue6897_MalformedRefSiblingRequiredKeepsOverwrite verifies that a "required" list which
+// is not a list of property names is left to the historical overwrite instead of being merged,
+// so a malformed client schema still cleans instead of failing.
+func TestIssue6897_MalformedRefSiblingRequiredKeepsOverwrite(t *testing.T) {
+	input := `{"$defs":{"A":{"type":"object","properties":{"a":{"type":"string"}},"required":[{"x":1}]}},` +
+		`"type":"object","properties":{"p":{"$ref":"#/$defs/A","required":[{"x":1}]}}}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	if gotType := gjson.Get(got, "properties.p.properties.a.type").String(); gotType != "string" {
+		t.Errorf("malformed required list lost the reference target, a type = %q: %s", gotType, got)
+	}
+}
