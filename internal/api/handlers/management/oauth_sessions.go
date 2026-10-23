@@ -30,12 +30,14 @@ var (
 	errUnsupportedOAuthFlow   = errors.New("unsupported oauth provider")
 	errOAuthSessionNotPending = errors.New("oauth session is not pending")
 	errOAuthSessionExists     = errors.New("oauth session already exists")
+	errOAuthDeviceCallback    = fmt.Errorf("%w: device login does not accept callbacks", errOAuthSessionNotPending)
 )
 
 // ErrSIWCCallbackRequiresV8 prevents legacy callback sinks from accepting SIWC codes.
 var ErrSIWCCallbackRequiresV8 = fmt.Errorf("%w: SIWC callbacks require /v8/management/oauth/callback", errOAuthSessionNotPending)
 
 type oauthSession struct {
+	Device         bool
 	Provider       string
 	Status         string
 	Source         string
@@ -82,6 +84,14 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 }
 
 func (s *oauthSessionStore) Register(state, provider string) {
+	s.register(state, provider, false)
+}
+
+func (s *oauthSessionStore) registerDevice(state, provider string) {
+	s.register(state, provider, true)
+}
+
+func (s *oauthSessionStore) register(state, provider string, device bool) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" || provider == "" {
@@ -94,6 +104,7 @@ func (s *oauthSessionStore) Register(state, provider string) {
 
 	s.purgeExpiredLocked(now)
 	s.sessions[state] = oauthSession{
+		Device:    device,
 		Provider:  provider,
 		Status:    "",
 		Source:    oauthSessionSourceBuiltin,
@@ -531,8 +542,13 @@ func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, err
 	if err != nil {
 		return "", err
 	}
-	if session, ok := oauthSessions.Get(state); ok && session.SIWC != nil {
-		return "", ErrSIWCCallbackRequiresV8
+	if session, ok := oauthSessions.Get(state); ok {
+		if session.Device {
+			return "", errOAuthDeviceCallback
+		}
+		if session.SIWC != nil {
+			return "", ErrSIWCCallbackRequiresV8
+		}
 	}
 	if !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending

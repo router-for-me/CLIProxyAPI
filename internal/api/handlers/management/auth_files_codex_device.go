@@ -22,7 +22,7 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
 		return
 	}
-	RegisterOAuthSession(state, "codex")
+	oauthSessions.registerDevice(state, "codex")
 
 	ctx, cancel := context.WithCancel(PopulateAuthContext(context.Background(), c))
 	watchCtx, stopWatch := context.WithCancel(ctx)
