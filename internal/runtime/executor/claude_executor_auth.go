@@ -34,14 +34,12 @@ func isClaudeSetupToken(auth *cliproxyauth.Auth, apiKey string) bool {
 	if !isClaudeOAuthToken(apiKey) || auth == nil {
 		return false
 	}
-	if skip, _ := auth.Metadata["skip_account_profile"].(bool); skip {
-		return true
-	}
-	if isSetup, _ := auth.Metadata["is_setup_token"].(bool); isSetup {
-		return true
-	}
-	if isSetup, _ := auth.Metadata["setup_token"].(bool); isSetup {
-		return true
+	// Read through the metadata lock: PrepareRequestAuth stores the account
+	// profile into the same map while other requests share the credential.
+	for _, key := range []string{"skip_account_profile", "is_setup_token", "setup_token"} {
+		if claudeauth.ReadMetadataBool(&auth.Metadata, key) {
+			return true
+		}
 	}
 	if kind := strings.ToLower(auth.Attributes["auth_kind"]); kind == "setup_token" || kind == "setup-token" {
 		return true
