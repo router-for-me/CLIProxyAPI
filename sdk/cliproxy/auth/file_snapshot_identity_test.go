@@ -381,6 +381,28 @@ func TestCredentialsChangedMetaDCAToken(t *testing.T) {
 	}
 }
 
+// A Devin file may hold only a session token (metadata or attributes), or the "token" attribute the executor falls back to.
+func TestCredentialsChangedDevinSessionToken(t *testing.T) {
+	metadata := func(token string) *Auth {
+		return &Auth{Provider: "devin", Metadata: map[string]any{"session_token": token}}
+	}
+	attribute := func(key, token string) *Auth {
+		return &Auth{Provider: "devin", Attributes: map[string]string{key: token}}
+	}
+	if !CredentialsChanged(metadata("session-a"), metadata("session-b")) {
+		t.Fatal("a rotated Devin session token in metadata did not count as a credential change")
+	}
+	if !CredentialsChanged(attribute("session_token", "session-a"), attribute("session_token", "session-b")) {
+		t.Fatal("a rotated Devin session token in attributes did not count as a credential change")
+	}
+	if !CredentialsChanged(attribute("token", "token-a"), attribute("token", "token-b")) {
+		t.Fatal("a rotated Devin token attribute did not count as a credential change")
+	}
+	if CredentialsChanged(metadata("session-a"), metadata("session-a")) {
+		t.Fatal("the same Devin session token counted as a credential change")
+	}
+}
+
 // An Antigravity request carries the file's project_id, so another project under the same tokens is another account.
 // The executor stores the project it discovers; gaining or losing the field is not a replacement.
 func TestCredentialsChangedAntigravityProject(t *testing.T) {

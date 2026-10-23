@@ -495,8 +495,7 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingKey != incomingKey {
 		return true
 	}
-	// A Meta file may hold only the device token, which the API key is minted from.
-	if authDCAToken(existing) != authDCAToken(incoming) {
+	if authBearerExtras(existing) != authBearerExtras(incoming) {
 		return true
 	}
 	if authSIWCTokenField(existing, "access_token") != authSIWCTokenField(incoming, "access_token") ||
@@ -513,14 +512,20 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	return false
 }
 
-func authDCAToken(auth *Auth) string {
-	if token := authMetadataString(auth, "dca_token"); token != "" {
-		return token
-	}
+// authBearerExtras are the provider-specific bearer credentials a file may hold instead of an access token or API key: Meta's
+// device token (the API key is minted from it) and Devin's session token, with the "token" attribute the Devin executor falls
+// back to.
+func authBearerExtras(auth *Auth) [3]string {
 	if auth == nil {
-		return ""
+		return [3]string{}
 	}
-	return strings.TrimSpace(auth.Attributes["dca_token"])
+	pick := func(key string) string {
+		if token := authMetadataString(auth, key); token != "" {
+			return token
+		}
+		return strings.TrimSpace(auth.Attributes[key])
+	}
+	return [3]string{pick("dca_token"), pick("session_token"), strings.TrimSpace(auth.Attributes["token"])}
 }
 
 // accountIdentityChanged reports whether the credential now targets another account
