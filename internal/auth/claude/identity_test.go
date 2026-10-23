@@ -193,3 +193,16 @@ func TestSelectDeviceIDUsesOneDeviceAcrossSessions(t *testing.T) {
 		t.Fatalf("single device selection = %q then %q, want %q", first, second, deviceIDs[0])
 	}
 }
+
+func TestReadMetadataBool(t *testing.T) {
+	metadata := map[string]any{"on": true, "off": false, "text": "true"}
+	for key, want := range map[string]bool{"on": true, "off": false, "text": false, "missing": false} {
+		if got := ReadMetadataBool(&metadata, key); got != want {
+			t.Errorf("ReadMetadataBool(%q) = %v, want %v", key, got, want)
+		}
+	}
+	var nilMap map[string]any
+	if ReadMetadataBool(&nilMap, "on") || ReadMetadataBool(nil, "on") {
+		t.Error("ReadMetadataBool on nil metadata = true, want false")
+	}
+}
