@@ -549,15 +549,30 @@ func pluginTokenStorageFileCurrent(path string, payload []byte) bool {
 }
 
 func jsonPayloadEqual(left, right []byte) bool {
-	var leftValue any
-	if errUnmarshalLeft := json.Unmarshal(left, &leftValue); errUnmarshalLeft != nil {
+	leftValue, errLeft := decodeJSONExact(left)
+	if errLeft != nil {
 		return false
 	}
-	var rightValue any
-	if errUnmarshalRight := json.Unmarshal(right, &rightValue); errUnmarshalRight != nil {
+	rightValue, errRight := decodeJSONExact(right)
+	if errRight != nil {
 		return false
 	}
 	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+// decodeJSONExact decodes one JSON value with numbers kept exact (integers above 2^53 stay distinct); trailing data is an error.
+func decodeJSONExact(data []byte) (any, error) {
+	trimmed := bytes.TrimSpace(data)
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if decoder.InputOffset() != int64(len(trimmed)) {
+		return nil, fmt.Errorf("trailing data")
+	}
+	return value, nil
 }
 
 func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]byte, error) {

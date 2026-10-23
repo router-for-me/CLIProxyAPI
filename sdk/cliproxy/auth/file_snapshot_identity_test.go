@@ -401,6 +401,28 @@ func TestCredentialsChangedDevinSessionToken(t *testing.T) {
 	if CredentialsChanged(metadata("session-a"), metadata("session-a")) {
 		t.Fatal("the same Devin session token counted as a credential change")
 	}
+	// The session token is only a fallback: next to an API key it is not the credential in use.
+	both := func(apiKey, session string) *Auth {
+		return &Auth{Provider: "devin", Metadata: map[string]any{"api_key": apiKey, "session_token": session}}
+	}
+	if CredentialsChanged(both("key-a", "session-a"), both("key-a", "session-b")) || CredentialsChanged(both("key-a", "session-a"), both("key-a", "")) {
+		t.Fatal("a change of the inactive Devin session token counted as a credential change")
+	}
+	if !CredentialsChanged(both("key-a", "session-a"), both("key-b", "session-a")) {
+		t.Fatal("a rotated Devin API key did not count as a credential change")
+	}
+	bothAttributes := func(apiKey, session string) *Auth {
+		return &Auth{Provider: "devin", Attributes: map[string]string{"api_key": apiKey, "session_token": session}}
+	}
+	if CredentialsChanged(bothAttributes("key-a", "session-a"), bothAttributes("key-a", "session-b")) {
+		t.Fatal("a change of the inactive session token next to an API key kept in attributes counted as a credential change")
+	}
+	if !CredentialsChanged(bothAttributes("key-a", "session-a"), bothAttributes("key-b", "session-a")) {
+		t.Fatal("a rotated Devin API key kept in attributes did not count as a credential change")
+	}
+	if !CredentialsChanged(both("key-a", "session-a"), both("", "session-a")) {
+		t.Fatal("a Devin file that lost its API key and fell back to the session token did not count as a credential change")
+	}
 }
 
 // The upstream base URL is part of where a credential is sent: another endpoint under the same tokens is another target. The
@@ -661,6 +683,9 @@ func TestResultFromPreviousTargetIsIgnoredAfterRequestTargetChange(t *testing.T)
 		{"claude auth kind", "claude",
 			func(a *Auth) { a.Metadata["auth_kind"] = "oauth" },
 			func(a *Auth) { a.Metadata["auth_kind"] = "apikey" }},
+		{"codex auth kind", "codex",
+			func(a *Auth) { a.Metadata["auth_kind"] = "oauth" },
+			func(a *Auth) { a.Metadata["auth_kind"] = "apikey" }},
 		{"vertex openapi location", "vertex",
 			func(a *Auth) { a.Attributes["openapi_location"] = "us-central1" },
 			func(a *Auth) { a.Attributes["openapi_location"] = "europe-west4" }},
@@ -777,15 +802,45 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	if CredentialsChanged(devin("https://server.codeium.com/"), devin("")) || CredentialsChanged(devin(""), devin("HTTPS://Server.Codeium.com")) {
 		t.Fatal("spelling out the default Devin base URL counted as a change")
 	}
-	// Claude sends Authorization: Bearer for OAuth and x-api-key for an API key, whatever the token string is.
-	claude := func(kind string) *Auth {
-		return &Auth{Provider: "claude", Metadata: map[string]any{"access_token": "same-token", "auth_kind": kind}}
+	// Claude and Codex send different headers for OAuth and for an API key, whatever the token string is.
+	for _, provider := range []string{"claude", "codex"} {
+		kind := func(kind string) *Auth {
+			return &Auth{Provider: provider, Metadata: map[string]any{"access_token": "same-token", "auth_kind": kind}}
+		}
+		if !CredentialsChanged(kind("oauth"), kind("api_key")) {
+			t.Fatalf("a %s file moved from OAuth to API key under the same token did not count as a credential change", provider)
+		}
+		if CredentialsChanged(kind("apikey"), kind("api-key")) {
+			t.Fatalf("two spellings of the same %s auth kind counted as a credential change", provider)
+		}
 	}
-	if !CredentialsChanged(claude("oauth"), claude("api_key")) {
-		t.Fatal("a Claude file moved from OAuth to API key under the same token did not count as a credential change")
+	// In API-key mode Codex omits the account header, so a leftover account_id edit changes nothing; in OAuth mode it does.
+	codex := func(kind, accountID string) *Auth {
+		a := &Auth{Provider: "codex", Metadata: map[string]any{"access_token": "same-token", "auth_kind": kind}}
+		if accountID != "" {
+			a.Metadata["account_id"] = accountID
+		}
+		return a
 	}
-	if CredentialsChanged(claude("apikey"), claude("api-key")) {
-		t.Fatal("two spellings of the same auth kind counted as a credential change")
+	if CredentialsChanged(codex("api_key", "account-a"), codex("api_key", "account-b")) || CredentialsChanged(codex("api_key", "account-a"), codex("api_key", "")) {
+		t.Fatal("an account_id edit in Codex API-key mode counted as a credential change")
+	}
+	configKey := func(accountID string) *Auth {
+		a := &Auth{Provider: "codex", Attributes: map[string]string{"api_key": "same-key"}, Metadata: map[string]any{"account_id": accountID}}
+		return a
+	}
+	if CredentialsChanged(configKey("account-a"), configKey("account-b")) {
+		t.Fatal("an account_id edit next to an API key kept in attributes counted as a credential change")
+	}
+	// The executor takes an API key in attributes for API-key mode even when the file says auth_kind oauth.
+	oauthLabelled := func(accountID string) *Auth {
+		return &Auth{Provider: "codex", Attributes: map[string]string{"api_key": "same-key"}, Metadata: map[string]any{"auth_kind": "oauth", "account_id": accountID}}
+	}
+	if CredentialsChanged(oauthLabelled("account-a"), oauthLabelled("account-b")) {
+		t.Fatal("an account_id edit next to an API key in attributes counted as a credential change although the executor is in API-key mode")
+	}
+	if !CredentialsChanged(codex("oauth", "account-a"), codex("oauth", "account-b")) {
+		t.Fatal("an account_id edit in Codex OAuth mode did not count as a credential change")
 	}
 	vertexIn := func(location, openapi, openapiLocation string) *Auth {
 		a := &Auth{Provider: "vertex", Attributes: map[string]string{}, Metadata: map[string]any{"access_token": "same-token", "project_id": "project-a"}}

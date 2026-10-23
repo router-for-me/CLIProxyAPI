@@ -733,4 +733,11 @@ func TestPluginTokenStorageKeepsLargeIntegers(t *testing.T) {
 	if _, errMerge := mergedStorageJSON([]byte(`{"account":1} x`), nil, "plugin-provider"); errMerge == nil {
 		t.Fatal("storage JSON with trailing data was accepted")
 	}
+	// Saving must not skip the write when the file differs from the payload only by such an integer.
+	if jsonPayloadEqual([]byte(`{"account":9007199254740992}`), []byte(`{"account":9007199254740993}`)) {
+		t.Fatal("payloads that differ in a 64-bit integer were taken for equal, so the save would be skipped")
+	}
+	if !jsonPayloadEqual([]byte(" {\"a\":1,\"b\":[9007199254740993]}\n"), []byte(`{"b":[9007199254740993],"a":1}`)) {
+		t.Fatal("equal payloads in another key order and layout were taken for different")
+	}
 }

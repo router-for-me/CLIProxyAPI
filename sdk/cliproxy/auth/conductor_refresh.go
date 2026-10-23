@@ -515,20 +515,33 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	return false
 }
 
+// codexUsesAPIKey mirrors the executor's codexAuthUsesAPIKey.
+func codexUsesAPIKey(auth *Auth) bool {
+	return auth.AuthKind() == AuthKindAPIKey || strings.TrimSpace(auth.Attributes["api_key"]) != ""
+}
+
 // authBearerExtras are the provider-specific bearer credentials a file may hold instead of an access token or API key: Meta's
-// device token (the API key is minted from it) and Devin's session token, with the "token" attribute the Devin executor falls
-// back to.
-func authBearerExtras(auth *Auth) [3]string {
+// device token (the API key is minted from it) and the credential Devin sends, which is the API key, else the session token, else
+// the "token" attribute (devinAuthCredentials: attributes first, each fallback only while nothing higher was found).
+func authBearerExtras(auth *Auth) [2]string {
 	if auth == nil {
-		return [3]string{}
+		return [2]string{}
 	}
-	pick := func(key string) string {
-		if token := authMetadataString(auth, key); token != "" {
-			return token
+	dca := authMetadataString(auth, "dca_token")
+	if dca == "" {
+		dca = strings.TrimSpace(auth.Attributes["dca_token"])
+	}
+	for _, key := range []string{"api_key", "session_token", "token"} {
+		if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
+			return [2]string{dca, value}
 		}
-		return strings.TrimSpace(auth.Attributes[key])
 	}
-	return [3]string{pick("dca_token"), pick("session_token"), strings.TrimSpace(auth.Attributes["token"])}
+	for _, key := range []string{"api_key", "session_token"} {
+		if value := authMetadataString(auth, key); value != "" {
+			return [2]string{dca, value}
+		}
+	}
+	return [2]string{dca, ""}
 }
 
 // accountIdentityChanged reports whether the credential now targets another account
@@ -555,12 +568,15 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 		xaiUsingAPIIdentity(existing) != xaiUsingAPIIdentity(incoming) {
 		return true
 	}
-	// Claude sends Authorization: Bearer for OAuth and x-api-key for an API key, whatever the token string is.
-	if strings.EqualFold(strings.TrimSpace(existing.Provider), "claude") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "claude") &&
-		existing.AuthKind() != incoming.AuthKind() {
+	// Claude sends Authorization: Bearer for OAuth and x-api-key for an API key, Codex other account and originator headers,
+	// whatever the token string is.
+	if existingProvider := strings.ToLower(strings.TrimSpace(existing.Provider)); (existingProvider == "claude" || existingProvider == "codex") &&
+		existingProvider == strings.ToLower(strings.TrimSpace(incoming.Provider)) && existing.AuthKind() != incoming.AuthKind() {
 		return true
 	}
-	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
+	// In API-key mode Codex omits the account header (codexAuthUsesAPIKey), so there account_id is not part of the identity.
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") &&
+		!(codexUsesAPIKey(existing) && codexUsesAPIKey(incoming)) {
 		existingAccountID, existingHasAccountID := existing.Metadata["account_id"]
 		incomingAccountID, incomingHasAccountID := incoming.Metadata["account_id"]
 		if existingHasAccountID != incomingHasAccountID || (existingHasAccountID && !reflect.DeepEqual(existingAccountID, incomingAccountID)) {
