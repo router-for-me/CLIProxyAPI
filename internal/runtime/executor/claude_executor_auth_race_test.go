@@ -128,3 +128,54 @@ func TestClaudeExecutorSharedCredentialMetadataMixedAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// isClaudeSetupToken runs on every PrepareRequestAuth that still lacks an account
+// UUID, while another request on the same credential may be storing the account
+// profile. Its flag reads must go through the metadata lock; under -race an
+// unlocked read is reported on every run, since nothing orders it after the
+// locked write.
+func TestIsClaudeSetupTokenReadsMetadataUnderLock(t *testing.T) {
+	auth := newSharedClaudeOAuthAuth("claude-race-setup-token")
+	// A setup-token flag makes it return before its locked scope read, which would
+	// otherwise order an unlocked flag read before the write when it runs first.
+	auth.Metadata["setup_token"] = true
+	apiKey := auth.Attributes["api_key"]
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+	}()
+	go func() {
+		defer wg.Done()
+		if !isClaudeSetupToken(auth, apiKey) {
+			t.Error("isClaudeSetupToken() = false, want true for setup_token")
+		}
+	}()
+	wg.Wait()
+}
+
+func TestIsClaudeSetupTokenFlags(t *testing.T) {
+	const apiKey = "sk-ant-oat-flag-probe"
+	for _, tc := range []struct {
+		name     string
+		metadata map[string]any
+		want     bool
+	}{
+		{"no flags", map[string]any{}, false},
+		{"nil metadata", nil, false},
+		{"skip_account_profile", map[string]any{"skip_account_profile": true}, true},
+		{"is_setup_token", map[string]any{"is_setup_token": true}, true},
+		{"setup_token", map[string]any{"setup_token": true}, true},
+		{"flag false", map[string]any{"setup_token": false}, false},
+		{"flag not a bool", map[string]any{"setup_token": "true"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": apiKey}, Metadata: tc.metadata}
+			if got := isClaudeSetupToken(auth, apiKey); got != tc.want {
+				t.Fatalf("isClaudeSetupToken() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
