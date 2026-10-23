@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -105,6 +106,68 @@ func TestProjectMetricLabelIsCapped(t *testing.T) {
 	// One already seen keeps its name.
 	if got := projectMetricLabel("pa" + "a"); got != "paa" {
 		t.Fatalf("a seen project = %q, want paa", got)
+	}
+}
+
+// A name with a random part (a temporary directory per run: OpenClaw's
+// openclaw-isolated-completion-<uuid>, mktemp's tmp.XXXXXXXXXX, a timestamp) keeps only what comes before it,
+// so all its runs are one project; nothing but random is "random".
+func TestStableProjectDropsRandomParts(t *testing.T) {
+	for raw, want := range map[string]string{
+		"openclaw-isolated-completion-078ac676-970e-440e-b37e-b4407c50b51": "openclaw-isolated-completion",
+		"openclaw-isolated-completion-10d22449-fdff-4718-b3bb-24bc75877a0": "openclaw-isolated-completion",
+		"build-20261023153000":                 "build",
+		"tmp.Ab3dE9fGh2":                       "tmp",
+		"ci_run_8f3a2b1c":                      "ci_run",
+		"job-k3j2h4g5f6d7-retry":               "job",
+		"3f2a9c1b-4d5e-6f70-8192-a3b4c5d6e7f8": "random",
+		"20261023":                             "random",
+		// Real names stay as they are.
+		"colton-games-snake":      "colton-games-snake",
+		"dolphin-labs":            "dolphin-labs",
+		"tsgo-pnp-rebuild":        "tsgo-pnp-rebuild",
+		"t-claude":                "t-claude",
+		"x86-dev":                 "x86-dev",
+		"claude-master-dashboard": "claude-master-dashboard",
+		"go1.26":                  "go1.26",
+		"web3":                    "web3",
+		"aws-2026":                "aws-2026",
+		"deadbeef":                "deadbeef",
+		"s3-uploader-v2":          "s3-uploader-v2",
+		"CLIProxyAPI":             "CLIProxyAPI",
+	} {
+		if got := stableProject(raw); got != want {
+			t.Errorf("stableProject(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// Random names do not use up the cap: 150 runs in their own temporary directories take one slot, and
+// real projects after them still get their names.
+func TestRandomNamesDoNotTakeSlots(t *testing.T) {
+	projectLabels.mu.Lock()
+	saved := projectLabels.seen
+	projectLabels.seen = nil
+	projectLabels.mu.Unlock()
+	t.Cleanup(func() {
+		projectLabels.mu.Lock()
+		projectLabels.seen = saved
+		projectLabels.mu.Unlock()
+	})
+	for i := 0; i < 150; i++ {
+		name := fmt.Sprintf("openclaw-isolated-completion-%08x-%04x-4%03x-b%03x-%012x", 0x1000000+i*7919, i, i, i, i*104729)
+		if got := projectMetricLabel(name); got != "openclaw-isolated-completion" {
+			t.Fatalf("run %d = %q, want openclaw-isolated-completion", i, got)
+		}
+	}
+	for i := 0; i < maxProjectLabels-1; i++ {
+		name := "project-" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+		if got := projectMetricLabel(name); got != name {
+			t.Fatalf("real project %d after the random runs = %q, want its name", i, got)
+		}
+	}
+	if got := projectMetricLabel("one-too-many"); got != "other" {
+		t.Fatalf("past the cap = %q, want other", got)
 	}
 }
 

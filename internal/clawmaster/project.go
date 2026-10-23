@@ -115,11 +115,13 @@ var projectLabels struct {
 }
 
 // projectMetricLabel is the project's value on the metrics: "none" when the tunnel named none, the
-// name while fewer than maxProjectLabels have been seen, else "other".
+// name without its random part (stableProject) while fewer than maxProjectLabels have been seen, else
+// "other".
 func projectMetricLabel(project string) string {
 	if project == "" {
 		return "none"
 	}
+	project = stableProject(project)
 	projectLabels.mu.Lock()
 	defer projectLabels.mu.Unlock()
 	if projectLabels.seen == nil {
@@ -133,4 +135,72 @@ func projectMetricLabel(project string) string {
 	}
 	projectLabels.seen[project] = struct{}{}
 	return project
+}
+
+// stableProject is a project name without its random part, so that a tool running each job in a new
+// temporary directory (OpenClaw's openclaw-isolated-completion-<uuid>, mktemp's tmp.XXXXXXXXXX, a
+// timestamped build directory) counts as one project instead of using up maxProjectLabels. The name
+// is cut at its first random-looking segment (randomSegment); one with nothing before it is "random".
+func stableProject(project string) string {
+	start := 0
+	for i := 0; i <= len(project); i++ {
+		if i < len(project) && !isProjectSeparator(project[i]) {
+			continue
+		}
+		if randomSegment(project[start:i]) {
+			if kept := strings.TrimRight(project[:start], "-._"); kept != "" {
+				return kept
+			}
+			return "random"
+		}
+		start = i + 1
+	}
+	return project
+}
+
+func isProjectSeparator(c byte) bool { return c == '-' || c == '_' || c == '.' }
+
+// randomSegment reports whether a part of a name between separators looks generated rather than
+// chosen: eight or more characters that are all digits (a timestamp, a counter), or hex with both a
+// digit and a letter (a UUID's first part, a hash), or letters and digits mixed in both cases or
+// alternating often (mktemp, a base-62 id). Words with a digit or two (web3, x86, s3, go1) are names.
+func randomSegment(seg string) bool {
+	if len(seg) < 8 {
+		return false
+	}
+	var digits, lower, upper, hexLetters, changes int
+	prevDigit := false
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		isDigit := c >= '0' && c <= '9'
+		switch {
+		case isDigit:
+			digits++
+		case c >= 'a' && c <= 'z':
+			lower++
+			if c <= 'f' {
+				hexLetters++
+			}
+		case c >= 'A' && c <= 'Z':
+			upper++
+		default:
+			return false
+		}
+		if i > 0 && isDigit != prevDigit {
+			changes++
+		}
+		prevDigit = isDigit
+	}
+	letters := lower + upper
+	switch {
+	case digits == len(seg):
+		return true
+	case digits > 0 && upper == 0 && hexLetters == lower && lower > 0:
+		return true
+	case digits > 0 && lower > 0 && upper > 0:
+		return true
+	case digits >= 3 && letters > 0 && changes >= 4:
+		return true
+	}
+	return false
 }
