@@ -78,7 +78,46 @@ class PolicyTests(unittest.TestCase):
         urgent_expiry = int((self.now + dt.timedelta(hours=1)).timestamp())
         self.assertIsNone(router.account_rank(self.limits(used=100, expiry=urgent_expiry), self.now))
         expired = self.limits(used=20, expiry=int((self.now - dt.timedelta(seconds=1)).timestamp()))
-        self.assertEqual(router.account_rank(expired, self.now)[0], 0)
+        self.assertEqual(router.account_rank(expired, self.now)[0], 2)
+
+    def test_weekly_deadline_beats_five_hour_and_unknown_weekly(self):
+        near_weekly = self.limits(used=20, reset=int((self.now + dt.timedelta(hours=12)).timestamp()))
+        far_weekly = self.limits(used=20)
+        no_weekly = self.limits(used=20)
+        no_weekly["rateLimitsByLimitId"]["codex"].pop("secondary")
+        for result, hours in ((near_weekly, 4), (far_weekly, 1), (no_weekly, 2)):
+            result["rateLimitResetCredits"] = {"availableCount": 0, "credits": []}
+            result["rateLimitsByLimitId"]["codex"]["primary"]["resetsAt"] = int(
+                (self.now + dt.timedelta(hours=hours)).timestamp())
+        self.assertLess(router.account_rank(near_weekly, self.now),
+                        router.account_rank(no_weekly, self.now))
+        self.assertLess(router.account_rank(no_weekly, self.now),
+                        router.account_rank(far_weekly, self.now))
+
+    def test_weekly_urgency_starts_at_forty_eight_hours(self):
+        at_boundary = self.limits(used=20, reset=int(
+            (self.now + dt.timedelta(hours=48)).timestamp()))
+        outside = self.limits(used=20, reset=int(
+            (self.now + dt.timedelta(hours=48, seconds=1)).timestamp()))
+        self.assertEqual(router.account_rank(at_boundary, self.now)[0], 0)
+        self.assertEqual(router.account_rank(outside, self.now)[0], 2)
+
+    def test_five_hour_deadline_and_remaining_capacity_break_ties(self):
+        earlier = self.limits(used=20)
+        later = self.limits(used=20)
+        for result, hours, used in ((earlier, 2, 10), (later, 3, 90)):
+            result["rateLimitResetCredits"] = {"availableCount": 0, "credits": []}
+            result["rateLimitsByLimitId"]["codex"]["primary"].update({
+                "resetsAt": int((self.now + dt.timedelta(hours=hours)).timestamp()),
+                "usedPercent": used,
+            })
+        self.assertLess(router.account_rank(earlier, self.now),
+                        router.account_rank(later, self.now))
+        later["rateLimitsByLimitId"]["codex"]["primary"]["resetsAt"] = earlier["rateLimitsByLimitId"]["codex"]["primary"]["resetsAt"]
+        self.assertLess(router.account_rank(earlier, self.now),
+                        router.account_rank(later, self.now))
+        earlier["rateLimitsByLimitId"]["codex"]["primary"]["usedPercent"] = 100
+        self.assertIsNone(router.account_rank(earlier, self.now))
 
     def test_urgent_credit_with_unknown_weekly_window_goes_first(self):
         urgent = self.limits(expiry=int((self.now + dt.timedelta(hours=2)).timestamp()))
@@ -225,6 +264,53 @@ class PolicyTests(unittest.TestCase):
                            }}}
         self.assertEqual(router.claude_weekly_rank(entry, self.now),
                          (self.weekly_reset, 0.45))
+
+    def test_fable_weekly_window_does_not_rank_opus_and_five_hour_still_does(self):
+        five_reset = int((self.now + dt.timedelta(hours=2)).timestamp())
+        fable_reset = int((self.now + dt.timedelta(hours=12)).timestamp())
+        entry = {"quota": {"observed_at": self.now.isoformat(), "signals": {
+            "Anthropic-Ratelimit-Unified-5h-Reset": str(five_reset),
+            "Anthropic-Ratelimit-Unified-5h-Utilization": "0.2"}},
+            "model_quotas": {"claude-fable-5": {
+                "observed_at": self.now.isoformat(), "signals": {
+                    "Anthropic-Ratelimit-Unified-7d-Reset": str(fable_reset),
+                    "Anthropic-Ratelimit-Unified-7d-Utilization": "0.0"}}}}
+        self.assertIsNone(router.claude_weekly_rank(entry, self.now))
+        self.assertEqual(router.claude_five_hour_rank(entry, self.now),
+                         (five_reset, 0.2))
+        entry["quota"]["signals"]["Anthropic-Ratelimit-Unified-5h-Utilization"] = "1.0"
+        self.assertEqual(router.claude_five_hour_rank(entry, self.now),
+                         (five_reset, 1.0))
+
+    def test_claude_credit_weekly_and_company_five_hour_order(self):
+        def entry(name, five_hours, weekly_hours=None):
+            signals = {
+                "Anthropic-Ratelimit-Unified-5h-Reset": str(int(
+                    (self.now + dt.timedelta(hours=five_hours)).timestamp())),
+                "Anthropic-Ratelimit-Unified-5h-Utilization": "0.2",
+            }
+            if weekly_hours is not None:
+                signals.update({
+                    "Anthropic-Ratelimit-Unified-7d-Reset": str(int(
+                        (self.now + dt.timedelta(hours=weekly_hours)).timestamp())),
+                    "Anthropic-Ratelimit-Unified-7d-Utilization": "0.2",
+                })
+            return {"name": name, "type": "claude", "status": "active", "priority": 0,
+                    "quota": {"observed_at": self.now.isoformat(), "signals": signals}}
+
+        auths = [entry("credit.json", 4, 72), entry("weekly.json", 3, 12),
+                 entry("company.json", 2), entry("far.json", 1, 120)]
+        with tempfile.TemporaryDirectory() as directory:
+            offer_file = Path(directory) / "offers.json"
+            offer_file.write_text(json.dumps({"offers": [{"name": "credit.json",
+                "expires_at": (self.now + dt.timedelta(hours=4)).isoformat()}]}))
+            args = SimpleNamespace(claude_offers_file=str(offer_file), dry_run=False)
+            with patch.object(router, "management") as send:
+                router.apply_claude_priorities(args, "unused", auths, self.now)
+            priorities = {call.args[3]["name"]: call.args[3]["priority"]
+                          for call in send.call_args_list}
+        self.assertEqual(priorities, {"credit.json": 4, "weekly.json": 3,
+                                      "company.json": 2, "far.json": 1})
 
     def test_claude_exact_offer_final_five_hours_overrides_weekly_order(self):
         def entry(name, days):

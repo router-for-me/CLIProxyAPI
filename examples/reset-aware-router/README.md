@@ -1,28 +1,31 @@
 # Renewal and reset aware routing companion
 
-This optional local companion updates CLIProxyAPI credential priorities. For
-accounts with usable weekly quota, it prefers the earliest upcoming weekly
-renewal, so unused capacity is spent before that window closes. Renewal times
-are compared to the nearest minute to ignore second-level reporting jitter.
-An earned manual reset expiry breaks ties, followed by unused weekly quota.
-During the final five hours before a known earned reset credit expires, an
-account that can serve ordinary requests takes priority over accounts with
-earlier weekly renewals. Among these urgent accounts, the earliest credit
-expiry goes first. This changes request routing; it does not automatically
-redeem a reset credit or guarantee that traffic will consume the balance.
-CLIProxyAPI still checks model support and cooldowns before serving a request.
+This optional local companion updates CLIProxyAPI credential priorities. Its
+order is: a usable account with a verified reset credit expiring within five
+hours; usable weekly quota renewing within 48 hours; an account with no
+observed general weekly window but with usable five-hour quota; then usable
+weekly quota renewing later. Within a group, the earlier five-hour renewal
+goes first, followed by more unused five-hour capacity. Weekly accounts inside
+the 48-hour horizon are ordered by weekly renewal first. Renewal times are
+compared to the nearest minute to ignore second-level reporting jitter.
+This changes request routing; it does not automatically redeem a reset credit
+or guarantee that traffic will consume the balance. CLIProxyAPI still checks
+model support and cooldowns before serving a request.
 
-Codex weekly limits and earned reset credits come from the Codex app-server
-account API. Accounts are promoted only when that API explicitly allows
-ordinary usage. A Codex credential in a CLIProxyAPI quota cooldown is still
+Codex weekly and five-hour limits and earned reset credits come from the Codex
+app-server account API. Accounts are promoted only when that API explicitly
+allows ordinary usage. An exhausted observed five-hour window is not promoted.
+A Codex credential in a CLIProxyAPI quota cooldown is still
 inspected for an eligible earned reset, while its previous priority is kept
 until it recovers. SIWC-backed credentials are excluded because their request
 token differs from the outer Codex token; if an active one is present, Codex
-priorities are left unchanged. Claude weekly limits come from recent
-quota headers already observed by CLIProxyAPI and exposed through its v8
-management API. Claude observations older than three days, expired windows,
-and credentials with an
-error status are not promoted. The companion does not send artificial model
+priorities are left unchanged. Claude weekly and five-hour limits come from
+recent quota headers already observed by CLIProxyAPI and exposed through its
+v8 management API. A Fable-only weekly window is not treated as a general
+Claude weekly window for other models. Accounts without a general weekly
+window can still be prioritized using their observed five-hour quota.
+Claude observations older than three days, expired or exhausted windows, and
+credentials with an error status are not promoted. The companion does not send artificial model
 requests or repeatedly probe Claude's quota endpoint. If any active Codex
 account cannot be read or its routing data is incomplete, that pass keeps the
 previous Codex ordering.
@@ -69,10 +72,11 @@ The offer expiry is normally a secondary routing signal. If Claude shows an
 exact expiry time, use `"expires_at": "2026-10-22T18:00:00+03:00"` instead
 of `expires_on`. An active offer with a known expiry within five hours takes
 priority over other Claude accounts with earlier weekly renewals, provided
-its weekly quota is usable or unknown. A date-only `expires_on` never triggers
-the five-hour override because the exact expiry time is unknown. When no
-usable weekly window is observed, a currently valid offer can promote the
-account until its recorded expiry. You can use `email` instead of `name` when exactly one loaded
+its observed quota windows are usable or unknown. A date-only `expires_on`
+never triggers the five-hour override because the exact expiry time is unknown.
+When neither weekly nor five-hour usage is observed, a currently valid offer
+can still promote the account after accounts with usable observed quota. You
+can use `email` instead of `name` when exactly one loaded
 Claude credential has that email. Ambiguous emails are skipped; use the exact
 credential name in that case. This companion never redeems a Claude offer;
 open Claude Settings > Usage and select **Reset for free** yourself when

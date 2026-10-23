@@ -23,8 +23,8 @@ import uuid
 from pathlib import Path
 
 UTC = dt.timezone.utc
-EXPIRY_HORIZON = dt.timedelta(days=7)
 URGENT_EXPIRY_HORIZON = dt.timedelta(hours=5)
+WEEKLY_URGENCY_HORIZON = dt.timedelta(hours=48)
 REDEEM_HORIZON = dt.timedelta(hours=24)
 
 
@@ -132,6 +132,23 @@ def weekly_window(result):
     return max(windows, key=lambda value: value.get("usedPercent") or 0, default=None)
 
 
+def five_hour_window(result):
+    buckets = result.get("rateLimitsByLimitId") or {}
+    if "codex" in buckets:
+        buckets = {"codex": buckets["codex"]}
+    elif not buckets and result.get("rateLimits"):
+        buckets = {"legacy": result["rateLimits"]}
+    windows = []
+    for bucket in buckets.values():
+        if not isinstance(bucket, dict):
+            continue
+        for name in ("primary", "secondary"):
+            window = bucket.get(name)
+            if isinstance(window, dict) and window.get("windowDurationMins") == 300:
+                windows.append(window)
+    return min(windows, key=lambda value: value.get("resetsAt") or float("inf"), default=None)
+
+
 def available_credits(result, now):
     reset = result.get("rateLimitResetCredits") or {}
     credits = reset.get("credits")
@@ -166,7 +183,7 @@ def should_redeem(result, now):
 
 
 def account_rank(result, now):
-    """Use credits expiring within five hours, then rank weekly renewal.
+    """Spend expiring credits, imminent weekly quota, then five-hour quota.
 
     An exhausted weekly bucket cannot serve a request until a reset is redeemed,
     so do not promote it merely because its renewal is close.
@@ -176,19 +193,31 @@ def account_rank(result, now):
     credits = available_credits(result, now)
     credit_expiry = credits[0]["expiresAt"] if credits else float("inf")
     weekly = weekly_window(result) or {}
+    five_hour = five_hour_window(result) or {}
+    five_reset = five_hour.get("resetsAt")
+    five_used = five_hour.get("usedPercent")
+    if five_hour and (not isinstance(five_used, (int, float))
+                      or not 0 <= five_used < 100):
+        return None
+    if isinstance(five_reset, (int, float)) and five_reset <= now.timestamp():
+        return None
+    five_rank = (renewal_minute(five_reset) if isinstance(five_reset, (int, float)) else float("inf"),
+                 five_used if five_hour else float("inf"))
     reset_at = weekly.get("resetsAt")
     used = weekly.get("usedPercent")
     if (isinstance(reset_at, (int, float)) and reset_at > now.timestamp()
             and isinstance(used, (int, float)) and 0 <= used < 100):
         if credit_expiry - now.timestamp() <= URGENT_EXPIRY_HORIZON.total_seconds():
-            return (-1, credit_expiry, renewal_minute(reset_at), used)
-        return (0, renewal_minute(reset_at), credit_expiry, used)
+            return (-1, credit_expiry, renewal_minute(reset_at), *five_rank)
+        if reset_at - now.timestamp() <= WEEKLY_URGENCY_HORIZON.total_seconds():
+            return (0, renewal_minute(reset_at), *five_rank, credit_expiry)
+        return (2, *five_rank, renewal_minute(reset_at), credit_expiry)
     if weekly:
         return None  # Known exhausted or malformed weekly quota is not promoted.
     if credit_expiry - now.timestamp() <= URGENT_EXPIRY_HORIZON.total_seconds():
-        return (-1, credit_expiry, float("inf"), 0)
-    if credit_expiry < now.timestamp() + EXPIRY_HORIZON.total_seconds():
-        return (1, credit_expiry, float("inf"), 0)
+        return (-1, credit_expiry, float("inf"), *five_rank)
+    if five_hour:
+        return (1, *five_rank, credit_expiry, float("inf"))
     return None
 
 
@@ -201,10 +230,13 @@ def routing_signal_known(result, now):
     if account_rank(result, now) is not None:
         return True
     weekly = weekly_window(result) or {}
-    return (isinstance(weekly.get("resetsAt"), (int, float))
-            and weekly["resetsAt"] > now.timestamp()
-            and isinstance(weekly.get("usedPercent"), (int, float))
-            and weekly["usedPercent"] >= 100)
+    five_hour = five_hour_window(result) or {}
+    return ((isinstance(weekly.get("resetsAt"), (int, float))
+             and weekly["resetsAt"] > now.timestamp()
+             and isinstance(weekly.get("usedPercent"), (int, float))
+             and weekly["usedPercent"] >= 100)
+            or (isinstance(five_hour.get("usedPercent"), (int, float))
+                and five_hour["usedPercent"] >= 100))
 
 
 def uses_siwc(credential):
@@ -354,12 +386,19 @@ def parse_observed_timestamp(raw):
         return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
 
 
-def claude_weekly_rank(entry, now):
-    """Use recent, observed Claude response headers; never infer a window."""
-    observations = [entry.get("quota") or {}]
+def claude_window_rank(entry, now, window):
+    """Read a shared Claude quota window without borrowing Fable-only limits."""
     model_quotas = entry.get("model_quotas")
+    fable_times = set()
     if isinstance(model_quotas, dict):
-        observations.extend(model_quotas.values())
+        fable_times = {value.get("observed_at") for model, value in model_quotas.items()
+                       if "fable" in str(model).lower() and isinstance(value, dict)}
+    general = entry.get("quota") or {}
+    observations = ([general] if window != "7d" or
+                    general.get("observed_at") not in fable_times else [])
+    if isinstance(model_quotas, dict):
+        observations.extend(value for model, value in model_quotas.items()
+                            if "fable" not in str(model).lower())
     candidates = []
     for observation in observations:
         if not isinstance(observation, dict):
@@ -367,10 +406,13 @@ def claude_weekly_rank(entry, now):
         signals = observation.get("signals") or {}
         try:
             seen = parse_observed_timestamp(observation["observed_at"])
-            reset_at = parse_reset_timestamp(signals["Anthropic-Ratelimit-Unified-7d-Reset"])
-            used = float(signals["Anthropic-Ratelimit-Unified-7d-Utilization"])
+            prefix = f"Anthropic-Ratelimit-Unified-{window}-"
+            reset_at = parse_reset_timestamp(signals[prefix + "Reset"])
+            used = float(signals[prefix + "Utilization"])
         except (KeyError, TypeError, ValueError):
             continue
+        if signals.get(prefix + "Status") not in (None, "allowed"):
+            used = 1.0
         if (seen.tzinfo is not None and dt.timedelta(0) <= now - seen <= dt.timedelta(days=3)
                 and now.timestamp() < reset_at and 0 <= used <= 1):
             candidates.append((seen, reset_at, used))
@@ -378,6 +420,14 @@ def claude_weekly_rank(entry, now):
         return None
     _, reset_at, used = max(candidates, key=lambda item: item[0])
     return reset_at, used
+
+
+def claude_weekly_rank(entry, now):
+    return claude_window_rank(entry, now, "7d")
+
+
+def claude_five_hour_rank(entry, now):
+    return claude_window_rank(entry, now, "5h")
 
 
 def apply_claude_priorities(args, key, auths, now):
@@ -411,20 +461,29 @@ def apply_claude_priorities(args, key, auths, now):
         offer = offer_by_name.get(identity) or {}
         offer_expiry, exact_expiry = claude_offer_expiry(offer, now)
         weekly = claude_weekly_rank(entry, now)
-        if weekly and weekly[1] < 1:
-            reset_at, used = weekly
-            if (exact_expiry is not None and exact_expiry - now.timestamp()
-                    <= URGENT_EXPIRY_HORIZON.total_seconds()):
-                rank = (-1, exact_expiry, renewal_minute(reset_at), used)
+        five_hour = claude_five_hour_rank(entry, now)
+        if (weekly and weekly[1] >= 1) or (five_hour and five_hour[1] >= 1):
+            continue
+        five_reset = renewal_minute(five_hour[0]) if five_hour else float("inf")
+        five_used = five_hour[1] if five_hour else float("inf")
+        urgent_offer = (exact_expiry is not None and exact_expiry - now.timestamp()
+                        <= URGENT_EXPIRY_HORIZON.total_seconds())
+        if weekly:
+            reset_at, _ = weekly
+            if urgent_offer:
+                rank = (-1, exact_expiry, renewal_minute(reset_at), five_reset, five_used)
+            elif reset_at - now.timestamp() <= WEEKLY_URGENCY_HORIZON.total_seconds():
+                rank = (0, renewal_minute(reset_at), five_reset, five_used, offer_expiry)
             else:
-                rank = (0, renewal_minute(reset_at), offer_expiry, used)
+                rank = (2, five_reset, five_used, renewal_minute(reset_at), offer_expiry)
             ranked.append((rank, identity))
-        elif weekly is None and offer_expiry != float("inf"):
-            if (exact_expiry is not None and exact_expiry - now.timestamp()
-                    <= URGENT_EXPIRY_HORIZON.total_seconds()):
-                ranked.append(((-1, exact_expiry, float("inf"), 0), identity))
+        elif five_hour:
+            if urgent_offer:
+                ranked.append(((-1, exact_expiry, float("inf"), five_reset, five_used), identity))
             else:
-                ranked.append(((1, offer_expiry, float("inf"), 0), identity))
+                ranked.append(((1, five_reset, five_used, offer_expiry, float("inf")), identity))
+        elif offer_expiry != float("inf"):
+            ranked.append(((3, offer_expiry, float("inf"), float("inf"), float("inf")), identity))
     ranked.sort()
     priorities = {identity: len(ranked) - index for index, (_, identity) in enumerate(ranked)}
     for identity, entry in by_name.items():
