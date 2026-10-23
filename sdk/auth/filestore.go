@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -133,23 +135,17 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			if errMarshal != nil {
 				return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 			}
-			if existing, errRead := os.ReadFile(path); errRead == nil {
-				if jsonEqual(existing, raw) {
+			if existing, upToDate, errRead := authfile.ReadFileCurrent(path); errRead == nil {
+				if jsonEqual(existing, raw) && upToDate {
 					break
 				}
-				file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-				if errOpen != nil {
-					return "", fmt.Errorf("auth filestore: open existing failed: %w", errOpen)
-				}
-				if _, errWrite := file.Write(raw); errWrite != nil {
-					_ = file.Close()
+				if errWrite := authfile.WriteFile(path, raw, 0o600); errWrite != nil {
 					return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
 				}
-				if errClose := file.Close(); errClose != nil {
-					return "", fmt.Errorf("auth filestore: close existing failed: %w", errClose)
-				}
-			} else if os.IsNotExist(errRead) {
-				if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+			} else if os.IsNotExist(errRead) || errors.Is(errRead, authfile.ErrUnreadable) {
+				// A file whose encrypted fields cannot be opened is replaced,
+				// so logging in again recovers the account.
+				if errWrite := authfile.WriteFile(path, raw, 0o600); errWrite != nil {
 					return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
 				}
 			} else {
@@ -234,7 +230,7 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 }
 
 func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Auth, error) {
-	data, err := os.ReadFile(path)
+	data, err := authfile.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}

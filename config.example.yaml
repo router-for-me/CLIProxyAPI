@@ -913,6 +913,24 @@ oauth:
   # Authentication directory (supports ~ for home directory)
   auth-dir: "~/.cli-proxy-api"
 
+  # Encrypt the secret fields of auth files (tokens, API keys, secrets, passwords, cookies)
+  # with AES-256-GCM. Other fields such as priority, prefix and proxy_url stay plain and
+  # editable. Off by default; plain files keep working.
+  # On startup, plain secrets are encrypted. Secrets are never decrypted back to disk: if you
+  # turn this off, encrypted accounts are skipped until you log in to them again.
+  # Requires a restart. Local file store only. If encrypted files exist, startup needs their key
+  # and stops when it is missing or wrong; no new key is created.
+  # The key is taken from the first source that is set:
+  #   1. CLIPROXY_AUTH_ENCRYPTION_KEY env var (32 bytes, base64 or hex)
+  #   2. key-file below, or CLIPROXY_AUTH_ENCRYPTION_KEY_FILE (for Docker secrets)
+  #   3. OS keyring (Windows Credential Manager, macOS Keychain, Linux Secret Service);
+  #      a key is created there on first use. Docker containers have no keyring.
+  # Make a key with: openssl rand -base64 32
+  # Losing the key means logging in to every encrypted account again. Back it up.
+  # auth-encryption:
+  #   enabled: true
+  #   key-file: "/run/secrets/cliproxy_auth_key"
+
   # Core auth auto-refresh and manual refresh-all worker pool size (OAuth/file-based auth token refresh).
   # When > 0, overrides the default worker count (16).
   # auth-auto-refresh-workers: 16

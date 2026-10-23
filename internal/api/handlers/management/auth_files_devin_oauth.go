@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/devin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -142,7 +143,7 @@ func waitDevinOAuthCallback(ctx context.Context, path, state string) (*oauthCall
 		if ctx.Err() != nil {
 			return nil, errors.New("Timeout waiting for OAuth callback")
 		}
-		data, errRead := os.ReadFile(path)
+		data, errRead := authfile.ReadFile(path)
 		if errRead == nil {
 			var result oauthCallbackFilePayload
 			if errDecode := json.Unmarshal(data, &result); errDecode != nil {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -419,7 +420,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 
 		// Read file to get type field
 		full := filepath.Join(h.cfg.AuthDir, name)
-		if data, errRead := os.ReadFile(full); errRead == nil {
+		if data, errRead := authfile.ReadFile(full); errRead == nil {
 			typeValue := gjson.GetBytes(data, "type").String()
 			emailValue := gjson.GetBytes(data, "email").String()
 			fileData["type"] = typeValue

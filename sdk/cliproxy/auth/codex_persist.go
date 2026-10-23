@@ -3,11 +3,13 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 )
 
 // IsCodexAuthRecord reports whether auth represents a Codex credential record.
@@ -44,7 +46,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 	switch {
 	case auth.CodexRefreshPatch != nil:
 		errRefresh := codex.WithFileLock(path, func() error {
-			existing, errRead := os.ReadFile(path)
+			existing, errRead := authfile.ReadFile(path)
 			if errRead != nil {
 				if os.IsNotExist(errRead) {
 					if auth.Metadata == nil {
@@ -94,7 +96,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 		if errSave := auth.Storage.SaveTokenToFile(path); errSave != nil {
 			return true, errSave
 		}
-		if persistedBytes, errReadPersisted := os.ReadFile(path); errReadPersisted == nil && len(persistedBytes) > 0 {
+		if persistedBytes, errReadPersisted := authfile.ReadFile(path); errReadPersisted == nil && len(persistedBytes) > 0 {
 			var diskMap map[string]any
 			if errUnmarshal := json.Unmarshal(persistedBytes, &diskMap); errUnmarshal == nil && len(diskMap) > 0 {
 				auth.Metadata = codex.MergeCodexCredentialsFromDisk(diskMap, auth.Metadata)
@@ -106,7 +108,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 	case auth.Metadata != nil:
 		auth.Metadata["disabled"] = auth.Disabled
 		errLock := codex.WithFileLock(path, func() error {
-			existing, errRead := os.ReadFile(path)
+			existing, upToDate, errRead := authfile.ReadFileCurrent(path)
 			if errRead == nil && len(existing) > 0 {
 				var diskMap map[string]any
 				if errUnmarshal := json.Unmarshal(existing, &diskMap); errUnmarshal == nil && len(diskMap) > 0 {
@@ -115,11 +117,13 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 					}
 					auth.Metadata["disabled"] = auth.Disabled
 					NormalizeCredentialMetadata(auth.Metadata)
-					if raw, errMarshal := json.Marshal(auth.Metadata); errMarshal == nil && string(existing) == string(raw) {
+					if raw, errMarshal := json.Marshal(auth.Metadata); errMarshal == nil && string(existing) == string(raw) && upToDate {
 						return nil
 					}
 				}
-			} else if errRead != nil && !os.IsNotExist(errRead) {
+			} else if errRead != nil && !os.IsNotExist(errRead) && !errors.Is(errRead, authfile.ErrUnreadable) {
+				// A file whose encrypted fields cannot be opened is replaced, so
+				// logging in again recovers the account.
 				return fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 			}
 			return codex.WriteJSONFileAtomic(path, auth.Metadata)

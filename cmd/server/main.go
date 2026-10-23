@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -648,6 +649,14 @@ func main() {
 		return
 	} else {
 		cfg.AuthDir = resolvedAuthDir
+	}
+	if cfg.AuthEncryption.Enabled && (usePostgresStore || useObjectStore || useGitStore) {
+		log.Error("auth-encryption supports only the local file store; disable it or the remote store")
+		return
+	}
+	if errEncryption := authfile.Setup(cfg.AuthEncryption.Enabled, cfg.AuthEncryption.KeyFile, cfg.AuthDir); errEncryption != nil {
+		log.Errorf("failed to set up auth file encryption: %v", errEncryption)
+		return
 	}
 	githubauth.SetToken(cfg.GitHubToken)
 	managementasset.SetCurrentConfig(cfg)

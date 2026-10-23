@@ -11,6 +11,7 @@ import (
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -178,7 +179,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	diskRotatedSIWC := false
 	var diskBaseline map[string]any
 	if diskPath != "" {
-		existingBytes, errRead := os.ReadFile(diskPath)
+		existingBytes, errRead := authfile.ReadFile(diskPath)
 		if errRead != nil {
 			return nil, fmt.Errorf("codex executor: read credential file %s: %w", diskPath, errRead)
 		}
@@ -443,7 +444,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		auth.Storage = &clonedStorage
 	}
 	if diskPath != "" {
-		latestBytes, errReadLatest := os.ReadFile(diskPath)
+		latestBytes, errReadLatest := authfile.ReadFile(diskPath)
 		if errReadLatest != nil {
 			return auth, fmt.Errorf("codex executor: re-read credential file %s before write: %w", diskPath, errReadLatest)
 		}

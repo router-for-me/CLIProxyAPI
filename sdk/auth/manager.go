@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -78,7 +78,7 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 			}
 			if targetFile != "" {
 				fullPath := filepath.Join(cfg.AuthDir, targetFile)
-				if raw, errRead := os.ReadFile(fullPath); errRead == nil && len(raw) > 0 {
+				if raw, errRead := authfile.ReadFile(fullPath); errRead == nil && len(raw) > 0 {
 					var existingMap map[string]any
 					if errUnmarshal := json.Unmarshal(raw, &existingMap); errUnmarshal == nil && len(existingMap) > 0 {
 						coreauth.MergeExistingAuthMetadata(record, existingMap)

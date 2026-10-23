@@ -48,6 +48,9 @@ type Config struct {
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
+	// AuthEncryption encrypts secret fields of auth files at rest. It is off by default.
+	AuthEncryption AuthEncryptionConfig `yaml:"auth-encryption,omitempty" json:"-"`
+
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 

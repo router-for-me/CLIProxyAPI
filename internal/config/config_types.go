@@ -448,6 +448,19 @@ type RoutingConfig struct {
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
 }
 
+// AuthEncryptionConfig encrypts the secret fields of auth files (tokens, keys,
+// passwords, cookies) with AES-256-GCM. Other fields stay plain and editable.
+// The key comes from CLIPROXY_AUTH_ENCRYPTION_KEY, then KeyFile (or
+// CLIPROXY_AUTH_ENCRYPTION_KEY_FILE), then the OS keyring, which creates a key
+// on first use. Plain files are still read, and their secrets are encrypted on startup.
+type AuthEncryptionConfig struct {
+	// Enabled turns encryption on. When false, nothing is decrypted: encrypted
+	// files are skipped until their accounts log in again.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// KeyFile is a file holding the base64 key, such as a Docker secret.
+	KeyFile string `yaml:"key-file,omitempty" json:"key-file,omitempty"`
+}
+
 // OAuthModelAlias defines a model ID alias for a specific channel.
 // It maps the upstream model name (Name) to the client-visible alias (Alias).
 // When Fork is true, the alias is added as an additional model in listings while

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -101,7 +102,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 						continue
 					}
 					fullPath := filepath.Join(resolvedAuthDir, name)
-					if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
+					if data, errReadFile := authfile.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
 						normalizedPath := w.normalizeAuthPath(fullPath)
 						newAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
@@ -171,7 +172,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
 	w.observeAuthFile(path)
-	data, errRead := os.ReadFile(path)
+	data, errRead := authfile.ReadFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
 		return
@@ -386,7 +387,7 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 		authFileCount++
 		log.Debugf("processing auth file %d: %s", authFileCount, name)
 		fullPath := filepath.Join(authDir, name)
-		if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
+		if data, errReadFile := authfile.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
 			successfulAuthCount++
 		}
 	}

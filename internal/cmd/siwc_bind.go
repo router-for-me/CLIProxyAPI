@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
@@ -62,7 +63,7 @@ func ResolveSIWCBindPath(cfg *config.Config, target string) (string, error) {
 	if errStat != nil || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("siwc-bind: credential target must be an existing regular file")
 	}
-	data, errRead := os.ReadFile(candidate)
+	data, errRead := authfile.ReadFile(candidate)
 	if errRead != nil {
 		return "", fmt.Errorf("siwc-bind: failed to read credential file %s: %w", candidate, errRead)
 	}
@@ -91,7 +92,7 @@ func validateSIWCBindCredential(metadata map[string]any) error {
 }
 
 func ensureSIWCDeviceIDFromFile(authFilePath string) (string, error) {
-	data, errRead := os.ReadFile(authFilePath)
+	data, errRead := authfile.ReadFile(authFilePath)
 	if errRead != nil {
 		return "", fmt.Errorf("failed to read credential file: %w", errRead)
 	}
@@ -113,7 +114,7 @@ func saveSIWCToCodexCredentialFile(authFilePath string, siwcData *codex.CodexSIW
 	}
 	misc.LogSavingCredentials(authFilePath)
 	return codex.WithFileLock(authFilePath, func() error {
-		existingBytes, errRead := os.ReadFile(authFilePath)
+		existingBytes, errRead := authfile.ReadFile(authFilePath)
 		if errRead != nil {
 			return fmt.Errorf("failed to read existing credential file: %w", errRead)
 		}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -166,7 +167,7 @@ func (w *Watcher) observeAuthFile(path string) {
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {
-	data, errRead := os.ReadFile(path)
+	data, errRead := authfile.ReadFile(path)
 	if errRead != nil {
 		return false, errRead
 	}

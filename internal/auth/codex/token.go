@@ -5,6 +5,7 @@ package codex
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
-	log "github.com/sirupsen/logrus"
 )
 
 var codexFileLocks sync.Map
@@ -56,40 +57,13 @@ func WithFileLock(authFilePath string, fn func() error) error {
 
 // WriteJSONFileAtomic writes data as JSON to authFilePath atomically via a temporary file in the same directory.
 func WriteJSONFileAtomic(authFilePath string, data map[string]any) error {
-	dir := filepath.Dir(authFilePath)
-	tmpFile, errTmp := os.CreateTemp(dir, filepath.Base(authFilePath)+".tmp.*")
-	if errTmp != nil {
-		return fmt.Errorf("failed to create temp credential file: %w", errTmp)
-	}
-	tmpPath := tmpFile.Name()
-	cleanupTmp := true
-	defer func() {
-		if cleanupTmp {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if errChmod := tmpFile.Chmod(0o600); errChmod != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to chmod temp credential file: %w", errChmod)
-	}
 	raw, errMarshal := json.Marshal(data)
 	if errMarshal != nil {
-		_ = tmpFile.Close()
 		return fmt.Errorf("failed to marshal token data: %w", errMarshal)
 	}
-	if _, errWrite := tmpFile.Write(raw); errWrite != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write token to temp file: %w", errWrite)
+	if errWrite := authfile.WriteFileAtomic(authFilePath, raw, 0o600); errWrite != nil {
+		return fmt.Errorf("failed to replace credential file: %w", errWrite)
 	}
-	if errClose := tmpFile.Close(); errClose != nil {
-		log.Errorf("codex token storage: close temp token file error: %v", errClose)
-		return fmt.Errorf("failed to close temp credential file: %w", errClose)
-	}
-	if errRename := os.Rename(tmpPath, authFilePath); errRename != nil {
-		return fmt.Errorf("failed to replace credential file: %w", errRename)
-	}
-	cleanupTmp = false
 	return nil
 }
 
@@ -274,7 +248,12 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 			return fmt.Errorf("failed to merge metadata: %w", errMerge)
 		}
 
-		existingBytes, errRead := os.ReadFile(authFilePath)
+		existingBytes, errRead := authfile.ReadFile(authFilePath)
+		if errors.Is(errRead, authfile.ErrUnreadable) {
+			// Encrypted fields that cannot be opened: replace the file, so
+			// logging in again recovers the account.
+			errRead = os.ErrNotExist
+		}
 		if errRead != nil && !os.IsNotExist(errRead) {
 			return fmt.Errorf("failed to read existing credentials: %w", errRead)
 		}

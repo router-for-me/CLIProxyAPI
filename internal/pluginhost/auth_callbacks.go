@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -180,7 +181,7 @@ func (h *Host) listAuthFilesFromDisk() ([]pluginapi.HostAuthFileEntry, error) {
 			fileEntry.Size = info.Size()
 			fileEntry.ModTime = info.ModTime()
 		}
-		if data, errRead := os.ReadFile(full); errRead == nil {
+		if data, errRead := authfile.ReadFile(full); errRead == nil {
 			var metadata map[string]any
 			if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal == nil {
 				if provider, ok := metadata["type"].(string); ok {
@@ -253,7 +254,7 @@ func (h *Host) authPhysicalJSONByIndex(authIndex string) (*coreauth.Auth, []byte
 	if path == "" {
 		return nil, nil, fmt.Errorf("auth file path not found for auth_index %s", authIndex)
 	}
-	data, errRead := os.ReadFile(path)
+	data, errRead := authfile.ReadFile(path)
 	if errRead != nil {
 		if os.IsNotExist(errRead) {
 			return nil, nil, fmt.Errorf("auth file not found for auth_index %s", authIndex)
@@ -304,7 +305,7 @@ func (h *Host) saveAuthFile(ctx context.Context, name string, data []byte) (stri
 	if errBuild != nil {
 		return "", errBuild
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	if errWrite := authfile.WriteFile(dst, data, 0o600); errWrite != nil {
 		return "", fmt.Errorf("failed to write auth file: %w", errWrite)
 	}
 	if errUpsert := h.upsertAuthRecordsForPath(ctx, dst, auths); errUpsert != nil {
@@ -319,7 +320,7 @@ func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []b
 	}
 	if data == nil {
 		var errRead error
-		data, errRead = os.ReadFile(path)
+		data, errRead = authfile.ReadFile(path)
 		if errRead != nil {
 			return nil, fmt.Errorf("failed to read auth file: %w", errRead)
 		}

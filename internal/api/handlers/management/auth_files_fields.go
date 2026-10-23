@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -211,7 +212,7 @@ func setSourceAuthFileDisabled(path string, disabled bool) error {
 	if path == "" {
 		return fmt.Errorf("source auth path is empty")
 	}
-	data, errRead := os.ReadFile(path)
+	data, errRead := authfile.ReadFile(path)
 	if errRead != nil {
 		return errRead
 	}
@@ -230,7 +231,7 @@ func setSourceAuthFileDisabled(path string, disabled bool) error {
 	if errMarshal != nil {
 		return fmt.Errorf("marshal auth file: %w", errMarshal)
 	}
-	if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+	if errWrite := authfile.WriteFile(path, raw, 0o600); errWrite != nil {
 		return errWrite
 	}
 	return nil
@@ -919,7 +920,7 @@ func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
 		}
 		if targetFile != "" {
 			fullPath := filepath.Join(h.cfg.AuthDir, targetFile)
-			if raw, errRead := os.ReadFile(fullPath); errRead == nil && len(raw) > 0 {
+			if raw, errRead := authfile.ReadFile(fullPath); errRead == nil && len(raw) > 0 {
 				_ = json.Unmarshal(raw, &existingMap)
 			}
 		}
@@ -982,7 +983,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	}
 	if h.postAuthPersistHook != nil {
 		persistedRecord := record
-		if data, errRead := os.ReadFile(savedPath); errRead == nil && len(data) > 0 {
+		if data, errRead := authfile.ReadFile(savedPath); errRead == nil && len(data) > 0 {
 			auths, errSynthesize := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
 				Config:           h.cfg,
 				AuthDir:          filepath.Dir(savedPath),
