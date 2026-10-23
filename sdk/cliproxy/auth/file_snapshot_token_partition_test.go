@@ -72,6 +72,12 @@ func TestResultFromPreviousAccountIsIgnoredAfterSameTokenSwitchInBothPartitions(
 			if authAccessToken(switched) != partitionSIWCToken || authOuterAccessToken(switched) != partitionOuterToken {
 				t.Fatalf("partitions: active=%q outer=%q", authAccessToken(switched), authOuterAccessToken(switched))
 			}
+			// A later re-read of the same file is a fresh auth that does not carry the account marker; the manager must keep it.
+			reread := bindTestSnapshot(t, authID, "codex", []byte(`{"type":"codex","account_id":"account-b"}`), map[string]string{})
+			reread.Metadata = partitionMetadata("account-b", true, "id-1")
+			if _, errUpdate := manager.Update(ctx, reread); errUpdate != nil {
+				t.Fatalf("re-read rejected: %v", errUpdate)
+			}
 
 			manager.MarkResult(ctx, partitionLate(authID, inflight, tc.token, &Error{Message: "failed", HTTPStatus: http.StatusTooManyRequests}))
 			manager.MarkResult(ctx, partitionLate(authID, inflight, tc.token, &Error{Message: "failed", HTTPStatus: http.StatusUnauthorized}))
