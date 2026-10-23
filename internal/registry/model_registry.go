@@ -1726,6 +1726,10 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 
 	switch handlerType {
 	case "openai":
+		contextLength := model.ContextLength
+		if contextLength <= 0 {
+			contextLength = model.InputTokenLimit
+		}
 		result := map[string]any{
 			"id":       model.ID,
 			"object":   "model",
@@ -1746,8 +1750,8 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Description != "" {
 			result["description"] = model.Description
 		}
-		if model.ContextLength > 0 {
-			result["context_length"] = model.ContextLength
+		if contextLength > 0 {
+			result["context_length"] = contextLength
 		}
 		if model.MaxContextLength > 0 {
 			result["max_context_length"] = model.MaxContextLength
@@ -1777,6 +1781,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		maxInput := model.ContextLength
 		if maxInput <= 0 {
+			maxInput = model.InputTokenLimit
+		}
+		if maxInput <= 0 {
 			maxInput = DefaultClaudeMaxInputTokens
 		}
 		maxOutput := model.MaxCompletionTokens
@@ -1788,6 +1795,10 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		return result
 
 	case "gemini":
+		resolvedInputTokenLimit := model.InputTokenLimit
+		if resolvedInputTokenLimit <= 0 {
+			resolvedInputTokenLimit = model.ContextLength
+		}
 		result := map[string]any{}
 		if model.Name != "" {
 			result["name"] = model.Name
@@ -1803,8 +1814,8 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Description != "" {
 			result["description"] = model.Description
 		}
-		if model.InputTokenLimit > 0 {
-			result["inputTokenLimit"] = model.InputTokenLimit
+		if resolvedInputTokenLimit > 0 {
+			result["inputTokenLimit"] = resolvedInputTokenLimit
 		}
 		if model.OutputTokenLimit > 0 {
 			result["outputTokenLimit"] = model.OutputTokenLimit
