@@ -189,6 +189,10 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 Those projects are based on CLIProxyAPI:
 
+### [Juice Bar](https://github.com/mindtheflo/juice-bar)
+
+An elegant, minimalist native macOS menu-bar companion for CLIProxyAPI and CPAMC, showing pooled Claude and OpenAI Codex subscription capacity, account renewal times, and confidence-gated usage forecasts; installs from source with a single coding-agent prompt.
+
 ### [vibeproxy](https://github.com/automazeio/vibeproxy)
 
 Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed

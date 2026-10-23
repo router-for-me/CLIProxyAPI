@@ -183,6 +183,10 @@ Ant Design を採用した CLIProxyAPI v8+ 向けのモダンな管理コンソ�
 
 CLIProxyAPIをベースにした以下のプロジェクトがあります：
 
+### [Juice Bar](https://github.com/mindtheflo/juice-bar)
+
+CLIProxyAPI と CPAMC 向けの、洗練されたミニマルな macOS ネイティブメニューバーアプリ。Claude と OpenAI Codex の合計残り枠、アカウントのリセット時刻、十分なデータがある場合のみ表示される使用量予測をひと目で確認でき、コーディングエージェントへの1行のプロンプトでソースからインストールできます。
+
 ### [vibeproxy](https://github.com/automazeio/vibeproxy)
 
 macOSネイティブのメニューバーアプリで、Claude CodeとChatGPTのサブスクリプションをAIコーディングツールで使用可能 - APIキー不要
