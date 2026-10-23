@@ -952,6 +952,11 @@ func findClaudeToolSchema(originalRequestRawJSON []byte, toolName string) (gjson
 // "reason" property injected for Gemini/Antigravity schema validation, so any returned
 // arguments must be normalized to "{}" before they reach the Claude client. Schemas that
 // allow dynamic additional or pattern properties are never parameterless.
+//
+// This stays wider than claudeInfoIsClosedParameterless on purpose. Its consumers use it
+// as the "empty input already emitted" guard for streaming tool-call deltas, and a tool
+// declared without properties still cleans to "{}" on every chunk whether or not it
+// closes the object, so the guard must cover the implicitly open case too.
 func ClaudeToolIsParameterless(toolName string, originalRequestRawJSON []byte) bool {
 	schema, root, found := findClaudeToolSchema(originalRequestRawJSON, toolName)
 	if !found {
@@ -1101,7 +1106,7 @@ func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.R
 	if merged.complex || !merged.declaresObject {
 		return argsJSON
 	}
-	isEmptySchema := len(merged.required) == 0 && (!merged.hasProperties || len(merged.properties) == 0)
+	isClosedParameterless := claudeInfoIsClosedParameterless(merged)
 	allSchemasDeclareObject := true
 	for _, schema := range schemas {
 		if !analyzeClaudeObjectSchema(schema, root).declaresObject {
@@ -1109,7 +1114,7 @@ func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.R
 			break
 		}
 	}
-	if isEmptySchema && allSchemasDeclareObject && !claudeInfoAnyBranchAllowsDynamic(merged) && !claudeOriginalsAnyBranchAllowsDynamic(schemas, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(schemas, root, argsResult) {
+	if isClosedParameterless && allSchemasDeclareObject && !claudeOriginalsAnyBranchAllowsDynamic(schemas, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(schemas, root, argsResult) {
 		if len(argsResult.Map()) == 0 {
 			return argsJSON
 		}
@@ -1307,6 +1312,21 @@ func claudeInfoAnyBranchAllowsDynamic(info claudeObjectSchemaInfo) bool {
 		}
 	}
 	return info.allowsDynamic && !info.forbidsDynamic
+}
+
+// claudeInfoIsClosedParameterless reports whether the analyzed schema declares an
+// object that cannot carry any argument: no required keys, no declared properties, and
+// an explicit "additionalProperties": false. JSON Schema leaves an object open when
+// additionalProperties is omitted, so an empty "properties" map on its own does not
+// forbid arguments and must not trigger destructive normalization of a tool call.
+func claudeInfoIsClosedParameterless(info claudeObjectSchemaInfo) bool {
+	if !info.declaresObject || !info.forbidsDynamic {
+		return false
+	}
+	if claudeInfoAnyBranchAllowsDynamic(info) {
+		return false
+	}
+	return len(info.required) == 0 && (!info.hasProperties || len(info.properties) == 0)
 }
 
 func claudeBranchMayAccept(info claudeObjectSchemaInfo, key string, current gjson.Result) bool {
@@ -1679,7 +1699,7 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 	if path != "" {
 		currentForNormalize = gjson.Get(cleaned, path)
 	}
-	if !originalInfo.complex && allCandidatesDeclareObject && !claudeInfoAnyBranchAllowsDynamic(originalInfo) && !claudeOriginalsAnyBranchAllowsDynamic(originals, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(originals, root, currentForNormalize) && originalInfo.declaresObject && len(originalInfo.required) == 0 && (!originalInfo.hasProperties || len(originalInfo.properties) == 0) {
+	if !originalInfo.complex && allCandidatesDeclareObject && claudeInfoIsClosedParameterless(originalInfo) && !claudeOriginalsAnyBranchAllowsDynamic(originals, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(originals, root, currentForNormalize) {
 		if topLevel {
 			return "{}"
 		}
@@ -1750,8 +1770,8 @@ func cleanClaudeTranslatedArray(argsJSON string, translatedArraySchemas []gjson.
 // injected for that object (present in the translated schema with the placeholder
 // description or marked required, while absent from the original declaration). When no
 // translated schema is available it falls back to the original-schema inference used by
-// CleanClaudeToolArguments. Parameterless tools are still normalized to "{}" because a
-// strict Claude client rejects any argument for them.
+// CleanClaudeToolArguments. Explicitly closed parameterless tools are still normalized to
+// "{}" because a strict Claude client rejects any argument for them.
 func CleanClaudeToolArgumentsWithTranslated(rawArgs string, toolName string, originalRequestRawJSON []byte, translatedRequestRawJSON []byte) string {
 	if translatedSchemas := findTranslatedClaudeToolSchemas(translatedRequestRawJSON, toolName, originalRequestRawJSON); len(translatedSchemas) > 0 {
 		rawArgs = strings.TrimSpace(rawArgs)
@@ -1775,8 +1795,10 @@ func CleanClaudeToolArgumentsWithTranslated(rawArgs string, toolName string, ori
 
 // CleanClaudeToolArguments strips placeholder arguments ("reason" or "_") injected during
 // schema normalization for empty object schemas when returning responses to Claude clients.
-// If the tool was declared with empty or missing properties, the arguments are normalized
-// to "{}". Placeholder fields are also stripped recursively from declared nested object
+// If the tool was declared with a missing schema, or with an explicitly closed object that
+// declares no property, the arguments are normalized to "{}". An object that omits
+// "additionalProperties" stays open under JSON Schema, so its arguments are kept.
+// Placeholder fields are also stripped recursively from declared nested object
 // properties when they were not declared there. Free-form nested schemas that do not declare
 // an object type or properties are preserved because no placeholder is injected for them.
 // Tools that legitimately declared those fields or use union schemas that cannot be resolved
@@ -1806,7 +1828,7 @@ func CleanClaudeToolArguments(rawArgs string, toolName string, originalRequestRa
 	if info.complex || !info.declaresObject {
 		return rawArgs
 	}
-	if len(info.required) == 0 && (!info.hasProperties || len(info.properties) == 0) && !claudeInfoAnyBranchAllowsDynamic(info) {
+	if claudeInfoIsClosedParameterless(info) {
 		return "{}"
 	}
 	return cleanClaudeToolObject(rawArgs, []gjson.Result{schema}, schema, "", true)

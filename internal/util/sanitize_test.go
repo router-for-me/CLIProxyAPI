@@ -1,6 +1,7 @@
 package util
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -640,6 +641,32 @@ func TestCleanClaudeToolArguments(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := CleanClaudeToolArgumentsWithTranslated(tt.rawArgs, tt.toolName, tt.origReq, tt.transferred); got != tt.want {
 				t.Errorf("CleanClaudeToolArguments(%q, %q) = %q, want %q", tt.rawArgs, tt.toolName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeToolArgumentsImplicitOpenObject(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		want   string
+	}{
+		{"additional properties omitted", `{"type":"object","properties":{}}`, `{"user":"v"}`},
+		{"additional properties true", `{"type":"object","properties":{},"additionalProperties":true}`, `{"user":"v"}`},
+		{"additional properties false", `{"type":"object","properties":{},"additionalProperties":false}`, "{}"},
+	}
+
+	const rawArgs = `{"user":"v"}`
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := []byte(fmt.Sprintf(`{"tools":[{"name":"echo","input_schema":%s}]}`, tt.schema))
+			translated := []byte(fmt.Sprintf(`{"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":%s}]}]}`, CleanJSONSchemaForGeminiJSONSchema(tt.schema)))
+			if got := CleanClaudeToolArguments(rawArgs, "echo", original); got != tt.want {
+				t.Errorf("CleanClaudeToolArguments(%s) = %q, want %q", tt.schema, got, tt.want)
+			}
+			if got := CleanClaudeToolArgumentsWithTranslated(rawArgs, "echo", original, translated); got != tt.want {
+				t.Errorf("CleanClaudeToolArgumentsWithTranslated(%s) = %q, want %q", tt.schema, got, tt.want)
 			}
 		})
 	}
