@@ -756,8 +756,8 @@ func mergeStringSlices(existing, promoted []string) []string {
 }
 
 // InlineLocalRefs resolves JSON Pointer references against the original schema. Every reference
-// receives its own copy as long as the expansion budget lasts, sibling keywords override the
-// referenced definition, and cycles terminate as a typed hint instead of recursing forever.
+// receives its own copy as long as the expansion budget lasts, sibling keywords apply on top of
+// the referenced definition, and cycles terminate as a typed hint instead of recursing forever.
 func InlineLocalRefs(jsonStr string) string {
 	return inlineLocalRefs(jsonStr)
 }
@@ -772,8 +772,8 @@ const maxInlinedSchemaBytes = 256 * 1024
 const maxFallbackDescriptionBytes = 512
 
 // inlineLocalRefs resolves JSON Pointer references against the original schema. Every reference
-// receives its own copy as long as the expansion budget lasts, sibling keywords override the
-// referenced definition, and cycles terminate as a typed hint instead of recursing forever.
+// receives its own copy as long as the expansion budget lasts, sibling keywords apply on top of
+// the referenced definition, and cycles terminate as a typed hint instead of recursing forever.
 func inlineLocalRefs(jsonStr string) string {
 	return inlineLocalRefsRooted(jsonStr, nil, false)
 }
@@ -889,7 +889,7 @@ func resolveSchemaRoot(root any, state *refResolveState, forClean bool) any {
 	}
 
 	// A root-level reference expands into the whole referenced schema; its siblings were resolved
-	// above and must override the target, mirroring resolveLocalRefs.
+	// above and are applied over the target, mirroring resolveLocalRefs.
 	if ref, hasRef := rootMap["$ref"].(string); hasRef && strings.HasPrefix(ref, "#/") {
 		if target, okTarget := resolveJSONPointer(rootMap, ref); okTarget {
 			if size := targetExpansionSize(target, forClean); size <= state.budget {
@@ -902,7 +902,7 @@ func resolveSchemaRoot(root any, state *refResolveState, forClean bool) any {
 					}
 					for _, key := range sortedKeys(out) {
 						if key != "$ref" {
-							merged[key] = out[key]
+							setRefSiblingValue(merged, key, out[key])
 						}
 					}
 					out = merged
@@ -1064,6 +1064,89 @@ func isLiteralValueKeyword(key string) bool {
 	return ok
 }
 
+// refSiblingBoundKeywords maps the validation keywords whose conjunction is a single numeric
+// value to whether the stricter of two values is the larger one.
+var refSiblingBoundKeywords = map[string]bool{
+	"minLength":        true,
+	"minItems":         true,
+	"minProperties":    true,
+	"minContains":      true,
+	"minimum":          true,
+	"exclusiveMinimum": true,
+	"maxLength":        false,
+	"maxItems":         false,
+	"maxProperties":    false,
+	"maxContains":      false,
+	"maximum":          false,
+	"exclusiveMaximum": false,
+}
+
+// setRefSiblingValue stores a keyword declared next to a "$ref" over the inlined reference
+// target. Draft 2019-09 and later apply such keywords in addition to the referenced schema, so
+// where both declare the same keyword the result must satisfy both: a plain overwrite would turn
+// a target's stricter constraint into the sibling's weaker one. Keywords whose conjunction cannot
+// be expressed as a single value (pattern, multipleOf, type, enum) keep the sibling, which stays
+// the historical behaviour.
+func setRefSiblingValue(out map[string]any, key string, siblingValue any) {
+	targetValue, exists := out[key]
+	if !exists {
+		out[key] = siblingValue
+		return
+	}
+	if keepLarger, isBound := refSiblingBoundKeywords[key]; isBound {
+		targetNumber, okTarget := jsonNumberValue(targetValue)
+		siblingNumber, okSibling := jsonNumberValue(siblingValue)
+		if okTarget && okSibling && targetNumber != siblingNumber && (targetNumber > siblingNumber) == keepLarger {
+			return // the target is the stricter bound; keep it
+		}
+	}
+	switch key {
+	case "uniqueItems":
+		if targetFlag, okTarget := targetValue.(bool); okTarget && targetFlag {
+			return // uniqueness already demanded by the target cannot be switched off
+		}
+	case "required":
+		// The union of the two lists is their exact conjunction: a property required by either
+		// schema is required by both together. mergeAllOf already applies that rule.
+		if targetNames, okTarget := refSiblingRequiredNames(targetValue); okTarget {
+			if siblingNames, okSibling := refSiblingRequiredNames(siblingValue); okSibling {
+				if merged := mergeStringSlices(targetNames, siblingNames); len(merged) > 0 {
+					out[key] = merged
+					return
+				}
+			}
+		}
+	}
+	out[key] = siblingValue
+}
+
+// jsonNumberValue reads a decoded JSON number, which arrives as json.Number because every
+// inlining pass decodes with UseNumber.
+func jsonNumberValue(value any) (float64, bool) {
+	switch number := value.(type) {
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil
+	case float64:
+		return number, true
+	}
+	return 0, false
+}
+
+// refSiblingRequiredNames reads a "required" list as plain property names. It reports false when
+// the list holds anything else, so a malformed list keeps the historical overwrite rather than
+// being rewritten into something its author did not declare.
+func refSiblingRequiredNames(value any) ([]string, bool) {
+	names := extractStringArray(value)
+	switch list := value.(type) {
+	case []any:
+		return names, len(names) == len(list)
+	case []string:
+		return names, true
+	}
+	return nil, false
+}
+
 func resolveLocalRefs(root, value any, active map[string]bool, state *refResolveState, inNameMap, forClean bool) any {
 	switch node := value.(type) {
 	case []any:
@@ -1107,7 +1190,7 @@ func resolveLocalRefs(root, value any, active map[string]bool, state *refResolve
 							if forClean && (key == "$defs" || key == "definitions") {
 								continue
 							}
-							out[key] = resolveSchemaEntry(root, key, node[key], active, state, forClean)
+							setRefSiblingValue(out, key, resolveSchemaEntry(root, key, node[key], active, state, forClean))
 						}
 						return out
 					}
