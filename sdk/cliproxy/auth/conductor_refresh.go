@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
@@ -538,7 +539,7 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 	}
 	// The executors write base_url themselves when it is missing, so only two known and different endpoints are a switch.
 	existingEndpoint, incomingEndpoint := authEndpoint(existing), authEndpoint(incoming)
-	if existingEndpoint != "" && incomingEndpoint != "" && !strings.EqualFold(existingEndpoint, incomingEndpoint) {
+	if existingEndpoint != "" && incomingEndpoint != "" && existingEndpoint != incomingEndpoint {
 		return true
 	}
 	// Custom headers override the built-in ones, Authorization and X-Api-Key included.
@@ -547,7 +548,7 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 	}
 	// xAI sends OAuth chat to the CLI chat proxy or to the official API depending on using_api.
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "xai") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "xai") &&
-		authSetting(existing, "using_api") != authSetting(incoming, "using_api") {
+		xaiUsingAPIIdentity(existing) != xaiUsingAPIIdentity(incoming) {
 		return true
 	}
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
@@ -608,6 +609,27 @@ func vertexServiceAccountIdentity(auth *Auth) (any, bool) {
 	return sa, true
 }
 
+// xaiUsingAPIIdentity is the request mode the xAI executor resolves (xaiUsingAPI): the using_api attribute, then the metadata
+// (bool or string), then the auth_kind default (OAuth uses the CLI chat proxy, anything else the official API).
+func xaiUsingAPIIdentity(auth *Auth) bool {
+	if parsed, err := strconv.ParseBool(strings.TrimSpace(auth.Attributes["using_api"])); err == nil {
+		return parsed
+	}
+	switch value := auth.Metadata["using_api"].(type) {
+	case bool:
+		return value
+	case string:
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+			return parsed
+		}
+	}
+	kind := strings.TrimSpace(auth.Attributes["auth_kind"])
+	if kind == "" {
+		kind = authMetadataString(auth, "auth_kind")
+	}
+	return !strings.EqualFold(kind, "oauth")
+}
+
 // authSetting is a request setting the file synthesizer copies to an attribute or the executor reads from metadata.
 func authSetting(auth *Auth, key string) string {
 	if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
@@ -639,6 +661,11 @@ func authEndpoint(auth *Auth) string {
 	}
 	for _, value := range []string{auth.Attributes["base_url"], authMetadataString(auth, "base_url"), authMetadataString(auth, "api_base_url")} {
 		if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
+			// The scheme and the host are case-insensitive, the path is not.
+			if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+				parsed.Scheme, parsed.Host = strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Host)
+				return parsed.String()
+			}
 			return value
 		}
 	}

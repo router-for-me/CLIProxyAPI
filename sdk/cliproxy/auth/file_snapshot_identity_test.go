@@ -416,8 +416,11 @@ func TestCredentialsChangedBaseURL(t *testing.T) {
 	if !CredentialsChanged(xai("https://a.example/v1"), xai("https://b.example/v1")) {
 		t.Fatal("another upstream base URL did not count as a change")
 	}
-	if CredentialsChanged(xai("https://a.example/v1"), xai(" https://A.example/v1/ ")) {
-		t.Fatal("a padded, differently cased or slash-terminated base URL counted as a change")
+	if CredentialsChanged(xai("https://a.example/v1"), xai(" HTTPS://A.Example/v1/ ")) {
+		t.Fatal("a padded, slash-terminated base URL or one with another scheme or host case counted as a change")
+	}
+	if !CredentialsChanged(xai("https://gateway.example/TeamA"), xai("https://gateway.example/teama")) {
+		t.Fatal("a base URL that differs in path case counted as the same endpoint")
 	}
 	if CredentialsChanged(xai(""), xai("https://a.example/v1")) || CredentialsChanged(xai("https://a.example/v1"), xai("")) {
 		t.Fatal("a base URL the executor wrote, or a missing one, counted as a change")
@@ -696,8 +699,20 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	if !CredentialsChanged(xai("", false), xai("", true)) || !CredentialsChanged(xai("false", nil), xai("true", nil)) {
 		t.Fatal("a toggled xAI using_api did not count as a credential change")
 	}
-	if CredentialsChanged(xai("true", nil), xai("", true)) || CredentialsChanged(xai("", "true"), xai("", true)) {
+	if CredentialsChanged(xai("true", nil), xai("", true)) || CredentialsChanged(xai("", "true"), xai("", true)) || CredentialsChanged(xai("", " false "), xai("", false)) {
 		t.Fatal("the same xAI using_api written as attribute, bool or string counted as a credential change")
+	}
+	// The mode defaults from auth_kind: OAuth uses the CLI chat proxy, anything else the official API.
+	kind := func(kind string, using any) *Auth {
+		a := xai("", using)
+		a.Attributes["auth_kind"] = kind
+		return a
+	}
+	if CredentialsChanged(kind("oauth", nil), kind("oauth", false)) || CredentialsChanged(kind("api_key", nil), kind("api_key", true)) {
+		t.Fatal("an omitted using_api against the explicit default of its auth_kind counted as a credential change")
+	}
+	if !CredentialsChanged(kind("oauth", nil), kind("oauth", true)) || !CredentialsChanged(kind("api_key", nil), kind("api_key", false)) {
+		t.Fatal("a using_api that differs from the default of its auth_kind did not count as a credential change")
 	}
 	vertex := func(openapi, location string) *Auth {
 		a := &Auth{Provider: "vertex", Attributes: map[string]string{}, Metadata: map[string]any{"access_token": "same-token", "project_id": "project-a"}}
