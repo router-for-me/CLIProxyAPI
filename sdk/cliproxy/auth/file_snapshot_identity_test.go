@@ -403,6 +403,39 @@ func TestCredentialsChangedDevinSessionToken(t *testing.T) {
 	}
 }
 
+// The upstream base URL is part of where a credential is sent: another endpoint under the same tokens is another target. The
+// executors write base_url themselves when it is missing, so only two known and different values count.
+func TestCredentialsChangedBaseURL(t *testing.T) {
+	xai := func(baseURL string) *Auth {
+		metadata := map[string]any{"access_token": "same-access-token"}
+		if baseURL != "" {
+			metadata["base_url"] = baseURL
+		}
+		return &Auth{Provider: "xai", Metadata: metadata}
+	}
+	if !CredentialsChanged(xai("https://a.example/v1"), xai("https://b.example/v1")) || !accountIdentityChanged(xai("https://a.example/v1"), xai("https://b.example/v1")) {
+		t.Fatal("another upstream base URL did not count as a change and an account switch")
+	}
+	if CredentialsChanged(xai("https://a.example/v1"), xai(" https://A.example/v1/ ")) {
+		t.Fatal("a padded, differently cased or slash-terminated base URL counted as a change")
+	}
+	if CredentialsChanged(xai(""), xai("https://a.example/v1")) || CredentialsChanged(xai("https://a.example/v1"), xai("")) {
+		t.Fatal("a base URL the executor wrote, or a missing one, counted as a change")
+	}
+	kimi := func(baseURL string) *Auth {
+		return &Auth{Provider: "kimi", Attributes: map[string]string{"base_url": baseURL}, Metadata: map[string]any{"access_token": "same-access-token"}}
+	}
+	if !CredentialsChanged(kimi("https://a.example/v1"), kimi("https://b.example/v1")) {
+		t.Fatal("another base URL kept in attributes did not count as a change")
+	}
+	meta := func(baseURL string) *Auth {
+		return &Auth{Provider: "meta", Metadata: map[string]any{"api_key": "same-key", "api_base_url": baseURL}}
+	}
+	if !CredentialsChanged(meta("https://a.example"), meta("https://b.example")) {
+		t.Fatal("another Meta api_base_url did not count as a change")
+	}
+}
+
 // An Antigravity request carries the file's project_id, so another project under the same tokens is another account.
 // The executor stores the project it discovers; gaining or losing the field is not a replacement.
 func TestCredentialsChangedAntigravityProject(t *testing.T) {
@@ -421,13 +454,15 @@ func TestCredentialsChangedAntigravityProject(t *testing.T) {
 	}
 }
 
-// The host reads prefix, proxy_url, disabled, priority and weight from the auth file itself and keeps them off Auth.Metadata, so
-// an edit of one of them changes the plugin's raw storage JSON without replacing the credential.
+// The host reads prefix, proxy_url, disabled, priority, weight, the model routing keys and the fingerprint profile from the auth
+// file itself and keeps them off Auth.Metadata, so an edit of one of them (under its legacy spelling too) changes the plugin's raw
+// storage JSON without replacing the credential.
 func TestCredentialsChangedStorageIgnoresHostOwnedFileKeys(t *testing.T) {
 	plugin := func(raw string) *Auth {
 		return &Auth{Provider: "plugin-provider", Storage: &rawJSONTestStorage{raw: []byte(raw)}}
 	}
-	for _, key := range []string{"prefix", "proxy_url", "disabled", "priority", "weight"} {
+	for _, key := range []string{"prefix", "proxy_url", "disabled", "priority", "weight", "excluded_models", "model_aliases", "models",
+		"fingerprint_profile", "excluded-models", "model-aliases", "fingerprint-profile", "proxy-url"} {
 		before := plugin(`{"token":"same","` + key + `":"old"}`)
 		after := plugin(`{"token":"same","` + key + `":"new"}`)
 		if CredentialsChanged(before, after) {

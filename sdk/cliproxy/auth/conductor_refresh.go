@@ -535,6 +535,11 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 	if !strings.EqualFold(strings.TrimSpace(existing.Provider), strings.TrimSpace(incoming.Provider)) {
 		return true
 	}
+	// The executors write base_url themselves when it is missing, so only two known and different endpoints are a switch.
+	existingEndpoint, incomingEndpoint := authEndpoint(existing), authEndpoint(incoming)
+	if existingEndpoint != "" && incomingEndpoint != "" && !strings.EqualFold(existingEndpoint, incomingEndpoint) {
+		return true
+	}
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
 		existingAccountID, existingHasAccountID := existing.Metadata["account_id"]
 		incomingAccountID, incomingHasAccountID := incoming.Metadata["account_id"]
@@ -588,6 +593,20 @@ func vertexServiceAccountIdentity(auth *Auth) (any, bool) {
 	return sa, true
 }
 
+// authEndpoint is the upstream base URL the credential is sent to, as the executors resolve it: the base_url attribute, then the
+// base_url metadata, then Meta's api_base_url.
+func authEndpoint(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	for _, value := range []string{auth.Attributes["base_url"], authMetadataString(auth, "base_url"), authMetadataString(auth, "api_base_url")} {
+		if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // vertexLocationIdentity is the location a Vertex request is addressed to; the executor defaults it to us-central1.
 func vertexLocationIdentity(auth *Auth) string {
 	if auth != nil && auth.Metadata != nil {
@@ -614,7 +633,7 @@ func vertexProjectIdentity(auth *Auth) (string, bool) {
 
 // authStorageIdentity returns the credential part of storage that exposes RawJSON
 // (plugin storage). Its RawJSON merges Auth.Metadata, so metadata keys are dropped, and so are
-// the keys the host reads from the auth file itself: they are routing or compared elsewhere.
+// the keys the host reads from the auth file itself (legacy spellings are canonicalised first): they are routing or compared elsewhere.
 // Storage without RawJSON is not inspectable.
 func authStorageIdentity(auth *Auth) ([]byte, bool) {
 	if auth == nil || auth.Storage == nil {
@@ -636,7 +655,8 @@ func authStorageIdentity(auth *Auth) ([]byte, bool) {
 		for key := range auth.Metadata {
 			delete(fields, key)
 		}
-		for _, key := range []string{"type", "prefix", "proxy_url", "disabled", "priority", "weight"} {
+		NormalizeCredentialMetadata(fields)
+		for _, key := range []string{"type", "prefix", "proxy_url", "disabled", "priority", "weight", "models", "model_aliases", "excluded_models", "fingerprint_profile"} {
 			delete(fields, key)
 		}
 	}
