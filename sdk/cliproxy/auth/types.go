@@ -873,12 +873,30 @@ func headerValueFromHTTPHeader(headers http.Header, name string) string {
 	return ""
 }
 
+type codexClientRequestKey struct{}
+
+// withCodexClientRequestSnapshot records whether the request is a Codex client in ctx.
+// Call it on the request goroutine before ctx is handed to a background goroutine:
+// gin recycles its Context after the handler returns, so later reads race with reuse.
+func withCodexClientRequestSnapshot(ctx context.Context, clientHeaders ...http.Header) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, codexClientRequestKey{}, IsCodexClientRequest(ctx, clientHeaders...))
+}
+
 // IsCodexClientRequest reports whether the request originates from a Codex client.
 func IsCodexClientRequest(ctx context.Context, clientHeaders ...http.Header) bool {
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-			if IsCodexClientUserAgent(headerValueFromHTTPHeader(ginCtx.Request.Header, "User-Agent")) {
-				return true
+		snapshot, snapshotted := ctx.Value(codexClientRequestKey{}).(bool)
+		if snapshot {
+			return true
+		}
+		if !snapshotted {
+			if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+				if IsCodexClientUserAgent(headerValueFromHTTPHeader(ginCtx.Request.Header, "User-Agent")) {
+					return true
+				}
 			}
 		}
 	}
