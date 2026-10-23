@@ -246,14 +246,23 @@ func registeredXAIImagesModel(model string) (string, bool) {
 	return "", false
 }
 
+func isXAIVendorAlias(prefix string) bool {
+	switch strings.ToLower(strings.TrimSpace(prefix)) {
+	case "xai", "x-ai", "grok":
+		return true
+	default:
+		return false
+	}
+}
+
 func isXAIImagesModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	if !isXAIImagesBaseModel(baseModel) {
 		return false
 	}
 
-	trimmedPrefix := strings.ToLower(strings.TrimSpace(prefix))
-	if trimmedPrefix == "" || trimmedPrefix == "xai" || trimmedPrefix == "x-ai" || trimmedPrefix == "grok" {
+	trimmedPrefix := strings.TrimSpace(prefix)
+	if trimmedPrefix == "" || isXAIVendorAlias(trimmedPrefix) {
 		return true
 	}
 	if _, ok := registeredXAIImagesModel(prefix + "/" + canonicalXAIImagesModel(model)); ok {
@@ -334,7 +343,7 @@ func (h *OpenAIAPIHandler) routingXAIImagesModel(model string) string {
 	if resolved, ok := registeredXAIImagesModel(model); ok {
 		return resolved
 	}
-	if h != nil {
+	if h != nil && !isXAIVendorAlias(prefix) {
 		if cfg := h.CurrentConfig(); cfg != nil && cfg.ForceModelPrefix {
 			return prefixedModel
 		}

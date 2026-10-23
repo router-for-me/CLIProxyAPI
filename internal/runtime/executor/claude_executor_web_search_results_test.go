@@ -74,6 +74,7 @@ func claudeWebSearchUpstream(t *testing.T, bodies *[][]byte, mu *sync.Mutex) htt
 type claudeWebSearchExecutorRun struct {
 	sessionID string
 	input     string
+	auth      *cliproxyauth.Auth
 }
 
 func runClaudeWebSearchScenario(t *testing.T, cfg *config.Config, stream bool, runs []claudeWebSearchExecutorRun) [][]byte {
@@ -88,12 +89,26 @@ func runClaudeWebSearchScenario(t *testing.T, cfg *config.Config, stream bool, r
 	defer server.Close()
 
 	executor := NewClaudeExecutor(cfg)
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-web-search", "base_url": server.URL}}
+	defaultAuth := &cliproxyauth.Auth{ID: "claude-cred-default", Attributes: map[string]string{"api_key": "key-web-search", "base_url": server.URL}}
 	streamJSON := "false"
 	if stream {
 		streamJSON = "true"
 	}
 	for _, run := range runs {
+		auth := defaultAuth
+		if run.auth != nil {
+			cloned := run.auth.Clone()
+			if cloned.Attributes == nil {
+				cloned.Attributes = make(map[string]string)
+			}
+			if cloned.Attributes["base_url"] == "" {
+				cloned.Attributes["base_url"] = server.URL
+			}
+			if cloned.Attributes["api_key"] == "" {
+				cloned.Attributes["api_key"] = "key-web-search"
+			}
+			auth = cloned
+		}
 		payload := []byte(`{"model":"claude-opus-5-5","stream":` + streamJSON + `,"input":[` + run.input + `]}`)
 		req := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}
 		opts := cliproxyexecutor.Options{
@@ -302,6 +317,50 @@ func TestClaudeExecutor_CountTokensRestoresWebSearchResultsWhenEnabled(t *testin
 	disabledTokens := gjson.GetBytes(disabledCountResp.Payload, "input_tokens").Int()
 	if enabledTokens <= disabledTokens {
 		t.Fatalf("enabled input_tokens (%d) <= disabled input_tokens (%d); want restored search results counted", enabledTokens, disabledTokens)
+	}
+	otherAuth := &cliproxyauth.Auth{ID: "other-cred", Attributes: map[string]string{"api_key": "key-other", "base_url": server.URL}}
+	otherCredCountResp, errOtherCredCount := enabledExec.CountTokens(context.Background(), otherAuth, historyReq, historyOpts)
+	if errOtherCredCount != nil {
+		t.Fatalf("other credential CountTokens() error = %v", errOtherCredCount)
+	}
+	otherCredTokens := gjson.GetBytes(otherCredCountResp.Payload, "input_tokens").Int()
+	if otherCredTokens != disabledTokens {
+		t.Fatalf("other credential input_tokens = %d, want %d (unrestored empty search results)", otherCredTokens, disabledTokens)
+	}
+}
+
+func TestClaudeExecutor_WebSearchResultCacheScopesByCredential(t *testing.T) {
+	cfg := enabledClaudeWebSearchCacheConfig()
+	credA := &cliproxyauth.Auth{ID: "claude-cred-a"}
+	credB := &cliproxyauth.Auth{ID: "claude-cred-b"}
+	keyA := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-a"}}
+	keyB := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-b"}}
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "non-stream", true: "stream"}[stream], func(t *testing.T) {
+			bodies := runClaudeWebSearchScenario(t, cfg, stream, []claudeWebSearchExecutorRun{
+				{sessionID: "session-ws", auth: credA, input: claudeWebSearchExecutorUser},
+				{sessionID: "session-ws", auth: credB, input: claudeWebSearchExecutorHistory},
+				{sessionID: "session-ws", auth: credA, input: claudeWebSearchExecutorHistory},
+				{sessionID: "session-key", auth: keyA, input: claudeWebSearchExecutorUser},
+				{sessionID: "session-key", auth: keyB, input: claudeWebSearchExecutorHistory},
+				{sessionID: "session-key", auth: keyA, input: claudeWebSearchExecutorHistory},
+			})
+			if len(bodies) != 6 {
+				t.Fatalf("upstream requests = %d, want 6", len(bodies))
+			}
+			if got := claudeWebSearchResultContent(t, bodies[1]); got != "[]" {
+				t.Fatalf("different credential ID in same session: web_search_tool_result content = %s, want []", got)
+			}
+			if got := claudeWebSearchResultContent(t, bodies[2]); got != claudeWebSearchExecutorResults {
+				t.Fatalf("original credential ID in same session: web_search_tool_result content = %s, want original results", got)
+			}
+			if got := claudeWebSearchResultContent(t, bodies[4]); got != "[]" {
+				t.Fatalf("different API key in same session: web_search_tool_result content = %s, want []", got)
+			}
+			if got := claudeWebSearchResultContent(t, bodies[5]); got != claudeWebSearchExecutorResults {
+				t.Fatalf("original API key in same session: web_search_tool_result content = %s, want original results", got)
+			}
+		})
 	}
 }
 

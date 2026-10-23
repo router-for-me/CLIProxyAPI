@@ -107,6 +107,7 @@ retain the corresponding business operation's fields.
 | `/oauth/import?provider=vertex` | POST | Import a Vertex service account using a multipart `file` upload. |
 | `/oauth/auth-url?provider=<provider>` | GET | Start built-in or plugin OAuth. |
 | `/oauth/siwc/bind` | POST | Start SIWC binding to an existing file-backed Codex OAuth credential. |
+| `/oauth/siwc/status` | GET | Read local SIWC credential status (`off`, `valid`, or `invalid`). |
 | `/oauth/status?state=<state>` | GET | Get login status. |
 | `/oauth/session?state=<state>` | DELETE | Cancel a login session. |
 | `/oauth/callback` | GET, POST | Submit an OAuth callback. |
@@ -208,12 +209,15 @@ returns `404` for the start endpoint; clients must not fall back to ordinary Cod
 login. Sessions are process-local, expire after five minutes, and do not survive
 restart; deployments with multiple independent instances require session affinity.
 
+Query local SIWC status for a Codex credential with `GET /v8/management/oauth/siwc/status?name=<name>` (or `?auth_index=<auth_index>`). The endpoint reads local credentials and runtime rejection state without triggering refresh or upstream verification requests, and returns `{"status": "off" | "valid" | "invalid"}`.
+
 For Codex entries, `GET /credentials` includes these non-secret summary fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `siwc_bind_supported` | boolean | This credential is eligible for the binding flow. Missing means unsupported. |
 | `use_siwc` | boolean | Requests are configured to use the nested SIWC credential. |
+| `siwc_status` | string | Local SIWC status: `off`, `valid`, or `invalid`. |
 | `siwc_bound` | boolean | SIWC access token, refresh token, and issued client ID are present; not a live validity check. |
 | `siwc_expires_at` | optional RFC3339 string | Stored SIWC expiration, when available. |
 

@@ -953,4 +953,49 @@ func TestXAIImagesSupportsBuiltInPrefixFallbackAndCustomCredentialPrefix(t *test
 			t.Fatalf("call = %+v, want authID=xai-custom-prefix-auth requestedModel=my-xai/grok-imagine-image-2.0 payloadModel=%s", calls[0], xaiImages20Model)
 		}
 	})
+
+	t.Run("built-in vendor aliases fall back to unprefixed registered model when force-model-prefix is enabled", func(t *testing.T) {
+		handler, executor := newXAIImagesRoutingTestHandler(t, true, "xai-unprefixed-force-auth", "", []string{
+			defaultXAIImagesModel,
+			xaiImagesQualityModel,
+			xaiImages20Model,
+		})
+		for _, aliasModel := range []string{
+			"xai/grok-imagine-image-2.0",
+			"x-ai/grok-imagine-image-2.0",
+			"grok/grok-imagine-image-2.0",
+		} {
+			before := len(executor.Calls())
+			body := strings.NewReader(`{"model":"` + aliasModel + `","prompt":"a red square"}`)
+			resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, want %d: %s", aliasModel, resp.Code, http.StatusOK, resp.Body.String())
+			}
+			calls := executor.Calls()
+			if len(calls) != before+1 {
+				t.Fatalf("%s executor calls = %d, want %d", aliasModel, len(calls), before+1)
+			}
+			last := calls[len(calls)-1]
+			if last.authID != "xai-unprefixed-force-auth" || last.requestedModel != xaiImages20Model || last.reqModel != xaiImages20Model || last.payloadModel != xaiImages20Model {
+				t.Fatalf("%s call = %+v, want authID=xai-unprefixed-force-auth requestedModel=%s reqModel=%s payloadModel=%s", aliasModel, last, xaiImages20Model, xaiImages20Model, xaiImages20Model)
+			}
+		}
+	})
+
+	t.Run("built-in vendor alias rejected when force-model-prefix is enabled and only custom-prefixed credential exists", func(t *testing.T) {
+		handler, executor := newXAIImagesRoutingTestHandler(t, true, "xai-custom-prefix-only-auth", "my-xai", []string{
+			"my-xai/" + xaiImages20Model,
+		})
+		body := strings.NewReader(`{"model":"xai/grok-imagine-image-2.0","prompt":"a red square"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+		}
+		if got := gjson.GetBytes(resp.Body.Bytes(), "error.message").String(); got != "unknown provider for model xai/grok-imagine-image-2.0" {
+			t.Fatalf("error.message = %q, want %q", got, "unknown provider for model xai/grok-imagine-image-2.0")
+		}
+		if len(executor.Calls()) != 0 {
+			t.Fatalf("expected no executor call, got %d", len(executor.Calls()))
+		}
+	})
 }

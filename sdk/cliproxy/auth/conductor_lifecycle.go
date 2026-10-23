@@ -289,7 +289,8 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, false, false, fmt.Errorf("update auth: %w", errWeight)
 	}
-	if mode == updateModeReplace && auth.HasFileSnapshot() {
+	isFileSnapshot := mode == updateModeReplace && auth.HasFileSnapshot()
+	if isFileSnapshot {
 		m.mu.RLock()
 		existing, ok := m.auths[auth.ID]
 		m.mu.RUnlock()
@@ -357,6 +358,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		auth.Index = existing.Index
 		auth.indexAssigned = existing.indexAssigned
 	}
+	if isFileSnapshot && auth.CreatedAt.IsZero() {
+		auth.CreatedAt = existing.CreatedAt
+	}
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
@@ -377,24 +381,51 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	}
 	cooldownStateChanged := false
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+		if isFileSnapshot {
+			auth.ModelStates = existing.ModelStates
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+			auth.RefreshFailures = existing.RefreshFailures
+		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
-		if credChanged || mode == updateModeRefresh {
-			auth.RejectedAccessToken = ""
-			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
-				auth.Unavailable = false
-				auth.LastError = nil
-				auth.StatusMessage = ""
-				auth.Status = StatusActive
-				cooldownStateChanged = true
+		if isFileSnapshot {
+			if (auth.Status == "" || auth.Status == StatusActive) && existing.Status != "" {
+				auth.Status = existing.Status
 			}
-			resumed := clearUnauthorizedModelStates(auth, time.Now())
-			if len(resumed) > 0 {
-				cooldownStateChanged = true
+			if auth.StatusMessage == "" {
+				auth.StatusMessage = existing.StatusMessage
+			}
+			auth.Unavailable = existing.Unavailable
+			auth.NextRetryAfter = existing.NextRetryAfter
+			if auth.LastError == nil && existing.LastError != nil {
+				auth.LastError = cloneError(existing.LastError)
+			}
+			observation := mergeQuotaObservation(auth.Quota, existing.Quota)
+			auth.Quota = existing.Quota.Clone()
+			auth.Quota.ObservedAt = observation.ObservedAt
+			auth.Quota.Signals = observation.Signals
+			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
+		}
+		if credChanged || mode == updateModeRefresh {
+			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+			if auth.RejectedAccessToken == "" || authAccessToken(auth) != auth.RejectedAccessToken {
+				if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
+					auth.Unavailable = false
+					auth.NextRetryAfter = time.Time{}
+					auth.cooldownRecordedSeq = 0
+					auth.LastError = nil
+					auth.StatusMessage = ""
+					auth.Status = StatusActive
+					cooldownStateChanged = true
+				}
+				resumed := clearUnauthorizedModelStates(auth, time.Now())
+				if len(resumed) > 0 {
+					cooldownStateChanged = true
+				}
 			}
 		} else {
-			auth.RejectedAccessToken = existing.RejectedAccessToken
+			applyPreservedRejectedTokens(existing, auth, false)
 		}
 		// A refresh that confirms quota restoration (issue #6690) releases the
 		// credential-wide cooldown early; otherwise the active credential
@@ -410,6 +441,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.Quota = existing.Quota
 			auth.Quota.ObservedAt = observation.ObservedAt
 			auth.Quota.Signals = observation.Signals
+			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
 			if auth.Status == StatusActive {
 				auth.Status = existing.Status
 			}
@@ -433,6 +465,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	// Save before publication, including the transactional Meta mint path.
 	// Runtime-only changes made during I/O are merged below, never overwritten.
 	existingBeforeSave := existing.Clone()
+	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
 		// A minted Meta key must reach the store before requests can use it.
@@ -448,6 +481,13 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
 	mergeAuthSaveDelta(auth, existingBeforeSave, existing, false)
+	if (auth.RejectedAccessToken == "" && existing.RejectedAccessToken != "") || (auth.RejectedSIWCAccessToken == "" && existing.RejectedSIWCAccessToken != "") {
+		probe := auth.Clone()
+		probe.CodexRefreshPatch = refreshPatchBeforeSave
+		applyPreservedRejectedTokens(existing, probe, mode == updateModeRefresh)
+		auth.RejectedAccessToken = probe.RejectedAccessToken
+		auth.RejectedSIWCAccessToken = probe.RejectedSIWCAccessToken
+	}
 	if existing.Generation >= auth.Generation {
 		auth.Generation = existing.Generation + 1
 	}

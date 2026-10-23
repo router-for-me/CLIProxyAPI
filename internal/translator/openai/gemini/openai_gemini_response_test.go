@@ -175,3 +175,71 @@ func TestConvertOpenAIResponseToGeminiNonStream_NullFinishReasonIgnored(t *testi
 		})
 	}
 }
+
+func TestConvertOpenAIResponseToGeminiNonStream_PreservesToolCallThoughtSignature(t *testing.T) {
+	up := []byte(`{"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+		{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"},"extra_content":{"google":{"thought_signature":"SIG"}}},
+		{"id":"c2","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"London\"}"}}
+	]}}]}`)
+	res := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "", nil, nil, up, nil)
+	if got := gjson.GetBytes(res, "candidates.0.content.parts.0.thoughtSignature").String(); got != "SIG" {
+		t.Fatalf("candidates.0.content.parts.0.thoughtSignature = %q, want SIG; res=%s", got, string(res))
+	}
+	if gjson.GetBytes(res, "candidates.0.content.parts.1.thoughtSignature").Exists() {
+		t.Fatalf("expected unsigned second tool call not to have thoughtSignature; res=%s", string(res))
+	}
+}
+
+func TestConvertOpenAIResponseToGeminiStream_PreservesToolCallThoughtSignature(t *testing.T) {
+	var param any
+	ConvertOpenAIResponseToGemini(context.Background(), "google/gemini-3-pro", nil, nil, []byte(`{"choices":[{"index":0,"delta":{"tool_calls":[
+		{"index":1,"id":"c2","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}},
+		{"index":0,"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"},"extra_content":{"google":{"thought_signature":"SIG"}}}
+	]}}]}`), &param)
+	ConvertOpenAIResponseToGemini(context.Background(), "google/gemini-3-pro", nil, nil, []byte(`{"choices":[{"index":0,"delta":{"tool_calls":[
+		{"index":1,"function":{"arguments":"\"London\"}"}},
+		{"index":0,"function":{"arguments":"\"Paris\"}"}}
+	]}}]}`), &param)
+	out := ConvertOpenAIResponseToGemini(context.Background(), "google/gemini-3-pro", nil, nil, []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`), &param)
+	if len(out) == 0 {
+		t.Fatalf("stream output is empty")
+	}
+	last := out[len(out)-1]
+	if got := gjson.GetBytes(last, "candidates.0.content.parts.0.functionCall.id").String(); got != "c1" {
+		t.Fatalf("candidates.0.content.parts.0.functionCall.id = %q, want c1; payload=%s", got, string(last))
+	}
+	if got := gjson.GetBytes(last, "candidates.0.content.parts.0.thoughtSignature").String(); got != "SIG" {
+		t.Fatalf("candidates.0.content.parts.0.thoughtSignature = %q, want SIG; payload=%s", got, string(last))
+	}
+	if got := gjson.GetBytes(last, "candidates.0.content.parts.1.functionCall.id").String(); got != "c2" {
+		t.Fatalf("candidates.0.content.parts.1.functionCall.id = %q, want c2; payload=%s", got, string(last))
+	}
+	if gjson.GetBytes(last, "candidates.0.content.parts.1.thoughtSignature").Exists() {
+		t.Fatalf("expected unsigned second tool call not to have thoughtSignature; payload=%s", string(last))
+	}
+
+	// Single-chunk tool call with finish_reason in the same SSE delta
+	var singleChunkParam any
+	singleOut := ConvertOpenAIResponseToGemini(context.Background(), "google/gemini-3-pro", nil, nil, []byte(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c_single","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Rome\"}"},"extra_content":{"google":{"thought_signature":"SIG_SINGLE"}}}]},"finish_reason":"tool_calls"}]}`), &singleChunkParam)
+	if len(singleOut) == 0 {
+		t.Fatalf("expected output for single-chunk tool_calls + finish_reason")
+	}
+	if got := gjson.GetBytes(singleOut[len(singleOut)-1], "candidates.0.content.parts.0.thoughtSignature").String(); got != "SIG_SINGLE" {
+		t.Fatalf("single-chunk thoughtSignature = %q, want SIG_SINGLE; payload=%s", got, string(singleOut[len(singleOut)-1]))
+	}
+
+	// Reasoning/content in the same delta as tool_calls, plus signature arriving in a later delta without function
+	var mixedParam any
+	mixedChunk1 := ConvertOpenAIResponseToGemini(context.Background(), "google/gemini-3-pro", nil, nil, []byte(`{"choices":[{"index":0,"delta":{"reasoning_content":"checking weather","tool_calls":[{"index":0,"id":"c_mixed","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Berlin\"}"}}]}}]}`), &mixedParam)
+	if len(mixedChunk1) != 1 || !gjson.GetBytes(mixedChunk1[0], "candidates.0.content.parts.0.thought").Bool() {
+		t.Fatalf("expected reasoning chunk output on mixed delta, got %v", mixedChunk1)
+	}
+	ConvertOpenAIResponseToGemini(context.Background(), "google/gemini-3-pro", nil, nil, []byte(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"extra_content":{"google":{"thought_signature":"SIG_LATE"}}}]}}]}`), &mixedParam)
+	mixedOut := ConvertOpenAIResponseToGemini(context.Background(), "google/gemini-3-pro", nil, nil, []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`), &mixedParam)
+	if len(mixedOut) == 0 {
+		t.Fatalf("expected output when flushing mixed tool call")
+	}
+	if got := gjson.GetBytes(mixedOut[len(mixedOut)-1], "candidates.0.content.parts.0.thoughtSignature").String(); got != "SIG_LATE" {
+		t.Fatalf("mixed/late-signature thoughtSignature = %q, want SIG_LATE; payload=%s", got, string(mixedOut[len(mixedOut)-1]))
+	}
+}

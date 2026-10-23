@@ -38,6 +38,7 @@ type siwcBindSession struct {
 	service      siwcOAuthService
 	targetID     string
 	epoch        uint64
+	accountID    string
 	path         string
 	authDir      string
 	deviceID     string
@@ -76,6 +77,20 @@ func resolveSIWCBindFile(authDir, path string) (string, map[string]any, error) {
 	dir, errDir := filepath.EvalSymlinks(dir)
 	if errDir != nil {
 		return "", nil, errDir
+	}
+	dir, errAbs = filepath.Abs(dir)
+	if errAbs != nil {
+		return "", nil, errAbs
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil, errors.New("credential must be an existing regular file")
+	}
+	if !filepath.IsAbs(path) {
+		path, errAbs = filepath.Abs(path)
+		if errAbs != nil {
+			return "", nil, errAbs
+		}
 	}
 	// Match the commit-time rule: directory aliases are allowed, but the
 	// credential itself must not be a symlink.
@@ -118,6 +133,60 @@ func resolveSIWCBindFile(authDir, path string) (string, map[string]any, error) {
 		}
 	}
 	return realPath, metadata, nil
+}
+
+// GetSIWCStatus returns the read-only local SIWC status ("off", "valid", or "invalid")
+// for a Codex credential without triggering any upstream refresh or verification request.
+func (h *Handler) GetSIWCStatus(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "handler unavailable"})
+		return
+	}
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
+		name = strings.TrimSpace(c.Query("id"))
+	}
+	authIndex := strings.TrimSpace(c.Query("auth_index"))
+	if authIndex == "" {
+		authIndex = strings.TrimSpace(c.Query("authIndex"))
+	}
+	if name == "" && authIndex == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name or auth_index is required"})
+		return
+	}
+	h.mu.Lock()
+	cfg, manager := h.cfg, h.authManager
+	h.mu.Unlock()
+	if manager == nil && (cfg == nil || strings.TrimSpace(cfg.AuthDir) == "") {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager unavailable"})
+		return
+	}
+	var target *coreauth.Auth
+	if manager != nil {
+		if name != "" {
+			target, _ = h.lookupAuthFile(name, authIndex)
+		} else {
+			target = h.authByIndex(authIndex)
+		}
+	} else if name != "" && authIndex == "" && !isUnsafeAuthFileName(name) && strings.HasSuffix(strings.ToLower(name), ".json") {
+		full := filepath.Join(cfg.AuthDir, name)
+		if data, errRead := os.ReadFile(full); errRead == nil {
+			var metadata map[string]any
+			if json.Unmarshal(data, &metadata) == nil && metadata != nil {
+				provider, _ := metadata["type"].(string)
+				target = &coreauth.Auth{ID: name, FileName: name, Provider: strings.TrimSpace(provider), Metadata: metadata}
+			}
+		}
+	}
+	if target == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	if !coreauth.IsCodexAuthRecord(target) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "SIWC status requires a Codex credential"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": string(target.CodexSIWCStatus(time.Now()))})
 }
 
 // StartSIWCBind creates a v8-only OAuth session for an existing Codex credential.
@@ -167,6 +236,11 @@ func (h *Handler) StartSIWCBind(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "SIWC binding target is unavailable or invalid"})
 		return
 	}
+	accountID, _ := target.Metadata["account_id"].(string)
+	if (accountID != "" && metadata["account_id"] != accountID) || (accountID == "" && metadata["account_id"] != nil && metadata["account_id"] != "") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "SIWC binding target is unavailable or invalid"})
+		return
+	}
 	deviceID := uuid.NewString()
 	if section, okSection := metadata["siwc"].(map[string]any); okSection {
 		if existing, _ := section["device_id"].(string); codex.IsValidUUID(existing) {
@@ -191,7 +265,7 @@ func (h *Handler) StartSIWCBind(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(PopulateAuthContext(context.Background(), c), siwcBindTTL)
 	flow := &siwcBindSession{owner: h, manager: manager, service: service, targetID: target.ID, epoch: target.RegistrationEpoch,
-		path: path, authDir: cfg.AuthDir, deviceID: deviceID, redirect: codex.SIWCRedirectURI, pkce: pkce, ctx: ctx, cancel: cancel}
+		accountID: accountID, path: path, authDir: cfg.AuthDir, deviceID: deviceID, redirect: codex.SIWCRedirectURI, pkce: pkce, ctx: ctx, cancel: cancel}
 	if !oauthSessions.registerSIWC(state, flow) {
 		cancel()
 		c.JSON(http.StatusConflict, gin.H{"error": "a SIWC binding is already pending for this credential"})
@@ -384,7 +458,7 @@ func (flow *siwcBindSession) exchange(state, code, clientID string) {
 		flow.pkce = nil
 		return
 	}
-	updated, errBind := flow.manager.BindCodexSIWC(flow.ctx, flow.targetID, flow.epoch, tokenData)
+	updated, errBind := flow.manager.BindCodexSIWC(flow.ctx, flow.targetID, flow.epoch, flow.accountID, tokenData)
 	if errBind != nil {
 		flow.fail(state, "Failed to save SIWC binding; the target may have changed")
 		return

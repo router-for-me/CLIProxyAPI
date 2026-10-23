@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
@@ -132,4 +133,86 @@ func TestCodexCallbackRejectsSIWCState(t *testing.T) {
 	if !management.IsOAuthSessionPending(flow.State, "codex") {
 		t.Fatal("rejected callback consumed SIWC session")
 	}
+}
+
+func TestSIWCStatusEndpoint(t *testing.T) {
+	hash, errHash := bcrypt.GenerateFromPassword([]byte("test-password"), bcrypt.MinCost)
+	if errHash != nil {
+		t.Fatal(errHash)
+	}
+	cfg := &config.Config{}
+	cfg.RemoteManagement.SecretKey = string(hash)
+	s := newTestServerWithConfig(t, cfg)
+	metadata := map[string]any{"type": "codex", "access_token": "outer-token", "refresh_token": "outer-refresh"}
+	path := filepath.Join(s.cfg.AuthDir, "codex.json")
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errWrite := os.WriteFile(path, data, 0o600); err != nil || errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(s.cfg)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID: "codex.json", FileName: "codex.json", Provider: "codex", Status: coreauth.StatusActive,
+		Metadata: metadata, Attributes: map[string]string{"path": path},
+	}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	s.mgmt.SetAuthManager(manager)
+	s.mgmt.SetLocalPassword("test-password")
+	s.managementRoutesEnabled.Store(true)
+	s.registerManagementRoutes()
+
+	checkStatus := func(url string, wantCode int, wantBody string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req.Header.Set("Authorization", "Bearer test-password")
+		req.RemoteAddr = "127.0.0.1:1234"
+		w := httptest.NewRecorder()
+		s.engine.ServeHTTP(w, req)
+		if w.Code != wantCode {
+			t.Fatalf("%s: status=%d want=%d: %s", url, w.Code, wantCode, w.Body.String())
+		}
+		if wantBody != "" && strings.TrimSpace(w.Body.String()) != wantBody {
+			t.Fatalf("%s: body=%s want %s", url, w.Body.String(), wantBody)
+		}
+	}
+
+	// 1. use_siwc not enabled -> off
+	checkStatus("/v8/management/oauth/siwc/status?name=codex.json", http.StatusOK, `{"status":"off"}`)
+	checkStatus("/v8/management/credentials/siwc/status?name=codex.json", http.StatusOK, `{"status":"off"}`)
+
+	// 2. Bind SIWC with valid future expires_at -> valid
+	registered, _ := manager.GetByID("codex.json")
+	_, errBind := manager.BindCodexSIWC(context.Background(), "codex.json", registered.RegistrationEpoch, "", &codex.CodexSIWCTokenData{
+		AccessToken:  "siwc-valid-1",
+		RefreshToken: "siwc-refresh-1",
+		ClientID:     "oaiapp_1",
+		Expire:       "2035-01-01T00:00:00Z",
+		ExpiresAt:    "2035-01-01T00:03:00Z",
+	})
+	if errBind != nil {
+		t.Fatalf("BindCodexSIWC: %v", errBind)
+	}
+	bound, _ := manager.GetByID("codex.json")
+	bound.EnsureIndex()
+	checkStatus("/v8/management/oauth/siwc/status?name=codex.json", http.StatusOK, `{"status":"valid"}`)
+	checkStatus("/v8/management/oauth/siwc/status?auth_index="+bound.Index, http.StatusOK, `{"status":"valid"}`)
+
+	// 3. SIWC request receives 401 -> invalid
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID:            "codex.json",
+		CredentialVersion: bound.CredentialVersion,
+		Provider:          "codex",
+		Model:             "gpt-5.4",
+		Success:           false,
+		Error:             &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Code: "unauthorized", Message: "401 unauthorized"},
+	})
+	checkStatus("/v8/management/oauth/siwc/status?name=codex.json", http.StatusOK, `{"status":"invalid"}`)
+
+	// 4. Missing parameter or unknown target
+	checkStatus("/v8/management/oauth/siwc/status", http.StatusBadRequest, "")
+	checkStatus("/v8/management/oauth/siwc/status?name=missing.json", http.StatusNotFound, "")
 }

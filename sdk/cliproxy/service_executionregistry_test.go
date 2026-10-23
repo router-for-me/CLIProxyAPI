@@ -131,9 +131,11 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	}()
 	deadline := time.Now().Add(time.Second)
 	for {
-		if _, errLate := registry.BeginDispatch(); errLate != nil {
+		late, errLate := registry.BeginDispatch()
+		if errLate != nil {
 			break
 		}
+		late.End()
 		if time.Now().After(deadline) {
 			t.Fatal("first replacement did not begin draining")
 		}

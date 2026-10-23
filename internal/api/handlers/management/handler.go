@@ -140,6 +140,13 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	h.cfg = cloned
 }
 
+// configSnapshot reads h.cfg under h.mu, for code that runs outside the request holding it.
+func (h *Handler) configSnapshot() *config.Config {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cfg
+}
+
 // isStaleConfigFileSnapshotLocked reports whether cfg was parsed from config file
 // bytes that are no longer on disk. Management saves hold h.mu, so none can land
 // during the check. Callers must hold h.mu.

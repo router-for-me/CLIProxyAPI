@@ -900,6 +900,14 @@ type preFTKeepAliveResponsesExecutor struct {
 	chunks chan coreexecutor.StreamChunk
 }
 
+type preFTStatusError struct {
+	status int
+	msg    string
+}
+
+func (e preFTStatusError) Error() string   { return e.msg }
+func (e preFTStatusError) StatusCode() int { return e.status }
+
 func (*preFTKeepAliveResponsesExecutor) Identifier() string { return "pre-ft-keepalive-responses" }
 
 func (*preFTKeepAliveResponsesExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -1073,6 +1081,72 @@ func TestResponsesHandlerSendKeepAliveBeforeFT(t *testing.T) {
 		}
 		if !strings.Contains(recorder.Body.String(), "upstream failed before keepalive") {
 			t.Fatalf("unexpected error body: %q", recorder.Body.String())
+		}
+	})
+
+	t.Run("enabled maps Claude prompt is too long after keepalive to response.failed context_length_exceeded", func(t *testing.T) {
+		tickChan := make(chan time.Time)
+		restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+			return tickChan, func() {}
+		})
+		defer restore()
+
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		executor := &preFTKeepAliveResponsesExecutor{chunks: chunks}
+		manager := coreauth.NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		model := "pre-ft-keepalive-prompt-too-long-responses-model"
+		auth := &coreauth.Auth{ID: "pre-ft-keepalive-prompt-too-long-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		})
+
+		go func() {
+			tickChan <- time.Unix(1, 0)
+			tickChan <- time.Unix(2, 0)
+			chunks <- coreexecutor.StreamChunk{
+				Err: preFTStatusError{
+					status: http.StatusBadRequest,
+					msg:    `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`,
+				},
+			}
+			close(chunks)
+		}()
+
+		base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				KeepAliveSeconds:      10,
+				SendKeepAliveBeforeFT: true,
+			},
+		}, manager)
+		h := NewOpenAIResponsesAPIHandler(base)
+		router := gin.New()
+		router.POST("/v1/responses", h.Responses)
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\""+model+"\",\"input\":\"hi\",\"stream\":true}"))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("User-Agent", "codex_cli_rs/0.1.0")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+		}
+		body := recorder.Body.String()
+		if !strings.Contains(body, ": keep-alive\n\n") {
+			t.Fatalf("initial keepalive missing: %q", body)
+		}
+		if !strings.Contains(body, "event: response.failed") {
+			t.Fatalf("missing response.failed event: %q", body)
+		}
+		if !strings.Contains(body, `"code":"context_length_exceeded"`) {
+			t.Fatalf("response.failed missing context_length_exceeded code: %q", body)
+		}
+		if !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, "prompt is too long: 210000 tokens") {
+			t.Fatalf("response.failed missing prompt is too long detail: %q", body)
 		}
 	})
 

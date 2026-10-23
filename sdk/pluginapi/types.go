@@ -458,8 +458,11 @@ type FrontendAuthRequest struct {
 	Headers http.Header
 	// Query contains inbound query parameters.
 	Query url.Values
-	// Body contains the raw request body.
+	// Body contains the raw request body as received, before any Content-Encoding decoding.
 	Body []byte
+	// DecodedBody contains the request body after Content-Encoding decoding. It is set only when
+	// the body was content-encoded and the route's handler decodes it, and is nil otherwise.
+	DecodedBody []byte
 }
 
 // FrontendAuthResponse reports the authentication decision and identity metadata.
@@ -470,6 +473,10 @@ type FrontendAuthResponse struct {
 	Principal string
 	// Metadata carries plugin-defined identity attributes for downstream use.
 	Metadata map[string]string
+	// DenyStatusCode optionally specifies an HTTP status code when denying the request.
+	DenyStatusCode int
+	// DenyMessage optionally specifies an error message when denying the request.
+	DenyMessage string
 }
 
 const (
@@ -858,6 +865,30 @@ type HostAuthSaveResponse struct {
 	Name string `json:"name"`
 	// Path is the saved auth file path.
 	Path string `json:"path"`
+}
+
+// HostAuthModelsRequest asks the host for the models registered for one or all credentials.
+type HostAuthModelsRequest struct {
+	// AuthIndex identifies the credential index; empty requests all credentials.
+	AuthIndex string `json:"auth_index,omitempty"`
+}
+
+// HostAuthModelsResponse returns the models registered for each matching credential.
+type HostAuthModelsResponse struct {
+	// Credentials lists the credentials and their registered models.
+	Credentials []HostAuthModels `json:"credentials"`
+}
+
+// HostAuthModels describes the models registered for one credential.
+type HostAuthModels struct {
+	// ID identifies the credential record.
+	ID string `json:"id"`
+	// AuthIndex is the stable runtime credential index.
+	AuthIndex string `json:"auth_index"`
+	// Provider is the credential provider key.
+	Provider string `json:"provider"`
+	// Models lists the model identifiers registered for this credential in the global registry.
+	Models []string `json:"models"`
 }
 
 // Host affinity lookup status outcomes.
@@ -1526,8 +1557,11 @@ type UsageRecord struct {
 	Source string
 	// ReasoningEffort records the requested reasoning effort.
 	ReasoningEffort string
-	// ServiceTier records the requested or reported service tier.
+	// ServiceTier records the tier requested by the original client.
 	ServiceTier string
+	// EffectiveServiceTier records the tier in the final outbound request after
+	// protocol translation and payload defaults or overrides.
+	EffectiveServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
 	// ResponseModel stores the model name reported by the upstream response, empty when unknown.

@@ -51,6 +51,8 @@ func (s *Server) registerManagementV8Routes() {
 	v8.POST("/oauth/import", s.mgmt.ImportOAuthV8)
 	v8.GET("/oauth/auth-url", s.mgmt.StartOAuthV8)
 	v8.POST("/oauth/siwc/bind", s.mgmt.StartSIWCBind)
+	v8.GET("/oauth/siwc/status", s.mgmt.GetSIWCStatus)
+	v8.GET("/credentials/siwc/status", s.mgmt.GetSIWCStatus)
 	v8.GET("/oauth/status", s.mgmt.GetAuthStatus)
 	v8.DELETE("/oauth/session", s.mgmt.CancelAuthSession)
 

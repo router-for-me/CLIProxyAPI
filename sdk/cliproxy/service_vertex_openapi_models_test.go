@@ -76,6 +76,7 @@ func TestSynthesizeAuthFile_VertexModelsAndAliases(t *testing.T) {
 		"project_id": "test-proj",
 		"location": "global",
 		"models": [
+			"gemini-2.5-flash",
 			{"name": "deepseek-ai/deepseek-v4.1-flash-maas", "alias": "ds-maas"},
 			{"name": "xai/grok-4-maas"}
 		],
@@ -115,5 +116,69 @@ func TestSynthesizeAuthFile_VertexModelsAndAliases(t *testing.T) {
 	}
 	if gotUpstream := service.coreManager.ResolveExecutionModel(registered, "ds-maas"); gotUpstream != "deepseek-ai/deepseek-v4.1-flash-maas" {
 		t.Fatalf("ResolveExecutionModel(ds-maas) = %q, want deepseek-ai/deepseek-v4.1-flash-maas", gotUpstream)
+	}
+}
+
+func TestRegisterModelsForAuth_VertexCompatAPIKey_OpenAPISettingsAndThinking(t *testing.T) {
+	cfg := &config.Config{
+		VertexCompatAPIKey: []config.VertexCompatKey{
+			{
+				APIKey:  "vk-test",
+				BaseURL: "https://vertex-relay.example.com/v1/projects/test-proj/locations/global",
+				Models: []config.VertexCompatModel{
+					{
+						Name:  "deepseek-ai/deepseek-v4.1-flash-maas",
+						Alias: "deepseek-flash",
+					},
+				},
+			},
+		},
+	}
+	cfg.SanitizeVertexCompatKeys()
+
+	synth := synthesizer.NewConfigSynthesizer()
+	auths, errSynth := synth.Synthesize(&synthesizer.SynthesisContext{
+		Config:      cfg,
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+		Now:         time.Unix(1700000000, 0),
+	})
+	if errSynth != nil {
+		t.Fatalf("Synthesize error: %v", errSynth)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 synthesized auth, got %d", len(auths))
+	}
+
+	service := &Service{
+		cfg:         cfg,
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	auth := auths[0]
+	t.Cleanup(func() {
+		GlobalModelRegistry().UnregisterClient(auth.ID)
+	})
+
+	registered, errReg := service.coreManager.Register(context.Background(), auth)
+	if errReg != nil {
+		t.Fatalf("Register auth error: %v", errReg)
+	}
+	service.registerModelsForAuth(context.Background(), registered)
+
+	models := GlobalModelRegistry().GetModelsForClient(auth.ID)
+	var dsInfo *ModelInfo
+	for _, m := range models {
+		if m != nil && m.ID == "deepseek-flash" {
+			dsInfo = m
+			break
+		}
+	}
+	if dsInfo == nil {
+		t.Fatal("expected model 'deepseek-flash' to be registered for VertexCompatKey")
+	}
+	if dsInfo.OwnedBy != "deepseek-ai" {
+		t.Fatalf("deepseek-flash OwnedBy = %q, want deepseek-ai", dsInfo.OwnedBy)
+	}
+	if dsInfo.Thinking == nil || len(dsInfo.Thinking.Levels) == 0 {
+		t.Fatalf("expected default Thinking support on Vertex OpenAPI model 'deepseek-flash', got %+v", dsInfo.Thinking)
 	}
 }

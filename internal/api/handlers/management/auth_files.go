@@ -787,6 +787,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	if quota.v8 && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		entry["siwc_bind_supported"] = siwcBindEligible(auth)
 		entry["use_siwc"] = coreauth.IsCodexUseSIWC(auth)
+		entry["siwc_status"] = string(auth.CodexSIWCStatus(time.Now().UTC()))
 		section, _ := auth.Metadata["siwc"].(map[string]any)
 		accessToken, _ := section["access_token"].(string)
 		refreshToken, _ := section["refresh_token"].(string)

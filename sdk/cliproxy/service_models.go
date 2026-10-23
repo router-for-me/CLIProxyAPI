@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -944,7 +945,33 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "google", "vertex", "vertex")
+	models := buildConfigModels(entry.Models, "google", "vertex", "vertex")
+	for _, info := range models {
+		for _, configured := range entry.Models {
+			name := strings.TrimSpace(configured.Name)
+			id := strings.TrimSpace(configured.Alias)
+			if id == "" {
+				id = name
+			}
+			if !strings.EqualFold(info.ID, id) {
+				continue
+			}
+			if publisher, model, ok := strings.Cut(helps.NormalizeVertexOpenAPIModel(name), "/"); ok && strings.TrimSpace(publisher) != "" && strings.TrimSpace(model) != "" && !strings.EqualFold(strings.TrimSpace(publisher), "google") {
+				info.OwnedBy = strings.TrimSpace(publisher)
+			}
+			openAPI := helps.IsVertexOpenAPIModel(name)
+			if configured.OpenAPI != nil {
+				openAPI = *configured.OpenAPI
+			} else if entry.OpenAPI != nil {
+				openAPI = *entry.OpenAPI
+			}
+			if openAPI && info.Thinking == nil {
+				info.Thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			}
+			break
+		}
+	}
+	return models
 }
 
 func appendVertexServiceAccountModels(cfg *config.Config, a *coreauth.Auth, baseModels []*ModelInfo) []*ModelInfo {
@@ -1025,7 +1052,7 @@ func appendVertexServiceAccountModels(cfg *config.Config, a *coreauth.Auth, base
 	out = append(out, baseModels...)
 	for _, name := range extraNames {
 		ownedBy := "google"
-		if publisher, _, ok := strings.Cut(name, "/"); ok && strings.TrimSpace(publisher) != "" {
+		if publisher, _, ok := strings.Cut(helps.NormalizeVertexOpenAPIModel(name), "/"); ok && strings.TrimSpace(publisher) != "" {
 			ownedBy = strings.TrimSpace(publisher)
 		}
 		info := &ModelInfo{

@@ -21,8 +21,11 @@ type oaiToResponsesStateReasoning struct {
 }
 type oaiToResponsesState struct {
 	translatorcommon.ApplyPatchErrorState
-	ApplyPatchCalls    map[string]*translatorcommon.ApplyPatchCallState
-	RequestJSON        []byte
+	ApplyPatchCalls map[string]*translatorcommon.ApplyPatchCallState
+	// RequestEcho holds the request fields echoed into the completed
+	// response, extracted once at stream init so the request body itself
+	// is neither retained nor re-scanned at stream end.
+	RequestEcho        responsesRequestEcho
 	ToolIndex          *responsesToolIndex
 	RequestInitialized bool
 	Seq                int
@@ -86,7 +89,215 @@ func incompleteByFinishReason(reason string) ([]byte, bool) {
 	}
 }
 
-func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
+// responsesRequestEcho carries the typed values of the Responses request
+// fields echoed into response objects. Extraction walks the top level of
+// the request once; apply writes the fields in the same fixed order and
+// with the same typed conversions as the previous per-field lookups, so
+// the emitted JSON is unchanged.
+type responsesRequestEcho struct {
+	instructions          string
+	hasInstructions       bool
+	maxOutputTokens       int64
+	hasMaxOutputTokens    bool
+	maxTokens             int64
+	hasMaxTokens          bool
+	maxToolCalls          int64
+	hasMaxToolCalls       bool
+	model                 string
+	hasModel              bool
+	parallelToolCalls     bool
+	hasParallelToolCalls  bool
+	previousResponseID    string
+	hasPreviousResponseID bool
+	promptCacheKey        string
+	hasPromptCacheKey     bool
+	reasoning             any
+	hasReasoning          bool
+	safetyIdentifier      string
+	hasSafetyIdentifier   bool
+	serviceTier           string
+	hasServiceTier        bool
+	store                 bool
+	hasStore              bool
+	temperature           float64
+	hasTemperature        bool
+	text                  any
+	hasText               bool
+	toolChoice            any
+	hasToolChoice         bool
+	tools                 any
+	hasTools              bool
+	topLogprobs           int64
+	hasTopLogprobs        bool
+	topP                  float64
+	hasTopP               bool
+	truncation            string
+	hasTruncation         bool
+	user                  any
+	hasUser               bool
+	metadata              any
+	hasMetadata           bool
+}
+
+func extractResponsesRequestEcho(root gjson.Result) responsesRequestEcho {
+	var e responsesRequestEcho
+	root.ForEach(func(key, value gjson.Result) bool {
+		switch key.String() {
+		case "instructions":
+			if !e.hasInstructions {
+				e.instructions, e.hasInstructions = value.String(), true
+			}
+		case "max_output_tokens":
+			if !e.hasMaxOutputTokens {
+				e.maxOutputTokens, e.hasMaxOutputTokens = value.Int(), true
+			}
+		case "max_tokens":
+			if !e.hasMaxTokens {
+				e.maxTokens, e.hasMaxTokens = value.Int(), true
+			}
+		case "max_tool_calls":
+			if !e.hasMaxToolCalls {
+				e.maxToolCalls, e.hasMaxToolCalls = value.Int(), true
+			}
+		case "model":
+			if !e.hasModel {
+				e.model, e.hasModel = value.String(), true
+			}
+		case "parallel_tool_calls":
+			if !e.hasParallelToolCalls {
+				e.parallelToolCalls, e.hasParallelToolCalls = value.Bool(), true
+			}
+		case "previous_response_id":
+			if !e.hasPreviousResponseID {
+				e.previousResponseID, e.hasPreviousResponseID = value.String(), true
+			}
+		case "prompt_cache_key":
+			if !e.hasPromptCacheKey {
+				e.promptCacheKey, e.hasPromptCacheKey = value.String(), true
+			}
+		case "reasoning":
+			if !e.hasReasoning {
+				e.reasoning, e.hasReasoning = value.Value(), true
+			}
+		case "safety_identifier":
+			if !e.hasSafetyIdentifier {
+				e.safetyIdentifier, e.hasSafetyIdentifier = value.String(), true
+			}
+		case "service_tier":
+			if !e.hasServiceTier {
+				e.serviceTier, e.hasServiceTier = value.String(), true
+			}
+		case "store":
+			if !e.hasStore {
+				e.store, e.hasStore = value.Bool(), true
+			}
+		case "temperature":
+			if !e.hasTemperature {
+				e.temperature, e.hasTemperature = value.Float(), true
+			}
+		case "text":
+			if !e.hasText {
+				e.text, e.hasText = value.Value(), true
+			}
+		case "tool_choice":
+			if !e.hasToolChoice {
+				e.toolChoice, e.hasToolChoice = value.Value(), true
+			}
+		case "tools":
+			if !e.hasTools {
+				e.tools, e.hasTools = value.Value(), true
+			}
+		case "top_logprobs":
+			if !e.hasTopLogprobs {
+				e.topLogprobs, e.hasTopLogprobs = value.Int(), true
+			}
+		case "top_p":
+			if !e.hasTopP {
+				e.topP, e.hasTopP = value.Float(), true
+			}
+		case "truncation":
+			if !e.hasTruncation {
+				e.truncation, e.hasTruncation = value.String(), true
+			}
+		case "user":
+			if !e.hasUser {
+				e.user, e.hasUser = value.Value(), true
+			}
+		case "metadata":
+			if !e.hasMetadata {
+				e.metadata, e.hasMetadata = value.Value(), true
+			}
+		}
+		return true
+	})
+	return e
+}
+
+func (e responsesRequestEcho) apply(dst []byte, prefix string) []byte {
+	if e.hasInstructions {
+		dst, _ = sjson.SetBytes(dst, prefix+"instructions", e.instructions)
+	}
+	if e.hasMaxOutputTokens {
+		dst, _ = sjson.SetBytes(dst, prefix+"max_output_tokens", e.maxOutputTokens)
+	}
+	if e.hasMaxToolCalls {
+		dst, _ = sjson.SetBytes(dst, prefix+"max_tool_calls", e.maxToolCalls)
+	}
+	if e.hasModel {
+		dst, _ = sjson.SetBytes(dst, prefix+"model", e.model)
+	}
+	if e.hasParallelToolCalls {
+		dst, _ = sjson.SetBytes(dst, prefix+"parallel_tool_calls", e.parallelToolCalls)
+	}
+	if e.hasPreviousResponseID {
+		dst, _ = sjson.SetBytes(dst, prefix+"previous_response_id", e.previousResponseID)
+	}
+	if e.hasPromptCacheKey {
+		dst, _ = sjson.SetBytes(dst, prefix+"prompt_cache_key", e.promptCacheKey)
+	}
+	if e.hasReasoning {
+		dst, _ = sjson.SetBytes(dst, prefix+"reasoning", e.reasoning)
+	}
+	if e.hasSafetyIdentifier {
+		dst, _ = sjson.SetBytes(dst, prefix+"safety_identifier", e.safetyIdentifier)
+	}
+	if e.hasServiceTier {
+		dst, _ = sjson.SetBytes(dst, prefix+"service_tier", e.serviceTier)
+	}
+	if e.hasStore {
+		dst, _ = sjson.SetBytes(dst, prefix+"store", e.store)
+	}
+	if e.hasTemperature {
+		dst, _ = sjson.SetBytes(dst, prefix+"temperature", e.temperature)
+	}
+	if e.hasText {
+		dst, _ = sjson.SetBytes(dst, prefix+"text", e.text)
+	}
+	if e.hasToolChoice {
+		dst, _ = sjson.SetBytes(dst, prefix+"tool_choice", e.toolChoice)
+	}
+	if e.hasTools {
+		dst, _ = sjson.SetBytes(dst, prefix+"tools", e.tools)
+	}
+	if e.hasTopLogprobs {
+		dst, _ = sjson.SetBytes(dst, prefix+"top_logprobs", e.topLogprobs)
+	}
+	if e.hasTopP {
+		dst, _ = sjson.SetBytes(dst, prefix+"top_p", e.topP)
+	}
+	if e.hasTruncation {
+		dst, _ = sjson.SetBytes(dst, prefix+"truncation", e.truncation)
+	}
+	if e.hasUser {
+		dst, _ = sjson.SetBytes(dst, prefix+"user", e.user)
+	}
+	if e.hasMetadata {
+		dst, _ = sjson.SetBytes(dst, prefix+"metadata", e.metadata)
+	}
+	return dst
+}
+
+func buildResponsesCompletedEvent(st *oaiToResponsesState, nextSeq func() int) []byte {
 	eventType := "response.completed"
 	status := "completed"
 	incompleteDetails, isIncomplete := incompleteByFinishReason(st.FinishReason)
@@ -105,69 +316,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 		completed, _ = sjson.SetRawBytes(completed, "response.incomplete_details", incompleteDetails)
 	}
 	// Inject original request fields into response as per docs/response.completed.json
-	if requestRawJSON != nil {
-		req := gjson.ParseBytes(requestRawJSON)
-		if v := req.Get("instructions"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.instructions", v.String())
-		}
-		if v := req.Get("max_output_tokens"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.max_output_tokens", v.Int())
-		}
-		if v := req.Get("max_tool_calls"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.max_tool_calls", v.Int())
-		}
-		if v := req.Get("model"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.model", v.String())
-		}
-		if v := req.Get("parallel_tool_calls"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.parallel_tool_calls", v.Bool())
-		}
-		if v := req.Get("previous_response_id"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.previous_response_id", v.String())
-		}
-		if v := req.Get("prompt_cache_key"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.prompt_cache_key", v.String())
-		}
-		if v := req.Get("reasoning"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.reasoning", v.Value())
-		}
-		if v := req.Get("safety_identifier"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.safety_identifier", v.String())
-		}
-		if v := req.Get("service_tier"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.service_tier", v.String())
-		}
-		if v := req.Get("store"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.store", v.Bool())
-		}
-		if v := req.Get("temperature"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.temperature", v.Float())
-		}
-		if v := req.Get("text"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.text", v.Value())
-		}
-		if v := req.Get("tool_choice"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.tool_choice", v.Value())
-		}
-		if v := req.Get("tools"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.tools", v.Value())
-		}
-		if v := req.Get("top_logprobs"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.top_logprobs", v.Int())
-		}
-		if v := req.Get("top_p"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.top_p", v.Float())
-		}
-		if v := req.Get("truncation"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.truncation", v.String())
-		}
-		if v := req.Get("user"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.user", v.Value())
-		}
-		if v := req.Get("metadata"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.metadata", v.Value())
-		}
-	}
+	completed = st.RequestEcho.apply(completed, "response.")
 
 	type completedOutputItem struct {
 		index int
@@ -303,14 +452,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 	rawJSON = bytes.TrimSpace(rawJSON)
 	if !st.RequestInitialized {
-		st.RequestJSON = pickRequestJSON(originalRequestRawJSON, requestRawJSON)
-		st.ToolIndex = newResponsesToolIndex(gjson.ParseBytes(st.RequestJSON))
+		requestRoot := gjson.ParseBytes(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
+		st.ToolIndex = newResponsesToolIndex(requestRoot)
+		st.RequestEcho = extractResponsesRequestEcho(requestRoot)
 		st.RequestInitialized = true
 	}
 	if len(rawJSON) == 0 {
 		return nil
 	}
-	requestForNamespace := st.RequestJSON
 	isDone := bytes.Equal(rawJSON, []byte("[DONE]"))
 	if isDone && (!st.Started || st.CompletedEmitted) {
 		return [][]byte{}
@@ -751,7 +900,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			return out
 		}
 		st.CompletedEmitted = true
-		out = append(out, buildResponsesCompletedEvent(st, requestForNamespace, nextSeq))
+		out = append(out, buildResponsesCompletedEvent(st, nextSeq))
 		return out
 	}
 
@@ -942,79 +1091,21 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	resp, _ = sjson.SetBytes(resp, "created_at", created)
 
 	// Echo request fields when available (aligns with streaming path behavior)
+	echo := responsesRequestEcho{}
 	if len(requestRawJSON) > 0 {
-		req := gjson.ParseBytes(requestRawJSON)
-		if v := req.Get("instructions"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "instructions", v.String())
+		echo = extractResponsesRequestEcho(gjson.ParseBytes(requestRawJSON))
+		// Also support max_tokens from chat completion style
+		if !echo.hasMaxOutputTokens && echo.hasMaxTokens {
+			echo.maxOutputTokens, echo.hasMaxOutputTokens = echo.maxTokens, true
 		}
-		if v := req.Get("max_output_tokens"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "max_output_tokens", v.Int())
-		} else {
-			// Also support max_tokens from chat completion style
-			if v = req.Get("max_tokens"); v.Exists() {
-				resp, _ = sjson.SetBytes(resp, "max_output_tokens", v.Int())
-			}
-		}
-		if v := req.Get("max_tool_calls"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "max_tool_calls", v.Int())
-		}
-		if v := req.Get("model"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "model", v.String())
-		} else if v = root.Get("model"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "model", v.String())
-		}
-		if v := req.Get("parallel_tool_calls"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "parallel_tool_calls", v.Bool())
-		}
-		if v := req.Get("previous_response_id"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "previous_response_id", v.String())
-		}
-		if v := req.Get("prompt_cache_key"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "prompt_cache_key", v.String())
-		}
-		if v := req.Get("reasoning"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "reasoning", v.Value())
-		}
-		if v := req.Get("safety_identifier"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "safety_identifier", v.String())
-		}
-		if v := req.Get("service_tier"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "service_tier", v.String())
-		}
-		if v := req.Get("store"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "store", v.Bool())
-		}
-		if v := req.Get("temperature"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "temperature", v.Float())
-		}
-		if v := req.Get("text"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "text", v.Value())
-		}
-		if v := req.Get("tool_choice"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "tool_choice", v.Value())
-		}
-		if v := req.Get("tools"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "tools", v.Value())
-		}
-		if v := req.Get("top_logprobs"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "top_logprobs", v.Int())
-		}
-		if v := req.Get("top_p"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "top_p", v.Float())
-		}
-		if v := req.Get("truncation"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "truncation", v.String())
-		}
-		if v := req.Get("user"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "user", v.Value())
-		}
-		if v := req.Get("metadata"); v.Exists() {
-			resp, _ = sjson.SetBytes(resp, "metadata", v.Value())
-		}
-	} else if v := root.Get("model"); v.Exists() {
-		// Fallback model from response
-		resp, _ = sjson.SetBytes(resp, "model", v.String())
 	}
+	if !echo.hasModel {
+		// Fallback model from response
+		if v := root.Get("model"); v.Exists() {
+			echo.model, echo.hasModel = v.String(), true
+		}
+	}
+	resp = echo.apply(resp, "")
 
 	// Build output list from choices[...]
 	var outputItems [][]byte
@@ -1025,8 +1116,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	}
 	rcText := rc.String()
 	includeReasoning := rcText != ""
-	if !includeReasoning && len(requestRawJSON) > 0 {
-		includeReasoning = gjson.GetBytes(requestRawJSON, "reasoning").Exists()
+	if !includeReasoning {
+		includeReasoning = echo.hasReasoning
 	}
 	if includeReasoning {
 		rid := id
