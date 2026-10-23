@@ -830,14 +830,19 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		}()
 		var terminalDelivered bool
 		var sawFinishReason bool
+		var promptBlockErr error
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
-			if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(line)) {
+			rawPayload := helps.JSONPayload(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
 				sawFinishReason = true
+			}
+			if promptBlockErr == nil && responseFormat != sdktranslator.FormatGemini {
+				promptBlockErr = geminiStreamPromptBlockError(rawPayload)
 			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				streamUsage.Observe(detail, true)
@@ -882,14 +887,17 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		if ctx.Err() != nil {
 			return
 		}
-		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
-			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
-			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
-			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
-				reporter.PublishFailure(ctx, truncErr)
+		termErr := promptBlockErr
+		if termErr == nil && responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
+			termErr = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+		}
+		if termErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, termErr)
+			if !streamUsage.PublishFailure(ctx, reporter, termErr) {
+				reporter.PublishFailure(ctx, termErr)
 			}
 			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case out <- cliproxyexecutor.StreamChunk{Err: termErr}:
 			case <-ctx.Done():
 			}
 			return
@@ -1038,14 +1046,19 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		}()
 		var terminalDelivered bool
 		var sawFinishReason bool
+		var promptBlockErr error
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
-			if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(line)) {
+			rawPayload := helps.JSONPayload(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
 				sawFinishReason = true
+			}
+			if promptBlockErr == nil && responseFormat != sdktranslator.FormatGemini {
+				promptBlockErr = geminiStreamPromptBlockError(rawPayload)
 			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				streamUsage.Observe(detail, true)
@@ -1090,14 +1103,17 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		if ctx.Err() != nil {
 			return
 		}
-		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
-			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
-			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
-			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
-				reporter.PublishFailure(ctx, truncErr)
+		termErr := promptBlockErr
+		if termErr == nil && responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
+			termErr = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+		}
+		if termErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, termErr)
+			if !streamUsage.PublishFailure(ctx, reporter, termErr) {
+				reporter.PublishFailure(ctx, termErr)
 			}
 			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case out <- cliproxyexecutor.StreamChunk{Err: termErr}:
 			case <-ctx.Done():
 			}
 			return
