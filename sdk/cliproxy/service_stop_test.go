@@ -30,11 +30,10 @@ func TestServiceShutdown_ViolentShutdownImmediatelyClosesServer(t *testing.T) {
 	}
 
 	server := api.NewServer(cfg, nil, nil, "")
-	// Start returns once Stop has closed the listener.
-	serverStopped := make(chan struct{})
+	// Start returns once Stop has closed the listener, with nil after a normal Stop.
+	serverStopped := make(chan error, 1)
 	go func() {
-		defer close(serverStopped)
-		_ = server.Start()
+		serverStopped <- server.Start()
 	}()
 
 	// Wait briefly for server to bind.
@@ -75,9 +74,13 @@ func TestServiceShutdown_ViolentShutdownImmediatelyClosesServer(t *testing.T) {
 	}
 
 	// Verify the server stopped listening. A dial can't tell: during a full test run
-	// another package may already be listening on the freed port.
+	// another package may already be listening on the freed port. Start must also
+	// have succeeded: had it failed to bind, the dial above reached another listener.
 	select {
-	case <-serverStopped:
+	case errStart := <-serverStopped:
+		if errStart != nil {
+			t.Fatalf("server Start error = %v, want nil after Stop", errStart)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("expected server to be closed, but it is still serving")
 	}
@@ -159,7 +162,10 @@ func TestServiceRun_ShutdownContextFreshAtExit(t *testing.T) {
 	// serverErr once Start returns. A dial can't tell: during a full test run
 	// another package may already be listening on the freed port.
 	select {
-	case <-service.serverErr:
+	case errServer := <-service.serverErr:
+		if errServer != nil {
+			t.Fatalf("server Start error = %v, want nil after Stop", errServer)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("expected server to be closed after Run exit, but it is still serving")
 	}
