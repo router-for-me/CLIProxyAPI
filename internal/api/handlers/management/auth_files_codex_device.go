@@ -88,7 +88,9 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		if !oauthSessions.BeginSave(state, "codex") {
 			return
 		}
-		if _, errSave := h.saveTokenRecord(ctx, record); errSave != nil {
+		saveCtx, stopSave := context.WithTimeout(ctx, oauthSessionTTL)
+		defer stopSave()
+		if _, errSave := h.saveTokenRecord(saveCtx, record); errSave != nil {
 			log.Error("Failed to save Codex device authentication")
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			return
