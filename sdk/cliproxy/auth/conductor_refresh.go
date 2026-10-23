@@ -584,8 +584,11 @@ func authStorageIdentity(auth *Auth) ([]byte, bool) {
 		return nil, false
 	}
 	raw := bytes.TrimSpace(rawProvider.RawJSON())
+	// UseNumber keeps 64-bit integers exact; float64 would make neighbouring ids equal.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	var value any
-	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
+	if errDecode := decoder.Decode(&value); errDecode != nil || decoder.InputOffset() != int64(len(raw)) {
 		return raw, true
 	}
 	if fields, isObject := value.(map[string]any); isObject {

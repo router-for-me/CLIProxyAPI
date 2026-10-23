@@ -364,6 +364,19 @@ func TestCredentialsChangedStorageIgnoresMetadataAndOpaqueStorage(t *testing.T) 
 	}
 }
 
+// Plugin storage may identify the credential by a 64-bit number; float64 would make neighbours equal.
+func TestCredentialsChangedStorageKeepsLargeIntegers(t *testing.T) {
+	plugin := func(id string) *Auth {
+		return &Auth{Provider: "plugin-provider", Storage: &rawJSONTestStorage{raw: []byte(`{"account":` + id + `}`)}}
+	}
+	if !CredentialsChanged(plugin("9007199254740992"), plugin("9007199254740993")) {
+		t.Fatal("storage identities that differ in a 64-bit integer counted as equal")
+	}
+	if !CredentialsChanged(plugin("1"), plugin("1} x")) {
+		t.Fatal("storage with trailing bytes after the JSON value counted as the same identity")
+	}
+}
+
 // A 401 rejects the access token for the account it was sent for. The same token under
 // another account must not stay marked as rejected.
 func TestSnapshotForAccountSwitchDropsRejectedToken(t *testing.T) {
