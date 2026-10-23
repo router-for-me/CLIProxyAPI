@@ -886,6 +886,9 @@ func withCodexClientRequestSnapshot(ctx context.Context, clientHeaders ...http.H
 }
 
 // IsCodexClientRequest reports whether the request originates from a Codex client.
+// A snapshot from withCodexClientRequestSnapshot is authoritative for its ctx chain:
+// the gin Context is not consulted again, even when the snapshot is false.
+// Explicit clientHeaders are always checked.
 func IsCodexClientRequest(ctx context.Context, clientHeaders ...http.Header) bool {
 	if ctx != nil {
 		snapshot, snapshotted := ctx.Value(codexClientRequestKey{}).(bool)
