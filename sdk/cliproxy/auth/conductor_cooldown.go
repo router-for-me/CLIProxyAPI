@@ -1112,14 +1112,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = time.Time{}
 							} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
 								state.NextRetryAfter = now.Add(*result.RetryAfter)
-							} else if isExplicitModelNotFoundForState(result.Error, modelKey, result.UpstreamModel, m.lookupAPIKeyUpstreamModel(auth.ID, modelKey)) {
+							} else if isExplicitModelNotFoundForState(result.Error, modelKey, result.UpstreamModel,
+								m.lookupAPIKeyUpstreamModel(auth.ID, modelKey),
+								authSelectionModelFromOptions(result.Options, "")) {
 								// A 404 that explicitly names this model as unsupported is
 								// demonstrably persistent and keeps the long cooldown. The
 								// structured message names the upstream identifier, which
 								// under API-key alias mapping can be the URL model the
-								// alias expanded to — a third name distinct from both the
-								// route key and the wire model the payload override left
-								// behind (#5514 review).
+								// alias expanded to, and under auth-selection override the
+								// model the selection resolved to — names distinct from
+								// both the route key and the wire model the payload
+								// override left behind (#5514 review).
 								state.NextRetryAfter = now.Add(modelSupportCooldown)
 							} else {
 								// Concurrent in-flight failures complete in any order: a
