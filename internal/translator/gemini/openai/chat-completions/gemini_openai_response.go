@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -26,7 +27,11 @@ type convertGeminiResponseToOpenAIChatParams struct {
 	// FunctionIndex tracks tool call indices per candidate index to support multiple candidates.
 	FunctionIndex            map[int]int
 	SawToolCall              map[int]bool
+	SawFinishReason          map[int]bool
 	UpstreamFinishReason     map[int]string
+	ModelVersion             string
+	ResponseID               string
+	PendingUsageMetadata     []byte
 	SanitizedNameMap         map[string]string
 	SanitizedNameMapResolved bool
 }
@@ -55,6 +60,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			UnixTimestamp:            0,
 			FunctionIndex:            make(map[int]int),
 			SawToolCall:              make(map[int]bool),
+			SawFinishReason:          make(map[int]bool),
 			UpstreamFinishReason:     make(map[int]string),
 			SanitizedNameMap:         util.SanitizedToolNameMap(originalRequestRawJSON),
 			SanitizedNameMapResolved: true,
@@ -68,6 +74,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	}
 	if p.SawToolCall == nil {
 		p.SawToolCall = make(map[int]bool)
+	}
+	if p.SawFinishReason == nil {
+		p.SawFinishReason = make(map[int]bool)
 	}
 	if p.UpstreamFinishReason == nil {
 		p.UpstreamFinishReason = make(map[int]string)
@@ -84,7 +93,37 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return [][]byte{}
+		var indices []int
+		for idx, reason := range p.UpstreamFinishReason {
+			if reason != "" && !p.SawFinishReason[idx] {
+				indices = append(indices, idx)
+			}
+		}
+		if len(indices) == 0 {
+			return [][]byte{}
+		}
+		sort.Ints(indices)
+		var doneChunks [][]byte
+		for _, idx := range indices {
+			p.SawFinishReason[idx] = true
+			finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(p.UpstreamFinishReason[idx], p.SawToolCall[idx])
+			template := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
+			template, _ = sjson.SetBytes(template, "created", p.UnixTimestamp)
+			if p.ModelVersion != "" {
+				template, _ = sjson.SetBytes(template, "model", p.ModelVersion)
+			}
+			if p.ResponseID != "" {
+				template, _ = sjson.SetBytes(template, "id", p.ResponseID)
+			}
+			if len(p.PendingUsageMetadata) > 0 {
+				template = applyGeminiOpenAIUsageMetadata(template, gjson.ParseBytes(p.PendingUsageMetadata))
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.index", idx)
+			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
+			doneChunks = append(doneChunks, template)
+		}
+		return doneChunks
 	}
 
 	// Initialize the OpenAI SSE base template.
@@ -93,7 +132,10 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 	// Extract and set the model version.
 	if modelVersionResult := gjson.GetBytes(rawJSON, "modelVersion"); modelVersionResult.Exists() {
-		baseTemplate, _ = sjson.SetBytes(baseTemplate, "model", modelVersionResult.String())
+		p.ModelVersion = modelVersionResult.String()
+		baseTemplate, _ = sjson.SetBytes(baseTemplate, "model", p.ModelVersion)
+	} else if p.ModelVersion != "" {
+		baseTemplate, _ = sjson.SetBytes(baseTemplate, "model", p.ModelVersion)
 	}
 
 	// Extract and set the creation timestamp.
@@ -109,31 +151,19 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 	// Extract and set the response ID.
 	if responseIDResult := gjson.GetBytes(rawJSON, "responseId"); responseIDResult.Exists() {
-		baseTemplate, _ = sjson.SetBytes(baseTemplate, "id", responseIDResult.String())
+		p.ResponseID = responseIDResult.String()
+		baseTemplate, _ = sjson.SetBytes(baseTemplate, "id", p.ResponseID)
+	} else if p.ResponseID != "" {
+		baseTemplate, _ = sjson.SetBytes(baseTemplate, "id", p.ResponseID)
 	}
 
 	// Extract and set usage metadata (token counts).
 	// Usage is applied to the base template so it appears in the chunks.
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
-		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int()+usageResult.Get("thoughtsTokenCount").Int())
-		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
-			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.total_tokens", totalTokenCountResult.Int())
-		}
-		promptTokenCount := usageResult.Get("promptTokenCount").Int()
-		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.prompt_tokens", promptTokenCount)
-		if thoughtsTokenCount > 0 {
-			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
-		}
-		// Include cached token count if present (indicates prompt caching is working)
-		if cachedTokenCount > 0 {
-			var err error
-			baseTemplate, err = sjson.SetBytes(baseTemplate, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
-			if err != nil {
-				log.Warnf("gemini openai response: failed to set cached_tokens in streaming: %v", err)
-			}
-		}
+		baseTemplate = applyGeminiOpenAIUsageMetadata(baseTemplate, usageResult)
+		p.PendingUsageMetadata = nil
+	} else if pendingUsage := gjson.GetBytes(rawJSON, "cpaUsageMetadata"); pendingUsage.Exists() {
+		p.PendingUsageMetadata = append(p.PendingUsageMetadata[:0], pendingUsage.Raw...)
 	}
 
 	var responseStrings [][]byte
@@ -260,16 +290,10 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			isFinalChunk := upstreamFinishReason != "" && usageExists
 
 			if isFinalChunk {
-				var finishReason string
-				if sawToolCall {
-					finishReason = "tool_calls"
-				} else if upstreamFinishReason == "MAX_TOKENS" {
-					finishReason = "max_tokens"
-				} else {
-					finishReason = "stop"
-				}
+				p.SawFinishReason[candidateIndex] = true
+				finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(upstreamFinishReason, sawToolCall)
 				template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
+				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
 			}
 
 			responseStrings = append(responseStrings, template)
@@ -278,7 +302,14 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	} else {
 		// If there are no candidates (e.g., a pure usageMetadata chunk), return the usage chunk if present.
 		if gjson.GetBytes(rawJSON, "usageMetadata").Exists() && len(responseStrings) == 0 {
-			responseStrings = append(responseStrings, append([]byte(nil), baseTemplate...))
+			chunk := append([]byte(nil), baseTemplate...)
+			if upstreamFinishReason := p.UpstreamFinishReason[0]; upstreamFinishReason != "" && !p.SawFinishReason[0] {
+				p.SawFinishReason[0] = true
+				finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(upstreamFinishReason, p.SawToolCall[0])
+				chunk, _ = sjson.SetBytes(chunk, "choices.0.finish_reason", finishReason)
+				chunk, _ = sjson.SetBytes(chunk, "choices.0.native_finish_reason", nativeFinishReason)
+			}
+			responseStrings = append(responseStrings, chunk)
 		}
 	}
 
@@ -357,7 +388,11 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 			// Set finish reason.
 			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
-				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "finish_reason", strings.ToLower(finishReasonResult.String()))
+				finishReason := strings.ToLower(finishReasonResult.String())
+				if isGeminiContentFilterFinishReason(finishReasonResult.String()) {
+					finishReason = "content_filter"
+				}
+				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "finish_reason", finishReason)
 				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "native_finish_reason", strings.ToLower(finishReasonResult.String()))
 			}
 
@@ -456,4 +491,53 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	return template
+}
+
+func resolveGeminiOpenAIFinishReason(upstreamFinishReason string, sawToolCall bool) (finishReason, nativeFinishReason string) {
+	switch {
+	case sawToolCall:
+		finishReason = "tool_calls"
+	case upstreamFinishReason == "MAX_TOKENS":
+		finishReason = "max_tokens"
+	case isGeminiContentFilterFinishReason(upstreamFinishReason):
+		finishReason = "content_filter"
+	default:
+		finishReason = "stop"
+	}
+	nativeFinishReason = "stop"
+	if upstreamFinishReason != "" {
+		nativeFinishReason = strings.ToLower(upstreamFinishReason)
+	}
+	return finishReason, nativeFinishReason
+}
+
+func applyGeminiOpenAIUsageMetadata(template []byte, usageResult gjson.Result) []byte {
+	cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
+	template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int()+usageResult.Get("thoughtsTokenCount").Int())
+	if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
+		template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
+	}
+	promptTokenCount := usageResult.Get("promptTokenCount").Int()
+	thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+	template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount)
+	if thoughtsTokenCount > 0 {
+		template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
+	}
+	if cachedTokenCount > 0 {
+		var err error
+		template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+		if err != nil {
+			log.Warnf("gemini openai response: failed to set cached_tokens in streaming: %v", err)
+		}
+	}
+	return template
+}
+
+func isGeminiContentFilterFinishReason(reason string) bool {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL":
+		return true
+	default:
+		return false
+	}
 }

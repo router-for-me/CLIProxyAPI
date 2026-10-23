@@ -582,6 +582,7 @@ func TestConvertGeminiResponseToClaudeNonStream_SafetyAndMalformedFunctionCallRe
 		{finishReason: "SPII", wantReason: "refusal"},
 		{finishReason: "BLOCKLIST", wantReason: "refusal"},
 		{finishReason: "IMAGE_SAFETY", wantReason: "refusal"},
+		{finishReason: "MALFORMED_RESPONSE", wantReason: "refusal"},
 		{finishReason: "MAX_TOKENS", wantReason: "max_tokens"},
 		{finishReason: "STOP", wantReason: "end_turn"},
 	}
