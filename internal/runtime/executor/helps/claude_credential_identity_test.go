@@ -234,3 +234,29 @@ func TestApplyClaudeCredentialMetadataRequiresAccountUUID(t *testing.T) {
 		t.Fatalf("missing credential identity error = %T %v, want credential-scoped", errApply, errApply)
 	}
 }
+
+// ClaudeAuthKind must classify exactly like Auth.AuthKind; it only changes how
+// the metadata is read.
+func TestClaudeAuthKindMatchesAuthKind(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+	}{
+		{"nil auth", nil},
+		{"empty", &cliproxyauth.Auth{}},
+		{"auth_kind attribute", &cliproxyauth.Auth{Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"auth_kind": "api_key"}}},
+		{"auth_kind metadata", &cliproxyauth.Auth{Metadata: map[string]any{"auth_kind": "api-key"}}},
+		{"api_key attribute", &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-api03-x"}}},
+		{"api_key attribute with oauth metadata", &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-api03-x"}, Metadata: map[string]any{"access_token": "sk-ant-oat-x"}}},
+		{"oauth token metadata", &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "sk-ant-oat-x"}}},
+		{"nested token metadata", &cliproxyauth.Auth{Metadata: map[string]any{"token": map[string]any{"access_token": "x"}}}},
+		{"use_siwc metadata", &cliproxyauth.Auth{Metadata: map[string]any{"use_siwc": true}}},
+		{"non-string auth_kind", &cliproxyauth.Auth{Metadata: map[string]any{"auth_kind": 1}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, want := ClaudeAuthKind(tc.auth), tc.auth.AuthKind(); got != want {
+				t.Fatalf("ClaudeAuthKind() = %q, want AuthKind() %q", got, want)
+			}
+		})
+	}
+}
