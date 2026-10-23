@@ -115,15 +115,20 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 	}
 
 	result := make([]map[string]any, 0, len(models))
+	templateModels := make(map[string]bool, len(models))
 	for _, model := range models {
 		id := strings.TrimSpace(stringModelValue(model, "id"))
 		if id == "" {
 			continue
 		}
 
-		metadataID := codexClientMetadataModelID(id)
+		metadataID := strings.TrimSpace(stringModelValue(model, "metadata_model_id"))
+		if metadataID == "" {
+			metadataID = codexClientMetadataModelID(id)
+		}
 
 		if template, ok := templates[metadataID]; ok {
+			templateModels[id] = true
 			entry := cloneCodexClientModelMap(template)
 			entry["slug"] = id
 			info := registry.LookupModelInfo(id)
@@ -162,7 +167,7 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		result = append(result, entry)
 	}
 
-	applyCodexClientNonTemplatePriorities(result, templates)
+	applyCodexClientNonTemplatePriorities(result, templates, templateModels)
 
 	sort.SliceStable(result, func(i, j int) bool {
 		return codexClientModelPriority(result[i]) < codexClientModelPriority(result[j])
@@ -182,7 +187,7 @@ func maxCodexClientTemplatePriority(templates map[string]map[string]any) int {
 	return maxPriority
 }
 
-func applyCodexClientNonTemplatePriorities(result []map[string]any, templates map[string]map[string]any) {
+func applyCodexClientNonTemplatePriorities(result []map[string]any, templates map[string]map[string]any, templateModels map[string]bool) {
 	if len(result) == 0 {
 		return
 	}
@@ -197,7 +202,7 @@ func applyCodexClientNonTemplatePriorities(result []map[string]any, templates ma
 	pending := make([]nonTemplateEntry, 0)
 	for index, entry := range result {
 		slug := stringModelValue(entry, "slug")
-		if _, ok := templates[codexClientMetadataModelID(slug)]; ok {
+		if templateModels[slug] {
 			continue
 		}
 		displayName := stringModelValue(entry, "display_name")

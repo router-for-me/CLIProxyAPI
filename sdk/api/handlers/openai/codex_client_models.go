@@ -26,7 +26,10 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 		toolSearchCapabilityForModel = h.SupportsNativeToolSearchModel
 	}
 	modelRegistry := registry.GetGlobalRegistry()
-	return codexmodels.BuildResponseForClientWithToolCapabilities(h.Models(), modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
+	response := codexmodels.BuildResponseForClientWithToolCapabilities(h.Models(), modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
+	ultrafast := h != nil && h.BaseAPIHandler != nil && h.AuthManager.HasCodexUltrafast()
+	codexmodels.ApplyUltrafastAvailability(response, func(string) (string, bool) { return "", ultrafast })
+	return response
 }
 
 // CodexClientModelsResponse builds a Codex client model response.
