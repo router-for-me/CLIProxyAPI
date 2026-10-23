@@ -323,6 +323,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 			}
 		}
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(cfg))
+	case "zai":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("zai", cfg))
 	case "devin":
 		s.coreManager.RegisterExecutor(executor.NewDevinExecutor(cfg))
 	case "meta":

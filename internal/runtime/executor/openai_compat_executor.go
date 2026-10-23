@@ -51,11 +51,41 @@ func ensureOpenAICompatUserAgent(r *http.Request, clientHeaders ...http.Header) 
 type OpenAICompatExecutor struct {
 	provider string
 	cfg      *config.Config
+	// claude serves auths flagged with the Anthropic messages upstream
+	// protocol (e.g. Z.ai Start Plan accounts hitting the zcode-plan
+	// gateway), reusing the shared Claude translation pipeline.
+	claude *ClaudeExecutor
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
-	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
+	return &OpenAICompatExecutor{provider: provider, cfg: cfg, claude: &ClaudeExecutor{cfg: cfg, requestLogProvider: provider}}
+}
+
+// anthropicUpstreamAuth reports whether the auth is flagged to speak the
+// Anthropic messages protocol instead of OpenAI chat completions.
+func anthropicUpstreamAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["upstream_protocol"]), "anthropic")
+}
+
+// isZAIAuth reports whether the auth belongs to the Z.ai provider: OAuth
+// accounts created by the ZCode login flow or API-key compat entries named
+// "zai". Z.ai auths keep their credential in custom headers instead of the
+// plain OpenAI-compatible Authorization header.
+func isZAIAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "zai") {
+		return true
+	}
+	if auth.Attributes != nil {
+		return strings.EqualFold(strings.TrimSpace(auth.Attributes["provider_key"]), "zai") || strings.EqualFold(strings.TrimSpace(auth.Attributes["compat_name"]), "zai")
+	}
+	return false
 }
 
 // Identifier implements cliproxyauth.ProviderExecutor.
@@ -67,7 +97,7 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		return nil
 	}
 	_, apiKey := e.resolveCredentials(auth)
-	if strings.TrimSpace(apiKey) != "" {
+	if strings.TrimSpace(apiKey) != "" && !isZAIAuth(auth) {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	ensureOpenAICompatUserAgent(req)
@@ -96,6 +126,9 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 }
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if anthropicUpstreamAuth(auth) {
+		return e.claude.Execute(ctx, auth, req, opts)
+	}
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
@@ -336,6 +369,9 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if anthropicUpstreamAuth(auth) {
+		return e.claude.ExecuteStream(ctx, auth, req, opts)
+	}
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)

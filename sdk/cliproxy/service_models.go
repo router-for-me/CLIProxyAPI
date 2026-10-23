@@ -186,6 +186,14 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "zai":
+		models = registry.GetZAIModels()
+		// Start Plan (free tier) accounts may only call the models listed in
+		// their balance buckets, captured at login; restrict the catalog.
+		if list := zaiStartPlanModelsAttribute(a); list != "" {
+			models = buildZaiStartPlanModels(models, strings.Split(list, ","))
+		}
+		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := resolveConfigXAIKeyForConfig(cfg, a); entry != nil {
@@ -747,6 +755,60 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		addModel(&clone)
 	}
 	return out
+}
+
+// zaiStartPlanModelsAttribute reads the comma-separated Start Plan model
+// whitelist captured at Z.ai login from the auth metadata or attributes.
+func zaiStartPlanModelsAttribute(a *coreauth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	if v, ok := a.Metadata["start_plan_models"].(string); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	if a.Attributes != nil {
+		return strings.TrimSpace(a.Attributes["start_plan_models"])
+	}
+	return ""
+}
+
+// buildZaiStartPlanModels restricts the Z.ai catalog to the Start Plan model
+// whitelist, reusing the static entry when known and synthesizing the rest.
+func buildZaiStartPlanModels(static []*ModelInfo, ids []string) []*ModelInfo {
+	index := make(map[string]*ModelInfo, len(static))
+	for _, model := range static {
+		if model != nil {
+			index[strings.ToLower(model.ID)] = model
+		}
+	}
+	models := make([]*ModelInfo, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if model, ok := index[id]; ok {
+			clone := *model
+			models = append(models, &clone)
+			continue
+		}
+		models = append(models, &ModelInfo{
+			ID:          id,
+			Object:      "model",
+			OwnedBy:     "zai",
+			Type:        "openai-compatibility",
+			DisplayName: id,
+			Name:        id,
+		})
+	}
+	return models
 }
 
 // matchWildcard performs case-insensitive wildcard matching where '*' matches any substring.

@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/zai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -239,6 +240,23 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	coreauth.ApplyAuthPriorityMetadata(a, metadata)
 	if errWeight := coreauth.ApplyAuthWeightMetadata(a, metadata); errWeight != nil {
 		return nil, fmt.Errorf("invalid auth weight in %s: %w", filepath.Base(fullPath), errWeight)
+	}
+	if provider == "zai" {
+		a.Attributes[coreauth.AttributeAuthKind] = coreauth.AuthKindOAuth
+		if base, ok := metadata["base_url"].(string); ok {
+			a.Attributes["base_url"] = strings.TrimSpace(base)
+		}
+		for _, key := range []string{"api_key", "access_token"} {
+			if value, ok := metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+				a.Attributes[coreauth.AttributeAPIKey] = strings.TrimSpace(value)
+				break
+			}
+		}
+		// Start Plan auths speak the Anthropic messages protocol upstream.
+		if upstream, ok := metadata["upstream_protocol"].(string); ok && strings.EqualFold(strings.TrimSpace(upstream), "anthropic") {
+			a.Attributes["upstream_protocol"] = "anthropic"
+			refreshZAIStartPlanIdentity(metadata, id)
+		}
 	}
 	// Read note from auth file.
 	if rawNote, ok := metadata["note"]; ok {
@@ -532,4 +550,41 @@ func ExtractExcludedModelsFromMetadata(metadata map[string]any) ([]string, error
 		}
 	}
 	return result, errInvalid
+}
+
+// refreshZAIStartPlanIdentity regenerates the official-client identity headers
+// (User-Agent, app version, OS headers, X-Device-Mid) for a Start Plan auth
+// file at load time, so header changes shipped in newer builds reach accounts
+// saved by older ones without a re-login. Older files that predate device_mid
+// get a stable derived id backfilled so the headers and the request
+// attribution metadata share one device identity.
+func refreshZAIStartPlanIdentity(metadata map[string]any, authID string) {
+	deviceMid := zai.StartPlanDeviceMid(metadata, authID)
+	if deviceMid == "" {
+		return
+	}
+	metadata["device_mid"] = deviceMid
+	headers := make(map[string]string, 16)
+	switch existing := metadata["headers"].(type) {
+	case map[string]string:
+		for name, value := range existing {
+			if strings.TrimSpace(name) != "" && strings.TrimSpace(value) != "" {
+				headers[name] = value
+			}
+		}
+	case map[string]any:
+		for name, value := range existing {
+			text, ok := value.(string)
+			if !ok {
+				continue
+			}
+			if strings.TrimSpace(name) != "" && strings.TrimSpace(text) != "" {
+				headers[name] = text
+			}
+		}
+	}
+	for name, value := range zai.ZCodeSourceHeaders(deviceMid) {
+		headers[name] = value
+	}
+	metadata["headers"] = headers
 }

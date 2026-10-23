@@ -186,6 +186,25 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
+	s.engine.GET("/zai/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "state is required"})
+			return
+		}
+		if _, errWrite := managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "zai", state, code, errStr); errWrite != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired OAuth callback"})
+			return
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
 	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
 		code := c.Query("code")
 		state := c.Query("state")

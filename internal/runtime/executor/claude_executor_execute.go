@@ -265,6 +265,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if errMidSystem := validateClaudeMidSystemMessageModel(bodyForUpstream, confirmedClaudeCode, isAnthropicUpstreamBase(baseURL)); errMidSystem != nil {
 		return resp, errMidSystem
 	}
+	// The ZCode Start Plan gateway rejects requests whose leading system
+	// blocks do not mirror the official client prompt; prepend the required
+	// fingerprint blocks last so cloaking and payload rules cannot reorder
+	// them away from the front.
+	if isZaiStartPlanUpstreamURL(url) {
+		bodyForUpstream = injectZaiStartPlanSystem(bodyForUpstream)
+	}
+	bodyForUpstream = applyZCodePlanRequestIdentity(auth, incomingHeaders, originalPayload, bodyForUpstream, opts.Metadata, req.Metadata)
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {

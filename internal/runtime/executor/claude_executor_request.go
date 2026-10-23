@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	zaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/zai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
@@ -127,6 +128,35 @@ var claudeManagedBetaSet = func() map[string]bool {
 	}
 	return set
 }()
+
+// zaiAnthropicUpstreamAuth reports whether the auth is a Z.ai Start Plan
+// credential flagged to speak the Anthropic messages protocol at the
+// zcode-plan gateway.
+func zaiAnthropicUpstreamAuth(auth *cliproxyauth.Auth) bool {
+	return anthropicUpstreamAuth(auth) && isZAIAuth(auth)
+}
+
+// applyZCodePlanRequestIdentity stamps the Anthropic metadata.user_id
+// attribution the official ZCode client attaches to every zcode-plan model
+// request: a JSON string with the account device id (the same value as the
+// X-Device-Mid header) and the request session id. Request-level metadata
+// overrides anything the caller already carried, mirroring the official
+// client's precedence over provider-static identity.
+func applyZCodePlanRequestIdentity(auth *cliproxyauth.Auth, incomingHeaders http.Header, originalPayload, body []byte, metadataSets ...map[string]any) []byte {
+	if !zaiAnthropicUpstreamAuth(auth) {
+		return body
+	}
+	deviceMid := zaiauth.StartPlanDeviceMid(auth.Metadata, auth.ID)
+	if deviceMid == "" {
+		return body
+	}
+	sessionID := helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, body, false, metadataSets...)
+	updated, errSet := sjson.SetBytes(body, "metadata.user_id", zaiauth.ZCodeMetadataUserID(deviceMid, sessionID))
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
 
 func isManagedClaudeBeta(beta string) bool {
 	return claudeManagedBetaSet[strings.TrimSpace(beta)]
