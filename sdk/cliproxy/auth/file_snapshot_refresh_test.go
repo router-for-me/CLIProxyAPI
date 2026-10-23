@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -161,5 +162,22 @@ func TestSynthesizedKimiDomainChangeIsACredentialChange(t *testing.T) {
 	}
 	if coreauth.CredentialsChanged(com, kimi("kimi.com")) {
 		t.Fatal("the same Kimi file counted as a credential change")
+	}
+}
+
+// The auth package cannot import the executor helpers, so it carries a copy of the Devin default host; this pins the copy.
+func TestDevinDefaultEndpointMatchesTheExecutor(t *testing.T) {
+	devin := func(baseURL string) *coreauth.Auth {
+		a := &coreauth.Auth{Provider: "devin", Metadata: map[string]any{"session_token": "same-token"}}
+		if baseURL != "" {
+			a.Metadata["base_url"] = baseURL
+		}
+		return a
+	}
+	if coreauth.CredentialsChanged(devin(helps.DevinDefaultBaseURL), devin("")) {
+		t.Fatalf("the executor's default Devin host %q is not the default the identity assumes", helps.DevinDefaultBaseURL)
+	}
+	if !coreauth.CredentialsChanged(devin("https://devin.example"), devin("")) {
+		t.Fatal("dropping a custom Devin base URL did not count as a change")
 	}
 }

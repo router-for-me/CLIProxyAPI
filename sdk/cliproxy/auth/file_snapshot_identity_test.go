@@ -646,6 +646,21 @@ func TestResultFromPreviousTargetIsIgnoredAfterRequestTargetChange(t *testing.T)
 		{"xai request mode", "xai",
 			func(a *Auth) { a.Metadata["using_api"] = false },
 			func(a *Auth) { a.Metadata["using_api"] = true }},
+		{"xai mode on the cli proxy", "xai",
+			func(a *Auth) {
+				a.Metadata["base_url"] = "https://cli-chat-proxy.grok.com/v1"
+				a.Metadata["using_api"] = false
+			},
+			func(a *Auth) {
+				a.Metadata["base_url"] = "https://cli-chat-proxy.grok.com/v1"
+				a.Metadata["using_api"] = true
+			}},
+		{"devin default base url", "devin",
+			func(a *Auth) { a.Metadata["base_url"] = "https://devin.example" },
+			func(a *Auth) {}},
+		{"claude auth kind", "claude",
+			func(a *Auth) { a.Metadata["auth_kind"] = "oauth" },
+			func(a *Auth) { a.Metadata["auth_kind"] = "apikey" }},
 		{"vertex openapi location", "vertex",
 			func(a *Auth) { a.Attributes["openapi_location"] = "us-central1" },
 			func(a *Auth) { a.Attributes["openapi_location"] = "europe-west4" }},
@@ -727,6 +742,15 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	if CredentialsChanged(custom(false), custom(true)) {
 		t.Fatal("a toggled xAI using_api on a custom base URL counted as a credential change")
 	}
+	// On the CLI chat proxy URL the mode still decides which headers are sent.
+	cliProxy := func(using bool) *Auth {
+		a := xai("", using)
+		a.Metadata["base_url"] = "https://cli-chat-proxy.grok.com/v1/"
+		return a
+	}
+	if !CredentialsChanged(cliProxy(false), cliProxy(true)) {
+		t.Fatal("a toggled xAI using_api on the CLI chat proxy URL did not count as a credential change")
+	}
 	// The mode defaults from auth_kind: OAuth uses the CLI chat proxy, anything else the official API.
 	kind := func(kind string, using any) *Auth {
 		a := xai("", using)
@@ -738,6 +762,30 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	}
 	if !CredentialsChanged(kind("oauth", nil), kind("oauth", true)) || !CredentialsChanged(kind("api_key", nil), kind("api_key", false)) {
 		t.Fatal("a using_api that differs from the default of its auth_kind did not count as a credential change")
+	}
+	// Devin without a base_url sends to its default host: dropping a custom one moves the requests, spelling out the default does not.
+	devin := func(baseURL string) *Auth {
+		a := &Auth{Provider: "devin", Metadata: map[string]any{"session_token": "same-token"}}
+		if baseURL != "" {
+			a.Metadata["base_url"] = baseURL
+		}
+		return a
+	}
+	if !CredentialsChanged(devin("https://devin.example"), devin("")) || !CredentialsChanged(devin(""), devin("https://devin.example")) {
+		t.Fatal("dropping or setting a custom Devin base URL did not count as a change")
+	}
+	if CredentialsChanged(devin("https://server.codeium.com/"), devin("")) || CredentialsChanged(devin(""), devin("HTTPS://Server.Codeium.com")) {
+		t.Fatal("spelling out the default Devin base URL counted as a change")
+	}
+	// Claude sends Authorization: Bearer for OAuth and x-api-key for an API key, whatever the token string is.
+	claude := func(kind string) *Auth {
+		return &Auth{Provider: "claude", Metadata: map[string]any{"access_token": "same-token", "auth_kind": kind}}
+	}
+	if !CredentialsChanged(claude("oauth"), claude("api_key")) {
+		t.Fatal("a Claude file moved from OAuth to API key under the same token did not count as a credential change")
+	}
+	if CredentialsChanged(claude("apikey"), claude("api-key")) {
+		t.Fatal("two spellings of the same auth kind counted as a credential change")
 	}
 	vertexIn := func(location, openapi, openapiLocation string) *Auth {
 		a := &Auth{Provider: "vertex", Attributes: map[string]string{}, Metadata: map[string]any{"access_token": "same-token", "project_id": "project-a"}}

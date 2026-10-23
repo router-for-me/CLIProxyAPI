@@ -547,11 +547,17 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 	if authCustomHeaders(existing) != authCustomHeaders(incoming) {
 		return true
 	}
-	// xAI sends OAuth chat to the CLI chat proxy or to the official API depending on using_api, but only on the default endpoint:
-	// a custom base_url is used as it is in both modes.
+	// xAI sends OAuth chat to the CLI chat proxy or to the official API depending on using_api, and on the CLI proxy URL the mode
+	// still picks the headers; a custom base_url is used as it is in both modes, so there the mode changes nothing.
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "xai") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "xai") &&
-		existingEndpoint == normalizeEndpoint(xaiauth.DefaultAPIBaseURL) && incomingEndpoint == existingEndpoint &&
+		incomingEndpoint == existingEndpoint &&
+		(existingEndpoint == normalizeEndpoint(xaiauth.DefaultAPIBaseURL) || existingEndpoint == normalizeEndpoint(xaiauth.CLIChatProxyBaseURL)) &&
 		xaiUsingAPIIdentity(existing) != xaiUsingAPIIdentity(incoming) {
+		return true
+	}
+	// Claude sends Authorization: Bearer for OAuth and x-api-key for an API key, whatever the token string is.
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "claude") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "claude") &&
+		existing.AuthKind() != incoming.AuthKind() {
 		return true
 	}
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
@@ -660,16 +666,19 @@ func authCustomHeaders(auth *Auth) string {
 	return strings.Join(lines, "\n")
 }
 
+// defaultEndpoints are the hosts a provider sends to without a base_url. Other providers' executors write base_url themselves when it
+// is missing, so for them a missing value is not a switch. The Devin host is a copy of helps.DevinDefaultBaseURL (that package imports
+// this one); TestDevinDefaultEndpointMatchesTheExecutor pins it.
+var defaultEndpoints = map[string]string{"xai": xaiauth.DefaultAPIBaseURL, "devin": "https://server.codeium.com"}
+
 // authEndpoint is the upstream base URL the credential is sent to, as the executors resolve it: the base_url attribute, then the
-// base_url metadata, then Meta's api_base_url, then (xAI only) the official API.
+// base_url metadata, then Meta's api_base_url, then the provider's default host, if it has one in defaultEndpoints.
 func authEndpoint(auth *Auth) string {
 	if auth == nil {
 		return ""
 	}
 	candidates := []string{auth.Attributes["base_url"], authMetadataString(auth, "base_url"), authMetadataString(auth, "api_base_url")}
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
-		candidates = append(candidates, xaiauth.DefaultAPIBaseURL)
-	}
+	candidates = append(candidates, defaultEndpoints[strings.ToLower(strings.TrimSpace(auth.Provider))])
 	for _, value := range candidates {
 		if value = normalizeEndpoint(value); value != "" {
 			return value
