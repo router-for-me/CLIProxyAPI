@@ -24,7 +24,6 @@ from pathlib import Path
 
 UTC = dt.timezone.utc
 URGENT_EXPIRY_HORIZON = dt.timedelta(hours=5)
-WEEKLY_URGENCY_HORIZON = dt.timedelta(hours=48)
 REDEEM_HORIZON = dt.timedelta(hours=24)
 
 
@@ -183,7 +182,7 @@ def should_redeem(result, now):
 
 
 def account_rank(result, now):
-    """Spend expiring credits, imminent weekly quota, then five-hour quota.
+    """Spend expiring credits, usable weekly quota, then five-hour-only quota.
 
     An exhausted weekly bucket cannot serve a request until a reset is redeemed,
     so do not promote it merely because its renewal is close.
@@ -209,9 +208,7 @@ def account_rank(result, now):
             and isinstance(used, (int, float)) and 0 <= used < 100):
         if credit_expiry - now.timestamp() <= URGENT_EXPIRY_HORIZON.total_seconds():
             return (-1, credit_expiry, renewal_minute(reset_at), *five_rank)
-        if reset_at - now.timestamp() <= WEEKLY_URGENCY_HORIZON.total_seconds():
-            return (0, renewal_minute(reset_at), *five_rank, credit_expiry)
-        return (2, *five_rank, renewal_minute(reset_at), credit_expiry)
+        return (0, renewal_minute(reset_at), *five_rank, credit_expiry)
     if weekly:
         return None  # Known exhausted or malformed weekly quota is not promoted.
     if credit_expiry - now.timestamp() <= URGENT_EXPIRY_HORIZON.total_seconds():
@@ -472,10 +469,8 @@ def apply_claude_priorities(args, key, auths, now):
             reset_at, _ = weekly
             if urgent_offer:
                 rank = (-1, exact_expiry, renewal_minute(reset_at), five_reset, five_used)
-            elif reset_at - now.timestamp() <= WEEKLY_URGENCY_HORIZON.total_seconds():
-                rank = (0, renewal_minute(reset_at), five_reset, five_used, offer_expiry)
             else:
-                rank = (2, five_reset, five_used, renewal_minute(reset_at), offer_expiry)
+                rank = (0, renewal_minute(reset_at), five_reset, five_used, offer_expiry)
             ranked.append((rank, identity))
         elif five_hour:
             if urgent_offer:

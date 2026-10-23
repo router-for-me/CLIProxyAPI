@@ -78,7 +78,7 @@ class PolicyTests(unittest.TestCase):
         urgent_expiry = int((self.now + dt.timedelta(hours=1)).timestamp())
         self.assertIsNone(router.account_rank(self.limits(used=100, expiry=urgent_expiry), self.now))
         expired = self.limits(used=20, expiry=int((self.now - dt.timedelta(seconds=1)).timestamp()))
-        self.assertEqual(router.account_rank(expired, self.now)[0], 2)
+        self.assertEqual(router.account_rank(expired, self.now)[0], 0)
 
     def test_weekly_deadline_beats_five_hour_and_unknown_weekly(self):
         near_weekly = self.limits(used=20, reset=int((self.now + dt.timedelta(hours=12)).timestamp()))
@@ -91,16 +91,18 @@ class PolicyTests(unittest.TestCase):
                 (self.now + dt.timedelta(hours=hours)).timestamp())
         self.assertLess(router.account_rank(near_weekly, self.now),
                         router.account_rank(no_weekly, self.now))
-        self.assertLess(router.account_rank(no_weekly, self.now),
-                        router.account_rank(far_weekly, self.now))
+        self.assertLess(router.account_rank(far_weekly, self.now),
+                        router.account_rank(no_weekly, self.now))
 
-    def test_weekly_urgency_starts_at_forty_eight_hours(self):
+    def test_weekly_order_has_no_forty_eight_hour_cutoff(self):
         at_boundary = self.limits(used=20, reset=int(
             (self.now + dt.timedelta(hours=48)).timestamp()))
         outside = self.limits(used=20, reset=int(
-            (self.now + dt.timedelta(hours=48, seconds=1)).timestamp()))
+            (self.now + dt.timedelta(hours=49)).timestamp()))
         self.assertEqual(router.account_rank(at_boundary, self.now)[0], 0)
-        self.assertEqual(router.account_rank(outside, self.now)[0], 2)
+        self.assertEqual(router.account_rank(outside, self.now)[0], 0)
+        self.assertLess(router.account_rank(at_boundary, self.now),
+                        router.account_rank(outside, self.now))
 
     def test_five_hour_deadline_and_remaining_capacity_break_ties(self):
         earlier = self.limits(used=20)
@@ -310,7 +312,7 @@ class PolicyTests(unittest.TestCase):
             priorities = {call.args[3]["name"]: call.args[3]["priority"]
                           for call in send.call_args_list}
         self.assertEqual(priorities, {"credit.json": 4, "weekly.json": 3,
-                                      "company.json": 2, "far.json": 1})
+                                      "far.json": 2, "company.json": 1})
 
     def test_claude_exact_offer_final_five_hours_overrides_weekly_order(self):
         def entry(name, days):

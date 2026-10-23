@@ -2,11 +2,10 @@
 
 This optional local companion updates CLIProxyAPI credential priorities. Its
 order is: a usable account with a verified reset credit expiring within five
-hours; usable weekly quota renewing within 48 hours; an account with no
-observed general weekly window but with usable five-hour quota; then usable
-weekly quota renewing later. Within a group, the earlier five-hour renewal
-goes first, followed by more unused five-hour capacity. Weekly accounts inside
-the 48-hour horizon are ordered by weekly renewal first. Renewal times are
+hours; accounts with usable general weekly quota, ordered by the earliest
+weekly renewal; then accounts with no observed general weekly window but with
+usable five-hour quota. Within a group, the earlier five-hour renewal goes
+first, followed by more unused five-hour capacity. Renewal times are
 compared to the nearest minute to ignore second-level reporting jitter.
 This changes request routing; it does not automatically redeem a reset credit
 or guarantee that traffic will consume the balance. CLIProxyAPI still checks
