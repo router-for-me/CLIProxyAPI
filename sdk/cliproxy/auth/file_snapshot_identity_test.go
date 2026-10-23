@@ -422,7 +422,23 @@ func TestCredentialsChangedBaseURL(t *testing.T) {
 	if !CredentialsChanged(xai("https://gateway.example/TeamA"), xai("https://gateway.example/teama")) {
 		t.Fatal("a base URL that differs in path case counted as the same endpoint")
 	}
-	if CredentialsChanged(xai(""), xai("https://a.example/v1")) || CredentialsChanged(xai("https://a.example/v1"), xai("")) {
+	// xAI without a base_url sends to the official API: dropping a custom endpoint, or setting one, moves the requests; spelling
+	// out the default does not.
+	if !CredentialsChanged(xai("https://a.example/v1"), xai("")) || !CredentialsChanged(xai(""), xai("https://a.example/v1")) {
+		t.Fatal("dropping or setting a custom xAI base URL did not count as a change")
+	}
+	if CredentialsChanged(xai("https://api.x.ai/v1"), xai("")) || CredentialsChanged(xai(""), xai(" https://API.x.ai/v1/ ")) {
+		t.Fatal("spelling out the default xAI base URL counted as a change")
+	}
+	// Other executors write base_url themselves when it is missing, so a missing value is not a switch.
+	meta := func(baseURL string) *Auth {
+		a := &Auth{Provider: "meta", Metadata: map[string]any{"api_key": "same-key"}}
+		if baseURL != "" {
+			a.Metadata["base_url"] = baseURL
+		}
+		return a
+	}
+	if CredentialsChanged(meta(""), meta("https://a.example/v1")) || CredentialsChanged(meta("https://a.example/v1"), meta("")) {
 		t.Fatal("a base URL the executor wrote, or a missing one, counted as a change")
 	}
 	kimi := func(baseURL string) *Auth {
@@ -431,10 +447,10 @@ func TestCredentialsChangedBaseURL(t *testing.T) {
 	if !CredentialsChanged(kimi("https://a.example/v1"), kimi("https://b.example/v1")) {
 		t.Fatal("another base URL kept in attributes did not count as a change")
 	}
-	meta := func(baseURL string) *Auth {
+	apiBase := func(baseURL string) *Auth {
 		return &Auth{Provider: "meta", Metadata: map[string]any{"api_key": "same-key", "api_base_url": baseURL}}
 	}
-	if !CredentialsChanged(meta("https://a.example"), meta("https://b.example")) {
+	if !CredentialsChanged(apiBase("https://a.example"), apiBase("https://b.example")) {
 		t.Fatal("another Meta api_base_url did not count as a change")
 	}
 }
@@ -714,16 +730,20 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	if !CredentialsChanged(kind("oauth", nil), kind("oauth", true)) || !CredentialsChanged(kind("api_key", nil), kind("api_key", false)) {
 		t.Fatal("a using_api that differs from the default of its auth_kind did not count as a credential change")
 	}
-	vertex := func(openapi, location string) *Auth {
+	vertexIn := func(location, openapi, openapiLocation string) *Auth {
 		a := &Auth{Provider: "vertex", Attributes: map[string]string{}, Metadata: map[string]any{"access_token": "same-token", "project_id": "project-a"}}
+		if location != "" {
+			a.Metadata["location"] = location
+		}
 		if openapi != "" {
 			a.Attributes["openapi"] = openapi
 		}
-		if location != "" {
-			a.Attributes["openapi_location"] = location
+		if openapiLocation != "" {
+			a.Attributes["openapi_location"] = openapiLocation
 		}
 		return a
 	}
+	vertex := func(openapi, openapiLocation string) *Auth { return vertexIn("", openapi, openapiLocation) }
 	if !CredentialsChanged(vertex("true", "us-central1"), vertex("true", "europe-west4")) {
 		t.Fatal("another Vertex OpenAPI location did not count as a credential change")
 	}
@@ -732,5 +752,12 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	}
 	if CredentialsChanged(vertex("true", "us-central1"), vertex("true", " us-central1 ")) {
 		t.Fatal("a padded Vertex OpenAPI location counted as a credential change")
+	}
+	// Without openapi_location the OpenAPI requests go to the regular location (default us-central1): spelling it out is not a change.
+	if CredentialsChanged(vertex("true", ""), vertex("true", "us-central1")) || CredentialsChanged(vertexIn("europe-west4", "true", ""), vertexIn("europe-west4", "true", "europe-west4")) {
+		t.Fatal("an openapi_location equal to the regular location it falls back to counted as a credential change")
+	}
+	if !CredentialsChanged(vertexIn("europe-west4", "true", ""), vertexIn("europe-west4", "true", "us-central1")) {
+		t.Fatal("an openapi_location that differs from the regular location it fell back to did not count as a credential change")
 	}
 }

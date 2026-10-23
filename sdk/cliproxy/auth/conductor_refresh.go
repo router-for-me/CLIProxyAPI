@@ -16,6 +16,7 @@ import (
 	"time"
 
 	vertexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/vertex"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -572,10 +573,8 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 		if vertexLocationIdentity(existing) != vertexLocationIdentity(incoming) {
 			return true
 		}
-		for _, key := range []string{"openapi", "openapi_location"} {
-			if authSetting(existing, key) != authSetting(incoming, key) {
-				return true
-			}
+		if authSetting(existing, "openapi") != authSetting(incoming, "openapi") || vertexOpenAPILocationIdentity(existing) != vertexOpenAPILocationIdentity(incoming) {
+			return true
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "antigravity") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "antigravity") {
@@ -654,12 +653,16 @@ func authCustomHeaders(auth *Auth) string {
 }
 
 // authEndpoint is the upstream base URL the credential is sent to, as the executors resolve it: the base_url attribute, then the
-// base_url metadata, then Meta's api_base_url.
+// base_url metadata, then Meta's api_base_url, then (xAI only) the official API.
 func authEndpoint(auth *Auth) string {
 	if auth == nil {
 		return ""
 	}
-	for _, value := range []string{auth.Attributes["base_url"], authMetadataString(auth, "base_url"), authMetadataString(auth, "api_base_url")} {
+	candidates := []string{auth.Attributes["base_url"], authMetadataString(auth, "base_url"), authMetadataString(auth, "api_base_url")}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+		candidates = append(candidates, xaiauth.DefaultAPIBaseURL)
+	}
+	for _, value := range candidates {
 		if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
 			// The scheme and the host are case-insensitive, the path is not.
 			if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
@@ -670,6 +673,14 @@ func authEndpoint(auth *Auth) string {
 		}
 	}
 	return ""
+}
+
+// vertexOpenAPILocationIdentity is the location OpenAPI requests are addressed to: the explicit openapi_location, else the regular one.
+func vertexOpenAPILocationIdentity(auth *Auth) string {
+	if value := authSetting(auth, "openapi_location"); value != "" {
+		return value
+	}
+	return vertexLocationIdentity(auth)
 }
 
 // vertexLocationIdentity is the location a Vertex request is addressed to; the executor defaults it to us-central1.

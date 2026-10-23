@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -130,4 +132,34 @@ func TestStaleFileSnapshotOfAnEarlierGatewayRefreshIsDiscarded(t *testing.T) {
 		t.Fatalf("the stale snapshot rolled the access token back to %v", got.Metadata["access_token"])
 	}
 	assertResultRuntimeState(t, got, want)
+}
+
+// The synthesizer derives a Kimi file's base_url from its domain, so moving the file from kimi.com to kimi.ai under the same
+// token is a change of endpoint that CredentialsChanged sees through the attribute.
+func TestSynthesizedKimiDomainChangeIsACredentialChange(t *testing.T) {
+	dir := t.TempDir()
+	kimi := func(domain string) *coreauth.Auth {
+		path := filepath.Join(dir, "kimi-"+domain+".json")
+		data := []byte(`{"type":"kimi","access_token":"same-token","domain":"` + domain + `"}`)
+		if errWrite := os.WriteFile(path, data, 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		auths, errSynthesize := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
+			Config: &config.Config{}, AuthDir: dir, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
+		}, path, data)
+		if errSynthesize != nil || len(auths) != 1 {
+			t.Fatalf("synthesize %s: err=%v auths=%v", domain, errSynthesize, auths)
+		}
+		return auths[0]
+	}
+	com, ai := kimi("kimi.com"), kimi("kimi.ai")
+	if com.Attributes["base_url"] == ai.Attributes["base_url"] || com.Attributes["base_url"] == "" {
+		t.Fatalf("the synthesizer did not derive distinct base URLs: %q %q", com.Attributes["base_url"], ai.Attributes["base_url"])
+	}
+	if !coreauth.CredentialsChanged(com, ai) {
+		t.Fatal("moving a Kimi file to another domain under the same token did not count as a credential change")
+	}
+	if coreauth.CredentialsChanged(com, kimi("kimi.com")) {
+		t.Fatal("the same Kimi file counted as a credential change")
+	}
 }
