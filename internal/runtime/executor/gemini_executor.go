@@ -385,6 +385,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}()
 		var param any
 		var sawFinishReason bool
+		var promptBlockErr error
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -393,6 +394,9 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			rawPayload := helps.JSONPayload(line)
 			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
 				sawFinishReason = true
+			}
+			if promptBlockErr == nil && responseFormat != sdktranslator.FormatGemini {
+				promptBlockErr = geminiStreamPromptBlockError(rawPayload)
 			}
 			if detail, ok := helps.ParseGeminiStreamUsage(rawPayload); ok {
 				streamUsage.Observe(detail, true)
@@ -442,14 +446,17 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if ctx.Err() != nil {
 			return
 		}
-		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
-			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
-			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
-			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
-				reporter.PublishFailure(ctx, truncErr)
+		termErr := promptBlockErr
+		if termErr == nil && responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
+			termErr = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+		}
+		if termErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, termErr)
+			if !streamUsage.PublishFailure(ctx, reporter, termErr) {
+				reporter.PublishFailure(ctx, termErr)
 			}
 			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+			case out <- cliproxyexecutor.StreamChunk{Err: termErr}:
 			case <-ctx.Done():
 			}
 			return
@@ -501,6 +508,35 @@ func geminiStreamHasFinishSignal(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+// geminiStreamPromptBlockError reports the upstream prompt block carried by a stream chunk that
+// produced no candidates at all. Such a chunk terminates the stream without any content, so it
+// must not reach the client as a normal completion or as a truncated stream. A chunk that carries
+// candidates alongside promptFeedback still completed normally and is left alone.
+//
+// Callers skip this for the native Gemini egress, which forwards promptFeedback verbatim and so
+// already tells the client what happened; synthesizing an error there would only diverge from
+// what upstream sent.
+func geminiStreamPromptBlockError(payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	for _, prefix := range []string{"", "response."} {
+		if candidates := gjson.GetBytes(payload, prefix+"candidates"); candidates.Exists() && len(candidates.Array()) > 0 {
+			continue
+		}
+		reason := strings.TrimSpace(gjson.GetBytes(payload, prefix+"promptFeedback.blockReason").String())
+		if reason == "" {
+			continue
+		}
+		msg := "upstream blocked the prompt: " + reason
+		if detail := strings.TrimSpace(gjson.GetBytes(payload, prefix+"promptFeedback.blockReasonMessage").String()); detail != "" {
+			msg += " - " + detail
+		}
+		return statusErr{code: http.StatusBadGateway, msg: msg}
+	}
+	return nil
 }
 
 func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
