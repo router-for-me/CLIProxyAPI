@@ -127,6 +127,12 @@ func TestStableProjectDropsGeneratedParts(t *testing.T) {
 		"tmp.AbcdefGhij":                                                   "tmp",
 		"tmp.a1b2c3":                                                       "tmp",
 		"20261023":                                                         "random",
+		// Cut by sanitizeProject at 64 inside the UUID's fourth group: still that UUID.
+		sanitizeProject(strings.Repeat("p", 40) + "-deadbeef-970e-440e-b37e-b4407c50b510"): strings.Repeat("p", 40),
+		// Not cut, so a short last group is not a UUID; nor is a five-digit time a time.
+		"app-deadbeef-cafe-face-beef-a": "app-deadbeef-cafe-face-beef-a",
+		"build-20261023T15300Z":         "build-20261023T15300Z",
+		"build-20261023T1530":           "build",
 		// Real names stay as they are.
 		"colton-games-snake":      "colton-games-snake",
 		"dolphin-labs":            "dolphin-labs",
