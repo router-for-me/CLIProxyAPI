@@ -548,6 +548,9 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 		if existingHasProjectID != incomingHasProjectID || existingProjectID != incomingProjectID {
 			return true
 		}
+		if vertexLocationIdentity(existing) != vertexLocationIdentity(incoming) {
+			return true
+		}
 	}
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "antigravity") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "antigravity") {
 		// The executor stores the project it discovers, so only two known and different projects are a switch.
@@ -580,6 +583,16 @@ func vertexServiceAccountIdentity(auth *Auth) (any, bool) {
 	return sa, true
 }
 
+// vertexLocationIdentity is the location a Vertex request is addressed to; the executor defaults it to us-central1.
+func vertexLocationIdentity(auth *Auth) string {
+	if auth != nil && auth.Metadata != nil {
+		if value, ok := auth.Metadata["location"].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return "us-central1"
+}
+
 func vertexProjectIdentity(auth *Auth) (string, bool) {
 	if auth == nil || auth.Metadata == nil {
 		return "", false
@@ -595,8 +608,9 @@ func vertexProjectIdentity(auth *Auth) (string, bool) {
 }
 
 // authStorageIdentity returns the credential part of storage that exposes RawJSON
-// (plugin storage). Its RawJSON merges Auth.Metadata, so metadata keys are dropped:
-// they are routing or compared elsewhere. Storage without RawJSON is not inspectable.
+// (plugin storage). Its RawJSON merges Auth.Metadata, so metadata keys are dropped, and so are
+// the keys the host reads from the auth file itself: they are routing or compared elsewhere.
+// Storage without RawJSON is not inspectable.
 func authStorageIdentity(auth *Auth) ([]byte, bool) {
 	if auth == nil || auth.Storage == nil {
 		return nil, false
@@ -617,7 +631,9 @@ func authStorageIdentity(auth *Auth) ([]byte, bool) {
 		for key := range auth.Metadata {
 			delete(fields, key)
 		}
-		delete(fields, "type")
+		for _, key := range []string{"type", "prefix", "proxy_url", "disabled", "priority", "weight"} {
+			delete(fields, key)
+		}
 	}
 	canonical, errMarshal := json.Marshal(value)
 	if errMarshal != nil {

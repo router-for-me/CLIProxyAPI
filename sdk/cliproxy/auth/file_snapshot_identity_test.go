@@ -399,6 +399,41 @@ func TestCredentialsChangedAntigravityProject(t *testing.T) {
 	}
 }
 
+// The host reads prefix, proxy_url, disabled, priority and weight from the auth file itself and keeps them off Auth.Metadata, so
+// an edit of one of them changes the plugin's raw storage JSON without replacing the credential.
+func TestCredentialsChangedStorageIgnoresHostOwnedFileKeys(t *testing.T) {
+	plugin := func(raw string) *Auth {
+		return &Auth{Provider: "plugin-provider", Storage: &rawJSONTestStorage{raw: []byte(raw)}}
+	}
+	for _, key := range []string{"prefix", "proxy_url", "disabled", "priority", "weight"} {
+		before := plugin(`{"token":"same","` + key + `":"old"}`)
+		after := plugin(`{"token":"same","` + key + `":"new"}`)
+		if CredentialsChanged(before, after) {
+			t.Fatalf("an edit of the host-owned key %q counted as a plugin credential change", key)
+		}
+	}
+	if !CredentialsChanged(plugin(`{"token":"a","prefix":"p"}`), plugin(`{"token":"b","prefix":"p"}`)) {
+		t.Fatal("a rotated plugin token went unnoticed")
+	}
+}
+
+// A Vertex request is addressed to the file's location (default us-central1), so another location is another endpoint.
+func TestCredentialsChangedVertexLocation(t *testing.T) {
+	vertex := func(location string) *Auth {
+		metadata := map[string]any{"access_token": "same-access-token", "project_id": "project-a"}
+		if location != "" {
+			metadata["location"] = location
+		}
+		return &Auth{Provider: "vertex", Metadata: metadata}
+	}
+	if !CredentialsChanged(vertex("us-central1"), vertex("europe-west4")) {
+		t.Fatal("another Vertex location did not count as a change")
+	}
+	if CredentialsChanged(vertex(""), vertex("us-central1")) || CredentialsChanged(vertex("us-central1"), vertex(" us-central1 ")) {
+		t.Fatal("the default or a padded Vertex location counted as a change")
+	}
+}
+
 // Plugin storage may identify the credential by a 64-bit number; float64 would make neighbours equal.
 func TestCredentialsChangedStorageKeepsLargeIntegers(t *testing.T) {
 	plugin := func(id string) *Auth {
