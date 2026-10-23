@@ -30,8 +30,10 @@ var (
 	errUnsupportedOAuthFlow   = errors.New("unsupported oauth provider")
 	errOAuthSessionNotPending = errors.New("oauth session is not pending")
 	errOAuthSessionExists     = errors.New("oauth session already exists")
-	errOAuthDeviceCallback    = fmt.Errorf("%w: device login does not accept callbacks", errOAuthSessionNotPending)
 )
+
+// ErrOAuthDeviceCallback rejects browser callbacks for a device login state.
+var ErrOAuthDeviceCallback = fmt.Errorf("%w: device login does not accept callbacks", errOAuthSessionNotPending)
 
 // ErrSIWCCallbackRequiresV8 prevents legacy callback sinks from accepting SIWC codes.
 var ErrSIWCCallbackRequiresV8 = fmt.Errorf("%w: SIWC callbacks require /v8/management/oauth/callback", errOAuthSessionNotPending)
@@ -326,6 +328,10 @@ var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
 
+func RegisterDeviceOAuthSession(state, provider string) {
+	oauthSessions.registerDevice(state, provider)
+}
+
 func RegisterPluginOAuthSession(state, provider string, metadata map[string]any) error {
 	return oauthSessions.RegisterPlugin(state, provider, metadata)
 }
@@ -544,7 +550,7 @@ func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, err
 	}
 	if session, ok := oauthSessions.Get(state); ok {
 		if session.Device {
-			return "", errOAuthDeviceCallback
+			return "", ErrOAuthDeviceCallback
 		}
 		if session.SIWC != nil {
 			return "", ErrSIWCCallbackRequiresV8
