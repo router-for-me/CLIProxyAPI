@@ -343,6 +343,17 @@ def parse_reset_timestamp(raw):
     return parsed.timestamp()
 
 
+def parse_observed_timestamp(raw):
+    if not isinstance(raw, str):
+        raise TypeError("observed timestamp is not text")
+    value = raw.replace("Z", "+00:00")
+    try:
+        return dt.datetime.fromisoformat(value)
+    except ValueError:
+        # macOS Python 3.9 rejects fractional seconds with fewer than six digits.
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
+
+
 def claude_weekly_rank(entry, now):
     """Use recent, observed Claude response headers; never infer a window."""
     observations = [entry.get("quota") or {}]
@@ -355,7 +366,7 @@ def claude_weekly_rank(entry, now):
             continue
         signals = observation.get("signals") or {}
         try:
-            seen = dt.datetime.fromisoformat(observation["observed_at"].replace("Z", "+00:00"))
+            seen = parse_observed_timestamp(observation["observed_at"])
             reset_at = parse_reset_timestamp(signals["Anthropic-Ratelimit-Unified-7d-Reset"])
             used = float(signals["Anthropic-Ratelimit-Unified-7d-Utilization"])
         except (KeyError, TypeError, ValueError):

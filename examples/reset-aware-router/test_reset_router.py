@@ -217,6 +217,15 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual([(call[3]["name"], call[3]["priority"]) for call in writes],
                          [("soon.json", 2), ("later.json", 1), ("invalid.json", 0)])
 
+    def test_claude_weekly_observation_with_five_digit_fraction(self):
+        entry = {"quota": {"observed_at": "2026-10-15T23:59:59.78603+00:00",
+                           "signals": {
+                               "Anthropic-Ratelimit-Unified-7d-Reset": str(self.weekly_reset),
+                               "Anthropic-Ratelimit-Unified-7d-Utilization": "0.45",
+                           }}}
+        self.assertEqual(router.claude_weekly_rank(entry, self.now),
+                         (self.weekly_reset, 0.45))
+
     def test_claude_exact_offer_final_five_hours_overrides_weekly_order(self):
         def entry(name, days):
             return {"name": name, "type": "claude", "status": "active", "priority": 0,
