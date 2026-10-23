@@ -718,6 +718,15 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	if CredentialsChanged(xai("true", nil), xai("", true)) || CredentialsChanged(xai("", "true"), xai("", true)) || CredentialsChanged(xai("", " false "), xai("", false)) {
 		t.Fatal("the same xAI using_api written as attribute, bool or string counted as a credential change")
 	}
+	// With a custom base URL both modes use it as it is, so toggling the mode changes nothing.
+	custom := func(using bool) *Auth {
+		a := xai("", using)
+		a.Metadata["base_url"] = "https://gateway.example/v1"
+		return a
+	}
+	if CredentialsChanged(custom(false), custom(true)) {
+		t.Fatal("a toggled xAI using_api on a custom base URL counted as a credential change")
+	}
 	// The mode defaults from auth_kind: OAuth uses the CLI chat proxy, anything else the official API.
 	kind := func(kind string, using any) *Auth {
 		a := xai("", using)
@@ -749,6 +758,13 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	}
 	if !CredentialsChanged(vertex("true", "us-central1"), vertex("false", "us-central1")) {
 		t.Fatal("a toggled Vertex OpenAPI flag did not count as a credential change")
+	}
+	// With OpenAPI off the location is never used; unset leaves the choice to model rules, so there it still counts.
+	if CredentialsChanged(vertex("false", "us-central1"), vertex("0", "europe-west4")) || CredentialsChanged(vertex("true", "us-central1"), vertex("1", "us-central1")) {
+		t.Fatal("an inert openapi_location edit or another spelling of the same flag counted as a credential change")
+	}
+	if !CredentialsChanged(vertex("", "us-central1"), vertex("", "europe-west4")) {
+		t.Fatal("an openapi_location edit with the flag unset did not count as a credential change")
 	}
 	if CredentialsChanged(vertex("true", "us-central1"), vertex("true", " us-central1 ")) {
 		t.Fatal("a padded Vertex OpenAPI location counted as a credential change")

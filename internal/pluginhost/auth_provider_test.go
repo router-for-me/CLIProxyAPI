@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -708,5 +709,28 @@ func TestRefreshAuth_MergesAttributesAndPreservesPath_Issue6119(t *testing.T) {
 				t.Errorf("refreshed priority attribute = %q, want 1", got)
 			}
 		})
+	}
+}
+
+// An opaque numeric credential above 2^53 must survive the merge of the stored JSON with the metadata, in the bytes the core
+// reads (credential identity) and in the bytes written back to the auth file.
+func TestPluginTokenStorageKeepsLargeIntegers(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"account":9007199254740993}`),
+		meta:     map[string]any{"label": "a"},
+	}
+	if got := string(storage.RawJSON()); !strings.Contains(got, `"account":9007199254740993`) {
+		t.Fatalf("RawJSON = %s, want the integer unchanged", got)
+	}
+	// The core compares that storage as the credential identity: adjacent ids are different credentials.
+	adjacent := func(id string) *coreauth.Auth {
+		return &coreauth.Auth{Provider: "plugin-provider", Storage: &pluginTokenStorage{provider: "plugin-provider", rawJSON: []byte(`{"account":` + id + `}`)}}
+	}
+	if !coreauth.CredentialsChanged(adjacent("9007199254740992"), adjacent("9007199254740993")) {
+		t.Fatal("plugin storage that differs in a 64-bit integer counted as the same credential")
+	}
+	if _, errMerge := mergedStorageJSON([]byte(`{"account":1} x`), nil, "plugin-provider"); errMerge == nil {
+		t.Fatal("storage JSON with trailing data was accepted")
 	}
 }

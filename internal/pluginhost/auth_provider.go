@@ -562,9 +562,14 @@ func jsonPayloadEqual(left, right []byte) bool {
 
 func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]byte, error) {
 	out := make(map[string]any)
-	if len(bytes.TrimSpace(raw)) > 0 {
-		if errUnmarshal := json.Unmarshal(raw, &out); errUnmarshal != nil {
-			return nil, fmt.Errorf("decode plugin token storage: %w", errUnmarshal)
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 {
+		// UseNumber keeps integers above 2^53 exact, in the saved file and in the identity the core compares.
+		decoder := json.NewDecoder(bytes.NewReader(trimmed))
+		decoder.UseNumber()
+		if errDecode := decoder.Decode(&out); errDecode != nil {
+			return nil, fmt.Errorf("decode plugin token storage: %w", errDecode)
+		} else if decoder.InputOffset() != int64(len(trimmed)) {
+			return nil, fmt.Errorf("decode plugin token storage: trailing data")
 		}
 		if out == nil {
 			out = make(map[string]any)

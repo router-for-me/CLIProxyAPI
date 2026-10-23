@@ -547,8 +547,10 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 	if authCustomHeaders(existing) != authCustomHeaders(incoming) {
 		return true
 	}
-	// xAI sends OAuth chat to the CLI chat proxy or to the official API depending on using_api.
+	// xAI sends OAuth chat to the CLI chat proxy or to the official API depending on using_api, but only on the default endpoint:
+	// a custom base_url is used as it is in both modes.
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "xai") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "xai") &&
+		existingEndpoint == normalizeEndpoint(xaiauth.DefaultAPIBaseURL) && incomingEndpoint == existingEndpoint &&
 		xaiUsingAPIIdentity(existing) != xaiUsingAPIIdentity(incoming) {
 		return true
 	}
@@ -573,7 +575,13 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 		if vertexLocationIdentity(existing) != vertexLocationIdentity(incoming) {
 			return true
 		}
-		if authSetting(existing, "openapi") != authSetting(incoming, "openapi") || vertexOpenAPILocationIdentity(existing) != vertexOpenAPILocationIdentity(incoming) {
+		existingMode, incomingMode := vertexOpenAPIMode(existing), vertexOpenAPIMode(incoming)
+		if existingMode != incomingMode {
+			return true
+		}
+		// shortcut: per-model OpenAPI overrides (model_aliases, models) are not looked at, so with the flag off an openapi_location
+		// edit is ignored even if a model rule switches OpenAPI on; compare the location whenever such a rule exists if that matters.
+		if existingMode != "off" && vertexOpenAPILocationIdentity(existing) != vertexOpenAPILocationIdentity(incoming) {
 			return true
 		}
 	}
@@ -663,14 +671,30 @@ func authEndpoint(auth *Auth) string {
 		candidates = append(candidates, xaiauth.DefaultAPIBaseURL)
 	}
 	for _, value := range candidates {
-		if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
-			// The scheme and the host are case-insensitive, the path is not.
-			if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
-				parsed.Scheme, parsed.Host = strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Host)
-				return parsed.String()
-			}
+		if value = normalizeEndpoint(value); value != "" {
 			return value
 		}
+	}
+	return ""
+}
+
+// normalizeEndpoint trims a base URL and its trailing slashes and folds the case of the scheme and the host, not of the path.
+func normalizeEndpoint(value string) string {
+	value = strings.TrimRight(strings.TrimSpace(value), "/")
+	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+		parsed.Scheme, parsed.Host = strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Host)
+		return parsed.String()
+	}
+	return value
+}
+
+// vertexOpenAPIMode is the credential's own OpenAPI setting as the executor reads it: "on", "off", or "" when unset (model rules decide).
+func vertexOpenAPIMode(auth *Auth) string {
+	switch strings.ToLower(authSetting(auth, "openapi")) {
+	case "true", "1":
+		return "on"
+	case "false", "0":
+		return "off"
 	}
 	return ""
 }
