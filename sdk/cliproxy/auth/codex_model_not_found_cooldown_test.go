@@ -387,3 +387,50 @@ func TestCodexStructuredModelNotFound_NamesAliasResolvedUpstreamModel(t *testing
 		t.Fatalf("404 naming the alias-resolved model must give ~12h cooldown, got remaining=%v", remaining)
 	}
 }
+
+// The auth-selection override puts a third name in play: selection used A, the
+// count-token URL carried the selection-resolved E, and a payload override
+// finalized the body to X — so a structured 404 quoting E matches neither
+// Model nor UpstreamModel. E rides in the result's own options metadata and
+// must join the attempted-name set (#5514 review on e8b81691).
+func TestCodexStructuredModelNotFound_NamesSelectionOverrideModel(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-codex-selection", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	resultErr := &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"type":"not_found_error","message":"model exec-e-5.2 was not found"}`,
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:        auth.ID,
+		Provider:      auth.Provider,
+		Model:         "route-a",
+		UpstreamModel: "wire-x",
+		Options: cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.AuthSelectionModelMetadataKey: "exec-e-5.2"},
+		},
+		Success: false,
+		Error:   resultErr,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth to be registered")
+	}
+	state := updated.ModelStates["route-a"]
+	if state == nil || !state.Unavailable {
+		t.Fatalf("expected model state to be unavailable, got %#v", state)
+	}
+	remaining := time.Until(state.NextRetryAfter)
+	if remaining < 11*time.Hour || remaining > 13*time.Hour {
+		t.Fatalf("404 naming the selection-resolved model must give ~12h cooldown, got remaining=%v", remaining)
+	}
+}
