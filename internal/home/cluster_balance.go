@@ -25,14 +25,15 @@ type rebalanceInstruction struct {
 }
 
 type clusterBalanceState struct {
-	moving      bool
-	returning   bool
-	target      clusterNode
-	origin      clusterNode
-	request     rebalanceInstruction
-	result      string
-	registered  bool
-	unsupported bool
+	moving           bool
+	returning        bool
+	target           clusterNode
+	origin           clusterNode
+	request          rebalanceInstruction
+	result           string
+	registered       bool
+	unsupported      bool
+	latencySupported bool
 }
 
 func (c *Client) canExecuteRebalanceLocked() bool {
@@ -96,7 +97,8 @@ func (c *Client) syncClusterBalance(ctx context.Context) error {
 			return fmt.Errorf("register Home rebalance: %w", errEnable)
 		}
 		var response struct {
-			OK bool `json:"ok"`
+			OK           bool     `json:"ok"`
+			Capabilities []string `json:"capabilities"`
 		}
 		if errJSON := json.Unmarshal([]byte(raw), &response); errJSON != nil {
 			return fmt.Errorf("decode Home rebalance ENABLE response: %w", errJSON)
@@ -106,6 +108,11 @@ func (c *Client) syncClusterBalance(ctx context.Context) error {
 		}
 		c.mu.Lock()
 		c.balance.registered = true
+		for _, capability := range response.Capabilities {
+			if capability == clusterLatencyCapability {
+				c.balance.latencySupported = true
+			}
+		}
 		c.mu.Unlock()
 	}
 	if result == "" {
