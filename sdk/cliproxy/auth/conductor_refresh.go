@@ -507,9 +507,8 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 		authSIWCTokenField(existing, "client_id") != authSIWCTokenField(incoming, "client_id") {
 		return true
 	}
-	existingUseSIWC, existingHasUseSIWC := parseBoolAny(existing.Metadata["use_siwc"])
-	incomingUseSIWC, incomingHasUseSIWC := parseBoolAny(incoming.Metadata["use_siwc"])
-	if existingHasUseSIWC != incomingHasUseSIWC || existingUseSIWC != incomingUseSIWC {
+	// The effective SIWC mode, so an omitted use_siwc and an explicit false are the same.
+	if IsCodexUseSIWC(existing) != IsCodexUseSIWC(incoming) {
 		return true
 	}
 	return false
@@ -669,8 +668,12 @@ func authSetting(auth *Auth, key string) string {
 	if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
 		return value
 	}
-	if raw, ok := auth.Metadata[key]; ok && raw != nil {
-		return strings.TrimSpace(fmt.Sprint(raw))
+	// The executors accept a bool or a string here; any other JSON type (a number) counts as unset.
+	switch value := auth.Metadata[key].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case bool:
+		return strconv.FormatBool(value)
 	}
 	return ""
 }

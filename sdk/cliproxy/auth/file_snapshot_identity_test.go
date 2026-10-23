@@ -847,6 +847,20 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 			t.Fatalf("two spellings of the same %s auth kind counted as a credential change", provider)
 		}
 	}
+	// An omitted use_siwc and an explicit false are the same SIWC mode; a switch to true is not.
+	siwc := func(set bool, value any) *Auth {
+		a := &Auth{Provider: "codex", Metadata: map[string]any{"access_token": "same-token", "account_id": "account-a"}}
+		if set {
+			a.Metadata["use_siwc"] = value
+		}
+		return a
+	}
+	if CredentialsChanged(siwc(false, nil), siwc(true, false)) || CredentialsChanged(siwc(true, "false"), siwc(true, false)) {
+		t.Fatal("an omitted use_siwc against an explicit false counted as a credential change")
+	}
+	if !CredentialsChanged(siwc(false, nil), siwc(true, true)) {
+		t.Fatal("use_siwc switched on did not count as a credential change")
+	}
 	// In API-key mode Codex omits the account header, so a leftover account_id edit changes nothing; in OAuth mode it does.
 	codex := func(kind, accountID string) *Auth {
 		a := &Auth{Provider: "codex", Metadata: map[string]any{"access_token": "same-token", "auth_kind": kind}}
@@ -894,6 +908,21 @@ func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
 	}
 	if !CredentialsChanged(vertex("true", "us-central1"), vertex("false", "us-central1")) {
 		t.Fatal("a toggled Vertex OpenAPI flag did not count as a credential change")
+	}
+	// The executor accepts a bool or a string for the flag; a JSON number is unset, whatever its value.
+	numeric := func(value any) *Auth {
+		a := vertex("", "")
+		a.Metadata["openapi"] = value
+		return a
+	}
+	if !CredentialsChanged(numeric(float64(1)), numeric(true)) || !CredentialsChanged(numeric(float64(0)), numeric(false)) {
+		t.Fatal("a numeric openapi flag, which the executor ignores, was taken for the boolean one")
+	}
+	if CredentialsChanged(numeric(float64(1)), vertex("", "")) {
+		t.Fatal("a numeric openapi flag differs from an unset one")
+	}
+	if CredentialsChanged(numeric(true), numeric("true")) || CredentialsChanged(numeric("1"), numeric(true)) {
+		t.Fatal("the bool and string spellings of the same openapi flag counted as a credential change")
 	}
 	// With OpenAPI off the location is never used; unset leaves the choice to model rules, so there it still counts.
 	if CredentialsChanged(vertex("false", "us-central1"), vertex("0", "europe-west4")) || CredentialsChanged(vertex("true", "us-central1"), vertex("1", "us-central1")) {
