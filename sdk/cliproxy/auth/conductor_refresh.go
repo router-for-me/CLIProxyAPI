@@ -520,28 +520,33 @@ func codexUsesAPIKey(auth *Auth) bool {
 	return auth.AuthKind() == AuthKindAPIKey || strings.TrimSpace(auth.Attributes["api_key"]) != ""
 }
 
-// authBearerExtras are the provider-specific bearer credentials a file may hold instead of an access token or API key: Meta's
-// device token (the API key is minted from it) and the credential Devin sends, which is the API key, else the session token, else
-// the "token" attribute (devinAuthCredentials: attributes first, each fallback only while nothing higher was found).
+// authBearerExtras are the provider-specific bearer credentials a file may hold instead of an access token or API key, each read only
+// for its own provider: Meta's device token (the API key is minted from it) and the credential Devin sends, which is the API key,
+// else the session token, else the "token" attribute (devinAuthCredentials: attributes first, each fallback only while nothing higher
+// was found).
 func authBearerExtras(auth *Auth) [2]string {
 	if auth == nil {
 		return [2]string{}
 	}
-	dca := authMetadataString(auth, "dca_token")
-	if dca == "" {
-		dca = strings.TrimSpace(auth.Attributes["dca_token"])
-	}
-	for _, key := range []string{"api_key", "session_token", "token"} {
-		if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
-			return [2]string{dca, value}
+	var out [2]string
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "meta":
+		if out[0] = authMetadataString(auth, "dca_token"); out[0] == "" {
+			out[0] = strings.TrimSpace(auth.Attributes["dca_token"])
+		}
+	case "devin":
+		for _, key := range []string{"api_key", "session_token", "token"} {
+			if out[1] = strings.TrimSpace(auth.Attributes[key]); out[1] != "" {
+				return out
+			}
+		}
+		for _, key := range []string{"api_key", "session_token"} {
+			if out[1] = authMetadataString(auth, key); out[1] != "" {
+				return out
+			}
 		}
 	}
-	for _, key := range []string{"api_key", "session_token"} {
-		if value := authMetadataString(auth, key); value != "" {
-			return [2]string{dca, value}
-		}
-	}
-	return [2]string{dca, ""}
+	return out
 }
 
 // accountIdentityChanged reports whether the credential now targets another account
@@ -688,7 +693,7 @@ func authCustomHeaders(auth *Auth) string {
 var defaultEndpoints = map[string]string{"xai": xaiauth.DefaultAPIBaseURL, "devin": "https://server.codeium.com"}
 
 // authEndpoint is the upstream base URL the credential is sent to, as the executors resolve it: the base_url attribute, then (not for
-// Claude and Codex) the base_url metadata, then Meta's api_base_url, then the provider's default host, if it has one in defaultEndpoints.
+// Claude and Codex) the base_url metadata, then (Meta only) api_base_url, then the provider's default host, if it has one in defaultEndpoints.
 func authEndpoint(auth *Auth) string {
 	if auth == nil {
 		return ""
@@ -696,7 +701,10 @@ func authEndpoint(auth *Auth) string {
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	candidates := []string{auth.Attributes["base_url"]}
 	if provider != "claude" && provider != "codex" { // their executors read base_url from attributes only
-		candidates = append(candidates, authMetadataString(auth, "base_url"), authMetadataString(auth, "api_base_url"))
+		candidates = append(candidates, authMetadataString(auth, "base_url"))
+	}
+	if provider == "meta" { // only Meta's executor reads api_base_url
+		candidates = append(candidates, authMetadataString(auth, "api_base_url"))
 	}
 	candidates = append(candidates, defaultEndpoints[provider])
 	for _, value := range candidates {

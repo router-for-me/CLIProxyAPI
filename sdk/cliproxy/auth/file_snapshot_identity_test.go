@@ -401,6 +401,17 @@ func TestCredentialsChangedDevinSessionToken(t *testing.T) {
 	if CredentialsChanged(metadata("session-a"), metadata("session-a")) {
 		t.Fatal("the same Devin session token counted as a credential change")
 	}
+	// Other providers do not read these fields: an unused session_token, token or dca_token is not their credential.
+	for _, provider := range []string{"claude", "codex", "xai"} {
+		unused := func(key, value string) *Auth {
+			return &Auth{Provider: provider, Attributes: map[string]string{"token": value}, Metadata: map[string]any{"access_token": "same-token", key: value}}
+		}
+		for _, key := range []string{"session_token", "dca_token"} {
+			if CredentialsChanged(unused(key, "a"), unused(key, "b")) {
+				t.Fatalf("an unused %s on a %s file counted as a credential change", key, provider)
+			}
+		}
+	}
 	// The session token is only a fallback: next to an API key it is not the credential in use.
 	both := func(apiKey, session string) *Auth {
 		return &Auth{Provider: "devin", Metadata: map[string]any{"api_key": apiKey, "session_token": session}}
@@ -483,6 +494,13 @@ func TestCredentialsChangedBaseURL(t *testing.T) {
 	}
 	if !CredentialsChanged(kimi("https://a.example/v1"), kimi("https://b.example/v1")) {
 		t.Fatal("another base URL kept in attributes did not count as a change")
+	}
+	// Only Meta's executor reads api_base_url.
+	otherAPIBase := func(baseURL string) *Auth {
+		return &Auth{Provider: "xai", Metadata: map[string]any{"access_token": "same-token", "api_base_url": baseURL}}
+	}
+	if CredentialsChanged(otherAPIBase("https://a.example"), otherAPIBase("https://b.example")) {
+		t.Fatal("an api_base_url on a provider that does not read it counted as a change")
 	}
 	apiBase := func(baseURL string) *Auth {
 		return &Auth{Provider: "meta", Metadata: map[string]any{"api_key": "same-key", "api_base_url": baseURL}}
