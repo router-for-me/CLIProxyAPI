@@ -189,6 +189,26 @@ func ReadMetadataString(metadata *map[string]any, key string) string {
 	return value
 }
 
+// SnapshotMetadata returns a shallow copy of the metadata map taken under the
+// metadata lock, for read-only checks that look at several keys. Nested values
+// are shared with the live map, so callers must not modify them.
+func SnapshotMetadata(metadata *map[string]any) map[string]any {
+	if metadata == nil {
+		return nil
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return nil
+	}
+	snapshot := make(map[string]any, len(*metadata))
+	for key, value := range *metadata {
+		snapshot[key] = value
+	}
+	return snapshot
+}
+
 // StoreMetadataString writes a string-valued metadata entry under the metadata
 // lock, initializing the map when needed. Empty values are skipped so callers can
 // forward optional fields without erasing a previously resolved value.

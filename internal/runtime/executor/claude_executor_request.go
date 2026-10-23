@@ -1137,7 +1137,7 @@ func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
 	if isClaudeOAuthToken(apiKey) {
 		return true
 	}
-	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+	if auth != nil && helps.ClaudeAuthKind(auth) == cliproxyauth.AuthKindAPIKey {
 		return false
 	}
 	hasAPIKeyAttr := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
