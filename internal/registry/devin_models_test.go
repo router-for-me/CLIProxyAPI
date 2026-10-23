@@ -136,12 +136,40 @@ func TestEmbeddedDevinModelsLoadedOnStartup(t *testing.T) {
 		"devin/grok-4-6",
 		"devin/claude-fable-5-1",
 		"devin/gpt-6-astra",
+		"devin/gpt-6-1-sol",
 	}
 
 	for _, id := range expectedIDs {
 		if !foundMap[id] {
 			t.Errorf("expected embedded catalog to contain %q", id)
 		}
+	}
+}
+
+func TestDevinGPT61SolCatalog(t *testing.T) {
+	for _, modelID := range []string{"devin/gpt-6-1-sol", "gpt-6-1-sol", "gpt-6-1-sol-high"} {
+		t.Run(modelID, func(t *testing.T) {
+			model := LookupDevinModel(modelID)
+			if model == nil {
+				t.Fatalf("LookupDevinModel(%q) returned nil", modelID)
+			}
+			if model.ID != "devin/gpt-6-1-sol" || model.DisplayName != "GPT-6.1 Sol" || model.OwnedBy != "openai" {
+				t.Fatalf("unexpected model metadata: %+v", model)
+			}
+			if model.ContextLength != 1000000 || model.MaxCompletionTokens != 64000 {
+				t.Errorf("unexpected token limits: context=%d output=%d", model.ContextLength, model.MaxCompletionTokens)
+			}
+			wantLevels := []string{"low", "medium", "high", "xhigh", "max"}
+			if model.Thinking == nil || !reflect.DeepEqual(model.Thinking.Levels, wantLevels) {
+				t.Errorf("thinking = %+v, want levels %v", model.Thinking, wantLevels)
+			}
+			if !reflect.DeepEqual(model.SupportedInputModalities, []string{"text", "image"}) {
+				t.Errorf("input modalities = %v, want text and image", model.SupportedInputModalities)
+			}
+			if got := LookupStaticModelInfo(model.ID); !reflect.DeepEqual(got, model) {
+				t.Errorf("static lookup = %+v, want active catalog metadata %+v", got, model)
+			}
+		})
 	}
 }
 
