@@ -609,27 +609,113 @@ func TestResultFromPreviousProviderIsIgnoredAfterProviderChange(t *testing.T) {
 	}
 }
 
-// A request sent to the previous endpoint can finish after the file moved to another endpoint under the same tokens.
-func TestResultFromPreviousEndpointIsIgnoredAfterBaseURLChange(t *testing.T) {
-	ctx := context.Background()
-	manager := NewManager(nil, nil, nil)
-	const authID = "endpoint-switch-inflight"
-	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "xai", Status: StatusActive,
-		Metadata: map[string]any{"access_token": "same-token", "base_url": "https://a.example/v1"}}); errRegister != nil {
-		t.Fatal(errRegister)
-	}
-	inflight, _ := manager.GetByID(authID)
+// A request sent to the previous target can finish after the file moved to another target under the same tokens: another base URL,
+// another custom authentication header, another xAI request mode, another Vertex OpenAPI location.
+func TestResultFromPreviousTargetIsIgnoredAfterRequestTargetChange(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider string
+		before   func(*Auth)
+		after    func(*Auth)
+	}{
+		{"base url", "xai",
+			func(a *Auth) { a.Metadata["base_url"] = "https://a.example/v1" },
+			func(a *Auth) { a.Metadata["base_url"] = "https://b.example/v1" }},
+		{"authentication header", "claude",
+			func(a *Auth) { a.Attributes["header:Authorization"] = "Bearer old" },
+			func(a *Auth) { a.Attributes["header:Authorization"] = "Bearer new" }},
+		{"xai request mode", "xai",
+			func(a *Auth) { a.Metadata["using_api"] = false },
+			func(a *Auth) { a.Metadata["using_api"] = true }},
+		{"vertex openapi location", "vertex",
+			func(a *Auth) { a.Attributes["openapi_location"] = "us-central1" },
+			func(a *Auth) { a.Attributes["openapi_location"] = "europe-west4" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			manager := NewManager(nil, nil, nil)
+			authID := "target-switch-inflight-" + strings.ReplaceAll(tc.name, " ", "-")
+			registered := &Auth{ID: authID, Provider: tc.provider, Status: StatusActive, Attributes: map[string]string{},
+				Metadata: map[string]any{"access_token": "same-token"}}
+			tc.before(registered)
+			if _, errRegister := manager.Register(ctx, registered); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			inflight, _ := manager.GetByID(authID)
 
-	snapshot := bindTestSnapshot(t, authID, "xai", []byte(`{"type":"xai","access_token":"same-token"}`), map[string]string{})
-	snapshot.Metadata = map[string]any{"access_token": "same-token", "base_url": "https://b.example/v1"}
-	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
-		t.Fatalf("snapshot rejected: %v", errUpdate)
+			snapshot := bindTestSnapshot(t, authID, tc.provider, []byte(`{"type":"`+tc.provider+`","access_token":"same-token"}`), map[string]string{})
+			snapshot.Metadata = map[string]any{"access_token": "same-token"}
+			tc.after(snapshot)
+			if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+				t.Fatalf("snapshot rejected: %v", errUpdate)
+			}
+			switched, _ := manager.GetByID(authID)
+			if switched.CredentialVersion <= inflight.CredentialVersion {
+				t.Fatalf("the change did not advance the credential version: %d -> %d", inflight.CredentialVersion, switched.CredentialVersion)
+			}
+			manager.MarkResult(ctx, Result{AuthID: authID, Provider: tc.provider, Model: "m", AccessToken: "same-token",
+				CredentialVersion: inflight.CredentialVersion, RegistrationEpoch: inflight.RegistrationEpoch,
+				Error: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests}})
+			got, _ := manager.GetByID(authID)
+			if got.Unavailable || got.LastError != nil || got.Quota.Exceeded {
+				t.Fatalf("old-target failure landed on the new target: unavailable=%v last=%v quota=%+v", got.Unavailable, got.LastError, got.Quota)
+			}
+		})
 	}
-	manager.MarkResult(ctx, Result{AuthID: authID, Provider: "xai", Model: "m", AccessToken: "same-token",
-		CredentialVersion: inflight.CredentialVersion, RegistrationEpoch: inflight.RegistrationEpoch,
-		Error: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests}})
-	got, _ := manager.GetByID(authID)
-	if got.Unavailable || got.LastError != nil || got.Quota.Exceeded {
-		t.Fatalf("old-endpoint failure landed on the new endpoint: unavailable=%v last=%v quota=%+v", got.Unavailable, got.LastError, got.Quota)
+}
+
+// Settings that do not change where or how a request is sent must not count: other attributes, header spelling and order, equal
+// settings written once as an attribute and once as metadata.
+func TestCredentialsChangedRequestTargetSettings(t *testing.T) {
+	headers := func(pairs ...string) *Auth {
+		a := &Auth{Provider: "claude", Attributes: map[string]string{}, Metadata: map[string]any{"access_token": "same-token"}}
+		for i := 0; i+1 < len(pairs); i += 2 {
+			a.Attributes["header:"+pairs[i]] = pairs[i+1]
+		}
+		return a
+	}
+	if !CredentialsChanged(headers("Authorization", "Bearer old"), headers("Authorization", "Bearer new")) {
+		t.Fatal("a changed Authorization header did not count as a credential change")
+	}
+	if !CredentialsChanged(headers("X-Api-Key", "a"), headers()) || !CredentialsChanged(headers(), headers("X-Api-Key", "a")) {
+		t.Fatal("a gained or lost custom header did not count as a credential change")
+	}
+	if CredentialsChanged(headers("authorization", "Bearer x ", "X-A", "1"), headers("X-A", "1", "Authorization", "Bearer x")) {
+		t.Fatal("header name case, value padding or order counted as a credential change")
+	}
+	xai := func(attribute string, metadata any) *Auth {
+		a := &Auth{Provider: "xai", Attributes: map[string]string{}, Metadata: map[string]any{"access_token": "same-token"}}
+		if attribute != "" {
+			a.Attributes["using_api"] = attribute
+		}
+		if metadata != nil {
+			a.Metadata["using_api"] = metadata
+		}
+		return a
+	}
+	if !CredentialsChanged(xai("", false), xai("", true)) || !CredentialsChanged(xai("false", nil), xai("true", nil)) {
+		t.Fatal("a toggled xAI using_api did not count as a credential change")
+	}
+	if CredentialsChanged(xai("true", nil), xai("", true)) || CredentialsChanged(xai("", "true"), xai("", true)) {
+		t.Fatal("the same xAI using_api written as attribute, bool or string counted as a credential change")
+	}
+	vertex := func(openapi, location string) *Auth {
+		a := &Auth{Provider: "vertex", Attributes: map[string]string{}, Metadata: map[string]any{"access_token": "same-token", "project_id": "project-a"}}
+		if openapi != "" {
+			a.Attributes["openapi"] = openapi
+		}
+		if location != "" {
+			a.Attributes["openapi_location"] = location
+		}
+		return a
+	}
+	if !CredentialsChanged(vertex("true", "us-central1"), vertex("true", "europe-west4")) {
+		t.Fatal("another Vertex OpenAPI location did not count as a credential change")
+	}
+	if !CredentialsChanged(vertex("true", "us-central1"), vertex("false", "us-central1")) {
+		t.Fatal("a toggled Vertex OpenAPI flag did not count as a credential change")
+	}
+	if CredentialsChanged(vertex("true", "us-central1"), vertex("true", " us-central1 ")) {
+		t.Fatal("a padded Vertex OpenAPI location counted as a credential change")
 	}
 }

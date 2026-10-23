@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -540,6 +541,15 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 	if existingEndpoint != "" && incomingEndpoint != "" && !strings.EqualFold(existingEndpoint, incomingEndpoint) {
 		return true
 	}
+	// Custom headers override the built-in ones, Authorization and X-Api-Key included.
+	if authCustomHeaders(existing) != authCustomHeaders(incoming) {
+		return true
+	}
+	// xAI sends OAuth chat to the CLI chat proxy or to the official API depending on using_api.
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "xai") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "xai") &&
+		authSetting(existing, "using_api") != authSetting(incoming, "using_api") {
+		return true
+	}
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
 		existingAccountID, existingHasAccountID := existing.Metadata["account_id"]
 		incomingAccountID, incomingHasAccountID := incoming.Metadata["account_id"]
@@ -560,6 +570,11 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 		}
 		if vertexLocationIdentity(existing) != vertexLocationIdentity(incoming) {
 			return true
+		}
+		for _, key := range []string{"openapi", "openapi_location"} {
+			if authSetting(existing, key) != authSetting(incoming, key) {
+				return true
+			}
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "antigravity") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "antigravity") {
@@ -591,6 +606,29 @@ func vertexServiceAccountIdentity(auth *Auth) (any, bool) {
 		return normalized, true
 	}
 	return sa, true
+}
+
+// authSetting is a request setting the file synthesizer copies to an attribute or the executor reads from metadata.
+func authSetting(auth *Auth, key string) string {
+	if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
+		return value
+	}
+	if raw, ok := auth.Metadata[key]; ok && raw != nil {
+		return strings.TrimSpace(fmt.Sprint(raw))
+	}
+	return ""
+}
+
+// authCustomHeaders is the user-defined request headers (the "header:" attributes), names case-folded, in a stable order.
+func authCustomHeaders(auth *Auth) string {
+	var lines []string
+	for key, value := range auth.Attributes {
+		if name, ok := strings.CutPrefix(key, "header:"); ok {
+			lines = append(lines, strings.ToLower(strings.TrimSpace(name))+"="+strings.TrimSpace(value))
+		}
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "\n")
 }
 
 // authEndpoint is the upstream base URL the credential is sent to, as the executors resolve it: the base_url attribute, then the
