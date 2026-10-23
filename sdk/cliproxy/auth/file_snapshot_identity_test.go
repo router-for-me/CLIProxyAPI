@@ -463,6 +463,21 @@ func TestCredentialsChangedBaseURL(t *testing.T) {
 	if CredentialsChanged(meta(""), meta("https://a.example/v1")) || CredentialsChanged(meta("https://a.example/v1"), meta("")) {
 		t.Fatal("a base URL the executor wrote, or a missing one, counted as a change")
 	}
+	// Claude and Codex read base_url from attributes only; a metadata value is never sent to.
+	for _, provider := range []string{"claude", "codex"} {
+		inMetadata := func(baseURL string) *Auth {
+			return &Auth{Provider: provider, Attributes: map[string]string{}, Metadata: map[string]any{"access_token": "same-token", "base_url": baseURL}}
+		}
+		inAttributes := func(baseURL string) *Auth {
+			return &Auth{Provider: provider, Attributes: map[string]string{"base_url": baseURL}, Metadata: map[string]any{"access_token": "same-token"}}
+		}
+		if CredentialsChanged(inMetadata("https://a.example/v1"), inMetadata("https://b.example/v1")) {
+			t.Fatalf("a %s metadata base_url the executor does not read counted as a change", provider)
+		}
+		if !CredentialsChanged(inAttributes("https://a.example/v1"), inAttributes("https://b.example/v1")) {
+			t.Fatalf("another %s base_url attribute did not count as a change", provider)
+		}
+	}
 	kimi := func(baseURL string) *Auth {
 		return &Auth{Provider: "kimi", Attributes: map[string]string{"base_url": baseURL}, Metadata: map[string]any{"access_token": "same-access-token"}}
 	}

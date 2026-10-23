@@ -687,14 +687,18 @@ func authCustomHeaders(auth *Auth) string {
 // this one); TestDevinDefaultEndpointMatchesTheExecutor pins it.
 var defaultEndpoints = map[string]string{"xai": xaiauth.DefaultAPIBaseURL, "devin": "https://server.codeium.com"}
 
-// authEndpoint is the upstream base URL the credential is sent to, as the executors resolve it: the base_url attribute, then the
-// base_url metadata, then Meta's api_base_url, then the provider's default host, if it has one in defaultEndpoints.
+// authEndpoint is the upstream base URL the credential is sent to, as the executors resolve it: the base_url attribute, then (not for
+// Claude and Codex) the base_url metadata, then Meta's api_base_url, then the provider's default host, if it has one in defaultEndpoints.
 func authEndpoint(auth *Auth) string {
 	if auth == nil {
 		return ""
 	}
-	candidates := []string{auth.Attributes["base_url"], authMetadataString(auth, "base_url"), authMetadataString(auth, "api_base_url")}
-	candidates = append(candidates, defaultEndpoints[strings.ToLower(strings.TrimSpace(auth.Provider))])
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	candidates := []string{auth.Attributes["base_url"]}
+	if provider != "claude" && provider != "codex" { // their executors read base_url from attributes only
+		candidates = append(candidates, authMetadataString(auth, "base_url"), authMetadataString(auth, "api_base_url"))
+	}
+	candidates = append(candidates, defaultEndpoints[provider])
 	for _, value := range candidates {
 		if value = normalizeEndpoint(value); value != "" {
 			return value
