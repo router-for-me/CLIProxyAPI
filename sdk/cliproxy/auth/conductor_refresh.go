@@ -99,10 +99,26 @@ func (m *Manager) StopAutoRefresh() {
 // Do not call it from a refresh callback: the worker running the callback cannot
 // return until the call does, so it waits until ctx ends.
 func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
+	return waitRefreshLoops(ctx, m.stopAutoRefresh())
+}
+
+// WaitAutoRefresh waits, like StopAutoRefreshContext, for the workers of loops
+// that earlier stops cancelled, without stopping anything again: a stop already
+// stopped the selector, and StoppableSelector.Stop need not be safe to call
+// twice. It does not wait for a loop that is still running. The same ctx rule
+// and callback restriction as StopAutoRefreshContext apply.
+func (m *Manager) WaitAutoRefresh(ctx context.Context) error {
+	m.mu.Lock()
+	loops := unfinishedRefreshLoops(m.retiredRefreshLoops)
+	m.retiredRefreshLoops = loops
+	m.mu.Unlock()
+	return waitRefreshLoops(ctx, loops)
+}
+
+func waitRefreshLoops(ctx context.Context, loops []*authAutoRefreshLoop) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	loops := m.stopAutoRefresh()
 	if len(loops) == 0 {
 		return nil
 	}

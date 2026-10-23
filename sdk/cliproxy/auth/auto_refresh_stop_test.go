@@ -86,7 +86,12 @@ func (*refreshSaveStore) Delete(context.Context, string) error { return nil }
 
 func startRefreshWithHeldSave(t *testing.T, store *refreshSaveStore) *Manager {
 	t.Helper()
-	manager := NewManager(store, &RoundRobinSelector{}, nil)
+	return startRefreshWithHeldSaveSelector(t, store, &RoundRobinSelector{})
+}
+
+func startRefreshWithHeldSaveSelector(t *testing.T, store *refreshSaveStore, selector Selector) *Manager {
+	t.Helper()
+	manager := NewManager(store, selector, nil)
 	manager.RegisterExecutor(stopTestExecutor{})
 	if _, err := manager.Register(context.Background(), &Auth{
 		ID:       "stop-waits-for-save",
@@ -488,5 +493,33 @@ func TestConcurrentStartAutoRefreshLeavesNoLoopRunning(t *testing.T) {
 	}
 	if running != 0 {
 		t.Fatalf("%d of %d loops still running after StopAutoRefreshContext", running, starts)
+	}
+}
+
+// countingStopSelector counts Stop calls; StoppableSelector.Stop need not be
+// safe to call twice.
+type countingStopSelector struct {
+	RoundRobinSelector
+	stops atomic.Int32
+}
+
+func (s *countingStopSelector) Stop() { s.stops.Add(1) }
+
+// After StopAutoRefresh, WaitAutoRefresh waits for the cancelled loop's save
+// without stopping the selector a second time.
+func TestWaitAutoRefreshWaitsWithoutStoppingSelectorAgain(t *testing.T) {
+	h := newHeldSave(t)
+	selector := &countingStopSelector{}
+	manager := startRefreshWithHeldSaveSelector(t, h.store, selector)
+
+	manager.StopAutoRefresh()
+	returned := h.stopAsync(func() { _ = manager.WaitAutoRefresh(context.Background()) })
+	h.awaitWaiting(t, returned)
+	h.release()
+	if !awaitReturned(t, returned) {
+		t.Fatal("WaitAutoRefresh returned before the refresh save finished")
+	}
+	if got := selector.stops.Load(); got != 1 {
+		t.Fatalf("selector Stop calls = %d, want 1", got)
 	}
 }
