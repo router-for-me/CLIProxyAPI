@@ -29,6 +29,19 @@ import (
 // The function works recursively, building dot-notation paths to each occurrence
 // of the specified field throughout the JSON structure.
 func Walk(value gjson.Result, path, field string, paths *[]string) {
+	walk(value, path, field, paths, false)
+}
+
+// WalkSchema is Walk for JSON Schema documents: it records the field wherever a schema keyword
+// may appear, but does not descend into literal values (default, example, examples, const, enum),
+// whose contents are client data rather than subschemas. The literal keyword itself is still
+// recorded when it is the searched field, and under a property-name map a key spelled like one is
+// a property name whose subschema is still walked.
+func WalkSchema(value gjson.Result, path, field string, paths *[]string) {
+	walk(value, path, field, paths, true)
+}
+
+func walk(value gjson.Result, path, field string, paths *[]string, schemaAware bool) {
 	switch value.Type {
 	case gjson.JSON:
 		// For JSON objects and arrays, iterate through each child
@@ -49,7 +62,10 @@ func Walk(value gjson.Result, path, field string, paths *[]string) {
 			if keyStr == field {
 				*paths = append(*paths, childPath)
 			}
-			Walk(val, childPath, field, paths)
+			if schemaAware && isLiteralValueKeyword(keyStr) && !isPropertyDefinition(path) {
+				return true
+			}
+			walk(val, childPath, field, paths, schemaAware)
 			return true
 		})
 	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:
@@ -235,6 +251,19 @@ func CanonicalToolName(name string) string {
 // ToolNameMapFromClaudeRequest returns a canonical-name -> original-name map extracted from a Claude request.
 // It is used to restore exact tool name casing for clients that require strict tool name matching (e.g. Claude Code).
 func ToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
+	return toolNameMapFromClaudeRequest(rawJSON, false)
+}
+
+// UnambiguousToolNameMapFromClaudeRequest precomputes the legacy Claude mapper's
+// collision policy so response chunks only need MapToolName, not the request body.
+// Ambiguous canonical keys are stored with an empty value, so the returned map is
+// only meaningful with MapToolName (which keeps the upstream name for empty
+// values); do not index it directly.
+func UnambiguousToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
+	return toolNameMapFromClaudeRequest(rawJSON, true)
+}
+
+func toolNameMapFromClaudeRequest(rawJSON []byte, rejectAmbiguous bool) map[string]string {
 	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
 		return nil
 	}
@@ -258,8 +287,12 @@ func ToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
 		if key == "" {
 			return true
 		}
-		if _, exists := out[key]; !exists {
+		if previous, exists := out[key]; !exists {
 			out[key] = name
+		} else if rejectAmbiguous && previous != name {
+			// An empty value preserves the upstream name for every spelling of
+			// an ambiguous canonical key, including exact declared names.
+			out[key] = ""
 		}
 		return true
 	})
@@ -282,6 +315,8 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 
 // MapClaudeToolName restores the client-facing tool name while preferring an exact
 // declared name over canonical (case/leading-underscore-insensitive) restoration.
+// It re-scans the request body on every call; hot paths should precompute with
+// UnambiguousToolNameMapFromClaudeRequest and use MapToolName instead.
 // This prevents distinct tools such as "Read" and "read" from being collapsed to
 // the first declaration when the upstream already returned an exact name.
 func MapClaudeToolName(toolNameMap map[string]string, originalRequestRawJSON []byte, name string) string {
@@ -913,10 +948,9 @@ func findClaudeToolSchema(originalRequestRawJSON []byte, toolName string) (gjson
 }
 
 // ClaudeToolIsParameterless reports whether the tool was declared in the original
-// Claude request with an empty or missing object schema. Such tools had a placeholder
-// "reason" property injected for Gemini/Antigravity schema validation, so any returned
-// arguments must be normalized to "{}" before they reach the Claude client. Schemas that
-// allow dynamic additional or pattern properties are never parameterless.
+// Claude request with a missing schema or an explicitly closed empty object schema
+// (additionalProperties: false). Schemas that allow dynamic additional or pattern
+// properties, including objects that omit additionalProperties, are not parameterless.
 func ClaudeToolIsParameterless(toolName string, originalRequestRawJSON []byte) bool {
 	schema, root, found := findClaudeToolSchema(originalRequestRawJSON, toolName)
 	if !found {
@@ -927,7 +961,7 @@ func ClaudeToolIsParameterless(toolName string, originalRequestRawJSON []byte) b
 	}
 	_ = root
 	info := analyzeClaudeObjectSchema(schema, schema)
-	if info.complex || claudeInfoAnyBranchAllowsDynamic(info) || !info.declaresObject {
+	if info.complex || claudeInfoAnyBranchAllowsDynamic(info) || !info.declaresObject || !info.forbidsDynamic {
 		return false
 	}
 	return len(info.required) == 0 && (!info.hasProperties || len(info.properties) == 0)
@@ -1074,7 +1108,7 @@ func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.R
 			break
 		}
 	}
-	if isEmptySchema && allSchemasDeclareObject && !claudeInfoAnyBranchAllowsDynamic(merged) && !claudeOriginalsAnyBranchAllowsDynamic(schemas, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(schemas, root, argsResult) {
+	if isEmptySchema && allSchemasDeclareObject && merged.forbidsDynamic && !claudeInfoAnyBranchAllowsDynamic(merged) && !claudeOriginalsAnyBranchAllowsDynamic(schemas, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(schemas, root, argsResult) {
 		if len(argsResult.Map()) == 0 {
 			return argsJSON
 		}
@@ -1627,12 +1661,11 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 			cleaned, _ = sjson.Delete(cleaned, joinPath(path, placeholder))
 		}
 	}
-	// Parameterless tools: if the original declared no properties and no candidate
-	// schema (including alternative union branches that supplied this child) allows
-	// dynamic data, any remaining keys can only be injected placeholders; normalize
-	// to "{}". A free-form alternative candidate ("{}" or any candidate that does
-	// not declare an object at all) accepts arbitrary data, so the whole-object
-	// normalization must not run when one is present.
+	// Closed parameterless objects: if the original declared no properties and
+	// explicitly forbids additional properties (additionalProperties: false) without
+	// any candidate or union branch permitting dynamic data, normalize to "{}".
+	// Implicitly open objects (additionalProperties omitted) keep non-placeholder
+	// arguments after proven injected placeholders have been removed above.
 	allCandidatesDeclareObject := true
 	for _, original := range originals {
 		if !analyzeClaudeObjectSchema(original, root).declaresObject {
@@ -1644,7 +1677,7 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 	if path != "" {
 		currentForNormalize = gjson.Get(cleaned, path)
 	}
-	if !originalInfo.complex && allCandidatesDeclareObject && !claudeInfoAnyBranchAllowsDynamic(originalInfo) && !claudeOriginalsAnyBranchAllowsDynamic(originals, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(originals, root, currentForNormalize) && originalInfo.declaresObject && len(originalInfo.required) == 0 && (!originalInfo.hasProperties || len(originalInfo.properties) == 0) {
+	if !originalInfo.complex && allCandidatesDeclareObject && originalInfo.forbidsDynamic && !claudeInfoAnyBranchAllowsDynamic(originalInfo) && !claudeOriginalsAnyBranchAllowsDynamic(originals, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(originals, root, currentForNormalize) && originalInfo.declaresObject && len(originalInfo.required) == 0 && (!originalInfo.hasProperties || len(originalInfo.properties) == 0) {
 		if topLevel {
 			return "{}"
 		}
@@ -1740,8 +1773,8 @@ func CleanClaudeToolArgumentsWithTranslated(rawArgs string, toolName string, ori
 
 // CleanClaudeToolArguments strips placeholder arguments ("reason" or "_") injected during
 // schema normalization for empty object schemas when returning responses to Claude clients.
-// If the tool was declared with empty or missing properties, the arguments are normalized
-// to "{}". Placeholder fields are also stripped recursively from declared nested object
+// If the tool was declared with empty or missing properties and additionalProperties: false,
+// the arguments are normalized to "{}". Placeholder fields are also stripped recursively from declared nested object
 // properties when they were not declared there. Free-form nested schemas that do not declare
 // an object type or properties are preserved because no placeholder is injected for them.
 // Tools that legitimately declared those fields or use union schemas that cannot be resolved
@@ -1771,7 +1804,7 @@ func CleanClaudeToolArguments(rawArgs string, toolName string, originalRequestRa
 	if info.complex || !info.declaresObject {
 		return rawArgs
 	}
-	if len(info.required) == 0 && (!info.hasProperties || len(info.properties) == 0) && !claudeInfoAnyBranchAllowsDynamic(info) {
+	if len(info.required) == 0 && (!info.hasProperties || len(info.properties) == 0) && info.forbidsDynamic && !claudeInfoAnyBranchAllowsDynamic(info) {
 		return "{}"
 	}
 	return cleanClaudeToolObject(rawArgs, []gjson.Result{schema}, schema, "", true)

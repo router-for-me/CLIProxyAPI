@@ -79,3 +79,55 @@ func TestRegisteredProvidersIgnoresStaleExclusiveProvider(t *testing.T) {
 		t.Fatalf("RegisteredProviders()[0] = %q, want test-a", providers[0].Identifier())
 	}
 }
+
+type funcTestProvider struct {
+	id   string
+	auth func(context.Context, *http.Request) (*Result, *AuthError)
+}
+
+func (p funcTestProvider) Identifier() string { return p.id }
+
+func (p funcTestProvider) Authenticate(ctx context.Context, r *http.Request) (*Result, *AuthError) {
+	return p.auth(ctx, r)
+}
+
+func TestManagerAuthenticateDeniedErrorEndsProviderChainAndPreservesStatus(t *testing.T) {
+	laterCalled := false
+	mgr := NewManager()
+	mgr.SetProviders([]Provider{
+		funcTestProvider{
+			id: "denier",
+			auth: func(context.Context, *http.Request) (*Result, *AuthError) {
+				return nil, NewDeniedError("quota exhausted", http.StatusTooManyRequests)
+			},
+		},
+		funcTestProvider{
+			id: "fallback",
+			auth: func(context.Context, *http.Request) (*Result, *AuthError) {
+				laterCalled = true
+				return &Result{Provider: "fallback", Principal: "user-1"}, nil
+			},
+		},
+	})
+
+	req, errReq := http.NewRequest(http.MethodPost, "http://example.test/v1/responses", nil)
+	if errReq != nil {
+		t.Fatalf("NewRequest() error = %v", errReq)
+	}
+	res, authErr := mgr.Authenticate(context.Background(), req)
+	if res != nil {
+		t.Fatalf("Authenticate() result = %#v, want nil", res)
+	}
+	if !IsAuthErrorCode(authErr, AuthErrorCodeDenied) {
+		t.Fatalf("Authenticate() error = %v, want code %s", authErr, AuthErrorCodeDenied)
+	}
+	if authErr.HTTPStatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("HTTPStatusCode() = %d, want %d", authErr.HTTPStatusCode(), http.StatusTooManyRequests)
+	}
+	if authErr.Message != "quota exhausted" {
+		t.Fatalf("Message = %q, want %q", authErr.Message, "quota exhausted")
+	}
+	if laterCalled {
+		t.Fatal("expected later provider not to be called after AuthErrorCodeDenied")
+	}
+}

@@ -1568,3 +1568,133 @@ func TestConvertGeminiResponseToOpenAIResponses_MessageOutputItemDoneFields(t *t
 		t.Fatalf("missing message response.output_item.done event")
 	}
 }
+
+func TestConvertGeminiResponseToOpenAIResponses_PinsRequestPerStream(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gemini-2.5-flash",
+		"instructions":"pinned-instructions",
+		"input":[{"type":"additional_tools","role":"developer","tools":[
+			{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}
+		]}]
+	}`)
+	chunks := [][]byte{
+		[]byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"starting"}]}}],"modelVersion":"gemini-2.5-flash","responseId":"resp_pinned"}`),
+		[]byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"functions__exec","args":{"input":"pwd"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15},"modelVersion":"gemini-2.5-flash","responseId":"resp_pinned"}`),
+		[]byte("data: [DONE]"),
+	}
+
+	var param any
+	var added, completed gjson.Result
+	for i, chunk := range chunks {
+		var requestForChunk []byte
+		if i == 0 {
+			requestForChunk = originalRequest
+		}
+		for _, output := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-flash", requestForChunk, nil, chunk, &param) {
+			event, data := parseSSEEvent(t, output)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "custom_tool_call" {
+					added = data
+				}
+			case "response.completed":
+				completed = data
+			}
+		}
+	}
+
+	if !added.Exists() || !completed.Exists() {
+		t.Fatalf("missing lifecycle events: added=%v completed=%v", added.Exists(), completed.Exists())
+	}
+	if got := added.Get("item.name").String(); got != "exec" {
+		t.Fatalf("added name = %q, want exec", got)
+	}
+	if got := added.Get("item.namespace").String(); got != "functions" {
+		t.Fatalf("added namespace = %q, want functions", got)
+	}
+	if got := completed.Get("response.instructions").String(); got != "pinned-instructions" {
+		t.Fatalf("completed instructions = %q, want pinned-instructions", got)
+	}
+
+	// Verify nil tool maps resolved on the first chunk are not rebuilt on subsequent chunks.
+	var nilMapParam any
+	firstReqNoTools := []byte(`{"model":"gemini-2.5-flash","instructions":"pinned-no-tools"}`)
+	laterReqWithTool := []byte(`{"model":"gemini-2.5-flash","instructions":"later-instructions","tools":[{"type":"function","name":"mcp/search","parameters":{"type":"object"}}]}`)
+	ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-flash", firstReqNoTools, nil, chunks[0], &nilMapParam)
+	var funcAdded, noToolsCompleted gjson.Result
+	laterChunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"mcp_search","args":{}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2},"modelVersion":"gemini-2.5-flash","responseId":"resp_pinned_nil"}`)
+	for _, output := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-flash", laterReqWithTool, nil, laterChunk, &nilMapParam) {
+		event, data := parseSSEEvent(t, output)
+		switch event {
+		case "response.output_item.added":
+			if data.Get("item.type").String() == "function_call" {
+				funcAdded = data
+			}
+		case "response.completed":
+			noToolsCompleted = data
+		}
+	}
+	if got := funcAdded.Get("item.name").String(); got != "mcp_search" {
+		t.Fatalf("nil-map stream tool name = %q, want mcp_search (must not rebuild tool maps on later chunk)", got)
+	}
+	if got := noToolsCompleted.Get("response.instructions").String(); got != "pinned-no-tools" {
+		t.Fatalf("nil-map stream completed instructions = %q, want pinned-no-tools", got)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponses_NonNormalFinishReasonsMapToIncompleteContentFilter(t *testing.T) {
+	ctx := context.Background()
+	req := []byte(`{"model":"gemini-4-argon"}`)
+	for _, reason := range []string{"MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL", "SAFETY", "RECITATION", "PROHIBITED_CONTENT"} {
+		t.Run("stream/"+reason, func(t *testing.T) {
+			var param any
+			chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` + reason + `"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-4-argon","responseId":"resp_1"}`)
+			var sawIncomplete bool
+			for _, out := range ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-4-argon", req, nil, chunk, &param) {
+				event, data := parseSSEEvent(t, out)
+				if event == "response.incomplete" {
+					sawIncomplete = true
+					if got := data.Get("response.status").String(); got != "incomplete" {
+						t.Fatalf("response.status = %q, want incomplete", got)
+					}
+					if got := data.Get("response.incomplete_details.reason").String(); got != "content_filter" {
+						t.Fatalf("incomplete_details.reason = %q, want content_filter", got)
+					}
+				}
+				if event == "response.completed" {
+					t.Fatalf("unexpected response.completed for finishReason %s: %s", reason, out)
+				}
+			}
+			if !sawIncomplete {
+				t.Fatalf("expected response.incomplete event for finishReason %s", reason)
+			}
+		})
+
+		t.Run("nonstream/"+reason, func(t *testing.T) {
+			raw := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` + reason + `"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-4-argon","responseId":"resp_1"}`)
+			out := ConvertGeminiResponseToOpenAIResponsesNonStream(ctx, "gemini-4-argon", req, nil, raw, nil)
+			if got := gjson.GetBytes(out, "status").String(); got != "incomplete" {
+				t.Fatalf("non-stream status = %q, want incomplete; payload=%s", got, out)
+			}
+			if got := gjson.GetBytes(out, "incomplete_details.reason").String(); got != "content_filter" {
+				t.Fatalf("non-stream incomplete_details.reason = %q, want content_filter; payload=%s", got, out)
+			}
+		})
+	}
+}
+
+func BenchmarkConvertGeminiResponseToOpenAIResponses_TextDelta(b *testing.B) {
+	request := []byte(`{"model":"gemini-2.5-flash","instructions":"` + strings.Repeat("x", 1024*1024) + `"}`)
+	delta := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"token "}]} }],"modelVersion":"gemini-2.5-flash","responseId":"resp_bench"}`)
+	done := []byte(`data: [DONE]`)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var param any
+		for j := 0; j < 64; j++ {
+			ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-flash", request, nil, delta, &param)
+		}
+		ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-flash", request, nil, done, &param)
+	}
+}

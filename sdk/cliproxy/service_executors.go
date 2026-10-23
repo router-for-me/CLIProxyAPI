@@ -502,8 +502,11 @@ func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
 	return s.pluginHost.ModelsForProvider(providerKey)
 }
 
-func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo) []*ModelInfo {
-	pluginModels := s.pluginModelsForProvider(providerKey)
+// appendPluginModels appends the provider's plugin static models that are not excluded.
+// Callers filter native models before applying OAuth aliases, so plugin models are filtered
+// here by their original IDs instead of re-filtering the merged list by alias names.
+func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo, excluded []string) []*ModelInfo {
+	pluginModels := applyExcludedModels(s.pluginModelsForProvider(providerKey), excluded)
 	if len(pluginModels) == 0 {
 		return models
 	}

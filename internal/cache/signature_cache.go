@@ -113,6 +113,7 @@ func purgeExpiredCaches() {
 	purgeExpiredAntigravityReasoningReplayCache(now)
 	purgeExpiredKimiThinkingReplayCache(now)
 	purgeExpiredClaudeThinkingReplayCache(now)
+	purgeExpiredClaudeWebSearchResultCache(now)
 }
 
 // CacheSignature stores a thinking signature for a given model group and text.

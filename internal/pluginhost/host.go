@@ -75,7 +75,7 @@ type Host struct {
 	runtimeConfig          *config.Config
 	authManager            *coreauth.Manager
 	modelExecutor          modelExecutor
-	modelClientIDs         map[string]struct{}
+	modelClientIDs         map[string]struct{} // Reserved for future use; catalog-only plugins do not populate it.
 	executorModelClientIDs map[string]struct{}
 	modelProviders         map[string]string
 	modelRegistrations     map[string]pluginModelRegistration
@@ -92,6 +92,8 @@ type Host struct {
 	modelStreams           *modelStreamBridge
 	callbackContexts       *callbackContextRegistry
 	snapshot               atomic.Value
+	// loadCleanupDoneHook, set by tests, runs after a late load cleanup dropped its load token.
+	loadCleanupDoneHook func()
 }
 
 func New() *Host {
@@ -578,6 +580,9 @@ func (h *Host) finishPluginLoadCleanup(id string, request *pluginLoadRequest, lo
 	go func() {
 		h.discardLoadedPlugin(loaded)
 		h.clearLoadingRequest(id, request)
+		if h.loadCleanupDoneHook != nil {
+			h.loadCleanupDoneHook()
+		}
 	}()
 }
 

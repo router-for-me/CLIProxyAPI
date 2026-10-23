@@ -53,7 +53,7 @@ func TestCountModels(t *testing.T) {
 
 func TestEnsureBaselineModel(t *testing.T) {
 	t.Run("clones first model as gpt-5.5 when missing", func(t *testing.T) {
-		raw := []byte(`{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list"},{"slug":"gpt-5.6-sol","visibility":"list"}]}`)
+		raw := []byte(`{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list","tool_mode":"code_mode_only","use_responses_lite":true,"supports_reasoning_effort_updates":true},{"slug":"gpt-5.6-sol","visibility":"list"}]}`)
 		out, count, errEnsure := ensureBaselineModel(raw)
 		if errEnsure != nil {
 			t.Fatalf("ensureBaselineModel: %v", errEnsure)
@@ -64,6 +64,9 @@ func TestEnsureBaselineModel(t *testing.T) {
 		if got := gjson.GetBytes(out, "models.0.slug").String(); got != "gpt-6.1-sol" {
 			t.Fatalf("models[0].slug = %q, want gpt-6.1-sol", got)
 		}
+		if got := gjson.GetBytes(out, "models.0.tool_mode").String(); got != "code_mode_only" {
+			t.Fatalf("models[0].tool_mode = %q, want code_mode_only", got)
+		}
 		if got := gjson.GetBytes(out, "models.2.slug").String(); got != "gpt-5.5" {
 			t.Fatalf("models[2].slug = %q, want gpt-5.5", got)
 		}
@@ -72,6 +75,15 @@ func TestEnsureBaselineModel(t *testing.T) {
 		}
 		if got := gjson.GetBytes(out, "models.2.visibility").String(); got != "list" {
 			t.Fatalf("models[2].visibility = %q, want list", got)
+		}
+		if got := gjson.GetBytes(out, "models.2.tool_mode"); got.Type != gjson.String || got.Str != "direct" {
+			t.Fatalf("models[2].tool_mode = %v (%s), want string \"direct\"", got.Value(), got.Type)
+		}
+		if got := gjson.GetBytes(out, "models.2.use_responses_lite"); got.Type != gjson.False {
+			t.Fatalf("models[2].use_responses_lite = %v (%s), want false", got.Value(), got.Type)
+		}
+		if got := gjson.GetBytes(out, "models.2.supports_reasoning_effort_updates"); got.Type != gjson.False {
+			t.Fatalf("models[2].supports_reasoning_effort_updates = %v (%s), want false", got.Value(), got.Type)
 		}
 	})
 

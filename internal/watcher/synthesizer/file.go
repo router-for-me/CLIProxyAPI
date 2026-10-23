@@ -3,10 +3,13 @@ package synthesizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
@@ -35,7 +38,10 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 
 	entries, err := os.ReadDir(ctx.AuthDir)
 	if err != nil {
-		// Not an error if directory doesn't exist
+		// A missing directory holds no auths; any other read failure keeps the loaded ones.
+		if !errors.Is(err, fs.ErrNotExist) {
+			ctx.RecordIncompleteFile(ctx.AuthDir)
+		}
 		return out, nil
 	}
 
@@ -49,7 +55,14 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		}
 		full := filepath.Join(ctx.AuthDir, name)
 		data, errRead := os.ReadFile(full)
-		if errRead != nil || len(data) == 0 {
+		if errRead != nil {
+			if !errors.Is(errRead, fs.ErrNotExist) {
+				ctx.RecordIncompleteFile(full)
+			}
+			continue
+		}
+		if !json.Valid(data) {
+			ctx.RecordIncompleteFile(full)
 			continue
 		}
 		auths, errSynthesize := synthesizeFileAuths(ctx, full, data)
@@ -155,6 +168,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 					}
 				}
 				coreauth.SetOAuthModelAliasesAttribute(auth, perAccountModelAliases)
+				applyVertexOpenAPISettingsAttribute(auth, metadata)
 				ApplyAuthExcludedModelsMeta(auth, perAccountExcluded, "oauth")
 				coreauth.ApplyCustomHeadersFromMetadata(auth)
 				applyFingerprintProfileAttribute(auth, metadata)
@@ -236,6 +250,8 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
+	applyOpenAPIModelsAttribute(a, metadata)
+	applyVertexOpenAPISettingsAttribute(a, metadata)
 	ApplyAuthExcludedModelsMeta(a, perAccountExcluded, "oauth")
 	applyFingerprintProfileAttribute(a, metadata)
 	// For Kimi auth files, preserve domain and base_url attributes.
@@ -305,32 +321,167 @@ func compactPluginAuths(auths []*coreauth.Auth) []*coreauth.Auth {
 
 // extractOAuthModelAliasesFromMetadata reads per-account model aliases from OAuth JSON metadata.
 // "model_aliases" is canonical; "model-aliases" remains a legacy alias.
+// Entries under "models" that specify both "name" and "alias" are also accepted.
 func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAuthModelAlias {
 	if metadata == nil {
 		return nil
 	}
-	raw, ok := metadata["model_aliases"]
-	if !ok {
-		raw, ok = metadata["model-aliases"]
+	var combined []config.OAuthModelAlias
+	for _, key := range []string{"model_aliases", "model-aliases", "models"} {
+		raw, ok := metadata[key]
+		if !ok || raw == nil {
+			continue
+		}
+		data, errMarshal := json.Marshal(raw)
+		if errMarshal != nil {
+			continue
+		}
+		var items []json.RawMessage
+		if errUnmarshal := json.Unmarshal(data, &items); errUnmarshal != nil {
+			continue
+		}
+		for _, item := range items {
+			var alias config.OAuthModelAlias
+			if errUnmarshal := json.Unmarshal(item, &alias); errUnmarshal != nil {
+				continue
+			}
+			combined = append(combined, alias)
+		}
 	}
-	if !ok || raw == nil {
-		return nil
-	}
-	data, errMarshal := json.Marshal(raw)
-	if errMarshal != nil {
-		return nil
-	}
-	var aliases []config.OAuthModelAlias
-	if errUnmarshal := json.Unmarshal(data, &aliases); errUnmarshal != nil {
+	if len(combined) == 0 {
 		return nil
 	}
 	cfg := config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
-			"auth": aliases,
+			"auth": combined,
 		},
 	}
 	cfg.SanitizeOAuthModelAlias()
 	return cfg.OAuthModelAlias["auth"]
+}
+
+func applyVertexOpenAPISettingsAttribute(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil || auth.Provider != "vertex" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	switch value := metadata["openapi"].(type) {
+	case bool:
+		auth.Attributes["openapi"] = strconv.FormatBool(value)
+	case string:
+		if parsed, errParse := strconv.ParseBool(strings.TrimSpace(strings.ToLower(value))); errParse == nil {
+			auth.Attributes["openapi"] = strconv.FormatBool(parsed)
+		}
+	}
+	for _, key := range []string{"openapi_location", "openapi-location"} {
+		if location, ok := metadata[key].(string); ok && strings.TrimSpace(location) != "" {
+			auth.Attributes["openapi_location"] = strings.TrimSpace(location)
+			break
+		}
+	}
+	var rules []config.OAuthModelAlias
+	seenAlias := make(map[string]struct{})
+	seenNameOnly := make(map[string]struct{})
+	for _, key := range []string{"model_aliases", "model-aliases", "models"} {
+		data, errMarshal := json.Marshal(metadata[key])
+		if errMarshal != nil {
+			continue
+		}
+		var items []json.RawMessage
+		if errUnmarshal := json.Unmarshal(data, &items); errUnmarshal != nil {
+			continue
+		}
+		for _, item := range items {
+			var rule config.OAuthModelAlias
+			if errUnmarshal := json.Unmarshal(item, &rule); errUnmarshal != nil {
+				continue
+			}
+			rule.Name = strings.TrimSpace(rule.Name)
+			rule.Alias = strings.TrimSpace(rule.Alias)
+			if rule.Name == "" {
+				continue
+			}
+			if rule.Alias != "" && !strings.EqualFold(rule.Name, rule.Alias) {
+				aliasKey := strings.ToLower(rule.Alias)
+				if _, exists := seenAlias[aliasKey]; exists {
+					continue
+				}
+				seenAlias[aliasKey] = struct{}{}
+			} else if rule.OpenAPI != nil {
+				nameKey := strings.ToLower(rule.Name)
+				if _, exists := seenNameOnly[nameKey]; exists {
+					continue
+				}
+				seenNameOnly[nameKey] = struct{}{}
+			} else {
+				continue
+			}
+			if rule.OpenAPI != nil {
+				rules = append(rules, rule)
+			}
+		}
+	}
+	if len(rules) > 0 {
+		if data, errMarshal := json.Marshal(rules); errMarshal == nil {
+			auth.Attributes["vertex_model_openapi"] = string(data)
+		}
+	}
+}
+
+func applyOpenAPIModelsAttribute(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil || metadata == nil {
+		return
+	}
+	var names []string
+	seen := make(map[string]struct{})
+	add := func(raw string) {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return
+		}
+		key := strings.ToLower(trimmed)
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		names = append(names, trimmed)
+	}
+	for _, key := range []string{"openapi_models", "openapi-models", "models"} {
+		raw, ok := metadata[key]
+		if !ok || raw == nil {
+			continue
+		}
+		switch v := raw.(type) {
+		case string:
+			for _, part := range strings.Split(v, ",") {
+				add(part)
+			}
+		case []string:
+			for _, item := range v {
+				add(item)
+			}
+		case []any:
+			for _, item := range v {
+				switch elem := item.(type) {
+				case string:
+					add(elem)
+				case map[string]any:
+					if name, okName := elem["name"].(string); okName {
+						add(name)
+					}
+				}
+			}
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["openapi_models"] = strings.Join(names, ",")
 }
 
 // ExtractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.
