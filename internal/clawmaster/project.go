@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -138,69 +139,66 @@ func projectMetricLabel(project string) string {
 }
 
 // stableProject is a project name without its random part, so that a tool running each job in a new
-// temporary directory (OpenClaw's openclaw-isolated-completion-<uuid>, mktemp's tmp.XXXXXXXXXX, a
-// timestamped build directory) counts as one project instead of using up maxProjectLabels. The name
-// is cut at its first random-looking segment (randomSegment); one with nothing before it is "random".
+// temporary directory counts as one project instead of using up maxProjectLabels. The name is cut
+// where the first generated part starts; one with nothing before it is "random". Generated means
+// exactly these forms (anything else is a name, so a real name is never merged into another):
+//   - a UUID, whole or cut short by projectMaxLen (OpenClaw's openclaw-isolated-completion-<uuid>);
+//   - a segment of eight or more characters that is hex with at least one digit (a hash, an id);
+//   - a segment of eight or more digits, or a compact ISO time (20261023T153000Z);
+//   - the segment after "tmp" (mktemp's tmp.XXXXXXXXXX).
 func stableProject(project string) string {
-	start := 0
-	for i := 0; i <= len(project); i++ {
-		if i < len(project) && !isProjectSeparator(project[i]) {
+	cut := len(project)
+	if loc := uuidInName.FindStringIndex(project); loc != nil {
+		cut = loc[0]
+	}
+	start, prev := 0, ""
+	for i := 0; i <= cut; i++ {
+		if i < cut && !isProjectSeparator(project[i]) {
 			continue
 		}
-		if randomSegment(project[start:i]) {
-			if kept := strings.TrimRight(project[:start], "-._"); kept != "" {
-				return kept
-			}
-			return "random"
+		seg := project[start:i]
+		if generatedSegment(seg) || (strings.EqualFold(prev, "tmp") && seg != "") {
+			cut = start
+			break
 		}
-		start = i + 1
+		prev, start = seg, i+1
 	}
-	return project
+	if kept := strings.TrimRight(project[:cut], "-._"); kept != "" {
+		return kept
+	}
+	if cut == len(project) {
+		return project
+	}
+	return "random"
 }
+
+// uuidInName is a UUID starting a segment, its last group possibly cut short by projectMaxLen.
+var uuidInName = regexp.MustCompile(`(?:^|[-._])([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{1,12})(?:$|[-._])`)
+
+// compactISOTime is a basic-format ISO 8601 date and time (20261023T153000Z).
+var compactISOTime = regexp.MustCompile(`^[0-9]{8}T[0-9]{4,6}Z?$`)
 
 func isProjectSeparator(c byte) bool { return c == '-' || c == '_' || c == '.' }
 
-// randomSegment reports whether a part of a name between separators looks generated rather than
-// chosen: eight or more characters that are all digits (a timestamp, a counter), or hex with both a
-// digit and a letter (a UUID's first part, a hash), or letters and digits mixed in both cases or
-// alternating often (mktemp, a base-62 id). Words with a digit or two (web3, x86, s3, go1) are names.
-func randomSegment(seg string) bool {
+// generatedSegment reports whether a part of a name between separators is a hash, an id or a time:
+// eight or more characters that are all digits, or hex with a digit, or a compact ISO time.
+func generatedSegment(seg string) bool {
 	if len(seg) < 8 {
 		return false
 	}
-	var digits, lower, upper, hexLetters, changes int
-	prevDigit := false
+	if compactISOTime.MatchString(seg) {
+		return true
+	}
+	digits := 0
 	for i := 0; i < len(seg); i++ {
 		c := seg[i]
-		isDigit := c >= '0' && c <= '9'
 		switch {
-		case isDigit:
+		case c >= '0' && c <= '9':
 			digits++
-		case c >= 'a' && c <= 'z':
-			lower++
-			if c <= 'f' {
-				hexLetters++
-			}
-		case c >= 'A' && c <= 'Z':
-			upper++
+		case c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
 		default:
 			return false
 		}
-		if i > 0 && isDigit != prevDigit {
-			changes++
-		}
-		prevDigit = isDigit
 	}
-	letters := lower + upper
-	switch {
-	case digits == len(seg):
-		return true
-	case digits > 0 && upper == 0 && hexLetters == lower && lower > 0:
-		return true
-	case digits > 0 && lower > 0 && upper > 0:
-		return true
-	case digits >= 3 && letters > 0 && changes >= 4:
-		return true
-	}
-	return false
+	return digits > 0
 }
