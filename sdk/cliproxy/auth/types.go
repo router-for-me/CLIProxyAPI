@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
@@ -836,6 +837,66 @@ func IsCodexUseSIWC(a *Auth) bool {
 		}
 	}
 	return enabled
+}
+
+// IsCodexClientUserAgent reports whether userAgent identifies a Codex client.
+func IsCodexClientUserAgent(userAgent string) bool {
+	ua := strings.ToLower(strings.TrimSpace(userAgent))
+	if ua == "" {
+		return false
+	}
+	return strings.Contains(ua, "codex-desktop") ||
+		strings.Contains(ua, "codex desktop") ||
+		strings.Contains(ua, "codex-rs") ||
+		strings.Contains(ua, "codex_cli_rs") ||
+		strings.Contains(ua, "codex-tui") ||
+		strings.Contains(ua, "codex_exec")
+}
+
+func headerValueFromHTTPHeader(headers http.Header, name string) string {
+	if headers == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(headers.Get(name)); value != "" {
+		return value
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+// IsCodexClientRequest reports whether the request originates from a Codex client.
+func IsCodexClientRequest(ctx context.Context, clientHeaders ...http.Header) bool {
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			if IsCodexClientUserAgent(headerValueFromHTTPHeader(ginCtx.Request.Header, "User-Agent")) {
+				return true
+			}
+		}
+	}
+	for _, headers := range clientHeaders {
+		if IsCodexClientUserAgent(headerValueFromHTTPHeader(headers, "User-Agent")) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsCodexUseSIWCForRequest reports whether a request should use the nested SIWC credential section.
+// Requests from Codex clients ignore use_siwc and always use non-SIWC credentials.
+func IsCodexUseSIWCForRequest(ctx context.Context, a *Auth, clientHeaders ...http.Header) bool {
+	if IsCodexClientRequest(ctx, clientHeaders...) {
+		return false
+	}
+	return IsCodexUseSIWC(a)
 }
 
 // OuterExpirationTime extracts the outer credential expiration timestamp, ignoring the nested "siwc" section.
