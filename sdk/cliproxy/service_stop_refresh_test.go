@@ -132,3 +132,27 @@ func TestServiceShutdown_ClosesListenerBeforeWaitingForRefreshSave(t *testing.T)
 		t.Fatal("Shutdown did not return after the refresh save was released")
 	}
 }
+
+// countingStopSelector counts Stop calls; StoppableSelector.Stop need not be
+// safe to call twice.
+type countingStopSelector struct {
+	coreauth.RoundRobinSelector
+	stops atomic.Int32
+}
+
+func (s *countingStopSelector) Stop() { s.stops.Add(1) }
+
+// Shutdown stops auto-refresh early and waits for its saves later; a custom
+// selector must still be stopped only once.
+func TestServiceShutdown_StopsSelectorOnce(t *testing.T) {
+	selector := &countingStopSelector{}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.StartAutoRefresh(context.Background(), time.Hour)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+	if errShutdown := service.Shutdown(context.Background()); errShutdown != nil {
+		t.Fatalf("Shutdown error = %v", errShutdown)
+	}
+	if got := selector.stops.Load(); got != 1 {
+		t.Fatalf("selector Stop calls = %d, want 1", got)
+	}
+}

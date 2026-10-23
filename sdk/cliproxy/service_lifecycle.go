@@ -380,8 +380,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			// Wait for in-flight refreshes to finish saving, within the shutdown
-			// deadline, before plugin executors they may use are shut down.
-			if errStop := s.coreManager.StopAutoRefreshContext(ctx); errStop != nil {
+			// deadline, before plugin executors they may use are shut down. The
+			// StopAutoRefresh above already stopped the loop and the selector.
+			if errStop := s.coreManager.WaitAutoRefresh(ctx); errStop != nil {
 				log.WithError(errStop).Warn("auth auto-refresh did not finish before shutdown deadline")
 			}
 		}
