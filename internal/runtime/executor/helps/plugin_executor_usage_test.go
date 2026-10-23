@@ -2,6 +2,57 @@ package helps
 
 import "testing"
 
+func TestObservePluginExecutorInteractionsUsagePreservesFinalSnapshot(t *testing.T) {
+	t.Parallel()
+
+	for _, protocol := range []string{"interactions", "interactions-response"} {
+		for _, tc := range []struct {
+			name    string
+			initial string
+			final   string
+		}{
+			{
+				name:    "cache and separate reasoning",
+				initial: `{"usage":{"input_tokens":100,"cache_read_tokens":20,"total_tokens":100}}`,
+				final:   `{"usage":{"input_tokens":100,"cache_read_tokens":20,"output_tokens":30,"reasoning_tokens":10,"total_tokens":140}}`,
+			},
+			{
+				name:    "official metadata and cache writes",
+				initial: `{"metadata":{"total_usage":{"total_input_tokens":100,"total_cached_tokens":20,"cache_write_tokens":10,"total_tokens":100}}}`,
+				final:   `{"metadata":{"total_usage":{"total_input_tokens":100,"total_cached_tokens":20,"cache_write_tokens":10,"total_output_tokens":30,"total_thought_tokens":10,"total_tokens":140}}}`,
+			},
+			{
+				name:    "Gemini usage metadata",
+				initial: `{"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":20,"totalTokenCount":100}}`,
+				final:   `{"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":20,"candidatesTokenCount":30,"thoughtsTokenCount":10,"totalTokenCount":140}}`,
+			},
+			{
+				name:    "authoritative zero buckets",
+				initial: `{"usage":{"input_tokens":100,"cache_read_tokens":20,"output_tokens":30,"reasoning_tokens":10,"total_tokens":140}}`,
+				final:   `{"usage":{"input_tokens":100,"cache_read_tokens":0,"output_tokens":30,"reasoning_tokens":0,"total_tokens":130}}`,
+			},
+		} {
+			t.Run(protocol+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				var buffer StreamUsageBuffer
+				ObservePluginExecutorStreamUsage(protocol, []byte("data: "+tc.initial+"\n\n"), &buffer)
+				// Repeated cumulative snapshots must not change their accounting.
+				for range 2 {
+					ObservePluginExecutorStreamUsage(protocol, []byte("data: "+tc.final+"\n\n"), &buffer)
+					got, ok := buffer.Detail()
+					want := ParseInteractionsUsage([]byte(tc.final))
+					if !ok || got != want {
+						t.Fatalf("stream usage = %+v (ok=%v), want final snapshot %+v", got, ok, want)
+					}
+					if !got.TokenBreakdown.Valid() {
+						t.Fatalf("invalid token breakdown: %+v", got.TokenBreakdown)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestObservePluginExecutorStreamUsageKeepsTopLevelResponsesTokensWhenServiceTierPresent(t *testing.T) {
 	t.Parallel()
 

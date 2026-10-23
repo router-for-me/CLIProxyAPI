@@ -71,7 +71,8 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 	case "interactions", "interactions-response":
 		IterateStreamLines(payload, func(line []byte) {
 			if detail, ok := ParseInteractionsStreamUsage(line); ok {
-				ObserveMergedStreamUsage(buffer, detail)
+				// Interactions usage is cumulative and already has normalized buckets.
+				buffer.Observe(detail, true)
 			}
 		})
 	case "antigravity":
