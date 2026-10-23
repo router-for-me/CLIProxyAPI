@@ -104,8 +104,10 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 
 			hasFunctionCall := part.Get("functionCall").Exists()
 			isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
-			if hasFunctionCall {
-				firstFunctionCallSeen = true
+			// A text part, even an empty signature carrier, ends the parallel group:
+			// the Gemini API rejects an unsigned functionCall after it. Thought parts do not.
+			if hasFunctionCall || !part.Get("thought").Bool() {
+				firstFunctionCallSeen = hasFunctionCall
 			}
 			if !hasFunctionCall && !hasSignature {
 				partItems = append(partItems, partJSON)
@@ -247,8 +249,8 @@ func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result) bool {
 			}
 			hasFunctionCall := part.Get("functionCall").Exists()
 			isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
-			if hasFunctionCall {
-				firstFunctionCallSeen = true
+			if hasFunctionCall || !part.Get("thought").Bool() {
+				firstFunctionCallSeen = hasFunctionCall
 			}
 			if isFirstFunctionCall {
 				replaySignature := GeminiReplaySignatureOrBypass(rawSignature, SignatureBlockKindGeminiFunctionCall)

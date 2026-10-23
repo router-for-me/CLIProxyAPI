@@ -83,6 +83,22 @@ func TestSanitizeGeminiRequestThoughtSignaturesParallelSyntheticOnlyFirstGetsByp
 	}
 }
 
+func TestSanitizeGeminiRequestThoughtSignaturesCallAfterTextGetsBypass(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first","args":{}}},{"functionCall":{"name":"second","args":{}}},{"text":"more"},{"functionCall":{"name":"third","args":{}}}]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if got := gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("first call signature = %q, want bypass sentinel; output=%s", got, out)
+	}
+	if signature := gjson.GetBytes(out, "contents.0.parts.1.thoughtSignature"); signature.Exists() {
+		t.Fatalf("second parallel call should remain unsigned; output=%s", out)
+	}
+	if got := gjson.GetBytes(out, "contents.0.parts.3.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("call after text signature = %q, want bypass sentinel; output=%s", got, out)
+	}
+}
+
 func TestSanitizeGeminiRequestThoughtSignaturesNativeParallelPreservesUnsignedSibling(t *testing.T) {
 	nativeSignature := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
 	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first","args":{}},"thoughtSignature":"` + nativeSignature + `"},{"functionCall":{"name":"second","args":{}}}]}]}`)
