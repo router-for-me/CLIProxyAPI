@@ -389,12 +389,12 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	carryRuntime := isFileSnapshot && !credChanged
 	replacementSnapshot := isFileSnapshot && !carryRuntime
 	cooldownStateChanged := false
+	if replacementSnapshot && (len(existing.ModelStates) > 0 || existing.Unavailable || existing.Quota.Exceeded ||
+		!existing.NextRetryAfter.IsZero() || existing.LastError != nil) {
+		// The dropped state may be persisted: rewrite the cooldown store, also when the replacement is disabled.
+		cooldownStateChanged = true
+	}
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if replacementSnapshot && (len(existing.ModelStates) > 0 || existing.Unavailable || existing.Quota.Exceeded ||
-			!existing.NextRetryAfter.IsZero() || existing.LastError != nil) {
-			// The dropped state may be persisted: rewrite the cooldown store.
-			cooldownStateChanged = true
-		}
 		if carryRuntime {
 			auth.ModelStates = existing.ModelStates
 			auth.LastRefreshedAt = existing.LastRefreshedAt

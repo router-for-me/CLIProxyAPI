@@ -364,6 +364,41 @@ func TestCredentialsChangedStorageIgnoresMetadataAndOpaqueStorage(t *testing.T) 
 	}
 }
 
+// A Meta file can hold only the device token (dca_token); replacing it is a new login.
+func TestCredentialsChangedMetaDCAToken(t *testing.T) {
+	meta := func(dca string) *Auth { return &Auth{Provider: "meta", Metadata: map[string]any{"dca_token": dca}} }
+	if !CredentialsChanged(meta("dca-a"), meta("dca-b")) {
+		t.Fatal("a replaced Meta device token did not count as a credential change")
+	}
+	if CredentialsChanged(meta("dca-a"), meta("dca-a")) {
+		t.Fatal("the same Meta device token counted as a credential change")
+	}
+	attribute := func(dca string) *Auth {
+		return &Auth{Provider: "meta", Attributes: map[string]string{"dca_token": dca}}
+	}
+	if !CredentialsChanged(attribute("dca-a"), attribute("dca-b")) {
+		t.Fatal("a replaced Meta device token kept in attributes did not count as a credential change")
+	}
+}
+
+// An Antigravity request carries the file's project_id, so another project under the same tokens is another account.
+// The executor stores the project it discovers; gaining or losing the field is not a replacement.
+func TestCredentialsChangedAntigravityProject(t *testing.T) {
+	antigravity := func(project string) *Auth {
+		metadata := map[string]any{"access_token": "same-access-token"}
+		if project != "" {
+			metadata["project_id"] = project
+		}
+		return &Auth{Provider: "antigravity", Metadata: metadata}
+	}
+	if !CredentialsChanged(antigravity("project-a"), antigravity("project-b")) {
+		t.Fatal("another Antigravity project did not count as a credential change")
+	}
+	if CredentialsChanged(antigravity(""), antigravity("project-a")) || CredentialsChanged(antigravity("project-a"), antigravity("")) {
+		t.Fatal("a discovered or missing Antigravity project counted as a credential change")
+	}
+}
+
 // Plugin storage may identify the credential by a 64-bit number; float64 would make neighbours equal.
 func TestCredentialsChangedStorageKeepsLargeIntegers(t *testing.T) {
 	plugin := func(id string) *Auth {
@@ -413,35 +448,46 @@ func TestSnapshotForAccountSwitchDropsRejectedToken(t *testing.T) {
 // With cooldown persistence on, dropping the old state must rewrite the store, or a
 // restart restores it for the replacement.
 func TestSnapshotReplacementRewritesPersistedCooldowns(t *testing.T) {
-	ctx := context.Background()
-	manager := NewManager(nil, nil, nil)
-	store := &recordingCooldownStateStore{}
-	manager.SetCooldownStateStore(store)
-	const authID = "replacement-persisted-cooldown"
-	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "claude", Status: StatusActive}); errRegister != nil {
-		t.Fatal(errRegister)
-	}
-	retryAfter := time.Hour
-	manager.MarkResult(ctx, Result{AuthID: authID, Provider: "claude", Model: "m", RetryAfter: &retryAfter,
-		Error: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests}})
-	hasRecord := func() bool {
-		for _, record := range store.savedRecords() {
-			if record.AuthID == authID {
-				return true
+	for _, tc := range []struct {
+		name     string
+		disabled bool
+	}{{"enabled", false}, {"disabled on arrival", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			manager := NewManager(nil, nil, nil)
+			store := &recordingCooldownStateStore{}
+			manager.SetCooldownStateStore(store)
+			const authID = "replacement-persisted-cooldown"
+			if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "claude", Status: StatusActive}); errRegister != nil {
+				t.Fatal(errRegister)
 			}
-		}
-		return false
-	}
-	if !hasRecord() {
-		t.Fatal("the model cooldown was not persisted before the replacement")
-	}
+			retryAfter := time.Hour
+			manager.MarkResult(ctx, Result{AuthID: authID, Provider: "claude", Model: "m", RetryAfter: &retryAfter,
+				Error: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests}})
+			hasRecord := func() bool {
+				for _, record := range store.savedRecords() {
+					if record.AuthID == authID {
+						return true
+					}
+				}
+				return false
+			}
+			if !hasRecord() {
+				t.Fatal("the model cooldown was not persisted before the replacement")
+			}
 
-	snapshot := bindTestSnapshot(t, authID, "codex", []byte(`{"type":"codex"}`), map[string]string{})
-	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
-		t.Fatalf("snapshot rejected: %v", errUpdate)
-	}
-	if hasRecord() {
-		t.Fatal("the replaced credential's cooldown is still in the persisted store")
+			snapshot := bindTestSnapshot(t, authID, "codex", []byte(`{"type":"codex"}`), map[string]string{})
+			if tc.disabled {
+				snapshot.Disabled = true
+				snapshot.Status = StatusDisabled
+			}
+			if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+				t.Fatalf("snapshot rejected: %v", errUpdate)
+			}
+			if hasRecord() {
+				t.Fatal("the replaced credential's cooldown is still in the persisted store")
+			}
+		})
 	}
 }
 

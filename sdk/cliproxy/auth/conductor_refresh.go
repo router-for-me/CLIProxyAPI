@@ -495,6 +495,10 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existingKey != incomingKey {
 		return true
 	}
+	// A Meta file may hold only the device token, which the API key is minted from.
+	if authDCAToken(existing) != authDCAToken(incoming) {
+		return true
+	}
 	if authSIWCTokenField(existing, "access_token") != authSIWCTokenField(incoming, "access_token") ||
 		authSIWCTokenField(existing, "refresh_token") != authSIWCTokenField(incoming, "refresh_token") ||
 		authSIWCTokenField(existing, "id_token") != authSIWCTokenField(incoming, "id_token") ||
@@ -507,6 +511,16 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 		return true
 	}
 	return false
+}
+
+func authDCAToken(auth *Auth) string {
+	if token := authMetadataString(auth, "dca_token"); token != "" {
+		return token
+	}
+	if auth == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes["dca_token"])
 }
 
 // accountIdentityChanged reports whether the credential now targets another account
@@ -532,6 +546,14 @@ func accountIdentityChanged(existing, incoming *Auth) bool {
 		existingProjectID, existingHasProjectID := vertexProjectIdentity(existing)
 		incomingProjectID, incomingHasProjectID := vertexProjectIdentity(incoming)
 		if existingHasProjectID != incomingHasProjectID || existingProjectID != incomingProjectID {
+			return true
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "antigravity") && strings.EqualFold(strings.TrimSpace(incoming.Provider), "antigravity") {
+		// The executor stores the project it discovers, so only two known and different projects are a switch.
+		existingProjectID, _ := vertexProjectIdentity(existing)
+		incomingProjectID, _ := vertexProjectIdentity(incoming)
+		if existingProjectID != "" && incomingProjectID != "" && existingProjectID != incomingProjectID {
 			return true
 		}
 	}

@@ -93,6 +93,33 @@ func TestResultFromPreviousAccountIsIgnoredAfterSameTokenSwitchInBothPartitions(
 	}
 }
 
+// The account switch also turns use_siwc off while the file keeps the nested SIWC token: the SIWC token is then in no active
+// partition, but a late 401 of the previous account must still not condemn it for the new account.
+func TestStaleUnauthorizedAfterAccountSwitchAndSIWCToggle(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	const authID = "partition-account-switch-siwc-off"
+	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "codex", Status: StatusActive,
+		Metadata: partitionMetadata("account-a", true, "id-1")}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	inflight, _ := manager.GetByID(authID)
+
+	snapshot := bindTestSnapshot(t, authID, "codex", []byte(`{"type":"codex","account_id":"account-b"}`), map[string]string{})
+	snapshot.Metadata = partitionMetadata("account-b", false, "id-1")
+	if _, errUpdate := manager.Update(ctx, snapshot); errUpdate != nil {
+		t.Fatalf("snapshot rejected: %v", errUpdate)
+	}
+	switched, _ := manager.GetByID(authID)
+	if authAccessToken(switched) != partitionOuterToken || authSIWCTokenField(switched, "access_token") != partitionSIWCToken {
+		t.Fatalf("partitions: active=%q siwc=%q", authAccessToken(switched), authSIWCTokenField(switched, "access_token"))
+	}
+
+	manager.MarkResult(ctx, partitionLate(authID, inflight, partitionSIWCToken, &Error{Message: "unauthorized", HTTPStatus: http.StatusUnauthorized}))
+	got, _ := manager.GetByID(authID)
+	partitionUntouched(t, got, "old-account 401 landed on the new account")
+}
+
 // A credential change that is not an account switch must not fence out a result under an unchanged token, whichever
 // token of the file the result carries.
 func TestResultAfterNonAccountCredentialChangeStillCountsInBothPartitions(t *testing.T) {
