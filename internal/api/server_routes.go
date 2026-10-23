@@ -1077,12 +1077,19 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 	if displayName == "" {
 		displayName = entry.id
 	}
-	return map[string]any{
+	model := map[string]any{
 		"name":                       name,
 		"displayName":                displayName,
 		"description":                displayName,
 		"supportedGenerationMethods": []string{"generateContent"},
 	}
+	if entry.contextLength > 0 {
+		model["inputTokenLimit"] = entry.contextLength
+	}
+	if entry.maxCompletionTokens > 0 {
+		model["outputTokenLimit"] = entry.maxCompletionTokens
+	}
+	return model
 }
 
 func homeGeminiModelMatches(entry homeModelEntry, action string) bool {

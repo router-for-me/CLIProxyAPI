@@ -1803,11 +1803,19 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Description != "" {
 			result["description"] = model.Description
 		}
-		if model.InputTokenLimit > 0 {
-			result["inputTokenLimit"] = model.InputTokenLimit
+		inputLimit := model.InputTokenLimit
+		if inputLimit <= 0 {
+			inputLimit = model.ContextLength
 		}
-		if model.OutputTokenLimit > 0 {
-			result["outputTokenLimit"] = model.OutputTokenLimit
+		if inputLimit > 0 {
+			result["inputTokenLimit"] = inputLimit
+		}
+		outputLimit := model.OutputTokenLimit
+		if outputLimit <= 0 {
+			outputLimit = model.MaxCompletionTokens
+		}
+		if outputLimit > 0 {
+			result["outputTokenLimit"] = outputLimit
 		}
 		if len(model.SupportedGenerationMethods) > 0 {
 			result["supportedGenerationMethods"] = append([]string(nil), model.SupportedGenerationMethods...)
