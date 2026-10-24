@@ -445,7 +445,7 @@ func checkSystemInstructionsWithSigningModeAt(
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 		return injectClaudeCodeCurrentDateInternal(payload, currentDate, isExplicit)
 	}
-	if claudeUsesLegacySystemReminder(payload) {
+	if claudeUsesCallerSystemReminder(payload, keepCallerSystemTopLevel) {
 		payload = prependClaudeSystemReminderBlocksToFirstUserMessage(payload, forwardedSystemBlocks, isExplicit)
 	} else if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEnd(payload) {
 		for _, block := range forwardedSystemBlocks {
@@ -503,7 +503,7 @@ func relocateClaudeSystemPromptForCountTokensWithPolicy(payload []byte, strictMo
 		return payload
 	}
 	payload = updated
-	if claudeUsesLegacySystemReminder(payload) {
+	if claudeUsesCallerSystemReminder(payload, keepCallerSystemTopLevel) {
 		return prependClaudeSystemReminderBlocksToFirstUserMessage(payload, forwardedSystemBlocks, isExplicit)
 	}
 	if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEnd(payload) {
@@ -543,13 +543,45 @@ var claudeLegacySystemReminderModels = map[string]struct{}{
 	"claude-sonnet-4-6":          {},
 }
 
-func claudeUsesLegacySystemReminder(payload []byte) bool {
+// claudeOAuthSystemReminderModels lists models that accept a mid-conversation
+// role=system turn but do not follow one that trails the only user turn, which
+// is where OAuth relocation (#6432) puts the caller system prompt on the first
+// request of every conversation. With a caller persona there, claude-haiku-5-5
+// answered as Claude Code in 4 of 5 requests; with the same text as a
+// system-reminder in the first user message, or with an assistant turn after the
+// relocated system turn, it followed the persona every time. Native Claude Code
+// sends the mid-conversation system turn only to opus-5 and sonnet-5.
+//
+// These models take the system-reminder path on every OAuth request, so the
+// cached prefix is the same on a conversation's first and later requests.
+var claudeOAuthSystemReminderModels = map[string]struct{}{
+	"claude-haiku-5-5": {},
+}
+
+func claudePayloadModelID(payload []byte) string {
 	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
 	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
 		model = model[slash+1:]
 	}
-	_, legacy := claudeLegacySystemReminderModels[model]
+	return model
+}
+
+func claudeUsesLegacySystemReminder(payload []byte) bool {
+	_, legacy := claudeLegacySystemReminderModels[claudePayloadModelID(payload)]
 	return legacy
+}
+
+// claudeUsesCallerSystemReminder reports whether caller system blocks go into the
+// first user message as system-reminders instead of a role=system turn.
+func claudeUsesCallerSystemReminder(payload []byte, keepCallerSystemTopLevel bool) bool {
+	if claudeUsesLegacySystemReminder(payload) {
+		return true
+	}
+	if keepCallerSystemTopLevel {
+		return false
+	}
+	_, preferred := claudeOAuthSystemReminderModels[claudePayloadModelID(payload)]
+	return preferred
 }
 
 // claudeCallerSystemBlockError reports a caller system block that Claude cannot
