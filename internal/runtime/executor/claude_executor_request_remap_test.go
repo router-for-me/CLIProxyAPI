@@ -1161,3 +1161,94 @@ func TestReverseRemapWrappedCallerMCPToolStaysAnErrorWhenAmbiguous(t *testing.T)
 		t.Fatalf("ambiguous wrapped tool error = %v, want matches multiple declared tools", errReverse)
 	}
 }
+
+func TestReverseRemapOAuthToolNamesRecoversBareToolComponent(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"edit","input_schema":{"type":"object"}},{"name":"write","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "bare-tool-component-caller"})
+	editAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	editParts, ok := parseClaudeMCPAlias(editAlias)
+	if !ok {
+		t.Fatalf("edit alias is invalid: %q", editAlias)
+	}
+
+	// The model answered with the tool component only, the whole
+	// mcp__<server>__ prefix dropped (issue #6848).
+	bareAlias := editParts.toolID + "_" + editParts.semantic
+	response := []byte(fmt.Sprintf(`{"content":[
+		{"type":"tool_use","id":"toolu_edit","name":%q,"input":{}},
+		{"type":"tool_use","id":"toolu_other","name":"orbit_fly","input":{}}
+	]}`, bareAlias))
+
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "edit" {
+		t.Fatalf("bare tool component restored to %q, want edit", got)
+	}
+	// A bare name that matches no declared tool component is still forwarded unchanged.
+	if got := gjson.GetBytes(restored, "content.1.name").String(); got != "orbit_fly" {
+		t.Fatalf("unrelated bare name changed to %q, want orbit_fly", got)
+	}
+
+	streamLine := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_edit","name":%q,"input":{}}}`, bareAlias))
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(streamLine, reverseMap)
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
+	}
+	if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "edit" {
+		t.Fatalf("streamed bare tool component restored to %q, want edit", got)
+	}
+}
+
+func TestClaudeMCPAliasResolverBareToolComponentAmbiguousWithPassthrough(t *testing.T) {
+	alias := "mcp__brave_lemon__orbit_edit"
+	resolver := newClaudeMCPAliasResolver(map[string]string{alias: "edit"})
+	if got, matched, err := resolver.resolve("orbit_edit"); err != nil || !matched || got != "edit" {
+		t.Fatalf("resolve(orbit_edit) = %q, %v, %v; want edit, true, nil", got, matched, err)
+	}
+
+	// A caller-owned passthrough tool whose tool component is the same bare name
+	// drops its prefix the same way, so the name is ambiguous and stays unchanged.
+	passthrough := "mcp__real__orbit_edit"
+	ambiguous := newClaudeMCPAliasResolver(map[string]string{alias: "edit", passthrough: passthrough})
+	if got, matched, err := ambiguous.resolve("orbit_edit"); err != nil || matched || got != "" {
+		t.Fatalf("resolve(orbit_edit) with passthrough = %q, %v, %v; want unchanged", got, matched, err)
+	}
+	if got, matched, err := ambiguous.resolve(passthrough); err != nil || matched || got != "" {
+		t.Fatalf("resolve(%s) = %q, %v, %v; want passthrough forwarded as is", passthrough, got, matched, err)
+	}
+
+	// A server tool keeps its name, so a generated component that spells it
+	// (tool ID "web", client tool "search") must not capture it either.
+	builtin := newClaudeMCPAliasResolver(map[string]string{"mcp__brave_lemon__web_search": "search", "web_search": "web_search"})
+	if got, matched, err := builtin.resolve("web_search"); err != nil || matched || got != "" {
+		t.Fatalf("resolve(web_search) = %q, %v, %v; want the server tool forwarded as is", got, matched, err)
+	}
+}
+
+func TestRemapOAuthToolNamesRecordsServerToolsForRestore(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"search","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "server-tool-caller"})
+	if got := gjson.GetBytes(remapped, "tools.0.name").String(); got != "web_search" {
+		t.Fatalf("server tool renamed to %q, want web_search", got)
+	}
+	if original, ok := reverseMap["web_search"]; !ok || original != "web_search" {
+		t.Fatalf("reverse map does not record the server tool as left untouched: %v", reverseMap)
+	}
+	searchAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	response := []byte(fmt.Sprintf(`{"content":[
+		{"type":"tool_reference","tool_name":"web_search"},
+		{"type":"tool_use","id":"toolu_search","name":%q,"input":{}}
+	]}`, searchAlias))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.tool_name").String(); got != "web_search" {
+		t.Fatalf("server tool reference changed to %q, want web_search", got)
+	}
+	if got := gjson.GetBytes(restored, "content.1.name").String(); got != "search" {
+		t.Fatalf("client tool alias restored to %q, want search", got)
+	}
+}
