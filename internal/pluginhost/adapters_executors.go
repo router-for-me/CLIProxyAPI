@@ -437,6 +437,13 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		}
 		nativeReq.Payload = translated.Body
 	}
+	// User payload rules are the last host-side mutation before the plugin sees
+	// the request, and match on the suffix-free model like the built-in executors.
+	if cfg := a.host.currentRuntimeConfig(); cfg != nil {
+		baseModel := thinking.ParseSuffix(req.Model).ModelName
+		finalize := helps.NewPayloadFinalizer(cfg, a.provider, baseModel, inputFormat.String(), "", nativeReq.Payload, req, opts)
+		nativeReq.Payload = finalize(nativeReq.Payload)
+	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
 	nativeOpts.ResponseFormat = outputFormat
