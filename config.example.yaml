@@ -111,6 +111,11 @@ access:
     - "your-api-key-1"
     - "your-api-key-2"
     - "your-api-key-3"
+  # Optional exact public model IDs per client key. Omitted keys can use all models.
+  # An empty list blocks every model for that key. Provider aliases are not expanded.
+  # api-key-models:
+  #   "your-api-key-1": ["gpt-5.4", "claude-sonnet-4-6"]
+  #   "your-api-key-2": []
 
 # Optional credential concurrency and observation contracts.
 

@@ -18,6 +18,8 @@ import (
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
+	// APIKeyModels restricts client keys to exact public model IDs. Missing keys are unrestricted; empty lists deny all models.
+	APIKeyModels map[string][]string `yaml:"api-key-models,omitempty" json:"api-key-models,omitempty"`
 	// MaxRequestBodyBytes limits the size (in bytes) of incoming HTTP request bodies.
 	// Values <= 0 disable the limit (default).
 	MaxRequestBodyBytes int64 `yaml:"max-request-body-bytes" json:"max-request-body-bytes"`
