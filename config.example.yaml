@@ -185,7 +185,8 @@ routing:
   # behind one load balancer send a session to the same credential without shared state.
   # If that credential is unavailable the session moves to its next-ranked credential and
   # returns when the first recovers. Subagents (when session-affinity-subagents is true) rank
-  # by the root session of their tree, forks by their parent, and a request with both
+  # by the root session of their tree when the request names it, otherwise by their parent;
+  # forks by their parent; and a request with both
   # prompt_cache_key and a conversation ID by the conversation. Round-robin spreads sessions
   # evenly and weighted-round-robin by weight; fill-first is unchanged. Unlike the cached mode:
   # a recovered higher-priority credential takes its sessions back; a credential that fails

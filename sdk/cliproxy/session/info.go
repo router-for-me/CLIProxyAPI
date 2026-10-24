@@ -206,6 +206,10 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		if agentID != "" && agentID != "main" {
 			info.AgentName = agentID
 			info.RootSessionID = "claude:" + sid
+			if parentCandidate != "" && parentCandidate != sid {
+				// The session itself names a parent session: that is the tree's root.
+				info.RootSessionID = "claude:" + parentCandidate
+			}
 			info.ParentSessionID = "claude:" + sid
 			if parentAgentID != "" && parentAgentID != "main" && parentAgentID != agentID {
 				info.ParentSessionID = "claude:" + sid + ":agent:" + parentAgentID
@@ -259,6 +263,12 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			if agentID != "" && agentID != "main" {
 				info.SessionID = "claude:" + sid + ":agent:" + agentID
 				info.RootSessionID = "claude:" + sid
+				if parentSID != "" && parentSID != sid {
+					// The session itself names a parent session: that is the tree's root.
+					info.RootSessionID = "claude:" + parentSID
+				} else if parentCandidate != "" && parentCandidate != sid {
+					info.RootSessionID = "claude:" + parentCandidate
+				}
 				info.ParentSessionID = "claude:" + sid
 				if parentAgentID != "" && parentAgentID != "main" && parentAgentID != agentID {
 					info.ParentSessionID = "claude:" + sid + ":agent:" + parentAgentID

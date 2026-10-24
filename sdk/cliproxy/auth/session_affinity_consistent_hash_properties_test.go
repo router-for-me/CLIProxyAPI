@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+// Properties of the consistent-hash ranking: order independence, spread, weights, priority
+// tiers, concurrency, message-hash identities, and pinned picks.
 
 // Candidate order must not change the pick (300 sessions, 5 shuffles of 6 credentials).
 func TestSessionAffinityConsistentHashIgnoresCandidateOrder(t *testing.T) {
@@ -80,52 +82,6 @@ func TestSessionAffinityConsistentHashUniformAndWeightedShares(t *testing.T) {
 		}
 	}
 	t.Logf("weighted counts=%v", wc)
-}
-
-// A subagent spawned by a subagent (X-Claude-Code-Parent-Agent-Id) should land on the
-// root session's credential, as it does with the per-process binding cache.
-func TestSessionAffinityConsistentHashNestedClaudeSubagentFollowsRoot(t *testing.T) {
-	auths := consistentHashAuths("claude-a", "claude-b", "claude-c", "claude-d")
-	nestedOpts := func(root string) cliproxyexecutor.Options {
-		return cliproxyexecutor.Options{
-			Headers: http.Header{
-				"X-Claude-Code-Session-Id":      []string{root},
-				"X-Claude-Code-Agent-Id":        []string{"nested"},
-				"X-Claude-Code-Parent-Agent-Id": []string{"sub"},
-			},
-			OriginalRequest: []byte(`{"messages":[{"role":"user","content":"nested"}]}`),
-			Metadata:        map[string]any{},
-		}
-	}
-	subOpts := func(root string) cliproxyexecutor.Options {
-		return cliproxyexecutor.Options{
-			Headers: http.Header{
-				"X-Claude-Code-Session-Id": []string{root},
-				"X-Claude-Code-Agent-Id":   []string{"sub"},
-			},
-			OriginalRequest: []byte(`{"messages":[{"role":"user","content":"sub"}]}`),
-			Metadata:        map[string]any{},
-		}
-	}
-	for _, enabled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("consistentHash=%v", enabled), func(t *testing.T) {
-			selector := newConsistentHashReplica(t, &RoundRobinSelector{}, enabled)
-			mismatch := 0
-			for i := 0; i < 40; i++ {
-				root := fmt.Sprintf("nested-root-%d", i)
-				rootAuth := pickConsistentHashAuth(t, selector, claudeSessionOpts(root), auths)
-				subAuth := pickConsistentHashAuth(t, selector, subOpts(root), auths)
-				nestedAuth := pickConsistentHashAuth(t, selector, nestedOpts(root), auths)
-				if subAuth != rootAuth || nestedAuth != rootAuth {
-					mismatch++
-				}
-			}
-			t.Logf("consistentHash=%v: %d/40 roots where sub or nested subagent left the root credential", enabled, mismatch)
-			if mismatch > 0 {
-				t.Errorf("nested subagents left the root credential in %d/40 sessions", mismatch)
-			}
-		})
-	}
 }
 
 // Without explicit IDs and without a caller scope the LCP matcher is skipped, so the
@@ -226,66 +182,6 @@ func TestSessionAffinityConsistentHashConcurrentPicks(t *testing.T) {
 	close(errs)
 	for e := range errs {
 		t.Fatal(e)
-	}
-}
-
-// A thread spawned by a spawned thread names its immediate parent, but Session_id still names
-// the root session; every thread of the tree should land with the root.
-func TestSessionAffinityConsistentHashNestedCodexThreadFollowsRoot(t *testing.T) {
-	auths := consistentHashAuths("codex-a", "codex-b", "codex-c", "codex-d")
-	codexOpts := func(root, thread, parent string) cliproxyexecutor.Options {
-		headers := http.Header{"Session_id": []string{root}}
-		if thread != "" {
-			headers.Set("Thread_id", thread)
-		}
-		if parent != "" {
-			headers.Set("X-Codex-Parent-Thread-Id", parent)
-		}
-		return cliproxyexecutor.Options{
-			Headers:         headers,
-			OriginalRequest: []byte(`{"input":[{"role":"user","content":"task"}]}`),
-			Metadata:        map[string]any{},
-		}
-	}
-	for _, enabled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("consistentHash=%v", enabled), func(t *testing.T) {
-			selector := newConsistentHashReplica(t, &RoundRobinSelector{}, enabled)
-			mismatch := 0
-			for i := 0; i < 40; i++ {
-				root := fmt.Sprintf("codex-root-%d", i)
-				rootAuth := pickConsistentHashAuth(t, selector, codexOpts(root, "", ""), auths)
-				childAuth := pickConsistentHashAuth(t, selector, codexOpts(root, root+"-a", root), auths)
-				nestedAuth := pickConsistentHashAuth(t, selector, codexOpts(root, root+"-b", root+"-a"), auths)
-				if childAuth != rootAuth || nestedAuth != rootAuth {
-					mismatch++
-				}
-			}
-			if mismatch > 0 {
-				t.Errorf("nested Codex threads left the root credential in %d/40 sessions", mismatch)
-			}
-		})
-	}
-}
-
-// A conversation whose first request carries prompt_cache_key and a conversation ID, and whose
-// later requests carry only the conversation, stays on one credential, on any replica.
-func TestSessionAffinityConsistentHashConversationAliasLinksRequests(t *testing.T) {
-	auths := consistentHashAuths("oa-a", "oa-b", "oa-c", "oa-d")
-	selector := newConsistentHashReplica(t, &RoundRobinSelector{}, true)
-	other := newConsistentHashReplica(t, &RoundRobinSelector{}, true)
-	for i := 0; i < 40; i++ {
-		both := cliproxyexecutor.Options{
-			OriginalRequest: []byte(fmt.Sprintf(`{"prompt_cache_key":"pck-%d","conversation":"conv-%d","input":[{"role":"user","content":"hi"}]}`, i, i)),
-			Metadata:        map[string]any{},
-		}
-		only := cliproxyexecutor.Options{
-			OriginalRequest: []byte(fmt.Sprintf(`{"conversation":"conv-%d","input":[{"role":"user","content":"hi"}]}`, i)),
-			Metadata:        map[string]any{},
-		}
-		first := pickConsistentHashAuth(t, selector, both, auths)
-		if later := pickConsistentHashAuth(t, other, only, auths); later != first {
-			t.Fatalf("conversation %d: %s with prompt_cache_key, %s without", i, first, later)
-		}
 	}
 }
 

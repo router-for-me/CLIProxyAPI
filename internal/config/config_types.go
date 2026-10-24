@@ -459,7 +459,7 @@ type RoutingConfig struct {
 	// cache entries, which no longer decide routing; SessionAffinityRebindOn has no effect;
 	// an SDK caller's custom fallback selector is not consulted (ranking is uniform, or by weight
 	// under weighted-round-robin). Subagents (when SessionAffinitySubagents is true) rank by the
-	// root of their tree, and a request with both prompt_cache_key and a conversation ID by the
+	// root of their tree when the request names it, otherwise by their parent, and a request with both prompt_cache_key and a conversation ID by the
 	// conversation. Codex requests over a downstream websocket rank only websocket-enabled
 	// credentials, so a session that mixes transports can use two credentials. Requests whose
 	// explicit session ID is missing use the per-process prefix matcher when it applies, else their

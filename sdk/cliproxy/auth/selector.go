@@ -1315,8 +1315,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 }
 
 // consistentHashSessionKey is the identity a request is ranked by. A subagent (when subagents
-// inherit) uses the root of its tree, so nested agents land with the root session: the root the
-// request names, else its ID cut at the first ":agent:", else its parent. A fork uses its parent.
+// inherit) uses the root of its tree when the request names it, so nested agents land with the
+// root session; otherwise its ID cut at the first ":agent:", otherwise its parent. A fork uses its parent.
 // A request with both prompt_cache_key and a conversation ID uses the conversation, which also
 // names the requests that carry only the conversation.
 func consistentHashSessionKey(primaryID, fallbackID, rootID string, isFork, inheritParent bool) string {
