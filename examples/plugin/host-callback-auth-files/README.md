@@ -86,4 +86,5 @@ http://localhost:8080/v0/resource/plugins/host-callback-auth-files/status?op=sav
 
 - `host.auth.get` returns the physical auth file JSON.
 - `host.auth.get_runtime` returns runtime credential metadata.
+- `host.auth.list` and `host.auth.get_runtime` entries include `cooldowns`, the same view as the Management API auth-files `cooldowns` field (`scope`, `model_key`, `reason`, `retry_at`, ...). It is omitted when no cooldown is active or when cooldowns are tracked by Home.
 - `host.auth.save` writes the JSON to the auth directory and upserts the runtime auth record.
