@@ -395,6 +395,34 @@ func TestVertexAPIKeyModelsURL(t *testing.T) {
 			action:  "generateContent",
 			want:    "https://zenmux.ai/v1/publishers/google/models/gemini-2.5-flash:generateContent",
 		},
+		{
+			name:    "bare host named like a version is not mistaken for /v1",
+			baseURL: "http://vertex1",
+			model:   "gemini-2.5-flash",
+			action:  "generateContent",
+			want:    "http://vertex1/v1/publishers/google/models/gemini-2.5-flash:generateContent",
+		},
+		{
+			name:    "bare host with hyphen and digit is not mistaken for /v1",
+			baseURL: "http://v1-gateway",
+			model:   "gemini-2.5-flash",
+			action:  "generateContent",
+			want:    "http://v1-gateway/v1/publishers/google/models/gemini-2.5-flash:generateContent",
+		},
+		{
+			name:    "host with port is not mistaken for /v1",
+			baseURL: "http://vertex1:8080",
+			model:   "gemini-2.5-flash",
+			action:  "streamGenerateContent",
+			want:    "http://vertex1:8080/v1/publishers/google/models/gemini-2.5-flash:streamGenerateContent",
+		},
+		{
+			name:    "host with port plus explicit /v1 path keeps single /v1",
+			baseURL: "http://vertex1:8080/v1",
+			model:   "gemini-2.5-flash",
+			action:  "streamGenerateContent",
+			want:    "http://vertex1:8080/v1/publishers/google/models/gemini-2.5-flash:streamGenerateContent",
+		},
 	}
 
 	for _, tc := range tests {
