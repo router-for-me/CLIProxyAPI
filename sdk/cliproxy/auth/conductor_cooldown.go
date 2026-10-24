@@ -925,7 +925,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 		now = time.Now()
-		responseHeaders := internallogging.GetResponseHeaders(ctx)
+		responseHeaders, responseObservedAt := internallogging.GetResponseHeadersSnapshot(ctx)
 		modelState := existingModelState(auth, modelKey)
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
@@ -1332,9 +1332,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.UpdatedAt = now
 
 		if !result.SkipQuotaObservation {
-			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, responseObservedAt)
 			if modelState != nil {
-				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, responseObservedAt)
 			}
 		}
 
