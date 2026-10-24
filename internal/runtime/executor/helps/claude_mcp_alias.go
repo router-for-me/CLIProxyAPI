@@ -56,7 +56,48 @@ func ClaudeMCPToolAlias(secret, original string, attempt uint32) string {
 // Attempts are capped at the wordlist size so names that sanitize to the same
 // suffix cannot spin forever. ok is false only when every one-word tool ID for
 // this semantic is already reserved.
+//
+// Prefer AllocateUniqueClaudeMCPToolAlias for request remapping: this entry
+// point keeps the historical per-tool semantic and can hand two tools the same
+// semantic component, which makes drifted names unrecoverable.
 func AllocateClaudeMCPToolAlias(secret, original string, reserved map[string]bool) (string, bool) {
+	return allocateClaudeMCPToolAliasWithSemantic(secret, original, "", reserved)
+}
+
+// AllocateUniqueClaudeMCPToolAlias picks an alias whose semantic component is
+// unique within one request. semantics maps an already allocated semantic to the
+// original tool name that owns it; the caller passes the same map for every tool
+// of a request. Over-length names keep their distinguishing tail instead of a
+// shared head, and any remaining semantic collision gets a deterministic short
+// keyed hash suffix. Two declared tools therefore never share a semantic, so
+// response restore never has to choose between equally good candidates.
+func AllocateUniqueClaudeMCPToolAlias(secret, original string, reserved map[string]bool, semantics map[string]string) (string, bool) {
+	server := claudeMCPAliasServerComponent(secret)
+	budget := claudeMCPUniqueSemanticBudget(server)
+	semantic := claudeMCPToolUniqueSemantic(original, budget)
+	if owner, taken := semantics[semantic]; taken && owner != original {
+		digest := claudeMCPAliasDigest(secret, "semantic", original)
+		found := false
+		for attempt := 0; attempt < len(digest)-2; attempt++ {
+			candidate := claudeMCPSemanticWithHash(semantic, budget, digest[attempt:attempt+3])
+			if owner, taken := semantics[candidate]; !taken || owner == original {
+				semantic = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", false
+		}
+	}
+	alias, ok := allocateClaudeMCPToolAliasWithSemantic(secret, original, semantic, reserved)
+	if ok && semantics != nil {
+		semantics[semantic] = original
+	}
+	return alias, ok
+}
+
+func allocateClaudeMCPToolAliasWithSemantic(secret, original, semantic string, reserved map[string]bool) (string, bool) {
 	words := claudeMCPAliasEnglishWords
 	totalWords := len(words)
 	if totalWords == 0 {
@@ -68,13 +109,84 @@ func AllocateClaudeMCPToolAlias(secret, original string, reserved map[string]boo
 	baseIndex := int(binary.BigEndian.Uint16(toolDigest[0:2])) % totalWords
 
 	for attempt := 0; attempt < totalWords; attempt++ {
-		alias := claudeMCPAliasFor(server, words[(baseIndex+attempt)%totalWords], original)
+		word := words[(baseIndex+attempt)%totalWords]
+		var alias string
+		if semantic == "" {
+			alias = claudeMCPAliasFor(server, word, original)
+		} else {
+			alias = "mcp__" + server + "__" + word + "_" + semantic
+		}
 		if reserved != nil && reserved[alias] {
 			continue
 		}
 		return alias, true
 	}
 	return "", false
+}
+
+// claudeMCPUniqueSemanticBudget is the semantic length that fits the 64-byte
+// tool-name cap with the longest one-word tool ID, so the semantic does not
+// depend on which word the allocator lands on.
+func claudeMCPUniqueSemanticBudget(server string) int {
+	longestWord := 0
+	for _, word := range claudeMCPAliasEnglishWords {
+		if len(word) > longestWord {
+			longestWord = len(word)
+		}
+	}
+	budget := 64 - len("mcp__"+server+"__") - longestWord - 1
+	if budget < 8 {
+		budget = 8
+	}
+	return budget
+}
+
+// claudeMCPToolUniqueSemantic keeps short names exactly as the historical
+// semantic does and head-truncates other over-length names the same way. A
+// caller MCP name (mcp__<server>__<tool>) drops its prefix instead and keeps
+// the tail of the tool part, which is where tools sharing a long stem differ.
+func claudeMCPToolUniqueSemantic(original string, budget int) string {
+	full := claudeMCPToolSemanticSuffix(original, len(original)+1)
+	if len(full) <= budget {
+		return full
+	}
+	if rest, ok := strings.CutPrefix(original, "mcp__"); ok {
+		if _, tool, ok := strings.Cut(rest, "__"); ok && tool != "" {
+			full = claudeMCPToolSemanticSuffix(tool, len(tool)+1)
+			if len(full) <= budget {
+				return full
+			}
+			if tail := strings.TrimLeft(full[len(full)-budget:], "_-"); tail != "" {
+				return tail
+			}
+			return "tool"
+		}
+	}
+	return claudeMCPToolSemanticSuffix(original, budget)
+}
+
+const claudeMCPSemanticHashAlphabet = "abcdefghijklmnopqrstuvwxyz234567"
+
+// claudeMCPSemanticWithHash appends a 4-character keyed hash so colliding
+// semantics stay readable but distinct, trimming the semantic to stay in budget.
+func claudeMCPSemanticWithHash(semantic string, budget int, digest []byte) string {
+	value := uint32(digest[0])<<16 | uint32(digest[1])<<8 | uint32(digest[2])
+	var hash [4]byte
+	for i := range hash {
+		hash[i] = claudeMCPSemanticHashAlphabet[value&31]
+		value >>= 5
+	}
+	keep := budget - len(hash) - 1
+	if keep < 1 {
+		keep = 1
+	}
+	if len(semantic) > keep {
+		semantic = strings.TrimRight(semantic[:keep], "_-")
+	}
+	if semantic == "" {
+		return "tool_" + string(hash[:])
+	}
+	return semantic + "_" + string(hash[:])
 }
 
 // claudeMCPAliasFor assembles the final alias for one server/tool word pair.

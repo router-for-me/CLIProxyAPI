@@ -380,10 +380,20 @@ func TestReverseRemapOAuthToolNamesWithBIP39Aliases(t *testing.T) {
 }
 
 func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
-	body := []byte(`{"tools":[{"name":"tool.name"},{"name":"tool/name"}]}`)
-	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "ambiguous-alias-caller"})
-	firstAlias := gjson.GetBytes(remapped, "tools.0.name").String()
-	secondAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	// The request allocator never hands two tools one semantic any more, so
+	// build an ambiguous symbol table with the historical per-tool allocator to
+	// keep the resolver's fail-closed path covered.
+	reserved := make(map[string]bool)
+	firstAlias, ok := helps.AllocateClaudeMCPToolAlias("ambiguous-alias-caller", "tool.name", reserved)
+	if !ok {
+		t.Fatal("first alias allocation failed")
+	}
+	reserved[firstAlias] = true
+	secondAlias, ok := helps.AllocateClaudeMCPToolAlias("ambiguous-alias-caller", "tool/name", reserved)
+	if !ok {
+		t.Fatal("second alias allocation failed")
+	}
+	reverseMap := map[string]string{firstAlias: "tool.name", secondAlias: "tool/name"}
 	firstParts, ok := parseClaudeMCPAlias(firstAlias)
 	if !ok {
 		t.Fatalf("first alias is invalid: %q", firstAlias)
