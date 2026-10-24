@@ -184,11 +184,19 @@ routing:
   # available credentials instead of by this process's binding cache, so several replicas
   # behind one load balancer send a session to the same credential without shared state.
   # If that credential is unavailable the session moves to its next-ranked credential and
-  # returns when the first recovers. Subagents and forks hash their parent's ID when
-  # session-affinity-subagents is true. Round-robin spreads sessions evenly and
-  # weighted-round-robin by weight; fill-first is unchanged. session-affinity-rebind-on has
-  # no effect in this mode. Requests without an explicit session ID still use the
-  # per-process prefix matcher. Ignored when routing.session-affinity is false.
+  # returns when the first recovers. Subagents (when session-affinity-subagents is true) rank
+  # by the root session of their tree, forks by their parent, and a request with both
+  # prompt_cache_key and a conversation ID by the conversation. Round-robin spreads sessions
+  # evenly and weighted-round-robin by weight; fill-first is unchanged. Unlike the cached mode:
+  # a recovered higher-priority credential takes its sessions back; a credential that fails
+  # without entering cooldown stays first for its sessions; session-affinity-ttl only expires
+  # cache entries; session-affinity-rebind-on has no effect; an SDK caller's custom fallback
+  # selector is not consulted. Codex requests over a downstream websocket rank only
+  # websocket-enabled credentials, so a session mixing transports can use two credentials.
+  # Requests without an explicit session ID use the per-process prefix matcher when it applies,
+  # else their derived or message-hash ID, ranked the same way. Clients choose session IDs, so a
+  # client can try IDs until one ranks a chosen credential first. No effect when Home is
+  # enabled (Home picks credentials). Ignored when routing.session-affinity is false.
   session-affinity-consistent-hash: false
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
