@@ -893,9 +893,10 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 
 // StreamUsageBuffer keeps the latest usage detail observed in a stream.
 type StreamUsageBuffer struct {
-	detail        usage.Detail
-	ok            bool
-	responseModel string
+	detail            usage.Detail
+	ok                bool
+	responseModel     string
+	interactionsUsage map[string]int64
 }
 
 var (
@@ -1338,9 +1339,13 @@ func hasUsageDetail(detail usage.Detail) bool {
 	return hasNonZeroTokenUsage(detail)
 }
 
+func interactionsUsageNode(root gjson.Result) gjson.Result {
+	return firstExistingUsageNode(root, "usage", "total_usage", "metadata.total_usage", "metadata.usage", "usageMetadata", "usage_metadata", "interaction.usage", "interaction.total_usage", "interaction.metadata.total_usage")
+}
+
 func ParseInteractionsUsage(data []byte) usage.Detail {
 	root := gjson.ParseBytes(data)
-	node := firstExistingUsageNode(root, "usage", "total_usage", "metadata.total_usage", "metadata.usage", "usageMetadata", "usage_metadata", "interaction.usage", "interaction.total_usage", "interaction.metadata.total_usage")
+	node := interactionsUsageNode(root)
 	if !node.Exists() {
 		return usage.Detail{}
 	}

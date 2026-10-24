@@ -53,6 +53,79 @@ func TestObservePluginExecutorInteractionsUsagePreservesFinalSnapshot(t *testing
 	}
 }
 
+func TestObservePluginExecutorInteractionsUsagePreservesPartialEvents(t *testing.T) {
+	t.Parallel()
+	for _, protocol := range []string{"interactions", "interactions-response"} {
+		for _, tc := range []struct {
+			name   string
+			events []string
+			want   string
+		}{
+			{
+				name: "input then output",
+				events: []string{
+					`{"usage":{"input_tokens":100,"cache_read_tokens":20,"cache_write_tokens":10,"total_tokens":100}}`,
+					`{"usage":{"output_tokens":30,"reasoning_tokens":10,"total_tokens":140}}`,
+				},
+				want: `{"usage":{"input_tokens":100,"cache_read_tokens":20,"cache_write_tokens":10,"output_tokens":30,"reasoning_tokens":10,"total_tokens":140}}`,
+			},
+			{
+				name: "output then input without total",
+				events: []string{
+					`{"interaction":{"usage":{"total_output_tokens":30,"total_thought_tokens":10,"total_tokens":40}}}`,
+					`{"metadata":{"total_usage":{"total_input_tokens":100,"total_cached_tokens":20}}}`,
+				},
+				want: `{"usage":{"input_tokens":100,"cached_tokens":20,"output_tokens":30,"reasoning_tokens":10,"total_tokens":140}}`,
+			},
+			{
+				name: "Gemini aliases across events",
+				events: []string{
+					`{"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":20}}`,
+					`{"usageMetadata":{"candidatesTokenCount":30,"thoughtsTokenCount":10}}`,
+					`{"usage_metadata":{"thoughtsTokenCount":0,"cachedContentTokenCount":0}}`,
+				},
+				want: `{"usage":{"input_tokens":100,"cached_tokens":0,"output_tokens":30,"reasoning_tokens":0,"total_tokens":130}}`,
+			},
+			{
+				name: "tool input updated separately",
+				events: []string{
+					`{"usage":{"input_tokens":90,"tool_use_tokens":10,"output_tokens":30,"reasoning_tokens":10}}`,
+					`{"usage":{"total_tool_use_tokens":15}}`,
+					`{"usage":{"prompt_tokens":100}}`,
+				},
+				want: `{"usage":{"input_tokens":100,"tool_use_tokens":15,"output_tokens":30,"reasoning_tokens":10,"total_tokens":155}}`,
+			},
+			{
+				name: "all zero snapshot",
+				events: []string{
+					`{"usage":{"input_tokens":100,"cached_tokens":20,"cache_read_tokens":20,"cache_write_tokens":10,"output_tokens":30,"reasoning_tokens":10}}`,
+					`{"service_tier":"default","usage":{"input_tokens":0,"cached_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"output_tokens":0,"reasoning_tokens":0,"total_tokens":0}}`,
+				},
+				want: `{"service_tier":"default","usage":{"input_tokens":0,"total_tokens":0}}`,
+			},
+		} {
+			t.Run(protocol+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				var buffer StreamUsageBuffer
+				for _, event := range tc.events {
+					// Repeating a partial cumulative event must not add its counts twice.
+					for range 2 {
+						ObservePluginExecutorStreamUsage(protocol, []byte("data: "+event+"\n\n"), &buffer)
+					}
+				}
+				got, ok := buffer.Detail()
+				want := ParseInteractionsUsage([]byte(tc.want))
+				if !ok || got != want {
+					t.Fatalf("stream usage = %+v (ok=%v), want %+v", got, ok, want)
+				}
+				if !got.TokenBreakdown.Valid() {
+					t.Fatalf("invalid token breakdown: %+v", got.TokenBreakdown)
+				}
+			})
+		}
+	}
+}
+
 func TestObservePluginExecutorStreamUsageKeepsTopLevelResponsesTokensWhenServiceTierPresent(t *testing.T) {
 	t.Parallel()
 
