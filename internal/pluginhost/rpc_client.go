@@ -81,6 +81,13 @@ func (e rpcError) SafeResponseHeaders() http.Header {
 	return http.Header{"Retry-After": []string{strconv.FormatInt(int64(*retryAfter/time.Second), 10)}}
 }
 
+func pluginErrorStatus(status int) int {
+	if status == 0 {
+		return http.StatusInternalServerError
+	}
+	return status
+}
+
 type rpcResponseNormalizer struct {
 	*rpcPluginAdapter
 	method string
@@ -392,7 +399,7 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 			return zero, rpcError{
 				Code:              strings.TrimSpace(envelope.Error.Code),
 				message:           message,
-				statusCode:        envelope.Error.HTTPStatus,
+				statusCode:        pluginErrorStatus(envelope.Error.HTTPStatus),
 				retryAfterSeconds: envelope.Error.RetryAfterSeconds,
 			}
 		}
