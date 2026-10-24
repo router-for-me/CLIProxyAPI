@@ -345,6 +345,34 @@ func TestConvertAntigravityResponseToOpenAINonStreamIncludesReasoningContent(t *
 	}
 }
 
+func TestConvertAntigravityResponseToOpenAI_NonStopFinishReasonsMapToContentFilter(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		upstreamReason string
+		wantNative     string
+	}{
+		{upstreamReason: "MALFORMED_RESPONSE", wantNative: "malformed_response"},
+		{upstreamReason: "MALFORMED_FUNCTION_CALL", wantNative: "malformed_function_call"},
+		{upstreamReason: "SAFETY", wantNative: "safety"},
+		{upstreamReason: "RECITATION", wantNative: "recitation"},
+	} {
+		t.Run(tc.upstreamReason, func(t *testing.T) {
+			var param any
+			chunk := []byte(`{"response":{"candidates":[{"content":{"role":"model"},"finishReason":"` + tc.upstreamReason + `"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11}}}`)
+			out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-4-argon", nil, nil, chunk, &param)
+			if len(out) != 1 {
+				t.Fatalf("expected 1 chunk, got %d", len(out))
+			}
+			if got := gjson.GetBytes(out[0], "choices.0.finish_reason").String(); got != "content_filter" {
+				t.Fatalf("finish_reason = %q, want content_filter; payload=%s", got, out[0])
+			}
+			if got := gjson.GetBytes(out[0], "choices.0.native_finish_reason").String(); got != tc.wantNative {
+				t.Fatalf("native_finish_reason = %q, want %q; payload=%s", got, tc.wantNative, out[0])
+			}
+		})
+	}
+}
+
 func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDelta(t *testing.T) {
 	ctx := context.Background()
 	var param any

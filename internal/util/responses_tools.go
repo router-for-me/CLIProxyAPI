@@ -339,6 +339,12 @@ type responsesToolWinnerKey struct {
 
 // BuildGeminiFunctionDeclarations builds Gemini function declarations, forward name mapping, and reverse identity mapping.
 func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]string, map[string]ResponsesToolIdentity) {
+	return buildGeminiFunctionDeclarations(root, true)
+}
+
+// buildGeminiFunctionDeclarations skips per-tool declaration construction and schema
+// cleanup when the caller only needs the name and identity maps.
+func buildGeminiFunctionDeclarations(root gjson.Result, withDeclarations bool) ([][]byte, map[string]string, map[string]ResponsesToolIdentity) {
 	descriptors := collectResponsesToolDescriptors(root, true)
 	winners := make(map[responsesToolWinnerKey]ResponsesToolDescriptor, len(descriptors))
 	for _, descriptor := range descriptors {
@@ -476,6 +482,9 @@ func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]st
 		if !desc.ClientSearch && desc.Name != geminiName {
 			reverseMap[desc.Name] = identity
 		}
+		if !withDeclarations {
+			continue
+		}
 
 		funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
 		funcDecl, _ = sjson.SetBytes(funcDecl, "name", geminiName)
@@ -531,7 +540,7 @@ func ResponsesToolReverseIdentityMap(rawJSON []byte) map[string]ResponsesToolIde
 	if req := root.Get("request"); req.Exists() && (req.Get("model").Exists() || req.Get("input").Exists() || req.Get("tools").Exists()) {
 		root = req
 	}
-	_, _, reverseMap := BuildGeminiFunctionDeclarations(root)
+	_, _, reverseMap := buildGeminiFunctionDeclarations(root, false)
 	return reverseMap
 }
 

@@ -994,6 +994,58 @@ func TestConvertOpenAIResponsesRequestToAntigravity_MixedToolsSuppressesGoogleSe
 	if !fnFound {
 		t.Fatalf("custom function lookup_data should be preserved in request.tools: %s", out)
 	}
+
+	// 4. Must never carry includeServerSideToolInvocations or leave empty toolConfig on Antigravity
+	if parsed.Get("request.toolConfig.includeServerSideToolInvocations").Exists() || parsed.Get("toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("Antigravity must not carry includeServerSideToolInvocations: %s", out)
+	}
+	if parsed.Get("request.toolConfig").Exists() {
+		t.Fatalf("expected no request.toolConfig when tool_choice is omitted, got: %s", out)
+	}
+
+	inputWithAutoChoice := []byte(`{
+		"model": "` + modelID + `",
+		"input": "Search weather and lookup local data",
+		"tools": [
+			{"type": "web_search"},
+			{"type": "function", "name": "lookup_data", "description": "Lookup data", "parameters": {"type": "object", "properties": {"k": {"type": "string"}}}}
+		],
+		"tool_choice": "auto"
+	}`)
+	outWithAuto, _ := ConvertOpenAIResponsesRequestToAntigravity(modelID, inputWithAutoChoice, false)
+	parsedAuto := gjson.ParseBytes(outWithAuto)
+	if parsedAuto.Get("request.toolConfig.includeServerSideToolInvocations").Exists() || parsedAuto.Get("toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("Antigravity must not carry includeServerSideToolInvocations with tool_choice=auto: %s", outWithAuto)
+	}
+	if mode := parsedAuto.Get("request.toolConfig.functionCallingConfig.mode").String(); mode != "AUTO" {
+		t.Fatalf("request.toolConfig.functionCallingConfig.mode = %q, want AUTO: %s", mode, outWithAuto)
+	}
+
+	inputWebSearchWithAdditionalTools := []byte(`{
+		"model": "` + modelID + `",
+		"input": [
+			{"type": "additional_tools", "tools": [{"type": "function", "name": "lookup_data", "parameters": {"type": "object", "properties": {"k": {"type": "string"}}}}]},
+			{"role": "user", "content": "Search weather"}
+		],
+		"tools": [{"type": "web_search"}]
+	}`)
+	outWebSearchAdditional, errWebSearchAdditional := ConvertOpenAIResponsesRequestToAntigravity(modelID, inputWebSearchWithAdditionalTools, false)
+	if errWebSearchAdditional != nil {
+		t.Fatalf("convert error: %v", errWebSearchAdditional)
+	}
+	if !gjson.ValidBytes(outWebSearchAdditional) {
+		t.Fatalf("expected valid JSON output, got: %s", outWebSearchAdditional)
+	}
+	parsedWebSearchAdditional := gjson.ParseBytes(outWebSearchAdditional)
+	if got := parsedWebSearchAdditional.Get("requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, outWebSearchAdditional)
+	}
+	if !parsedWebSearchAdditional.Get("request.tools.1.functionDeclarations.0.name").Exists() {
+		t.Fatalf("expected functionDeclarations from additional_tools in request.tools: %s", outWebSearchAdditional)
+	}
+	if parsedWebSearchAdditional.Get("request.toolConfig.includeServerSideToolInvocations").Exists() || parsedWebSearchAdditional.Get("toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("Antigravity web_search envelope must not carry includeServerSideToolInvocations: %s", outWebSearchAdditional)
+	}
 }
 
 func TestConvertOpenAIResponsesRequestToAntigravity_CrossProviderCapabilityIsolation(t *testing.T) {

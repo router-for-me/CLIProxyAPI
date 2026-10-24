@@ -153,17 +153,28 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	return []byte(`{"type":"error","error":{"type":"server_error","code":"internal_server_error","message":"internal error","param":null},"sequence_number":0}`)
 }
 
+func applyOpenAIResponsesNestedErrorCode(errorDetail map[string]any) map[string]any {
+	if existing, ok := errorDetail["code"]; ok && existing != nil && strings.TrimSpace(fmt.Sprint(existing)) != "" {
+		return errorDetail
+	}
+	// Anthropic reports input overflow by message only; Responses clients key on this code.
+	if m, _ := errorDetail["message"].(string); errorDetail["type"] == "invalid_request_error" && strings.HasPrefix(m, "prompt is too long") {
+		errorDetail["code"] = "context_length_exceeded"
+	}
+	return errorDetail
+}
+
 func openAIResponsesStreamErrorDetail(status int, errText, code, message string) map[string]any {
 	var payload map[string]any
 	trimmed := strings.TrimSpace(errText)
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
 		if errUnmarshal := unmarshalJSONWithNumber([]byte(trimmed), &payload); errUnmarshal == nil {
 			if errorDetail, ok := payload["error"].(map[string]any); ok {
-				return errorDetail
+				return applyOpenAIResponsesNestedErrorCode(errorDetail)
 			}
 			if response, ok := payload["response"].(map[string]any); ok {
 				if errorDetail, ok := response["error"].(map[string]any); ok {
-					return errorDetail
+					return applyOpenAIResponsesNestedErrorCode(errorDetail)
 				}
 			}
 			if m, ok := payload["message"].(string); ok && strings.TrimSpace(m) != "" {

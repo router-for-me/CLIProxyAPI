@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -59,6 +61,76 @@ func HasResponsesCompactionItem(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+// HasResponsesCompactionTriggerRequest reports whether req.Payload or opts.OriginalRequest contains a compaction_trigger item.
+func HasResponsesCompactionTriggerRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
+	return HasResponsesCompactionTrigger(req.Payload) || HasResponsesCompactionTrigger(opts.OriginalRequest)
+}
+
+// ResponsesCompactionSourcePayload selects the source payload containing the compaction trigger or request history.
+func ResponsesCompactionSourcePayload(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) []byte {
+	payload := req.Payload
+	if !HasResponsesCompactionTrigger(payload) && HasResponsesCompactionTrigger(opts.OriginalRequest) {
+		payload = opts.OriginalRequest
+	}
+	if len(payload) == 0 && len(opts.OriginalRequest) > 0 {
+		payload = opts.OriginalRequest
+	}
+	return payload
+}
+
+// DropForeignResponsesCompactionItems removes compaction items whose encrypted_content does not use the CPA capsule prefix.
+func DropForeignResponsesCompactionItems(payload []byte, provider string) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return payload
+	}
+	dropped := 0
+	items := make([]string, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		if item.Get("type").String() == "compaction" && !RecognizedAntigravityCompactionCapsule(item.Get("encrypted_content").String()) {
+			dropped++
+			continue
+		}
+		items = append(items, item.Raw)
+	}
+	if dropped == 0 {
+		return payload
+	}
+	log.Warnf("%s compaction: dropped %d non-CPA compaction item(s)", provider, dropped)
+	out, _ := sjson.SetRawBytes(payload, "input", []byte("["+strings.Join(items, ",")+"]"))
+	return out
+}
+
+// ExpandResponsesCompactionCapsules drops foreign compaction items and expands recognized CPA compaction capsules in req and opts.
+func ExpandResponsesCompactionCapsules(req *cliproxyexecutor.Request, opts *cliproxyexecutor.Options, provider string) error {
+	sameOriginal := req != nil && opts != nil && len(opts.OriginalRequest) > 0 && bytes.Equal(req.Payload, opts.OriginalRequest)
+	if req != nil {
+		req.Payload = DropForeignResponsesCompactionItems(req.Payload, provider)
+		if HasResponsesCompactionItem(req.Payload) {
+			expanded, errExpand := ExpandAntigravityCompactionCapsules(req.Payload)
+			if errExpand != nil {
+				return errExpand
+			}
+			req.Payload = expanded
+		}
+	}
+	if opts != nil && len(opts.OriginalRequest) > 0 {
+		if sameOriginal {
+			opts.OriginalRequest = req.Payload
+			return nil
+		}
+		opts.OriginalRequest = DropForeignResponsesCompactionItems(opts.OriginalRequest, provider)
+		if HasResponsesCompactionItem(opts.OriginalRequest) {
+			expanded, errExpand := ExpandAntigravityCompactionCapsules(opts.OriginalRequest)
+			if errExpand != nil {
+				return errExpand
+			}
+			opts.OriginalRequest = expanded
+		}
+	}
+	return nil
 }
 
 // PrepareAntigravityCompactionSummaryPayload prepares a payload for non-stream Antigravity summary generation.
@@ -230,7 +302,8 @@ func ExtractAntigravitySummaryText(respPayload []byte) (string, error) {
 				content := item.Get("content")
 				if content.IsArray() {
 					for _, part := range content.Array() {
-						if part.Get("type").String() == "output_text" {
+						partType := part.Get("type").String()
+						if partType == "output_text" || partType == "text" {
 							if t := part.Get("text").String(); t != "" {
 								textParts = append(textParts, t)
 							}
@@ -375,6 +448,115 @@ func BuildAntigravityCompactionResponse(modelName, capsule string, inputTokens, 
 	respJSON, _ = sjson.SetRawBytes(respJSON, "usage", usageJSON)
 
 	return respJSON
+}
+
+// ExtractResponsesCompactionUsage extracts usage counters from an OpenAI Responses summary payload.
+func ExtractResponsesCompactionUsage(payload []byte) (inputTokens, outputTokens, totalTokens, cachedTokens, reasoningTokens int) {
+	if detail, ok := ParseCodexUsage(payload); ok && (detail.TotalTokens > 0 || detail.InputTokens > 0 || detail.OutputTokens > 0) {
+		return int(detail.InputTokens), int(detail.OutputTokens), int(detail.TotalTokens), int(detail.CachedTokens), int(detail.ReasoningTokens)
+	}
+	parsed := ParseOpenAIUsage(payload)
+	return int(parsed.InputTokens), int(parsed.OutputTokens), int(parsed.TotalTokens), int(parsed.CachedTokens), int(parsed.ReasoningTokens)
+}
+
+// PatchResponsesCompactionStreamUsage updates usage counters on a compaction SSE chunk.
+func PatchResponsesCompactionStreamUsage(chunk []byte, inputTokens, outputTokens, totalTokens, cachedTokens, reasoningTokens int) []byte {
+	const dataPrefix = "data: "
+	idx := bytes.Index(chunk, []byte(dataPrefix))
+	if idx < 0 {
+		return chunk
+	}
+	data := bytes.TrimSpace(chunk[idx+len(dataPrefix):])
+	path := ""
+	switch {
+	case gjson.GetBytes(data, "response.usage").Exists():
+		path = "response.usage"
+	case gjson.GetBytes(data, "usage").Exists():
+		path = "usage"
+	default:
+		return chunk
+	}
+	data, _ = sjson.SetBytes(data, path+".input_tokens", inputTokens)
+	data, _ = sjson.SetBytes(data, path+".output_tokens", outputTokens)
+	data, _ = sjson.SetBytes(data, path+".total_tokens", totalTokens)
+	data, _ = sjson.SetBytes(data, path+".input_tokens_details.cached_tokens", cachedTokens)
+	data, _ = sjson.SetBytes(data, path+".output_tokens_details.reasoning_tokens", reasoningTokens)
+	var buf bytes.Buffer
+	buf.Write(chunk[:idx])
+	buf.WriteString(dataPrefix)
+	buf.Write(data)
+	buf.WriteString("\n\n")
+	return buf.Bytes()
+}
+
+// ValidateResponsesCompactionSummaryStatus ensures the upstream summary response finished with status "completed".
+func ValidateResponsesCompactionSummaryStatus(summaryPayload []byte) error {
+	status := strings.ToLower(strings.TrimSpace(gjson.GetBytes(summaryPayload, "status").String()))
+	if status == "" {
+		status = strings.ToLower(strings.TrimSpace(gjson.GetBytes(summaryPayload, "response.status").String()))
+	}
+	if status != "completed" {
+		if status == "" {
+			status = "missing"
+		}
+		return fmt.Errorf("compaction summary response status is %q, want \"completed\"", status)
+	}
+	if eventType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(summaryPayload, "type").String())); eventType == "response.incomplete" || eventType == "response.failed" {
+		return fmt.Errorf("compaction summary response terminal event is %q", eventType)
+	}
+	for _, path := range []string{"incomplete_details", "response.incomplete_details", "error", "response.error"} {
+		if node := gjson.GetBytes(summaryPayload, path); node.Exists() && node.Type != gjson.Null {
+			return fmt.Errorf("compaction summary response contains %s", path)
+		}
+	}
+	if output := gjson.GetBytes(summaryPayload, "output"); output.IsArray() {
+		for _, item := range output.Array() {
+			itemStatus := strings.ToLower(strings.TrimSpace(item.Get("status").String()))
+			if itemStatus != "" && itemStatus != "completed" {
+				return fmt.Errorf("compaction summary output item status is %q, want \"completed\"", itemStatus)
+			}
+		}
+	}
+	return nil
+}
+
+// BuildResponsesCompactionResponseFromSummary seals summary text from an OpenAI Responses payload into a response.compaction payload.
+func BuildResponsesCompactionResponseFromSummary(modelName string, summaryPayload []byte) ([]byte, error) {
+	if errStatus := ValidateResponsesCompactionSummaryStatus(summaryPayload); errStatus != nil {
+		return nil, errStatus
+	}
+	summaryText, errExtract := ExtractAntigravitySummaryText(summaryPayload)
+	if errExtract != nil {
+		return nil, fmt.Errorf("extract summary: %w", errExtract)
+	}
+	capsule, errSeal := SealAntigravityCompaction(summaryText, modelName)
+	if errSeal != nil {
+		return nil, fmt.Errorf("seal compaction capsule: %w", errSeal)
+	}
+	inputTokens, outputTokens, totalTokens, cachedTokens, reasoningTokens := ExtractResponsesCompactionUsage(summaryPayload)
+	respPayload := BuildAntigravityCompactionResponse(modelName, capsule, inputTokens, outputTokens, totalTokens)
+	respPayload, _ = sjson.SetBytes(respPayload, "usage.input_tokens_details.cached_tokens", cachedTokens)
+	respPayload, _ = sjson.SetBytes(respPayload, "usage.output_tokens_details.reasoning_tokens", reasoningTokens)
+	return respPayload, nil
+}
+
+// BuildResponsesCompactionStreamChunksFromResponse converts a sealed response.compaction payload into SSE stream chunks.
+func BuildResponsesCompactionStreamChunksFromResponse(modelName string, compactionPayload []byte) ([][]byte, error) {
+	item := gjson.GetBytes(compactionPayload, "output.0")
+	capsule := item.Get("encrypted_content").String()
+	if item.Get("type").String() != "compaction" || capsule == "" {
+		return nil, fmt.Errorf("extract summary: compaction item missing")
+	}
+	inputTokens := int(gjson.GetBytes(compactionPayload, "usage.input_tokens").Int())
+	outputTokens := int(gjson.GetBytes(compactionPayload, "usage.output_tokens").Int())
+	totalTokens := int(gjson.GetBytes(compactionPayload, "usage.total_tokens").Int())
+	cachedTokens := int(gjson.GetBytes(compactionPayload, "usage.input_tokens_details.cached_tokens").Int())
+	reasoningTokens := int(gjson.GetBytes(compactionPayload, "usage.output_tokens_details.reasoning_tokens").Int())
+	chunks := BuildAntigravityCompactionStreamChunks(modelName, capsule, inputTokens, outputTokens, totalTokens)
+	for i := range chunks {
+		chunks[i] = PatchResponsesCompactionStreamUsage(chunks[i], inputTokens, outputTokens, totalTokens, cachedTokens, reasoningTokens)
+	}
+	return chunks, nil
 }
 
 func buildSSEFrame(event string, data []byte) []byte {

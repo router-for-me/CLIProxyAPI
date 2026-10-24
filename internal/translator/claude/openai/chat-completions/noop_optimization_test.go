@@ -17,6 +17,7 @@ func TestConvertClaudeResponseToOpenAINonStreamFinishReasons(t *testing.T) {
 		{name: "end_turn", stopReason: "end_turn", want: "stop"},
 		{name: "stop_sequence", stopReason: "stop_sequence", want: "stop"},
 		{name: "max_tokens", stopReason: "max_tokens", want: "length"},
+		{name: "model_context_window_exceeded", stopReason: "model_context_window_exceeded", want: "length"},
 		{name: "refusal", stopReason: "refusal", want: "content_filter"},
 		{name: "sensitive", stopReason: "sensitive", want: "content_filter"},
 	}

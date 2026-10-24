@@ -1,6 +1,7 @@
 package util
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -454,5 +455,41 @@ func TestBuildGeminiFunctionDeclarations_CollectsToolSearchOutputTools(t *testin
 	identity := reverseMap["fixture_tools__ping"]
 	if identity.Name != "ping" || identity.Namespace != "fixture_tools" {
 		t.Fatalf("discovered identity = %+v, want ping in fixture_tools", identity)
+	}
+}
+
+func TestResponsesToolReverseIdentityMap_MatchesFullDeclarations(t *testing.T) {
+	minimalRaw := []byte(`{
+		"tools": [
+			{"type": "function", "name": "read.file", "parameters": {"type": "object"}},
+			{"type": "custom", "name": "apply_patch", "description": "Apply a patch", "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}},
+			{"type": "custom", "name": "notes"},
+			{"type": "tool_search", "execution": "client"},
+			{"type": "namespace", "name": "mcp", "tools": [{"type": "function", "name": "search", "parameters": {"type": "object"}}]}
+		]
+	}`)
+	heavyRaw := []byte(`{
+		"tools": [
+			{"type": "function", "name": "read.file", "parameters": {"$defs": {"item": {"type": "object", "properties": {"id": {"type": "string", "pattern": "^[^\\x00]*$", "examples": ["/tmp/a"]}}}}, "type": "object", "properties": {"path": {"type": "string", "pattern": "^[^\\x00]*$", "examples": ["/tmp/a"]}, "items": {"type": "array", "items": {"$ref": "#/$defs/item"}}, "mode": {"anyOf": [{"type": "string", "const": "fast"}, {"type": "null"}]}}, "additionalProperties": false}},
+			{"type": "custom", "name": "apply_patch", "description": "Apply a patch", "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}},
+			{"type": "custom", "name": "notes"},
+			{"type": "tool_search", "execution": "client", "parameters": {"type": "object", "properties": {"query": {"type": ["string", "null"], "examples": ["mcp"]}, "limit": {"type": "number", "minimum": 1, "maximum": 50}}, "required": ["query"], "additionalProperties": false}},
+			{"type": "namespace", "name": "mcp", "tools": [{"type": "function", "name": "search", "parameters": {"$defs": {"filter": {"type": "object", "properties": {"tag": {"type": ["string", "null"]}}}}, "type": "object", "properties": {"q": {"type": ["string", "null"]}, "filter": {"$ref": "#/$defs/filter"}}, "additionalProperties": false}}]}
+		]
+	}`)
+	_, _, full := BuildGeminiFunctionDeclarations(gjson.ParseBytes(heavyRaw))
+	fast := ResponsesToolReverseIdentityMap(heavyRaw)
+	if len(full) == 0 || !reflect.DeepEqual(full, fast) {
+		t.Fatalf("reverse identity map differs from full declarations:\nfull=%#v\nfast=%#v", full, fast)
+	}
+
+	minimalAllocs := testing.AllocsPerRun(10, func() {
+		_ = ResponsesToolReverseIdentityMap(minimalRaw)
+	})
+	heavyAllocs := testing.AllocsPerRun(10, func() {
+		_ = ResponsesToolReverseIdentityMap(heavyRaw)
+	})
+	if heavyAllocs > minimalAllocs+10 {
+		t.Fatalf("ResponsesToolReverseIdentityMap performed schema cleanup allocations: minimalAllocs=%.1f heavyAllocs=%.1f", minimalAllocs, heavyAllocs)
 	}
 }

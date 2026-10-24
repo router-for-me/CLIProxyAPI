@@ -1617,3 +1617,117 @@ func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartFollowedByThinkin
 		t.Fatalf("expected exactly 2 stopped blocks (0=thinking, 1=text), got: %v", stopped)
 	}
 }
+
+func TestConvertAntigravityResponseToClaude_SanitizesParameterlessToolArguments(t *testing.T) {
+	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}}]}`)
+	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{"reason":"Switching to plan mode to inspect files"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+
+	nonStream := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, responseJSON, nil)
+	if got := gjson.GetBytes(nonStream, "content.0.input").Raw; got != "{}" {
+		t.Fatalf("expected non-streaming input {}, got %s", got)
+	}
+
+	var param any
+	streamChunks := ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, responseJSON, &param)
+	streamText := string(bytes.Join(streamChunks, nil))
+	var deltaPartial strings.Builder
+	for _, line := range strings.Split(streamText, "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			payload := strings.TrimPrefix(line, "data: ")
+			if gjson.Get(payload, "delta.type").String() == "input_json_delta" {
+				deltaPartial.WriteString(gjson.Get(payload, "delta.partial_json").String())
+			}
+		}
+	}
+	if got := deltaPartial.String(); got != "{}" {
+		t.Fatalf("expected streaming partial_json {}, got %q (full output: %s)", got, streamText)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_StripsExecutorInjectedUnderscore(t *testing.T) {
+	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"WrappedPlaceholder","input_schema":{"type":"object","properties":{"flag":{"type":"string"}},"additionalProperties":false}}]}`)
+	translatedRequest, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", origRequest, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToAntigravity error: %v", errConvert)
+	}
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"WrappedPlaceholder","args":{"flag":"x","_":true}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-wrapped"}}`)
+
+	nonStream := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, responseJSON, nil)
+	if got := gjson.GetBytes(nonStream, "content.0.input").Raw; got != `{"flag":"x"}` {
+		t.Fatalf("expected executor-injected underscore stripped, got %s (translated: %s)", got, string(translatedRequest))
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_ParameterlessContinuationDoesNotDuplicateEmptyObject(t *testing.T) {
+	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}}]}`)
+	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)
+	firstChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{"reason":"Switching to plan mode"}}}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+	continuationChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"reason":"more"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+
+	var param any
+	streamBytes := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, firstChunk, &param), nil)
+	streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, continuationChunk, &param), nil)...)
+	streamText := string(streamBytes)
+	var deltaPartial strings.Builder
+	toolUseStarts := 0
+	for _, line := range strings.Split(streamText, "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			payload := strings.TrimPrefix(line, "data: ")
+			if gjson.Get(payload, "type").String() == "content_block_start" && gjson.Get(payload, "content_block.type").String() == "tool_use" {
+				toolUseStarts++
+			}
+			if gjson.Get(payload, "delta.type").String() == "input_json_delta" {
+				deltaPartial.WriteString(gjson.Get(payload, "delta.partial_json").String())
+			}
+		}
+	}
+	if toolUseStarts != 1 {
+		t.Fatalf("expected exactly one tool_use block, got %d (full output: %s)", toolUseStarts, streamText)
+	}
+	if got := deltaPartial.String(); got != "{}" {
+		t.Fatalf("expected concatenated partial_json {}, got %q (full output: %s)", got, streamText)
+	}
+	if strings.Contains(streamText, `"name":""`) {
+		t.Fatalf("continuation must not open an unnamed tool_use block: %s", streamText)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_ImplicitOpenToolContinuationOrdering(t *testing.T) {
+	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"echo","input_schema":{"type":"object","properties":{}}}]}`)
+	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)
+
+	for _, tc := range []struct {
+		name      string
+		firstArgs string
+		contArgs  string
+		want      string
+	}{
+		{"empty_then_real_args", `{}`, `{"user":"v"}`, `{"user":"v"}`},
+		{"placeholder_then_real_args", `{"reason":"thinking"}`, `{"user":"v"}`, `{"user":"v"}`},
+		{"real_args_then_empty", `{"user":"v"}`, `{}`, `{"user":"v"}`},
+		{"real_args_then_placeholder", `{"user":"v"}`, `{"reason":"done"}`, `{"user":"v"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			firstChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"echo","args":` + tc.firstArgs + `}}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+			continuationChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":` + tc.contArgs + `}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+
+			var param any
+			streamBytes := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, firstChunk, &param), nil)
+			streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, continuationChunk, &param), nil)...)
+			streamText := string(streamBytes)
+			var deltaPartial strings.Builder
+			for _, line := range strings.Split(streamText, "\n") {
+				if strings.HasPrefix(line, "data: ") {
+					payload := strings.TrimPrefix(line, "data: ")
+					if gjson.Get(payload, "delta.type").String() == "input_json_delta" {
+						deltaPartial.WriteString(gjson.Get(payload, "delta.partial_json").String())
+					}
+				}
+			}
+			if got := deltaPartial.String(); got != tc.want {
+				t.Fatalf("expected concatenated partial_json %s, got %q (full output: %s)", tc.want, got, streamText)
+			}
+		})
+	}
+}

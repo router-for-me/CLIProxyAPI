@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -249,5 +252,110 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 	}
 	if state.Quota.BackoffLevel != backoffLevel {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
+	}
+}
+
+func TestManager_Update_FileSnapshotReadDoesNotHoldGlobalLock(t *testing.T) {
+	dir := t.TempDir()
+	slowPath := filepath.Join(dir, "slow.json")
+	slowData := []byte(`{"type":"codex","prefix":"pfx-slow"}`)
+	if errWrite := os.WriteFile(slowPath, slowData, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+
+	ctx := WithSkipPersist(context.Background())
+	m := NewManager(nil, nil, nil)
+	if _, errReg := m.Register(ctx, &Auth{ID: "slow.json", Provider: "codex", Status: StatusActive}); errReg != nil {
+		t.Fatal(errReg)
+	}
+	if _, errReg := m.Register(ctx, &Auth{ID: "other.json", Provider: "codex", Status: StatusActive}); errReg != nil {
+		t.Fatal(errReg)
+	}
+
+	readStarted := make(chan struct{})
+	releaseRead := make(chan struct{})
+	slowDone := make(chan error, 1)
+	var releaseOnce sync.Once
+	releaseSlowRead := func() {
+		releaseOnce.Do(func() {
+			close(releaseRead)
+		})
+	}
+	origRead := readAuthSnapshotFileFunc
+	t.Cleanup(func() {
+		releaseSlowRead()
+		<-slowDone
+		readAuthSnapshotFileFunc = origRead
+	})
+	var startedOnce sync.Once
+	readAuthSnapshotFileFunc = func(path string) ([]byte, error) {
+		if path == slowPath {
+			startedOnce.Do(func() {
+				close(readStarted)
+			})
+			<-releaseRead
+		}
+		return origRead(path)
+	}
+
+	slowSnapshot := &Auth{
+		ID:       "slow.json",
+		Provider: "codex",
+		Prefix:   "pfx-slow",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributePath: slowPath,
+		},
+	}
+	slowSnapshot.BindFileSnapshot(slowPath, slowData)
+
+	go func() {
+		_, errUpdate := m.Update(ctx, slowSnapshot)
+		slowDone <- errUpdate
+	}()
+	select {
+	case <-readStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for slow snapshot read to start")
+	}
+
+	// While slow.json is blocked reading its snapshot file, operations on other.json
+	// must not be blocked on m.mu.
+	otherDone := make(chan error, 1)
+	go func() {
+		if _, ok := m.GetByID("other.json"); !ok {
+			otherDone <- os.ErrNotExist
+			return
+		}
+		_, errUpdate := m.Update(ctx, &Auth{
+			ID:       "other.json",
+			Provider: "codex",
+			Prefix:   "pfx-other",
+			Status:   StatusActive,
+		})
+		otherDone <- errUpdate
+	}()
+	select {
+	case errOther := <-otherDone:
+		if errOther != nil {
+			t.Fatalf("other auth update failed while slow snapshot read was in flight: %v", errOther)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("other auth update blocked while slow snapshot read was in flight")
+	}
+
+	releaseSlowRead()
+	select {
+	case errSlow := <-slowDone:
+		slowDone <- errSlow
+		if errSlow != nil {
+			t.Fatalf("slow auth update failed: %v", errSlow)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for slow auth update to complete")
+	}
+	slowAfter, _ := m.GetByID("slow.json")
+	if slowAfter == nil || slowAfter.Prefix != "pfx-slow" {
+		t.Fatalf("slow auth prefix = %v, want pfx-slow", slowAfter)
 	}
 }

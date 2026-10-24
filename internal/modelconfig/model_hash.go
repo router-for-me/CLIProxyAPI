@@ -35,7 +35,11 @@ func ComputeVertexCompatModelsHash(models []config.VertexCompatModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + thinkingHashSuffix(model.Thinking))
+			key := strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping)
+			if model.OpenAPI != nil {
+				key += fmt.Sprintf("|openapi=%t", *model.OpenAPI)
+			}
+			out(key + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)

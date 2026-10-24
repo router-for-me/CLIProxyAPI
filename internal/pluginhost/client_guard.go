@@ -4,7 +4,41 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
+
+type pluginCallFinishKey struct{}
+
+type pluginCallFinishHook struct {
+	once    sync.Once
+	claimed atomic.Bool
+	fn      func()
+}
+
+func withPluginCallFinish(ctx context.Context, fn func()) (context.Context, func()) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hook := &pluginCallFinishHook{fn: fn}
+	return context.WithValue(ctx, pluginCallFinishKey{}, hook), func() {
+		if !hook.claimed.Load() {
+			hook.once.Do(hook.fn)
+		}
+	}
+}
+
+func claimPluginCallFinish(ctx context.Context) func() {
+	if ctx == nil {
+		return nil
+	}
+	hook, ok := ctx.Value(pluginCallFinishKey{}).(*pluginCallFinishHook)
+	if !ok || hook == nil || !hook.claimed.CompareAndSwap(false, true) {
+		return nil
+	}
+	return func() {
+		hook.once.Do(hook.fn)
+	}
+}
 
 type guardedPluginClient struct {
 	mu           sync.Mutex
@@ -51,15 +85,22 @@ func (c *guardedPluginClient) Call(ctx context.Context, method string, request [
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	onFinish := claimPluginCallFinish(ctx)
 	result := make(chan guardedPluginCallResult, 1)
 	go func() {
 		defer c.release()
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				if onFinish != nil {
+					onFinish()
+				}
 				result <- guardedPluginCallResult{recovered: recovered}
 			}
 		}()
 		response, errCall := inner.Call(ctx, method, request)
+		if onFinish != nil {
+			onFinish()
+		}
 		result <- guardedPluginCallResult{response: response, err: errCall}
 	}()
 	select {
