@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -44,9 +46,11 @@ type rpcQuotaProvider struct {
 }
 
 type rpcError struct {
-	Code       string
-	message    string
-	statusCode int
+	Code             string
+	message          string
+	statusCode       int
+	retryAfter       time.Duration
+	credentialScoped bool
 }
 
 func (e rpcError) Error() string {
@@ -55,6 +59,19 @@ func (e rpcError) Error() string {
 
 func (e rpcError) StatusCode() int {
 	return e.statusCode
+}
+
+// RetryAfter returns the plugin-supplied cooldown hint, or nil when the plugin did not provide one.
+func (e rpcError) RetryAfter() *time.Duration {
+	if e.retryAfter <= 0 {
+		return nil
+	}
+	return new(e.retryAfter)
+}
+
+// IsCredentialScoped reports whether the plugin marked the failure as affecting the whole credential.
+func (e rpcError) IsCredentialScoped() bool {
+	return e.credentialScoped
 }
 
 type rpcResponseNormalizer struct {
@@ -366,9 +383,11 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 				message = "plugin call failed"
 			}
 			return zero, rpcError{
-				Code:       strings.TrimSpace(envelope.Error.Code),
-				message:    message,
-				statusCode: envelope.Error.HTTPStatus,
+				Code:             strings.TrimSpace(envelope.Error.Code),
+				message:          message,
+				statusCode:       envelope.Error.HTTPStatus,
+				retryAfter:       retryAfterFromMillis(envelope.Error.RetryAfterMS),
+				credentialScoped: envelope.Error.CredentialScoped,
 			}
 		}
 		return zero, fmt.Errorf("plugin call failed")
@@ -381,6 +400,14 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 		return zero, errDecode
 	}
 	return out, nil
+}
+
+// retryAfterFromMillis converts a plugin retry hint, ignoring non-positive and overflowing values.
+func retryAfterFromMillis(millis int64) time.Duration {
+	if millis <= 0 || millis > int64(math.MaxInt64/time.Millisecond) {
+		return 0
+	}
+	return time.Duration(millis) * time.Millisecond
 }
 
 func marshalRPCEnvelope(result json.RawMessage) ([]byte, error) {

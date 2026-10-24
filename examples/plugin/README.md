@@ -130,6 +130,13 @@ When a plugin executor encounters an upstream failure (such as `401 Unauthorized
 - **Important**: Both non-streaming (`executor.execute`) and streaming (`executor.execute_stream`) call sites must include `http_status` so failures are classified consistently.
 - Because native dynamic library plugins communicate across the C ABI via serialized JSON buffers, the status code must be encoded in the serialized JSON envelope (e.g. using `pluginabi.NewErrorEnvelope` or a custom envelope struct with an `http_status` field). Returning an unmarshaled Go error does not traverse the C ABI boundary.
 
+Plugins can also steer CPA's credential cooldown with two optional fields in the same `error` object:
+
+- `retry_after_ms`: how long CPA should cool the selected credential down before retrying it. CPA honors this hint for `429` (with the same 10-second minimum as built-in providers), `404`, and transient `5xx` statuses. `401`/`402`/`403` keep CPA's fixed cooldown. Omitted, zero, or negative values keep CPA's default backoff.
+- `credential_scoped`: set to `true` with a `429` when the quota applies to the whole credential (for example an account-wide monthly quota), so CPA cools every model on that credential instead of only the requested model.
+
+Both fields are additive; older envelopes that omit them behave exactly as before. These hints currently travel only through RPC error envelopes (`executor.execute`, and `executor.execute_stream` before the stream opens); errors sent later through `host.stream.close` carry only the message string.
+
 Go plugins can import `github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi` and use `pluginabi.NewErrorEnvelope(code, message, httpStatus)`:
 
 ```go
