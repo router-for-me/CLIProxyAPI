@@ -147,7 +147,12 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, random, least-used, p2c
+  # random picks uniformly; least-used picks the credential with the fewest requests started in the last
+  # 60 seconds; p2c draws two credentials at random and picks the less used. All three keep priority tiers.
+  # Override the strategy per provider:
+  # provider-strategies:
+  #   codex: p2c
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.

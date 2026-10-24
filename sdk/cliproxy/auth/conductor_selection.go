@@ -2085,7 +2085,17 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 	}
 }
 
+// pickNext picks the next auth and counts the start for the least-used and p2c selectors, affinity-bound picks
+// included.
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	auth, executor, err := m.pickNextUncounted(ctx, provider, model, opts, tried)
+	if err == nil && auth != nil {
+		RecordStart(auth.ID, model)
+	}
+	return auth, executor, err
+}
+
+func (m *Manager) pickNextUncounted(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	opts.EnsureMetadata()
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
@@ -2271,7 +2281,16 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	return authCopy, executor, providerKey, nil
 }
 
+// pickNextMixed picks the next auth across providers and counts the start like pickNext.
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	auth, executor, provider, err := m.pickNextMixedUncounted(ctx, providers, model, opts, tried)
+	if err == nil && auth != nil {
+		RecordStart(auth.ID, model)
+	}
+	return auth, executor, provider, err
+}
+
+func (m *Manager) pickNextMixedUncounted(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	opts.EnsureMetadata()
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
