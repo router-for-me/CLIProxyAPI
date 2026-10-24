@@ -754,6 +754,17 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 	antigravityCapabilityMu.Unlock()
 	authAModel.Store("gemini-3.1-flash-lite")
 
+	// The probe signal fires when the server has answered, not when authB's
+	// models are published. The registry hook runs after the registry state is
+	// updated, so it is the publication signal itself.
+	authBPublished := make(chan struct{}, 1)
+	SetGlobalModelRegistryHook(publicationSignalHook{
+		clientID: authB.ID,
+		modelID:  "gemini-3-flash",
+		signal:   authBPublished,
+	})
+	t.Cleanup(func() { SetGlobalModelRegistryHook(nil) })
+
 	svc.refreshAntigravityModels(t.Context())
 	select {
 	case <-authBProbed:
@@ -761,6 +772,16 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 		cancelLifetime()
 		svc.WaitAntigravityProbes()
 		t.Fatal("stalled persistence on authA blocked authB probe")
+	}
+	// Wait for the publication itself: the foreground Update below changes
+	// authB's prefix, and the registration fence then correctly drops a
+	// publication that is still in flight.
+	select {
+	case <-authBPublished:
+	case <-time.After(time.Second):
+		cancelLifetime()
+		svc.WaitAntigravityProbes()
+		t.Fatal("stalled persistence on authA blocked authB model publication")
 	}
 	select {
 	case <-authARefreshed:
@@ -1011,3 +1032,28 @@ func TestAntigravityConcurrentAuthUpdatePreservesBothNewTokenAndPersistedHints(t
 		t.Fatalf("expected version 2 hints to survive preemption and stale-snapshot Update, got %v", loadedHints.ModelIDs)
 	}
 }
+
+// publicationSignalHook signals once the registry has published modelID for
+// clientID. The registry calls it after its state is updated.
+type publicationSignalHook struct {
+	clientID string
+	modelID  string
+	signal   chan<- struct{}
+}
+
+func (h publicationSignalHook) OnModelsRegistered(_ context.Context, _, clientID string, models []*ModelInfo) {
+	if clientID != h.clientID {
+		return
+	}
+	for _, model := range models {
+		if model != nil && model.ID == h.modelID {
+			select {
+			case h.signal <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}
+}
+
+func (publicationSignalHook) OnModelsUnregistered(context.Context, string, string) {}
