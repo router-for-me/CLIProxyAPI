@@ -31,6 +31,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// WriteResponsesSSEChunk frames complete executor events for authenticated bound
+// Responses routes as well as ordinary routing. It never mutates JSON payloads.
+func WriteResponsesSSEChunk(w io.Writer, chunk []byte) error {
+	return writeResponsesSSEChunk(w, chunk)
+}
+
 func writeResponsesSSEChunk(w io.Writer, chunk []byte) error {
 	if w == nil || len(chunk) == 0 {
 		return nil

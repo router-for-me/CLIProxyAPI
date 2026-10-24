@@ -148,6 +148,9 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	}
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
 	rawJSON = helps.FinalizePayload(ctx, rawJSON)
+	if err := cliproxyexecutor.ValidateBoundModel(ctx, rawJSON); err != nil {
+		return nil, nil, err
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, err
