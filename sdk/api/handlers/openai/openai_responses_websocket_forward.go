@@ -328,7 +328,7 @@ func writeResponsesWebsocketTerminalError(
 
 	if len(payload) == 0 {
 		var errBuild error
-		payload, errBuild = buildResponsesWebsocketErrorPayload(errMsg)
+		payload, errBuild = buildResponsesWebsocketErrorPayload(errMsg, writer != nil && writer.passthroughHeaders)
 		if errBuild != nil {
 			_, _ = writer.closeWithoutError()
 			return nil, false, errBuild
@@ -622,7 +622,7 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 	return payloads
 }
 
-func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byte, error) {
+func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage, passthroughHeaders bool) ([]byte, error) {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
@@ -651,10 +651,10 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
+	if passthroughHeaders && errMsg != nil && errMsg.Addon != nil {
 		headers := []byte(`{}`)
 		hasHeaders := false
-		for key, values := range errMsg.Addon {
+		for key, values := range handlers.FilterUpstreamHeaders(errMsg.Addon) {
 			if len(values) == 0 {
 				continue
 			}
@@ -700,7 +700,7 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 }
 
 func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {
-	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg, writer != nil && writer.passthroughHeaders)
 	if errBuild != nil {
 		return nil, errBuild
 	}
