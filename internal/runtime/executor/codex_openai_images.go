@@ -456,6 +456,36 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 		return nil, err
 	}
 
+	// The native images endpoints may ignore stream=true and answer with one JSON
+	// document (images/edits does). Re-emit it as the SSE events the client asked for.
+	if codexIsJSONContentType(httpResp.Header.Get("Content-Type")) {
+		data, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body error: %v", errClose)
+		}
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			return nil, errRead
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		frames, errFrames := codexDirectImageJSONToSSEFrames(data, codexDirectImageStreamPrefix(endpointPath))
+		if errFrames != nil {
+			err = errFrames
+			return nil, err
+		}
+		reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+		reporter.EnsurePublished(ctx)
+		headers := httpResp.Header.Clone()
+		headers.Set("Content-Type", "text/event-stream")
+		headers.Del("Content-Length")
+		out := make(chan cliproxyexecutor.StreamChunk, len(frames))
+		for _, frame := range frames {
+			out <- cliproxyexecutor.StreamChunk{Payload: frame}
+		}
+		close(out)
+		return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+	}
+
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -1170,6 +1200,71 @@ func codexBuildSSEFrame(eventName string, data []byte) []byte {
 	buf.Write(data)
 	buf.WriteString("\n\n")
 	return buf.Bytes()
+}
+
+func codexIsJSONContentType(contentType string) bool {
+	mediaType, _, errParse := mime.ParseMediaType(strings.TrimSpace(contentType))
+	return errParse == nil && strings.EqualFold(mediaType, "application/json")
+}
+
+func codexDirectImageStreamPrefix(endpointPath string) string {
+	if endpointPath == codexDirectImagesEdit {
+		return "image_edit"
+	}
+	return "image_generation"
+}
+
+// codexDirectImageJSONToSSEFrames converts a non-streamed Images API response into
+// one "<prefix>.completed" SSE frame per image.
+func codexDirectImageJSONToSSEFrames(body []byte, streamPrefix string) ([][]byte, error) {
+	if !json.Valid(body) {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "upstream returned invalid image JSON"}
+	}
+	root := gjson.ParseBytes(body)
+	eventName := streamPrefix + ".completed"
+	usageRaw := root.Get("usage").Raw
+	var items []gjson.Result
+	for _, item := range root.Get("data").Array() {
+		if strings.TrimSpace(item.Get("b64_json").String()) != "" || strings.TrimSpace(item.Get("url").String()) != "" {
+			items = append(items, item)
+		}
+	}
+	var frames [][]byte
+	for i, item := range items {
+		b64 := strings.TrimSpace(item.Get("b64_json").String())
+		url := strings.TrimSpace(item.Get("url").String())
+		data := []byte(`{"type":""}`)
+		data, _ = sjson.SetBytes(data, "type", eventName)
+		if b64 != "" {
+			data, _ = sjson.SetBytes(data, "b64_json", b64)
+		} else {
+			data, _ = sjson.SetBytes(data, "url", url)
+		}
+		if revised := item.Get("revised_prompt").String(); revised != "" {
+			data, _ = sjson.SetBytes(data, "revised_prompt", revised)
+		}
+		if created := root.Get("created"); created.Exists() {
+			data, _ = sjson.SetBytes(data, "created_at", created.Int())
+		}
+		for _, field := range []string{"size", "quality", "background", "output_format"} {
+			if value := root.Get(field).String(); value != "" {
+				data, _ = sjson.SetBytes(data, field, value)
+			}
+		}
+		// Usage covers the whole request; attach it once, on the last event.
+		if i == len(items)-1 && usageRaw != "" && json.Valid([]byte(usageRaw)) {
+			data, _ = sjson.SetRawBytes(data, "usage", []byte(usageRaw))
+		}
+		frames = append(frames, codexBuildSSEFrame(eventName, data))
+	}
+	if len(frames) == 0 {
+		msg := "upstream did not return image output"
+		if upstreamMsg := strings.TrimSpace(root.Get("error.message").String()); upstreamMsg != "" {
+			msg += ": " + upstreamMsg
+		}
+		return nil, statusErr{code: http.StatusBadGateway, msg: msg}
+	}
+	return frames, nil
 }
 
 func codexMimeTypeFromOutputFormat(outputFormat string) string {
