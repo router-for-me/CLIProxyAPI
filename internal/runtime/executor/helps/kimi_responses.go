@@ -1,11 +1,13 @@
 package helps
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -185,4 +187,516 @@ func NormalizeKimiResponsesInput(body []byte) ([]byte, error) {
 		return body, fmt.Errorf("normalize kimi responses input: %w", errSet)
 	}
 	return updated, nil
+}
+
+const kimiCustomToolInput = "input"
+
+var kimiCustomToolParameters = []byte(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`)
+
+// NormalizeKimiResponsesCustomTools adapts Responses custom tools to the
+// function shape accepted by Kimi while preserving the client-facing name.
+// apply_patch remains owned by the existing apply-patch bridge.
+func NormalizeKimiResponsesCustomTools(body, original []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, fmt.Errorf("invalid Responses request JSON")
+	}
+	winners := util.CollectResponsesToolWinners(gjson.ParseBytes(body))
+	originalWinners := winners
+	if gjson.ValidBytes(original) {
+		originalWinners = util.CollectResponsesToolWinners(gjson.ParseBytes(original))
+	}
+
+	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
+		body, _ = sjson.SetRawBytes(body, "tools", normalizeKimiCustomToolArray(tools, "", winners))
+	}
+	winners = util.CollectResponsesToolWinners(gjson.ParseBytes(body))
+	for index, item := range gjson.GetBytes(body, "input").Array() {
+		if itemType := item.Get("type").String(); itemType == "additional_tools" || itemType == "tool_search_output" {
+			if tools := item.Get("tools"); tools.IsArray() {
+				path := fmt.Sprintf("input.%d.tools", index)
+				body, _ = sjson.SetRawBytes(body, path, normalizeKimiCustomToolArray(tools, "", winners))
+			}
+		}
+	}
+
+	convertedCalls := make(map[string]bool)
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "custom_tool_call" && strings.TrimSpace(item.Get("name").String()) != "apply_patch" {
+			if callID := item.Get("call_id").String(); callID != "" {
+				convertedCalls[callID] = true
+			}
+		}
+	}
+	for index, item := range gjson.GetBytes(body, "input").Array() {
+		path := fmt.Sprintf("input.%d", index)
+		switch item.Get("type").String() {
+		case "custom_tool_call":
+			if strings.TrimSpace(item.Get("name").String()) == "apply_patch" {
+				continue
+			}
+			if item.Get("input").Type != gjson.String {
+				return nil, fmt.Errorf("Kimi custom tool history input must be a string")
+			}
+			raw := []byte(item.Raw)
+			raw, _ = sjson.SetBytes(raw, "type", "function_call")
+			raw, _ = sjson.SetBytes(raw, "arguments", kimiCustomToolArguments(item.Get("input").String()))
+			raw, _ = sjson.DeleteBytes(raw, "input")
+			raw = normalizeKimiResponsesUpstreamItemID(raw, "function_call")
+			body, _ = sjson.SetRawBytes(body, path, raw)
+		case "custom_tool_call_output":
+			if convertedCalls[item.Get("call_id").String()] {
+				raw := []byte(item.Raw)
+				raw, _ = sjson.SetBytes(raw, "type", "function_call_output")
+				raw = normalizeKimiResponsesUpstreamItemID(raw, "function_call_output")
+				body, _ = sjson.SetRawBytes(body, path, raw)
+			}
+		}
+	}
+	if choice := gjson.GetBytes(body, "tool_choice"); choice.IsObject() {
+		body, _ = sjson.SetRawBytes(body, "tool_choice", normalizeKimiCustomToolChoice(choice, originalWinners))
+	}
+	return body, nil
+}
+
+func normalizeKimiCustomToolArray(tools gjson.Result, namespace string, winners map[string]util.ResponsesToolDescriptor) []byte {
+	items := make([][]byte, 0, len(tools.Array()))
+	for _, tool := range tools.Array() {
+		raw := []byte(tool.Raw)
+		if tool.Get("type").String() == "namespace" {
+			childNamespace := util.QualifyResponsesNamespaceToolName(namespace, strings.TrimSpace(tool.Get("name").String()))
+			if children := tool.Get("tools"); children.IsArray() {
+				raw, _ = sjson.SetRawBytes(raw, "tools", normalizeKimiCustomToolArray(children, childNamespace, winners))
+			} else if children := tool.Get("children"); children.IsArray() {
+				raw, _ = sjson.SetRawBytes(raw, "children", normalizeKimiCustomToolArray(children, childNamespace, winners))
+			}
+			items = append(items, raw)
+			continue
+		}
+		if tool.Get("type").String() == "custom" {
+			name := kimiResponsesToolName(tool)
+			qualified := util.QualifyResponsesNamespaceToolName(namespace, name)
+			winner, ok := winners[qualified]
+			if ok && winner.ToolType == "custom" && winner.Tool.Index == tool.Index && !strings.EqualFold(name, "apply_patch") {
+				raw, _ = sjson.SetBytes(raw, "type", "function")
+				raw, _ = sjson.SetRawBytes(raw, "parameters", kimiCustomToolParameters)
+				raw, _ = sjson.DeleteBytes(raw, "format")
+			}
+		}
+		items = append(items, raw)
+	}
+	return translatorcommon.JoinRawArray(items)
+}
+
+func normalizeKimiCustomToolChoice(choice gjson.Result, winners map[string]util.ResponsesToolDescriptor) []byte {
+	raw := []byte(choice.Raw)
+	if choice.Get("type").String() == "custom" {
+		name := choice.Get("name").String()
+		qualified := util.QualifyResponsesNamespaceToolName(choice.Get("namespace").String(), name)
+		if winner, ok := winners[qualified]; ok && winner.ToolType == "custom" && !strings.EqualFold(winner.LocalName, "apply_patch") {
+			raw, _ = sjson.SetBytes(raw, "type", "function")
+		}
+	}
+	for index, child := range choice.Get("tools").Array() {
+		raw, _ = sjson.SetRawBytes(raw, fmt.Sprintf("tools.%d", index), normalizeKimiCustomToolChoice(child, winners))
+	}
+	return raw
+}
+
+func kimiResponsesToolName(tool gjson.Result) string {
+	if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+		return name
+	}
+	return strings.TrimSpace(tool.Get("function.name").String())
+}
+
+func kimiCustomToolArguments(input string) string {
+	raw := []byte(`{"input":""}`)
+	raw, _ = sjson.SetBytes(raw, kimiCustomToolInput, input)
+	return string(raw)
+}
+
+func normalizeKimiResponsesUpstreamItemID(raw []byte, itemType string) []byte {
+	id := gjson.GetBytes(raw, "id").String()
+	if id == "" {
+		return raw
+	}
+	if itemType == "function_call" && strings.HasPrefix(id, "ctc_") {
+		raw, _ = sjson.SetBytes(raw, "id", "fc_"+strings.TrimPrefix(id, "ctc_"))
+	}
+	if itemType == "function_call_output" && strings.HasPrefix(id, "ctco_") {
+		raw, _ = sjson.SetBytes(raw, "id", "fco_"+strings.TrimPrefix(id, "ctco_"))
+	}
+	return raw
+}
+
+func normalizeKimiResponsesClientItemID(raw []byte, itemType string) []byte {
+	id := gjson.GetBytes(raw, "id").String()
+	if id == "" {
+		return raw
+	}
+	if itemType == "custom_tool_call" && strings.HasPrefix(id, "fc_") {
+		raw, _ = sjson.SetBytes(raw, "id", "ctc_"+strings.TrimPrefix(id, "fc_"))
+	}
+	if itemType == "custom_tool_call_output" && strings.HasPrefix(id, "fco_") {
+		raw, _ = sjson.SetBytes(raw, "id", "ctco_"+strings.TrimPrefix(id, "fco_"))
+	}
+	return raw
+}
+
+func normalizeKimiResponsesClientItemIDValue(id string) string {
+	if strings.HasPrefix(id, "fc_") {
+		return "ctc_" + strings.TrimPrefix(id, "fc_")
+	}
+	if strings.HasPrefix(id, "fco_") {
+		return "ctco_" + strings.TrimPrefix(id, "fco_")
+	}
+	return id
+}
+
+func kimiCustomInputFromArguments(arguments string) string {
+	if arguments == "" {
+		return ""
+	}
+	parsed := gjson.Parse(arguments)
+	if input := parsed.Get(kimiCustomToolInput); input.Exists() {
+		if input.Type == gjson.String {
+			return input.String()
+		}
+		return input.Raw
+	}
+	return arguments
+}
+
+// KimiResponsesCustomToolState restores Kimi function calls to Responses
+// custom tool calls for one response, including streamed argument events.
+type KimiResponsesCustomToolState struct {
+	customByName  map[string]util.ResponsesToolDescriptor
+	customByLocal map[string]util.ResponsesToolDescriptor
+	ambiguous     map[string]bool
+	calls         map[string]*kimiCustomCall
+	eventLine     []byte
+	lastSequence  int
+}
+
+type kimiCustomCall struct {
+	descriptor  util.ResponsesToolDescriptor
+	itemID      string
+	callID      string
+	outputIndex int
+	arguments   string
+	inputDone   bool
+}
+
+// NewKimiResponsesCustomToolState builds a response adapter from the original
+// client declarations. Ordinary function tools are never classified as custom.
+func NewKimiResponsesCustomToolState(original []byte) *KimiResponsesCustomToolState {
+	state := &KimiResponsesCustomToolState{
+		customByName:  make(map[string]util.ResponsesToolDescriptor),
+		customByLocal: make(map[string]util.ResponsesToolDescriptor),
+		ambiguous:     make(map[string]bool),
+		calls:         make(map[string]*kimiCustomCall),
+	}
+	root := gjson.ParseBytes(original)
+	for name, descriptor := range util.CollectResponsesToolWinners(root) {
+		if descriptor.ToolType != "custom" || strings.EqualFold(descriptor.LocalName, "apply_patch") {
+			continue
+		}
+		state.customByName[name] = descriptor
+		local := descriptor.LocalName
+		if previous, ok := state.customByLocal[local]; ok && previous.Name != descriptor.Name {
+			state.ambiguous[local] = true
+			delete(state.customByLocal, local)
+			continue
+		}
+		if !state.ambiguous[local] {
+			state.customByLocal[local] = descriptor
+		}
+	}
+	return state
+}
+
+func (s *KimiResponsesCustomToolState) Active() bool {
+	return s != nil && len(s.customByName) > 0
+}
+
+func (s *KimiResponsesCustomToolState) resolve(name, namespace string) (util.ResponsesToolDescriptor, bool) {
+	if s == nil {
+		return util.ResponsesToolDescriptor{}, false
+	}
+	qualified := util.QualifyResponsesNamespaceToolName(namespace, name)
+	if descriptor, ok := s.customByName[qualified]; ok {
+		return descriptor, true
+	}
+	if namespace == "" {
+		if descriptor, ok := s.customByName[name]; ok {
+			return descriptor, true
+		}
+		if !s.ambiguous[name] {
+			if descriptor, ok := s.customByLocal[name]; ok {
+				return descriptor, true
+			}
+		}
+	}
+	return util.ResponsesToolDescriptor{}, false
+}
+
+func (s *KimiResponsesCustomToolState) rememberCall(root, item gjson.Result, descriptor util.ResponsesToolDescriptor) *kimiCustomCall {
+	itemID := item.Get("id").String()
+	if itemID == "" {
+		itemID = root.Get("item_id").String()
+	}
+	callID := item.Get("call_id").String()
+	if callID == "" {
+		callID = root.Get("call_id").String()
+	}
+	outputIndex := int(root.Get("output_index").Int())
+	if item.Get("output_index").Exists() {
+		outputIndex = int(item.Get("output_index").Int())
+	}
+	var call *kimiCustomCall
+	for _, key := range []string{itemID, root.Get("item_id").String(), callID, fmt.Sprintf("index:%d", outputIndex)} {
+		if key != "" {
+			call = s.calls[key]
+			if call != nil {
+				break
+			}
+		}
+	}
+	if call == nil {
+		call = &kimiCustomCall{descriptor: descriptor, itemID: itemID, callID: callID, outputIndex: outputIndex}
+	}
+	if itemID != "" {
+		call.itemID = itemID
+		s.calls[itemID] = call
+	}
+	if callID != "" {
+		call.callID = callID
+		s.calls[callID] = call
+	}
+	s.calls[fmt.Sprintf("index:%d", outputIndex)] = call
+	return call
+}
+
+func (s *KimiResponsesCustomToolState) findCall(root, item gjson.Result) *kimiCustomCall {
+	for _, key := range []string{root.Get("item_id").String(), item.Get("id").String(), root.Get("call_id").String(), item.Get("call_id").String(), fmt.Sprintf("index:%d", root.Get("output_index").Int())} {
+		if key != "" {
+			if call := s.calls[key]; call != nil {
+				return call
+			}
+		}
+	}
+	return nil
+}
+
+func (s *KimiResponsesCustomToolState) restoreCustomItem(raw []byte, descriptor util.ResponsesToolDescriptor, itemType string) []byte {
+	raw, _ = sjson.SetBytes(raw, "type", itemType)
+	raw = normalizeKimiResponsesClientItemID(raw, itemType)
+	if itemType == "custom_tool_call" {
+		input := gjson.GetBytes(raw, "input").String()
+		if arguments := gjson.GetBytes(raw, "arguments"); arguments.Exists() {
+			input = kimiCustomInputFromArguments(arguments.String())
+		}
+		raw, _ = sjson.SetBytes(raw, "input", input)
+		raw, _ = sjson.DeleteBytes(raw, "arguments")
+		raw, _ = sjson.SetBytes(raw, "name", descriptor.LocalName)
+		if descriptor.Namespace != "" {
+			raw, _ = sjson.SetBytes(raw, "namespace", descriptor.Namespace)
+		} else {
+			raw, _ = sjson.DeleteBytes(raw, "namespace")
+		}
+	}
+	return raw
+}
+
+func (s *KimiResponsesCustomToolState) restoreResponseOutput(raw []byte, path string) []byte {
+	items := gjson.GetBytes(raw, path)
+	if !items.IsArray() {
+		return raw
+	}
+	for index, item := range items.Array() {
+		itemType := item.Get("type").String()
+		if itemType != "function_call" && itemType != "function_call_output" {
+			continue
+		}
+		descriptor, ok := s.resolve(item.Get("name").String(), item.Get("namespace").String())
+		if !ok {
+			continue
+		}
+		clientType := "custom_tool_call"
+		if itemType == "function_call_output" {
+			clientType = "custom_tool_call_output"
+		}
+		converted := s.restoreCustomItem([]byte(item.Raw), descriptor, clientType)
+		raw, _ = sjson.SetRawBytes(raw, fmt.Sprintf("%s.%d", path, index), converted)
+	}
+	return raw
+}
+
+// TransformNonStream restores custom tool output items in a completed response.
+func (s *KimiResponsesCustomToolState) TransformNonStream(response []byte) ([]byte, error) {
+	if !s.Active() {
+		return response, nil
+	}
+	if !gjson.ValidBytes(response) {
+		return nil, fmt.Errorf("invalid Kimi Responses response JSON")
+	}
+	if gjson.GetBytes(response, "output").IsArray() {
+		response = s.restoreResponseOutput(response, "output")
+	}
+	if gjson.GetBytes(response, "response.output").IsArray() {
+		response = s.restoreResponseOutput(response, "response.output")
+	}
+	return response, nil
+}
+
+func (s *KimiResponsesCustomToolState) setSequence(raw []byte) []byte {
+	sequence := int(gjson.GetBytes(raw, "sequence_number").Int())
+	if sequence <= s.lastSequence {
+		sequence = s.lastSequence + 1
+	}
+	s.lastSequence = sequence
+	raw, _ = sjson.SetBytes(raw, "sequence_number", sequence)
+	return raw
+}
+
+func (s *KimiResponsesCustomToolState) customInputDone(root gjson.Result, call *kimiCustomCall, input string) []byte {
+	raw := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","call_id":"","output_index":0,"input":""}`)
+	raw, _ = sjson.SetBytes(raw, "item_id", normalizeKimiResponsesClientItemIDValue(call.itemID))
+	raw, _ = sjson.SetBytes(raw, "call_id", call.callID)
+	raw, _ = sjson.SetBytes(raw, "output_index", call.outputIndex)
+	raw, _ = sjson.SetBytes(raw, "input", input)
+	if name := root.Get("name").String(); name != "" {
+		raw, _ = sjson.SetBytes(raw, "name", call.descriptor.LocalName)
+	}
+	return s.setSequence(raw)
+}
+
+func (s *KimiResponsesCustomToolState) streamPayload(payload []byte) [][]byte {
+	data := append([]byte("data: "), payload...)
+	data = append(data, '\n', '\n')
+	if s.eventLine == nil {
+		return [][]byte{data}
+	}
+	eventName := gjson.GetBytes(payload, "type").String()
+	event := []byte("event: " + eventName)
+	s.eventLine = nil
+	return [][]byte{event, data}
+}
+
+func (s *KimiResponsesCustomToolState) streamOriginal(line []byte) [][]byte {
+	if s.eventLine == nil {
+		return [][]byte{bytes.Clone(line)}
+	}
+	event := bytes.Clone(s.eventLine)
+	s.eventLine = nil
+	return [][]byte{event, bytes.Clone(line)}
+}
+
+// Stream restores custom tool events while retaining SSE framing. Function
+// argument deltas are buffered because Kimi streams the wrapper JSON rather
+// than the client's raw custom input.
+func (s *KimiResponsesCustomToolState) Stream(line []byte) ([][]byte, error) {
+	if !s.Active() {
+		return [][]byte{line}, nil
+	}
+	if bytes.HasPrefix(line, []byte("event:")) {
+		s.eventLine = bytes.Clone(line)
+		return nil, nil
+	}
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return [][]byte{line}, nil
+	}
+	payload := bytes.TrimSpace(line[len("data:"):])
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		s.eventLine = nil
+		return [][]byte{line}, nil
+	}
+	if !gjson.ValidBytes(payload) {
+		return s.streamOriginal(line), nil
+	}
+	root := gjson.ParseBytes(payload)
+	if sequence := int(root.Get("sequence_number").Int()); sequence > s.lastSequence {
+		s.lastSequence = sequence
+	}
+	kind := root.Get("type").String()
+	item := root.Get("item")
+	if kind == "response.output_item.added" || kind == "response.output_item.done" {
+		if !item.Exists() {
+			return s.streamOriginal(line), nil
+		}
+		descriptor, ok := s.resolve(item.Get("name").String(), item.Get("namespace").String())
+		if !ok {
+			return s.streamOriginal(line), nil
+		}
+		call := s.rememberCall(root, item, descriptor)
+		if kind == "response.output_item.done" && !call.inputDone {
+			arguments := item.Get("arguments").String()
+			if arguments == "" {
+				arguments = call.arguments
+			}
+			input := kimiCustomInputFromArguments(arguments)
+			call.arguments = arguments
+			call.inputDone = true
+			out := s.streamPayload(s.customInputDone(root, call, input))
+			converted := s.restoreCustomItem([]byte(item.Raw), descriptor, "custom_tool_call")
+			converted, _ = sjson.SetBytes(converted, "input", input)
+			payload, _ = sjson.SetRawBytes(payload, "item", converted)
+			payload = s.setSequence(payload)
+			s.eventLine = []byte("event: response.output_item.done")
+			out = append(out, s.streamPayload(payload)...)
+			return out, nil
+		}
+		converted := s.restoreCustomItem([]byte(item.Raw), descriptor, "custom_tool_call")
+		payload, _ = sjson.SetRawBytes(payload, "item", converted)
+		payload = s.setSequence(payload)
+		return s.streamPayload(payload), nil
+	}
+	if kind == "response.function_call_arguments.delta" || kind == "response.function_call_arguments.done" {
+		call := s.findCall(root, item)
+		if call == nil {
+			if descriptor, ok := s.resolve(root.Get("name").String(), root.Get("namespace").String()); ok {
+				call = s.rememberCall(root, item, descriptor)
+			}
+		}
+		if call == nil {
+			return s.streamOriginal(line), nil
+		}
+		if kind == "response.function_call_arguments.delta" {
+			call.arguments += root.Get("delta").String()
+			return nil, nil
+		}
+		arguments := root.Get("arguments").String()
+		if arguments == "" {
+			arguments = call.arguments
+		}
+		call.arguments = arguments
+		if call.inputDone {
+			return nil, nil
+		}
+		call.inputDone = true
+		inputDone := s.customInputDone(root, call, kimiCustomInputFromArguments(arguments))
+		return s.streamPayload(inputDone), nil
+	}
+	if strings.HasPrefix(kind, "response.") {
+		if gjson.GetBytes(payload, "response.output").IsArray() {
+			updated := s.restoreResponseOutput(payload, "response.output")
+			if bytes.Equal(updated, payload) {
+				return s.streamOriginal(line), nil
+			}
+			payload = s.setSequence(updated)
+		} else {
+			return s.streamOriginal(line), nil
+		}
+		return s.streamPayload(payload), nil
+	}
+	return s.streamOriginal(line), nil
+}
+
+// FinishStream flushes no additional data. Kimi's terminal output item carries
+// the complete argument snapshot when it omits function_call_arguments.done.
+func (s *KimiResponsesCustomToolState) FinishStream() ([][]byte, error) {
+	if s != nil {
+		s.eventLine = nil
+	}
+	return nil, nil
 }
