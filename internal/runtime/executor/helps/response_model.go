@@ -288,8 +288,26 @@ func IsModelSubstituted(requested, served string) bool {
 	if isDatedModelAlias(reqNoLatest, srvNoLatest) || isDatedModelAlias(srvNoLatest, reqNoLatest) {
 		return false
 	}
+	if isReasoningTierAlias(srvNoLatest, reqNoLatest) {
+		return false
+	}
 
 	return true
+}
+
+// isReasoningTierAlias reports whether tiered is base with a reasoning tier
+// suffix, e.g. gemini-4-argon-high served as gemini-4-argon.
+func isReasoningTierAlias(base, tiered string) bool {
+	prefix := base + "-"
+	if !strings.HasPrefix(tiered, prefix) {
+		return false
+	}
+	switch tiered[len(prefix):] {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 func isDatedModelAlias(base, dated string) bool {
