@@ -364,6 +364,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
+	if auth.Provider == existing.Provider && quotaScheduleIdentityMatches(auth, existing) &&
+		auth.QuotaResetSchedule.ObservedAt.Before(existing.QuotaResetSchedule.ObservedAt) {
+		auth.QuotaResetSchedule = existing.QuotaResetSchedule
+	}
 	if auth.Generation <= existing.Generation {
 		auth.Generation = existing.Generation + 1
 	} else {
