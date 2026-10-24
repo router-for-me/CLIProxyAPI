@@ -416,12 +416,12 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
 				targetAuth.Metadata[coreauth.AttributeWeight] = weight
 			}
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
-		return &authFileFieldPatchError{message: "weight does not support nested fields"}
-	} else if rootAuthFileField(fieldPath) == coreauth.MetadataOfficialClientOnly {
-		if errOfficial := applyOfficialClientOnlyPatch(targetAuth, fieldPath, value); errOfficial != nil {
-			return &authFileFieldPatchError{message: errOfficial.Error()}
-		}
-	} else if fieldPath == "headers" {
+			return &authFileFieldPatchError{message: "weight does not support nested fields"}
+		} else if rootAuthFileField(fieldPath) == coreauth.MetadataOfficialClientOnly {
+			if errOfficial := applyOfficialClientOnlyPatch(targetAuth, fieldPath, value); errOfficial != nil {
+				return &authFileFieldPatchError{message: errOfficial.Error()}
+			}
+		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
 			return &authFileFieldPatchError{message: errSet.Error()}
