@@ -66,7 +66,10 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		ctx = context.Background()
 	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	httpClient := a.deviceHTTPClient
+	if httpClient == nil {
+		httpClient = util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	}
 
 	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
 	if err != nil {
@@ -82,11 +85,22 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, fmt.Errorf("codex device flow did not return required fields")
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, codexDeviceTimeout)
+	defer cancel()
+
 	pollInterval := parseCodexDevicePollInterval(userCodeResp.Interval)
 
 	fmt.Println("Starting Codex device authentication...")
-	fmt.Printf("Codex device URL: %s\n", codexDeviceVerificationURL)
-	fmt.Printf("Codex device code: %s\n", deviceCode)
+	if opts.OnDeviceCode != nil {
+		opts.OnDeviceCode(DeviceCodeInfo{
+			UserCode:        deviceCode,
+			VerificationURL: codexDeviceVerificationURL,
+			ExpiresIn:       int(codexDeviceTimeout / time.Second),
+		})
+	} else {
+		fmt.Printf("Codex device URL: %s\n", codexDeviceVerificationURL)
+		fmt.Printf("Codex device code: %s\n", deviceCode)
+	}
 
 	if !opts.NoBrowser {
 		if !browser.IsAvailable() {
@@ -172,6 +186,9 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 	deadline := time.Now().Add(codexDeviceTimeout)
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("codex device authentication timed out after 15 minutes")
 		}

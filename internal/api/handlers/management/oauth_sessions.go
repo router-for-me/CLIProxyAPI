@@ -32,19 +32,24 @@ var (
 	errOAuthSessionExists     = errors.New("oauth session already exists")
 )
 
+// ErrOAuthDeviceCallback rejects browser callbacks for a device login state.
+var ErrOAuthDeviceCallback = fmt.Errorf("%w: device login does not accept callbacks", errOAuthSessionNotPending)
+
 // ErrSIWCCallbackRequiresV8 prevents legacy callback sinks from accepting SIWC codes.
 var ErrSIWCCallbackRequiresV8 = fmt.Errorf("%w: SIWC callbacks require /v8/management/oauth/callback", errOAuthSessionNotPending)
 
 type oauthSession struct {
+	Device         bool
 	Provider       string
 	Status         string
 	Source         string
 	Metadata       map[string]any
-	SIWC           *siwcBindSession
-	SIWCCommitting bool
 	Completed      bool
+	Saving         bool
 	CreatedAt      time.Time
 	ExpiresAt      time.Time
+	SIWC           *siwcBindSession
+	SIWCCommitting bool
 }
 
 type oauthSessionStore struct {
@@ -71,7 +76,7 @@ func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 
 func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	for state, session := range s.sessions {
-		if !session.SIWCCommitting && !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
+		if !session.Saving && !session.SIWCCommitting && !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
 			if session.SIWC != nil {
 				session.SIWC.cancel()
 			}
@@ -81,6 +86,14 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 }
 
 func (s *oauthSessionStore) Register(state, provider string) {
+	s.register(state, provider, false)
+}
+
+func (s *oauthSessionStore) registerDevice(state, provider string) {
+	s.register(state, provider, true)
+}
+
+func (s *oauthSessionStore) register(state, provider string, device bool) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" || provider == "" {
@@ -93,6 +106,7 @@ func (s *oauthSessionStore) Register(state, provider string) {
 
 	s.purgeExpiredLocked(now)
 	s.sessions[state] = oauthSession{
+		Device:    device,
 		Provider:  provider,
 		Status:    "",
 		Source:    oauthSessionSourceBuiltin,
@@ -150,6 +164,7 @@ func (s *oauthSessionStore) SetError(state, message string) {
 		return
 	}
 	session.Status = message
+	session.Saving = false
 	session.SIWCCommitting = false
 	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
@@ -172,6 +187,7 @@ func (s *oauthSessionStore) Complete(state string) {
 	}
 	session.Status = ""
 	session.Metadata = nil
+	session.Saving = false
 	session.SIWCCommitting = false
 	session.Completed = true
 	session.ExpiresAt = now.Add(s.completedTTL)
@@ -192,7 +208,7 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if session.SIWC == nil && !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
+		if session.SIWC == nil && !session.Saving && !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
 			session.Status = ""
 			session.Metadata = nil
 			session.Completed = true
@@ -259,7 +275,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Status != "" {
+	if !ok || session.Completed || session.Saving || session.Status != "" {
 		return false
 	}
 	if session.SIWC != nil {
@@ -268,6 +284,33 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 	}
 	delete(s.sessions, state)
 	return true
+}
+
+// BeginSave atomically claims a pending session before persistence begins.
+// Until Complete or SetError releases the claim, cancellation and expiry cannot
+// discard the result because persistence may already have side effects.
+func (s *oauthSessionStore) BeginSave(state, provider string) bool {
+	state = strings.TrimSpace(state)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(time.Now())
+	session, ok := s.sessions[state]
+	if !ok || session.Completed || session.Saving || session.Status != "" || !strings.EqualFold(session.Provider, provider) {
+		return false
+	}
+	session.Saving = true
+	s.sessions[state] = session
+	return true
+}
+
+// Discard removes a startup session whose state was never returned to the caller,
+// including a session that the login worker has already marked as failed.
+func (s *oauthSessionStore) Discard(state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, strings.TrimSpace(state))
 }
 
 func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
@@ -284,6 +327,10 @@ func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
+
+func RegisterDeviceOAuthSession(state, provider string) {
+	oauthSessions.registerDevice(state, provider)
+}
 
 func RegisterPluginOAuthSession(state, provider string, metadata map[string]any) error {
 	return oauthSessions.RegisterPlugin(state, provider, metadata)
@@ -501,8 +548,13 @@ func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, err
 	if err != nil {
 		return "", err
 	}
-	if session, ok := oauthSessions.Get(state); ok && session.SIWC != nil {
-		return "", ErrSIWCCallbackRequiresV8
+	if session, ok := oauthSessions.Get(state); ok {
+		if session.Device {
+			return "", ErrOAuthDeviceCallback
+		}
+		if session.SIWC != nil {
+			return "", ErrSIWCCallbackRequiresV8
+		}
 	}
 	if !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending

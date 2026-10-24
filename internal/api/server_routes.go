@@ -176,7 +176,12 @@ func (s *Server) setupRoutes() {
 		}
 		if state != "" {
 			if cfg := s.getConfig(); cfg != nil {
-				if _, errWrite := managementHandlers.WriteOAuthCallbackFileForPendingSession(cfg.AuthDir, "codex", state, code, errStr); errors.Is(errWrite, managementHandlers.ErrSIWCCallbackRequiresV8) {
+				_, errWrite := managementHandlers.WriteOAuthCallbackFileForPendingSession(cfg.AuthDir, "codex", state, code, errStr)
+				if errors.Is(errWrite, managementHandlers.ErrOAuthDeviceCallback) {
+					c.JSON(http.StatusConflict, gin.H{"error": "device login does not accept callbacks"})
+					return
+				}
+				if errors.Is(errWrite, managementHandlers.ErrSIWCCallbackRequiresV8) {
 					c.JSON(http.StatusConflict, gin.H{"error": "SIWC callbacks require /v8/management/oauth/callback"})
 					return
 				}

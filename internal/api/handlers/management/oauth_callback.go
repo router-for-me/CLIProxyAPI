@@ -121,6 +121,10 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	}
 
 	if _, errWrite := WriteOAuthCallbackFileForPendingSession(h.cfg.AuthDir, canonicalProvider, state, code, errMsg); errWrite != nil {
+		if errors.Is(errWrite, ErrOAuthDeviceCallback) {
+			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "device login does not accept callbacks"})
+			return
+		}
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
 			_, status, okSession := GetOAuthSession(state)
 			if okSession && status != "" {
