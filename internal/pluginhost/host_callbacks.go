@@ -566,8 +566,9 @@ func finalizeHostHTTPRequest(ctx context.Context, req pluginapi.HTTPRequest) []b
 
 func hasSignedPayloadHeaders(headers map[string][]string) bool {
 	for name, values := range headers {
-		switch strings.ToLower(strings.TrimSpace(name)) {
-		case "content-digest", "digest", "signature", "signature-input", "x-amz-content-sha256":
+		name = strings.ToLower(strings.TrimSpace(name))
+		switch name {
+		case "content-md5", "content-digest", "digest", "repr-digest", "signature", "signature-input", "x-signature", "x-amz-content-sha256", "x-goog-hash", "x-goog-content-sha256":
 			return true
 		case "authorization":
 			for _, value := range values {
@@ -576,6 +577,9 @@ func hasSignedPayloadHeaders(headers map[string][]string) bool {
 					return true
 				}
 			}
+		}
+		if strings.HasPrefix(name, "x-amz-checksum-") || strings.HasPrefix(name, "x-goog-checksum-") {
+			return true
 		}
 	}
 	return false

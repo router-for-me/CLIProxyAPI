@@ -371,4 +371,27 @@ func TestFinalizeHostHTTPRequestScopesPayloadRules(t *testing.T) {
 			t.Errorf("finalizeHostHTTPRequest(%s, %s) = %s, want unchanged", req.Method, req.Body, got)
 		}
 	}
+	for _, header := range []string{
+		"Content-MD5",
+		"Digest",
+		"Content-Digest",
+		"Repr-Digest",
+		"Signature",
+		"Signature-Input",
+		"X-Signature",
+		"X-Amz-Content-Sha256",
+		"X-Amz-Checksum-SHA256",
+		"X-Goog-Hash",
+		"X-Goog-Content-Sha256",
+		"X-Goog-Checksum-CRC32C",
+	} {
+		req := pluginapi.HTTPRequest{
+			Method:  http.MethodPost,
+			Body:    []byte(`{"model":"model","a":1}`),
+			Headers: map[string][]string{header: {"integrity-value"}},
+		}
+		if got := finalizeHostHTTPRequest(ctx, req); string(got) != string(req.Body) {
+			t.Errorf("finalizeHostHTTPRequest with %s = %s, want unchanged body", header, got)
+		}
+	}
 }
