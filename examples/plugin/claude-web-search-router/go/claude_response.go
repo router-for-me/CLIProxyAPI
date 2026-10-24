@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -104,8 +105,12 @@ func webSearchResultBlocks(hits []claudeWebSearchHit) []map[string]any {
 		if title == "" {
 			title = hostFromURL(hit.URL)
 		}
+		var pageAge any
+		if hit.PageAge != "" {
+			pageAge = hit.PageAge
+		}
 		resultContent = append(resultContent, map[string]any{
-			"type": "web_search_result", "title": title, "url": hit.URL, "page_age": nil,
+			"type": "web_search_result", "title": title, "url": hit.URL, "page_age": pageAge,
 		})
 	}
 	return resultContent
@@ -149,19 +154,26 @@ func composeAnswerText(answer string, hits []claudeWebSearchHit) string {
 	return buf.String()
 }
 
+// hostFromURL extracts the hostname from raw, normalized so ports, userinfo,
+// and DNS terminal dots cannot defeat domain matching (e.g.
+// "blocked.example:443" or "blocked.example." must match a "blocked.example"
+// rule).
 func hostFromURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+		return strings.TrimSuffix(u.Hostname(), ".")
 	}
 	withoutScheme := raw
 	if idx := strings.Index(raw, "://"); idx >= 0 {
 		withoutScheme = raw[idx+3:]
 	}
 	if slash := strings.Index(withoutScheme, "/"); slash >= 0 {
-		return withoutScheme[:slash]
+		return strings.TrimSuffix(withoutScheme[:slash], ".")
 	}
-	return withoutScheme
+	return strings.TrimSuffix(withoutScheme, ".")
 }
 
 func estimateTokens(text string) int {
