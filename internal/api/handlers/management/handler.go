@@ -149,12 +149,13 @@ func (h *Handler) configSnapshot() *config.Config {
 
 // isStaleConfigFileSnapshotLocked reports whether cfg was parsed from config file
 // bytes that are no longer on disk. Management saves hold h.mu, so none can land
-// during the check. Callers must hold h.mu.
+// during the check, and config.ReadConfigFile keeps other in-process writes (such
+// as LoadConfig's write-backs) from being read half-done. Callers must hold h.mu.
 func (h *Handler) isStaleConfigFileSnapshotLocked(cfg *config.Config) bool {
 	if cfg == nil || cfg.SourceHash == "" || h.configFilePath == "" {
 		return false
 	}
-	data, errRead := os.ReadFile(h.configFilePath)
+	data, errRead := config.ReadConfigFile(h.configFilePath)
 	if errRead != nil {
 		return false
 	}

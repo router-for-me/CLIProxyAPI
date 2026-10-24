@@ -110,20 +110,7 @@ func WriteConfig(path string, data []byte) error {
 			return err
 		}
 	}
-	data = config.NormalizeCommentIndentation(data)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
-	}
-	if _, errWrite := f.Write(data); errWrite != nil {
-		_ = f.Close()
-		return errWrite
-	}
-	if errSync := f.Sync(); errSync != nil {
-		_ = f.Close()
-		return errSync
-	}
-	return f.Close()
+	return config.WriteConfigFile(path, config.NormalizeCommentIndentation(data), 0o644)
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {
@@ -183,7 +170,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 // GetConfigYAML returns the raw config.yaml file bytes without re-encoding.
 // It preserves comments and original formatting/styles.
 func (h *Handler) GetConfigYAML(c *gin.Context) {
-	data, err := os.ReadFile(h.configFilePath)
+	data, err := config.ReadConfigFile(h.configFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "config file not found"})
