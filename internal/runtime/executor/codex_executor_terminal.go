@@ -10,11 +10,18 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 const codexIncompleteStreamMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
+
+// codexOutputItemsRetainLimit bounds the best-effort response.output repair
+// buffer: once a stream retains more than this in output items, the remaining
+// response.output_item.done events are skipped and the terminal event is
+// forwarded without the reconstructed output patch.
+const codexOutputItemsRetainLimit = 16 << 20
 
 type codexIncompleteStreamError struct {
 	statusErr
@@ -49,17 +56,62 @@ func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
 // Streamed Codex responses may emit response.output_item.done events while leaving
 // response.completed.response.output empty. Keep the stream path aligned with the
 // already-patched non-stream path by reconstructing response.output from those items.
-func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
+// It reports how many bytes the event added to the retained buffers so callers can
+// enforce codexOutputItemsRetainLimit; overwriting an existing index still reports
+// the full item size, which keeps the bound conservative.
+func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) int {
 	itemResult := gjson.GetBytes(eventData, "item")
 	if !itemResult.Exists() || itemResult.Type != gjson.JSON {
-		return
+		return 0
 	}
 	outputIndexResult := gjson.GetBytes(eventData, "output_index")
 	if outputIndexResult.Exists() {
 		outputItemsByIndex[outputIndexResult.Int()] = []byte(itemResult.Raw)
-		return
+		return len(itemResult.Raw)
 	}
 	*outputItemsFallback = append(*outputItemsFallback, []byte(itemResult.Raw))
+	return len(itemResult.Raw)
+}
+
+// codexOutputItemPatchBuffer accumulates response.output_item.done items for the
+// best-effort response.completed output reconstruction, bounded by
+// codexOutputItemsRetainLimit. Past the limit the retained items are dropped and
+// the patch is skipped for the rest of the stream, so a hostile or malformed
+// stream cannot grow the repair buffer without bound.
+type codexOutputItemPatchBuffer struct {
+	byIndex  map[int64][]byte
+	fallback [][]byte
+	retained int
+	dropped  bool
+}
+
+func newCodexOutputItemPatchBuffer() *codexOutputItemPatchBuffer {
+	return &codexOutputItemPatchBuffer{byIndex: make(map[int64][]byte)}
+}
+
+func (b *codexOutputItemPatchBuffer) collect(eventData []byte) {
+	if b.dropped {
+		return
+	}
+	b.retained += collectCodexOutputItemDone(eventData, b.byIndex, &b.fallback)
+	if b.retained > codexOutputItemsRetainLimit {
+		b.byIndex = make(map[int64][]byte)
+		b.fallback = nil
+		b.dropped = true
+		log.Debugf("codex executor: retained output items exceeded %d bytes, skipping response.completed output patch", codexOutputItemsRetainLimit)
+	}
+}
+
+// count reports how many items remain available for the terminal-empty check.
+func (b *codexOutputItemPatchBuffer) count() int {
+	return len(b.byIndex) + len(b.fallback)
+}
+
+func (b *codexOutputItemPatchBuffer) patch(completedData []byte) []byte {
+	if b.dropped {
+		return completedData
+	}
+	return patchCodexCompletedOutput(completedData, b.byIndex, b.fallback)
 }
 
 func hydrateCodexCompletedOutputItemIDs(eventData []byte, outputItems []gjson.Result, outputItemsByIndex map[int64][]byte) []byte {
