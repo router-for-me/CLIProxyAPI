@@ -45,6 +45,7 @@ type UsageSnapshot struct {
 	Breakdown   coreusage.TokenBreakdown `json:"breakdown"`
 	Providers   []ProviderUsage          `json:"providers"`
 	Credentials []CredentialUsage        `json:"credentials"`
+	ClientKeys  []ClientKeyUsage         `json:"client_keys"`
 }
 
 type entry struct {
@@ -66,6 +67,7 @@ type aggregator struct {
 	overall  entry
 	byCred   map[string]*credentialEntry
 	byProv   map[string]*entry
+	byClient map[string]*ClientKeyUsage
 	revision atomic.Uint64
 }
 
@@ -76,7 +78,11 @@ var defaultAggregator = &aggregator{
 
 // HandleUsage implements coreusage.Plugin.
 func (a *aggregator) HandleUsage(_ context.Context, record coreusage.Record) {
-	if a == nil || record.Failed {
+	if a == nil {
+		return
+	}
+	a.recordClientUsage(record)
+	if record.Failed {
 		return
 	}
 	breakdown := breakdownFor(record.Detail)
@@ -188,6 +194,7 @@ func (a *aggregator) restore(snapshot UsageSnapshot) {
 		byCred[provKey+"\x00"+cred.AuthID+"\x00"+cred.AuthIndex] = entryCred
 	}
 	a.byCred = byCred
+	a.restoreClientUsage(snapshot.ClientKeys)
 
 	a.revision.Add(1)
 }
@@ -197,11 +204,23 @@ func (a *aggregator) snapshot() UsageSnapshot {
 	defer a.mu.Unlock()
 
 	out := UsageSnapshot{
+		ClientKeys:  make([]ClientKeyUsage, 0, len(a.byClient)),
 		Requests:    a.overall.requests,
 		Breakdown:   finalize(a.overall),
 		Providers:   make([]ProviderUsage, 0, len(a.byProv)),
 		Credentials: make([]CredentialUsage, 0, len(a.byCred)),
 	}
+	for _, client := range a.byClient {
+		copyClient := *client
+		copyClient.Buckets = append([]ClientTrafficBucket(nil), client.Buckets...)
+		out.ClientKeys = append(out.ClientKeys, copyClient)
+	}
+	sort.Slice(out.ClientKeys, func(i, j int) bool {
+		if out.ClientKeys[i].ID != out.ClientKeys[j].ID {
+			return out.ClientKeys[i].ID < out.ClientKeys[j].ID
+		}
+		return out.ClientKeys[i].Model < out.ClientKeys[j].Model
+	})
 
 	for provider, entry := range a.byProv {
 		out.Providers = append(out.Providers, ProviderUsage{
