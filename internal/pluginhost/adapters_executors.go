@@ -1027,6 +1027,20 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 }
 
 func pluginExecutorTokenCount(format sdktranslator.Format, payload []byte) (int64, bool) {
+	if format == sdktranslator.FormatGemini {
+		for _, path := range []string{"promptFeedback", "response.promptFeedback"} {
+			if gjson.GetBytes(payload, path).Exists() {
+				return 0, false
+			}
+		}
+		if !gjson.GetBytes(payload, "totalTokens").Exists() {
+			for _, path := range []string{"usageMetadata", "response.usageMetadata"} {
+				if gjson.GetBytes(payload, path).Exists() {
+					return 0, false
+				}
+			}
+		}
+	}
 	for _, path := range []string{"choices", "content", "candidates", "output", "response.output"} {
 		if gjson.GetBytes(payload, path).Exists() {
 			return 0, false
@@ -1035,7 +1049,7 @@ func pluginExecutorTokenCount(format sdktranslator.Format, payload []byte) (int6
 	// response.usage.input_tokens is the native Codex count shape.
 	paths := []string{"usage.prompt_tokens", "input_tokens", "response.usage.input_tokens", "totalTokens", "total_tokens"}
 	if format == sdktranslator.FormatGemini {
-		paths = []string{"totalTokens", "usageMetadata.promptTokenCount", "input_tokens", "total_tokens"}
+		paths = []string{"totalTokens"}
 	}
 	for _, path := range paths {
 		value := gjson.GetBytes(payload, path)
