@@ -404,6 +404,10 @@ func (s *Service) wsOnDisconnected(channelID string, reason error) {
 	})
 }
 
+// beforeSnapshotRegister runs before an absent auth's snapshot is registered;
+// tests use it to land a concurrent registration in that window.
+var beforeSnapshotRegister = func(string) {}
+
 func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
 	auth = s.prepareCoreAuthForModelRegistration(ctx, auth)
 	if auth == nil {
@@ -424,7 +428,34 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 	// immediately for API calls, rather than waiting for model registration to complete.
 	op := "register"
 	var err error
-	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
+	existing, ok := s.coreManager.GetByID(auth.ID)
+	if !ok {
+		if auth.Generation == 0 {
+			// A registration (an upload, a login) can land after the lookup above.
+			// Register only if the auth is still absent, under its lock; otherwise
+			// apply this snapshot as an update of that auth, so the update's file
+			// snapshot fence drops a read that predates the registration's save.
+			beforeSnapshotRegister(auth.ID)
+			var registered *coreauth.Auth
+			var applied bool
+			registered, applied, err = s.coreManager.RegisterIfAbsent(ctx, auth)
+			if applied {
+				auth = registered
+			} else if err == nil {
+				if existing, ok = s.coreManager.GetByID(auth.ID); !ok {
+					// Registered and removed again since this snapshot was read.
+					return nil
+				}
+			}
+		} else {
+			var registered *coreauth.Auth
+			registered, err = s.coreManager.Register(ctx, auth)
+			if err == nil && registered != nil {
+				auth = registered
+			}
+		}
+	}
+	if ok {
 		if isStaleCoreAuth(existing, auth) {
 			log.Debugf("skipping stale auth update for %s: incoming gen=%d, existing gen=%d", auth.ID, auth.Generation, existing.Generation)
 			return existing
@@ -459,12 +490,6 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 				return updated
 			}
 			auth = updated
-		}
-	} else {
-		var registered *coreauth.Auth
-		registered, err = s.coreManager.Register(ctx, auth)
-		if err == nil && registered != nil {
-			auth = registered
 		}
 	}
 	if err != nil {

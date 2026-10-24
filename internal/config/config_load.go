@@ -41,6 +41,8 @@ func ComputeSourceHash(data []byte) string {
 // copies stay identical. When the plaintext cannot be removed it returns an error and
 // leaves configFile untouched, so every later attempt refuses the file again.
 func PrepareConfigFileForUpload(configFile string) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
 	data, errRead := os.ReadFile(configFile)
 	if errRead != nil {
 		return errRead
@@ -169,7 +171,87 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
+	return loadConfigData(configFile, data, optional, true)
+}
 
+// LoadConfigData parses config YAML that was already read from configFile, so a
+// caller that hashed those bytes loads exactly them. A plaintext management secret
+// is hashed and written back only while configFile still holds data, so a newer
+// save is never overwritten; conflicting legacy fields are left for startup.
+func LoadConfigData(configFile string, data []byte) (*Config, error) {
+	return loadConfigData(configFile, data, false, false)
+}
+
+// HasPlaintextSecretKey reports whether config YAML holds a management secret that
+// is not bcrypt-hashed yet at either path the loader reads one from:
+// management.secret-key or the legacy remote-management.secret-key, even when the
+// loader would use the other one. Aliases and merge keys are followed to the node
+// that defines each value, so a plaintext anchor a secret path reads counts too,
+// as does a merged value a direct key shadows. YAML that does not parse reports
+// false.
+func HasPlaintextSecretKey(data []byte) bool {
+	var root yaml.Node
+	if yaml.Unmarshal(data, &root) != nil || len(root.Content) == 0 {
+		return false
+	}
+	for _, path := range [][]string{{"management", "secret-key"}, {"remote-management", "secret-key"}} {
+		nodes := []*yaml.Node{root.Content[0]}
+		for _, key := range path {
+			var next []*yaml.Node
+			for _, node := range nodes {
+				next = append(next, yamlKeyValues(node, key, map[*yaml.Node]bool{})...)
+			}
+			nodes = next
+		}
+		for _, secret := range nodes {
+			if secret.Kind != yaml.ScalarNode || (secret.Value != "" && !looksLikeBcrypt(secret.Value)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// yamlKeyValues returns the values key has in mapping, its own and those merged
+// in, each resolved through aliases to the node that defines it. seen stops a
+// merge that refers back to a mapping being searched.
+func yamlKeyValues(mapping *yaml.Node, key string, seen map[*yaml.Node]bool) []*yaml.Node {
+	mapping = resolveYAMLAlias(mapping)
+	if mapping == nil || mapping.Kind != yaml.MappingNode || seen[mapping] {
+		return nil
+	}
+	seen[mapping] = true
+	var values []*yaml.Node
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		name, value := mapping.Content[i], resolveYAMLAlias(mapping.Content[i+1])
+		if name.Tag != "!!merge" {
+			if name.Value == key && value != nil {
+				values = append(values, value)
+			}
+			continue
+		}
+		sources := []*yaml.Node{value}
+		if value != nil && value.Kind == yaml.SequenceNode {
+			sources = value.Content
+		}
+		for _, source := range sources {
+			values = append(values, yamlKeyValues(source, key, seen)...)
+		}
+	}
+	return values
+}
+
+func resolveYAMLAlias(node *yaml.Node) *yaml.Node {
+	for node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
+}
+
+// loadConfigData parses data. persist allows startup writes to configFile: an
+// unchecked secret write-back and removal of conflicting legacy fields. Without
+// it, the secret write-back is checked against data.
+func loadConfigData(configFile string, data []byte, optional, persist bool) (*Config, error) {
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
 		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
@@ -209,7 +291,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
-	if err = yaml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
@@ -249,9 +331,23 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		cfg.RemoteManagement.SecretKey = hashed
 
-		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
-		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed)
+		// Persist the hashed value back to the config file to avoid re-hashing on next startup
+		// and to keep the plaintext out of remote store mirrors. Preserve YAML comments and
+		// ordering; update only the nested key.
+		// A hot reload may parse bytes a newer save (perhaps with a rotated secret)
+		// already replaced, so it writes back only over the bytes it parsed.
+		var expected []byte
+		if !persist {
+			expected = data
+		}
+		configWriteMu.Lock()
+		errWriteBack := updateNestedScalarLocked(configFile, expected, managementSecretKeyPath(data), hashed)
+		configWriteMu.Unlock()
+		if errWriteBack != nil {
+			// Remote stores refuse to mirror the plaintext, so they keep the previous
+			// config until the file can be written.
+			log.WithError(errWriteBack).Warnf("failed to write the hashed management secret back to %s", configFile)
+		}
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
@@ -334,8 +430,18 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Record the exact bytes this config was parsed from, so a consumer can tell
+	// it apart from a newer version of the file.
+	cfg.SourceHash = ComputeSourceHash(data)
+
+	if !persist {
+		return &cfg, nil
+	}
+
 	// Only conflicting legacy fields are removed on load. A legacy-only document
 	// stays legacy until a v8 configuration write explicitly migrates it.
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
 	current, errRead := os.ReadFile(configFile)
 	if errRead != nil {
 		return nil, errRead
@@ -349,10 +455,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
 		}
 	}
-
-	// Record the exact bytes this config was parsed from, so a consumer can tell
-	// it apart from a newer version of the file.
-	cfg.SourceHash = ComputeSourceHash(data)
 
 	// Return the populated configuration struct.
 	return &cfg, nil
