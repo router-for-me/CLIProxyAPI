@@ -11,11 +11,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 type rpcHostHTTPRequest struct {
@@ -207,6 +209,7 @@ func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, erro
 		return nil, errAcquire
 	}
 	defer operation.finish()
+	httpReq.Body = finalizeHostHTTPBody(operation.ctx, httpReq.Body)
 	resp, errDo := h.newHTTPClient(nil).Do(operation.ctx, httpReq)
 	if errDo != nil {
 		return nil, errDo
@@ -240,6 +243,7 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 		operation.finish()
 	}()
 
+	httpReq.Body = finalizeHostHTTPBody(streamCtx, httpReq.Body)
 	resp, errDo := h.newHTTPClient(nil).DoStream(streamCtx, httpReq)
 	if errDo != nil {
 		return nil, errDo
@@ -538,4 +542,14 @@ func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) 
 		entry.Debug(message)
 	}
 	return marshalRPCResult(rpcEmptyResponse{})
+}
+
+// finalizeHostHTTPBody applies the executor call's payload-rule barrier to a
+// JSON object body right before it is sent upstream. Calls without a
+// finalizer in their context, and non-JSON-object bodies, are left untouched.
+func finalizeHostHTTPBody(ctx context.Context, body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject() {
+		return body
+	}
+	return helps.FinalizePayload(ctx, body)
 }

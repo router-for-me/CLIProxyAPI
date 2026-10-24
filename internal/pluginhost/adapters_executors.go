@@ -409,6 +409,9 @@ type preparedExecutorCall struct {
 	requestedFormat sdktranslator.Format
 	inputFormat     sdktranslator.Format
 	outputFormat    sdktranslator.Format
+	// finalizePayload applies user payload rules to the body the plugin sends
+	// upstream. It is nil when no runtime config is available.
+	finalizePayload helps.PayloadFinalizer
 }
 
 func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
@@ -437,12 +440,23 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		}
 		nativeReq.Payload = translated.Body
 	}
-	// User payload rules are the last host-side mutation before the plugin sees
-	// the request, and match on the suffix-free model like the built-in executors.
+	// User payload rules must be the last mutation of the body that is actually
+	// sent upstream, i.e. after any plugin-side building. The finalizer travels
+	// with the call context and is applied at the host HTTP send boundary
+	// (see finalizeHostHTTPBody). Rules match on the suffix-free model like the
+	// built-in executors, and use the canonical client format as source protocol.
+	var finalizePayload helps.PayloadFinalizer
 	if cfg := a.host.currentRuntimeConfig(); cfg != nil {
 		baseModel := thinking.ParseSuffix(req.Model).ModelName
-		finalize := helps.NewPayloadFinalizer(cfg, a.provider, baseModel, inputFormat.String(), "", nativeReq.Payload, req, opts)
-		nativeReq.Payload = finalize(nativeReq.Payload)
+		finalizeOpts := opts
+		if inputRequested != "" {
+			finalizeOpts.SourceFormat = inputRequested
+		}
+		root := ""
+		if inputFormat == sdktranslator.FormatAntigravity {
+			root = "request"
+		}
+		finalizePayload = helps.NewPayloadFinalizer(cfg, a.provider, baseModel, inputFormat.String(), root, nativeReq.Payload, req, finalizeOpts)
 	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
@@ -455,6 +469,7 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		requestedFormat: requestedFormat,
 		inputFormat:     inputFormat,
 		outputFormat:    outputFormat,
+		finalizePayload: finalizePayload,
 	}, nil
 }
 
@@ -725,7 +740,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 		reporter.StartResponseTTFT()
 	}
 
-	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
+	pluginResp, errExecute := a.executor.Execute(withExecutorPayloadFinalizer(ctx, prepared), buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
 	}
@@ -783,7 +798,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 		reporter.StartResponseTTFT()
 	}
 
-	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
+	pluginResp, errExecuteStream := a.executor.ExecuteStream(withExecutorPayloadFinalizer(ctx, prepared), buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecuteStream != nil {
 		return nil, errExecuteStream
 	}
@@ -1006,7 +1021,7 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
-	pluginResp, errCountTokens := a.executor.CountTokens(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
+	pluginResp, errCountTokens := a.executor.CountTokens(withExecutorPayloadFinalizer(ctx, prepared), buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errCountTokens != nil {
 		return coreexecutor.Response{}, errCountTokens
 	}
@@ -1195,4 +1210,13 @@ func mapExecutorStreamChunks(ctx context.Context, in <-chan pluginapi.ExecutorSt
 		}
 	}()
 	return out
+}
+
+// withExecutorPayloadFinalizer carries the payload-rule barrier to the host
+// HTTP callbacks the plugin uses for this call.
+func withExecutorPayloadFinalizer(ctx context.Context, prepared preparedExecutorCall) context.Context {
+	if prepared.finalizePayload == nil {
+		return ctx
+	}
+	return helps.WithPayloadFinalizer(ctx, prepared.finalizePayload)
 }
