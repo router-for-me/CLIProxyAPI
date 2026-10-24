@@ -333,7 +333,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	updatedAuth, committed, errModify := h.authManager.Modify(ctx, targetAuth.ID, targetAuth.RegistrationEpoch, func(current *coreauth.Auth) error {
-		return applyAuthFileFieldsPatch(current, req, requestRetryPatch)
+		return applyAuthFileFieldsPatch(current, req, requestRetryPatch, c.GetBool(ConfigV8ContextKey))
 	})
 	if errModify != nil {
 		var patchErr *authFileFieldPatchError
@@ -366,7 +366,9 @@ func (e *authFileFieldPatchError) Error() string {
 	return e.message
 }
 
-func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.RawMessage, requestRetryPatch authFileRequestRetryPatch) error {
+// v8 enables fields that are only part of the v8 management contract (model_weights);
+// the deprecated v0 endpoint keeps its previous behavior for them.
+func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.RawMessage, requestRetryPatch authFileRequestRetryPatch, v8 bool) error {
 	coreauth.NormalizeCredentialMetadata(targetAuth.Metadata)
 
 	changed := false
@@ -417,6 +419,26 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
 			}
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
 			return &authFileFieldPatchError{message: "weight does not support nested fields"}
+		} else if v8 && fieldPath == coreauth.AttributeModelWeights {
+			if value == nil {
+				delete(targetAuth.Metadata, coreauth.AttributeModelWeights)
+			} else {
+				modelWeights, errModelWeights := coreauth.ParseModelWeights(value)
+				if errModelWeights != nil {
+					return &authFileFieldPatchError{message: errModelWeights.Error()}
+				}
+				if len(modelWeights) == 0 {
+					delete(targetAuth.Metadata, coreauth.AttributeModelWeights)
+				} else {
+					normalized := make(map[string]any, len(modelWeights))
+					for model, weight := range modelWeights {
+						normalized[model] = weight
+					}
+					targetAuth.Metadata[coreauth.AttributeModelWeights] = normalized
+				}
+			}
+		} else if v8 && rootAuthFileField(fieldPath) == coreauth.AttributeModelWeights {
+			return &authFileFieldPatchError{message: "model_weights does not support nested fields; send the whole object"}
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
@@ -670,6 +692,9 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots[coreauth.AttributeWeight]; ok {
 		syncAuthFileWeightAttribute(auth)
 	}
+	if _, ok := touchedRoots[coreauth.AttributeModelWeights]; ok {
+		syncAuthFileModelWeightsAttribute(auth)
+	}
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
 	}
@@ -768,6 +793,26 @@ func syncAuthFileWeightAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes[coreauth.AttributeWeight] = strconv.FormatInt(weight, 10)
+}
+
+func syncAuthFileModelWeightsAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	rawModelWeights, ok := auth.Metadata[coreauth.AttributeModelWeights]
+	if !ok || rawModelWeights == nil {
+		delete(auth.Attributes, coreauth.AttributeModelWeights)
+		return
+	}
+	modelWeights, errParse := coreauth.ParseModelWeights(rawModelWeights)
+	if errParse != nil || len(modelWeights) == 0 {
+		delete(auth.Attributes, coreauth.AttributeModelWeights)
+		return
+	}
+	auth.Attributes[coreauth.AttributeModelWeights] = coreauth.EncodeModelWeights(modelWeights)
 }
 
 func authFileIntValue(value any) (int, bool) {

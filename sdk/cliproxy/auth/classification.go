@@ -18,6 +18,7 @@ const (
 	AttributeCodexAlphaSearch     = "codex_alpha_search"
 	AttributeCodexDisableCloaking = "codex_disable_cloaking"
 	AttributeConfigIndex          = "config_index"
+	AttributeModelWeights         = "model_weights"
 	AttributePath                 = "path"
 	AttributeRuntimeOnly          = "runtime_only"
 	AttributeSource               = "source"
