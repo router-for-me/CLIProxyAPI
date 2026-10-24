@@ -67,6 +67,62 @@ func TestPatchClaudeKeyFingerprintProfile(t *testing.T) {
 	}
 }
 
+func TestConfigV8ClaudeRelaxedSystemPromptPresence(t *testing.T) {
+	for _, setting := range []struct {
+		name  string
+		value *bool
+	}{
+		{name: "omitted"},
+		{name: "disabled", value: new(bool)},
+		{name: "enabled", value: new(true)},
+	} {
+		t.Run(setting.name, func(t *testing.T) {
+			h := &Handler{cfg: &config.Config{}, configFilePath: writeTestConfigFile(t)}
+			router := gin.New()
+			router.PUT("/v8/management/config/*path", h.ConfigV8)
+			router.PATCH("/v8/management/config", h.ConfigV8)
+			cloak := map[string]any{"mode": "auto"}
+			if setting.value != nil {
+				cloak["relaxed-system-prompt"] = *setting.value
+			}
+			body, errMarshal := json.Marshal([]any{map[string]any{
+				"name": "primary",
+				"keys": []any{map[string]any{"api-key": "test-key", "cloak": cloak}},
+			}})
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			for _, request := range []struct {
+				method string
+				path   string
+				body   string
+			}{
+				{http.MethodPut, "/v8/management/config/api-keys/claude", string(body)},
+				{http.MethodPatch, "/v8/management/config", `{"observability":{"logs":{"debug":true}}}`},
+			} {
+				recorder := httptest.NewRecorder()
+				router.ServeHTTP(recorder, httptest.NewRequest(request.method, request.path, strings.NewReader(request.body)))
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("%s %s: %d %s", request.method, request.path, recorder.Code, recorder.Body.String())
+				}
+				loaded, errLoad := config.LoadConfigOptional(h.configFilePath, false)
+				if errLoad != nil {
+					t.Fatal(errLoad)
+				}
+				for _, cfg := range []*config.Config{h.cfg, loaded} {
+					if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].Cloak == nil {
+						t.Fatal("v8 write lost the Claude credential cloak")
+					}
+					got := cfg.ClaudeKey[0].Cloak.RelaxedSystemPrompt
+					if (got == nil) != (setting.value == nil) || (got != nil && *got != *setting.value) {
+						t.Fatalf("relaxed-system-prompt = %v, want %v", got, setting.value)
+					}
+				}
+			}
+		})
+	}
+}
+
 // A typo must fail the write instead of reaching the request path, where it can
 // only be reported as a warning behind every later request.
 func TestPatchClaudeKeyRejectsUnknownFingerprintProfile(t *testing.T) {
@@ -903,5 +959,53 @@ func TestPatchClaudeKeyPriority(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchClaudeKeyRelaxedSystemPrompt(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		initial *bool
+		patch   string
+		want    *bool
+	}{
+		{name: "enable", patch: `{"relaxed-system-prompt":true}`, want: new(true)},
+		{name: "explicit false", patch: `{"relaxed-system-prompt":false}`, want: new(false)},
+		{name: "disable", initial: new(true), patch: `{"relaxed-system-prompt":false}`, want: new(false)},
+		{name: "preserve omitted", initial: new(true), patch: `{"strict-mode":true}`, want: new(true)},
+		{name: "omit unset", patch: `{"strict-mode":true}`},
+		{name: "clear cloak", initial: new(true), patch: `null`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+				APIKey: "test-key", Cloak: &config.CloakConfig{RelaxedSystemPrompt: test.initial},
+			}}}
+			h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/claude-api-key",
+				strings.NewReader(`{"index":0,"value":{"cloak":`+test.patch+`}}`))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			h.PatchClaudeKey(ctx)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			loaded, errLoad := config.LoadConfigOptional(h.configFilePath, false)
+			if errLoad != nil {
+				t.Fatal(errLoad)
+			}
+			for _, entry := range []config.ClaudeKey{cfg.ClaudeKey[0], loaded.ClaudeKey[0]} {
+				var got *bool
+				if entry.Cloak != nil {
+					got = entry.Cloak.RelaxedSystemPrompt
+				}
+				if (got == nil) != (test.want == nil) {
+					t.Fatalf("relaxed-system-prompt presence = %t, want %t", got != nil, test.want != nil)
+				}
+				if got != nil && *got != *test.want {
+					t.Fatalf("relaxed-system-prompt = %t, want %t", *got, *test.want)
+				}
+			}
+		})
 	}
 }
