@@ -468,7 +468,7 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 		return resp, errNormalizePatch
 	}
 	var errNormalizeCustom error
-	body, errNormalizeCustom = helps.NormalizeKimiResponsesCustomTools(body, originalRequest)
+	body, errNormalizeCustom = helps.NormalizeKimiResponsesCustomTools(body)
 	if errNormalizeCustom != nil {
 		return resp, fmt.Errorf("kimi executor: failed to normalize custom tools: %w", errNormalizeCustom)
 	}
@@ -616,7 +616,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 		return nil, errNormalizePatch
 	}
 	var errNormalizeCustom error
-	body, errNormalizeCustom = helps.NormalizeKimiResponsesCustomTools(body, originalRequest)
+	body, errNormalizeCustom = helps.NormalizeKimiResponsesCustomTools(body)
 	if errNormalizeCustom != nil {
 		return nil, fmt.Errorf("kimi executor: failed to normalize custom tools: %w", errNormalizeCustom)
 	}
@@ -881,7 +881,7 @@ func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 		if errNormalize != nil {
 			return cliproxyexecutor.Response{}, errNormalize
 		}
-		req.Payload, errNormalize = helps.NormalizeKimiResponsesCustomTools(req.Payload, req.Payload)
+		req.Payload, errNormalize = helps.NormalizeKimiResponsesCustomTools(req.Payload)
 		if errNormalize != nil {
 			return cliproxyexecutor.Response{}, errNormalize
 		}

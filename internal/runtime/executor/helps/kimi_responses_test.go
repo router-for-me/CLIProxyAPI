@@ -371,7 +371,7 @@ func TestNormalizeKimiResponsesCustomTools(t *testing.T) {
 			{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"wait"}]}
 		],
 		"input":[
-			{"type":"additional_tools","tools":[{"type":"custom","name":"view_image"}]},
+			{"type":"additional_tools","tools":[{"type":"custom","name":"view_image"},{"type":"custom","name":"exec"},{"type":"namespace","name":"functions","children":[{"type":"custom","name":"request_user_input"}]}]},
 			{"type":"custom_tool_call","id":"ctc_exec","call_id":"c1","name":"exec","input":"pwd"},
 			{"type":"custom_tool_call_output","id":"ctco_exec","call_id":"c1","output":"ok"},
 			{"type":"custom_tool_call","id":"ctc_patch","call_id":"p1","name":"apply_patch","input":"patch"}
@@ -379,7 +379,7 @@ func TestNormalizeKimiResponsesCustomTools(t *testing.T) {
 		"tool_choice":{"type":"custom","name":"exec"}
 	}`)
 
-	normalized, errNormalize := NormalizeKimiResponsesCustomTools(body, body)
+	normalized, errNormalize := NormalizeKimiResponsesCustomTools(body)
 	if errNormalize != nil {
 		t.Fatalf("NormalizeKimiResponsesCustomTools error = %v", errNormalize)
 	}
@@ -400,6 +400,18 @@ func TestNormalizeKimiResponsesCustomTools(t *testing.T) {
 	}
 	if got := gjson.GetBytes(normalized, "input.0.tools.0.type").String(); got != "function" {
 		t.Fatalf("additional_tools custom declaration type = %q, want function", got)
+	}
+	if got := len(gjson.GetBytes(normalized, "input.0.tools").Array()); got != 2 {
+		t.Fatalf("additional_tools declarations = %d, want duplicate removed and namespace kept", got)
+	}
+	if got := gjson.GetBytes(normalized, "input.0.tools.1.tools.0.type").String(); got != "function" {
+		t.Fatalf("message namespace custom declaration type = %q, want function", got)
+	}
+	if got := gjson.GetBytes(normalized, "input.0.tools.1.description").String(); got == "" {
+		t.Fatal("message namespace description is missing")
+	}
+	if gjson.GetBytes(normalized, "input.0.tools.1.children").Exists() {
+		t.Fatal("message namespace children field was not normalized")
 	}
 	if got := gjson.GetBytes(normalized, "input.1.type").String(); got != "function_call" {
 		t.Fatalf("custom history type = %q, want function_call", got)
@@ -424,8 +436,90 @@ func TestNormalizeKimiResponsesCustomTools(t *testing.T) {
 	}
 }
 
+func TestNormalizeKimiResponsesCustomToolsDeduplicatesMessageTools(t *testing.T) {
+	body := []byte(`{
+		"tools":[{"type":"function","name":"request_user_input","parameters":{"type":"object"}}],
+		"input":[
+			{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","children":[
+				{"type":"function","name":"request_user_input","parameters":{"type":"object"}},
+				{"type":"function","name":"request_user_input_async","parameters":{"type":"object"}}
+			]}]}
+		]
+	}`)
+
+	normalized, errNormalize := NormalizeKimiResponsesCustomTools(body)
+	if errNormalize != nil {
+		t.Fatalf("NormalizeKimiResponsesCustomTools error = %v", errNormalize)
+	}
+	if got := len(gjson.GetBytes(normalized, "tools").Array()); got != 1 {
+		t.Fatalf("request-level tools = %d, want 1", got)
+	}
+	if got := len(gjson.GetBytes(normalized, "input.0.tools.0.tools").Array()); got != 1 {
+		t.Fatalf("message-level namespace tools = %d, want only the non-duplicate tool: %s", got, normalized)
+	}
+	if got := gjson.GetBytes(normalized, "input.0.tools.0.tools.0.name").String(); got != "request_user_input_async" {
+		t.Fatalf("remaining message-level tool = %q, want request_user_input_async", got)
+	}
+}
+
+func TestNormalizeKimiResponsesCustomToolsDropsEmptyNamespaces(t *testing.T) {
+	body := []byte(`{
+		"tools":[
+			{"type":"namespace","name":"clock","tools":[]},
+			{"type":"function","name":"exec","parameters":{"type":"object"}}
+		],
+		"input":[
+			{"type":"additional_tools","tools":[
+				{"type":"namespace","name":"collaboration","children":[]},
+				{"type":"namespace","name":"functions","children":[
+					{"type":"custom","name":"read"}
+				]}
+			]}
+		]
+	}`)
+
+	normalized, errNormalize := NormalizeKimiResponsesCustomTools(body)
+	if errNormalize != nil {
+		t.Fatalf("NormalizeKimiResponsesCustomTools error = %v", errNormalize)
+	}
+	if got := len(gjson.GetBytes(normalized, "tools").Array()); got != 1 {
+		t.Fatalf("top-level tools = %d, want only the non-empty function", got)
+	}
+	if got := len(gjson.GetBytes(normalized, "input.0.tools").Array()); got != 1 {
+		t.Fatalf("additional tools = %d, want only the non-empty namespace", got)
+	}
+	if got := gjson.GetBytes(normalized, "input.0.tools.0.name").String(); got != "functions" {
+		t.Fatalf("remaining namespace = %q, want functions", got)
+	}
+	if got := len(gjson.GetBytes(normalized, "input.0.tools.0.tools").Array()); got != 1 {
+		t.Fatalf("functions namespace children = %d, want 1", got)
+	}
+}
+
+func TestNormalizeKimiResponsesCustomToolsDropsMalformedMessageNamespace(t *testing.T) {
+	body := []byte(`{
+		"tools":[{"type":"custom","name":"exec"}],
+		"input":[
+			{"type":"message","role":"user","content":"run"},
+			{"type":"additional_tools","tools":[
+				{"type":"custom","name":"read"},
+				{"type":"namespace","name":"functions"}
+			]}
+		]
+	}`)
+
+	normalized, errNormalize := NormalizeKimiResponsesCustomTools(body)
+	if errNormalize != nil {
+		t.Fatalf("NormalizeKimiResponsesCustomTools error = %v", errNormalize)
+	}
+	messageTools := gjson.GetBytes(normalized, "input.1.tools").Array()
+	if len(messageTools) != 1 || messageTools[0].Get("name").String() != "read" {
+		t.Fatalf("message-level tools contain a malformed namespace: %s", gjson.GetBytes(normalized, "input.1.tools").Raw)
+	}
+}
+
 func TestKimiResponsesCustomToolStateRestoresNonStreamAndStream(t *testing.T) {
-	original := []byte(`{"tools":[{"type":"custom","name":"exec"},{"type":"function","name":"read"}]}`)
+	original := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]},{"type":"function","name":"read"}]}`)
 	state := NewKimiResponsesCustomToolState(original)
 	response := []byte(`{"id":"r1","output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"c1","name":"exec","arguments":"{\"input\":\"pwd\"}"},{"id":"fc_2","type":"function_call","call_id":"c2","name":"read","arguments":"{}"}]}`)
 	restored, errRestore := state.TransformNonStream(response)
@@ -433,13 +527,19 @@ func TestKimiResponsesCustomToolStateRestoresNonStreamAndStream(t *testing.T) {
 		t.Fatalf("TransformNonStream error = %v", errRestore)
 	}
 	if got := gjson.GetBytes(restored, "output.0.type").String(); got != "custom_tool_call" {
-		t.Fatalf("restored custom type = %q", got)
+		t.Fatalf("restored custom tool type = %q", got)
 	}
 	if got := gjson.GetBytes(restored, "output.0.id").String(); got != "ctc_1" {
-		t.Fatalf("restored custom id = %q", got)
+		t.Fatalf("restored function id = %q", got)
+	}
+	if got := gjson.GetBytes(restored, "output.0.namespace").String(); got != "functions" {
+		t.Fatalf("restored function namespace = %q", got)
 	}
 	if got := gjson.GetBytes(restored, "output.0.input").String(); got != "pwd" {
-		t.Fatalf("restored custom input = %q", got)
+		t.Fatalf("restored custom tool input = %q", got)
+	}
+	if gjson.GetBytes(restored, "output.0.arguments").Exists() {
+		t.Fatalf("upstream function arguments leaked into custom tool response: %s", restored)
 	}
 	if got := gjson.GetBytes(restored, "output.1.type").String(); got != "function_call" {
 		t.Fatalf("ordinary function type = %q, want function_call", got)
@@ -464,13 +564,13 @@ func TestKimiResponsesCustomToolStateRestoresNonStreamAndStream(t *testing.T) {
 		}
 		streamed = append(streamed, bytes.Join(converted, nil)...)
 	}
+	if !strings.Contains(string(streamed), "response.custom_tool_call_input.done") {
+		t.Fatalf("custom tool input completion event is missing: %s", streamed)
+	}
 	if strings.Contains(string(streamed), "response.function_call_arguments") {
-		t.Fatalf("function argument event leaked into restored stream: %s", streamed)
+		t.Fatalf("function argument events leaked into the custom tool stream: %s", streamed)
 	}
-	if !strings.Contains(string(streamed), "response.custom_tool_call_input.done") || !strings.Contains(string(streamed), `"type":"custom_tool_call"`) {
-		t.Fatalf("custom stream events missing: %s", streamed)
-	}
-	if !strings.Contains(string(streamed), `"id":"ctc_1"`) || !strings.Contains(string(streamed), `"input":"pwd"`) {
-		t.Fatalf("custom stream identity/input missing: %s", streamed)
+	if !strings.Contains(string(streamed), `"id":"ctc_1"`) || !strings.Contains(string(streamed), `"namespace":"functions"`) || !strings.Contains(string(streamed), `"input":"pwd"`) {
+		t.Fatalf("custom tool stream identity/namespace/input missing: %s", streamed)
 	}
 }
