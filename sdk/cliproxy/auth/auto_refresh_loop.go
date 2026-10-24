@@ -28,6 +28,8 @@ type authAutoRefreshLoop struct {
 
 	wakeCh chan struct{}
 	jobs   chan *authRefreshJob
+	// done is closed once run has returned and all its workers have exited.
+	done chan struct{}
 }
 
 type authRefreshJob struct {
@@ -57,6 +59,7 @@ func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrenc
 		dirty:       make(map[string]struct{}),
 		wakeCh:      make(chan struct{}, 1),
 		jobs:        make(chan *authRefreshJob, jobBuffer),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -74,21 +77,35 @@ func (l *authAutoRefreshLoop) queueReschedule(authID string) {
 }
 
 func (l *authAutoRefreshLoop) run(ctx context.Context) {
-	if l == nil || l.manager == nil {
+	if l == nil {
 		return
 	}
-
-	defer l.releaseQueuedJobs()
+	defer close(l.done)
+	if l.manager == nil {
+		return
+	}
 
 	workers := l.concurrency
 	if workers <= 0 {
 		workers = refreshMaxConcurrency
 	}
+	var workersWG sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go l.worker(ctx)
+		workersWG.Add(1)
+		go func() {
+			defer workersWG.Done()
+			l.worker(ctx)
+		}()
 	}
 
 	l.loop(ctx)
+	// Release queued jobs before joining the workers: a worker held in a slow save
+	// must not keep the others' credentials from the loop that replaced this one.
+	// No job starts once ctx has ended (beginRefreshJob), and running jobs are kept.
+	l.releaseQueuedJobs()
+	// A worker may be mid-refresh (and mid-save) when ctx ends; wait for it so
+	// done means no refresh from this loop is still running.
+	workersWG.Wait()
 }
 
 func (l *authAutoRefreshLoop) worker(ctx context.Context) {
