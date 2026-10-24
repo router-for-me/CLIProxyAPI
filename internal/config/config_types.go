@@ -446,6 +446,33 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// SessionAffinityConsistentHash routes each session by rendezvous hashing of its session
+	// identity over the available credentials instead of by this process's binding cache.
+	// Replicas behind one load balancer then pick the same credential for a session without
+	// shared state. When the chosen credential is unavailable the session moves to its
+	// next-ranked credential and returns once the first recovers. Applies to round-robin
+	// (uniform) and weighted-round-robin (by weight); fill-first is already deterministic and
+	// is left unchanged.
+	//
+	// Differences from the cached mode: a recovered higher-priority credential takes its
+	// sessions back (a binding no longer outranks priority); a credential that fails without
+	// entering cooldown stays first for its sessions; session-affinity-ttl only expires cache
+	// entries, which no longer decide routing; SessionAffinityRebindOn has no effect;
+	// an SDK caller's custom fallback selector is not consulted (ranking is uniform, or by
+	// weight under weighted-round-robin).
+	//
+	// Subagents (when SessionAffinitySubagents is true) rank by the root of their tree when the
+	// request names it, otherwise by their parent; a request with both prompt_cache_key and a
+	// conversation ID ranks by the conversation. Codex requests over a downstream websocket
+	// rank only websocket-enabled credentials, so a session that mixes transports can use two
+	// credentials. Requests whose explicit session ID is missing use the per-process prefix
+	// matcher when it applies, else their derived or message-hash ID, ranked the same way.
+	// Clients choose their session IDs, so a client can try IDs until one ranks a chosen
+	// credential first. When Home is enabled, Home picks credentials and this option has no
+	// effect.
+	// Default: false. Ignored when SessionAffinity is false.
+	SessionAffinityConsistentHash bool `yaml:"session-affinity-consistent-hash,omitempty" json:"session-affinity-consistent-hash,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

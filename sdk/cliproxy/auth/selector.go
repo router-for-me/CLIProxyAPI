@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -915,6 +917,7 @@ type SessionAffinitySelector struct {
 	matcher           *cliproxysession.MerklePrefixMatcher
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
+	consistentHash    bool
 }
 
 const (
@@ -1046,6 +1049,10 @@ type SessionAffinityConfig struct {
 	TTL              time.Duration
 	SubagentAffinity *bool
 	RebindOn         string
+	// ConsistentHash ranks credentials for a session by rendezvous hashing of the session
+	// identity and credential ID instead of consulting this process's binding cache, so
+	// separate replicas behind one load balancer route a session to the same credential.
+	ConsistentHash bool
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1075,6 +1082,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
 		subagentAffinity:  subagentAffinity,
 		rebindOnQuotaOnly: rebindOnQuotaOnly,
+		consistentHash:    cfg.ConsistentHash,
 	}
 }
 
@@ -1094,6 +1102,10 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // applies to cold bindings, requests without a session, and genuine bound-credential
 // failover, so the fallback selector only ever receives the highest available priority tier.
 //
+// With ConsistentHash the binding cache does not decide routing: a request with a session ID
+// takes the top-ranked credential of the highest available priority tier (pickConsistent), so a
+// recovered higher-priority credential takes its sessions back.
+//
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
@@ -1107,7 +1119,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	// Explicit harness identities are absolute authority. The LCP matcher is only
 	// consulted when no header, body, or execution-session identity is present.
-	explicitID, explicitFallbackID := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	explicitID, explicitFallbackID, explicitRootID := extractExplicitSessionIdentities(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	if explicitID == "" {
 		if auth, handled, errLCP := s.pickLCP(ctx, provider, model, opts, auths, entry); handled || errLCP != nil {
 			return auth, errLCP
@@ -1194,6 +1206,17 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 		s.cache.setSessionAliases(authID, bindingProvider, primaryID, keys...)
+	}
+
+	if s.consistentHash && !s.fallbackIsFillFirst() {
+		hashID := consistentHashSessionKey(primaryID, fallbackID, explicitRootID, isFork, isSubagent && s.subagentAffinity)
+		auth := s.pickConsistent(ctx, provider, hashID, fallbackAuths)
+		if auth == nil {
+			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		bind(auth.ID, true)
+		entry.Infof("session-affinity: consistent hash | session=%s key=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(hashID), auth.ID, provider, model)
+		return auth, nil
 	}
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
@@ -1289,6 +1312,81 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	}
 	return auth, nil
+}
+
+// consistentHashSessionKey is the identity a request is ranked by. A subagent (when subagents
+// inherit) uses the root of its tree when the request names it, so nested agents land with the
+// root session; otherwise its ID cut at the first ":agent:", otherwise its parent. A fork uses its parent.
+// A request with both prompt_cache_key and a conversation ID uses the conversation, which also
+// names the requests that carry only the conversation.
+func consistentHashSessionKey(primaryID, fallbackID, rootID string, isFork, inheritParent bool) string {
+	if inheritParent {
+		if rootID != "" {
+			return cliproxysession.BoundSessionIdentity(rootID)
+		}
+		for _, id := range []string{primaryID, fallbackID} {
+			if index := strings.Index(id, ":agent:"); index > 0 {
+				return id[:index]
+			}
+		}
+		if fallbackID != "" {
+			return fallbackID
+		}
+		return primaryID
+	}
+	if isFork && fallbackID != "" {
+		return fallbackID
+	}
+	if strings.HasPrefix(primaryID, "pck:") && strings.HasPrefix(fallbackID, "conv:") {
+		return fallbackID
+	}
+	return primaryID
+}
+
+func (s *SessionAffinitySelector) fallbackIsFillFirst() bool {
+	_, fillFirst := s.fallback.(*FillFirstSelector)
+	return fillFirst
+}
+
+// pickConsistent returns the credential that ranks first for hashID among the available
+// candidates, or nil when there is none. The ranking is rendezvous (highest random weight)
+// hashing of the session identity and each credential ID, so every replica that sees the
+// same candidates picks the same credential without shared state. A credential that becomes
+// unavailable moves only its own sessions, each to its next-ranked credential, and they
+// return once it is available again. Under weighted-round-robin each credential's share of
+// sessions follows its weight.
+func (s *SessionAffinitySelector) pickConsistent(ctx context.Context, provider, hashID string, available []*Auth) *Auth {
+	candidates := preferCodexWebsocketAuths(ctx, provider, available)
+	_, weighted := s.fallback.(*WeightedRoundRobinSelector)
+	var best *Auth
+	bestScore := math.Inf(-1)
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		weight := 1.0
+		if weighted {
+			w := authWeight(candidate)
+			if w <= 0 {
+				continue
+			}
+			weight = float64(w)
+		}
+		score := rendezvousScore(hashID, candidate.ID, weight)
+		if best == nil || score > bestScore || (score == bestScore && candidate.ID < best.ID) {
+			best, bestScore = candidate, score
+		}
+	}
+	return best
+}
+
+// rendezvousScore is the weighted rendezvous score -weight/ln(u) for the pair, with u drawn
+// uniformly from (0, 1) by SHA-256 of the session identity and credential ID. Equal weights
+// give a uniform choice; weight w wins a share of sessions proportional to w.
+func rendezvousScore(sessionID, authID string, weight float64) float64 {
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + authID))
+	u := (float64(binary.BigEndian.Uint64(sum[:8])>>11) + 0.5) / (1 << 53)
+	return -weight / math.Log(u)
 }
 
 func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry) (*Auth, bool, error) {
@@ -1853,9 +1951,16 @@ func extractConversationAlias(payload []byte) string {
 // extractExplicitSessionIDs returns only client- or execution-provided identities.
 // LCP fallback must run after this function so explicit harness sessions remain authoritative.
 func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
+	primary, fallback, _ := extractExplicitSessionIdentities(headers, payload, metadata)
+	return primary, fallback
+}
+
+// extractExplicitSessionIdentities is extractExplicitSessionIDs plus the root session of a
+// subagent tree when the request names it.
+func extractExplicitSessionIdentities(headers http.Header, payload []byte, metadata map[string]any) (string, string, string) {
 	info, ok := cliproxysession.ExtractSessionInfo(headers, payload, metadata)
 	if !ok || info.ClientType == "lcp" {
-		return "", ""
+		return "", "", ""
 	}
 	if metadata != nil {
 		if info.IsFork {
@@ -1869,7 +1974,7 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 	if fallback == "" && strings.HasPrefix(info.SessionID, "pck:") && len(payload) > 0 {
 		fallback = extractConversationAlias(payload)
 	}
-	return info.SessionID, fallback
+	return info.SessionID, fallback, info.RootSessionID
 }
 
 // extractSessionIDs returns (primaryID, fallbackID) for session affinity.
