@@ -40,8 +40,22 @@ type streamBridgeEmit struct {
 
 type streamBridgeClose struct {
 	errorMessage string
+	statusCode   int
 	accepted     chan struct{}
 }
+
+// streamBridgeError preserves the downstream HTTP status attached to an
+// asynchronous plugin stream close. The status is consumed by the core auth
+// manager for refresh/cooldown decisions; keeping it on the error avoids
+// reducing a Cursor 401/429 trailer to an opaque string across the plugin ABI.
+type streamBridgeError struct {
+	message    string
+	statusCode int
+}
+
+func (e streamBridgeError) Error() string { return e.message }
+
+func (e streamBridgeError) StatusCode() int { return e.statusCode }
 
 type rpcStreamEmitRequest struct {
 	StreamID string `json:"stream_id"`
@@ -50,8 +64,9 @@ type rpcStreamEmitRequest struct {
 }
 
 type rpcStreamCloseRequest struct {
-	StreamID string `json:"stream_id"`
-	Error    string `json:"error,omitempty"`
+	StreamID   string `json:"stream_id"`
+	Error      string `json:"error,omitempty"`
+	StatusCode int    `json:"status_code,omitempty"`
 }
 
 func newStreamBridge() *streamBridge {
@@ -98,7 +113,7 @@ func (s *streamBridgeStream) run() {
 			s.markClosed()
 			close(request.accepted)
 			if request.errorMessage != "" {
-				queue = append(queue, pluginapi.ExecutorStreamChunk{Err: fmt.Errorf("%s", request.errorMessage)})
+				queue = append(queue, pluginapi.ExecutorStreamChunk{Err: streamBridgeError{message: request.errorMessage, statusCode: request.statusCode}})
 			}
 			for len(queue) > 0 {
 				select {
@@ -161,12 +176,13 @@ func (s *streamBridgeStream) emit(ctx context.Context, chunk pluginapi.ExecutorS
 	return <-request.done
 }
 
-func (s *streamBridgeStream) close(errorMessage string) {
+func (s *streamBridgeStream) close(errorMessage string, statusCode int) {
 	if s == nil {
 		return
 	}
 	request := streamBridgeClose{
 		errorMessage: errorMessage,
+		statusCode:   statusCode,
 		accepted:     make(chan struct{}),
 	}
 	select {
@@ -228,7 +244,7 @@ func (b *streamBridge) emit(ctx context.Context, id string, chunk pluginapi.Exec
 	return nil
 }
 
-func (b *streamBridge) close(id string, errorMessage string) {
+func (b *streamBridge) close(id string, errorMessage string, statusCodes ...int) {
 	if b == nil || id == "" {
 		return
 	}
@@ -239,5 +255,9 @@ func (b *streamBridge) close(id string, errorMessage string) {
 	if stream == nil {
 		return
 	}
-	stream.close(errorMessage)
+	statusCode := 0
+	if len(statusCodes) > 0 {
+		statusCode = statusCodes[0]
+	}
+	stream.close(errorMessage, statusCode)
 }
