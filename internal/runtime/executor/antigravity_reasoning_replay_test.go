@@ -1982,3 +1982,115 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(
 		t.Fatalf("out = %s, want original payload %s", out, payload)
 	}
 }
+
+func TestPrepareAntigravityGeminiReasoningReplayPreservesLargeIntegerArguments(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		clientArgs string
+		wantNative bool
+	}{
+		{name: "changed integer", clientArgs: `{"id":9007199254740992}`},
+		{name: "changed integer with default", clientArgs: `{"id":9007199254740992,"offset":0}`},
+		{name: "unchanged integer", clientArgs: `{"id":9007199254740993}`, wantNative: true},
+		{name: "equivalent exponent", clientArgs: `{"id":9.007199254740993e15,"offset":0.0}`, wantNative: true},
+		{name: "unchanged integer with default", clientArgs: `{"id":9007199254740993,"offset":0}`, wantNative: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			internalcache.ClearAntigravityReasoningReplayCache()
+			t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+			const model = "gemini-3.6-flash-high"
+			const nativeID = "native-lookup"
+			const nativeArgs = `{"id":9007199254740993}`
+			const signature = "EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"
+			clientID := util.GeminiClaudeToolUseID(nativeID, "lookup", nativeArgs)
+			payload := []byte(`{"sessionId":"large-integer-replay","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + clientID + `","name":"lookup","args":` + tt.clientArgs + `}}]},{"role":"user","parts":[{"functionResponse":{"id":"` + clientID + `","name":"lookup","response":{"result":"ok"}}}]}]}}`)
+			item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"lookup","call_id":"` + nativeID + `","args":` + nativeArgs + `,"thoughtSignature":"` + signature + `"}`)
+			sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+			if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
+				t.Fatal("failed to cache native call")
+			}
+			original := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"id":{"type":"integer"},"offset":{"type":"integer","default":0}}}}]}`)
+			opts := cliproxyexecutor.Options{OriginalRequest: original, SourceFormat: sdktranslator.FromString("claude")}
+			out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload)
+			if errPrepare != nil {
+				t.Fatalf("prepare failed: %v", errPrepare)
+			}
+			call := gjson.GetBytes(out, "request.contents.0.parts.0")
+			wantArgs := tt.clientArgs
+			wantSignature := internalsignature.GeminiSkipThoughtSignatureValidator
+			if tt.wantNative {
+				wantArgs = nativeArgs
+				wantSignature = signature
+			}
+			if got := call.Get("functionCall.args").Raw; got != wantArgs {
+				t.Errorf("args = %s, want %s", got, wantArgs)
+			}
+			if gotNative := call.Get("functionCall.id").String() == nativeID; gotNative != tt.wantNative {
+				t.Errorf("native identity restored = %v, want %v", gotNative, tt.wantNative)
+			}
+			if got := call.Get("thoughtSignature").String(); got != wantSignature {
+				t.Errorf("signature = %q, want %q", got, wantSignature)
+			}
+			if antigravityPayloadHasClaudeToolProvenanceID(out) {
+				t.Errorf("reserved provenance ID leaked upstream: %s", out)
+			}
+			if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+				t.Fatalf("invalid call/response pairing: %v", errPairing)
+			}
+		})
+	}
+}
+
+func TestAntigravityFunctionCallMatchesReplayItemPreservesNumericDefaults(t *testing.T) {
+	original := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"id":{"type":"integer","default":9007199254740993}}}}]}`)
+	schemas := antigravityReplayToolSchemasFromRequests(original)
+	item := gjson.Parse(`{"name":"lookup","args":{}}`)
+	for _, tt := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "9007199254740993", want: true},
+		{value: "9007199254740992", want: false},
+	} {
+		t.Run(tt.value, func(t *testing.T) {
+			call := gjson.Parse(`{"name":"lookup","args":{"id":` + tt.value + `}}`)
+			if got := antigravityFunctionCallMatchesReplayItem(call, item, schemas); got != tt.want {
+				t.Fatalf("matches default = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAntigravityReplayNumbersCompareByValue(t *testing.T) {
+	for _, tt := range []struct {
+		left  string
+		right string
+	}{
+		{left: "1", right: "1.0"},
+		{left: "1", right: "1e0"},
+		{left: "1000", right: "1e3"},
+		{left: "-12.5", right: "-125e-1"},
+		{left: "0", right: "-0.0e100000000000000000000"},
+		{left: "0.000001", right: "1e-6"},
+		{left: "0.0000001", right: "1e-7"},
+		{left: "9007199254740993", right: "9.007199254740993e15"},
+		{left: "1e100000000000000000000", right: "10e99999999999999999999"},
+		{left: "1e-100000000000000000000", right: "10e-100000000000000000001"},
+	} {
+		t.Run(tt.left+"="+tt.right, func(t *testing.T) {
+			left := []byte(`{"id":` + tt.left + `}`)
+			right := []byte(`{"id":` + tt.right + `}`)
+			if !bytes.Equal(antigravityCanonicalReplayJSON(left), antigravityCanonicalReplayJSON(right)) {
+				t.Errorf("equivalent numeric arguments have different fingerprints")
+			}
+			original := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"id":{"type":"number","default":` + tt.left + `}}}}]}`)
+			schemas := antigravityReplayToolSchemasFromRequests(original)
+			item := gjson.Parse(`{"name":"lookup","args":{}}`)
+			call := gjson.Parse(`{"name":"lookup","args":` + string(right) + `}`)
+			if !antigravityFunctionCallMatchesReplayItem(call, item, schemas) {
+				t.Errorf("equivalent numeric default did not match")
+			}
+		})
+	}
+}
