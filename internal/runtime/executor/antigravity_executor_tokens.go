@@ -69,6 +69,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if errReplay != nil {
 		return cliproxyexecutor.Response{}, errReplay
 	}
+	preparedPayload = helps.StripClaudeDisabledThoughtContents(baseModel, preparedPayload, "request.contents")
 	payload = ensureAntigravityGeminiLeadingUserContent(baseModel, preparedPayload)
 
 	payload = helps.DeleteJSONField(payload, "project")
