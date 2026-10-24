@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -15,6 +17,55 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"golang.org/x/net/context"
 )
+
+// streamBootstrapAttempt owns one streaming attempt's cancellable context and its optional
+// first-frame deadline. The deadline lives only until a deliverable frame exists, so an
+// established stream is never cut by it, and release ends an attempt that produced none.
+type streamBootstrapAttempt struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	timer    *time.Timer
+	timedOut *atomic.Bool
+}
+
+// newStreamBootstrapAttempt derives an attempt context from parent and arms the first-frame
+// deadline when timeout is positive; a non-positive timeout leaves the attempt unbounded.
+func newStreamBootstrapAttempt(parent context.Context, timeout time.Duration) *streamBootstrapAttempt {
+	attemptCtx, cancel := context.WithCancel(parent)
+	attempt := &streamBootstrapAttempt{ctx: attemptCtx, cancel: cancel}
+	if timeout > 0 {
+		timedOut := &atomic.Bool{}
+		attempt.timedOut = timedOut
+		attempt.timer = time.AfterFunc(timeout, func() {
+			// The callback runs on a timer goroutine: record the reason before canceling so
+			// the reader can tell this deadline from a caller cancellation.
+			timedOut.Store(true)
+			cancel()
+		})
+	}
+	return attempt
+}
+
+// deadlineExpired reports whether this attempt was abandoned by its first-frame deadline.
+func (a *streamBootstrapAttempt) deadlineExpired() bool {
+	return a != nil && a.timedOut != nil && a.timedOut.Load()
+}
+
+// disarmDeadline stops the deadline so the attempt's established stream can run to completion.
+func (a *streamBootstrapAttempt) disarmDeadline() {
+	if a != nil && a.timer != nil {
+		a.timer.Stop()
+	}
+}
+
+// release ends the attempt: stop the deadline first, then cancel its context.
+func (a *streamBootstrapAttempt) release() {
+	if a == nil {
+		return
+	}
+	a.disarmDeadline()
+	a.cancel()
+}
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
@@ -351,17 +402,50 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		errMsg := executionErrorMessage(err)
-		lifecycle.completeError(ctx, errMsg)
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- errMsg
-		close(errChan)
-		return nil, nil, errChan
+	// The bootstrap budget guards one thing: how long an attempt may stay silent before its
+	// first frame. The manager waits for that frame inside ExecuteStream, so the deadline
+	// covers the whole request-to-first-byte leg and is disarmed once a frame exists.
+	bootstrapTimeout := StreamingBootstrapTimeout(h.CurrentConfig())
+	maxBootstrapRetries := StreamingBootstrapRetries(h.CurrentConfig())
+	if h.AuthManager.HomeEnabled() {
+		maxBootstrapRetries = 0
 	}
-	if streamResult == nil {
+	bootstrapRetries := 0
+	attempt := newStreamBootstrapAttempt(ctx, bootstrapTimeout)
+	var streamResult *coreexecutor.StreamResult
+	for {
+		var errAcquire error
+		streamResult, errAcquire = h.AuthManager.ExecuteStream(attempt.ctx, providers, req, opts)
+		if errAcquire == nil && streamResult != nil && !attempt.deadlineExpired() {
+			break
+		}
+		if attempt.deadlineExpired() {
+			attempt.release()
+			if bootstrapRetries >= maxBootstrapRetries {
+				errMsg := &interfaces.ErrorMessage{
+					StatusCode: http.StatusGatewayTimeout,
+					Error:      fmt.Errorf("upstream produced no frame within bootstrap timeout %s", bootstrapTimeout),
+				}
+				lifecycle.completeError(ctx, errMsg)
+				errChan := make(chan *interfaces.ErrorMessage, 1)
+				errChan <- errMsg
+				close(errChan)
+				return nil, nil, errChan
+			}
+			bootstrapRetries++
+			attempt = newStreamBootstrapAttempt(ctx, bootstrapTimeout)
+			continue
+		}
+		attempt.release()
+		if errAcquire != nil {
+			errAcquire = enrichAuthSelectionError(errAcquire, providers, normalizedModel)
+			errMsg := executionErrorMessage(errAcquire)
+			lifecycle.completeError(ctx, errMsg)
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- errMsg
+			close(errChan)
+			return nil, nil, errChan
+		}
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("auth manager returned nil stream")}
 		lifecycle.completeError(ctx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -369,6 +453,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		close(errChan)
 		return nil, nil, errChan
 	}
+	// The manager returns only after the first frame exists, so the attempt has nothing left
+	// to bound: liveness beyond this point belongs to the client, not to the bootstrap budget.
+	attempt.disarmDeadline()
 	executedRequest := func() (coreexecutor.Request, coreexecutor.Options) {
 		return afterAuthCapture.apply(req, opts)
 	}
@@ -539,22 +626,26 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 	}
 
-	maxBootstrapRetries := StreamingBootstrapRetries(h.CurrentConfig())
-	if h.AuthManager.HomeEnabled() {
-		maxBootstrapRetries = 0
-	}
-	for bootstrapRetries := 0; !streamCanceledBeforeRead; {
+	for !streamCanceledBeforeRead {
 		readInitialStreamChunks()
 		if streamCanceledBeforeRead || bootstrapErr != nil || bootstrapStreamErr == nil {
+			// An attempt that never produced a client-visible frame is abandoned; one that
+			// did keeps its context alive for the remainder of the stream.
+			if bootstrapPayload == nil {
+				attempt.release()
+			}
 			break
 		}
+		attempt.release()
 		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
 			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
 			break
 		}
 		bootstrapRetries++
-		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+		nextAttempt := newStreamBootstrapAttempt(ctx, bootstrapTimeout)
+		retryResult, retryErr := h.AuthManager.ExecuteStream(nextAttempt.ctx, providers, req, opts)
 		if retryErr != nil {
+			nextAttempt.release()
 			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
 			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
 				bootstrapErr = originalBootstrapErr
@@ -564,9 +655,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			break
 		}
 		if retryResult == nil {
+			nextAttempt.release()
 			bootstrapErr = executionErrorMessage(fmt.Errorf("auth manager returned nil stream"))
 			break
 		}
+		attempt = nextAttempt
+		attempt.disarmDeadline()
 		rawStreamHeaders = cloneHeader(retryResult.Headers)
 		baseStreamHeaders = cloneHeader(retryResult.Headers)
 		streamHeaderInitialized = false

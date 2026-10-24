@@ -58,6 +58,8 @@ const idempotencyKeyMetadataKey = "idempotency_key"
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
+	// defaultStreamingBootstrapTimeout leaves the wait for the first upstream frame unbounded.
+	defaultStreamingBootstrapTimeout = 0
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -235,6 +237,18 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 		retries = 0
 	}
 	return retries
+}
+
+// StreamingBootstrapTimeout returns how long one streaming attempt may wait for the first
+// upstream frame before the attempt is abandoned. Zero leaves the wait unbounded.
+func StreamingBootstrapTimeout(cfg *config.SDKConfig) time.Duration {
+	if cfg == nil {
+		return defaultStreamingBootstrapTimeout
+	}
+	if timeout := cfg.Streaming.BootstrapTimeoutDuration(); timeout > 0 {
+		return timeout
+	}
+	return defaultStreamingBootstrapTimeout
 }
 
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.

@@ -1333,3 +1333,244 @@ func TestExecuteStreamWithAuthManager_AllowsSplitOpenAIResponsesSSEEventLines(t 
 		t.Fatalf("unexpected second chunk.\nGot:  %q\nWant: %q", got[1], expectedData)
 	}
 }
+
+// silentThenServingStreamExecutor blocks its first attempt until the bootstrap deadline
+// cancels it, then serves one frame on every later attempt. It mirrors an upstream that
+// accepts a request and writes nothing until the connection is abandoned.
+type silentThenServingStreamExecutor struct {
+	mu       sync.Mutex
+	calls    int
+	canceled chan struct{}
+	once     sync.Once
+}
+
+func (e *silentThenServingStreamExecutor) Identifier() string { return "codex" }
+
+func (e *silentThenServingStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *silentThenServingStreamExecutor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	call := e.calls
+	e.mu.Unlock()
+
+	if call == 1 {
+		<-ctx.Done()
+		e.once.Do(func() { close(e.canceled) })
+		return nil, ctx.Err()
+	}
+
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{Payload: []byte("ok")}
+	close(ch)
+	return &coreexecutor.StreamResult{Headers: http.Header{"X-Upstream-Attempt": {"2"}}, Chunks: ch}, nil
+}
+
+func (e *silentThenServingStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *silentThenServingStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *silentThenServingStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *silentThenServingStreamExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+// silentStreamBootstrapExecutor publishes a stream that never yields and never closes, so
+// the read stays outstanding until the bootstrap deadline abandons it.
+type silentStreamBootstrapExecutor struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (e *silentStreamBootstrapExecutor) Identifier() string { return "codex" }
+
+func (e *silentStreamBootstrapExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *silentStreamBootstrapExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+	return &coreexecutor.StreamResult{Chunks: make(chan coreexecutor.StreamChunk)}, nil
+}
+
+func (e *silentStreamBootstrapExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *silentStreamBootstrapExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *silentStreamBootstrapExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *silentStreamBootstrapExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func newBootstrapTimeoutTestHandler(t *testing.T, executor coreauth.ProviderExecutor, streaming sdkconfig.StreamingConfig) *BaseAPIHandler {
+	t.Helper()
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auths := []*coreauth.Auth{
+		{ID: "auth1", Provider: "codex", Status: coreauth.StatusActive, Metadata: map[string]any{"email": "test1@example.com"}},
+		{ID: "auth2", Provider: "codex", Status: coreauth.StatusActive, Metadata: map[string]any{"email": "test2@example.com"}},
+	}
+	for _, auth := range auths {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("manager.Register(%s): %v", auth.ID, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		}
+	})
+	return NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true, Streaming: streaming}, manager)
+}
+
+func TestStreamingBootstrapTimeoutAccessor(t *testing.T) {
+	if got := StreamingBootstrapTimeout(nil); got != 0 {
+		t.Fatalf("StreamingBootstrapTimeout(nil) = %v, want 0", got)
+	}
+	cfg := &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{BootstrapTimeout: "90s"}}
+	if got := StreamingBootstrapTimeout(cfg); got != 90*time.Second {
+		t.Fatalf("StreamingBootstrapTimeout(90s) = %v, want 90s", got)
+	}
+	cfg = &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{BootstrapTimeout: "off"}}
+	if got := StreamingBootstrapTimeout(cfg); got != 0 {
+		t.Fatalf("StreamingBootstrapTimeout(off) = %v, want 0", got)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_RetriesAttemptAbandonedByBootstrapTimeout(t *testing.T) {
+	executor := &silentThenServingStreamExecutor{canceled: make(chan struct{})}
+	handler := newBootstrapTimeoutTestHandler(t, executor, sdkconfig.StreamingConfig{
+		BootstrapRetries: 1,
+		BootstrapTimeout: "25ms",
+	})
+
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+
+	if string(got) != "ok" {
+		t.Fatalf("expected payload ok, got %q", string(got))
+	}
+	if executor.Calls() != 2 {
+		t.Fatalf("expected 2 stream attempts, got %d", executor.Calls())
+	}
+	if upstreamHeaders.Get("X-Upstream-Attempt") != "2" {
+		t.Fatalf("expected upstream header from retry attempt, got %q", upstreamHeaders.Get("X-Upstream-Attempt"))
+	}
+	select {
+	case <-executor.canceled:
+	default:
+		t.Fatalf("expected the abandoned attempt to observe its deadline cancellation")
+	}
+}
+
+func TestExecuteStreamWithAuthManager_ReportsGatewayTimeoutWhenBootstrapTimeoutExhaustsRetries(t *testing.T) {
+	executor := &silentThenServingStreamExecutor{canceled: make(chan struct{})}
+	handler := newBootstrapTimeoutTestHandler(t, executor, sdkconfig.StreamingConfig{
+		BootstrapTimeout: "25ms",
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if errChan == nil {
+		t.Fatalf("expected a non-nil error channel")
+	}
+
+	// The attempt never produced a stream, so the caller receives the failure before any
+	// payload channel exists.
+	if dataChan != nil {
+		for chunk := range dataChan {
+			t.Fatalf("expected no stream data, got %q", string(chunk))
+		}
+	}
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		gotErr = msg
+	}
+	if gotErr == nil {
+		t.Fatalf("expected a bootstrap timeout error")
+	}
+	if gotErr.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("expected status %d, got %d", http.StatusGatewayTimeout, gotErr.StatusCode)
+	}
+	if gotErr.Error == nil || !strings.Contains(gotErr.Error.Error(), "bootstrap timeout") {
+		t.Fatalf("expected the error to name the bootstrap timeout, got %v", gotErr.Error)
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("expected 1 stream attempt without retries, got %d", executor.Calls())
+	}
+}
+
+// TestExecuteStreamWithAuthManager_ConsumesBootstrapRetriesOnSilentUpstream covers the whole
+// silent-upstream incident: every attempt waits for a first frame that never arrives, the
+// bootstrap budget allows exactly one retry, and the client gets a gateway timeout.
+func TestExecuteStreamWithAuthManager_ConsumesBootstrapRetriesOnSilentUpstream(t *testing.T) {
+	executor := &silentStreamBootstrapExecutor{}
+	handler := newBootstrapTimeoutTestHandler(t, executor, sdkconfig.StreamingConfig{
+		BootstrapRetries: 1,
+		BootstrapTimeout: "25ms",
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	var streamErr *interfaces.ErrorMessage
+	if errChan != nil {
+		for msg := range errChan {
+			streamErr = msg
+		}
+	}
+	if dataChan != nil {
+		for chunk := range dataChan {
+			t.Fatalf("expected no stream data, got %q", string(chunk))
+		}
+	}
+	if streamErr == nil {
+		t.Fatalf("expected a gateway timeout error; dataChan nil=%t", dataChan == nil)
+	}
+	if streamErr.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("expected status %d, got %d (%v)", http.StatusGatewayTimeout, streamErr.StatusCode, streamErr.Error)
+	}
+	if executor.Calls() != 2 {
+		t.Fatalf("expected 2 stream attempts under one bootstrap retry, got %d", executor.Calls())
+	}
+}

@@ -250,6 +250,11 @@ requests:
   #   keepalive-seconds: 15         # Default: 0 (disabled). <= 0 disables keep-alives.
   #   bootstrap-retries: 1          # Default: 0 (disabled). Retries before first byte is sent.
   #   send-keepalive-before-ft: false # Default: false. When true and keepalive-seconds > 0, send SSE heartbeats before the first token.
+  #   bootstrap-timeout: 90s        # Default: 0 (unbounded). Abandons one attempt that produces no
+  #                                 # first upstream frame within the bound, then retries it (see
+  #                                 # bootstrap-retries) or fails with 504. Accepts a duration
+  #                                 # ("90s", "1m30s") or seconds ("90"). Once a frame exists the
+  #                                 # established stream is unbounded.
 
   # Optional payload configuration
   # payload:

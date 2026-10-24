@@ -364,4 +364,42 @@ type StreamingConfig struct {
 	// SendKeepAliveBeforeFT controls whether SSE heartbeats are sent before the first token arrives
 	// when KeepAliveSeconds > 0. Default is false.
 	SendKeepAliveBeforeFT bool `yaml:"send-keepalive-before-ft,omitempty" json:"send-keepalive-before-ft,omitempty"`
+
+	// BootstrapTimeout bounds how long one streaming attempt may wait for the first upstream
+	// frame before the attempt is abandoned, so a silent upstream is retried (see
+	// BootstrapRetries) or reported promptly instead of holding the client's response open
+	// indefinitely. It covers the attempt's request and first-frame read only: once a
+	// deliverable frame exists, the established stream carries no timeout. It complements
+	// SendKeepAliveBeforeFT: heartbeats keep a client that accepts SSE comments waiting, while
+	// this bound also covers clients that ignore comments and attempts whose upstream has died.
+	// Accepts a duration ("90s", "1m30s") or whole seconds ("90"). <= 0 disables the bound.
+	// Default is 0 (unbounded): the client owns downstream idle detection.
+	BootstrapTimeout string `yaml:"bootstrap-timeout,omitempty" json:"bootstrap-timeout,omitempty"`
+}
+
+// DefaultStreamingBootstrapTimeout is the default bound on the wait for the first upstream
+// frame. Zero leaves the wait unbounded, so an operator must opt into cutting a silent attempt.
+const DefaultStreamingBootstrapTimeout = 0
+
+// BootstrapTimeoutDuration returns the bound on the wait for the first upstream frame.
+// Defaults to 0 (unbounded) for empty, "0", "none", "unlimited", "disabled", "off",
+// "never", or unparsable values; accepts durations ("90s", "1m30s") and whole seconds ("90").
+func (c *StreamingConfig) BootstrapTimeoutDuration() time.Duration {
+	if c == nil {
+		return DefaultStreamingBootstrapTimeout
+	}
+	raw := strings.TrimSpace(c.BootstrapTimeout)
+	if raw == "" || raw == "0" || strings.EqualFold(raw, "none") || strings.EqualFold(raw, "unlimited") || strings.EqualFold(raw, "disabled") || strings.EqualFold(raw, "off") || strings.EqualFold(raw, "never") {
+		return 0
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
+		return d
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs >= 0 && int64(secs) <= maxBootstrapTimeoutSeconds {
+		d := time.Duration(secs) * time.Second
+		if d >= 0 {
+			return d
+		}
+	}
+	return DefaultStreamingBootstrapTimeout
 }
