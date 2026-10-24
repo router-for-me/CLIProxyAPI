@@ -80,7 +80,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	for {
 		select {
 		case interruptPayload := <-localFrames:
-			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
+			responseID := opts.localInterrupt.claim(interruptPayload)
+			if responseID == "" {
+				continue
+			}
+			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, responseID, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
@@ -164,12 +168,17 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if eventType == "response.subscription_usage" {
 					continue
 				}
+				responseID := gjson.GetBytes(payloads[i], "response.id").String()
 				if eventType == "response.created" {
+					opts.localInterrupt.observeCreated(responseID)
 					responseStarted = true
 					completed = false
 					outputItemsByIndex = make(map[int64][]byte)
 					outputItemsFallback = nil
 					pendingToolCallIDs = make(map[string]struct{})
+				}
+				if isResponsesWebsocketCompletionEvent(eventType) || eventType == "response.incomplete" || eventType == "response.failed" {
+					opts.localInterrupt.observeTerminal(responseID)
 				}
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
@@ -251,12 +260,11 @@ func completeResponsesWebsocketLocalInterrupt(
 	writer *responsesWebsocketWriter,
 	wsTimelineLog websocketTimelineAppender,
 	cancel handlers.APIHandlerCancelFunc,
-	payload []byte,
+	responseID string,
 	outputItemsByIndex map[int64][]byte,
 	outputItemsFallback [][]byte,
 	pendingToolCallIDs map[string]struct{},
 ) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
-	responseID := strings.TrimSpace(gjson.GetBytes(payload, "response_id").String())
 	output := responseCompletedOutputFromPayload([]byte(`{"response":{"output":[]}}`), outputItemsByIndex, outputItemsFallback)
 	incomplete := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}`)
 	var errSet error

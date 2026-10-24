@@ -31,11 +31,16 @@ func writeResponsesWebsocketSyntheticPrewarm(
 	requestJSON []byte,
 	wsTimelineLog websocketTimelineAppender,
 	sessionID string,
+	localInterrupt *responsesLocalInterrupt,
 ) (string, error) {
 	payloads, errPayloads := syntheticResponsesWebsocketPrewarmPayloads(requestJSON)
 	if errPayloads != nil {
 		return "", errPayloads
 	}
+	responseID := gjson.GetBytes(payloads[0], "response.id").String()
+	// Prewarm is already complete without an upstream turn. Record its ID before
+	// publishing it so an immediate interrupt is handled idempotently.
+	localInterrupt.observeTerminal(responseID)
 	for i := 0; i < len(payloads); i++ {
 		markAPIResponseTimestamp(c)
 		// log.Infof(
@@ -55,7 +60,7 @@ func writeResponsesWebsocketSyntheticPrewarm(
 			return "", errWrite
 		}
 	}
-	return gjson.GetBytes(payloads[0], "response.id").String(), nil
+	return responseID, nil
 }
 
 // A synthetic warm-up acknowledges input that never reached the upstream.
