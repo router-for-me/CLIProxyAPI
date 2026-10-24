@@ -1648,6 +1648,100 @@ func TestCleanJSONSchemaKeepsPropertyNamedEncrypted(t *testing.T) {
 	}
 }
 
+// TestCleanJSONSchemaStripsReadOnlyWriteOnly covers tool schemas that carry the JSON Schema
+// annotation keywords "readOnly"/"writeOnly" (e.g. Google Discovery-derived MCP tools such as
+// firestore_create_database). The Gemini backend strictly rejects unknown schema fields with an
+// INVALID_ARGUMENT 400.
+func TestCleanJSONSchemaStripsReadOnlyWriteOnly(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"backupSchedule": {
+				"type": "object",
+				"properties": {
+					"name": {
+						"type": "string",
+						"description": "Output only. The backup schedule identifier.",
+						"readOnly": true
+					},
+					"etag": {
+						"type": "string",
+						"writeOnly": true
+					}
+				}
+			},
+			"records": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"createTime": {
+							"type": "string",
+							"readOnly": true
+						}
+					}
+				}
+			}
+		},
+		"required": ["backupSchedule"]
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		if strings.Contains(got, `"readOnly"`) || strings.Contains(got, `"writeOnly"`) {
+			t.Errorf("%s: 'readOnly'/'writeOnly' marker survived cleaning: %s", cleaner, got)
+		}
+		parsed := gjson.Parse(got)
+		if !parsed.Get("properties.backupSchedule.properties.name.type").Exists() {
+			t.Errorf("%s: nested property name was corrupted: %s", cleaner, got)
+		}
+		if parsed.Get(`properties.records.items.properties.createTime.type`).String() != "string" {
+			t.Errorf("%s: array item schema was corrupted: %s", cleaner, got)
+		}
+	}
+}
+
+// TestCleanJSONSchemaKeepsPropertyNamedReadOnly guards the legitimate case where a tool
+// parameter itself is named "readOnly" (e.g. properties.readOnly: {"type": "boolean"}).
+func TestCleanJSONSchemaKeepsPropertyNamedReadOnly(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"readOnly": {
+				"type": "boolean",
+				"description": "Whether the field is read only",
+				"readOnly": true
+			},
+			"data": {
+				"type": "string"
+			}
+		},
+		"required": ["readOnly"]
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity": CleanJSONSchemaForAntigravity,
+		"gemini":      CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		if !parsed.Get("properties.readOnly").Exists() {
+			t.Errorf("%s: property named 'readOnly' was removed: %s", cleaner, got)
+		}
+		if parsed.Get("properties.readOnly.type").String() != "boolean" {
+			t.Errorf("%s: property named 'readOnly' type corrupted: %s", cleaner, got)
+		}
+		if parsed.Get("properties.readOnly.readOnly").Exists() {
+			t.Errorf("%s: inner 'readOnly' attribute survived: %s", cleaner, got)
+		}
+	}
+}
+
 // TestCleanJSONSchema_BarePropertyMapNormalized covers Issue #5178:
 // MCP tools (e.g. Asana) emit bare property maps missing type:object and properties wrappers,
 // plus boolean required: true on child properties.
