@@ -1432,6 +1432,68 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 	}
 }
 
+// With cooling disabled the auth state keeps no deadline, so the upstream reset
+// hint is the only signal that retrying the same credential is pointless. A hint
+// beyond max-retry-interval must end the retry loop instead of hammering the
+// exhausted credential request-retry more times.
+func TestManager_Execute_DisableCooling_StopsWhen429RetryAfterExceedsMaxWait(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"auth-429-long-retryafter-exec": &retryAfterStatusError{
+				status:     http.StatusTooManyRequests,
+				message:    "quota exhausted",
+				retryAfter: 2 * time.Hour,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-429-long-retryafter-exec",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"disable_cooling": true,
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-429-long-retryafter-exec"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	req := cliproxyexecutor.Request{Model: model}
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected execute error")
+	}
+	if statusCodeFromError(errExecute) != http.StatusTooManyRequests {
+		t.Fatalf("execute status = %d, want %d", statusCodeFromError(errExecute), http.StatusTooManyRequests)
+	}
+
+	if calls := executor.ExecuteCalls(); len(calls) != 1 {
+		t.Fatalf("execute calls = %d, want 1 (no retry once Retry-After exceeds max-retry-interval)", len(calls))
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if state := updated.ModelStates[model]; state != nil && !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to stay zero when disable_cooling=true, got %v", state.NextRetryAfter)
+	}
+}
+
 func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(t *testing.T) {
 	incompleteErr := &requestScopedStatusError{
 		status:  http.StatusRequestTimeout,
