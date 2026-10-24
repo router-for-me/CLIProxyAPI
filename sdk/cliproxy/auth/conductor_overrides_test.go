@@ -1788,6 +1788,75 @@ func TestManager_DeepSeekCredentialFailuresRotateCredential(t *testing.T) {
 	}
 }
 
+// TestManager_SIWCUserNotEligibleRotatesCredential pins the SIWC eligibility
+// contract. OpenAI rejects a ChatGPT user whose plan cannot be shared with a 403
+// that carries the generic invalid_request_error type. The refusal belongs to
+// the credential, so the request must fall through to the next credential and
+// the rejected credential must cool down instead of serving the same 403 again.
+func TestManager_SIWCUserNotEligibleRotatesCredential(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(2, 30*time.Second, 0)
+
+	const provider = "codex"
+	const model = "gpt-siwc-not-eligible-test"
+
+	executor := &authFallbackExecutor{
+		id: provider,
+		executeErrors: map[string]error{
+			"aa-siwc-not-eligible": &Error{
+				HTTPStatus: http.StatusForbidden,
+				Message:    `{"error":{"message":"The ChatGPT user is not eligible for subscription sharing.","type":"invalid_request_error","param":null,"code":"subscription_sharing_user_not_eligible"}}`,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	rejectedAuth := &Auth{ID: "aa-siwc-not-eligible", Provider: provider}
+	availableAuth := &Auth{ID: "bb-codex-available", Provider: provider}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{{ID: model}}
+	reg.RegisterClient(rejectedAuth.ID, provider, models)
+	reg.RegisterClient(availableAuth.ID, provider, models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(rejectedAuth.ID)
+		reg.UnregisterClient(availableAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), rejectedAuth); errRegister != nil {
+		t.Fatalf("register rejected auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), availableAuth); errRegister != nil {
+		t.Fatalf("register available auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: model},
+		cliproxyexecutor.Options{},
+	)
+	if errExecute != nil {
+		t.Fatalf("expected fallback to the next credential, got error: %v", errExecute)
+	}
+	if got := string(resp.Payload); got != availableAuth.ID {
+		t.Fatalf("served by %q, want %q", got, availableAuth.ID)
+	}
+	wantCalls := []string{rejectedAuth.ID, availableAuth.ID}
+	if calls := executor.ExecuteCalls(); !slices.Equal(calls, wantCalls) {
+		t.Fatalf("credential calls = %v, want %v", calls, wantCalls)
+	}
+
+	updatedRejected, ok := m.GetByID(rejectedAuth.ID)
+	if !ok || updatedRejected == nil {
+		t.Fatal("expected rejected auth to remain registered")
+	}
+	state := updatedRejected.ModelStates[model]
+	if state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("rejected auth model state = %#v, want active cooldown", state)
+	}
+}
+
 // TestManager_UnknownUpstreamErrorRotatesAndPenalizesModelOnly pins the upstream
 // 500 "status":"UNKNOWN" contract. It is an upstream internal failure, not a
 // request fault, so the request must fall through to the next credential. The
