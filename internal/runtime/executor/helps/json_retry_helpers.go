@@ -23,6 +23,13 @@ func DeleteJSONField(body []byte, key string) []byte {
 	return updated
 }
 
+// humanRetryDelayPatterns match human-readable reset hints in 429 messages such as
+// "Your quota will reset after 1h43m56s." and "Individual quota reached. ... Resets in 2h39m14s."
+var humanRetryDelayPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)\.?`),
+	regexp.MustCompile(`resets?\s+in\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)\.?`),
+}
+
 // ParseRetryDelay extracts the retry delay from a Google API 429 error response.
 func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
 	details := gjson.GetBytes(errorBody, "error.details")
@@ -67,8 +74,12 @@ func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
 				return &duration, nil
 			}
 		}
-		reHuman := regexp.MustCompile(`after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)\.?`)
-		if matches := reHuman.FindStringSubmatch(strings.ToLower(message)); len(matches) > 1 {
+		lowerMessage := strings.ToLower(message)
+		for _, reHuman := range humanRetryDelayPatterns {
+			matches := reHuman.FindStringSubmatch(lowerMessage)
+			if len(matches) < 2 {
+				continue
+			}
 			duration, err := time.ParseDuration(matches[1])
 			if err == nil && duration > 0 {
 				return &duration, nil

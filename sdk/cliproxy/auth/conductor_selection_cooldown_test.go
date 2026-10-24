@@ -313,6 +313,27 @@ func TestSafeResponseHeaders_IncludesModelCooldownRetryAfter(t *testing.T) {
 	}
 }
 
+func TestSafeResponseHeaders_HomeRetryRoundDelayOverridesNestedRetryHint(t *testing.T) {
+	t.Parallel()
+
+	upstream := WithSafeRetryAfter(errors.New("rate limited"), time.Minute)
+
+	shorter := 10 * time.Second
+	if got := SafeResponseHeaders(markHomeRetryRoundExhausted(upstream, &shorter, false)).Get("Retry-After"); got != "10" {
+		t.Fatalf("Retry-After with shorter Home round delay = %q, want 10", got)
+	}
+
+	longer := 5 * time.Minute
+	if got := SafeResponseHeaders(markHomeRetryRoundExhausted(upstream, &longer, false)).Get("Retry-After"); got != "300" {
+		t.Fatalf("Retry-After with longer Home round delay = %q, want 300", got)
+	}
+
+	// Without a Home delay the upstream hint remains the fallback.
+	if got := SafeResponseHeaders(markHomeRetryRoundExhausted(upstream, nil, true)).Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After without Home round delay = %q, want 60", got)
+	}
+}
+
 func TestMixedUnavailableErrorLocked_GlobalModelErrorPriorityAcrossShards(t *testing.T) {
 	t.Parallel()
 
