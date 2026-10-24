@@ -2,6 +2,8 @@ package codex
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -67,31 +69,130 @@ func resetCodexRefreshGroupForTest() {
 	codexRefreshGroup = singleflight.Group{}
 }
 
-func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
-	var calls int32
-	auth := &CodexAuth{
-		httpClient: &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				atomic.AddInt32(&calls, 1)
-				return &http.Response{
-					StatusCode: http.StatusBadRequest,
-					Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant","code":"refresh_token_reused"}`)),
-					Header:     make(http.Header),
-					Request:    req,
-				}, nil
-			}),
+func TestIsNonRetryableRefreshErr(t *testing.T) {
+	// Terminal cases mirror how RefreshTokens formats a non-200 token endpoint
+	// response: "token refresh failed with status %d: %s".
+	refreshStatusErr := func(statusCode int, body string) error {
+		return fmt.Errorf("token refresh failed with status %d: %s", statusCode, body)
+	}
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "transport failure",
+			err:  errors.New(`Post "https://auth.openai.com/oauth/token": dial tcp: i/o timeout`),
+			want: false,
+		},
+		{
+			name: "server error",
+			err:  refreshStatusErr(http.StatusServiceUnavailable, `{"error":"server_error","error_description":"upstream unavailable"}`),
+			want: false,
+		},
+		{
+			name: "refresh token reused",
+			err:  refreshStatusErr(http.StatusBadRequest, `{"error":"invalid_request","code":"refresh_token_reused"}`),
+			want: true,
+		},
+		{
+			name: "refresh token invalidated",
+			err:  refreshStatusErr(http.StatusBadRequest, `{"error":"invalid_request","code":"refresh_token_invalidated"}`),
+			want: true,
+		},
+		{
+			name: "token invalidated",
+			err:  refreshStatusErr(http.StatusUnauthorized, `{"error":"unauthorized","code":"token_invalidated"}`),
+			want: true,
+		},
+		{
+			name: "invalid grant",
+			err:  refreshStatusErr(http.StatusUnauthorized, `{"error":"invalid_grant","error_description":"refresh token revoked"}`),
+			want: true,
+		},
+		{
+			name: "invalid grant uppercase",
+			err:  refreshStatusErr(http.StatusBadRequest, `{"error":"INVALID_GRANT","error_description":"Refresh token revoked"}`),
+			want: true,
 		},
 	}
 
-	_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
-	if err == nil {
-		t.Fatalf("expected error for non-retryable refresh failure")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isNonRetryableRefreshErr(tc.err); got != tc.want {
+				t.Fatalf("isNonRetryableRefreshErr(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "refresh_token_reused") {
-		t.Fatalf("expected refresh_token_reused in error, got: %v", err)
+}
+
+func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		body       string
+		wantErr    string
+	}{
+		{
+			name:       "refresh_token_reused",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":"invalid_grant","code":"refresh_token_reused"}`,
+			wantErr:    "refresh_token_reused",
+		},
+		{
+			name:       "refresh_token_invalidated",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":"invalid_request","code":"refresh_token_invalidated"}`,
+			wantErr:    "refresh_token_invalidated",
+		},
+		{
+			name:       "token_invalidated",
+			statusCode: http.StatusUnauthorized,
+			body:       `{"error":"unauthorized","code":"token_invalidated"}`,
+			wantErr:    "token_invalidated",
+		},
+		{
+			name:       "invalid_grant",
+			statusCode: http.StatusUnauthorized,
+			body:       `{"error":"invalid_grant","error_description":"refresh token revoked"}`,
+			wantErr:    "invalid_grant",
+		},
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("expected 1 refresh attempt, got %d", got)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int32
+			auth := &CodexAuth{
+				httpClient: &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						atomic.AddInt32(&calls, 1)
+						return &http.Response{
+							StatusCode: tc.statusCode,
+							Body:       io.NopCloser(strings.NewReader(tc.body)),
+							Header:     make(http.Header),
+							Request:    req,
+						}, nil
+					}),
+				},
+			}
+
+			_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token_"+tc.name, 3)
+			if err == nil {
+				t.Fatalf("expected error for non-retryable refresh failure")
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), tc.wantErr) {
+				t.Fatalf("expected %s in error, got: %v", tc.wantErr, err)
+			}
+			if got := atomic.LoadInt32(&calls); got != 1 {
+				t.Fatalf("expected 1 refresh attempt, got %d", got)
+			}
+		})
 	}
 }
 
