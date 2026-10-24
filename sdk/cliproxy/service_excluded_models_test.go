@@ -335,7 +335,7 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		switch strings.TrimSpace(model.ID) {
 		case "gemini-3.1-flash-lite":
 			webSearchModel = model
-		case "gemini-pro-agent":
+		case "gemini-3.1-pro":
 			agentModel = model
 		case "gpt-oss-120b-medium":
 			staticOnlyModel = model
@@ -396,5 +396,164 @@ func TestRegisterModelsForAuth_DevinSWE16SlowIncluded(t *testing.T) {
 	}
 	if foundSlow.DisplayName != "SWE-1.6 Slow" {
 		t.Errorf("DisplayName = %q, want 'SWE-1.6 Slow'", foundSlow.DisplayName)
+	}
+}
+
+func TestRegisterModelsForAuth_AntigravitySuffixedCatalogNormalizesToCleanModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"models": {
+				"gemini-3.8-flash-high": {"displayName": "Gemini 3.8 Flash"},
+				"gemini-3.7-flash-high": {"displayName": "Gemini 3.7 Flash"},
+				"gemini-3.6-flash-high": {"displayName": "Gemini 3.6 Flash"},
+				"gemini-3.1-pro-high": {"displayName": "Gemini 3.1 Pro"},
+				"gemini-3.1-pro-low": {"displayName": "Gemini 3.1 Pro (Low)"},
+				"claude-opus-4-6-thinking": {"displayName": "Claude Opus 4.6"},
+				"claude-sonnet-4-6": {"displayName": "Claude Sonnet 4.6"},
+				"gemini-3-flash": {"displayName": "Gemini 3 Flash"},
+				"gemini-3.1-flash-lite": {"displayName": "Gemini 3.1 Flash Lite"},
+				"gemini-3.5-flash-lite": {"displayName": "Gemini 3.5 Flash Lite"},
+				"gemini-3.1-flash-image": {"displayName": "Gemini 3.1 Flash Image"},
+				"gpt-oss-120b-medium": {"displayName": "GPT-OSS 120B"}
+			},
+			"webSearchModelIds": ["gemini-3.8-flash-high", "gemini-3.5-flash-lite"]
+		}`))
+	}))
+	defer server.Close()
+
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-antigravity-suffixed-catalog",
+		Provider: "antigravity",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token-test",
+		},
+	}
+
+	reg := internalregistry.GetGlobalRegistry()
+	reg.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+	service.WaitAntigravityProbes()
+
+	clientModels := reg.GetModelsForClient(auth.ID)
+	registeredIDs := make(map[string]bool)
+	for _, m := range clientModels {
+		if m != nil {
+			registeredIDs[m.ID] = true
+		}
+	}
+
+	expectedModels := []string{
+		"gemini-3.8-flash",
+		"gemini-3.7-flash",
+		"gemini-3.6-flash",
+		"gemini-3.1-pro",
+		"claude-opus-4-6-thinking",
+		"claude-sonnet-4-6",
+		"claude-opus-5-5-high",
+		"claude-sonnet-5-5-high",
+		"gemini-3-flash",
+		"gemini-3.1-flash-lite",
+		"gemini-3.5-flash-lite",
+		"gemini-3.1-flash-image",
+		"gpt-oss-120b-medium",
+	}
+
+	for _, expected := range expectedModels {
+		if !registeredIDs[expected] {
+			t.Errorf("expected model %q to be registered, but was missing", expected)
+		}
+	}
+
+	var m38 *internalregistry.ModelInfo
+	for _, m := range clientModels {
+		if m != nil && m.ID == "gemini-3.8-flash" {
+			m38 = m
+			break
+		}
+	}
+	if m38 == nil {
+		t.Fatal("gemini-3.8-flash must be registered")
+	}
+	if !m38.SupportsWebSearch {
+		t.Error("gemini-3.8-flash should have SupportsWebSearch=true via webSearchModelIds normalization")
+	}
+}
+
+func TestRegisterModelsForAuth_AntigravityPersistedSuffixedHintsNormalizesToCleanModels(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-antigravity-persisted-hints",
+		Provider: "antigravity",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token-persisted",
+			"project_id":   "test-project-consumer",
+			"antigravity_capability_hints": map[string]any{
+				"endpoint":   "https://daily-cloudcode-pa.googleapis.com",
+				"project_id": "test-project-consumer",
+				"model_ids": []any{
+					"claude-opus-4-6-thinking", "claude-sonnet-4-6",
+					"gemini-3-flash", "gemini-3.1-flash-image", "gemini-3.1-flash-lite",
+					"gemini-3.1-pro-high", "gemini-3.1-pro-low",
+					"gemini-3.5-flash-lite",
+					"gemini-3.6-flash-high", "gemini-3.6-flash-low", "gemini-3.6-flash-medium",
+					"gemini-3.7-flash-high", "gemini-3.7-flash-low", "gemini-3.7-flash-medium",
+					"gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-tiered",
+					"gemini-pro-agent", "gpt-oss-120b-medium",
+				},
+				"web_search_model_ids": []any{"gemini-3.5-flash-lite"},
+			},
+		},
+	}
+
+	reg := internalregistry.GetGlobalRegistry()
+	reg.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	clientModels := reg.GetModelsForClient(auth.ID)
+	registeredIDs := make(map[string]bool)
+	for _, m := range clientModels {
+		if m != nil {
+			registeredIDs[m.ID] = true
+		}
+	}
+
+	expectedModels := []string{
+		"gemini-3.8-flash",
+		"gemini-3.7-flash",
+		"gemini-3.6-flash",
+		"gemini-3.1-pro",
+		"claude-opus-4-6-thinking",
+		"claude-sonnet-4-6",
+		"claude-opus-5-5-high",
+		"claude-sonnet-5-5-high",
+		"gemini-3-flash",
+		"gemini-3.1-flash-lite",
+		"gemini-3.5-flash-lite",
+		"gemini-3.1-flash-image",
+		"gpt-oss-120b-medium",
+	}
+
+	if len(clientModels) != len(expectedModels) {
+		t.Errorf("registered count = %d, want %d (got=%v)", len(clientModels), len(expectedModels), registeredIDs)
+	}
+	for _, expected := range expectedModels {
+		if !registeredIDs[expected] {
+			t.Errorf("expected model %q to be registered from persisted hints, but was missing", expected)
+		}
 	}
 }
