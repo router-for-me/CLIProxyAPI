@@ -86,10 +86,11 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		Metadata:      resp.Metadata,
 		SchemaVersion: schemaVersion,
 		Capabilities: pluginapi.Capabilities{
-			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
-			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,
-			ExecutorInputFormats:          append([]string(nil), resp.Capabilities.ExecutorInputFormats...),
-			ExecutorOutputFormats:         append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
+			ResponseNormalizerOmitRequestBody: resp.Capabilities.ResponseNormalizerOmitRequestBody,
+			FrontendAuthProviderExclusive:     resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
+			ExecutorModelScope:                resp.Capabilities.ExecutorModelScope,
+			ExecutorInputFormats:              append([]string(nil), resp.Capabilities.ExecutorInputFormats...),
+			ExecutorOutputFormats:             append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
 		},
 	}
 	if resp.Capabilities.ModelRegistrar {

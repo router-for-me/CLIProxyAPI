@@ -110,6 +110,10 @@ type Capabilities struct {
 	ResponseBeforeTranslator ResponseNormalizer
 	// ResponseAfterTranslator normalizes translated responses before delivery.
 	ResponseAfterTranslator ResponseNormalizer
+	// ResponseNormalizerOmitRequestBody opts response normalizers out of receiving
+	// full request bodies. RequestedModel remains available for routing decisions.
+	// The default preserves the original response-normalizer contract.
+	ResponseNormalizerOmitRequestBody bool
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
@@ -1156,6 +1160,10 @@ type ResponseTransformRequest struct {
 	ToFormat string
 	// Model is the requested model identifier.
 	Model string
+	// RequestedModel is the client's model before provider prefix removal. It is
+	// supplied when ResponseNormalizerOmitRequestBody is enabled, without replaying
+	// the full conversation on every response fragment.
+	RequestedModel string `json:",omitempty"`
 	// Stream reports whether the response is streaming.
 	Stream bool
 	// OriginalRequest contains the raw client request body.
