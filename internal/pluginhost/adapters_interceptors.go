@@ -284,6 +284,12 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 		if h.isPluginFused(record.id) || interceptor == nil || current.DropChunk || record.id == skipPluginID {
 			continue
 		}
+		// Skip plugins that declared a provider or model scope this chunk does not
+		// fall into. This keeps the cgo/JSON round trip off the per-chunk hot path
+		// for the providers a plugin does not serve.
+		if !streamChunkInterceptorMatchesScope(record.plugin.Capabilities, req.Provider, req.Model, req.RequestedModel, req.ChunkIndex) {
+			continue
+		}
 		nextReq := req
 		nextReq.RequestHeaders = cloneHeader(req.RequestHeaders)
 		nextReq.ResponseHeaders = cloneHeader(current.Headers)
@@ -375,6 +381,61 @@ func (h *Host) StreamChunkPayloadIncludesHistory() bool {
 
 func streamChunkOmitsHistory(schemaVersion uint32) bool {
 	return schemaVersion >= pluginabi.SchemaVersionStreamChunkOmitHistory
+}
+
+// streamChunkInterceptorMatchesScope reports whether a stream chunk interceptor
+// wants to receive a chunk for the given provider and model. An empty scope list
+// matches everything, which preserves the behavior of plugins that do not
+// declare a scope and keeps the interceptor call free for the common case.
+//
+// The header-init call (ChunkIndex == StreamChunkHeaderInitIndex) always matches
+// because it carries header rewrites rather than payload, and dropping it would
+// silently disable header handling for scoped plugins.
+func streamChunkInterceptorMatchesScope(caps pluginapi.Capabilities, provider, model, requestedModel string, chunkIndex int) bool {
+	if len(caps.StreamChunkInterceptorProviders) == 0 && len(caps.StreamChunkInterceptorModels) == 0 {
+		return true
+	}
+	if chunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+		return true
+	}
+	if len(caps.StreamChunkInterceptorProviders) > 0 && !matchesScopeEntry(caps.StreamChunkInterceptorProviders, provider) {
+		return false
+	}
+	if len(caps.StreamChunkInterceptorModels) > 0 {
+		// Both names are client supplied: the request may be rewritten to a different
+		// upstream model by an auth model alias or a model pool, and that resolved
+		// name never reaches this filter. A plugin must therefore declare the name
+		// its clients send, not the upstream name.
+		if !matchesScopeEntry(caps.StreamChunkInterceptorModels, model) &&
+			!matchesScopeEntry(caps.StreamChunkInterceptorModels, requestedModel) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchesScopeEntry reports whether value matches any scope entry. Entries match
+// case-insensitively either exactly or as a path-style prefix, so a scope entry
+// of "vendor-a/" selects every model in that namespace without also matching an
+// unrelated "vendor-a-lite" model.
+func matchesScopeEntry(entries []string, value string) bool {
+	normalizedValue := strings.ToLower(strings.TrimSpace(value))
+	if normalizedValue == "" {
+		return false
+	}
+	for _, entry := range entries {
+		normalizedEntry := strings.ToLower(strings.TrimSpace(entry))
+		if normalizedEntry == "" {
+			continue
+		}
+		if normalizedValue == normalizedEntry {
+			return true
+		}
+		if strings.HasSuffix(normalizedEntry, "/") && strings.HasPrefix(normalizedValue, normalizedEntry) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Host) HasRequestInterceptors() bool {
