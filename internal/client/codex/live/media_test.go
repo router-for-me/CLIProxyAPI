@@ -195,6 +195,8 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
+	relay.downstreamAPI = newTestWebRTCAPI(t)
+	relay.upstreamAPI = newTestWebRTCAPI(t)
 	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer, mediaSessionRoute{
 		credential: "Voice credential",
 		authIndex:  "auth-index",
@@ -367,9 +369,14 @@ func newTestWebRTCAPI(t *testing.T) *webrtc.API {
 	if errRegister := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); errRegister != nil {
 		t.Fatalf("register test interceptors: %v", errRegister)
 	}
+	settings := webrtc.SettingEngine{}
+	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	settings.SetIncludeLoopbackCandidate(true)
+	settings.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
 	return webrtc.NewAPI(
 		webrtc.WithMediaEngine(mediaEngine),
 		webrtc.WithInterceptorRegistry(interceptorRegistry),
+		webrtc.WithSettingEngine(settings),
 	)
 }
 
