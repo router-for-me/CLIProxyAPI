@@ -1214,7 +1214,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		bind(auth.ID, true)
-		entry.Debugf("session-affinity: consistent hash | session=%s key=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(hashID), auth.ID, provider, model)
+		entry.Infof("session-affinity: consistent hash | session=%s key=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(hashID), auth.ID, provider, model)
 		return auth, nil
 	}
 
