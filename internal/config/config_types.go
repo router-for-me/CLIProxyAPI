@@ -446,6 +446,17 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// SessionAffinityConsistentHash routes each session by rendezvous hashing of its session
+	// identity over the available credentials instead of by this process's binding cache.
+	// Replicas behind one load balancer then pick the same credential for a session without
+	// shared state. When the chosen credential is unavailable the session moves to its
+	// next-ranked credential and returns once the first recovers. Applies to round-robin
+	// (uniform) and weighted-round-robin (by weight); fill-first is already deterministic and
+	// is left unchanged. SessionAffinityRebindOn has no effect in this mode. Requests without
+	// an explicit session identity still use the per-process prefix matcher.
+	// Default: false. Ignored when SessionAffinity is false.
+	SessionAffinityConsistentHash bool `yaml:"session-affinity-consistent-hash,omitempty" json:"session-affinity-consistent-hash,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

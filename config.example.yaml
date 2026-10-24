@@ -180,6 +180,16 @@ routing:
   #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
+  # When true, each session is routed by rendezvous hashing of its session ID over the
+  # available credentials instead of by this process's binding cache, so several replicas
+  # behind one load balancer send a session to the same credential without shared state.
+  # If that credential is unavailable the session moves to its next-ranked credential and
+  # returns when the first recovers. Subagents and forks hash their parent's ID when
+  # session-affinity-subagents is true. Round-robin spreads sessions evenly and
+  # weighted-round-robin by weight; fill-first is unchanged. session-affinity-rebind-on has
+  # no effect in this mode. Requests without an explicit session ID still use the
+  # per-process prefix matcher. Ignored when routing.session-affinity is false.
+  session-affinity-consistent-hash: false
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false

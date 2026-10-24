@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -915,6 +917,7 @@ type SessionAffinitySelector struct {
 	matcher           *cliproxysession.MerklePrefixMatcher
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
+	consistentHash    bool
 }
 
 const (
@@ -1046,6 +1049,10 @@ type SessionAffinityConfig struct {
 	TTL              time.Duration
 	SubagentAffinity *bool
 	RebindOn         string
+	// ConsistentHash ranks credentials for a session by rendezvous hashing of the session
+	// identity and credential ID instead of consulting this process's binding cache, so
+	// separate replicas behind one load balancer route a session to the same credential.
+	ConsistentHash bool
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1075,6 +1082,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
 		subagentAffinity:  subagentAffinity,
 		rebindOnQuotaOnly: rebindOnQuotaOnly,
+		consistentHash:    cfg.ConsistentHash,
 	}
 }
 
@@ -1196,6 +1204,20 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		s.cache.setSessionAliases(authID, bindingProvider, primaryID, keys...)
 	}
 
+	if s.consistentHash && !s.fallbackIsFillFirst() {
+		hashID := primaryID
+		if fallbackID != "" && (isFork || (isSubagent && s.subagentAffinity)) {
+			hashID = fallbackID
+		}
+		auth := s.pickConsistent(ctx, provider, hashID, fallbackAuths)
+		if auth == nil {
+			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		bind(auth.ID, true)
+		entry.Debugf("session-affinity: consistent hash | session=%s key=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(hashID), auth.ID, provider, model)
+		return auth, nil
+	}
+
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
@@ -1289,6 +1311,52 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	}
 	return auth, nil
+}
+
+func (s *SessionAffinitySelector) fallbackIsFillFirst() bool {
+	_, fillFirst := s.fallback.(*FillFirstSelector)
+	return fillFirst
+}
+
+// pickConsistent returns the credential that ranks first for hashID among the available
+// candidates, or nil when there is none. The ranking is rendezvous (highest random weight)
+// hashing of the session identity and each credential ID, so every replica that sees the
+// same candidates picks the same credential without shared state. A credential that becomes
+// unavailable moves only its own sessions, each to its next-ranked credential, and they
+// return once it is available again. Under weighted-round-robin each credential's share of
+// sessions follows its weight.
+func (s *SessionAffinitySelector) pickConsistent(ctx context.Context, provider, hashID string, available []*Auth) *Auth {
+	candidates := preferCodexWebsocketAuths(ctx, provider, available)
+	_, weighted := s.fallback.(*WeightedRoundRobinSelector)
+	var best *Auth
+	bestScore := math.Inf(-1)
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		weight := 1.0
+		if weighted {
+			w := authWeight(candidate)
+			if w <= 0 {
+				continue
+			}
+			weight = float64(w)
+		}
+		score := rendezvousScore(hashID, candidate.ID, weight)
+		if best == nil || score > bestScore || (score == bestScore && candidate.ID < best.ID) {
+			best, bestScore = candidate, score
+		}
+	}
+	return best
+}
+
+// rendezvousScore is the weighted rendezvous score -weight/ln(u) for the pair, with u drawn
+// uniformly from (0, 1) by SHA-256 of the session identity and credential ID. Equal weights
+// give a uniform choice; weight w wins a share of sessions proportional to w.
+func rendezvousScore(sessionID, authID string, weight float64) float64 {
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + authID))
+	u := (float64(binary.BigEndian.Uint64(sum[:8])>>11) + 0.5) / (1 << 53)
+	return -weight / math.Log(u)
 }
 
 func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry) (*Auth, bool, error) {
