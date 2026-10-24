@@ -324,9 +324,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if watcherCancel != nil {
 			watcherCancel()
 		}
-		if s.coreManager != nil {
-			s.coreManager.StopAutoRefresh()
-		}
 		if watcher := s.currentWatcher(); watcher != nil {
 			if err := watcher.Stop(); err != nil {
 				log.Errorf("failed to stop file watcher: %v", err)
@@ -369,6 +366,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 					shutdownErr = errStop
 				}
 			}
+		}
+
+		// Stop the core manager (and its selector) only after the API server has
+		// drained, so results from in-flight requests reach the selector before a
+		// stoppable selector releases or persists its state.
+		if s.coreManager != nil {
+			s.coreManager.StopAutoRefresh()
 		}
 
 		if s.pluginHost != nil {
