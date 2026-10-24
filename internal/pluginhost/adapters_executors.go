@@ -412,6 +412,7 @@ type preparedExecutorCall struct {
 	// finalizePayload applies user payload rules to the body the plugin sends
 	// upstream. It is nil when no runtime config is available.
 	finalizePayload helps.PayloadFinalizer
+	finalizeModel   string
 }
 
 func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
@@ -470,6 +471,7 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		inputFormat:     inputFormat,
 		outputFormat:    outputFormat,
 		finalizePayload: finalizePayload,
+		finalizeModel:   thinking.ParseSuffix(req.Model).ModelName,
 	}, nil
 }
 
@@ -1218,5 +1220,8 @@ func withExecutorPayloadFinalizer(ctx context.Context, prepared preparedExecutor
 	if prepared.finalizePayload == nil {
 		return ctx
 	}
-	return helps.WithPayloadFinalizer(ctx, prepared.finalizePayload)
+	ctx = helps.WithPayloadFinalizer(ctx, prepared.finalizePayload)
+	return context.WithValue(ctx, executorPayloadModelKey{}, prepared.finalizeModel)
 }
+
+type executorPayloadModelKey struct{}

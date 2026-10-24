@@ -284,16 +284,91 @@ func TestExecutorAdapterWithoutPayloadRulesLeavesSentBodyUntouched(t *testing.T)
 	}
 }
 
-func TestFinalizeHostHTTPBodyIgnoresNonObjectBodies(t *testing.T) {
+func TestExecutorAdapterDoesNotApplyPayloadRulesToAuxiliaryJSON(t *testing.T) {
+	host := New()
+	host.runtimeConfig = payloadRulesConfig("openai", "", map[string]any{"max_tokens": 64})
+	upstream := newPayloadUpstream(t)
+
+	adapter := newCurrentExecutorAdapterForTest(host, "payload-aux-plugin", &fakeExecutor{
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			callbackID, closeCallback := host.openCallbackContext(ctx)
+			defer closeCallback()
+			body := []byte(`{"access_token":"temporary","secret":"keep"}`)
+			raw, _ := json.Marshal(rpcHostHTTPRequest{HostCallbackID: callbackID, Method: http.MethodPost, URL: upstream.URL, Body: body})
+			if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, raw); errCall != nil {
+				t.Fatalf("host call error = %v", errCall)
+			}
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"choices":[{"message":{"content":"ok"}}]}`)}, nil
+		},
+	}, []sdktranslator.Format{sdktranslator.FormatOpenAI}, []sdktranslator.Format{sdktranslator.FormatOpenAI})
+
+	if _, err := adapter.Execute(context.Background(), nil, coreexecutor.Request{
+		Model: "claude-model", Format: sdktranslator.FormatOpenAI, Payload: []byte(`{"model":"claude-model"}`),
+	}, coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatOpenAI}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got, want := string(upstream.last(t)), `{"access_token":"temporary","secret":"keep"}`; got != want {
+		t.Errorf("auxiliary body = %s, want unchanged %s", got, want)
+	}
+}
+
+func TestExecutorAdapterDoesNotRewriteSignedHostHTTPBody(t *testing.T) {
+	host := New()
+	host.runtimeConfig = payloadRulesConfig("openai", "", map[string]any{"max_tokens": 64})
+	upstream := newPayloadUpstream(t)
+	body := []byte(`{"model":"claude-model","max_tokens":8}`)
+
+	adapter := newCurrentExecutorAdapterForTest(host, "payload-signed-plugin", &fakeExecutor{
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			callbackID, closeCallback := host.openCallbackContext(ctx)
+			defer closeCallback()
+			raw, _ := json.Marshal(rpcHostHTTPRequest{
+				HostCallbackID: callbackID,
+				Method:         http.MethodPost,
+				URL:            upstream.URL,
+				Headers: httpHeader{
+					"Authorization":  {"AWS4-HMAC-SHA256 Credential=test, Signature=body-hash"},
+					"Content-Digest": {"sha-256=:c2lnbmVkLWJvZHk=:"},
+				},
+				Body: body,
+			})
+			if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, raw); errCall != nil {
+				t.Fatalf("host call error = %v", errCall)
+			}
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"choices":[{"message":{"content":"ok"}}]}`)}, nil
+		},
+	}, []sdktranslator.Format{sdktranslator.FormatOpenAI}, []sdktranslator.Format{sdktranslator.FormatOpenAI})
+
+	if _, err := adapter.Execute(context.Background(), nil, coreexecutor.Request{
+		Model: "claude-model", Format: sdktranslator.FormatOpenAI, Payload: body,
+	}, coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatOpenAI}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := string(upstream.last(t)); got != string(body) {
+		t.Errorf("signed body = %s, want unchanged %s", got, body)
+	}
+}
+
+func TestFinalizeHostHTTPRequestScopesPayloadRules(t *testing.T) {
 	ctx := helps.WithPayloadFinalizer(context.Background(), func(body []byte) []byte {
 		return append([]byte("rewritten:"), body...)
 	})
+	ctx = context.WithValue(ctx, executorPayloadModelKey{}, "model")
 	for _, body := range [][]byte{nil, []byte(""), []byte("not json"), []byte(`["array"]`), []byte(`"string"`)} {
-		if got := finalizeHostHTTPBody(ctx, body); string(got) != string(body) {
-			t.Errorf("finalizeHostHTTPBody(%q) = %q, want unchanged", body, got)
+		if got := finalizeHostHTTPRequest(ctx, pluginapi.HTTPRequest{Method: http.MethodPost, Body: body}); string(got) != string(body) {
+			t.Errorf("finalizeHostHTTPRequest(%q) = %q, want unchanged", body, got)
 		}
 	}
-	if got := finalizeHostHTTPBody(ctx, []byte(`{"a":1}`)); string(got) != `rewritten:{"a":1}` {
-		t.Errorf("finalizeHostHTTPBody(object) = %q, want finalizer applied", got)
+	if got := finalizeHostHTTPRequest(ctx, pluginapi.HTTPRequest{Method: http.MethodPost, Body: []byte(`{"model":"model","a":1}`)}); string(got) != `rewritten:{"model":"model","a":1}` {
+		t.Errorf("finalizeHostHTTPRequest(model object) = %q, want finalizer applied", got)
+	}
+	for _, req := range []pluginapi.HTTPRequest{
+		{Method: http.MethodGet, Body: []byte(`{"model":"model","a":1}`)},
+		{Method: http.MethodPost, Body: []byte(`{"model":"another-model","a":1}`)},
+		{Method: http.MethodPost, Body: []byte(`{"a":1}`)},
+	} {
+		if got := finalizeHostHTTPRequest(ctx, req); string(got) != string(req.Body) {
+			t.Errorf("finalizeHostHTTPRequest(%s, %s) = %s, want unchanged", req.Method, req.Body, got)
+		}
 	}
 }

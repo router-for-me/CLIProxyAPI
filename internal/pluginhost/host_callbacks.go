@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -209,7 +210,7 @@ func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, erro
 		return nil, errAcquire
 	}
 	defer operation.finish()
-	httpReq.Body = finalizeHostHTTPBody(operation.ctx, httpReq.Body)
+	httpReq.Body = finalizeHostHTTPRequest(operation.ctx, httpReq)
 	resp, errDo := h.newHTTPClient(nil).Do(operation.ctx, httpReq)
 	if errDo != nil {
 		return nil, errDo
@@ -243,7 +244,7 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 		operation.finish()
 	}()
 
-	httpReq.Body = finalizeHostHTTPBody(streamCtx, httpReq.Body)
+	httpReq.Body = finalizeHostHTTPRequest(streamCtx, httpReq)
 	resp, errDo := h.newHTTPClient(nil).DoStream(streamCtx, httpReq)
 	if errDo != nil {
 		return nil, errDo
@@ -544,12 +545,38 @@ func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) 
 	return marshalRPCResult(rpcEmptyResponse{})
 }
 
-// finalizeHostHTTPBody applies the executor call's payload-rule barrier to a
-// JSON object body right before it is sent upstream. Calls without a
-// finalizer in their context, and non-JSON-object bodies, are left untouched.
-func finalizeHostHTTPBody(ctx context.Context, body []byte) []byte {
-	if len(body) == 0 || !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject() {
+// finalizeHostHTTPRequest applies rules only to an identifiable model request.
+// Signed bodies and auxiliary requests stay byte-for-byte intact: this host
+// cannot re-sign plugin requests or reliably infer business meaning otherwise.
+func finalizeHostHTTPRequest(ctx context.Context, req pluginapi.HTTPRequest) []byte {
+	body := req.Body
+	if !strings.EqualFold(strings.TrimSpace(req.Method), http.MethodPost) || len(body) == 0 || !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject() {
+		return body
+	}
+	model, ok := ctx.Value(executorPayloadModelKey{}).(string)
+	if !ok || model == "" || hasSignedPayloadHeaders(req.Headers) {
+		return body
+	}
+	bodyModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if bodyModel == "" || thinking.ParseSuffix(bodyModel).ModelName != model {
 		return body
 	}
 	return helps.FinalizePayload(ctx, body)
+}
+
+func hasSignedPayloadHeaders(headers map[string][]string) bool {
+	for name, values := range headers {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "content-digest", "digest", "signature", "signature-input", "x-amz-content-sha256":
+			return true
+		case "authorization":
+			for _, value := range values {
+				value = strings.ToLower(value)
+				if strings.Contains(value, "signature=") || strings.Contains(value, "aws4-hmac-sha256") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
