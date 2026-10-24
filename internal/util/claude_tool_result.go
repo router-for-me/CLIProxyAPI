@@ -5,10 +5,10 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ClaudeToolResultImage represents a base64-encoded image extracted from a Claude
-// tool_result content block. Callers emit it as a provider-specific inline data
-// part so that image bytes do not bloat the textual function response result.
-type ClaudeToolResultImage struct {
+// ClaudeToolResultInlineData represents base64 bytes, an image or a document, extracted from
+// a Claude tool_result content block. Callers emit it as a provider-specific inline data
+// part so that file bytes do not bloat the textual function response result.
+type ClaudeToolResultInlineData struct {
 	MimeType string
 	Data     string
 }
@@ -23,12 +23,12 @@ type ClaudeToolResult struct {
 	// sjson.Set as a string value would double-encode it, so callers must honor
 	// this flag.
 	ResultIsRaw bool
-	// Images holds base64 image blocks separated out of the content.
-	Images []ClaudeToolResultImage
+	// InlineData holds base64 image and document blocks separated out of the content.
+	InlineData []ClaudeToolResultInlineData
 }
 
 // ConvertClaudeToolResultContent normalizes a Claude tool_result `content` field into
-// a deterministic Gemini functionResponse result plus any extracted images.
+// a deterministic Gemini functionResponse result plus any extracted inline data.
 //
 // Claude tool_result content may be a plain string, an array of mixed text/image
 // blocks, a single object, or absent. Some Claude->Gemini translators previously
@@ -40,8 +40,8 @@ type ClaudeToolResult struct {
 //   - string             -> plain string result (no double-encoding)
 //   - single non-image   -> raw JSON result (structure preserved)
 //   - multiple non-image -> raw JSON array result
-//   - base64 image block -> separated into Images (emitted as inline data parts)
-//   - object             -> raw JSON result, or image -> Images with empty result
+//   - base64 image or document block -> separated into InlineData (emitted as inline data parts)
+//   - object             -> raw JSON result, or image -> InlineData with empty result
 //   - absent/empty       -> empty string result
 //
 // Unlike Antigravity, image blocks without base64 data are dropped rather than
@@ -51,14 +51,14 @@ func ConvertClaudeToolResultContent(content gjson.Result) ClaudeToolResult {
 	case content.Type == gjson.String:
 		return ClaudeToolResult{Result: content.String()}
 	case content.IsArray():
-		var images []ClaudeToolResultImage
+		var inline []ClaudeToolResultInlineData
 		nonImageCount := 0
 		lastNonImageRaw := ""
 		filtered := []byte(`[]`)
 		content.ForEach(func(_, block gjson.Result) bool {
-			if isClaudeBase64Image(block) {
-				if img, ok := claudeImageFromBlock(block); ok {
-					images = append(images, img)
+			if isClaudeBase64Media(block) {
+				if img, ok := claudeInlineDataFromBlock(block); ok {
+					inline = append(inline, img)
 				}
 				return true
 			}
@@ -69,16 +69,16 @@ func ConvertClaudeToolResultContent(content gjson.Result) ClaudeToolResult {
 		})
 		switch {
 		case nonImageCount == 1:
-			return ClaudeToolResult{Result: lastNonImageRaw, ResultIsRaw: true, Images: images}
+			return ClaudeToolResult{Result: lastNonImageRaw, ResultIsRaw: true, InlineData: inline}
 		case nonImageCount > 1:
-			return ClaudeToolResult{Result: string(filtered), ResultIsRaw: true, Images: images}
+			return ClaudeToolResult{Result: string(filtered), ResultIsRaw: true, InlineData: inline}
 		default:
-			return ClaudeToolResult{Images: images}
+			return ClaudeToolResult{InlineData: inline}
 		}
 	case content.IsObject():
-		if isClaudeBase64Image(content) {
-			if img, ok := claudeImageFromBlock(content); ok {
-				return ClaudeToolResult{Images: []ClaudeToolResultImage{img}}
+		if isClaudeBase64Media(content) {
+			if img, ok := claudeInlineDataFromBlock(content); ok {
+				return ClaudeToolResult{InlineData: []ClaudeToolResultInlineData{img}}
 			}
 			return ClaudeToolResult{}
 		}
@@ -90,19 +90,29 @@ func ConvertClaudeToolResultContent(content gjson.Result) ClaudeToolResult {
 	}
 }
 
-// isClaudeBase64Image reports whether a content block is a base64-encoded image block.
-func isClaudeBase64Image(block gjson.Result) bool {
-	return block.Get("type").String() == "image" && block.Get("source.type").String() == "base64"
+// isClaudeBase64Media reports whether a content block is base64 bytes Gemini can take inline:
+// an image, or a document that names its media type.
+func isClaudeBase64Media(block gjson.Result) bool {
+	if block.Get("source.type").String() != "base64" {
+		return false
+	}
+	switch block.Get("type").String() {
+	case "image":
+		return true
+	case "document":
+		return block.Get("source.media_type").String() != "" && block.Get("source.data").String() != ""
+	}
+	return false
 }
 
-// claudeImageFromBlock extracts image data from a base64 image block. It returns false
+// claudeInlineDataFromBlock extracts the bytes of a base64 image or document block. It returns false
 // when the block carries no base64 data, so empty inline data parts are not emitted.
-func claudeImageFromBlock(block gjson.Result) (ClaudeToolResultImage, bool) {
+func claudeInlineDataFromBlock(block gjson.Result) (ClaudeToolResultInlineData, bool) {
 	data := block.Get("source.data").String()
 	if data == "" {
-		return ClaudeToolResultImage{}, false
+		return ClaudeToolResultInlineData{}, false
 	}
-	return ClaudeToolResultImage{
+	return ClaudeToolResultInlineData{
 		MimeType: block.Get("source.media_type").String(),
 		Data:     data,
 	}, true
