@@ -209,14 +209,6 @@ Native macOS menu bar app that unifies Claude, Gemini, OpenAI, and Antigravity s
 
 Windows-native CLIProxyAPI fork with TUI, system tray, and multi-provider OAuth for AI coding tools - no API keys needed.
 
-### [Claude Proxy VSCode](https://github.com/uzhao/claude-proxy-vscode)
-
-VSCode extension for quick switching between Claude Code models, featuring integrated CLIProxyAPI as its backend with automatic background lifecycle management.
-
-### [ZeroLimit](https://github.com/0xtbug/zero-limit)
-
-Windows desktop app built with Tauri + React for monitoring AI coding assistant quotas via CLIProxyAPI. Track usage across Gemini, Claude, OpenAI Codex, and Antigravity accounts with real-time dashboard, system tray integration, and one-click proxy control - no API keys needed.
-
 ### [CPA-XXX Panel](https://github.com/ferretgeek/CPA-X)
 
 A lightweight web admin panel for CLIProxyAPI with health checks, resource monitoring, real-time logs, auto-update, request statistics and pricing display. Supports one-click installation and systemd service.

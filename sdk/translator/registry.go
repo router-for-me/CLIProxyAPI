@@ -247,6 +247,19 @@ func (r *Registry) HasNonStreamResponseTransformer(from, to Format) bool {
 	return false
 }
 
+// HasTokenCountTransformer indicates whether a token count translator exists.
+func (r *Registry) HasTokenCountTransformer(from, to Format) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if byTarget, ok := r.responses[to]; ok {
+		if fn, isOk := byTarget[from]; isOk && fn.TokenCount != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // TranslateStream applies the registered streaming response translator.
 func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	r.mu.RLock()
@@ -420,6 +433,11 @@ func HasStreamResponseTransformer(from, to Format) bool {
 // HasNonStreamResponseTransformer inspects the default registry for a non-streaming response translator.
 func HasNonStreamResponseTransformer(from, to Format) bool {
 	return defaultRegistry.HasNonStreamResponseTransformer(from, to)
+}
+
+// HasTokenCountTransformer inspects the default registry.
+func HasTokenCountTransformer(from, to Format) bool {
+	return defaultRegistry.HasTokenCountTransformer(from, to)
 }
 
 // TranslateStream is a helper on the default registry.

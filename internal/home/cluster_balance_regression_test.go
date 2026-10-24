@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -239,5 +240,83 @@ func TestClusterBalanceMalformedRegistrationEndsSubscriberBeforeReady(t *testing
 	}
 	if ready || client.HeartbeatOK() {
 		t.Fatal("malformed registration published a healthy subscriber")
+	}
+}
+
+type blockingOuterCloseConn struct {
+	net.Conn
+	enteredClose     chan struct{}
+	enterOnce        sync.Once
+	underlyingClosed chan struct{}
+}
+
+func (c *blockingOuterCloseConn) NetConn() net.Conn {
+	return c.Conn
+}
+
+func (c *blockingOuterCloseConn) Close() error {
+	if c.enteredClose != nil {
+		c.enterOnce.Do(func() { close(c.enteredClose) })
+	}
+	<-c.underlyingClosed
+	return c.Conn.Close()
+}
+
+type trackingUnderlyingConn struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *trackingUnderlyingConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+func TestCancelableConnClosesUnderlyingTransportWhenCloseRacesCancel(t *testing.T) {
+	for _, mode := range []string{"pre-canceled", "after-wrap", "during-close"} {
+		t.Run(mode, func(t *testing.T) {
+			for range 32 {
+				local, peer := net.Pipe()
+				t.Cleanup(func() {
+					_ = local.Close()
+					_ = peer.Close()
+				})
+				underlying := &trackingUnderlyingConn{Conn: local, closed: make(chan struct{})}
+				enteredClose := make(chan struct{})
+				outer := &blockingOuterCloseConn{
+					Conn:             underlying,
+					enteredClose:     enteredClose,
+					underlyingClosed: underlying.closed,
+				}
+
+				ctx, cancel := context.WithCancel(context.Background())
+				if mode == "pre-canceled" {
+					cancel()
+				}
+				wrapped := newPluginSyncCancelableConn(ctx, outer)
+				if mode == "after-wrap" {
+					cancel()
+				}
+
+				done := make(chan error, 1)
+				go func() {
+					done <- wrapped.Close()
+				}()
+				if mode == "during-close" {
+					<-enteredClose
+					cancel()
+				}
+				select {
+				case errClose := <-done:
+					if errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+						t.Fatalf("close error = %v", errClose)
+					}
+				case <-time.After(500 * time.Millisecond):
+					_ = underlying.Close()
+					t.Fatal("Close blocked because underlying transport was not closed before outer Close")
+				}
+			}
+		})
 	}
 }

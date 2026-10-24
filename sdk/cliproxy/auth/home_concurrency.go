@@ -309,6 +309,12 @@ func SafeResponseHeaders(err error) http.Header {
 	if errors.As(err, &unavailable) && unavailable != nil {
 		return unavailable.Headers()
 	}
+	var safeHeaderProvider interface{ SafeResponseHeaders() http.Header }
+	if errors.As(err, &safeHeaderProvider) && safeHeaderProvider != nil {
+		if value := safeHeaderProvider.SafeResponseHeaders().Get("Retry-After"); value != "" {
+			return http.Header{"Retry-After": []string{value}}
+		}
+	}
 	return nil
 }
 

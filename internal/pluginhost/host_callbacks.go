@@ -388,9 +388,7 @@ func (h *Host) callHostStreamEmit(ctx context.Context, request []byte) ([]byte, 
 		return nil, fmt.Errorf("decode stream emit request: %w", errUnmarshal)
 	}
 	chunk := pluginapi.ExecutorStreamChunk{Payload: append([]byte(nil), req.Payload...)}
-	if req.Error != "" {
-		chunk.Err = fmt.Errorf("%s", req.Error)
-	}
+	chunk.Err = rpcStreamError(req.Error, req.ErrorDetail)
 	if errEmit := h.streams.emit(ctx, req.StreamID, chunk); errEmit != nil {
 		return nil, errEmit
 	}
@@ -402,7 +400,7 @@ func (h *Host) callHostStreamClose(request []byte) ([]byte, error) {
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode stream close request: %w", errUnmarshal)
 	}
-	h.streams.close(req.StreamID, req.Error)
+	h.streams.closeWithError(req.StreamID, rpcStreamError(req.Error, req.ErrorDetail))
 	return marshalRPCResult(rpcEmptyResponse{})
 }
 

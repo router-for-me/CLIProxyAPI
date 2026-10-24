@@ -320,6 +320,30 @@ func TestConvertGeminiResponseToOpenAI_FinishReasonWithoutInlineUsage(t *testing
 	})
 }
 
+func TestConvertGeminiResponseToOpenAI_ParallelToolCallsAcrossChunks(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	chunk1 := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_utc","name":"get_time","args":{"tz":"UTC"}}}]}}],"modelVersion":"gemini-3-flash","responseId":"resp-parallel-1"}`)
+	chunk2 := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_scl","name":"get_time","args":{"tz":"America/Santiago"}}},{"functionCall":{"id":"call_tyo","name":"get_time","args":{"tz":"Asia/Tokyo"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15},"modelVersion":"gemini-3-flash","responseId":"resp-parallel-1"}`)
+
+	var indices []int64
+	var ids []string
+	for _, chunk := range [][]byte{chunk1, chunk2} {
+		for _, out := range ConvertGeminiResponseToOpenAI(ctx, "gemini-3-flash", nil, nil, chunk, &param) {
+			for _, tc := range gjson.GetBytes(out, "choices.0.delta.tool_calls").Array() {
+				indices = append(indices, tc.Get("index").Int())
+				ids = append(ids, tc.Get("id").String())
+			}
+		}
+	}
+	if len(indices) != 3 || indices[0] != 0 || indices[1] != 1 || indices[2] != 2 {
+		t.Fatalf("parallel tool call indices across chunks = %v, want [0 1 2]", indices)
+	}
+	if len(ids) != 3 || ids[0] != "call_utc" || ids[1] != "call_scl" || ids[2] != "call_tyo" {
+		t.Fatalf("parallel tool call ids across chunks = %v, want [call_utc call_scl call_tyo]", ids)
+	}
+}
+
 func BenchmarkConvertGeminiResponseToOpenAI_TextDelta(b *testing.B) {
 	request := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"` + strings.Repeat("x", 1024*1024) + `"}]}`)
 	delta := []byte(`{"candidates":[{"content":{"parts":[{"text":"token "}]}}],"modelVersion":"gemini-2.5-flash","responseId":"resp_bench"}`)

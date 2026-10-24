@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -16,6 +17,13 @@ func APIKeyModelIsCompat(req cliproxyexecutor.Request) bool {
 // ApplyRequestThinking preserves the registry lookup path unless the auth
 // manager bound authoritative model capabilities to this execution attempt.
 func ApplyRequestThinking(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, fromFormat, toFormat, provider string, normalizedUpdatesChanged ...bool) ([]byte, error) {
+	return ApplyRequestThinkingWithModelInfo(body, req, opts, fromFormat, toFormat, provider, nil, normalizedUpdatesChanged...)
+}
+
+// ApplyRequestThinkingWithModelInfo applies request thinking and falls back to
+// fallbackModelInfo when neither request metadata nor the global registry
+// resolves a model definition.
+func ApplyRequestThinkingWithModelInfo(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, fromFormat, toFormat, provider string, fallbackModelInfo *registry.ModelInfo, normalizedUpdatesChanged ...bool) ([]byte, error) {
 	originalSource := opts.OriginalRequest
 	if len(originalSource) == 0 {
 		originalSource = req.Payload
@@ -28,5 +36,5 @@ func ApplyRequestThinking(body []byte, req cliproxyexecutor.Request, opts clipro
 	if modelInfo, ok := cliproxyauth.ResolvedModelInfo(req); ok {
 		return thinking.ApplyThinkingWithModelInfoAndSummary(body, source, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig, normalizedUpdatesChanged...)
 	}
-	return thinking.ApplyThinkingWithSourceAndSummary(body, source, req.Model, fromFormat, toFormat, provider, summaryConfig, normalizedUpdatesChanged...)
+	return thinking.ApplyThinkingWithFallbackModelInfoAndSummary(body, source, req.Model, fromFormat, toFormat, provider, fallbackModelInfo, summaryConfig, normalizedUpdatesChanged...)
 }
