@@ -242,6 +242,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		helps.PayloadRequestedModel(opts, req.Model), helps.PayloadRequestPath(opts), opts.Headers,
 		"diagnostics",
 	)
+	if errToolChoice := validateClaudeToolChoiceThinking(bodyForUpstream); errToolChoice != nil {
+		return nil, errToolChoice
+	}
 	if touchedPayloadPaths["diagnostics"] {
 		diagnosticsState = claudeDiagnosticsRequestState{}
 	}

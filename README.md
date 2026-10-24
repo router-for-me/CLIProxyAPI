@@ -8,6 +8,10 @@ CLIProxyAPI is a proxy server that provides OpenAI/Gemini/Claude/Codex/Grok comp
 
 You can access the following providers locally and with multiple CLI accounts through any OpenAI (including Responses), Gemini (including Interactions), or Claude-compatible client or SDK.
 
+Model API JSON requests (OpenAI, Claude, Gemini, and Interactions, including token counting) support `Content-Encoding: gzip`, `br`, and `zstd`, including stacked codings and repeated encoding headers. The request body limit applies to both the wire body and each decoded layer. Responses negotiate these codecs using `Accept-Encoding`; SSE flushes are propagated immediately, including transport errors. Quality values, `identity`, `no-transform`, bodyless responses, and WebSocket upgrades are respected. HTTP compression never compresses WebSocket application frames.
+
+Shared upstream HTTP clients decode gzip, Brotli, and Zstandard responses without replacing provider transports or changing explicit `Accept-Encoding` headers. Upstream request bodies remain uncompressed: a provider advertising compressed responses does **not** establish support for compressed POST requests. No capability probing or speculative compressed-request retries are performed.
+
 <table>
 <tbody>
     <tr>

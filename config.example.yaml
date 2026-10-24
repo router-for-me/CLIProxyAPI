@@ -252,6 +252,10 @@ requests:
   #   send-keepalive-before-ft: false # Default: false. When true and keepalive-seconds > 0, send SSE heartbeats before the first token.
 
   # Optional payload configuration
+  # Signed Claude history may synthesize adaptive thinking before these rules.
+  # When forcing tool_choice.type to any/tool, disable or filter thinking here,
+  # or use tool_choice.type auto. Final enabled/adaptive thinking with forced tool
+  # choice is rejected locally with HTTP 400, without rewriting configured fields.
   # payload:
   #   default: # Default rules only set parameters when they are missing in the payload.
   #     - models:

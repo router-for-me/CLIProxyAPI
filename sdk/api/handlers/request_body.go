@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httpcompression"
 )
 
 // MaxRequestBodyBytesContextKey stores the configured request body size limit (in bytes) on the Gin context.
@@ -24,14 +24,20 @@ func ReadRequestBody(c *gin.Context) ([]byte, error) {
 	if c != nil {
 		maxBytes = c.GetInt64(MaxRequestBodyBytesContextKey)
 	}
+	if maxBytes > 0 && c != nil && c.Request != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+	}
 	raw, err := c.GetRawData()
 	if err != nil {
 		return nil, err
 	}
+	if maxBytes > 0 && int64(len(raw)) > maxBytes {
+		return nil, &http.MaxBytesError{Limit: maxBytes}
+	}
 
 	encoding := ""
 	if c != nil && c.Request != nil {
-		encoding = strings.TrimSpace(c.Request.Header.Get("Content-Encoding"))
+		encoding = strings.TrimSpace(strings.Join(c.Request.Header.Values("Content-Encoding"), ","))
 	}
 	if encoding == "" || strings.EqualFold(encoding, "identity") {
 		return raw, nil
@@ -59,8 +65,8 @@ func decodeRequestBody(raw []byte, encoding string, maxBytes int64) ([]byte, err
 		switch enc {
 		case "", "identity":
 			continue
-		case "zstd":
-			decoded, err := decodeZstdRequestBody(body, maxBytes)
+		case "gzip", "br", "zstd":
+			decoded, err := decodeCompressedRequestBody(body, enc, maxBytes)
 			if err != nil {
 				return nil, err
 			}
@@ -72,12 +78,12 @@ func decodeRequestBody(raw []byte, encoding string, maxBytes int64) ([]byte, err
 	return body, nil
 }
 
-func decodeZstdRequestBody(raw []byte, maxBytes int64) ([]byte, error) {
-	decoder, err := zstd.NewReader(bytes.NewReader(raw))
+func decodeCompressedRequestBody(raw []byte, encoding string, maxBytes int64) ([]byte, error) {
+	decoder, err := httpcompression.Decode(io.NopCloser(bytes.NewReader(raw)), encoding)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create zstd request decoder: %w", err)
+		return nil, fmt.Errorf("failed to create %s request decoder: %w", encoding, err)
 	}
-	defer decoder.Close()
+	defer func() { _ = decoder.Close() }()
 
 	var reader io.Reader = decoder
 	if maxBytes > 0 && maxBytes < math.MaxInt64 {
@@ -85,7 +91,7 @@ func decodeZstdRequestBody(raw []byte, maxBytes int64) ([]byte, error) {
 	}
 	decoded, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode zstd request body: %w", err)
+		return nil, fmt.Errorf("failed to decode %s request body: %w", encoding, err)
 	}
 	if maxBytes > 0 && int64(len(decoded)) > maxBytes {
 		return nil, &http.MaxBytesError{Limit: maxBytes}

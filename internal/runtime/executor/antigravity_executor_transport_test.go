@@ -73,8 +73,8 @@ func TestNewAntigravityHTTPClientSharesTransport(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			first := newAntigravityHTTPClient(context.Background(), tc.cfg, tc.auth, 0)
-			second := newAntigravityHTTPClient(context.Background(), tc.cfg, tc.auth, 0)
+			first := compressionTestClient(newAntigravityHTTPClient(context.Background(), tc.cfg, tc.auth, 0))
+			second := compressionTestClient(newAntigravityHTTPClient(context.Background(), tc.cfg, tc.auth, 0))
 			if first.Transport == nil || second.Transport == nil {
 				t.Fatal("expected a transport to be configured")
 			}
@@ -188,7 +188,7 @@ func TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff(t *testing.T) {
 func TestNewAntigravityHTTPClientRejectsTypedNilContextTransport(t *testing.T) {
 	var typedNil *http.Transport
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(typedNil))
-	client := newAntigravityHTTPClient(ctx, &config.Config{}, antigravityAuthWithIDAndProxy("typed-nil", ""), 0)
+	client := compressionTestClient(newAntigravityHTTPClient(ctx, &config.Config{}, antigravityAuthWithIDAndProxy("typed-nil", ""), 0))
 
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok || transport == nil {
@@ -209,7 +209,7 @@ func TestNewAntigravityHTTPClientKeepsForeignRoundTripper(t *testing.T) {
 		return nil, errors.New("unused")
 	})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(foreign))
-	client := newAntigravityHTTPClient(ctx, &config.Config{}, antigravityAuthWithIDAndProxy("foreign-rt", ""), 0)
+	client := compressionTestClient(newAntigravityHTTPClient(ctx, &config.Config{}, antigravityAuthWithIDAndProxy("foreign-rt", ""), 0))
 	if _, isTransport := client.Transport.(*http.Transport); isTransport {
 		t.Fatal("a non-*http.Transport RoundTripper must be preserved as-is")
 	}
@@ -363,8 +363,8 @@ func TestAntigravityConcurrentRequestsDefaultPoolLimitsToTwo(t *testing.T) {
 
 func TestNewAntigravityHTTPClientDistinctProxiesUseDistinctPools(t *testing.T) {
 	cfg := &config.Config{}
-	a := newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithProxy("http://127.0.0.1:18090"), 0)
-	b := newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithProxy("http://127.0.0.1:18091"), 0)
+	a := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithProxy("http://127.0.0.1:18090"), 0))
+	b := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithProxy("http://127.0.0.1:18091"), 0))
 	if a.Transport == b.Transport {
 		t.Fatal("expected distinct proxies to use distinct connection pools")
 	}
@@ -374,9 +374,9 @@ func TestNewAntigravityHTTPClientScopesPoolsByAuthIdentity(t *testing.T) {
 	cfg := &config.Config{}
 	const proxyURL = "http://127.0.0.1:18092"
 
-	a1 := newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("auth-a", proxyURL), 0)
-	a2 := newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("auth-a", proxyURL), 0)
-	b := newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("auth-b", proxyURL), 0)
+	a1 := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("auth-a", proxyURL), 0))
+	a2 := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("auth-a", proxyURL), 0))
+	b := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("auth-b", proxyURL), 0))
 	if a1.Transport != a2.Transport {
 		t.Fatal("the same auth identity must share its connection pool across sessions")
 	}
@@ -384,8 +384,8 @@ func TestNewAntigravityHTTPClientScopesPoolsByAuthIdentity(t *testing.T) {
 		t.Fatal("different auth identities must not share a proxied connection pool")
 	}
 
-	directA := newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("direct-a", ""), 0)
-	directB := newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("direct-b", ""), 0)
+	directA := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("direct-a", ""), 0))
+	directB := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, antigravityAuthWithIDAndProxy("direct-b", ""), 0))
 	if directA.Transport == directB.Transport {
 		t.Fatal("different auth identities must not share a direct connection pool")
 	}
@@ -562,7 +562,7 @@ func TestAntigravityTransportCacheEvictsStalePools(t *testing.T) {
 	cfg := &config.Config{}
 	for i := 0; i < 40; i++ {
 		auth := antigravityAuthWithIDAndProxy("rotating-auth", fmt.Sprintf("http://127.0.0.1:%d", 19000+i))
-		if client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0); client.Transport == nil {
+		if client := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, auth, 0)); client.Transport == nil {
 			t.Fatalf("request %d: expected a transport", i)
 		}
 	}
@@ -576,7 +576,7 @@ func TestAntigravityTransportCacheEvictsStalePools(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		fresh := http.DefaultTransport.(*http.Transport).Clone()
 		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(fresh))
-		if client := newAntigravityHTTPClient(ctx, cfg, auth, 0); client.Transport == nil {
+		if client := compressionTestClient(newAntigravityHTTPClient(ctx, cfg, auth, 0)); client.Transport == nil {
 			t.Fatalf("ctx request %d: expected a transport", i)
 		}
 	}
@@ -676,7 +676,7 @@ func TestAntigravityProxiedRequestsReuseOneConnection(t *testing.T) {
 	auth := antigravityAuthWithProxy(srv.URL)
 	const requests = 8
 	for i := 0; i < requests; i++ {
-		client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+		client := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, auth, 0))
 		req, errReq := http.NewRequest(http.MethodGet, "http://antigravity.invalid/v1internal:streamGenerateContent", nil)
 		if errReq != nil {
 			t.Fatalf("NewRequest() error = %v", errReq)
@@ -841,7 +841,7 @@ func TestAntigravityPoolConfigIdleTimeoutCustomAndCap(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			auth := antigravityAuthWithIDAndProxy("cfg-test-"+tc.name, "")
-			client := newAntigravityHTTPClient(context.Background(), tc.cfg, auth, 0)
+			client := compressionTestClient(newAntigravityHTTPClient(context.Background(), tc.cfg, auth, 0))
 			transport, ok := client.Transport.(*http.Transport)
 			if !ok {
 				t.Fatalf("expected *http.Transport, got %T", client.Transport)
@@ -887,7 +887,7 @@ func TestAntigravityShortModeNeverAdvertisesConnectionCloseAndDisconnects(t *tes
 
 	const requests = 4
 	for i := 0; i < requests; i++ {
-		client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+		client := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, auth, 0))
 		req, errReq := http.NewRequest(http.MethodGet, "http://antigravity.invalid/v1internal:streamGenerateContent", nil)
 		if errReq != nil {
 			t.Fatalf("NewRequest() error = %v", errReq)
@@ -922,7 +922,7 @@ func TestCloseAntigravityAuthIdleTransportsEvictsIdlePool(t *testing.T) {
 	auth := antigravityAuthWithIDAndProxy("auth-to-close", "")
 	cfg := &config.Config{}
 
-	client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+	client := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, auth, 0))
 	if client.Transport == nil {
 		t.Fatal("expected transport to be initialized")
 	}
@@ -983,7 +983,7 @@ func TestAntigravityCountTokens429EvictsIdleTransports(t *testing.T) {
 	exec := NewAntigravityExecutor(cfg)
 
 	// Build client to populate cache
-	client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+	client := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfg, auth, 0))
 	if client.Transport == nil {
 		t.Fatal("expected transport to be initialized")
 	}
@@ -1024,7 +1024,7 @@ func TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload(t *testing.T) 
 
 	// 1. Client with short connection mode (default enabled: false)
 	cfgShort := &config.Config{}
-	clientShort := newAntigravityHTTPClient(context.Background(), cfgShort, auth, 0)
+	clientShort := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfgShort, auth, 0))
 
 	// 2. Client with pooled mode (enabled: true)
 	enabledPool := true
@@ -1035,7 +1035,7 @@ func TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload(t *testing.T) 
 			},
 		},
 	}
-	clientPooled := newAntigravityHTTPClient(context.Background(), cfgPooled, auth, 0)
+	clientPooled := compressionTestClient(newAntigravityHTTPClient(context.Background(), cfgPooled, auth, 0))
 
 	// Transports must NOT be shared because their pool settings keys differ!
 	if clientShort.Transport == clientPooled.Transport {

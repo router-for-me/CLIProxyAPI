@@ -15,12 +15,10 @@ func TestNewProxyAwareHTTPClientRequestProxyOverridesAuthAndGlobal(t *testing.T)
 	t.Parallel()
 
 	ctx := coreexecutor.WithRequestProxyURL(context.Background(), "http://request-proxy.example:8081")
-	client := NewProxyAwareHTTPClient(
-		ctx,
+	client := compressionTestClient(NewProxyAwareHTTPClient(ctx,
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
 		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example:8080"},
-		0,
-	)
+		0))
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok || transport.Proxy == nil {
 		t.Fatalf("transport = %#v, want request proxy", client.Transport)
@@ -38,12 +36,10 @@ func TestNewProxyAwareHTTPClientRequestProxyOverridesAuthAndGlobal(t *testing.T)
 	}
 
 	refreshCtx := coreexecutor.WithoutRequestProxyURL(ctx)
-	refreshClient := NewProxyAwareHTTPClient(
-		refreshCtx,
+	refreshClient := compressionTestClient(NewProxyAwareHTTPClient(refreshCtx,
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
 		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example:8080"},
-		0,
-	)
+		0))
 	refreshTransport, ok := refreshClient.Transport.(*http.Transport)
 	if !ok || refreshTransport.Proxy == nil {
 		t.Fatalf("refresh transport = %#v, want auth proxy", refreshClient.Transport)
@@ -60,12 +56,10 @@ func TestNewProxyAwareHTTPClientRequestProxyOverridesAuthAndGlobal(t *testing.T)
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
-	client := NewProxyAwareHTTPClient(
-		context.Background(),
+	client := compressionTestClient(NewProxyAwareHTTPClient(context.Background(),
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
 		&cliproxyauth.Auth{ProxyURL: "direct"},
-		0,
-	)
+		0))
 
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
@@ -80,8 +74,8 @@ func TestNewDevinHTTPClient_ReusesTransportFromContext(t *testing.T) {
 	baseTransport := &http.Transport{}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", baseTransport)
 
-	c1 := NewDevinHTTPClient(ctx, nil, nil, 0)
-	c2 := NewDevinHTTPClient(ctx, nil, nil, 0)
+	c1 := compressionTestClient(NewDevinHTTPClient(ctx, nil, nil, 0))
+	c2 := compressionTestClient(NewDevinHTTPClient(ctx, nil, nil, 0))
 
 	if c1.Transport != c2.Transport {
 		t.Errorf("expected c1.Transport == c2.Transport across requests, got different pointers %p vs %p", c1.Transport, c2.Transport)
@@ -104,7 +98,7 @@ func TestNewDevinHTTPClient_NonStandardRoundTripperDisablesGzip(t *testing.T) {
 	})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", customRT)
 
-	c := NewDevinHTTPClient(ctx, nil, nil, 0)
+	c := compressionTestClient(NewDevinHTTPClient(ctx, nil, nil, 0))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.invalid", nil)
 	_, _ = c.Transport.RoundTrip(req)
 

@@ -64,6 +64,16 @@ The Home-owned revision fields
 `credentials.concurrency.observation-barrier-revision`, and `plugins.auth-revision`
 cannot be changed through these endpoints.
 
+### Conditional writes
+
+Configuration reads return a strong `ETag` identifying the on-disk source bytes.
+Send it as `If-Match` on a configuration write to prevent overwriting a newer
+version. Stale or weak tags return HTTP 412 with the current `ETag`; omitting
+`If-Match` leaves the write unconditional. Successful writes return the new tag.
+V8 management responses bypass compression even when `Accept-Encoding` is sent,
+so these validators remain usable for conditional writes. CORS exposes `ETag`
+to cross-origin management clients.
+
 ### Codex multi-agent configuration migration
 
 `client.codex.optimize-multi-agent-v2` is the sole runtime setting. Loading older
