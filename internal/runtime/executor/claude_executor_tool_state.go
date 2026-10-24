@@ -105,6 +105,18 @@ func claudeThreadContinuationNeedsAliasState(payload []byte) bool {
 	return !tools.Exists() || !tools.IsArray() || len(tools.Array()) == 0
 }
 
+// claudeThreadContinuationNeedsReplay reports whether a thread continuation is
+// headed to an upstream that cannot hold Anthropic thread state. Third-party
+// gateways drop the thread reference and answer from the newest turn alone, so
+// the caller must replay the full conversation with thread create instead.
+// OAuth tokens always reach Anthropic, which reports missing state itself.
+func claudeThreadContinuationNeedsReplay(payload []byte, apiKey, baseURL string) bool {
+	if gjson.GetBytes(payload, "thread.previous_message_id").String() == "" {
+		return false
+	}
+	return !isClaudeOAuthToken(apiKey) && !isAnthropicUpstreamBase(baseURL)
+}
+
 func (e *ClaudeExecutor) prepareClaudeOAuthToolNamesForRequest(payload []byte, options claudeMCPAliasOptions) ([]byte, map[string]string, error) {
 	if claudeThreadContinuationNeedsAliasState(payload) {
 		aliases, ok := e.claudeOAuthToolAliasStore().load(claudeOAuthToolAliasKeys(payload, ""))
