@@ -17,7 +17,13 @@ const (
 	// Version 6 preserves raw JSON bodies for plugin management responses.
 	// Plugins that still require HTML entity escaping on JSON response strings
 	// should keep schema_version < 6.
-	SchemaVersion uint32 = 6
+	// Version 7 omits OriginalRequest/TranslatedRequest on streaming response
+	// normalize/translate calls. The host invokes those hooks once per SSE
+	// frame, so re-sending both request bodies per frame made the cost of a
+	// stream O(frames * request size). Non-streaming calls still carry them.
+	// Plugins that need the request bodies on every stream frame should keep
+	// schema_version < 7.
+	SchemaVersion uint32 = 7
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -30,6 +36,10 @@ const (
 	// SchemaVersionRawManagementResponse is the first schema version where plugin
 	// management JSON responses are preserved without HTML-escaping strings.
 	SchemaVersionRawManagementResponse uint32 = 6
+	// SchemaVersionResponseTransformOmitRequestBodies is the first schema version
+	// that omits OriginalRequest/TranslatedRequest on streaming response
+	// normalize/translate calls.
+	SchemaVersionResponseTransformOmitRequestBodies uint32 = 7
 )
 
 const (
