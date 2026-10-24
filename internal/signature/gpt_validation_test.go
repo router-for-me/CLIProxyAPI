@@ -33,3 +33,30 @@ func TestInspectGPTReasoningSignatureRejectsUnicodeEllipsis(t *testing.T) {
 		t.Fatalf("error = %q, want U+2026 base64url detail", err.Error())
 	}
 }
+
+func TestInspectGPTReasoningSignature_RouterSuffixed(t *testing.T) {
+	native := testGPTReasoningSignature()
+	suffix := strings.Repeat("Ab3", 27)[:79]
+	routed := native + "." + suffix
+
+	info, err := InspectGPTReasoningSignature(routed)
+	if err != nil {
+		t.Fatalf("InspectGPTReasoningSignature(routed) error = %v", err)
+	}
+	if info.RouterSuffix != suffix {
+		t.Fatalf("RouterSuffix = %q, want %q", info.RouterSuffix, suffix)
+	}
+	if got := DetectSignatureProvider(routed); got != SignatureProviderGPT {
+		t.Fatalf("DetectSignatureProvider(routed) = %q, want %q", got, SignatureProviderGPT)
+	}
+	if got, ok := CompatibleSignatureForProvider(SignatureProviderGPT, routed); !ok || got != routed {
+		t.Fatalf("CompatibleSignatureForProvider(GPT, routed) = (%q, %v), want verbatim routed value", got, ok)
+	}
+
+	// Malformed router suffixes must be rejected.
+	for _, bad := range []string{native + ".", native + ".bad_char", native + ".a.b"} {
+		if _, err := InspectGPTReasoningSignature(bad); err == nil {
+			t.Fatalf("InspectGPTReasoningSignature(%q) unexpectedly succeeded", bad)
+		}
+	}
+}

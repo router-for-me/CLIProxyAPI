@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -20,13 +21,19 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "meta"); errExpand != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.HasResponsesCompactionTriggerRequest(req, opts) {
+		return e.executeMetaCompactionStream(ctx, auth, req, opts)
+	}
 
 	enriched, errAuth := e.ensureAuth(ctx, auth)
 	if errAuth != nil {
 		return nil, errAuth
 	}
 
-	prepared, errPrepare := e.prepareResponsesRequest(ctx, req, opts, true)
+	prepared, errPrepare := e.prepareResponsesRequest(ctx, enriched, req, opts, true)
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
@@ -86,6 +93,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		var terminalDelivered bool
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			lines, errBridge := prepared.applyPatch.Stream(translatedLine)
 			if errBridge != nil {
@@ -117,17 +125,81 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			return true
 		}
+		var pendingEventLine []byte
+		var filteringSubscriptionUsage bool
+		var skipFilteredBlankLine bool
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if !bytes.HasPrefix(line, dataTag) {
+			trimmedLine := bytes.TrimSpace(line)
+			if bytes.HasPrefix(trimmedLine, metaEventTag) {
+				eventName := bytes.TrimSpace(trimmedLine[len(metaEventTag):])
+				if bytes.Equal(eventName, []byte(metaSubscriptionUsageEventType)) {
+					if pendingEventLine != nil {
+						if !emitTranslatedLine(pendingEventLine) {
+							return
+						}
+						pendingEventLine = nil
+					}
+					filteringSubscriptionUsage = true
+					skipFilteredBlankLine = true
+					continue
+				}
+				filteringSubscriptionUsage = false
+				skipFilteredBlankLine = false
+				if pendingEventLine != nil {
+					if !emitTranslatedLine(pendingEventLine) {
+						return
+					}
+				}
+				pendingEventLine = bytes.Clone(line)
+				continue
+			}
+			if !bytes.HasPrefix(trimmedLine, dataTag) {
+				if len(trimmedLine) == 0 {
+					filteringSubscriptionUsage = false
+					if skipFilteredBlankLine {
+						skipFilteredBlankLine = false
+						continue
+					}
+				}
+				if filteringSubscriptionUsage {
+					continue
+				}
+				skipFilteredBlankLine = false
+				if pendingEventLine != nil {
+					if !emitTranslatedLine(pendingEventLine) {
+						return
+					}
+					pendingEventLine = nil
+				}
 				if !emitTranslatedLine(bytes.Clone(line)) {
 					return
 				}
 				continue
 			}
-			eventData := bytes.TrimSpace(line[len(dataTag):])
-			reporter.ObserveResponseModel(eventData)
+			eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
+			eventType := gjson.GetBytes(eventData, "type").String()
+			if isMetaSubscriptionUsageEvent(eventType, eventData) {
+				pendingEventLine = nil
+				filteringSubscriptionUsage = false
+				skipFilteredBlankLine = true
+				continue
+			}
+			if filteringSubscriptionUsage {
+				if eventType == "" {
+					pendingEventLine = nil
+					if gjson.ValidBytes(eventData) {
+						filteringSubscriptionUsage = false
+					}
+					skipFilteredBlankLine = true
+					continue
+				}
+				filteringSubscriptionUsage = false
+			}
+			skipFilteredBlankLine = false
+			// Observe upstream content before translation or failure publication.
+			helps.ObserveResponsesTokenEvent(reporter, eventData)
 			if errEvent := metaStreamEventError(eventData); errEvent != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errEvent)
 				reporter.PublishFailure(ctx, errEvent)
@@ -137,7 +209,6 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				}
 				return
 			}
-			eventType := gjson.GetBytes(eventData, "type").String()
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -147,9 +218,24 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				}
 				eventData = patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			}
+			if pendingEventLine != nil {
+				if !emitTranslatedLine(pendingEventLine) {
+					return
+				}
+				pendingEventLine = nil
+			}
 			if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
 				return
 			}
+			if eventType == "response.completed" || eventType == "response.incomplete" {
+				terminalDelivered = true
+			}
+		}
+		if pendingEventLine != nil {
+			if !emitTranslatedLine(pendingEventLine) {
+				return
+			}
+			pendingEventLine = nil
 		}
 		finishEvents, errFinish := prepared.applyPatch.FinishStream()
 		if errFinish != nil {
@@ -174,6 +260,9 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			return
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			if terminalDelivered && errors.Is(errScan, context.Canceled) {
+				return
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			select {

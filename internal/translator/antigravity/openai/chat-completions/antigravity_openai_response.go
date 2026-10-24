@@ -178,9 +178,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				toolCallsResult := gjson.GetBytes(template, "choices.0.delta.tool_calls")
 				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
 				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
-				if toolCallsResult.Exists() && toolCallsResult.IsArray() {
-					functionCallIndex = len(toolCallsResult.Array())
-				} else {
+				if !toolCallsResult.IsArray() {
 					template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
 				}
 
@@ -273,6 +271,8 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 		finishReason = "tool_calls"
 	case params.UpstreamFinishReason == "MAX_TOKENS":
 		finishReason = "max_tokens"
+	case isAntigravityContentFilterFinishReason(params.UpstreamFinishReason):
+		finishReason = "content_filter"
 	default:
 		finishReason = "stop"
 	}
@@ -281,6 +281,15 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 		nativeFinishReason = strings.ToLower(params.UpstreamFinishReason)
 	}
 	return finishReason, nativeFinishReason
+}
+
+func isAntigravityContentFilterFinishReason(reason string) bool {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL":
+		return true
+	default:
+		return false
+	}
 }
 
 func setOpenAIUsageMetadata(template []byte, usageResult gjson.Result) []byte {

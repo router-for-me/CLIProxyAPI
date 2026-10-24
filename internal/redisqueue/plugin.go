@@ -85,6 +85,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if serviceTier == "" {
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
 	}
+	effectiveServiceTier := strings.TrimSpace(record.EffectiveServiceTier)
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
 	responseModel := strings.TrimSpace(record.ResponseModel)
 	clientRequestMetadata := internallogging.GetClientRequestMetadata(ctx)
@@ -145,30 +146,31 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		requestDetail:       detail,
-		AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
-		TokenBreakdown:      usageDetail.TokenBreakdown,
-		Provider:            provider,
-		ExecutorType:        executorType,
-		Model:               modelName,
-		Alias:               aliasName,
-		Endpoint:            resolveEndpoint(ctx),
-		AuthType:            authType,
-		APIKey:              apiKey,
-		IsNativeKey:         isNativeKey,
-		AccessProvider:      accessProvider,
-		RequestID:           requestID,
-		ExecutionID:         executionID,
-		TraceID:             traceID,
-		SessionID:           sessionID,
-		ParentSessionID:     parentSessionID,
-		NodeKind:            strings.TrimSpace(clientRequestMetadata.NodeKind),
-		IsFork:              clientRequestMetadata.IsFork,
-		IsCompaction:        clientRequestMetadata.IsCompaction,
-		ReasoningEffort:     reasoningEffort,
-		ServiceTier:         serviceTier,
-		ResponseServiceTier: responseServiceTier,
-		ResponseModel:       responseModel,
+		requestDetail:        detail,
+		AccountingVersion:    coreusage.TokenAccountingSchemaVersion,
+		TokenBreakdown:       usageDetail.TokenBreakdown,
+		Provider:             provider,
+		ExecutorType:         executorType,
+		Model:                modelName,
+		Alias:                aliasName,
+		Endpoint:             resolveEndpoint(ctx),
+		AuthType:             authType,
+		APIKey:               apiKey,
+		IsNativeKey:          isNativeKey,
+		AccessProvider:       accessProvider,
+		RequestID:            requestID,
+		ExecutionID:          executionID,
+		TraceID:              traceID,
+		SessionID:            sessionID,
+		ParentSessionID:      parentSessionID,
+		NodeKind:             strings.TrimSpace(clientRequestMetadata.NodeKind),
+		IsFork:               clientRequestMetadata.IsFork,
+		IsCompaction:         clientRequestMetadata.IsCompaction,
+		ReasoningEffort:      reasoningEffort,
+		ServiceTier:          serviceTier,
+		EffectiveServiceTier: effectiveServiceTier,
+		ResponseServiceTier:  responseServiceTier,
+		ResponseModel:        responseModel,
 	})
 	if err != nil {
 		return
@@ -178,29 +180,30 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	AccountingVersion   int                      `json:"accounting_version"`
-	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown"`
-	Provider            string                   `json:"provider"`
-	ExecutorType        string                   `json:"executor_type"`
-	Model               string                   `json:"model"`
-	Alias               string                   `json:"alias"`
-	Endpoint            string                   `json:"endpoint"`
-	AuthType            string                   `json:"auth_type"`
-	APIKey              string                   `json:"api_key"`
-	IsNativeKey         bool                     `json:"is_native_key"`
-	AccessProvider      string                   `json:"access_provider,omitempty"`
-	RequestID           string                   `json:"request_id"`
-	ExecutionID         string                   `json:"execution_id,omitempty"`
-	TraceID             string                   `json:"trace_id,omitempty"`
-	SessionID           string                   `json:"session_id,omitempty"`
-	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
-	NodeKind            string                   `json:"node_kind,omitempty"`
-	IsFork              bool                     `json:"is_fork,omitempty"`
-	IsCompaction        bool                     `json:"is_compaction,omitempty"`
-	ReasoningEffort     string                   `json:"reasoning_effort"`
-	ServiceTier         string                   `json:"service_tier"`
-	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
-	ResponseModel       string                   `json:"response_model,omitempty"`
+	AccountingVersion    int                      `json:"accounting_version"`
+	TokenBreakdown       coreusage.TokenBreakdown `json:"token_breakdown"`
+	Provider             string                   `json:"provider"`
+	ExecutorType         string                   `json:"executor_type"`
+	Model                string                   `json:"model"`
+	Alias                string                   `json:"alias"`
+	Endpoint             string                   `json:"endpoint"`
+	AuthType             string                   `json:"auth_type"`
+	APIKey               string                   `json:"api_key"`
+	IsNativeKey          bool                     `json:"is_native_key"`
+	AccessProvider       string                   `json:"access_provider,omitempty"`
+	RequestID            string                   `json:"request_id"`
+	ExecutionID          string                   `json:"execution_id,omitempty"`
+	TraceID              string                   `json:"trace_id,omitempty"`
+	SessionID            string                   `json:"session_id,omitempty"`
+	ParentSessionID      string                   `json:"parent_session_id,omitempty"`
+	NodeKind             string                   `json:"node_kind,omitempty"`
+	IsFork               bool                     `json:"is_fork,omitempty"`
+	IsCompaction         bool                     `json:"is_compaction,omitempty"`
+	ReasoningEffort      string                   `json:"reasoning_effort"`
+	ServiceTier          string                   `json:"service_tier"`
+	EffectiveServiceTier string                   `json:"effective_service_tier,omitempty"`
+	ResponseServiceTier  string                   `json:"response_service_tier,omitempty"`
+	ResponseModel        string                   `json:"response_model,omitempty"`
 }
 
 type requestDetail struct {

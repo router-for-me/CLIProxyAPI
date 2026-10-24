@@ -75,7 +75,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	merged.CodexRefreshPatch = updated.CodexRefreshPatch
 
 	// 1. Refresh Lifecycle Timestamps
-	merged.RejectedAccessToken = updated.RejectedAccessToken
+	applyPreservedRejectedTokens(current, merged, true)
 	if !updated.LastRefreshedAt.IsZero() {
 		merged.LastRefreshedAt = updated.LastRefreshedAt
 	}
@@ -124,7 +124,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Status = current.Status
 			merged.Unavailable = current.Unavailable
 			merged.StatusMessage = current.StatusMessage
-		} else if current.Quota.Exceeded && current.Quota.Reason == "credential_quota" && current.Quota.NextRecoverAt.After(time.Now()) {
+		} else if current.Quota.Exceeded && current.Quota.Reason == "credential_quota" && current.Quota.NextRecoverAt.After(time.Now()) && !devinQuotaObservationRestored(merged, current, time.Now()) {
 			// Preserve active credential quota
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
@@ -134,7 +134,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
 			merged.StatusMessage = current.StatusMessage
-		} else if updated.Status == StatusActive || updated.Status == "" {
+		} else if (updated.Status == StatusActive || updated.Status == "") && (merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken) {
 			// Successful refresh clears previous auth error and restores active
 			merged.Status = StatusActive
 			merged.Unavailable = false
@@ -143,7 +143,28 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 		}
 	}
 
+	// 2b. Quota observations: adopt the refreshed snapshot when it is newer.
+	// Without this, executor Refresh results (e.g. Devin quota reset signals)
+	// never reach the stored auth and cannot drive scheduling. Cooldown
+	// fields stay with current so concurrent failures are never lost.
+	// The merge happens after the status branches above (they only copy
+	// scalar fields), so ordering relative to them is safe.
+	merged.Quota = mergeQuotaObservation(merged.Quota, updated.Quota)
+
 	// 3. ModelStates: three-way merge to preserve concurrent cooldown/quota
+	// Independent layers follow the same current-wins rule: executor refresh
+	// results are derived from the base snapshot and never move them.
+	for model, mergedState := range merged.ModelStates {
+		if mergedState == nil {
+			continue
+		}
+		if currentState := current.ModelStates[model]; currentState != nil {
+			if currentState.credentialQuotaShadow != nil && mergedState.credentialQuotaShadow == nil {
+				mergedState.credentialQuotaShadow = currentState.credentialQuotaShadow.cloneShallow()
+			}
+			mergedState.credentialQuotaPropagated = mergedState.credentialQuotaPropagated || currentState.credentialQuotaPropagated
+		}
+	}
 	var baseModels map[string]*ModelState
 	if base != nil {
 		baseModels = base.ModelStates

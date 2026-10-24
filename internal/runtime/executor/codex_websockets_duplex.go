@@ -136,7 +136,40 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				return false
 			}
 		}
+		authorizePayload := func(payload []byte, forceBoundModel bool) (allowed bool, keepOpen bool) {
+			authPayload := payload
+			boundModel := ""
+			if initial != nil {
+				boundModel = strings.TrimSpace(gjson.GetBytes(initial.originalPayload, "model").String())
+			}
+			if boundModel == "" {
+				boundModel = req.Model
+			}
+			explicitModel := strings.TrimSpace(gjson.GetBytes(authPayload, "model").String())
+			if boundModel != "" && json.Valid(authPayload) && (forceBoundModel || explicitModel == "" || explicitModel == req.Model) {
+				if withModel, errSet := sjson.SetBytes(bytes.Clone(authPayload), "model", boundModel); errSet == nil {
+					authPayload = withModel
+				}
+			}
+			errPayload, errAuth := cliproxyexecutor.AuthorizeWebsocketTurn(streamCtx, authPayload)
+			if errAuth != nil {
+				fail(errAuth)
+				return false, false
+			}
+			if len(errPayload) > 0 {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: errPayload}:
+					return false, true
+				case <-streamCtx.Done():
+					return false, false
+				}
+			}
+			return true, true
+		}
 		processCreatePayload := func(payload []byte) bool {
+			if allowed, keepOpen := authorizePayload(payload, false); !allowed {
+				return keepOpen
+			}
 			metadataMu.Lock()
 			isAppend := gjson.GetBytes(payload, "type").String() == "response.append"
 			prevID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
@@ -278,10 +311,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.steer":
+					if allowed, keepOpen := authorizePayload(payload, true); !allowed {
+						if !keepOpen {
+							return
+						}
+						continue
+					}
 					// Steering carries business input but must not inherit response.create defaults.
 					steerReq := req
 					steerReq.Payload = payload
-					if codexUseSIWC(auth) {
+					if codexUseSIWCForRequest(ctx, auth, opts.Headers) {
 						payload = thinking.StripConfigurationUpdates(payload)
 					}
 					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, opts)(payload)
@@ -430,6 +469,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				if inst := gjson.GetBytes(current.clientBody, "instructions"); inst.Exists() {
 					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "instructions", []byte(inst.Raw))
+				}
+				if serviceTier := gjson.GetBytes(current.clientBody, "service_tier"); serviceTier.Exists() {
+					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "service_tier", []byte(serviceTier.Raw))
 				}
 				responseSettings[responseID] = &snapshot
 				responseOrder = append(responseOrder, responseID)

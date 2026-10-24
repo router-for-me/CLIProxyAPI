@@ -438,7 +438,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 				auth.Metadata[antigravityPersistedHintsMetaKey] = persistedHints
 			}
 		}
-		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+		if !auth.HasFileSnapshot() && !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
@@ -446,9 +446,26 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 			}
 		}
 		op = "update"
-		_, err = s.coreManager.Update(ctx, auth)
+		var updated *coreauth.Auth
+		updated, err = s.coreManager.Update(ctx, auth)
+		if err == nil && updated != nil {
+			if auth.HasFileSnapshot() || updated.Generation == existing.Generation {
+				log.Debugf("skipping stale auth update for %s: incoming snapshot did not advance generation (gen=%d)", auth.ID, existing.Generation)
+				if auth.HasFileSnapshot() {
+					if w := s.currentWatcher(); w != nil {
+						w.RereadDiscardedFileSnapshot(auth)
+					}
+				}
+				return updated
+			}
+			auth = updated
+		}
 	} else {
-		_, err = s.coreManager.Register(ctx, auth)
+		var registered *coreauth.Auth
+		registered, err = s.coreManager.Register(ctx, auth)
+		if err == nil && registered != nil {
+			auth = registered
+		}
 	}
 	if err != nil {
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
@@ -579,9 +596,35 @@ func (s *Service) completeModelRegistrationForAuthWithCache(ctx context.Context,
 	if latest, ok := s.latestAuthForModelRegistration(auth.ID); ok && latest != nil {
 		targetAuth = latest
 	}
-	s.registerModelsForAuthWithCache(ctx, targetAuth, compatCache)
+	published := s.registerModelsForAuthWithCache(ctx, targetAuth, compatCache)
 	if ctx != nil && ctx.Err() != nil {
 		return 0
+	}
+	if !published {
+		// The registration was fenced out because its registration inputs
+		// or the registry epoch changed mid-computation (e.g. a plugin
+		// persisting its model snapshot through host.auth.save during
+		// ModelsForAuth, issue #6718). The intervening change may not have
+		// left this client's models behind, so reconcile the latest auth
+		// once instead of risking an empty model list. The retry
+		// recomputes from the latest snapshot;
+		// it never republishes the superseded computation's models. A
+		// removed auth stays unregistered (removal owns cleanup), while
+		// a newly disabled auth gets a fenced unregistration so its old
+		// models do not linger.
+		if latest, ok := s.latestAuthForModelRegistration(auth.ID); ok && latest != nil {
+			targetAuth = latest
+			if latest.Disabled {
+				accepted := s.unregisterModelsForAuthFenced(latest, newModelRegistrationFence(latest, s.currentConfig()))
+				log.WithFields(log.Fields{"auth_id": latest.ID, "provider": latest.Provider, "superseded": !accepted}).Debugf("model registration reconciliation attempted for disabled auth %s", latest.ID)
+			} else {
+				accepted := s.registerModelsForAuthWithCache(ctx, targetAuth, compatCache)
+				if ctx != nil && ctx.Err() != nil {
+					return 0
+				}
+				log.WithFields(log.Fields{"auth_id": latest.ID, "provider": latest.Provider, "superseded": !accepted}).Debugf("model registration reconciliation attempted for auth %s", latest.ID)
+			}
+		}
 	}
 	s.reconcileRegisteredModelStates(ctx, targetAuth)
 
