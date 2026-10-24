@@ -142,6 +142,19 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### Docker 安全更新
+
+Docker 构建固定使用 Go 1.26.10，以包含 [eMudhra 中间 CA 安全修复（CVE-2026-111943）](https://go.dev/issue/82345)。构建和运行阶段均要求 Debian Bookworm 的 `ca-certificates` 不低于 `20250419~deb12u2`（[DLA-4845-1](https://security-tracker.debian.org/tracker/DLA-4845-1)）；如果软件源只提供旧版本，构建会失败。
+
+更新宿主机的 Go 或 CA 证书包不会修复已有容器镜像。更新本仓库后，请重新构建镜像并重建容器：
+
+```bash
+docker compose build --pull --no-cache
+docker compose up -d --no-build --pull never
+```
+
+`--pull never` 可防止 Compose 用镜像仓库中的镜像覆盖本地刚构建的镜像。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

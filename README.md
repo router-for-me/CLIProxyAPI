@@ -147,6 +147,19 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Docker security updates
+
+The Docker build pins Go 1.26.10 for the [eMudhra intermediate CA mitigation (CVE-2026-111943)](https://go.dev/issue/82345). Both build and runtime stages require Debian Bookworm `ca-certificates` version `20250419~deb12u2` or newer ([DLA-4845-1](https://security-tracker.debian.org/tracker/DLA-4845-1)); builds fail if a mirror only provides an older package.
+
+Updating the host's Go installation or CA bundle does not patch existing container images. Rebuild and recreate the containers after updating this repository:
+
+```bash
+docker compose build --pull --no-cache
+docker compose up -d --no-build --pull never
+```
+
+`--pull never` keeps Compose from replacing the locally rebuilt image with the registry image.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

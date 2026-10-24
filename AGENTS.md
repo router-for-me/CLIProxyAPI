@@ -61,3 +61,8 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Avoid wall-clock `time.Sleep` in TTL, expiration, ordering, or cache-eviction unit tests due to platform timer granularity (e.g. Windows default timer resolution of ~15.6ms) and CI jitter under load; prefer controllable clocks (`nowFunc` / mock clock), explicit timestamp manipulation, or deterministic synchronization primitives.
 - Note: if modifying features that involve CLIProxyAPIHome, check if corresponding updates are needed in the CLIProxyAPIHome repository.
 - Endpoints under the `/v0/management` base URL are deprecated and no longer maintained. For any feature changes, do not modify endpoints under `/v0/management` unless necessary to fix compilation errors.
+
+## Lessons
+
+- The eMudhra CA mitigation requires Go 1.26.10 (CVE-2026-111943) and Debian Bookworm `ca-certificates` >= `20250419~deb12u2` (DLA-4845-1). Update both Docker stages: Go's intermediate-key blocking and the system trust store protect different TLS consumers. Keep the builder aligned with `go.mod` and enforce a minimum CA package version so stale mirrors fail closed.
+- After a local security rebuild, use `docker compose up -d --no-build --pull never`; the Compose file's `pull_policy: always` otherwise replaces the rebuilt image with the registry image.
