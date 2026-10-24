@@ -14,8 +14,8 @@ import (
 )
 
 // ModelSupportsWebSearch checks whether the given model supports native web search,
-// checking both dynamic registry capability (SupportsWebSearch) and models.json
-// static definitions (native_capabilities.web_search). Explicit false wins as a veto.
+// checking models.json capability metadata and registered SupportsWebSearch flags.
+// Explicit native_capabilities.web_search=false wins as a veto.
 func ModelSupportsWebSearch(modelID string) bool {
 	info := registry.LookupModelInfo(modelID)
 	infoAG := registry.LookupModelInfo(modelID, "antigravity")
@@ -36,7 +36,7 @@ func ModelSupportsWebSearch(modelID string) bool {
 		return true
 	}
 
-	// 3. Dynamic capability checks via Antigravity probes and registry flags.
+	// 3. Fall back to catalog-derived flags, including registered aliases.
 	if registry.AntigravityWebSearchModelFor(modelID) != "" {
 		return true
 	}
