@@ -18,7 +18,9 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 	headers := opts.Headers.Clone()
 	source := append([]byte(nil), original...)
 	return func(body []byte) []byte {
-		return ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, opts.SourceFormat.String(), root, body, source, requestedModel, requestPath, headers)
+		out := ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, opts.SourceFormat.String(), root, body, source, requestedModel, requestPath, headers)
+		RecordWireModelMetadata(opts, out, req.Model)
+		return out
 	}
 }
 

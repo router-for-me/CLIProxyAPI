@@ -30,6 +30,23 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 	return out
 }
 
+// RecordWireModelMetadata notes the final wire model when the fully prepared
+// body carries a model name that differs from the request model — for example
+// after payload override rules rewrote the body's "model" field inside the
+// executor. The conductor reads it back through Options.Metadata so structured
+// 404 classification can match the model the provider actually received. The
+// write is a no-op without a metadata map or without a rewrite.
+func RecordWireModelMetadata(opts cliproxyexecutor.Options, body []byte, requestModel string) {
+	if opts.Metadata == nil || len(body) == 0 {
+		return
+	}
+	finalModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if finalModel == "" || strings.EqualFold(finalModel, requestModel) {
+		return
+	}
+	opts.Metadata[cliproxyexecutor.WireModelMetadataKey] = finalModel
+}
+
 // ApplyPayloadConfigWithRequestForExecutor applies payload config with explicit target executor context.
 func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
 	out, _ := ApplyPayloadConfigWithTrackedPathsForExecutor(cfg, targetExecutor, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers)

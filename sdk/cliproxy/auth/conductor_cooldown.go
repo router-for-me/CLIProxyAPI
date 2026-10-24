@@ -1044,7 +1044,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
 							state.NextRetryAfter = now.Add(*result.RetryAfter)
 						} else {
-							next := now.Add(12 * time.Hour)
+							next := now.Add(modelSupportCooldown)
 							state.NextRetryAfter = next
 						}
 					} else if isCloudflareChallengeResultError(result.Error) {
@@ -1080,8 +1080,26 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = time.Time{}
 							} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
 								state.NextRetryAfter = now.Add(*result.RetryAfter)
+							} else if isExplicitModelNotFoundForState(result.Error, modelKey, result.UpstreamModel,
+								m.lookupAPIKeyUpstreamModel(auth.ID, modelKey),
+								authSelectionModelFromOptions(result.Options, "")) {
+								// A 404 that explicitly names this model as unsupported is
+								// demonstrably persistent and keeps the long cooldown. The
+								// structured message names the upstream identifier, which
+								// under API-key alias mapping can be the URL model the
+								// alias expanded to, and under auth-selection override the
+								// model the selection resolved to — names distinct from
+								// both the route key and the wire model the payload
+								// override left behind (#5514 review).
+								state.NextRetryAfter = now.Add(modelSupportCooldown)
 							} else {
-								next := now.Add(12 * time.Hour)
+								// Concurrent in-flight failures complete in any order: a
+								// transient 404 must not shorten a still-live longer
+								// deadline recorded by an earlier result.
+								next := now.Add(notFoundCooldown)
+								if state.NextRetryAfter.After(next) && state.NextRetryAfter.After(now) {
+									next = state.NextRetryAfter
+								}
 								state.NextRetryAfter = next
 							}
 						case 429:
@@ -1945,6 +1963,30 @@ func resultErrorFromError(err error) *Error {
 	return resultErr
 }
 
+// isExplicitModelNotFoundForState reports whether a 404 result explicitly
+// names the attempted model — by route key, by the reported wire model, or by
+// any additional attempted name such as the alias-resolved upstream identifier,
+// since structured provider errors quote whichever name their URL carried — as
+// unsupported (#5476 review).
+func isExplicitModelNotFoundForState(err *Error, modelKey, upstreamModel string, extraNames ...string) bool {
+	if err == nil {
+		return false
+	}
+	if isExplicitModelNotFoundError(err, thinking.ParseSuffix(modelKey).ModelName) {
+		return true
+	}
+	for _, candidate := range append([]string{upstreamModel}, extraNames...) {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "" || strings.EqualFold(trimmed, modelKey) {
+			continue
+		}
+		if isExplicitModelNotFoundError(err, thinking.ParseSuffix(trimmed).ModelName) {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldSkipCredentialCooldown reports failures that must not mark auth/model cooling.
 // Connection lifecycle is intentionally separate from request_scoped so transport
 // drops do not also stop credential rotation via isRequestInvalidError.
@@ -2741,7 +2783,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			} else if retryAfter != nil && *retryAfter > 0 {
 				auth.NextRetryAfter = now.Add(*retryAfter)
 			} else {
-				auth.NextRetryAfter = now.Add(12 * time.Hour)
+				auth.NextRetryAfter = now.Add(notFoundCooldown)
 			}
 		case 429:
 			auth.StatusMessage = "quota exhausted"

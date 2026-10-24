@@ -222,7 +222,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					payload, _ = sjson.SetRawBytes(payload, "instructions", []byte(inst.Raw))
 				}
 			}
-			nextReq, nextOpts := req, opts
+			nextReq, nextOpts := req, isolatedContinuationOptions(opts)
 			nextReq.Payload = payload
 			nextOpts.OriginalRequest = payload
 			prepared, errPrepare := e.prepareCodexWebsocketStream(streamCtx, auth, nextReq, nextOpts)
@@ -323,7 +323,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					if codexUseSIWCForRequest(ctx, auth, opts.Headers) {
 						payload = thinking.StripConfigurationUpdates(payload)
 					}
-					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, opts)(payload)
+					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, isolatedContinuationOptions(opts))(payload)
 					payload, _ = sjson.SetBytes(payload, "type", "response.steer")
 					parent := gjson.GetBytes(payload, "previous_response_id").String()
 					metadataMu.Lock()
@@ -648,4 +648,23 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
+}
+
+// isolatedContinuationOptions clones the shared attempt metadata for continuation
+// work running on the duplex writer goroutine: follow-up creates and steers
+// finalize their payload after the conductor has observed response.created, so a
+// wire-model report through RecordWireModelMetadata would write the same map the
+// stream goroutine reads concurrently and terminate the server with a
+// concurrent-map fault (#5514 review). The clone starts from the already
+// recorded values so an unchanged model stays consistent.
+func isolatedContinuationOptions(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	if len(opts.Metadata) == 0 {
+		return opts
+	}
+	clone := make(map[string]any, len(opts.Metadata)+1)
+	for k, v := range opts.Metadata {
+		clone[k] = v
+	}
+	opts.Metadata = clone
+	return opts
 }
