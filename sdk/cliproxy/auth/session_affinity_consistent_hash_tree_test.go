@@ -225,3 +225,106 @@ func TestSessionAffinityConsistentHashNamedParentSessionIsTheRoot(t *testing.T) 
 		})
 	}
 }
+
+func namedParentOpts(h http.Header, body string) cliproxyexecutor.Options {
+	if h == nil {
+		h = http.Header{}
+	}
+	return cliproxyexecutor.Options{Headers: h, OriginalRequest: []byte(body), Metadata: map[string]any{}}
+}
+
+func namedParentHeaders(kv ...string) http.Header {
+	h := http.Header{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		h[kv[i]] = []string{kv[i+1]}
+	}
+	return h
+}
+
+// Five ways a Claude Code request can name a parent. A parent session becomes the tree's root;
+// a parent agent (in a header, metadata.parent_agent_id, or metadata.user_id JSON) is a node of
+// the session's own tree and must not. Index 0 of each tree is its top request.
+func namedParentTrees() map[string]func(i int) []cliproxyexecutor.Options {
+	const msgs = `"messages":[{"role":"user","content":"x"}]`
+	userJSON := func(fields string) string {
+		return fmt.Sprintf(`{"metadata":{"user_id":%s},%s}`, strconv.Quote("{"+fields+"}"), msgs)
+	}
+	return map[string]func(i int) []cliproxyexecutor.Options{
+		"header session, body parent session": func(i int) []cliproxyexecutor.Options {
+			p, s := fmt.Sprintf("P-%d", i), fmt.Sprintf("S-%d", i)
+			body := fmt.Sprintf(`{"extra_body":{"parent_session":%q},%s}`, p, msgs)
+			return []cliproxyexecutor.Options{
+				namedParentOpts(namedParentHeaders("X-Claude-Code-Session-Id", p), "{"+msgs+"}"),
+				namedParentOpts(namedParentHeaders("X-Claude-Code-Session-Id", s), body),
+				namedParentOpts(namedParentHeaders("X-Claude-Code-Session-Id", s, "X-Claude-Code-Agent-Id", "sub"), body),
+				namedParentOpts(namedParentHeaders("X-Claude-Code-Session-Id", s, "X-Claude-Code-Agent-Id", "nested", "X-Claude-Code-Parent-Agent-Id", "sub"), body),
+			}
+		},
+		"user_id JSON parent_session_id": func(i int) []cliproxyexecutor.Options {
+			p, s := fmt.Sprintf("P-%d", i), fmt.Sprintf("S-%d", i)
+			return []cliproxyexecutor.Options{
+				namedParentOpts(nil, userJSON(fmt.Sprintf(`"session_id":%q`, p))),
+				namedParentOpts(nil, userJSON(fmt.Sprintf(`"session_id":%q,"parent_session_id":%q`, s, p))),
+				namedParentOpts(nil, userJSON(fmt.Sprintf(`"session_id":%q,"parent_session_id":%q,"agent_id":"sub"`, s, p))),
+			}
+		},
+		"user_id JSON parent_agent_id": func(i int) []cliproxyexecutor.Options {
+			s := fmt.Sprintf("S-%d", i)
+			return []cliproxyexecutor.Options{
+				namedParentOpts(nil, userJSON(fmt.Sprintf(`"session_id":%q`, s))),
+				namedParentOpts(nil, userJSON(fmt.Sprintf(`"session_id":%q,"agent_id":"sub"`, s))),
+				namedParentOpts(nil, userJSON(fmt.Sprintf(`"session_id":%q,"agent_id":"nested","parent_agent_id":"sub"`, s))),
+			}
+		},
+		"legacy user_id, metadata.parent_agent_id": func(i int) []cliproxyexecutor.Options {
+			s := fmt.Sprintf("abcdef%02d-1111-2222-3333-444455556666", i)
+			uid := `"user_id":"user_x_account_y_session_` + s + `"`
+			return []cliproxyexecutor.Options{
+				namedParentOpts(nil, `{"metadata":{`+uid+`},`+msgs+`}`),
+				namedParentOpts(nil, `{"metadata":{`+uid+`,"agent_id":"sub"},`+msgs+`}`),
+				namedParentOpts(nil, `{"metadata":{`+uid+`,"agent_id":"nested","parent_agent_id":"sub"},`+msgs+`}`),
+			}
+		},
+		"header agents, user_id JSON parent_agent_id": func(i int) []cliproxyexecutor.Options {
+			s := fmt.Sprintf("S-%d", i)
+			return []cliproxyexecutor.Options{
+				namedParentOpts(namedParentHeaders("X-Claude-Code-Session-Id", s), userJSON(fmt.Sprintf(`"session_id":%q`, s))),
+				namedParentOpts(namedParentHeaders("X-Claude-Code-Session-Id", s, "X-Claude-Code-Agent-Id", "sub"), userJSON(fmt.Sprintf(`"session_id":%q,"agent_id":"sub"`, s))),
+				namedParentOpts(namedParentHeaders("X-Claude-Code-Session-Id", s, "X-Claude-Code-Agent-Id", "nested"), userJSON(fmt.Sprintf(`"session_id":%q,"agent_id":"nested","parent_agent_id":"sub"`, s))),
+			}
+		},
+	}
+}
+
+func TestSessionAffinityConsistentHashNamedParentAgentIsNotTheRoot(t *testing.T) {
+	auths := consistentHashAuths("n-a", "n-b", "n-c", "n-d")
+	for name, requests := range namedParentTrees() {
+		for _, replicaCount := range []int{1, 4} {
+			t.Run(fmt.Sprintf("%s/replicas=%d", name, replicaCount), func(t *testing.T) {
+				replicas := make([]*SessionAffinitySelector, replicaCount)
+				for k := range replicas {
+					replicas[k] = newConsistentHashReplica(t, &RoundRobinSelector{}, true)
+					for w := 0; w < k; w++ { // replicas have served different traffic
+						pickConsistentHashAuth(t, replicas[k], claudeSessionOpts(fmt.Sprintf("warm-%d-%d", k, w)), auths)
+					}
+				}
+				split := 0
+				for i := 0; i < 40; i++ {
+					top := ""
+					for k, opts := range requests(i) {
+						got := pickConsistentHashAuth(t, replicas[k%replicaCount], opts, auths)
+						if k == 0 {
+							top = got
+						} else if got != top {
+							split++
+							break
+						}
+					}
+				}
+				if split != 0 {
+					t.Errorf("%d/40 trees split", split)
+				}
+			})
+		}
+	}
+}

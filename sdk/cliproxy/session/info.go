@@ -206,7 +206,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		if agentID != "" && agentID != "main" {
 			info.AgentName = agentID
 			info.RootSessionID = "claude:" + sid
-			if parentCandidate != "" && parentCandidate != sid {
+			if parentCandidate != "" && parentCandidate != sid && !claudeNamesParentAgent(headers, root, parentCandidate) {
 				// The session itself names a parent session: that is the tree's root.
 				info.RootSessionID = "claude:" + parentCandidate
 			}
@@ -263,10 +263,10 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			if agentID != "" && agentID != "main" {
 				info.SessionID = "claude:" + sid + ":agent:" + agentID
 				info.RootSessionID = "claude:" + sid
-				if parentSID != "" && parentSID != sid {
+				if parentSID != "" && parentSID != sid && !claudeNamesParentAgent(headers, root, parentSID) {
 					// The session itself names a parent session: that is the tree's root.
 					info.RootSessionID = "claude:" + parentSID
-				} else if parentCandidate != "" && parentCandidate != sid {
+				} else if parentCandidate != "" && parentCandidate != sid && !claudeNamesParentAgent(headers, root, parentCandidate) {
 					info.RootSessionID = "claude:" + parentCandidate
 				}
 				info.ParentSessionID = "claude:" + sid
@@ -958,6 +958,32 @@ func BoundSessionIdentity(id string) string {
 		prefix = prefix[:len(prefix)-1]
 	}
 	return prefix + "#" + hashHex
+}
+
+// claudeNamesParentAgent reports whether id is the parent agent the request names rather than a
+// parent session: Claude Code's X-Claude-Code-Parent-Agent-Id header, metadata.parent_agent_id,
+// or parent_agent_id inside metadata.user_id JSON. Such an id names a node inside the session's
+// own tree, so it must not become the tree's root.
+func claudeNamesParentAgent(headers http.Header, root interface{ Get(string) gjson.Result }, id string) bool {
+	if id == "" {
+		return false
+	}
+	if sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id") == id {
+		return true
+	}
+	for _, prefix := range []string{"", "request."} {
+		for _, path := range []string{"metadata.parent_agent_id", "metadata.parentAgentId"} {
+			if normalizedSessionCandidate(root.Get(prefix+path).String()) == id {
+				return true
+			}
+		}
+		if userID := strings.TrimSpace(root.Get(prefix + "metadata.user_id").String()); strings.HasPrefix(userID, "{") {
+			if NormalizeExplicitID(gjson.Parse(userID).Get("parent_agent_id").String()) == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
