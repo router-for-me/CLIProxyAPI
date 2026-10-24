@@ -184,6 +184,18 @@ routing:
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
 
+  # Stop routing to a credential once its observed usage reaches a percent of the
+  # provider window. The credential cools down until that window resets, and other
+  # credentials take its requests. When every credential is capped, clients get 429.
+  # Works for providers that report usage: Claude, Codex, and Devin. 0 disables a cap.
+  # Usage is read from upstream responses, so parallel requests can overshoot a little.
+  # Per credential, add a "usage_ceiling" object to the auth JSON; each key it sets
+  # overrides the value here (0 turns the cap off for that credential):
+  #   "usage_ceiling": { "weekly_percent": 70, "short_window_percent": 90 }
+  # usage-ceiling:
+  #   weekly-percent: 100       # Claude 7d, Codex weekly, Devin weekly
+  #   short-window-percent: 100 # Claude 5h, Codex 5h, Devin daily
+
   retry:
     # Number of additional credential retry rounds after the first round exhausts
     # its eligible credentials. Round 0 is the initial round; round r only admits

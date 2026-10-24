@@ -536,6 +536,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if len(models) == 0 {
 			continue
 		}
+		if errCeiling := m.markUsageCeilingResult(execCtx, auth, provider, routeModel, pickOpts); errCeiling != nil {
+			lastErr = errCeiling
+			continue
+		}
 		attempted[auth.ID] = struct{}{}
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
@@ -1083,6 +1087,16 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 			}
 			continue
+		}
+		// Home owns dispatched credential availability; only local selections check the usage ceiling.
+		if selection == nil {
+			if errCeiling := m.markUsageCeilingResult(execCtx, auth, provider, routeModel, pickOpts); errCeiling != nil {
+				lastErr = errCeiling
+				if homeMode {
+					roundTiming.Observe(lastErr)
+				}
+				continue
+			}
 		}
 		attempted[auth.ID] = struct{}{}
 		var errPrepare error

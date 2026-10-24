@@ -446,6 +446,21 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// UsageCeiling stops routing to a credential once its observed upstream usage
+	// reaches a percent of the provider window. An auth file "usage_ceiling" object
+	// overrides these values per credential.
+	UsageCeiling UsageCeilingConfig `yaml:"usage-ceiling,omitempty" json:"usage-ceiling,omitempty"`
+}
+
+// UsageCeilingConfig sets usage percent caps for provider quota windows.
+// Values are 0-100. Zero or a negative value disables the cap.
+// Only providers that report usage (Claude, Codex, Devin) are affected.
+type UsageCeilingConfig struct {
+	// WeeklyPercent caps the weekly window (Claude 7d, Codex weekly, Devin weekly).
+	WeeklyPercent float64 `yaml:"weekly-percent,omitempty" json:"weekly-percent,omitempty"`
+	// ShortWindowPercent caps the short window (Claude 5h, Codex 5h, Devin daily).
+	ShortWindowPercent float64 `yaml:"short-window-percent,omitempty" json:"short-window-percent,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
