@@ -819,6 +819,15 @@ func (m *Manager) RefreshHomeSelectionAfterUnauthorized(ctx context.Context, sel
 	return current, false, nil
 }
 
+// RefreshAfterUnauthorized refreshes a credential once after its upstream
+// answered 401 to a request sent outside the execution pipeline, such as a
+// relay that calls HttpRequest directly. It follows the pipeline's own rules and
+// reports whether a refreshed credential was returned.
+func (m *Manager) RefreshAfterUnauthorized(ctx context.Context, auth *Auth) (*Auth, bool) {
+	unauthorized := &Error{Code: "unauthorized", Message: "upstream returned 401", HTTPStatus: http.StatusUnauthorized}
+	return m.tryRefreshAfterUnauthorized(ctx, auth, unauthorized, false)
+}
+
 // tryRefreshAfterUnauthorized refreshes local OAuth credentials once after a
 // 401 so the current auth can be retried before fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool) {
