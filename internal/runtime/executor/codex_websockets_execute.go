@@ -99,6 +99,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if errPromptCache != nil {
 		return resp, errPromptCache
 	}
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		body = helps.DropOrphanResponsesToolCalls(body)
+	}
 	body = helps.SanitizeCodexInputItemIDs(body)
 	if useSIWC {
 		body = applyCodexSIWCWebsocketBodyRules(body, hasExplicitInstructions, cliproxyexecutor.Options{KeepTopLevelEffort: thinking.HasThinkingSuffix(req.Model)})
