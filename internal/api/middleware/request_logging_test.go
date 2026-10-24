@@ -196,6 +196,61 @@ func TestDeferredRequestBodyCaptureDoesNotDrainUnreadBody(t *testing.T) {
 		t.Fatalf("remaining body = %q, want %q", string(remaining), "emaining-body")
 	}
 }
+func TestRequestLoggingMiddlewareIncludesAuthenticatedNativeRouteAndSkipsUnknownV1(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logsDir := t.TempDir()
+	spy := &spyRequestLogger{underlying: logging.NewFileRequestLogger(true, logsDir, "", 10)}
+	router := gin.New()
+	router.Use(logging.GinLogrusLogger())
+	router.Use(func(c *gin.Context) {
+		if c.Request.URL.Path == "/v1/native" {
+			c.Request = c.Request.WithContext(WithNativeRouteAuthenticated(c.Request.Context()))
+		}
+		c.Next()
+	})
+	router.Use(RequestLoggingMiddleware(spy))
+	router.NoRoute(func(c *gin.Context) { c.Status(http.StatusNotFound) })
+
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/native", strings.NewReader("payload")))
+	if spy.lastLogRequestID == "" {
+		t.Fatal("authenticated native request did not produce a request log")
+	}
+
+	spy.lastLogRequestID = ""
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/unknown", strings.NewReader("payload")))
+	if spy.lastLogRequestID != "" {
+		t.Fatal("unknown /v1 request produced a request log")
+	}
+}
+
+func TestRequestLoggingMiddlewareLogsAuthenticatedNativeGETButSkipsBuiltInGET(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	spy := &spyRequestLogger{underlying: logging.NewFileRequestLogger(true, t.TempDir(), "", 10)}
+	router := gin.New()
+	router.Use(logging.GinLogrusLogger())
+	router.Use(func(c *gin.Context) {
+		if c.Request.URL.Path == "/v1/native" {
+			c.Request = c.Request.WithContext(WithNativeRouteAuthenticated(c.Request.Context()))
+		}
+		c.Next()
+	})
+	router.Use(RequestLoggingMiddleware(spy))
+	router.GET("/v1/models", func(c *gin.Context) { c.Status(http.StatusOK) })
+	router.NoRoute(func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	// Plugin GET routes are API calls, so they are logged like other native requests.
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/native", nil))
+	if spy.lastLogRequestID == "" {
+		t.Fatal("authenticated native GET did not produce a request log")
+	}
+
+	// Built-in GET routes keep the existing skip.
+	spy.lastLogRequestID = ""
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if spy.lastLogRequestID != "" {
+		t.Fatal("built-in GET /v1/models produced a request log")
+	}
+}
 
 func TestRequestLoggingMiddlewareCapturesLargeErrorRequestAndDeferredAPIRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)

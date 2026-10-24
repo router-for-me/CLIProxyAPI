@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,19 @@ const (
 	maxDeferredErrorRequestBodyBytes     int64 = 32 << 20 // 32 MiB
 )
 
+type nativeRouteAuthenticatedKey struct{}
+
+// WithNativeRouteAuthenticated marks a request as having passed native-route authentication.
+func WithNativeRouteAuthenticated(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nativeRouteAuthenticatedKey{}, true)
+}
+
+// NativeRouteAuthenticated reports whether native-route authentication already accepted the request.
+func NativeRouteAuthenticated(ctx context.Context) bool {
+	value, _ := ctx.Value(nativeRouteAuthenticatedKey{}).(bool)
+	return value
+}
+
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
 // and uses the provided RequestLogger to record this data. When full request logging is disabled,
@@ -37,12 +51,17 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		if shouldSkipMethodForRequestLogging(c.Request) {
+		// Plugin GET routes are API calls, so authenticated native requests bypass the built-in GET skip.
+		if !NativeRouteAuthenticated(c.Request.Context()) && shouldSkipMethodForRequestLogging(c.Request) {
 			c.Next()
 			return
 		}
 
 		path := c.Request.URL.Path
+		if c.FullPath() == "" && !NativeRouteAuthenticated(c.Request.Context()) && (path == "/v1" || strings.HasPrefix(path, "/v1/")) {
+			c.Next()
+			return
+		}
 		if !shouldLogRequest(path) {
 			c.Next()
 			return

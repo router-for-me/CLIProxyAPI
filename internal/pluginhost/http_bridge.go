@@ -62,6 +62,9 @@ func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (plu
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if req.MaxResponseBytes < 0 || req.MaxResponseBytes == int64(^uint64(0)>>1) {
+		return pluginapi.HTTPResponse{}, fmt.Errorf("host http request has invalid bounds")
+	}
 	resp, cfg, cleanup, errDo := c.doHTTP(ctx, req)
 	if errDo != nil {
 		return pluginapi.HTTPResponse{}, errDo
@@ -74,31 +77,45 @@ func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (plu
 			cleanup()
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header.Clone())
-	body, errReadAll := io.ReadAll(resp.Body)
-	if len(body) > 0 {
+	if !req.SuppressLogging {
+		helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+	}
+	var body []byte
+	var errReadAll error
+	if req.MaxResponseBytes > 0 {
+		body, errReadAll = io.ReadAll(io.LimitReader(resp.Body, req.MaxResponseBytes+1))
+		if errReadAll == nil && int64(len(body)) > req.MaxResponseBytes {
+			errReadAll = fmt.Errorf("host http response exceeds maximum size of %d bytes", req.MaxResponseBytes)
+		}
+	} else {
+		body, errReadAll = io.ReadAll(resp.Body)
+	}
+	if len(body) > 0 && !req.SuppressLogging {
 		helps.AppendAPIResponseChunk(ctx, cfg, body)
 	}
 	if errReadAll != nil {
-		helps.RecordAPIResponseError(ctx, cfg, errReadAll)
+		if !req.SuppressLogging {
+			helps.RecordAPIResponseError(ctx, cfg, errReadAll)
+		}
 		return pluginapi.HTTPResponse{}, fmt.Errorf("read host http response: %w", errReadAll)
 	}
-	return pluginapi.HTTPResponse{
-		StatusCode: resp.StatusCode,
-		Headers:    cloneHeader(resp.Header),
-		Body:       body,
-	}, nil
+	return pluginapi.HTTPResponse{StatusCode: resp.StatusCode, Headers: cloneHeader(resp.Header), Body: body}, nil
 }
 
 func (c *hostHTTPClient) DoStream(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if req.MaxResponseBytes != 0 {
+		return pluginapi.HTTPStreamResponse{}, fmt.Errorf("host http streaming does not support response bounds")
+	}
 	resp, cfg, cleanup, errDo := c.doHTTP(ctx, req)
 	if errDo != nil {
 		return pluginapi.HTTPStreamResponse{}, errDo
 	}
-	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+	if !req.SuppressLogging {
+		helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+	}
 	chunks := make(chan pluginapi.HTTPStreamChunk)
 	go func() {
 		defer close(chunks)
@@ -115,7 +132,9 @@ func (c *hostHTTPClient) DoStream(ctx context.Context, req pluginapi.HTTPRequest
 			n, errRead := resp.Body.Read(buf)
 			if n > 0 {
 				payload := bytes.Clone(buf[:n])
-				helps.AppendAPIResponseChunk(ctx, cfg, payload)
+				if !req.SuppressLogging {
+					helps.AppendAPIResponseChunk(ctx, cfg, payload)
+				}
 				select {
 				case <-ctx.Done():
 					return
@@ -124,7 +143,9 @@ func (c *hostHTTPClient) DoStream(ctx context.Context, req pluginapi.HTTPRequest
 			}
 			if errRead != nil {
 				if errRead != io.EOF {
-					helps.RecordAPIResponseError(ctx, cfg, errRead)
+					if !req.SuppressLogging {
+						helps.RecordAPIResponseError(ctx, cfg, errRead)
+					}
 					select {
 					case <-ctx.Done():
 					case chunks <- pluginapi.HTTPStreamChunk{Err: errRead}:
@@ -158,7 +179,9 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 		return nil, cfg, nil, fmt.Errorf("create host http request: %w", errNewRequest)
 	}
 	httpReq.Header = cloneHeader(req.Headers)
-	c.recordHTTPRequest(ctx, cfg, httpReq, req.Body)
+	if !req.SuppressLogging {
+		c.recordHTTPRequest(ctx, cfg, httpReq, req.Body)
+	}
 	client, cleanup, errClient := c.newHTTPClientForRequest(ctx, cfg, req, httpReq)
 	if errClient != nil {
 		return nil, cfg, nil, errClient
@@ -166,13 +189,20 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 	if client == nil {
 		client = &http.Client{}
 	}
+	if req.DisableRedirects {
+		clientCopy := *client
+		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &clientCopy
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {
 		if cleanup != nil {
 			cleanup()
 		}
-		helps.RecordAPIResponseError(ctx, cfg, errDo)
+		if !req.SuppressLogging {
+			helps.RecordAPIResponseError(ctx, cfg, errDo)
+		}
 		return nil, cfg, nil, fmt.Errorf("execute host http request: %w", errDo)
 	}
 	return resp, cfg, cleanup, nil

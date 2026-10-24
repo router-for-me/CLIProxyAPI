@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	log "github.com/sirupsen/logrus"
 )
@@ -232,6 +233,7 @@ func (s *Server) refreshPluginManagementRoutes() {
 		return
 	}
 	s.pluginHost.RegisterManagementRoutes(context.Background(), s.registeredManagementRouteKeys())
+	s.pluginHost.RegisterNativeRoutes(context.Background(), s.registeredNativeRouteKeys())
 }
 
 // RefreshPluginManagementRoutes rebuilds plugin-owned Management API routes.
@@ -252,6 +254,65 @@ func (s *Server) registeredManagementRouteKeys() map[string]struct{} {
 	return out
 }
 
+func (s *Server) registeredNativeRouteKeys() map[string]struct{} {
+	out := make(map[string]struct{})
+	if s == nil || s.engine == nil {
+		return out
+	}
+	for _, route := range s.engine.Routes() {
+		if route.Path == "/v1" || strings.HasPrefix(route.Path, "/v1/") {
+			out[strings.ToUpper(strings.TrimSpace(route.Method))+" "+route.Path] = struct{}{}
+		}
+	}
+	return out
+}
+
+func nativeNoRouteAuthenticated(c *gin.Context) bool {
+	return c != nil && c.Request != nil && middleware.NativeRouteAuthenticated(c.Request.Context())
+}
+
+func (s *Server) authenticateNativeNoRoute(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	if s == nil || c.Request == nil || c.Request.URL == nil {
+		c.Next()
+		return
+	}
+	// corsMiddleware answers every OPTIONS request; authenticating it here would reveal registered routes.
+	if c.Request.Method == http.MethodOptions {
+		c.Next()
+		return
+	}
+	if c.FullPath() != "" || nativeNoRouteAuthenticated(c) {
+		c.Next()
+		return
+	}
+	path := c.Request.URL.Path
+	if path != "/v1" && !strings.HasPrefix(path, "/v1/") {
+		c.Next()
+		return
+	}
+	if s.pluginHost == nil || !s.pluginHost.HasNativeRoute(path) {
+		c.Next()
+		return
+	}
+	// Let the Home heartbeat gate report an outage as 503 instead of a credential error.
+	if s.homeHeartbeatUnavailable() {
+		c.Next()
+		return
+	}
+	// Let example-API-key safe mode block native routes with its setup response, as it does built-in /v1 routes.
+	if s.exampleAPIKeySafeModeActive.Load() {
+		c.Next()
+		return
+	}
+	// Browsers can only read a native 401 when it carries the same CORS headers as built-in routes.
+	setCORSHeaders(c)
+	c.Request = c.Request.WithContext(middleware.WithNativeRouteAuthenticated(c.Request.Context()))
+	AuthMiddleware(s.accessManager)(c)
+}
+
 func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
 		if c != nil {
@@ -260,6 +321,30 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	path := c.Request.URL.Path
+	if path == "/v1" || strings.HasPrefix(path, "/v1/") {
+		if s.pluginHost == nil || !s.pluginHost.HasNativeRoute(path) {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		if !nativeNoRouteAuthenticated(c) {
+			AuthMiddleware(s.accessManager)(c)
+			if c.IsAborted() {
+				return
+			}
+		}
+		if c.IsAborted() {
+			return
+		}
+		// Host callback logging records upstream attempts on the Gin context, as for built-in handlers.
+		// Deriving from the request context keeps client-disconnect cancellation.
+		nativeRequest := c.Request.WithContext(context.WithValue(c.Request.Context(), "gin", c))
+		if s.pluginHost.ServeNativeHTTP(c.Writer, nativeRequest) {
+			c.Abort()
+			return
+		}
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
 	if strings.HasPrefix(path, "/v0/resource/plugins/") {
 		s.pluginResourceNoRoute(c)
 		return

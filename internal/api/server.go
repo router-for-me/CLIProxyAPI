@@ -176,6 +176,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
+	// Native auth runs after embedder middleware (which may prepare credentials, as for built-in routes)
+	// and before request logging, so unauthenticated native bodies are never logged.
+	engine.Use(s.authenticateNativeNoRoute)
 
 	// Add request logging middleware (positioned after recovery, before auth)
 	// Resolve logs directory relative to the configuration file directory.
