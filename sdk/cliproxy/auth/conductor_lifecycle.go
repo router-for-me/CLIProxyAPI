@@ -374,6 +374,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		existingVersion = 1
 	}
 	credChanged := CredentialsChanged(existing, auth)
+	auth.geminiAppCookieEpoch = existing.geminiAppCookieEpoch
+	if mode == updateModeReplace && geminiAppCookiesChanged(existing, auth) {
+		auth.geminiAppCookieEpoch++
+	}
 	if credChanged {
 		auth.CredentialVersion = max(auth.CredentialVersion, existingVersion) + 1
 	} else {

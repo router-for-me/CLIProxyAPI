@@ -1980,7 +1980,12 @@ func isConnectionLifecycleError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	return isConnectionLifecycleMessage(err.Error())
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if isConnectionLifecycleMessage(cause.Error()) {
+			return true
+		}
+	}
+	return false
 }
 
 func isConnectionLifecycleResultError(err *Error) bool {
@@ -2075,7 +2080,12 @@ func isTransientTransportError(err error) bool {
 	if errors.As(err, &opErr) && opErr != nil {
 		return true
 	}
-	return isTransientTransportMessage(err.Error())
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if isTransientTransportMessage(cause.Error()) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTransientTransportResultError(err *Error) bool {

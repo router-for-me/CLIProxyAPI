@@ -126,6 +126,8 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+	// geminiAppCookieEpoch distinguishes explicit replacements from upstream rotations.
+	geminiAppCookieEpoch uint64
 	// fileSnapshotPath and fileSnapshotDigest bind an unversioned file-synthesized
 	// Auth snapshot to the source file path and SHA-256 byte digest it observed.
 	// Cleared when committed to a Manager so runtime clones are not treated as
