@@ -550,6 +550,7 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 // use it for membership checks or feed it to highestPriorityAuths, never as a priority-ordered
 // selection order.
 func availableAuthsFromPriorityBuckets(availableByPriority map[int][]*Auth, allPriorities bool) []*Auth {
+	availableByPriority = dropCodexQuotaRecheckBuckets(availableByPriority, time.Now())
 	var candidates []*Auth
 	if allPriorities {
 		total := 0
@@ -583,6 +584,7 @@ func availableAuthsFromPriorityBuckets(availableByPriority map[int][]*Auth, allP
 // preserving the input order. The input slice is returned unchanged when every candidate
 // already shares the highest priority, so the common single-tier case allocates nothing.
 func highestPriorityAuths(auths []*Auth) []*Auth {
+	auths = withoutCodexQuotaRecheck(auths, time.Now())
 	if len(auths) <= 1 {
 		return auths
 	}
@@ -608,6 +610,62 @@ func highestPriorityAuths(auths []*Auth) []*Auth {
 		}
 	}
 	return highest
+}
+
+// codexQuotaRecheckPending reports a Codex credential whose upstream reset is
+// still ahead of the shortened local cooldown. Selection should probe it only
+// when every other credential is unavailable.
+func codexQuotaRecheckPending(auth *Auth, now time.Time) bool {
+	return auth != nil && auth.Quota.RecheckUntil.After(now)
+}
+
+// withoutCodexQuotaRecheck drops credentials that are waiting for a quota
+// recheck when at least one other credential is ready. An all-recheck pool is
+// returned unchanged so the release check still has a candidate.
+func withoutCodexQuotaRecheck(auths []*Auth, now time.Time) []*Auth {
+	if len(auths) < 2 {
+		return auths
+	}
+	kept := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if !codexQuotaRecheckPending(auth, now) {
+			kept = append(kept, auth)
+		}
+	}
+	if len(kept) == 0 || len(kept) == len(auths) {
+		return auths
+	}
+	return kept
+}
+
+func dropCodexQuotaRecheckBuckets(available map[int][]*Auth, now time.Time) map[int][]*Auth {
+	if len(available) == 0 {
+		return available
+	}
+	hasReady := false
+	for _, bucket := range available {
+		for _, auth := range bucket {
+			if !codexQuotaRecheckPending(auth, now) {
+				hasReady = true
+				break
+			}
+		}
+		if hasReady {
+			break
+		}
+	}
+	if !hasReady {
+		return available
+	}
+	filtered := make(map[int][]*Auth, len(available))
+	for priority, bucket := range available {
+		for _, auth := range bucket {
+			if !codexQuotaRecheckPending(auth, now) {
+				filtered[priority] = append(filtered[priority], auth)
+			}
+		}
+	}
+	return filtered
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
@@ -1160,6 +1218,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
+	bindingPool := withoutCodexQuotaRecheck(available, now)
 	fallbackAuths := highestPriorityAuths(available)
 
 	modelKey := canonicalModelKey(model)
@@ -1197,7 +1256,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
-		for _, auth := range available {
+		for _, auth := range bindingPool {
 			if auth.ID == cachedAuthID {
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
@@ -1247,7 +1306,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
-			for _, auth := range available {
+			for _, auth := range bindingPool {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID, true)
@@ -1325,8 +1384,9 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	}
 
 	var preservedAuthID string
+	lcpPool := withoutCodexQuotaRecheck(available, now)
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
-		for _, auth := range available {
+		for _, auth := range lcpPool {
 			if auth == nil || auth.ID != match.AuthID {
 				continue
 			}

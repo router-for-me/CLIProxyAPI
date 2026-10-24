@@ -162,7 +162,8 @@ func TestCodexDuplexInitialFailure(t *testing.T) {
 					if state == nil || state.LastError == nil || state.LastError.HTTPStatus != tc.status || !state.Unavailable {
 						t.Fatalf("initial failure was not recorded: %+v", state)
 					}
-					if tc.quota && (current.Quota.Reason != "credential_quota" || current.Quota.NextRecoverAt.Before(before.Add(time.Hour))) {
+					recoverAt := current.Quota.NextRecoverAt
+					if tc.quota && (current.Quota.Reason != "credential_quota" || recoverAt.Before(before.Add(4*time.Minute)) || recoverAt.After(before.Add(6*time.Minute))) {
 						t.Fatalf("credential quota cooldown lost: %+v", current.Quota)
 					}
 				}

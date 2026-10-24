@@ -315,6 +315,10 @@ type QuotaState struct {
 	Reason string `json:"reason,omitempty"`
 	// NextRecoverAt is when the credential may become available again.
 	NextRecoverAt time.Time `json:"next_recover_at"`
+	// RecheckUntil is the upstream reset hint when NextRecoverAt was shortened
+	// so a later request can probe early. While it is in the future, selection
+	// uses another ready credential first.
+	RecheckUntil time.Time `json:"recheck_until,omitempty"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
 	// ObservedAt is the time the current Signals snapshot was observed.
