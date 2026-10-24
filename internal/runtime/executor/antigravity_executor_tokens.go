@@ -70,6 +70,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, errReplay
 	}
 	payload = ensureAntigravityGeminiLeadingUserContent(baseModel, preparedPayload)
+	payload = helps.EnsureAntigravityGeminiToolResultBoundary(baseModel, payload, "request.contents")
 
 	payload = helps.DeleteJSONField(payload, "project")
 	payload = helps.DeleteJSONField(payload, "model")
