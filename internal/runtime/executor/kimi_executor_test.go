@@ -129,6 +129,117 @@ func TestKimiExecutorResponsesPassthrough(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorResponsesCustomToolBridge(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_custom","object":"response","status":"completed","output":[{"id":"fc_2","type":"function_call","status":"completed","call_id":"call_2","name":"exec","arguments":"{\"input\":\"ls\"}"}]}`)),
+		}, nil
+	}))
+
+	payload := []byte(`{
+		"model":"kimi-k3",
+		"tools":[{"type":"custom","name":"exec"},{"type":"function","name":"read","parameters":{}}],
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},
+			{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"exec","input":"pwd"},
+			{"type":"custom_tool_call_output","id":"ctco_1","call_id":"call_1","output":"/tmp"}
+		]
+	}`)
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://api.kimi.com/coding"}, Metadata: map[string]any{"access_token": "test-key"}}
+	response, errExecute := executor.Execute(ctx, auth, cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if got := gjson.GetBytes(upstreamBody, "tools.0.type").String(); got != "function" {
+		t.Fatalf("upstream exec type = %q, want function: %s", got, upstreamBody)
+	}
+	if got := gjson.GetBytes(upstreamBody, "input.1.type").String(); got != "function_call" {
+		t.Fatalf("upstream custom history type = %q, want function_call: %s", got, upstreamBody)
+	}
+	if got := gjson.GetBytes(upstreamBody, "input.1.id").String(); got != "fc_1" {
+		t.Fatalf("upstream custom history id = %q, want fc_1", got)
+	}
+	if got := gjson.GetBytes(upstreamBody, "input.2.type").String(); got != "function_call_output" {
+		t.Fatalf("upstream custom output type = %q, want function_call_output: %s", got, upstreamBody)
+	}
+	if got := gjson.GetBytes(response.Payload, "output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("client response custom type = %q, want custom_tool_call: %s", got, response.Payload)
+	}
+	if got := gjson.GetBytes(response.Payload, "output.0.id").String(); got != "ctc_2" {
+		t.Fatalf("client response custom id = %q, want ctc_2", got)
+	}
+	if got := gjson.GetBytes(response.Payload, "output.0.input").String(); got != "ls" {
+		t.Fatalf("client response custom input = %q, want ls", got)
+	}
+}
+
+func TestKimiExecutorResponsesCustomToolBridgeStream(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		stream := strings.Join([]string{
+			"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"\"}}\n\n",
+			"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":2,\"item_id\":\"fc_1\",\"delta\":\"{\\\"input\\\":\\\"pwd\\\"}\"}\n\n",
+			"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"{\\\"input\\\":\\\"pwd\\\"}\"}}\n\n",
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_stream\",\"output\":[{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"{\\\"input\\\":\\\"pwd\\\"}\"}]}}\n\n",
+			"data: [DONE]\n\n",
+		}, "")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(stream)),
+		}, nil
+	}))
+
+	payload := []byte(`{"model":"kimi-k3","stream":true,"tools":[{"type":"custom","name":"exec"}],"input":[{"type":"message","role":"user","content":"run"}]}`)
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://api.kimi.com/coding"}, Metadata: map[string]any{"access_token": "test-key"}}
+	result, errExecute := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+		Stream:          true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	var output []byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		output = append(output, chunk.Payload...)
+	}
+	if got := gjson.GetBytes(upstreamBody, "tools.0.type").String(); got != "function" {
+		t.Fatalf("upstream exec type = %q, want function", got)
+	}
+	if bytes.Contains(output, []byte("response.function_call_arguments")) {
+		t.Fatalf("function argument events leaked: %s", output)
+	}
+	if !bytes.Contains(output, []byte("response.custom_tool_call_input.done")) || !bytes.Contains(output, []byte(`"type":"custom_tool_call"`)) {
+		t.Fatalf("custom stream events missing: %s", output)
+	}
+	if !bytes.Contains(output, []byte(`"id":"ctc_1"`)) || !bytes.Contains(output, []byte(`"input":"pwd"`)) {
+		t.Fatalf("custom stream identity/input missing: %s", output)
+	}
+}
+
 func TestKimiExecutorResponsesStreamPassthrough(t *testing.T) {
 	var upstreamURL string
 	var upstreamBody []byte

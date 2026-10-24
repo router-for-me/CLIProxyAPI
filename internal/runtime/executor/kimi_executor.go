@@ -458,10 +458,19 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
+	originalRequest := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalRequest = opts.OriginalRequest
+	}
 	var errNormalizePatch error
 	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body)
 	if errNormalizePatch != nil {
 		return resp, errNormalizePatch
+	}
+	var errNormalizeCustom error
+	body, errNormalizeCustom = helps.NormalizeKimiResponsesCustomTools(body)
+	if errNormalizeCustom != nil {
+		return resp, fmt.Errorf("kimi executor: failed to normalize custom tools: %w", errNormalizeCustom)
 	}
 	var errNormalizeInput error
 	body, errNormalizeInput = helps.NormalizeKimiResponsesInput(body)
@@ -533,13 +542,14 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
 
-	originalRequest := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalRequest = opts.OriginalRequest
-	}
 	bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
 	out, errTransform := bridge.Bridge.TransformNonStream(data)
 	if errTransform != nil || (len(out) == 0 && helps.ApplyPatchRequested(originalRequest)) {
+		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	customBridge := helps.NewKimiResponsesCustomToolState(originalRequest)
+	out, errTransform = customBridge.TransformNonStream(out)
+	if errTransform != nil {
 		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 	}
 	if responseFormat != sdktranslator.FormatOpenAIResponse {
@@ -596,10 +606,19 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
+	originalRequest := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalRequest = opts.OriginalRequest
+	}
 	var errNormalizePatch error
 	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body)
 	if errNormalizePatch != nil {
 		return nil, errNormalizePatch
+	}
+	var errNormalizeCustom error
+	body, errNormalizeCustom = helps.NormalizeKimiResponsesCustomTools(body)
+	if errNormalizeCustom != nil {
+		return nil, fmt.Errorf("kimi executor: failed to normalize custom tools: %w", errNormalizeCustom)
 	}
 	var errNormalizeInputStream error
 	body, errNormalizeInputStream = helps.NormalizeKimiResponsesInput(body)
@@ -672,11 +691,8 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800)
-		originalRequest := req.Payload
-		if len(opts.OriginalRequest) > 0 {
-			originalRequest = opts.OriginalRequest
-		}
 		bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
+		customBridge := helps.NewKimiResponsesCustomToolState(originalRequest)
 		sendFailure := func(errFailure error) {
 			errFailure = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 			reporter.PublishFailure(ctx, errFailure)
@@ -739,8 +755,16 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 				reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			}
 			for _, converted := range lines {
-				if !emitTranslatedLine(converted) {
+				customLines, errCustom := customBridge.Stream(converted)
+				if errCustom != nil {
+					reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+					sendFailure(errCustom)
 					return
+				}
+				for _, customLine := range customLines {
+					if !emitTranslatedLine(customLine) {
+						return
+					}
 				}
 			}
 			if errTransform != nil {
@@ -753,11 +777,28 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 			reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 		}
 		for _, event := range finishEvents {
+			customEvents, errCustom := customBridge.Stream(event)
+			if errCustom != nil {
+				reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+				sendFailure(errCustom)
+				return
+			}
+			for _, customEvent := range customEvents {
+				if !emitTranslatedLine(customEvent) {
+					return
+				}
+			}
+		}
+		customFinishEvents, errCustomFinish := customBridge.FinishStream()
+		if errCustomFinish != nil {
+			reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		}
+		for _, event := range customFinishEvents {
 			if !emitTranslatedLine(event) {
 				return
 			}
 		}
-		if errFinish != nil {
+		if errFinish != nil || errCustomFinish != nil {
 			sendFailure(errFinish)
 			return
 		}
@@ -837,6 +878,10 @@ func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 		}
 		var errNormalize error
 		req.Payload, errNormalize = helps.NormalizeApplyPatchResponsesRequest(req.Payload)
+		if errNormalize != nil {
+			return cliproxyexecutor.Response{}, errNormalize
+		}
+		req.Payload, errNormalize = helps.NormalizeKimiResponsesCustomTools(req.Payload)
 		if errNormalize != nil {
 			return cliproxyexecutor.Response{}, errNormalize
 		}
