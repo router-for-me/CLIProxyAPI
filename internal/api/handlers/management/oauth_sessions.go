@@ -208,7 +208,7 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if session.SIWC == nil && !session.Saving && !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
+		if !session.Device && session.SIWC == nil && !session.Saving && !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
 			session.Status = ""
 			session.Metadata = nil
 			session.Completed = true
