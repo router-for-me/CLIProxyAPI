@@ -1155,7 +1155,12 @@ type statusErr struct {
 	msg              string
 	retryAfter       *time.Duration
 	credentialScoped bool
+	delegatedCode    string
+	delegatedScope   string
 }
+
+// DelegatedFailure is set only by the Codex upstream structured decoder.
+func (e statusErr) DelegatedFailure() (string, string) { return e.delegatedCode, e.delegatedScope }
 
 func (e statusErr) Error() string {
 	if e.msg != "" {
