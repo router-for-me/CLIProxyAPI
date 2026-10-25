@@ -43,6 +43,9 @@ type ModelInfo struct {
 	// MetadataModelID identifies the canonical model used to resolve client metadata.
 	// It is internal and must not be exposed in model-list responses.
 	MetadataModelID string `json:"-"`
+	// UpstreamModelID retains the account-entitled wire model behind a public ID.
+	// It is internal routing metadata and must not appear in model-list responses.
+	UpstreamModelID string `json:"-"`
 	// ExplicitThinking indicates thinking/reasoning configuration was explicitly configured for this model.
 	ExplicitThinking bool `json:"-"`
 	// ExplicitInputModalities indicates input modalities were explicitly configured for this model.
@@ -266,6 +269,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	if modelID == "" {
 		return nil
 	}
+	modelID = normalizeAntigravityModelID(modelID)
 
 	p := ""
 	if len(provider) > 0 {

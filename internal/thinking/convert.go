@@ -96,6 +96,17 @@ func ConvertBudgetToLevel(budget int) (string, bool) {
 	}
 }
 
+// ConvertBudgetToSupportedLevel converts a budget and applies central level clamping.
+// Providers that serialize hybrid models as levels must use the same supported set
+// as the canonical validator rather than emitting an unsupported standard level.
+func ConvertBudgetToSupportedLevel(budget int, modelInfo *registry.ModelInfo, provider string) (string, bool) {
+	level, ok := ConvertBudgetToLevel(budget)
+	if !ok {
+		return "", false
+	}
+	return string(clampLevel(ThinkingLevel(level), modelInfo, provider)), true
+}
+
 // HasLevel reports whether the given target level exists in the levels slice.
 // Matching is case-insensitive with leading/trailing whitespace trimmed.
 func HasLevel(levels []string, target string) bool {
