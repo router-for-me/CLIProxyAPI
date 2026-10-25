@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -101,7 +102,47 @@ func parseLastRefreshValue(v any) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+func safeAuthFileEntry(entry gin.H, auth *coreauth.Auth) gin.H {
+	if entry == nil {
+		return nil
+	}
+	var panicErr any
+	var marshalErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicErr = r
+			}
+		}()
+		_, marshalErr = json.Marshal(entry)
+	}()
+	if panicErr != nil || marshalErr != nil {
+		log.Errorf("auth file entry %s failed json.Marshal (panic=%v, err=%v), degrading safely", auth.ID, panicErr, marshalErr)
+		name := auth.ID
+		if auth.FileName != "" {
+			name = filepath.Base(auth.FileName)
+		}
+		return gin.H{
+			"id":          auth.ID,
+			"auth_index":  auth.Index,
+			"name":        name,
+			"provider":    auth.Provider,
+			"status":      auth.Status,
+			"disabled":    auth.Disabled,
+			"unavailable": auth.Unavailable,
+			"source":      "file",
+		}
+	}
+	return entry
+}
+
 func (h *Handler) ListAuthFiles(c *gin.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("ListAuthFiles recovered from panic: %v", r)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list auth files: %v", r)})
+		}
+	}()
 	if h == nil {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
 		return
@@ -147,7 +188,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 				if cooldownsKnown {
 					entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
 				}
-				files = append(files, entry)
+				files = append(files, safeAuthFileEntry(entry, auth))
 			}
 		}
 		c.JSON(200, authFilesListResponse(observedAt, files, pagination, total, end))
@@ -163,7 +204,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 			if cooldownsKnown {
 				entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
 			}
-			files = append(files, entry)
+			files = append(files, safeAuthFileEntry(entry, auth))
 		}
 	}
 	sort.Slice(files, func(i, j int) bool {
