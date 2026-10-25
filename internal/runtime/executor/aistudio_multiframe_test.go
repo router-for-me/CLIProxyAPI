@@ -80,7 +80,11 @@ func streamThroughRelay(t *testing.T, source sdktranslator.Format, chunks []stri
 	if errDial != nil {
 		t.Fatal(errDial)
 	}
-	defer conn.Close()
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
 	<-connected
 	clientDone := make(chan error, 1)
 	go func() {
