@@ -8013,3 +8013,39 @@ func TestResponsesWebsocketReauthorizesEachTurnAndKeepsSocketOpen(t *testing.T) 
 		}
 	}
 }
+
+// The stream producers buffer a terminal error, then close errs and data. forwardResponsesWebsocket
+// must report that error, not "stream closed before response.completed", whichever channel its
+// select reads first; otherwise a pinned-auth failure loses its replay close.
+func TestForwardResponsesWebsocketPrefersBufferedErrorOverClosedData(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	want := &interfaces.ErrorMessage{StatusCode: http.StatusUnauthorized, Error: errors.New("credential failed")}
+	for _, duplex := range []bool{false, true} {
+		for i := 0; i < 200; i++ {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/responses/ws", nil)
+			data := make(chan []byte)
+			errCh := make(chan *interfaces.ErrorMessage, 1)
+			errCh <- want
+			close(errCh)
+			close(data)
+			_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
+				ctx,
+				newResponsesWebsocketWriter(nil),
+				func(...interface{}) {},
+				data,
+				errCh,
+				nil,
+				"session-1",
+				responsesWebsocketForwardOptions{
+					suppressError: func(*interfaces.ErrorMessage) bool { return true },
+					duplexStream:  func() bool { return duplex },
+				},
+			)
+			if errMsg != want || errForward != nil {
+				t.Fatalf("duplex=%v iteration %d: errMsg = %v, err = %v; want the buffered credential error", duplex, i, errMsg, errForward)
+			}
+		}
+	}
+}
