@@ -81,7 +81,7 @@ func TestStartOAuthV8CodexDeviceFlowBoundsPersistence(t *testing.T) {
 				<-deadline.C
 				synctest.Wait()
 				session, ok := sessions.Get(result.State)
-				if !ok || session.Saving || session.Status != "Failed to save authentication tokens" {
+				if !ok || session.Committing || session.Status != "Failed to save authentication tokens" {
 					t.Errorf("stalled persistence did not resolve to an error: %#v, exists=%t", session, ok)
 				}
 				if ctx.Err() == nil {

@@ -146,7 +146,8 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 			if len(chunkOutputs) > 0 {
 				results = append(results, chunkOutputs...)
-				if !delta.Get("tool_calls").Exists() {
+				finishReason := choice.Get("finish_reason")
+				if !delta.Get("tool_calls").Exists() && (finishReason.Type != gjson.String || finishReason.String() == "") {
 					return true
 				}
 			}

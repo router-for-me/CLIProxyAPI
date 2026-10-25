@@ -14,7 +14,7 @@ func TestOAuthSessionSaveSurvivesExpiryUntilPersistenceResolves(t *testing.T) {
 			replaceOAuthSessionStoreForTest(t, store)
 			store.Register("saving-state", "codex")
 			store.Register("pending-state", "codex")
-			if !store.BeginSave("saving-state", "codex") {
+			if !store.claimCommit("saving-state", "codex") {
 				t.Fatal("could not claim session for persistence")
 			}
 			store.mu.Lock()
@@ -46,7 +46,7 @@ func TestOAuthSessionSaveSurvivesExpiryUntilPersistenceResolves(t *testing.T) {
 			if outcome == "success" {
 				store.Complete("saving-state")
 			} else {
-				store.SetError("saving-state", "persistence failed")
+				store.FailCommit("saving-state", "persistence failed")
 			}
 			status := performOAuthStatusRequest(t, router, "saving-state")
 			if outcome == "success" && status.Status != "ok" {
@@ -56,7 +56,7 @@ func TestOAuthSessionSaveSurvivesExpiryUntilPersistenceResolves(t *testing.T) {
 				t.Fatalf("status after saving = %#v, want persistence error", status)
 			}
 			session, ok := store.Get("saving-state")
-			if !ok || session.Saving || !session.ExpiresAt.After(time.Now()) {
+			if !ok || session.Committing || !session.ExpiresAt.After(time.Now()) {
 				t.Fatalf("resolved session did not resume normal expiry: %#v, exists=%t", session, ok)
 			}
 			store.mu.Lock()

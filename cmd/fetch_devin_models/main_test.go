@@ -24,6 +24,9 @@ func TestSplitDevinUID(t *testing.T) {
 		{"swe-1-6-slow", "swe-1-6-slow", ""},
 		{"swe-1-6-fast", "swe-1-6", ""},
 		{"swe-2", "swe-2", ""},
+		{"swe-2-medium-lightning", "swe-2-lightning", "medium"},
+		{"swe-2-high-lightning", "swe-2-lightning", "high"},
+		{"swe-2-max-lightning", "swe-2-lightning", "max"},
 	}
 
 	for _, tt := range tests {

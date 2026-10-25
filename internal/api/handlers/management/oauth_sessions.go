@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -43,13 +45,14 @@ type oauthSession struct {
 	Provider       string
 	Status         string
 	Source         string
+	ProxyURL       string
 	Metadata       map[string]any
+	SIWC           *siwcBindSession
+	Committing     bool
+	SIWCCommitting bool
 	Completed      bool
-	Saving         bool
 	CreatedAt      time.Time
 	ExpiresAt      time.Time
-	SIWC           *siwcBindSession
-	SIWCCommitting bool
 }
 
 type oauthSessionStore struct {
@@ -76,7 +79,7 @@ func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 
 func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	for state, session := range s.sessions {
-		if !session.Saving && !session.SIWCCommitting && !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
+		if (session.Completed || (!session.Committing && !session.SIWCCommitting)) && !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
 			if session.SIWC != nil {
 				session.SIWC.cancel()
 			}
@@ -86,16 +89,21 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 }
 
 func (s *oauthSessionStore) Register(state, provider string) {
-	s.register(state, provider, false)
+	s.RegisterWithProxy(state, provider, "")
 }
 
-func (s *oauthSessionStore) registerDevice(state, provider string) {
-	s.register(state, provider, true)
+func (s *oauthSessionStore) RegisterWithProxy(state, provider, proxyURL string) {
+	s.register(state, provider, proxyURL, false)
 }
 
-func (s *oauthSessionStore) register(state, provider string, device bool) {
+func (s *oauthSessionStore) registerDevice(state, provider, proxyURL string) {
+	s.register(state, provider, proxyURL, true)
+}
+
+func (s *oauthSessionStore) register(state, provider, proxyURL string, device bool) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	proxyURL = strings.TrimSpace(proxyURL)
 	if state == "" || provider == "" {
 		return
 	}
@@ -110,14 +118,20 @@ func (s *oauthSessionStore) register(state, provider string, device bool) {
 		Provider:  provider,
 		Status:    "",
 		Source:    oauthSessionSourceBuiltin,
+		ProxyURL:  proxyURL,
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
 }
 
 func (s *oauthSessionStore) RegisterPlugin(state, provider string, metadata map[string]any) error {
+	return s.RegisterPluginWithProxy(state, provider, metadata, "")
+}
+
+func (s *oauthSessionStore) RegisterPluginWithProxy(state, provider string, metadata map[string]any, proxyURL string) error {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	proxyURL = strings.TrimSpace(proxyURL)
 	if state == "" || provider == "" {
 		return fmt.Errorf("%w: empty state or provider", errInvalidOAuthState)
 	}
@@ -137,6 +151,7 @@ func (s *oauthSessionStore) RegisterPlugin(state, provider string, metadata map[
 		Provider:  provider,
 		Status:    "",
 		Source:    oauthSessionSourcePlugin,
+		ProxyURL:  proxyURL,
 		Metadata:  cloneOAuthSessionMetadata(metadata),
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
@@ -160,14 +175,76 @@ func (s *oauthSessionStore) SetError(state, message string) {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed {
+	if !ok || session.Completed || session.Committing {
 		return
 	}
-	session.Status = message
-	session.Saving = false
+	session.Status = redactSessionProxyInString(message, session.ProxyURL)
+	session.ProxyURL = ""
 	session.SIWCCommitting = false
 	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
+}
+
+func (s *oauthSessionStore) FailCommit(state, message string) {
+	state = strings.TrimSpace(state)
+	message = strings.TrimSpace(message)
+	if state == "" {
+		return
+	}
+	if message == "" {
+		message = "Authentication failed"
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed {
+		return
+	}
+	session.Status = redactSessionProxyInString(message, session.ProxyURL)
+	session.ProxyURL = ""
+	session.Committing = false
+	session.SIWCCommitting = false
+	session.ExpiresAt = now.Add(s.ttl)
+	s.sessions[state] = session
+}
+
+func (s *oauthSessionStore) FailPendingPoll(state, message string) (errStatus string, completed bool, committing bool, ok bool) {
+	state = strings.TrimSpace(state)
+	message = strings.TrimSpace(message)
+	if state == "" {
+		return "", false, false, false
+	}
+	if message == "" {
+		message = "Authentication failed"
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, exists := s.sessions[state]
+	if !exists {
+		return "", false, false, false
+	}
+	if session.Completed {
+		return "", true, false, true
+	}
+	if session.Committing || session.SIWCCommitting {
+		return "", false, true, true
+	}
+	if session.Status != "" {
+		return session.Status, false, false, true
+	}
+	session.Status = redactSessionProxyInString(message, session.ProxyURL)
+	session.ProxyURL = ""
+	session.ExpiresAt = now.Add(s.ttl)
+	s.sessions[state] = session
+	return session.Status, false, false, true
 }
 
 func (s *oauthSessionStore) Complete(state string) {
@@ -186,8 +263,9 @@ func (s *oauthSessionStore) Complete(state string) {
 		return
 	}
 	session.Status = ""
+	session.ProxyURL = ""
 	session.Metadata = nil
-	session.Saving = false
+	session.Committing = false
 	session.SIWCCommitting = false
 	session.Completed = true
 	session.ExpiresAt = now.Add(s.completedTTL)
@@ -208,9 +286,12 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if !session.Device && session.SIWC == nil && !session.Saving && !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
+		if !session.Device && session.SIWC == nil && !session.Completed && !session.Committing && !session.SIWCCommitting && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
 			session.Status = ""
+			session.ProxyURL = ""
 			session.Metadata = nil
+			session.Committing = false
+			session.SIWCCommitting = false
 			session.Completed = true
 			session.ExpiresAt = now.Add(s.completedTTL)
 			s.sessions[state] = session
@@ -255,6 +336,30 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	return strings.EqualFold(session.Provider, provider)
 }
 
+func (s *oauthSessionStore) claimCommit(state, provider string) bool {
+	state = strings.TrimSpace(state)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if state == "" {
+		return false
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed || session.Status != "" || session.Committing || session.SIWCCommitting {
+		return false
+	}
+	if provider != "" && !strings.EqualFold(session.Provider, provider) {
+		return false
+	}
+	session.Committing = true
+	s.sessions[state] = session
+	return true
+}
+
 // Cancel removes a pending OAuth session so background waiters exit without saving credentials.
 // Returns true when a pending session was cancelled.
 func (s *oauthSessionStore) Cancel(state string) bool {
@@ -275,7 +380,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Saving || session.Status != "" {
+	if !ok || session.Completed || session.Status != "" || session.Committing || session.SIWCCommitting {
 		return false
 	}
 	if session.SIWC != nil {
@@ -283,25 +388,6 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 		session.SIWC.pkce = nil
 	}
 	delete(s.sessions, state)
-	return true
-}
-
-// BeginSave atomically claims a pending session before persistence begins.
-// Until Complete or SetError releases the claim, cancellation and expiry cannot
-// discard the result because persistence may already have side effects.
-func (s *oauthSessionStore) BeginSave(state, provider string) bool {
-	state = strings.TrimSpace(state)
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.purgeExpiredLocked(time.Now())
-	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Saving || session.Status != "" || !strings.EqualFold(session.Provider, provider) {
-		return false
-	}
-	session.Saving = true
-	s.sessions[state] = session
 	return true
 }
 
@@ -329,14 +415,52 @@ var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
 
 func RegisterDeviceOAuthSession(state, provider string) {
-	oauthSessions.registerDevice(state, provider)
+	oauthSessions.registerDevice(state, provider, "")
+}
+
+func RegisterOAuthSessionWithProxy(state, provider, proxyURL string) {
+	oauthSessions.RegisterWithProxy(state, provider, proxyURL)
 }
 
 func RegisterPluginOAuthSession(state, provider string, metadata map[string]any) error {
 	return oauthSessions.RegisterPlugin(state, provider, metadata)
 }
 
+func RegisterPluginOAuthSessionWithProxy(state, provider string, metadata map[string]any, proxyURL string) error {
+	return oauthSessions.RegisterPluginWithProxy(state, provider, metadata, proxyURL)
+}
+
+func GetOAuthSessionProxyURL(state string) string {
+	session, ok := oauthSessions.Get(state)
+	if !ok || session.Completed || session.Status != "" {
+		return ""
+	}
+	return strings.TrimSpace(session.ProxyURL)
+}
+
+func redactSessionProxyInString(text, proxyURL string) string {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if text == "" || proxyURL == "" {
+		return text
+	}
+	redacted := proxyutil.Redact(proxyURL)
+	if redacted != "" && redacted != proxyURL {
+		text = strings.ReplaceAll(text, proxyURL, redacted)
+	}
+	if parsed, errParse := url.Parse(proxyURL); errParse == nil && parsed != nil && parsed.User != nil {
+		if userInfo := parsed.User.String(); userInfo != "" {
+			text = strings.ReplaceAll(text, userInfo, "redacted")
+		}
+		if password, hasPass := parsed.User.Password(); hasPass && password != "" {
+			text = strings.ReplaceAll(text, password, "redacted")
+		}
+	}
+	return text
+}
+
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
+
+func FailOAuthSessionCommit(state, message string) { oauthSessions.FailCommit(state, message) }
 
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
 
@@ -374,6 +498,16 @@ func IsOAuthSessionPending(state, provider string) bool {
 // exchange or metadata fetch cannot save credentials for a cancelled flow.
 func guardOAuthSessionPendingForSave(state, provider string) error {
 	if IsOAuthSessionPending(state, provider) {
+		return nil
+	}
+	return errOAuthSessionNotPending
+}
+
+// claimOAuthSessionCommit atomically verifies that the session is still pending
+// and transitions it into the committing state so a concurrent CancelOAuthSession
+// cannot report true while credentials are being persisted.
+func claimOAuthSessionCommit(state, provider string) error {
+	if oauthSessions.claimCommit(state, provider) {
 		return nil
 	}
 	return errOAuthSessionNotPending

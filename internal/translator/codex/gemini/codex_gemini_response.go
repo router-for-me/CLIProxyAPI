@@ -343,6 +343,8 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		template, _ = sjson.SetBytes(template, "usageMetadata.totalTokenCount", totalTokens)
 		if typeStr == "response.incomplete" {
 			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", codexGeminiIncompleteFinishReason(rootResult.Get("response.incomplete_details.reason").String()))
+		} else {
+			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", "STOP")
 		}
 	} else {
 		return [][]byte{}

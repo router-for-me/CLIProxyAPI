@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -26,8 +27,15 @@ type callbackForwarder struct {
 }
 
 func isWebUIRequest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
 	raw := strings.TrimSpace(c.Query("is_webui"))
 	if raw == "" {
+		if val, ok := c.Get(oauthSessionIsWebUIContextKey); ok {
+			b, _ := val.(bool)
+			return b
+		}
 		return false
 	}
 	switch strings.ToLower(raw) {
@@ -172,11 +180,21 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 		return false
 	}
 	provider, ok := pluginAuthProviderFromURL(c.Request.URL)
+	if !ok && strings.TrimSpace(c.Request.URL.Path) == "/v8/management/oauth/auth-url" {
+		normalized, errNormalize := NormalizePluginOAuthCallbackProvider(oauthSessionProviderFromContext(c))
+		if errNormalize == nil {
+			provider, ok = normalized, true
+		}
+	}
 	if !ok || !host.HasAuthProvider(provider) {
 		return false
 	}
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
 	ctx := PopulateAuthContext(context.Background(), c)
+	if sessionProxyURL != "" {
+		ctx = pluginhost.WithOAuthProxyURL(ctx, sessionProxyURL)
+	}
 	callbackPath := "/v0/management/oauth-callback"
 	query := c.Request.URL.Query()
 	if c.Request.URL.Path == "/v8/management/oauth/auth-url" {
@@ -190,12 +208,22 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 		return true
 	}
 	metadata := queryValuesToMetadata(query)
+	if extraMeta := oauthSessionExtraMetadataFromContext(c); len(extraMeta) > 0 {
+		if metadata == nil {
+			metadata = make(map[string]any, len(extraMeta))
+		}
+		for k, v := range extraMeta {
+			if _, exists := metadata[k]; !exists {
+				metadata[k] = v
+			}
+		}
+	}
 	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL, metadata)
 	if !handled {
 		return false
 	}
 	if errStart != nil {
-		log.WithError(errStart).Error("failed to start plugin auth login")
+		log.Errorf("failed to start plugin auth login: %s", redactSessionProxyInString(errStart.Error(), sessionProxyURL))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return true
 	}
@@ -210,7 +238,7 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth state"})
 		return true
 	}
-	if errRegister := RegisterPluginOAuthSession(state, provider, resp.Metadata); errRegister != nil {
+	if errRegister := RegisterPluginOAuthSessionWithProxy(state, provider, resp.Metadata, sessionProxyURL); errRegister != nil {
 		log.WithError(errRegister).WithField("provider", provider).Error("failed to register plugin oauth session")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
 		return true

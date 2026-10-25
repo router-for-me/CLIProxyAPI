@@ -243,3 +243,36 @@ func TestConvertOpenAIResponseToGeminiStream_PreservesToolCallThoughtSignature(t
 		t.Fatalf("mixed/late-signature thoughtSignature = %q, want SIG_LATE; payload=%s", got, string(mixedOut[len(mixedOut)-1]))
 	}
 }
+
+func TestConvertOpenAIResponseToGeminiStream_ContentWithFinishReason(t *testing.T) {
+	var param any
+	ConvertOpenAIResponseToGemini(context.Background(), "glm-test", nil, nil, []byte(`{"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`), &param)
+	out := ConvertOpenAIResponseToGemini(context.Background(), "glm-test", nil, nil, []byte(`{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`), &param)
+	var text, reason string
+	for _, c := range out {
+		if s := gjson.GetBytes(c, "candidates.0.content.parts.0.text").String(); s != "" {
+			text = s
+		}
+		if s := gjson.GetBytes(c, "candidates.0.finishReason").String(); s != "" {
+			reason = s
+		}
+	}
+	if text != "ok" || reason != "STOP" {
+		t.Fatalf("want text ok and finishReason STOP, got text=%q reason=%q chunks=%q", text, reason, out)
+	}
+
+	var reasoningParam any
+	reasoningOut := ConvertOpenAIResponseToGemini(context.Background(), "glm-test", nil, nil, []byte(`{"choices":[{"index":0,"delta":{"reasoning_content":"thinking"},"finish_reason":"length"}]}`), &reasoningParam)
+	var thoughtText, reasoningFinish string
+	for _, c := range reasoningOut {
+		if gjson.GetBytes(c, "candidates.0.content.parts.0.thought").Bool() {
+			thoughtText = gjson.GetBytes(c, "candidates.0.content.parts.0.text").String()
+		}
+		if s := gjson.GetBytes(c, "candidates.0.finishReason").String(); s != "" {
+			reasoningFinish = s
+		}
+	}
+	if thoughtText != "thinking" || reasoningFinish != "MAX_TOKENS" {
+		t.Fatalf("want thoughtText thinking and finishReason MAX_TOKENS, got thought=%q reason=%q chunks=%q", thoughtText, reasoningFinish, reasoningOut)
+	}
+}

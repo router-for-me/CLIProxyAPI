@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
@@ -22,7 +23,8 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
 		return
 	}
-	RegisterDeviceOAuthSession(state, "codex")
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	oauthSessions.registerDevice(state, "codex", sessionProxyURL)
 
 	ctx, cancel := context.WithCancel(PopulateAuthContext(context.Background(), c))
 	watchCtx, stopWatch := context.WithCancel(ctx)
@@ -61,6 +63,12 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		h.mu.Lock()
 		cfg := h.cfg.CloneForRuntime()
 		h.mu.Unlock()
+		if sessionProxyURL != "" {
+			if cfg == nil {
+				cfg = &config.Config{}
+			}
+			cfg.ProxyURL = sessionProxyURL
+		}
 		record, errLogin := authenticator.Login(ctx, cfg, &sdkAuth.LoginOptions{
 			NoBrowser: true,
 			Metadata:  map[string]string{"codex_login_mode": "device"},
@@ -85,14 +93,15 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		case <-ctx.Done():
 			return
 		}
-		if !oauthSessions.BeginSave(state, "codex") {
+		applySessionProxyToAuthRecord(record, sessionProxyURL)
+		if errGuard := claimOAuthSessionCommit(state, "codex"); errGuard != nil {
 			return
 		}
 		saveCtx, stopSave := context.WithTimeout(ctx, oauthSessionTTL)
 		defer stopSave()
 		if _, errSave := h.saveTokenRecord(saveCtx, record); errSave != nil {
 			log.Error("Failed to save Codex device authentication")
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			FailOAuthSessionCommit(state, "Failed to save authentication tokens")
 			return
 		}
 		CompleteOAuthSession(state)
