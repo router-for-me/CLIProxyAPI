@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
@@ -58,6 +59,7 @@ func NormalizeMetadata(metadata map[string]any) {
 	if String(metadata, "auth_method") == "" && method != "" {
 		metadata["auth_method"] = method
 	}
+	EnsureMachineID(metadata)
 }
 
 func TokenNeedsRefresh(metadata map[string]any, now time.Time) bool {
@@ -234,8 +236,8 @@ func (c *Client) StartDeviceFlow(ctx context.Context, region, startURL string) (
 		ClientSecretExpiresAt int64  `json:"clientSecretExpiresAt"`
 	}
 	err := c.jsonRequest(ctx, http.MethodPost, c.oidcURL(region)+"/client/register", "", nil, map[string]any{
-		"clientName": "CLIProxyAPI", "clientType": "public",
-		"scopes":     []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"},
+		"clientName": "Kiro IDE", "clientType": "public",
+		"scopes":     []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations", "codewhisperer:transformations", "codewhisperer:taskassist"},
 		"grantTypes": []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
 	}, &registration)
 	if err != nil {
@@ -310,6 +312,7 @@ func TokenMetadata(token *Token, device *DeviceAuthorization) map[string]any {
 		"client_id": device.ClientID, "client_secret": device.ClientSecret, "client_secret_expires_at": device.ClientSecretExpiresAt,
 		"region": device.Region, "auth_method": "idc", "last_refresh": time.Now().UTC().Format(time.RFC3339)}
 	ApplyToken(metadata, token)
+	EnsureMachineID(metadata)
 	return metadata
 }
 
@@ -339,17 +342,19 @@ func (c *Client) Refresh(ctx context.Context, metadata map[string]any) (*Token, 
 	// Social authentication uses the desktop auth service, independent of the inference region.
 	endpoint := "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
 	payload := map[string]any{"refreshToken": refresh}
+	headers := map[string]string{"User-Agent": DesktopAuthUserAgent(metadata)}
 	if clientID := String(metadata, "client_id"); clientID != "" {
 		if String(metadata, "client_secret") == "" {
 			return nil, fmt.Errorf("kiro: OIDC client secret is missing")
 		}
 		endpoint = c.oidcURL(Region(metadata)) + "/token"
 		payload["grantType"], payload["clientId"], payload["clientSecret"] = "refresh_token", clientID, String(metadata, "client_secret")
+		headers = nil
 	} else if method == "idc" || method == "builderid" || method == "builder-id" || method == "enterprise" {
 		return nil, fmt.Errorf("kiro: OIDC refresh requires client_id and client_secret")
 	}
 	var token Token
-	if err := c.jsonRequest(ctx, http.MethodPost, endpoint, "", nil, payload, &token); err != nil {
+	if err := c.jsonRequest(ctx, http.MethodPost, endpoint, "", headers, payload, &token); err != nil {
 		return nil, err
 	}
 	if token.AccessToken == "" {
@@ -362,9 +367,16 @@ func (c *Client) controlPlaneRequest(ctx context.Context, target, token string, 
 	if token == "" {
 		return &APIError{Code: http.StatusUnauthorized, Kind: "missing_access_token"}
 	}
+	// Mirror the IDE control-plane client headers (captured from the official
+	// client), including the per-request SDK invocation metadata.
 	headers := map[string]string{
-		"Content-Type": "application/x-amz-json-1.0",
-		"x-amz-target": "KiroControlPlaneBearerService." + target,
+		"Content-Type":          "application/x-amz-json-1.0",
+		"x-amz-target":          "KiroControlPlaneBearerService." + target,
+		"User-Agent":            ControlPlaneUserAgent(metadata),
+		"x-amz-user-agent":      ControlPlaneXAmzUserAgent(),
+		"amz-sdk-invocation-id": uuid.NewString(),
+		"amz-sdk-request":       "attempt=1; max=1",
+		"Connection":            "close",
 	}
 	return c.jsonRequest(ctx, http.MethodPost, ControlURL(metadata)+"/", token, headers, body, result)
 }

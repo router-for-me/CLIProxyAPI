@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -18,6 +19,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 type KiroExecutor struct{ cfg *config.Config }
@@ -38,7 +40,15 @@ func (e *KiroExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "CLIProxyAPI/kiro")
+	req.Header.Set("User-Agent", kiroauth.RuntimeUserAgent(auth.Metadata))
+	req.Header.Set("x-amz-user-agent", kiroauth.RuntimeXAmzUserAgent(auth.Metadata))
+	req.Header.Set("amz-sdk-invocation-id", uuid.NewString())
+	req.Header.Set("amz-sdk-request", "attempt=1; max=1")
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+	if arn := kiroauth.String(auth.Metadata, "profile_arn"); arn != "" {
+		req.Header.Set("x-amzn-kiro-profile-arn", arn)
+	}
 	util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
 	return nil
 }
@@ -83,6 +93,11 @@ func (e *KiroExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	if err = e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, nil, err
+	}
+	// The transport header must reflect payload rules, including a filtered ARN.
+	httpReq.Header.Del("x-amzn-kiro-profile-arn")
+	if arn := gjson.GetBytes(body, "profileArn"); arn.Type == gjson.String && arn.String() != "" {
+		httpReq.Header.Set("x-amzn-kiro-profile-arn", arn.String())
 	}
 	httpReq.Header.Set("Accept", "application/vnd.amazon.eventstream")
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{URL: httpReq.URL.String(), Method: httpReq.Method, Headers: httpReq.Header.Clone(), Body: body, Provider: e.Identifier(), AuthID: auth.ID, AuthLabel: auth.Label})

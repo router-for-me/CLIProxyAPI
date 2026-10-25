@@ -40,6 +40,9 @@ func TestKiroAccountManagerUploadAndFirstQuota(t *testing.T) {
 					if r.Host != "prod.us-east-1.auth.desktop.kiro.dev" {
 						t.Errorf("refresh host: %s", r.Host)
 					}
+					if !strings.HasPrefix(r.Header.Get("User-Agent"), "KiroIDE-0.6.18-") {
+						t.Errorf("refresh user agent does not mimic the IDE: %q", r.Header.Get("User-Agent"))
+					}
 					var body map[string]any
 					_ = json.NewDecoder(r.Body).Decode(&body)
 					if body["refreshToken"] != "fixture-refresh" {
@@ -51,11 +54,17 @@ func TestKiroAccountManagerUploadAndFirstQuota(t *testing.T) {
 					if r.Host != "management.us-east-1.kiro.dev" || r.Header.Get("Authorization") != "Bearer fixture-access" {
 						t.Errorf("profile request: %s", r.Host)
 					}
+					if r.Header.Get("x-amz-user-agent") != "aws-sdk-js/1.0.0" || r.Header.Get("amz-sdk-invocation-id") == "" {
+						t.Errorf("profile request headers do not mimic the IDE client")
+					}
 					_, _ = io.WriteString(w, `{"profiles":[{"arn":"`+profile+`"}]}`)
 				case r.URL.Path == "/getUsageLimits":
 					quotas.Add(1)
 					if r.Host != "management.eu-central-1.kiro.dev" || r.URL.Query().Get("profileArn") != profile || r.URL.Query().Get("resourceType") != "AGENTIC_REQUEST" || r.URL.Query().Get("isEmailRequired") != "true" || r.Header.Get("Authorization") != "Bearer fixture-access" {
 						t.Errorf("quota used stale metadata: %s %s", r.Host, r.URL.String())
+					}
+					if !strings.HasPrefix(r.Header.Get("User-Agent"), "aws-sdk-js/1.0.0 ua/2.1 os/") || !strings.Contains(r.Header.Get("User-Agent"), "api/codewhispererruntime#1.0.0 m/N,E KiroIDE-") || !strings.HasPrefix(r.Header.Get("x-amz-user-agent"), "aws-sdk-js/1.0.0 KiroIDE-") || r.Header.Get("amz-sdk-invocation-id") == "" || r.Header.Get("amz-sdk-request") != "attempt=1; max=1" {
+						t.Errorf("quota request headers do not mimic the IDE client")
 					}
 					_, _ = io.WriteString(w, `{"usageBreakdownList":[]}`)
 				default:

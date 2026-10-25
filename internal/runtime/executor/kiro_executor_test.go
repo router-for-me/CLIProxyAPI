@@ -53,7 +53,7 @@ func TestKiroExecutorProtocolsAndFinalPayloadBarrier(t *testing.T) {
 					if r.URL.Path != "/generateAssistantResponse" || r.Header.Get("Authorization") != "Bearer test-token" {
 						t.Errorf("request: %s", r.URL)
 					}
-					if gjson.GetBytes(body, "conversationState.currentMessage.userInputMessage.content").String() != "Configured content" || gjson.GetBytes(body, "profileArn").Exists() || gjson.GetBytes(body, "conversationState.currentMessage.userInputMessage.modelId").String() != "configured-model" {
+					if gjson.GetBytes(body, "conversationState.currentMessage.userInputMessage.content").String() != "Configured content" || gjson.GetBytes(body, "profileArn").Exists() || r.Header.Get("x-amzn-kiro-profile-arn") != "" || gjson.GetBytes(body, "conversationState.currentMessage.userInputMessage.modelId").String() != "configured-model" {
 						t.Errorf("payload config was overwritten: %s", body)
 					}
 					w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
@@ -99,6 +99,33 @@ func TestKiroExecutorProtocolsAndFinalPayloadBarrier(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestKiroRuntimeProfileHeaderUsesConfiguredProfile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if got := r.Header.Get("x-amzn-kiro-profile-arn"); got != "configured-profile" || got != gjson.GetBytes(body, "profileArn").String() {
+			t.Errorf("profile header %q does not match configured payload %s", got, body)
+		}
+		ua := r.Header.Get("User-Agent")
+		identity := strings.TrimPrefix(r.Header.Get("x-amz-user-agent"), "aws-sdk-js/1.0.39 ")
+		if !strings.HasSuffix(ua, identity) {
+			t.Errorf("runtime headers carry different identities: %q / %q", ua, identity)
+		}
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		_, _ = w.Write(kiroExecutorFrame("assistantResponseEvent", `{"content":"ok"}`))
+	}))
+	defer server.Close()
+	cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+		Models: []config.PayloadModelRule{{Name: "*", Protocol: "kiro"}},
+		Params: map[string]any{"profileArn": "configured-profile"},
+	}}}}
+	executor := NewKiroExecutor(cfg)
+	auth := &coreauth.Auth{Provider: "kiro", Metadata: map[string]any{"access_token": "fixture-access", "profile_arn": "original-profile", "base_url": server.URL}}
+	_, err := executor.Execute(context.Background(), auth, coreexecutor.Request{Model: "auto", Payload: []byte(`{"messages":[{"role":"user","content":"Hello"}]}`)}, coreexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

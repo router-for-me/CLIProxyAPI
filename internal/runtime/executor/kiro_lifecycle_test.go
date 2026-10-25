@@ -33,12 +33,15 @@ func TestKiroConcurrentFirstInferencePreparesAndPersistsImport(t *testing.T) {
 		switch {
 		case req.URL.Path == "/refreshToken":
 			refreshes.Add(1)
-			if req.Header.Get("User-Agent") != "CLIProxyAPI/kiro" {
-				return nil, fmt.Errorf("client identification changed")
+			if !strings.HasPrefix(req.Header.Get("User-Agent"), "KiroIDE-0.6.18-") || len(req.Header.Get("User-Agent")) <= len("KiroIDE-0.6.18-") {
+				return nil, fmt.Errorf("desktop auth client identification changed: %q", req.Header.Get("User-Agent"))
 			}
 			payload = `{"accessToken":"access-fixture","refreshToken":"rotated-fixture","expiresIn":3600}`
 		case req.Header.Get("X-Amz-Target") == "KiroControlPlaneBearerService.ListAvailableProfiles":
 			profiles.Add(1)
+			if !strings.HasPrefix(req.Header.Get("User-Agent"), "aws-sdk-js/1.0.0 ua/2.1 os/") || !strings.Contains(req.Header.Get("User-Agent"), "api/kirocontrolplanebearer#1.0.0 m/N,E") || req.Header.Get("x-amz-user-agent") != "aws-sdk-js/1.0.0" || req.Header.Get("amz-sdk-invocation-id") == "" || req.Header.Get("amz-sdk-request") != "attempt=1; max=1" {
+				return nil, fmt.Errorf("control-plane headers no longer mimic the IDE client")
+			}
 			payload = `{"profiles":[{"arn":"` + profile + `"}]}`
 		case req.URL.Path == "/generateAssistantResponse":
 			generations.Add(1)
@@ -48,6 +51,9 @@ func TestKiroConcurrentFirstInferencePreparesAndPersistsImport(t *testing.T) {
 			}
 			if req.URL.Host != "runtime.eu-central-1.kiro.dev" || req.Header.Get("Authorization") != "Bearer access-fixture" || gjson.GetBytes(data, "profileArn").String() != profile {
 				return nil, fmt.Errorf("inference used stale credentials or the wrong region")
+			}
+			if !strings.HasPrefix(req.Header.Get("User-Agent"), "aws-sdk-js/1.0.39 ua/2.1 os/") || !strings.Contains(req.Header.Get("User-Agent"), "api/codewhispererstreaming#1.0.39 m/N KiroIDE-") || !strings.HasPrefix(req.Header.Get("x-amz-user-agent"), "aws-sdk-js/1.0.39 KiroIDE-") || req.Header.Get("amz-sdk-invocation-id") == "" || req.Header.Get("amz-sdk-request") != "attempt=1; max=1" || req.Header.Get("x-amzn-codewhisperer-optout") != "true" || req.Header.Get("x-amzn-kiro-agent-mode") != "vibe" || req.Header.Get("x-amzn-kiro-profile-arn") != profile {
+				return nil, fmt.Errorf("runtime headers no longer mimic the IDE client")
 			}
 			contentType = "application/vnd.amazon.eventstream"
 			frames := kiroExecutorFrame("assistantResponseEvent", `{"content":"fixture response"}`)

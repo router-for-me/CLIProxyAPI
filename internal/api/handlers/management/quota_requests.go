@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/google/uuid"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
@@ -59,6 +60,18 @@ func prepareCredentialQuotaRequest(auth *coreauth.Auth, target *url.URL, headers
 			query.Del("profileArn")
 		}
 		target.RawQuery = query.Encode()
+		// Inject the IDE management client identity server-side so quota
+		// requests cannot leak the caller's own user agent.
+		for key := range headers {
+			if strings.EqualFold(key, "User-Agent") || strings.EqualFold(key, "x-amz-user-agent") {
+				delete(headers, key)
+			}
+		}
+		headers["User-Agent"] = kiro.ManagementUserAgent(auth.Metadata)
+		headers["x-amz-user-agent"] = kiro.ManagementXAmzUserAgent(auth.Metadata)
+		headers["amz-sdk-invocation-id"] = uuid.NewString()
+		headers["amz-sdk-request"] = "attempt=1; max=1"
+		headers["Connection"] = "close"
 	case "kimi":
 		if (host == "api.kimi.com" || host == "api.kimi.ai") && target.Path == "/coding/v1/usages" {
 			regionalAuth := *auth

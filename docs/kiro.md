@@ -64,8 +64,27 @@ tokens with unknown expiry or less than five minutes remaining. Preparation and
 scheduled/manual refresh share a per-credential lock to avoid simultaneous token
 rotation. Empty or failed profile lookups defer the next attempt for five minutes;
 a manual credential refresh permits an immediate retry. External IdP refresh and
-Kiro API keys are not implemented by this OAuth provider. Client identification
-remains `CLIProxyAPI`, not an impersonated IDE.
+Kiro API keys are not implemented by this OAuth provider.
+
+Runtime, quota, control-plane and social-refresh requests use the client headers
+observed in the Kiro account-manager reference. These headers do not establish
+that upstream will treat the proxy as an IDE or prevent account restrictions.
+Runtime inference (`generateAssistantResponse`) sends the `aws-sdk-js/1.0.39` streaming
+user agent with a `KiroIDE-<version>-<machineId>` suffix, `amz-sdk-invocation-id`,
+`amz-sdk-request`, `x-amzn-codewhisperer-optout: true`, `x-amzn-kiro-agent-mode`
+and `x-amzn-kiro-profile-arn`; quota (`getUsageLimits`) sends the
+`aws-sdk-js/1.0.0` `codewhispererruntime` management identity; profile and model
+lookups send the `kirocontrolplanebearer` control-plane identity; social refresh
+sends the desktop auth client's pinned `KiroIDE-0.6.18-<machineId>` user agent.
+Existing `machineId` / `machine_id` values are retained, with explicit canonical
+fields taking precedence. Missing identities are derived as stable UUIDs from
+the account provider and email (or token when email is absent), then persisted
+with the credential. Reading an unchanged import repeatedly or constructing
+concurrent request headers does not generate a different identity. The
+`ide_version` credential metadata key overrides the default version `1.4.26`.
+Management and hub quota requests replace the caller's user-agent headers
+server-side. The inference profile header mirrors the final native `profileArn`,
+including user payload overrides and filters.
 
 ## Models and compatible APIs
 
@@ -123,9 +142,13 @@ the existing proxy-aware transport. Inference streams have no application timeou
 ## Verification boundary and references
 
 Automated verification uses local mock OIDC, refresh, model-list and binary
-inference responses. No real Kiro account has been authorized or charged during
-development; live login, model availability, inference and quota queries remain
-unverified.
+inference responses. Live checks on 2026-10-25, before the subsequent review
+fixes, succeeded with an imported GitHub social credential: refresh, profile
+resolution, model discovery, streaming and non-streaming inference with
+`claude-haiku-4.5`, and quota queries. The reviewed identity and final-profile-header
+fixes are covered by local regression tests, including source-file reloads,
+canonical-field precedence, stable request identities, and payload filters and
+overrides.
 
 - [Kiro authentication](https://kiro.dev/docs/getting-started/authentication/)
 - [Kiro models and plan availability](https://kiro.dev/docs/models/)
