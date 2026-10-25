@@ -62,8 +62,8 @@ func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
 	}
-	if got := recorder.Header().Get("Retry-After"); got != "" {
-		t.Fatalf("Retry-After should be empty when passthrough is disabled, got %q", got)
+	if got := recorder.Header().Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After must survive disabled general passthrough, got %q", got)
 	}
 	if got := recorder.Header().Get("X-Request-Id"); got != "" {
 		t.Fatalf("X-Request-Id should be empty when passthrough is disabled, got %q", got)

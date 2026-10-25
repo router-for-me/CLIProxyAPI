@@ -1151,6 +1151,7 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 }
 
 type statusErr struct {
+	responseHeaders  http.Header
 	code             int
 	msg              string
 	retryAfter       *time.Duration
@@ -1166,14 +1167,16 @@ func (e statusErr) Error() string {
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
+func (e statusErr) Headers() http.Header       { return e.responseHeaders.Clone() }
 
 const openAICompatTPMFallbackRetryAfter = time.Minute
 
 func newOpenAICompatStatusError(status int, headers http.Header, body []byte) statusErr {
 	return statusErr{
-		code:       status,
-		msg:        string(body),
-		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
+		responseHeaders: headers.Clone(),
+		code:            status,
+		msg:             string(body),
+		retryAfter:      openAICompatRetryAfter(status, headers, body, time.Now()),
 	}
 }
 

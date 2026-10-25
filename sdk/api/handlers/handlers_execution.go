@@ -394,7 +394,8 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 		}
 	}
 	var addon http.Header
-	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+	var he interface{ Headers() http.Header }
+	if errors.As(err, &he) && he != nil {
 		if hdr := he.Headers(); hdr != nil {
 			addon = hdr.Clone()
 		}

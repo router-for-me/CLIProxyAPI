@@ -18,6 +18,29 @@ func statusFromError(err error) int {
 	return clienterror.HTTPStatusFromError(err)
 }
 
+// WriteRateLimitHeaders preserves recovery metadata without enabling general
+// upstream header passthrough. Never forward credentials or transport headers.
+func WriteRateLimitHeaders(dst http.Header, status int, src http.Header) {
+	if status != http.StatusTooManyRequests {
+		return
+	}
+	for key, values := range src {
+		name := strings.ToLower(key)
+		if name != "retry-after" && name != "retry-after-ms" &&
+			!strings.HasPrefix(name, "x-ratelimit-") &&
+			!strings.HasPrefix(name, "anthropic-ratelimit-") &&
+			!strings.HasPrefix(name, "x-codex-") {
+			continue
+		}
+		dst.Del(key)
+		for _, value := range values {
+			if !strings.ContainsAny(value, "\r\n") {
+				dst.Add(key, value)
+			}
+		}
+	}
+}
+
 func isAuthSelectionUnavailable(err error) bool {
 	type modelCooldownMarker interface {
 		IsModelCooldown() bool
@@ -127,6 +150,9 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
 		}
+	}
+	if msg != nil {
+		WriteRateLimitHeaders(c.Writer.Header(), status, msg.Addon)
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.CurrentConfig()) {
 		for key, values := range msg.Addon {
