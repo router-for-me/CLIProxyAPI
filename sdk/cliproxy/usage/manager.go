@@ -26,8 +26,10 @@ type Record struct {
 	// RequestID uniquely identifies this specific model execution instance (UUID v4).
 	RequestID string
 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
-	TraceID  string
-	Provider string
+	TraceID string
+	// SelectionID identifies the scheduler selection decision that produced this usage record when available.
+	SelectionID string
+	Provider    string
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
@@ -103,6 +105,7 @@ type generateContextKey struct{}
 type streamContextKey struct{}
 type executionRequestIDContextKey struct{}
 type executionTraceIDContextKey struct{}
+type selectionIDContextKey struct{}
 type apiKeyContextKey struct{}
 type accessProviderContextKey struct{}
 type isNativeKeyContextKey struct{}
@@ -143,6 +146,30 @@ func TraceIDFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+// WithSelectionID attaches the scheduler selection ID for the selected credential to the context.
+func WithSelectionID(ctx context.Context, selectionID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, selectionIDContextKey{}, strings.TrimSpace(selectionID))
+}
+
+// SelectionIDFromContext retrieves the scheduler selection ID from the context.
+func SelectionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(selectionIDContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
 }
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
@@ -516,6 +543,11 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 			record.TraceID = trID
 		} else if trID := internallogging.GetRequestID(ctx); trID != "" {
 			record.TraceID = trID
+		}
+	}
+	if strings.TrimSpace(record.SelectionID) == "" {
+		if selID := SelectionIDFromContext(ctx); selID != "" {
+			record.SelectionID = selID
 		}
 	}
 	if strings.TrimSpace(record.APIKey) == "" {

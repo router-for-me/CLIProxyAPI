@@ -1059,3 +1059,182 @@ func TestExecutorAdapterExecuteStreamLargeSSELineKeepsUsage(t *testing.T) {
 			rec.Detail.InputTokens, rec.Detail.OutputTokens, rec.Detail.TotalTokens)
 	}
 }
+
+type endToEndSelectionTestExecutor struct {
+	provider      string
+	execute       func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
+	executeStream func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
+}
+
+func (e *endToEndSelectionTestExecutor) Identifier() string { return e.provider }
+
+func (e *endToEndSelectionTestExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	if e.execute != nil {
+		return e.execute(ctx, auth, req, opts)
+	}
+	return coreexecutor.Response{}, nil
+}
+
+func (e *endToEndSelectionTestExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	if e.executeStream != nil {
+		return e.executeStream(ctx, auth, req, opts)
+	}
+	return nil, nil
+}
+
+func (e *endToEndSelectionTestExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *endToEndSelectionTestExecutor) CountTokens(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, nil
+}
+
+func (e *endToEndSelectionTestExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestSchedulerPickAndUsageRecordShareSelectionIDEndToEnd(t *testing.T) {
+	provider := "selection-e2e-provider"
+	model := "selection-e2e-model"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("auth-e2e-1", provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("auth-e2e-1")
+	})
+
+	pickSelectionIDs := make(chan string, 32)
+	usageRecords := make(chan pluginapi.UsageRecord, 32)
+
+	host := newHostWithRecords(capabilityRecord{
+		id:       "routing-usage-plugin",
+		priority: 10,
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Scheduler: schedulerFunc(func(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				selID, _ := req.Options.Metadata[pluginapi.SelectionIDMetadataKey].(string)
+				pickSelectionIDs <- selID
+				return pluginapi.SchedulerPickResponse{
+					Handled: true,
+					AuthID:  "auth-e2e-1",
+				}, nil
+			}),
+			UsagePlugin: usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+				if record.Provider == provider {
+					usageRecords <- record
+				}
+			}),
+		}},
+	})
+	host.RegisterUsagePlugins()
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin("plugin:routing-usage-plugin", noopUsagePlugin{})
+	})
+
+	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager.SetRetryConfig(1, 0, 0)
+	coreauth.SetQuotaCooldownDisabled(true)
+	t.Cleanup(func() { coreauth.SetQuotaCooldownDisabled(false) })
+	manager.SetPluginScheduler(host)
+
+	if _, errReg := manager.Register(context.Background(), &coreauth.Auth{ID: "auth-e2e-1", Provider: provider}); errReg != nil {
+		t.Fatalf("Register(auth-e2e-1) error = %v", errReg)
+	}
+
+	attemptCount := 0
+	streamRelease := make(chan struct{})
+	manager.RegisterExecutor(&endToEndSelectionTestExecutor{
+		provider: provider,
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			reporter := helps.NewUsageReporter(ctx, provider, req.Model, auth)
+			if opts.Metadata["mode"] == "retry-429-once" {
+				attemptCount++
+				if attemptCount == 1 {
+					reporter.PublishFailure(ctx, &coreauth.Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true})
+					return coreexecutor.Response{}, &coreauth.Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true}
+				}
+			}
+			reporter.Publish(ctx, coreusage.Detail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15})
+			return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+		},
+		executeStream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			reporter := helps.NewUsageReporter(ctx, provider, req.Model, auth)
+			ch := make(chan coreexecutor.StreamChunk, 1)
+			ch <- coreexecutor.StreamChunk{Payload: []byte("data: chunk\n\n")}
+			go func() {
+				<-streamRelease
+				close(ch)
+				// Delayed asynchronous usage publication after other requests have run.
+				reporter.Publish(context.Background(), coreusage.Detail{InputTokens: 20, OutputTokens: 10, TotalTokens: 30})
+			}()
+			return &coreexecutor.StreamResult{Chunks: ch}, nil
+		},
+	})
+
+	// 1. Single credential outer retry after 429: two Picks, two distinct SelectionIDs, each matching its UsageRecord.
+	traceCtx := logging.WithRequestID(context.Background(), "trace-429")
+	_, errExec := manager.Execute(traceCtx, []string{provider}, coreexecutor.Request{Model: model}, coreexecutor.Options{
+		Metadata: map[string]any{"mode": "retry-429-once"},
+	})
+	if errExec != nil {
+		t.Fatalf("Execute(retry-429-once) error = %v", errExec)
+	}
+	pick1 := <-pickSelectionIDs
+	pick2 := <-pickSelectionIDs
+	if pick1 == "" || pick2 == "" || pick1 == pick2 {
+		t.Fatalf("outer retry pick SelectionIDs = (%q, %q), want two distinct non-empty IDs", pick1, pick2)
+	}
+
+	rec1 := waitPluginUsageRecord(t, usageRecords)
+	rec2 := waitPluginUsageRecord(t, usageRecords)
+	if rec1.SelectionID != pick1 || !rec1.Failed {
+		t.Fatalf("first UsageRecord = (SelectionID=%q, Failed=%v), want (%q, true)", rec1.SelectionID, rec1.Failed, pick1)
+	}
+	if rec2.SelectionID != pick2 || rec2.Failed {
+		t.Fatalf("second UsageRecord = (SelectionID=%q, Failed=%v), want (%q, false)", rec2.SelectionID, rec2.Failed, pick2)
+	}
+	if rec1.RequestID == rec2.RequestID {
+		t.Fatalf("UsageRecord RequestIDs should remain distinct: %q", rec1.RequestID)
+	}
+
+	// 2. Concurrent requests and delayed asynchronous streaming usage keep their own SelectionIDs.
+	sharedOpts := coreexecutor.Options{Stream: true, Metadata: map[string]any{"shared": "true"}}
+	streamRes, errStream := manager.ExecuteStream(context.Background(), []string{provider}, coreexecutor.Request{Model: model}, sharedOpts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	streamPickID := <-pickSelectionIDs
+
+	// Run a concurrent non-streaming request while the stream is still open and its usage has not been published.
+	if _, errConcurrent := manager.Execute(context.Background(), []string{provider}, coreexecutor.Request{Model: model}, coreexecutor.Options{Metadata: sharedOpts.Metadata}); errConcurrent != nil {
+		t.Fatalf("concurrent Execute() error = %v", errConcurrent)
+	}
+	concurrentPickID := <-pickSelectionIDs
+	if streamPickID == "" || concurrentPickID == "" || streamPickID == concurrentPickID {
+		t.Fatalf("streamPickID=%q concurrentPickID=%q, want distinct non-empty IDs", streamPickID, concurrentPickID)
+	}
+
+	concurrentRec := waitPluginUsageRecord(t, usageRecords)
+	if concurrentRec.SelectionID != concurrentPickID {
+		t.Fatalf("concurrent UsageRecord.SelectionID = %q, want %q", concurrentRec.SelectionID, concurrentPickID)
+	}
+
+	close(streamRelease)
+	for range streamRes.Chunks {
+	}
+	streamRec := waitPluginUsageRecord(t, usageRecords)
+	if streamRec.SelectionID != streamPickID {
+		t.Fatalf("delayed stream UsageRecord.SelectionID = %q, want %q", streamRec.SelectionID, streamPickID)
+	}
+}
+
+func waitPluginUsageRecord(t *testing.T, ch <-chan pluginapi.UsageRecord) pluginapi.UsageRecord {
+	t.Helper()
+	select {
+	case rec := <-ch:
+		return rec
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pluginapi.UsageRecord")
+		return pluginapi.UsageRecord{}
+	}
+}

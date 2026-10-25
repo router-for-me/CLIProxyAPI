@@ -471,3 +471,60 @@ func TestSanitizePluginRequestScheduler(t *testing.T) {
 		t.Fatalf("scheduler candidate metadata drop survived sanitize: %#v", gotCandidate.Metadata)
 	}
 }
+
+func TestRPCSchedulerAndUsageSelectionIDCompatibility(t *testing.T) {
+	pickReq := pluginapi.SchedulerPickRequest{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Options: pluginapi.SchedulerOptions{
+			Metadata: map[string]any{
+				pluginapi.SelectionIDMetadataKey: "sel-rpc-123",
+			},
+		},
+	}
+	rawPick, errMarshalPick := json.Marshal(sanitizePluginRequest(pickReq))
+	if errMarshalPick != nil {
+		t.Fatalf("Marshal(SchedulerPickRequest) error = %v", errMarshalPick)
+	}
+	var decodedPick pluginapi.SchedulerPickRequest
+	if errUnmarshalPick := json.Unmarshal(rawPick, &decodedPick); errUnmarshalPick != nil {
+		t.Fatalf("Unmarshal(SchedulerPickRequest) error = %v", errUnmarshalPick)
+	}
+	if got := decodedPick.Options.Metadata[pluginapi.SelectionIDMetadataKey]; got != "sel-rpc-123" {
+		t.Fatalf("decodedPick selection_id = %#v, want %q", got, "sel-rpc-123")
+	}
+
+	usageRec := pluginapi.UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-5.4",
+		RequestID:   "req-1",
+		TraceID:     "trace-1",
+		SelectionID: "sel-rpc-123",
+	}
+	rawUsage, errMarshalUsage := json.Marshal(usageRec)
+	if errMarshalUsage != nil {
+		t.Fatalf("Marshal(UsageRecord) error = %v", errMarshalUsage)
+	}
+	var decodedUsage pluginapi.UsageRecord
+	if errUnmarshalUsage := json.Unmarshal(rawUsage, &decodedUsage); errUnmarshalUsage != nil {
+		t.Fatalf("Unmarshal(UsageRecord) error = %v", errUnmarshalUsage)
+	}
+	if decodedUsage.SelectionID != "sel-rpc-123" {
+		t.Fatalf("decodedUsage.SelectionID = %q, want %q", decodedUsage.SelectionID, "sel-rpc-123")
+	}
+
+	// Old plugins compiled against a legacy UsageRecord without SelectionID must still unmarshal cleanly.
+	type legacyUsageRecord struct {
+		Provider  string
+		Model     string
+		RequestID string
+		TraceID   string
+	}
+	var legacy legacyUsageRecord
+	if errLegacy := json.Unmarshal(rawUsage, &legacy); errLegacy != nil {
+		t.Fatalf("Unmarshal(legacyUsageRecord) error = %v", errLegacy)
+	}
+	if legacy.Provider != "openai" || legacy.RequestID != "req-1" || legacy.TraceID != "trace-1" {
+		t.Fatalf("legacyUsageRecord = %+v", legacy)
+	}
+}

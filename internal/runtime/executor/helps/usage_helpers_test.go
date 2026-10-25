@@ -1465,3 +1465,16 @@ func TestUsageReporter_DistinguishesNativeKey(t *testing.T) {
 		}
 	})
 }
+
+func TestUsageReporterCapturesSelectionIDForDelayedPublish(t *testing.T) {
+	ctx := usage.WithSelectionID(context.Background(), "sel-delayed-123")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	if got := reporter.SelectionID(); got != "sel-delayed-123" {
+		t.Fatalf("reporter.SelectionID() = %q, want %q", got, "sel-delayed-123")
+	}
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 42}, false, usage.Failure{})
+	if record.SelectionID != "sel-delayed-123" {
+		t.Fatalf("record.SelectionID = %q, want %q", record.SelectionID, "sel-delayed-123")
+	}
+}

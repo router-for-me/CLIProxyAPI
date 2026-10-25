@@ -484,6 +484,8 @@ const (
 	SchedulerBuiltinRoundRobin = "round-robin"
 	// SchedulerBuiltinFillFirst delegates auth selection to the built-in fill-first scheduler.
 	SchedulerBuiltinFillFirst = "fill-first"
+	// SelectionIDMetadataKey is the metadata key carrying the per-selection identifier in SchedulerOptions.Metadata.
+	SelectionIDMetadataKey = "selection_id"
 )
 
 // Scheduler chooses an auth candidate before the built-in scheduler runs.
@@ -1537,6 +1539,8 @@ type UsageRecord struct {
 	RequestID string
 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
 	TraceID string
+	// SelectionID identifies the scheduler selection decision that produced this usage record when available.
+	SelectionID string
 	// Provider identifies the upstream provider.
 	Provider string
 	// BaseURL is the upstream base URL configured for the request/credential when available.

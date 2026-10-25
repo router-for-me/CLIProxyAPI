@@ -849,16 +849,23 @@ func TestUsageRecordResponseModelServiceTierAndStream(t *testing.T) {
 
 func TestUsageRecordRequestIDAndTraceID(t *testing.T) {
 	record := UsageRecord{
-		RequestID: "b5db448b-3d6d-495c-9c71-f925b68926cb",
-		TraceID:   "00000001",
-		Provider:  "codex",
-		Model:     "gpt-5.6-luna",
+		RequestID:   "b5db448b-3d6d-495c-9c71-f925b68926cb",
+		TraceID:     "00000001",
+		SelectionID: "7e57d004-2b97-4e7a-b45f-5387367791cd",
+		Provider:    "codex",
+		Model:       "gpt-5.6-luna",
 	}
 	if record.RequestID != "b5db448b-3d6d-495c-9c71-f925b68926cb" {
 		t.Fatalf("UsageRecord.RequestID = %q, want %q", record.RequestID, "b5db448b-3d6d-495c-9c71-f925b68926cb")
 	}
 	if record.TraceID != "00000001" {
 		t.Fatalf("UsageRecord.TraceID = %q, want %q", record.TraceID, "00000001")
+	}
+	if record.SelectionID != "7e57d004-2b97-4e7a-b45f-5387367791cd" {
+		t.Fatalf("UsageRecord.SelectionID = %q, want %q", record.SelectionID, "7e57d004-2b97-4e7a-b45f-5387367791cd")
+	}
+	if SelectionIDMetadataKey != "selection_id" {
+		t.Fatalf("SelectionIDMetadataKey = %q, want selection_id", SelectionIDMetadataKey)
 	}
 }
 
