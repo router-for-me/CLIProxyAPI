@@ -5,7 +5,7 @@
 - 注册请求/响应翻译器进行协议转换
 - 注册模型以出现在 `/v1/models`
 
-示例基于 Go 1.24+ 与 v6 模块路径。
+示例基于 Go 1.26+ 与 v7 模块路径。
 
 ## 概念
 
@@ -24,8 +24,8 @@ import (
     "context"
     "net/http"
 
-    coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-    clipexec "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+    coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+    clipexec "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 type Executor struct{}
@@ -77,7 +77,7 @@ package myprov
 
 import (
   "context"
-  sdktr "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+  sdktr "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 const (
