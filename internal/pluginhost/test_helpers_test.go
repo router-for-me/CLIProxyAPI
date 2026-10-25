@@ -220,6 +220,32 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errReset
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodNativeRegister:
+		if l.active.Capabilities.NativeAPI == nil {
+			return nil, fmt.Errorf("missing native API")
+		}
+		resp, errRegister := l.active.Capabilities.NativeAPI.RegisterNative(ctx, pluginapi.NativeRegistrationRequest{})
+		if errRegister != nil {
+			return nil, errRegister
+		}
+		routes := make([]rpcNativeRoute, 0, len(resp.Routes))
+		for _, route := range resp.Routes {
+			routes = append(routes, rpcNativeRoute{Method: route.Method, Path: route.Path})
+		}
+		return marshalRPCResult(rpcNativeRegistrationResponse{Routes: routes})
+	case pluginabi.MethodNativeHandle:
+		if l.active.Capabilities.NativeAPI == nil {
+			return nil, fmt.Errorf("missing native API")
+		}
+		var req rpcNativeRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errHandle := l.active.Capabilities.NativeAPI.HandleNative(ctx, req.NativeRequest)
+		if errHandle != nil {
+			return nil, errHandle
+		}
+		return marshalRPCResult(resp)
 	default:
 		return nil, fmt.Errorf("missing test method %s", method)
 	}

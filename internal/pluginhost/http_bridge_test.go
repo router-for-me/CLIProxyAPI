@@ -21,6 +21,103 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
+func TestHostHTTPClientBoundedNoRedirectRequest(t *testing.T) {
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { t.Fatal("followed redirect") }))
+	defer redirectTarget.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", redirectTarget.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = io.WriteString(w, "redirect")
+	}))
+	defer server.Close()
+	client := New().newHTTPClient(nil)
+	response, err := client.Do(context.Background(), pluginapi.HTTPRequest{URL: server.URL, DisableRedirects: true, MaxResponseBytes: 32})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusTemporaryRedirect || string(response.Body) != "redirect" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestHostHTTPClientRejectsResponseBeyondLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "12345") }))
+	defer server.Close()
+	_, err := New().newHTTPClient(nil).Do(context.Background(), pluginapi.HTTPRequest{URL: server.URL, MaxResponseBytes: 4})
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("error = %v, want response size error", err)
+	}
+}
+
+func TestHostHTTPClientSuppressesCredentialResponseCapture(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "secret-response") }))
+	defer server.Close()
+	response, err := New().newHTTPClient(nil).Do(context.Background(), pluginapi.HTTPRequest{URL: server.URL, SuppressLogging: true, MaxResponseBytes: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(response.Body) != "secret-response" {
+		t.Fatalf("body = %q", response.Body)
+	}
+}
+
+func TestHostHTTPClientRejectsOverflowingBounds(t *testing.T) {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	for _, req := range []pluginapi.HTTPRequest{{URL: "https://example.invalid", MaxResponseBytes: maxInt64}} {
+		if _, err := New().newHTTPClient(nil).Do(context.Background(), req); err == nil {
+			t.Fatal("overflowing bound accepted")
+		}
+	}
+}
+func TestHostHTTPClientRejectsNegativeLimits(t *testing.T) {
+	_, err := New().newHTTPClient(nil).Do(context.Background(), pluginapi.HTTPRequest{URL: "https://example.invalid", MaxResponseBytes: -1})
+	if err == nil || !strings.Contains(err.Error(), "invalid bounds") {
+		t.Fatalf("error = %v, want invalid-bounds error", err)
+	}
+}
+
+func TestDecodeHostHTTPRequestHonorsNestedSafetyOptions(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		max  int64
+	}{
+		{"nested only", `{"request":{"url":"https://example.invalid","disable_redirects":true,"suppress_logging":true,"max_response_bytes":4096}}`, 4096},
+		{"outer only", `{"disable_redirects":true,"suppress_logging":true,"max_response_bytes":2048,"request":{"url":"https://example.invalid"}}`, 2048},
+		{"stricter outer wins", `{"max_response_bytes":1024,"disable_redirects":true,"suppress_logging":true,"request":{"url":"https://example.invalid","max_response_bytes":8192}}`, 1024},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := decodeHostHTTPRequest([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !req.DisableRedirects || !req.SuppressLogging || req.MaxResponseBytes != tc.max {
+				t.Fatalf("decoded request = %+v, want redirects disabled, logging suppressed, max %d", req, tc.max)
+			}
+		})
+	}
+}
+
+func TestDecodeHostHTTPRequestRejectsInvalidNestedBounds(t *testing.T) {
+	for _, raw := range []string{
+		`{"request":{"url":"https://example.invalid","max_response_bytes":-1}}`,
+		`{"max_response_bytes":4096,"request":{"url":"https://example.invalid","max_response_bytes":9223372036854775807}}`,
+	} {
+		if _, err := decodeHostHTTPRequest([]byte(raw)); err == nil {
+			t.Fatalf("accepted invalid nested bound %s", raw)
+		}
+	}
+}
+
+func TestDecodeHostHTTPRequestRejectsOverflowingBounds(t *testing.T) {
+	for _, raw := range []string{`{"url":"https://example.invalid","max_response_bytes":9223372036854775807}`} {
+		if _, err := decodeHostHTTPRequest([]byte(raw)); err == nil {
+			t.Fatalf("accepted overflow request %s", raw)
+		}
+	}
+}
+
 func TestHostHTTPClientMarksUpstreamAttempt(t *testing.T) {
 	t.Parallel()
 

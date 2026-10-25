@@ -40,6 +40,8 @@ type rpcThinkingApplier struct {
 	*rpcPluginAdapter
 }
 
+type rpcNativeAPI struct{ *rpcPluginAdapter }
+
 type rpcQuotaProvider struct {
 	*rpcPluginAdapter
 	identifier string
@@ -186,6 +188,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.CommandLinePlugin {
 		plugin.Capabilities.CommandLinePlugin = adapter
+	}
+	if resp.Capabilities.NativeAPI && schemaVersion >= pluginabi.SchemaVersionNativeAPI {
+		plugin.Capabilities.NativeAPI = rpcNativeAPI{rpcPluginAdapter: adapter}
 	}
 	if resp.Capabilities.ManagementAPI {
 		plugin.Capabilities.ManagementAPI = adapter
@@ -666,6 +671,24 @@ func (a *rpcPluginAdapter) HandleManagement(ctx context.Context, req pluginapi.M
 		ManagementRequest: req,
 		HostCallbackID:    callbackID,
 	})
+}
+
+func (a rpcNativeAPI) RegisterNative(ctx context.Context, req pluginapi.NativeRegistrationRequest) (pluginapi.NativeRegistrationResponse, error) {
+	resp, errCall := callPlugin[rpcNativeRegistrationResponse](ctx, a.client, pluginabi.MethodNativeRegister, req)
+	if errCall != nil {
+		return pluginapi.NativeRegistrationResponse{}, errCall
+	}
+	routes := make([]pluginapi.NativeRoute, 0, len(resp.Routes))
+	for _, route := range resp.Routes {
+		routes = append(routes, pluginapi.NativeRoute{Method: route.Method, Path: route.Path, Handler: a})
+	}
+	return pluginapi.NativeRegistrationResponse{Routes: routes}, nil
+}
+
+func (a rpcNativeAPI) HandleNative(ctx context.Context, req pluginapi.NativeRequest) (pluginapi.NativeResponse, error) {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.NativeResponse](ctx, a.client, pluginabi.MethodNativeHandle, rpcNativeRequest{NativeRequest: req, HostCallbackID: callbackID})
 }
 
 func (a rpcQuotaProvider) Identifier() string {
