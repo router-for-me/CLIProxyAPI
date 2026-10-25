@@ -218,6 +218,7 @@ routing:
     save-cooldown-status: false
 
     # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504/520-526).
+    # Request-scoped timeouts (including propagated Codex request_timeout errors) stay request-scoped and do not cool healthy credentials.
     # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
     transient-error-cooldown-seconds: 0
 

@@ -195,6 +195,8 @@ func codexTerminalFailureStatus(body []byte) int {
 		return http.StatusForbidden
 	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
 		return http.StatusTooManyRequests
+	case errorCode == "request_timeout":
+		return http.StatusRequestTimeout
 	case errorType == "invalid_request_error", errorType == "bad_request_error":
 		return http.StatusBadRequest
 	default:
@@ -322,7 +324,13 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped}
+	requestScoped := !isUsageLimit && errCode == http.StatusRequestTimeout && isCodexRequestTimeoutError(body)
+	err := statusErr{
+		code:             errCode,
+		msg:              string(body),
+		credentialScoped: credentialScoped,
+		requestScoped:    requestScoped,
+	}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
@@ -419,6 +427,20 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 		}
 	}
 	return false
+}
+
+// isCodexRequestTimeoutError reports whether the error body carries a serialized
+// request_timeout failure (such as an upstream CLIProxyAPI incomplete-stream 408)
+// without an authentication, permission, quota, rate-limit, or model-not-found type.
+func isCodexRequestTimeoutError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(errorBody, "error.type").String())) {
+	case "authentication_error", "permission_error", "rate_limit_error", "usage_limit_reached", "not_found_error":
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(gjson.GetBytes(errorBody, "error.code").String()), "request_timeout")
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {

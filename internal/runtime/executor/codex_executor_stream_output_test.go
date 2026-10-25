@@ -3,14 +3,19 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -718,4 +723,332 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 	if gotContent != "ok" {
 		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
 	}
+}
+
+func TestCodexPropagatedRequestTimeoutKeepsCredentialEligible(t *testing.T) {
+	const (
+		timeoutFailedEvent = `{"type":"response.failed","sequence_number":2,"response":{"status":"failed","error":{"code":"request_timeout","message":"stream error: stream disconnected before completion: stream closed before response.completed","param":null,"type":"server_error"}}}`
+		timeoutErrorBody   = `{"error":{"code":"request_timeout","message":"stream error: stream disconnected before completion: stream closed before response.completed","type":"server_error"}}`
+		websocketError408  = `{"type":"error","status":408,"error":{"code":"request_timeout","message":"stream error: stream disconnected before completion: stream closed before response.completed","type":"server_error"}}`
+		createdEvent       = `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`
+		doneItemEvent      = `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":0}`
+		completedEvent     = `{"type":"response.completed","response":{"id":"resp_2","object":"response","status":"completed","model":"gpt-5.4","output":[],"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10}}}`
+	)
+
+	tests := []struct {
+		name          string
+		streamTurn1   bool
+		useWebsockets bool
+		http408Turn1  bool
+		wsFrameTurn1  string
+	}{
+		{
+			name:        "sse_stream_response_failed",
+			streamTurn1: true,
+		},
+		{
+			name: "nonstream_response_failed",
+		},
+		{
+			name:         "http_408_request_timeout",
+			http408Turn1: true,
+		},
+		{
+			name:          "websocket_stream_response_failed",
+			streamTurn1:   true,
+			useWebsockets: true,
+			wsFrameTurn1:  timeoutFailedEvent,
+		},
+		{
+			name:          "websocket_status_408_error",
+			useWebsockets: true,
+			wsFrameTurn1:  websocketError408,
+		},
+	}
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			stopWS := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				turn := attempts.Add(1)
+				if tc.useWebsockets {
+					conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+					if errUpgrade != nil {
+						t.Errorf("upgrade websocket: %v", errUpgrade)
+						return
+					}
+					defer func() { _ = conn.Close() }()
+					go func() {
+						<-stopWS
+						_ = conn.Close()
+					}()
+					_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+					if _, _, errRead := conn.ReadMessage(); errRead != nil {
+						t.Errorf("read websocket request: %v", errRead)
+						return
+					}
+					if turn == 1 {
+						if tc.streamTurn1 {
+							_ = conn.WriteMessage(websocket.TextMessage, []byte(createdEvent))
+						}
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(tc.wsFrameTurn1))
+					} else {
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(createdEvent))
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(doneItemEvent))
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(completedEvent))
+					}
+					for {
+						if _, _, errRead := conn.ReadMessage(); errRead != nil {
+							return
+						}
+					}
+				}
+
+				if turn == 1 && tc.http408Turn1 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusRequestTimeout)
+					_, _ = w.Write([]byte(timeoutErrorBody))
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if turn == 1 {
+					_, _ = w.Write([]byte("data: " + createdEvent + "\n\n"))
+					_, _ = w.Write([]byte("data: " + timeoutFailedEvent + "\n\n"))
+					return
+				}
+				_, _ = w.Write([]byte("data: " + createdEvent + "\n\n"))
+				_, _ = w.Write([]byte("data: " + doneItemEvent + "\n\n"))
+				_, _ = w.Write([]byte("data: " + completedEvent + "\n\n"))
+			}))
+			defer server.Close()
+			defer close(stopWS)
+
+			manager, authID, model := newCodexTimeoutScopeTestManager(t, server.URL, tc.useWebsockets, 1)
+			req := cliproxyexecutor.Request{
+				Model:   model,
+				Payload: []byte(`{"model":"gpt-5.4","input":"hello"}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FromString("openai-response"),
+				ResponseFormat: sdktranslator.FromString("openai-response"),
+				Stream:         tc.streamTurn1,
+			}
+
+			var errTurn1 error
+			if tc.streamTurn1 {
+				result, errStream := manager.ExecuteStream(context.Background(), []string{"codex"}, req, opts)
+				errTurn1 = errStream
+				if result != nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							errTurn1 = chunk.Err
+						}
+					}
+				}
+			} else {
+				_, errTurn1 = manager.Execute(context.Background(), []string{"codex"}, req, opts)
+			}
+			if errTurn1 == nil {
+				t.Fatal("expected propagated request_timeout failure on first turn, got nil")
+			}
+			if got := statusCodeFromManagerTestError(t, errTurn1); got != http.StatusRequestTimeout {
+				t.Fatalf("first turn status = %d, want %d; err=%v", got, http.StatusRequestTimeout, errTurn1)
+			}
+			if !isRequestScopedManagerTestError(errTurn1) {
+				t.Fatalf("first turn error %T is not request-scoped: %v", errTurn1, errTurn1)
+			}
+			if got := gjson.Get(errTurn1.Error(), "error.code").String(); got != "request_timeout" {
+				t.Fatalf("error.code = %q, want request_timeout; err=%v", got, errTurn1)
+			}
+			if got := gjson.Get(errTurn1.Error(), "error.type").String(); got != "server_error" {
+				t.Fatalf("error.type = %q, want server_error; err=%v", got, errTurn1)
+			}
+			if got := attempts.Load(); got != 1 {
+				t.Fatalf("first turn upstream attempts = %d, want 1", got)
+			}
+
+			updated, ok := manager.GetByID(authID)
+			if !ok || updated == nil {
+				t.Fatalf("auth %s not found", authID)
+			}
+			if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+				t.Fatalf("auth cooled after request_timeout: unavailable=%v next_retry_after=%v", updated.Unavailable, updated.NextRetryAfter)
+			}
+			if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+				t.Fatalf("model state cooled after request_timeout: %+v", state)
+			}
+			if registry.GetGlobalRegistry().IsModelSuspendedForClient(authID, model) {
+				t.Fatalf("model %s suspended in registry after request_timeout", model)
+			}
+
+			respTurn2, errTurn2 := manager.Execute(context.Background(), []string{"codex"}, req, cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FromString("openai-response"),
+				ResponseFormat: sdktranslator.FromString("openai-response"),
+			})
+			if errTurn2 != nil {
+				t.Fatalf("subsequent request failed after propagated request_timeout: %v", errTurn2)
+			}
+			if got := attempts.Load(); got != 2 {
+				t.Fatalf("total upstream attempts = %d, want 2", got)
+			}
+			if got := gjson.GetBytes(respTurn2.Payload, "output.0.content.0.text").String(); got != "ok" {
+				t.Fatalf("subsequent response text = %q, want %q; payload=%s", got, "ok", respTurn2.Payload)
+			}
+		})
+	}
+}
+
+func TestCodexPropagatedRequestTimeoutPreservesCredentialFailures(t *testing.T) {
+	tests := []struct {
+		name          string
+		useWebsockets bool
+		event         string
+		wantStatus    int
+	}{
+		{
+			name:       "server_error",
+			event:      `{"type":"response.failed","response":{"status":"failed","error":{"code":"internal_server_error","type":"server_error","message":"Internal error."}}}`,
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "authentication_error_with_request_timeout_code",
+			event:      `{"type":"error","error":{"code":"request_timeout","type":"authentication_error","message":"Invalid token."}}`,
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "usage_limit_reached",
+			event:      `{"type":"response.failed","response":{"status":"failed","error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":300}}}`,
+			wantStatus: http.StatusTooManyRequests,
+		},
+		{
+			name:          "websocket_server_error",
+			useWebsockets: true,
+			event:         `{"type":"error","status":502,"error":{"code":"internal_server_error","type":"server_error","message":"Internal error."}}`,
+			wantStatus:    http.StatusBadGateway,
+		},
+	}
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			stopWS := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				if tc.useWebsockets {
+					conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+					if errUpgrade != nil {
+						t.Errorf("upgrade websocket: %v", errUpgrade)
+						return
+					}
+					defer func() { _ = conn.Close() }()
+					go func() {
+						<-stopWS
+						_ = conn.Close()
+					}()
+					_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+					if _, _, errRead := conn.ReadMessage(); errRead != nil {
+						return
+					}
+					_ = conn.WriteMessage(websocket.TextMessage, []byte(tc.event))
+					for {
+						if _, _, errRead := conn.ReadMessage(); errRead != nil {
+							return
+						}
+					}
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + tc.event + "\n\n"))
+			}))
+			defer server.Close()
+			defer close(stopWS)
+
+			manager, authID, model := newCodexTimeoutScopeTestManager(t, server.URL, tc.useWebsockets, 0)
+			req := cliproxyexecutor.Request{
+				Model:   model,
+				Payload: []byte(`{"model":"gpt-5.4","input":"hello"}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FromString("openai-response"),
+				ResponseFormat: sdktranslator.FromString("openai-response"),
+			}
+
+			_, errTurn1 := manager.Execute(context.Background(), []string{"codex"}, req, opts)
+			if errTurn1 == nil {
+				t.Fatal("expected failure on first turn, got nil")
+			}
+			if got := statusCodeFromManagerTestError(t, errTurn1); got != tc.wantStatus {
+				t.Fatalf("first turn status = %d, want %d; err=%v", got, tc.wantStatus, errTurn1)
+			}
+			if isRequestScopedManagerTestError(errTurn1) {
+				t.Fatalf("credential/server failure unexpectedly became request-scoped: %v", errTurn1)
+			}
+
+			updated, ok := manager.GetByID(authID)
+			if !ok || updated == nil {
+				t.Fatalf("auth %s not found", authID)
+			}
+			state := updated.ModelStates[model]
+			if !updated.Unavailable && (state == nil || !state.Unavailable) {
+				t.Fatalf("expected credential or model cooldown after %s: auth=%+v modelState=%+v", tc.name, updated, state)
+			}
+
+			_, errTurn2 := manager.Execute(context.Background(), []string{"codex"}, req, opts)
+			if errTurn2 == nil {
+				t.Fatal("expected second turn to fail while sole credential is cooling")
+			}
+			if got := attempts.Load(); got != 1 {
+				t.Fatalf("upstream attempts = %d, want 1 while credential is cooled", got)
+			}
+		})
+	}
+}
+
+func newCodexTimeoutScopeTestManager(t *testing.T, baseURL string, useWebsockets bool, retry int) (*cliproxyauth.Manager, string, string) {
+	t.Helper()
+	const model = "gpt-5.4"
+	cfg := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}
+	manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+	manager.SetRetryConfig(retry, 0, 0)
+	if useWebsockets {
+		manager.RegisterExecutor(NewCodexWebsocketsExecutor(cfg))
+	} else {
+		manager.RegisterExecutor(NewCodexExecutor(cfg))
+	}
+
+	authID := "codex-timeout-scope-" + uuid.NewString()
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+	if _, err := manager.Register(context.Background(), &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   cliproxyauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": baseURL,
+			"api_key":  "sk-test",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	return manager, authID, model
+}
+
+func statusCodeFromManagerTestError(t *testing.T, err error) int {
+	t.Helper()
+	var statusCoder interface{ StatusCode() int }
+	if !errors.As(err, &statusCoder) || statusCoder == nil {
+		t.Fatalf("error %T does not expose StatusCode(): %v", err, err)
+	}
+	return statusCoder.StatusCode()
+}
+
+func isRequestScopedManagerTestError(err error) bool {
+	var requestErr cliproxyexecutor.RequestScopedError
+	return errors.As(err, &requestErr) && requestErr != nil && requestErr.IsRequestScoped()
 }
