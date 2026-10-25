@@ -29,6 +29,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `internal/api/modules/amp/` — Amp integration (Amp-style routes + reverse proxy)
 - `internal/thinking/` — Main thinking/reasoning pipeline. `ApplyThinking()` (apply.go) parses suffixes (`suffix.go`, suffix overrides body), normalizes config to canonical `ThinkingConfig` (`types.go`), normalizes and validates centrally (`validate.go`/`convert.go`), then applies provider-specific output via `ProviderApplier`. Do not break this "canonical representation → per-provider translation" architecture.
 - `internal/runtime/executor/` — Per-provider runtime executors (incl. Codex WebSocket)
+- Kiro subscription authentication, native wire format and verification boundaries: `docs/kiro.md`.
 - `internal/translator/` — Provider protocol translators (and shared `common`)
 - `internal/registry/` — Model registry + remote updater (`StartModelsUpdater`); `--local-model` disables remote updates
 - `internal/store/` — Storage implementations and secret resolution

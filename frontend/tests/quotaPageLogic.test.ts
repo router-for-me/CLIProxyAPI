@@ -71,6 +71,7 @@ describe('buildTabCounts', () => {
       codex: 2,
       xai: 1,
       kimi: 1,
+      kiro: 0,
       zcode: 0,
       devin: 0,
       meta: 0,

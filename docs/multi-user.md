@@ -40,9 +40,10 @@ Use one server process per account data directory. This is not a Home worker fea
    hint.
 4. Create a channel, such as `573`, then upload a CLIProxyAPI
    credential JSON into it, or use the channel's OAuth login action. Existing
-   OAuth providers and refresh behavior are reused. JSON must include the provider
-   `type`, as in existing CLIProxyAPI auth files; this is not a generic token-paste
-   or provider-key configuration editor. Members can also mount AI providers: an
+   OAuth providers and refresh behavior are reused. JSON identifies the provider
+   with `type`, as in existing CLIProxyAPI auth files; recognized
+   [Kiro account-manager exports](kiro.md#login-and-import) can omit it.
+   This is not a generic token-paste or provider-key configuration editor. Members can also mount AI providers: an
    OpenAI-compatible upstream defined by a base URL, an API key, an optional proxy
    URL, and a model list (fetched from the upstream `/models` or edited manually).
    Member-supplied upstream URLs are contacted by the server process; run this
@@ -65,6 +66,12 @@ name. It contains 1–40 lowercase letters, digits or hyphens, cannot start with
 hyphen, is unique across the whole site, and cannot change after creation because
 model IDs depend on it. There are no separate account display names or channel
 names. Existing usernames, identifiers and pinned model IDs remain unchanged.
+
+## Kiro subscriptions
+
+Kiro uses the existing channel OAuth, credential model editor, quota cards and
+marketplace. Authentication, native credential import, model-discovery limits and
+verification boundaries are documented in [Kiro subscription credentials](kiro.md).
 
 ## ZCode OAuth
 

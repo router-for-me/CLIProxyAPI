@@ -45,6 +45,10 @@ CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API �
 </tbody>
 </table>
 
+## Kiro 订阅
+
+在 OAuth 页面选择 **Kiro 订阅**，通过 AWS Builder ID 设备授权登录；也可以导入已有 Kiro 凭证。接入方式、模型发现与验证边界见 [Kiro 订阅说明](docs/kiro.md)。
+
 ## Windows 本地开发
 
 在项目目录运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev.ps1`，或双击 `start-dev.cmd`，即可构建并启动当前源码。需要 Go 1.26+ 和本地 `config.yaml`；配置、后台运行和停止方法见 [本地开发指南](docs/development_CN.md)。

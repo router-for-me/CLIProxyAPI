@@ -26,6 +26,7 @@ import iconGLM from '@/assets/icons/glm.svg';
 import iconCodex from '@/assets/icons/codex.svg';
 import iconClaude from '@/assets/icons/claude.svg';
 import iconAntigravity from '@/assets/icons/antigravity.svg';
+import iconKiro from '@/assets/icons/kiro.svg';
 import iconKimiLight from '@/assets/icons/kimi-light.svg';
 import iconKimiDark from '@/assets/icons/kimi-dark.svg';
 import iconVertex from '@/assets/icons/vertex.svg';
@@ -87,6 +88,7 @@ function getErrorStatus(error: unknown): number | undefined {
 }
 
 const PROVIDERS: BuiltInOAuthProviderCard[] = [
+  { kind: 'builtin', id: 'kiro', titleKey: 'auth_login.kiro_oauth_title', icon: iconKiro },
   {
     kind: 'builtin',
     id: 'zcode',
@@ -145,7 +147,7 @@ const PROVIDERS: BuiltInOAuthProviderCard[] = [
 
 const BUILTIN_PROVIDER_IDS = new Set<string>(PROVIDERS.map((provider) => provider.id));
 const CALLBACK_SUPPORTED = new Set<string>(['codex', 'anthropic', 'antigravity', 'xai', 'devin']);
-const CANCELLABLE_PROVIDERS = new Set(['devin', 'zcode']);
+const CANCELLABLE_PROVIDERS = new Set(['devin', 'zcode', 'kiro']);
 const XAI_CALLBACK_URL = 'http://127.0.0.1:56121/callback';
 const SUCCESS_RESET_DELAY_MS = 5000;
 const getProviderI18nPrefix = (provider: string) => provider.replace('-', '_');
@@ -473,7 +475,10 @@ export function OAuthPage() {
       if (!attempt.isCurrent()) return;
       const message = getErrorMessage(err);
       updateProviderState(provider, { cancelError: message });
-      showNotification(`${getProviderTextByID(provider, 'oauth_cancel_error')} ${message}`, 'error');
+      showNotification(
+        `${getProviderTextByID(provider, 'oauth_cancel_error')} ${message}`,
+        'error'
+      );
     }
     updateProviderState(provider, {
       cancelling: false,
@@ -774,11 +779,13 @@ export function OAuthPage() {
                   </Button>
                 )}
               </div>
-              {CANCELLABLE_PROVIDERS.has(provider.id) && state.state && state.status === 'error' && (
-                <div className={styles.cardHintSecondary}>
-                  {getProviderText(provider, 'oauth_retry_hint')}
-                </div>
-              )}
+              {CANCELLABLE_PROVIDERS.has(provider.id) &&
+                state.state &&
+                state.status === 'error' && (
+                  <div className={styles.cardHintSecondary}>
+                    {getProviderText(provider, 'oauth_retry_hint')}
+                  </div>
+                )}
               {state.cancelError && (
                 <div className="status-badge error">
                   {getProviderText(provider, 'oauth_cancel_error')} {state.cancelError}
@@ -802,7 +809,8 @@ export function OAuthPage() {
                       : 'auth_login.oauth_callback_hint'
                 )}
                 disabled={
-                  CANCELLABLE_PROVIDERS.has(provider.id) && (state.cancelling || state.status !== 'waiting')
+                  CANCELLABLE_PROVIDERS.has(provider.id) &&
+                  (state.cancelling || state.status !== 'waiting')
                 }
                 value={state.callbackUrl || ''}
                 onChange={(e) =>
@@ -827,7 +835,8 @@ export function OAuthPage() {
                   onClick={() => submitCallback(provider.id)}
                   loading={state.callbackSubmitting}
                   disabled={
-                    CANCELLABLE_PROVIDERS.has(provider.id) && (state.cancelling || state.status !== 'waiting')
+                    CANCELLABLE_PROVIDERS.has(provider.id) &&
+                    (state.cancelling || state.status !== 'waiting')
                   }
                 >
                   {t('auth_login.oauth_callback_button')}

@@ -17,6 +17,7 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewAntigravityAuthenticator(),
 		sdkAuth.NewZCodeAuthenticator(),
+		sdkAuth.NewKiroAuthenticator(),
 		sdkAuth.NewKimiAuthenticator(),
 		sdkAuth.NewKimiAIAuthenticator(),
 		sdkAuth.NewKimiAIDotAuthenticator(),

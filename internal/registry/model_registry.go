@@ -313,7 +313,7 @@ func responsesWebSearchProviderPathSupport(provider string) *bool {
 	switch provider {
 	case "codex", "xai", "claude", "antigravity":
 		return boolPointer(true)
-	case "openai", "openai-compatibility", "gemini", "aistudio", "vertex", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "interactions", "gemini-interactions":
+	case "openai", "openai-compatibility", "gemini", "aistudio", "vertex", "kiro", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "interactions", "gemini-interactions":
 		return boolPointer(false)
 	default:
 		if strings.HasPrefix(provider, "openai-compatible-") {

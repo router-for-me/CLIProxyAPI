@@ -128,7 +128,7 @@ func SupportsCredentialModels(a *Auth) bool {
 		return false
 	}
 	switch provider {
-	case "claude", "codex", "gemini", "gemini-interactions", "vertex", "aistudio", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "xai", "devin", "meta", "zcode", "antigravity":
+	case "claude", "codex", "gemini", "gemini-interactions", "vertex", "aistudio", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "kiro", "xai", "devin", "meta", "zcode", "antigravity":
 		return true
 	default:
 		return false

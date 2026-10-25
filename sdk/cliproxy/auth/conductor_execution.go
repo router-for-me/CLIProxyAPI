@@ -1547,8 +1547,8 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 	}
 
 	var prepareMu *sync.Mutex
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
-		// Meta also mints on 401 recovery. Serialize both paths per credential.
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") || strings.EqualFold(strings.TrimSpace(auth.Provider), "kiro") {
+		// Preparation can rotate tokens, just like scheduled and forced refresh.
 		lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
 		prepareMu = &lockValue.(*authRefreshLock).mu
 	} else {

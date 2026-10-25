@@ -1,5 +1,7 @@
 package auth
 
+import "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
+
 // CanonicalCredentialMetadataKey returns the canonical snake_case name for
 // credential metadata keys that previously also accepted config-style aliases.
 func CanonicalCredentialMetadataKey(key string) string {
@@ -32,6 +34,7 @@ func CanonicalCredentialMetadataKey(key string) string {
 // NormalizeCredentialMetadata rewrites recognized legacy keys to their
 // canonical snake_case names. An explicitly present canonical value wins.
 func NormalizeCredentialMetadata(metadata map[string]any) {
+	kiro.NormalizeMetadata(metadata)
 	for key, value := range metadata {
 		canonical := CanonicalCredentialMetadataKey(key)
 		if canonical == key {

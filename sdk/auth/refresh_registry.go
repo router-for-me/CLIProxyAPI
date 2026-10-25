@@ -10,6 +10,7 @@ func init() {
 	registerRefreshLead("codex", func() Authenticator { return NewCodexAuthenticator() })
 	registerRefreshLead("claude", func() Authenticator { return NewClaudeAuthenticator() })
 	registerRefreshLead("antigravity", func() Authenticator { return NewAntigravityAuthenticator() })
+	registerRefreshLead("kiro", func() Authenticator { return NewKiroAuthenticator() })
 	registerRefreshLead("kimi", func() Authenticator { return NewKimiAuthenticator() })
 	registerRefreshLead("kimi-ai", func() Authenticator { return NewKimiAIAuthenticator() })
 	registerRefreshLead("kimi.ai", func() Authenticator { return NewKimiAIDotAuthenticator() })

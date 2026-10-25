@@ -10,6 +10,7 @@ import iconGemini from '@/assets/icons/gemini.svg';
 import iconGrok from '@/assets/icons/grok.svg';
 import iconGrokDark from '@/assets/icons/grok-dark.svg';
 import iconIflow from '@/assets/icons/iflow.svg';
+import iconKiro from '@/assets/icons/kiro.svg';
 import iconKimiDark from '@/assets/icons/kimi-dark.svg';
 import iconKimiLight from '@/assets/icons/kimi-light.svg';
 import iconQwen from '@/assets/icons/qwen.svg';
@@ -29,7 +30,7 @@ export type AuthFileModelItem = {
 export type AuthFileIconAsset = string | { light: string; dark: string };
 
 export type QuotaProviderType =
-  'antigravity' | 'claude' | 'codex' | 'devin' | 'kimi' | 'xai' | 'meta' | 'zcode';
+  'antigravity' | 'claude' | 'codex' | 'devin' | 'kiro' | 'kimi' | 'xai' | 'meta' | 'zcode';
 export type AuthFileQuotaFilter = QuotaProviderType | 'all' | null;
 export type OAuthConfigLoadError = 'loading' | 'unsupported' | 'load' | null;
 
@@ -40,6 +41,7 @@ export const QUOTA_PROVIDER_TYPES = new Set<QuotaProviderType>([
   'claude',
   'codex',
   'devin',
+  'kiro',
   'kimi',
   'xai',
 ]);
@@ -54,6 +56,7 @@ export const OAUTH_PROVIDER_PRESETS = [
   'claude',
   'codex',
   'devin',
+  'kiro',
   'kimi',
 ];
 
@@ -73,6 +76,7 @@ export const AUTH_FILE_MANUAL_REFRESH_PROVIDERS = new Set([
   'antigravity',
   'claude',
   'codex',
+  'kiro',
   'kimi',
   'xai',
 ]);
@@ -91,6 +95,7 @@ export const AUTH_FILE_ICONS: Record<string, AuthFileIconAsset> = {
   gemini: iconGemini,
   xai: { light: iconGrok, dark: iconGrokDark },
   iflow: iconIflow,
+  kiro: iconKiro,
   kimi: { light: iconKimiDark, dark: iconKimiLight },
   qwen: iconQwen,
   vertex: iconVertex,

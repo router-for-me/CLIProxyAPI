@@ -30,11 +30,7 @@ import type { AuthFileStatusBarData } from '@/features/authFiles/hooks/useAuthFi
 import { PageHeader } from '@/features/sharing/shared';
 import { CARD_ENTRANCE_BUDGET_MS } from './constants';
 import { classifyQuotaFiles, type QuotaFileEntry } from './logic';
-import {
-  buildExpiringEntries,
-  expiryUrgency,
-  type ExpiringQuotaEntry,
-} from './expiringQuota';
+import { buildExpiringEntries, expiryUrgency, type ExpiringQuotaEntry } from './expiringQuota';
 import { useQuotaBatchLoader } from './hooks/useQuotaBatchLoader';
 import type { QuotaProviderType } from './providers/types';
 import type { QuotaCardState } from './providers';
@@ -58,8 +54,7 @@ const channelTarget = (file: AuthFileItem): { id: string; name: string } | null 
   return { id, name };
 };
 
-const entryKey = (entry: QuotaFileEntry): string =>
-  `${entry.type}:${getQuotaCacheKey(entry.file)}`;
+const entryKey = (entry: QuotaFileEntry): string => `${entry.type}:${getQuotaCacheKey(entry.file)}`;
 
 function ExpiringCard({
   item,
@@ -100,11 +95,7 @@ function ExpiringCard({
     >
       <div className={styles.meta}>
         {channelUrl ? (
-          <Link
-            to={channelUrl}
-            className={styles.channelLink}
-            title={t('sharing.tab_resources')}
-          >
+          <Link to={channelUrl} className={styles.channelLink} title={t('sharing.tab_resources')}>
             <span className={styles.channelName}>{channelName}</span>
             <IconChevronRight size={12} aria-hidden="true" />
           </Link>
@@ -193,6 +184,7 @@ export function ExpiringQuotaPage() {
   const claudeQuota = useQuotaStore((state) => state.claudeQuota);
   const codexQuota = useQuotaStore((state) => state.codexQuota);
   const devinQuota = useQuotaStore((state) => state.devinQuota);
+  const kiroQuota = useQuotaStore((state) => state.kiroQuota);
   const kimiQuota = useQuotaStore((state) => state.kimiQuota);
   const metaQuota = useQuotaStore((state) => state.metaQuota);
   const xaiQuota = useQuotaStore((state) => state.xaiQuota);
@@ -205,6 +197,7 @@ export function ExpiringQuotaPage() {
         claude: claudeQuota,
         codex: codexQuota,
         devin: devinQuota,
+        kiro: kiroQuota,
         kimi: kimiQuota,
         meta: metaQuota,
         xai: xaiQuota,
@@ -215,6 +208,7 @@ export function ExpiringQuotaPage() {
       claudeQuota,
       codexQuota,
       devinQuota,
+      kiroQuota,
       kimiQuota,
       metaQuota,
       xaiQuota,
@@ -275,7 +269,10 @@ export function ExpiringQuotaPage() {
   /* ---------- Expiring rows ---------- */
 
   const now = useNow(true);
-  const fresh = useMemo(() => buildExpiringEntries(entries, getQuota, now), [entries, getQuota, now]);
+  const fresh = useMemo(
+    () => buildExpiringEntries(entries, getQuota, now),
+    [entries, getQuota, now]
+  );
 
   /* A refresh replaces the credential's quota state with a bare loading one,
      so its expiring rows vanish until the fetch lands — the card would blink
@@ -333,8 +330,7 @@ export function ExpiringQuotaPage() {
   const refreshing = loading || batchLoading;
   const disableControls = connectionStatus !== 'connected';
   const batchSettled = settledVersion === listVersion;
-  const showSkeleton =
-    loading || (displayed.length === 0 && entries.length > 0 && !batchSettled);
+  const showSkeleton = loading || (displayed.length === 0 && entries.length > 0 && !batchSettled);
   const showEmpty = !loading && !error && displayed.length === 0 && batchSettled;
 
   /* First batch of visible cards captures its staggered entrance once; cards

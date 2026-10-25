@@ -177,8 +177,9 @@ export function collectExpiringQuotaRows(
       })
     );
   } else if (provider === 'antigravity') {
-    const groups = (quota as { groups?: { id?: string; label?: string; buckets?: WindowShape[] }[] })
-      .groups ?? [];
+    const groups =
+      (quota as { groups?: { id?: string; label?: string; buckets?: WindowShape[] }[] }).groups ??
+      [];
     for (const group of groups) {
       const groupLabel = (group.label ?? '').trim();
       const prefixKey = ANTIGRAVITY_GROUP_LABEL_KEYS.get(normalizeLabelKey(groupLabel));
@@ -203,7 +204,7 @@ export function collectExpiringQuotaRows(
         });
       }
     }
-  } else if (provider === 'kimi') {
+  } else if (provider === 'kimi' || provider === 'kiro') {
     const kimiRows = (quota as { rows?: KimiRowShape[] }).rows ?? [];
     kimiRows.forEach((row, index) => {
       const used = isFiniteNumber(row.used) ? row.used : null;
@@ -243,8 +244,7 @@ export function collectExpiringQuotaRows(
         const isMonthly = billing.periodType === 'monthly';
         // A bare rollover with no monthly quota figure is not an expiring
         // quota — nothing is lost when it resets.
-        const hasMonthlyQuota =
-          billing.usedPercent !== null || billing.monthlyLimitCents !== null;
+        const hasMonthlyQuota = billing.usedPercent !== null || billing.monthlyLimitCents !== null;
         if (!isMonthly || hasMonthlyQuota) {
           push({
             id: `xai:${billing.periodType}`,
@@ -264,8 +264,7 @@ export function collectExpiringQuotaRows(
       // at billingPeriodEnd — a second expiring row worth listing.
       if (billing.periodType === 'weekly') {
         const monthlyResetAtMs = parseIsoToMs(billing.billingPeriodEnd);
-        const hasMonthlyQuota =
-          billing.usedPercent !== null || billing.monthlyLimitCents !== null;
+        const hasMonthlyQuota = billing.usedPercent !== null || billing.monthlyLimitCents !== null;
         if (hasMonthlyQuota && monthlyResetAtMs !== null) {
           push({
             id: 'xai:monthly-billing',
@@ -295,12 +294,14 @@ export function collectExpiringQuotaRows(
         })
       );
   } else if (provider === 'meta') {
-    const data = (quota as {
-      data?: {
-        planName?: string;
-        windows?: { id?: string; usedPercent?: number | null; resetAt?: number }[];
-      };
-    }).data;
+    const data = (
+      quota as {
+        data?: {
+          planName?: string;
+          windows?: { id?: string; usedPercent?: number | null; resetAt?: number }[];
+        };
+      }
+    ).data;
     (data?.windows ?? [])
       .filter((window) => window.id === 'weekly')
       .forEach((window, index) =>

@@ -5,8 +5,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -92,6 +95,40 @@ func (s *Service) credentialModelCatalog(ctx context.Context, a *coreauth.Auth, 
 		return nil, coreauth.ErrCredentialModelsUnsupported
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	if provider == "kiro" {
+		status := registry.ModelCatalogStatus{Kind: "account_upstream", SupportsRefresh: true, UpstreamDiscovery: true}
+		models := cachedUpstreamModels(a)
+		if refresh {
+			preparer := executor.NewKiroExecutor(s.cfg)
+			var errPrepare error
+			if s.coreManager != nil {
+				a, errPrepare = s.coreManager.PrepareRequestAuth(ctx, preparer, a)
+			} else if preparer.ShouldPrepareRequestAuth(a) {
+				a, errPrepare = preparer.PrepareRequestAuth(ctx, a)
+			}
+			if errPrepare != nil {
+				log.WithError(errPrepare).Debug("kiro: model discovery credential preparation failed")
+				return nil, coreauth.ErrCredentialModelsRefreshFailed
+			}
+			client := &kiro.Client{HTTP: helps.NewProxyAwareHTTPClient(ctx, s.cfg, a, 0)}
+			var errFetch error
+			models, errFetch = client.ListModels(ctx, a.Metadata)
+			if errFetch != nil {
+				log.WithError(errFetch).Debug("kiro: account model discovery failed")
+				return nil, coreauth.ErrCredentialModelsRefreshFailed
+			}
+			storeUpstreamModels(a, models)
+			if s.coreManager != nil {
+				if current, ok := s.coreManager.GetByID(a.ID); ok && !current.Disabled {
+					s.refreshModelRegistrationForAuthWithContext(ctx, current, nil)
+				}
+			}
+		}
+		if models == nil {
+			models = registry.GetKiroModels()
+		}
+		return &coreauth.CredentialModelCatalog{Models: models, Source: status}, nil
+	}
 	if provider == "zcode" || provider == "openai-compatible" {
 		return s.upstreamCredentialModelCatalog(ctx, a, provider, refresh)
 	}

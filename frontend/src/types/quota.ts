@@ -355,7 +355,18 @@ export interface KimiUsagePayload {
   };
 }
 
-export interface KimiQuotaRow {
+export type KimiQuotaRow = CountQuotaRow;
+export type KiroQuotaRow = CountQuotaRow;
+
+export interface KiroQuotaState {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  rows: KiroQuotaRow[];
+  plan?: string;
+  error?: string;
+  errorStatus?: number;
+}
+
+export interface CountQuotaRow {
   id: string;
   label?: string;
   labelKey?: string;

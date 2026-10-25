@@ -10,6 +10,7 @@ import type {
   CodexQuotaState,
   DevinQuotaState,
   KimiQuotaState,
+  KiroQuotaState,
   MetaQuotaState,
   XaiQuotaState,
   ZCodeQuotaState,
@@ -24,6 +25,7 @@ interface QuotaStoreState {
   claudeQuota: Record<string, ClaudeQuotaState>;
   codexQuota: Record<string, CodexQuotaState>;
   devinQuota: Record<string, DevinQuotaState>;
+  kiroQuota: Record<string, KiroQuotaState>;
   kimiQuota: Record<string, KimiQuotaState>;
   metaQuota: Record<string, MetaQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
@@ -32,6 +34,7 @@ interface QuotaStoreState {
   setClaudeQuota: (updater: QuotaUpdater<Record<string, ClaudeQuotaState>>) => void;
   setCodexQuota: (updater: QuotaUpdater<Record<string, CodexQuotaState>>) => void;
   setDevinQuota: (updater: QuotaUpdater<Record<string, DevinQuotaState>>) => void;
+  setKiroQuota: (updater: QuotaUpdater<Record<string, KiroQuotaState>>) => void;
   setKimiQuota: (updater: QuotaUpdater<Record<string, KimiQuotaState>>) => void;
   setMetaQuota: (updater: QuotaUpdater<Record<string, MetaQuotaState>>) => void;
   setXaiQuota: (updater: QuotaUpdater<Record<string, XaiQuotaState>>) => void;
@@ -53,6 +56,7 @@ export const useQuotaStore = create<QuotaStoreState>((set) => ({
   claudeQuota: {},
   codexQuota: {},
   devinQuota: {},
+  kiroQuota: {},
   kimiQuota: {},
   metaQuota: {},
   xaiQuota: {},
@@ -73,6 +77,8 @@ export const useQuotaStore = create<QuotaStoreState>((set) => ({
     set((state) => ({
       devinQuota: resolveUpdater(updater, state.devinQuota),
     })),
+  setKiroQuota: (updater) =>
+    set((state) => ({ kiroQuota: resolveUpdater(updater, state.kiroQuota) })),
   setKimiQuota: (updater) =>
     set((state) => ({
       kimiQuota: resolveUpdater(updater, state.kimiQuota),
@@ -109,6 +115,7 @@ export const useQuotaStore = create<QuotaStoreState>((set) => ({
           claudeQuota: omitNames(state.claudeQuota),
           codexQuota: omitNames(state.codexQuota),
           devinQuota: omitNames(state.devinQuota),
+          kiroQuota: omitNames(state.kiroQuota),
           kimiQuota: omitNames(state.kimiQuota),
           metaQuota: omitNames(state.metaQuota),
           xaiQuota: omitNames(state.xaiQuota),
@@ -122,6 +129,7 @@ export const useQuotaStore = create<QuotaStoreState>((set) => ({
         claudeQuota: {},
         codexQuota: {},
         devinQuota: {},
+        kiroQuota: {},
         kimiQuota: {},
         metaQuota: {},
         xaiQuota: {},

@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -39,6 +40,25 @@ func prepareCredentialQuotaRequest(auth *coreauth.Auth, target *url.URL, headers
 			}
 			headers["User-Agent"] = misc.AntigravityUserAgent()
 		}
+	case "kiro":
+		if !hubQuotaRouteAllowed("kiro", host, target.Path) {
+			return nil
+		}
+		control, errParse := url.Parse(kiro.ControlURL(auth.Metadata))
+		if errParse != nil || control.Host == "" {
+			return errors.New("invalid Kiro control endpoint")
+		}
+		target.Scheme, target.Host = control.Scheme, control.Host
+		query := target.Query()
+		query.Set("origin", "AI_EDITOR")
+		query.Set("resourceType", "AGENTIC_REQUEST")
+		query.Set("isEmailRequired", "true")
+		if arn := kiro.String(auth.Metadata, "profile_arn"); arn != "" {
+			query.Set("profileArn", arn)
+		} else {
+			query.Del("profileArn")
+		}
+		target.RawQuery = query.Encode()
 	case "kimi":
 		if (host == "api.kimi.com" || host == "api.kimi.ai") && target.Path == "/coding/v1/usages" {
 			regionalAuth := *auth

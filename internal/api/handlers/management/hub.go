@@ -301,6 +301,9 @@ func (h *Handler) HubUploadCredential(c *gin.Context) {
 		hubError(c, fmt.Errorf("%w: invalid credential JSON", multiuser.ErrInvalid))
 		return
 	}
+	// Recognized provider-specific shapes without an explicit type (e.g. the
+	// Kiro social export) are normalized before the provider check.
+	coreauth.NormalizeCredentialMetadata(metadata)
 	provider, _ := metadata["type"].(string)
 	if strings.TrimSpace(provider) == "" {
 		hubError(c, fmt.Errorf("%w: credential type is required", multiuser.ErrInvalid))
@@ -675,7 +678,7 @@ func (h *Handler) HubDeleteChannel(c *gin.Context) {
 func (h *Handler) HubOAuth(c *gin.Context) {
 	provider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
 	switch provider {
-	case "codex", "claude", "kimi", "kimi-ai", "antigravity", "xai", "meta", "devin", "zcode":
+	case "codex", "claude", "kiro", "kimi", "kimi-ai", "antigravity", "xai", "meta", "devin", "zcode":
 	default:
 		hubError(c, fmt.Errorf("%w: use a built-in OAuth provider or upload a credential JSON", multiuser.ErrInvalid))
 		return

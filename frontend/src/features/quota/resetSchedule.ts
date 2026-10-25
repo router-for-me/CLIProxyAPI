@@ -130,7 +130,7 @@ export function collectQuotaRowInstants(
     return collectRows(buckets, 'bucket');
   }
 
-  if (provider === 'kimi') {
+  if (provider === 'kimi' || provider === 'kiro') {
     return collectRows((quota as { rows?: WindowLike[] }).rows ?? [], 'row');
   }
 

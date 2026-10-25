@@ -41,6 +41,10 @@ var hubQuotaRoutes = map[string][]hubQuotaRoute{
 		{host: "bigmodel.cn", prefixes: []string{"/api/monitor/usage/quota/limit"}},
 		{host: "zcode.z.ai", prefixes: []string{"/api/v1/coding-plan/reset/status", "/api/v1/coding-plan/reset/use"}},
 	},
+	"kiro": {
+		{host: "management.us-east-1.kiro.dev", prefixes: []string{"/getUsageLimits"}},
+		{host: "management.eu-central-1.kiro.dev", prefixes: []string{"/getUsageLimits"}},
+	},
 	"kimi": {
 		{host: "api.kimi.com", prefixes: []string{"/coding/v1/usages"}},
 		{host: "api.kimi.ai", prefixes: []string{"/coding/v1/usages"}},
@@ -63,6 +67,17 @@ func hubQuotaRouteAllowed(provider, host, path string) bool {
 		return false
 	}
 	host = strings.ToLower(strings.TrimSpace(host))
+	if quotaProviderKey(provider) == "kiro" {
+		if path != "/getUsageLimits" {
+			return false
+		}
+		for _, route := range routes {
+			if route.host == host {
+				return true
+			}
+		}
+		return false
+	}
 	for _, route := range routes {
 		if route.host != host {
 			continue
@@ -125,6 +140,13 @@ func (h *Handler) HubQuotaAPICall(c *gin.Context) {
 		return
 	}
 
+	var errPrepare error
+	a, errPrepare = h.prepareKiroAuth(c.Request.Context(), a, "")
+	if errPrepare != nil {
+		log.WithError(errPrepare).Debug("hub quota: Kiro credential preparation failed")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Kiro credential preparation failed"})
+		return
+	}
 	reqHeaders := body.Header
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}

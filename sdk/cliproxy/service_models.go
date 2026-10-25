@@ -166,6 +166,12 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			models = registry.GetCodexProModels()
 		}
 		models = applyExcludedModels(models, excluded)
+	case "kiro":
+		models = cachedUpstreamModels(a)
+		if models == nil {
+			models = registry.GetKiroModels()
+		}
+		models = applyExcludedModels(models, excluded)
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)

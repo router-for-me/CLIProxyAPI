@@ -134,6 +134,13 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
+	var errPrepare error
+	auth, errPrepare = h.prepareKiroAuth(c.Request.Context(), auth, requestProxyURL)
+	if errPrepare != nil {
+		log.WithError(errPrepare).Debug("management APICall: Kiro credential preparation failed")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Kiro credential preparation failed"})
+		return
+	}
 
 	reqHeaders := body.Header
 	if reqHeaders == nil {
