@@ -354,6 +354,28 @@ func requestCallerScope(ginCtx *gin.Context) string {
 	return coresession.CallerScope(fmt.Sprint(value))
 }
 
+func addCallerScopeMetadata(meta map[string]any, callerScope string) {
+	if meta == nil {
+		return
+	}
+	callerScope = strings.TrimSpace(callerScope)
+	if callerScope == "" {
+		return
+	}
+	meta[coreexecutor.CallerScopeMetadataKey] = callerScope
+}
+
+func callerScopeFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	value, ok := meta[coreexecutor.CallerScopeMetadataKey].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
 func addAuthSelectionModelMetadata(meta map[string]any, model string) {
 	if meta == nil {
 		return

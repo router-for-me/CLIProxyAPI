@@ -128,6 +128,16 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			nextReq.Body = nil
 		}
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
+		if nextReq.CallerScope == "" {
+			if scope, ok := nextReq.Metadata[coreexecutor.CallerScopeMetadataKey].(string); ok {
+				nextReq.CallerScope = strings.TrimSpace(scope)
+			}
+		} else if _, ok := nextReq.Metadata[coreexecutor.CallerScopeMetadataKey]; !ok {
+			if nextReq.Metadata == nil {
+				nextReq.Metadata = make(map[string]any, 1)
+			}
+			nextReq.Metadata[coreexecutor.CallerScopeMetadataKey] = strings.TrimSpace(nextReq.CallerScope)
+		}
 		if current.Path != "" {
 			if nextReq.Metadata == nil {
 				nextReq.Metadata = make(map[string]any, 1)

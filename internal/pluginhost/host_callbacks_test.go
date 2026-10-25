@@ -1004,6 +1004,94 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 }
 
+func TestHostModelExecuteCallbacksForwardCallerScope(t *testing.T) {
+	host := New()
+	var gotExec, gotStream handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			gotExec = req
+			return handlers.ModelExecutionResponse{StatusCode: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
+		},
+		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			gotStream = req
+			chunks := make(chan handlers.ModelExecutionChunk)
+			close(chunks)
+			return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: chunks}, nil
+		},
+	})
+
+	rawExec, errMarshalExec := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol: "claude",
+			ExitProtocol:  "claude",
+			Model:         "claude-sonnet-4-5",
+			Body:          []byte(`{"messages":[]}`),
+			CallerScope:   " caller-scope-handle-abc ",
+		},
+	})
+	if errMarshalExec != nil {
+		t.Fatalf("marshal execute request: %v", errMarshalExec)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawExec); errCall != nil {
+		t.Fatalf("callFromPlugin(execute) error = %v", errCall)
+	}
+	if gotExec.CallerScope != "caller-scope-handle-abc" {
+		t.Fatalf("gotExec.CallerScope = %q, want caller-scope-handle-abc", gotExec.CallerScope)
+	}
+
+	rawStream, errMarshalStream := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol: "claude",
+			ExitProtocol:  "claude",
+			Model:         "claude-sonnet-4-5",
+			Stream:        true,
+			Body:          []byte(`{"messages":[]}`),
+			CallerScope:   " caller-scope-handle-abc ",
+		},
+	})
+	if errMarshalStream != nil {
+		t.Fatalf("marshal execute_stream request: %v", errMarshalStream)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawStream); errCall != nil {
+		t.Fatalf("callFromPlugin(execute_stream) error = %v", errCall)
+	}
+	if gotStream.CallerScope != "caller-scope-handle-abc" {
+		t.Fatalf("gotStream.CallerScope = %q, want caller-scope-handle-abc", gotStream.CallerScope)
+	}
+
+	var seenBefore, seenAfter pluginapi.RequestInterceptRequest
+	interceptHost := newHostWithRecords(capabilityRecord{
+		id: "intercept-caller-scope",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					if req.ToFormat == "" {
+						seenBefore = req
+					} else {
+						seenAfter = req
+					}
+					return pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body}, nil
+				}),
+			},
+		},
+	})
+
+	_ = interceptHost.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Metadata: map[string]any{pluginapi.CallerScopeMetadataKey: "scope-from-metadata"},
+	})
+	if seenBefore.CallerScope != "scope-from-metadata" {
+		t.Fatalf("seenBefore.CallerScope = %q, want scope-from-metadata", seenBefore.CallerScope)
+	}
+
+	_ = interceptHost.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		ToFormat:    "claude",
+		CallerScope: "scope-from-field",
+	})
+	if seenAfter.Metadata[pluginapi.CallerScopeMetadataKey] != "scope-from-field" {
+		t.Fatalf("seenAfter.Metadata[caller_scope] = %v, want scope-from-field", seenAfter.Metadata[pluginapi.CallerScopeMetadataKey])
+	}
+}
+
 func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 	host := New()
 	var got handlers.ModelExecutionRequest

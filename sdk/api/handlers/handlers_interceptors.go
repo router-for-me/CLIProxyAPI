@@ -499,6 +499,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 		Stream:         opts.Stream,
 		Headers:        cloneHeader(opts.Headers),
 		Body:           req.Payload,
+		CallerScope:    callerScopeFromMetadata(opts.Metadata),
 		Metadata:       opts.Metadata,
 	}, skipPluginID)
 	opts.Headers = finalInterceptorHeaders(opts.Headers, resp.Headers)
@@ -589,6 +590,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		Stream:         req.Stream,
 		Headers:        cloneHeader(req.Headers),
 		Body:           req.Body,
+		CallerScope:    callerScopeFromMetadata(req.Metadata),
 		Metadata:       req.Metadata,
 	}, skipPluginID)
 	return coreexecutor.RequestAfterAuthInterceptResponse{

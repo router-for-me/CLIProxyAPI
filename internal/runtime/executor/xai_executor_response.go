@@ -477,9 +477,15 @@ func unwrapXAIDispatcherArguments(rawArgs string, namespaceName string, refs map
 	}
 
 	if namespaceName != "" {
-		qualified := qualifyXAINamespaceToolName(namespaceName, childName)
-		if ref, exists := refs[qualified]; exists && ref.isDispatcher {
-			return "", nil, false
+		if dispRef, exists := refs[namespaceName]; exists && dispRef.isDispatcher && len(dispRef.children) > 0 {
+			if _, isChild := dispRef.children[childName]; !isChild {
+				return "", nil, false
+			}
+		} else {
+			qualified := qualifyXAINamespaceToolName(namespaceName, childName)
+			if ref, exists := refs[qualified]; exists && ref.isDispatcher {
+				return "", nil, false
+			}
 		}
 	} else {
 		isChildOfDispatcher := false
