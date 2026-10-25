@@ -79,12 +79,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
-		var errStart error
-		if forwarder, errStart = startCallbackForwarder(anthropicCallbackPort, "anthropic", targetURL); errStart != nil {
-			log.WithError(errStart).Error("failed to start anthropic callback forwarder")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-			return
-		}
+		forwarder = startOptionalWebUICallbackForwarder(anthropicCallbackPort, "anthropic", targetURL)
 	}
 
 	go func() {
@@ -241,12 +236,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
-		var errStart error
-		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
-			log.WithError(errStart).Error("failed to start codex callback forwarder")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-			return
-		}
+		forwarder = startOptionalWebUICallbackForwarder(codexCallbackPort, "codex", targetURL)
 	}
 
 	go func() {
@@ -388,12 +378,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
-		var errStart error
-		if forwarder, errStart = startCallbackForwarder(antigravity.CallbackPort, "antigravity", targetURL); errStart != nil {
-			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-			return
-		}
+		forwarder = startOptionalWebUICallbackForwarder(antigravity.CallbackPort, "antigravity", targetURL)
 	}
 
 	go func() {
