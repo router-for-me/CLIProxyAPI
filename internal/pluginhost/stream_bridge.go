@@ -194,10 +194,6 @@ func (s *streamBridgeStream) emit(ctx context.Context, chunk pluginapi.ExecutorS
 	return <-request.done
 }
 
-func (s *streamBridgeStream) close(errorMessage string) {
-	s.closeWithError(rpcStreamError(errorMessage, nil))
-}
-
 func (s *streamBridgeStream) closeWithError(err error) {
 	if s == nil {
 		return

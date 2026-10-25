@@ -136,15 +136,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				return false
 			}
 		}
+		initialModel := ""
+		if initial != nil {
+			initialModel = strings.TrimSpace(gjson.GetBytes(initial.originalPayload, "model").String())
+		}
+		boundModel := helps.PayloadRequestedModel(opts, initialModel)
+		if boundModel == "" {
+			boundModel = req.Model
+		}
 		authorizePayload := func(payload []byte, forceBoundModel bool) (allowed bool, keepOpen bool) {
 			authPayload := payload
-			boundModel := ""
-			if initial != nil {
-				boundModel = strings.TrimSpace(gjson.GetBytes(initial.originalPayload, "model").String())
-			}
-			if boundModel == "" {
-				boundModel = req.Model
-			}
 			explicitModel := strings.TrimSpace(gjson.GetBytes(authPayload, "model").String())
 			if boundModel != "" && json.Valid(authPayload) && (forceBoundModel || explicitModel == "" || explicitModel == req.Model) {
 				if withModel, errSet := sjson.SetBytes(bytes.Clone(authPayload), "model", boundModel); errSet == nil {
@@ -186,14 +187,14 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				return true
 			}
 			model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-			if model != "" && model != req.Model && model != gjson.GetBytes(initial.originalPayload, "model").String() {
+			if model != "" && model != req.Model && model != boundModel {
 				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 				return false
 			}
 			if model == "" {
 				model = req.Model
 				if model == "" {
-					model = strings.TrimSpace(gjson.GetBytes(initial.originalPayload, "model").String())
+					model = boundModel
 				}
 				payload, _ = sjson.SetBytes(payload, "model", model)
 			}

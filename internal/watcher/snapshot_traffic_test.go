@@ -281,45 +281,67 @@ func (p hostConfigParser) ParseAuth(_ context.Context, req pluginapi.AuthParseRe
 // auth over its own snapshot and reads the file again afterwards, as a file event would, so
 // what the plugin parser derives from the new host config reaches the runtime.
 func TestRefreshAuthStateRereadsAuthPersistedDuringScan(t *testing.T) {
-	ctx := context.Background()
-	w, manager, path := newTrafficWatcher(t, true)
-	host := "old"
-	w.SetPluginAuthParser(hostConfigParser{host: &host})
+	for _, kind := range []string{"runtime_patch", "login_snapshot"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			w, manager, path := newTrafficWatcher(t, true)
+			host := "old"
+			parser := hostConfigParser{host: &host}
+			w.SetPluginAuthParser(parser)
 
-	patched, _ := manager.GetByID(trafficAuthFile)
-	patched.Metadata["note"] = "patched"
-	persisted, errUpdate := manager.Update(ctx, patched)
-	if errUpdate != nil {
-		t.Fatalf("persisted update: %v", errUpdate)
-	}
-	w.addOrUpdateClient(path)
-	written, _ := takeQueuedAuthUpdate(w, trafficAuthFile)
-	if !applyQueuedSnapshot(t, manager, written) {
-		t.Fatal("the PATCH's file event was discarded")
-	}
-	if got, _ := manager.GetByID(trafficAuthFile); got.Attributes["host_config"] != "old" {
-		t.Fatalf("runtime host_config = %q, want old", got.Attributes["host_config"])
-	}
+			patched, _ := manager.GetByID(trafficAuthFile)
+			patched.Metadata["note"] = "patched"
+			persisted, errUpdate := manager.Update(ctx, patched)
+			if errUpdate != nil {
+				t.Fatalf("persisted update: %v", errUpdate)
+			}
+			if kind == "login_snapshot" {
+				data, errRead := os.ReadFile(path)
+				if errRead != nil {
+					t.Fatal(errRead)
+				}
+				auths, errSynth := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
+					Config:           excludedModelsConfig(w.authDir, "old-model"),
+					AuthDir:          w.authDir,
+					Now:              time.Now(),
+					IDGenerator:      synthesizer.NewStableIDGenerator(),
+					PluginAuthParser: parser,
+				}, path, data)
+				if errSynth != nil || len(auths) != 1 || !auths[0].HasFileSnapshot() {
+					t.Fatalf("synthesize login snapshot: err=%v auths=%v", errSynth, auths)
+				}
+				persisted = auths[0]
+			}
+			w.addOrUpdateClient(path)
+			written, _ := takeQueuedAuthUpdate(w, trafficAuthFile)
+			if !applyQueuedSnapshot(t, manager, written) {
+				t.Fatal("the PATCH's file event was discarded")
+			}
+			if got, _ := manager.GetByID(trafficAuthFile); got.Attributes["host_config"] != "old" {
+				t.Fatalf("runtime host_config = %q, want old", got.Attributes["host_config"])
+			}
 
-	setTrafficConfig(w, excludedModelsConfig(w.authDir, "new-model"))
-	host = "new"
-	original := snapshotCoreAuthsFunc
-	t.Cleanup(func() { snapshotCoreAuthsFunc = original })
-	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string, parser synthesizer.PluginAuthParser) ([]*coreauth.Auth, map[string]struct{}) {
-		w.dispatchPersistedAuthUpdate(AuthUpdate{Action: AuthUpdateActionModify, ID: trafficAuthFile, Auth: persisted})
-		return original(cfg, authDir, parser)
-	}
-	w.reloadClients(false, []string{"claude"}, false)
-	snapshotCoreAuthsFunc = original
-	update, ok := takeQueuedAuthUpdate(w, trafficAuthFile)
-	if !ok {
-		t.Fatal("nothing queued for the auth after the scan")
-	}
-	manager.MarkResult(ctx, trafficRequestResult(true))
-	applyQueuedSnapshot(t, manager, update)
+			setTrafficConfig(w, excludedModelsConfig(w.authDir, "new-model"))
+			host = "new"
+			original := snapshotCoreAuthsFunc
+			t.Cleanup(func() { snapshotCoreAuthsFunc = original })
+			snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string, parser synthesizer.PluginAuthParser) ([]*coreauth.Auth, map[string]struct{}) {
+				w.dispatchPersistedAuthUpdate(AuthUpdate{Action: AuthUpdateActionModify, ID: trafficAuthFile, Auth: persisted})
+				return original(cfg, authDir, parser)
+			}
+			w.reloadClients(false, []string{"claude"}, false)
+			snapshotCoreAuthsFunc = original
+			update, ok := takeQueuedAuthUpdate(w, trafficAuthFile)
+			if !ok {
+				t.Fatal("nothing queued for the auth after the scan")
+			}
+			manager.MarkResult(ctx, trafficRequestResult(true))
+			applyQueuedSnapshot(t, manager, update)
 
-	if got, _ := manager.GetByID(trafficAuthFile); got.Attributes["host_config"] != "new" || got.Metadata["note"] != "patched" {
-		t.Fatalf("runtime host_config = %q note = %v, want the new host config and the PATCH's note", got.Attributes["host_config"], got.Metadata["note"])
+			if got, _ := manager.GetByID(trafficAuthFile); got.Attributes["host_config"] != "new" || got.Metadata["note"] != "patched" {
+				t.Fatalf("runtime host_config = %q note = %v, want the new host config and the PATCH's note", got.Attributes["host_config"], got.Metadata["note"])
+			}
+			requireNextScanKeeps(t, w)
+		})
 	}
-	requireNextScanKeeps(t, w)
 }

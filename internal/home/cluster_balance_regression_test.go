@@ -291,6 +291,7 @@ func TestCancelableConnClosesUnderlyingTransportWhenCloseRacesCancel(t *testing.
 				}
 
 				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 				if mode == "pre-canceled" {
 					cancel()
 				}

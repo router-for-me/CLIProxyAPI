@@ -396,10 +396,10 @@ func TestIssue6825SDKCallerReplayIsolation(t *testing.T) {
 				gin.SetMode(gin.TestMode)
 				ginCtxA, _ := gin.CreateTestContext(httptest.NewRecorder())
 				ginCtxA.Set("userApiKey", "downstream-api-key-A")
-				ctxA = context.WithValue(context.Background(), "gin", ginCtxA)
+				ctxA = context.WithValue(context.Background(), "gin", ginCtxA) //nolint:staticcheck -- "gin" is the shared Gin context key contract.
 				ginCtxB, _ := gin.CreateTestContext(httptest.NewRecorder())
 				ginCtxB.Set("userApiKey", "downstream-api-key-B")
-				ctxB = context.WithValue(context.Background(), "gin", ginCtxB)
+				ctxB = context.WithValue(context.Background(), "gin", ginCtxB) //nolint:staticcheck -- "gin" is the shared Gin context key contract.
 			}
 			assistantA, _ := conversation.callWithContext(ctxA, []byte(issue6825FirstRequest), optsA, scenario.enrich, metadataA)
 			assistantB, _ := conversation.callWithContext(ctxB, []byte(issue6825FirstRequest), optsB, scenario.enrich, metadataB)

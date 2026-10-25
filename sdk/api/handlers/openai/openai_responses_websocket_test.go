@@ -7781,6 +7781,7 @@ func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
 
 type revocableWebsocketAccessProvider struct {
 	revoked      atomic.Bool
+	rotated      atomic.Bool
 	deniedModel  string
 	mu           sync.Mutex
 	seenRequests []*http.Request
@@ -7811,7 +7812,43 @@ func (p *revocableWebsocketAccessProvider) Authenticate(_ context.Context, r *ht
 	if p.deniedModel != "" && strings.TrimSpace(gjson.GetBytes(body, "model").String()) == p.deniedModel {
 		return nil, sdkaccess.NewDeniedError("quota exhausted for model", http.StatusTooManyRequests)
 	}
-	return &sdkaccess.Result{Principal: "key-1", Provider: p.Identifier()}, nil
+	principal := "key-1"
+	if p.rotated.Load() {
+		principal = "key-2"
+	}
+	return &sdkaccess.Result{Principal: principal, Provider: p.Identifier()}, nil
+}
+
+func TestResponsesWebsocketDuplexTurnAuthLeavesContextIdentity(t *testing.T) {
+	access := sdkaccess.NewManager()
+	access.SetProviders([]sdkaccess.Provider{&revocableWebsocketAccessProvider{}})
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	h.AccessManager = access
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/ping", nil)
+	c.Set("userApiKey", "other-request")
+	c.Set("accessProvider", "other-provider")
+	c.Set("accessMetadata", map[string]string{"source": "other"})
+	turn := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	turn.Header.Set("Authorization", "Bearer key-1")
+
+	principal, errAuth := h.authenticateResponsesWebsocketTurn(c, turn, []byte(`{"type":"response.create"}`), "gpt-5.5", false)
+	if errAuth != nil {
+		t.Fatalf("turn auth: %v", errAuth.Error)
+	}
+	if principal != "key-1" {
+		t.Fatalf("principal = %q, want %q", principal, "key-1")
+	}
+	if got := c.GetString("userApiKey"); got != "other-request" {
+		t.Fatalf("userApiKey = %q, want the context's own identity", got)
+	}
+	if got := c.GetString("accessProvider"); got != "other-provider" {
+		t.Fatalf("accessProvider = %q, want the context's own provider", got)
+	}
+	if got, _ := c.Get("accessMetadata"); !maps.Equal(got.(map[string]string), map[string]string{"source": "other"}) {
+		t.Fatalf("accessMetadata = %#v, want the context's own metadata", got)
+	}
 }
 
 func TestResponsesWebsocketReauthorizesEachTurnAndKeepsSocketOpen(t *testing.T) {
