@@ -683,6 +683,17 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
 	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
+	resetAt, usedPercent, spent := coreauth.ConsumeFirstStanding(auth, time.Now())
+	standing := gin.H{"used_percent": usedPercent, "spent": spent}
+	if !resetAt.IsZero() {
+		standing["reset_at"] = resetAt.UTC()
+	}
+	entry["consume_first"] = standing
+	for _, key := range []string{coreauth.MetadataHoldUntil, coreauth.MetadataGroup} {
+		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			entry[key] = strings.TrimSpace(value)
+		}
+	}
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
 	}

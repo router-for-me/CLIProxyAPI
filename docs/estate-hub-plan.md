@@ -34,7 +34,7 @@ through Claude Code. Fable is Waseem's own seat: never dispatch a lane on it.
 
 | Lane | Deliverable | Route | State |
 |---|---|---|---|
-| L1 routing | `consume-first` routing strategy + account pinning, merged to `main` of Automancer-Ltd/CLIProxyAPI | bb thread, Claude Code, Opus 5.5, high | dispatched 2026-10-26 as bb thread thr_cu7cfdji97 (tracker t8305; L2 t8304; migration t8306) |
+| L1 routing | `consume-first` routing strategy + account pinning, merged to `main` of Automancer-Ltd/CLIProxyAPI | bb thread, Claude Code, Opus 5.5, high | merged 2026-10-26 from bb thread thr_cu7cfdji97 (tracker t8305 has the PR and merge SHA; L2 t8304; migration t8306) |
 | L2 dashboard | web dashboard replacing sysdash/codexbar | after L1 | not started |
 
 Base for L1: upstream `main` at 1f917e77 (fork point). Keep the diff upstream-mergeable: new files
@@ -77,8 +77,66 @@ Report format (final message): what shipped (PR URL, merge SHA), the exact confi
 sets, what the strategy does when reset data is missing, open questions for L2, anything you
 deliberately left out.
 
+## L1 outcome (2026-10-26)
+
+Operator detail lives in `docs/estate-hub.md`. What shipped:
+
+- `routing.strategy: "consume-first"` (`sdk/cliproxy/auth/selector_consume_first.go`). It ranks on the
+  quota headers each credential already records from its own responses. No new polling.
+- Holds: auth JSON `"hold_until": "<RFC3339>"`, live via `PATCH /v8/management/credentials/fields`.
+  `disabled` remains the open-ended hold.
+- Pins: request header `X-CPA-Account: <account or group>`. Groups are the auth JSON `"group"`
+  field (comma-separated). Refusals: 400 unknown pin, 429 + `Retry-After` held or at limit, 503 disabled.
+- `GET /v8/management/credentials` entries gain `consume_first` (`reset_at`, `used_percent`, `spent`),
+  `hold_until` and `group`.
+
+Decisions:
+
+- Rank on the longest (weekly) window, as cswap does. The 5-hour window only marks an account spent.
+  The 95% spent line and the "window not started" rule are cxswap's. No 5-minute reset margin: the hub
+  picks per new conversation, so nothing ping-pongs. Spent accounts are a last resort, not refused.
+- Pin by header, not a per-API-key map. `access.api-keys` is a plain list in the v8 schema, and both
+  Claude Code (`ANTHROPIC_CUSTOM_HEADERS`) and Codex (`http_headers`) can send a header. Per-key pins
+  wait until a client cannot send headers.
+- Holds and pins are enforced in the per-request eligibility filter, which every strategy, the
+  scheduler fast path and mixed-provider routing already call. Hold expiry needs no event.
+- The deprecated v0 management API is untouched (AGENTS.md), so v0 `PUT /routing/strategy` rejects
+  `consume-first`. Set it in the YAML or through `/v8/management/config`.
+- The fork has no CI: GitHub Actions has never run on it (fork workflows stay off until someone
+  enables them in the Actions tab). L1 therefore ran the full `go test ./...` once locally. The fork
+  also inherited upstream's `auto-retarget-main-pr-to-dev` workflow, which would move every PR against
+  `main` onto upstream's `dev` branch once Actions are on. L1 disabled that one workflow. Undo:
+  `gh workflow enable auto-retarget-main-pr-to-dev -R Automancer-Ltd/CLIProxyAPI`.
+
+Findings to verify once m6 has logins (inferred, not seen on a live response):
+
+- Claude utilization is read from `anthropic-ratelimit-unified-5h-utilization` / `-7d-utilization` as
+  a 0-1 fraction, which is how Claude Code reads it. The repo's own fixtures only show `-7d-status`
+  and `-7d-reset`. Check one account's `quota.signals` in the credential listing. If utilization is a
+  percent, every Claude account looks spent and the order still follows the weekly reset.
+- The quota snapshot is in memory only. After a hub restart every account ranks "unknown" (ID order)
+  until it serves one request.
+- Figures refresh only when an account serves traffic. That is accurate while the hub is the only
+  user of each account.
+
+What L2 (dashboard) needs:
+
+- Source: `GET /v8/management/credentials` with the management key. Per account it has provider,
+  label, email, `disabled`, `status`, `unavailable`, `next_retry_after`, `hold_until`, `group`,
+  `priority`, `quota.signals` + `quota.observed_at`, `consume_first`, `recent_requests`.
+- Router order: sort as described in `docs/estate-hub.md` ("Reading the state").
+- Actions: hold or clear with `PATCH /v8/management/credentials/fields {name, hold_until}`; disable
+  with `PATCH /v8/management/credentials/status`. Strategy is in `GET /v8/management/config`.
+- Not available: a single "active account" (the hub binds per conversation; `recent_requests` shows
+  which accounts are serving), Claude plan names, and fresh figures for idle accounts.
+- Open question for L2: refresh idle accounts by calling the providers' usage endpoints through
+  `/v8/management/requests/api-call` or the quota plugins. That would also close the restart gap.
+
 ## Cursor
 
 - 2026-10-26: hub installed on m6 (brew `cliproxyapi` 8.0.40, bound to 127.0.0.1:8317, Tailscale
   Serve on :8317, keys in BWS `AUT_HUB_ACCESS_KEY` / `AUT_HUB_MANAGEMENT_KEY`, project `personal`).
   Logins pending (Waseem does them in the browser). L1 dispatched.
+- 2026-10-26: L1 merged to `main` (consume-first, holds, pins, credential listing fields, docs,
+  tests). m6 still runs upstream brew 8.0.40, so none of it is live until the migration (t8306)
+  installs this fork's build. Next: L2 brief (t8304) from "What L2 needs" above.

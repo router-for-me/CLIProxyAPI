@@ -130,6 +130,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
+	if errPin := m.accountPinRefusal(normalized, authSelectionModelFromOptions(opts, req.Model), opts); errPin != nil {
+		return cliproxyexecutor.Response{}, errPin
+	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -190,6 +193,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, true)
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
+	if errPin := m.accountPinRefusal(normalized, authSelectionModelFromOptions(opts, req.Model), opts); errPin != nil {
+		return cliproxyexecutor.Response{}, errPin
+	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -243,6 +249,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if !m.HomeEnabled() {
+		if errPin := m.accountPinRefusal(normalized, authSelectionModelFromOptions(opts, req.Model), opts); errPin != nil {
+			return nil, errPin
+		}
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
