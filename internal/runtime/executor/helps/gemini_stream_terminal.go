@@ -14,6 +14,10 @@ func IsGeminiTerminalStreamChunk(chunk []byte) bool {
 		if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
 			return true
 		}
+		// In the Interactions format this is the last event before the final done frame.
+		if event, ok := bytes.CutPrefix(trimmed, []byte("event:")); ok && string(bytes.TrimSpace(event)) == "interaction.completed" {
+			return true
+		}
 		payload := JSONPayload(line)
 		if len(payload) == 0 {
 			continue
