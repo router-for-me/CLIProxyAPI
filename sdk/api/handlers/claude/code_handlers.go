@@ -590,6 +590,13 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 				body = markedBody
 			}
 		}
+		if resetIn := claudeErrorResetIn(msg.Error); status == http.StatusTooManyRequests && resetIn > 0 {
+			if message := gjson.GetBytes(body, "error.message"); message.Type == gjson.String {
+				if updated, errSet := sjson.SetBytes(body, "error.message", fmt.Sprintf("%s (reset after %s)", message.String(), resetIn)); errSet == nil {
+					body = updated
+				}
+			}
+		}
 		appendClaudeAPIResponse(c, body)
 		if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
 			c.Writer.Header().Set("Content-Type", "application/json")

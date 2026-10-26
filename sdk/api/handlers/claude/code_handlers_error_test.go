@@ -323,6 +323,30 @@ func TestClaudeErrorPutsRateLimitResetInMessage(t *testing.T) {
 	}
 }
 
+func TestWriteClaudeDirectErrorPutsRateLimitResetInMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+	upstreamReset := 3 * time.Hour
+	msg := &interfaces.ErrorMessage{
+		StatusCode:     http.StatusTooManyRequests,
+		Error:          rateLimitedClaudeError{retryAfter: &upstreamReset},
+		DirectResponse: true,
+		Body:           []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited."},"request_id":"req_123"}`),
+	}
+
+	handler.WriteErrorResponse(c, msg)
+
+	body := recorder.Body.Bytes()
+	if got := gjson.GetBytes(body, "error.message").String(); got != "Rate limited. (reset after 3h0m0s)" {
+		t.Fatalf("error.message = %q; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "request_id").String(); got != "req_123" {
+		t.Fatalf("request_id = %q; body=%s", got, body)
+	}
+}
+
 func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	wantErr := &interfaces.ErrorMessage{
 		StatusCode: http.StatusBadRequest,
