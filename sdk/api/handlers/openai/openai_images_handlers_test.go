@@ -445,6 +445,17 @@ func TestBuildImagesAPIResponseFromXAI(t *testing.T) {
 	}
 }
 
+func TestBuildImagesResponsesRequestUsesDefaultMainModel(t *testing.T) {
+	body := buildImagesResponsesRequest("draw a square", nil, []byte(`{"type":"image_generation","model":"gpt-image-2"}`))
+
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.6-luna" {
+		t.Fatalf("main model = %q, want %q", got, "gpt-5.6-luna")
+	}
+	if got := gjson.GetBytes(body, "tools.0.model").String(); got != "gpt-image-2" {
+		t.Fatalf("tool model = %q, want %q", got, "gpt-image-2")
+	}
+}
+
 func TestImagesGenerationsRejectsUnsupportedModel(t *testing.T) {
 	handler := &OpenAIAPIHandler{}
 	body := strings.NewReader(`{"model":"gpt-5.4-mini","prompt":"draw a square"}`)
