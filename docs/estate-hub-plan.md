@@ -35,7 +35,7 @@ through Claude Code. Fable is Waseem's own seat: never dispatch a lane on it.
 | Lane | Deliverable | Route | State |
 |---|---|---|---|
 | L1 routing | `consume-first` routing strategy + account pinning, merged to `main` of Automancer-Ltd/CLIProxyAPI | bb thread, Claude Code, Opus 5.5, high | merged 2026-10-26 from bb thread thr_cu7cfdji97 (tracker t8305 has the PR and merge SHA; L2 t8304; migration t8306) |
-| L2 dashboard | web dashboard replacing sysdash/codexbar + usage refresher | bb thread, Claude Code, Opus 5.5, high | dispatched 2026-10-26 20:25 as bb thread thr_yh5dttfgcu (tracker t8304) |
+| L2 dashboard | web dashboard replacing sysdash/codexbar, plus the usage refresher | bb thread, Claude Code, Opus 5.5 | merged 2026-10-26 from bb thread thr_yh5dttfgcu (tracker t8304 has the PR and merge SHA) |
 
 Base for L1: upstream `main` at 1f917e77 (fork point). Keep the diff upstream-mergeable: new files
 where possible, config-driven, no rewrites of existing strategies.
@@ -133,6 +133,32 @@ What L2 (dashboard) needs:
 - Open question for L2: refresh idle accounts by calling the providers' usage endpoints through
   `/v8/management/requests/api-call` or the quota plugins. That would also close the restart gap.
 
+## L2 outcome (2026-10-26)
+
+Operator detail is in `docs/estate-hub.md` ("Usage refresher", "Dashboard"). What shipped:
+
+- Dashboard at `/hub`, one embedded HTML file (`internal/api/hub_dashboard.html`), management key in
+  local storage like the stock panel. Reads `GET /v8/management/credentials/usage` (new: every file
+  credential plus config-file API keys, with `usage` and `cooldowns`, and the strategy). Hold,
+  release, disable/enable, name (`note`) and groups go through the existing L1 endpoints.
+- Usage refresher: `routing.usage-refresh.interval` (off by default) and `.providers`. Polls idle
+  accounts of Claude, Codex, Kimi, Grok (`xai`), Antigravity and Muse (`meta`, 3-hour floor).
+  Claude and Codex readings become quota headers, so consume-first ranks idle accounts. The last
+  reading persists in `<auth-dir>/usage-snapshot.cache`, closing the restart gap L1 noted.
+
+Not verified against a live account (only fixtures taken from CodexBar's source, commit 5de59e1):
+every provider's usage endpoint as called with the hub's own token. Check once on m6 with the
+refresher on: each account's `usage.error` on `/hub` should be empty. Most likely to need a fix:
+Kimi (CodexBar also sends `X-Msh-*` device headers), Antigravity (summary endpoint only, no
+`fetchAvailableModels` fallback) and Grok (`subscriptionTier` may be an enum, not a display name).
+Claude's header utilization scale (L1's open question) also still needs one live response: the
+refresher writes a 0-1 fraction, matching how L1 reads it.
+
+Left out: usage for API-key upstreams (deepseek, commandcode, zai, opencode-go, local), Claude
+plan names (every account reports the same tier; name accounts with `note` on the page), Codex
+banked resets, CodexBar's predicted "will last" pace, and a record of which client pinned
+which account (the hub keeps none; groups and pin targets are shown).
+
 ## Cursor
 
 - 2026-10-26: hub installed on m6 (brew `cliproxyapi` 8.0.40, bound to 127.0.0.1:8317, Tailscale
@@ -157,3 +183,7 @@ What L2 (dashboard) needs:
   lives at `~/.local/hub/config.yaml`, not the brew path. wasnewpc's Claude Code and Codex point at the hub
   and answered. L2 dispatched.
 - 2026-10-26 20:50: Devin signed in (18 logins). OMP on m6 and wasnewpc, and opencode on wasnewpc, carry a `hub` provider (25 non-Claude models: GPT via the Codex subs, Antigravity Gemini, Grok, Kimi, Muse, DeepSeek, GLM, CommandCode, OpenCode Go, Devin, local GPU). Claude models stay Claude-Code-only through the hub (Waseem's rule). ROUTES.md now allows Terra for Codex lanes (skills commit fae7cf5). Migration item t8306 carries the Gandalf usage read via estate-gateway and the remaining harnesses.
+- 2026-10-26: L2 merged (dashboard `/hub`, `GET /v8/management/credentials/usage`, usage refresher
+  with persisted snapshot). m6 runs the L1 build, so none of L2 is live until m6's binary is rebuilt
+  from `main` and `routing.usage-refresh.interval` is set in `~/.local/hub/config.yaml`. Then open
+  `/hub` and check each account's poll error.

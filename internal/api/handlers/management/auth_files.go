@@ -689,6 +689,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		standing["reset_at"] = resetAt.UTC()
 	}
 	entry["consume_first"] = standing
+	if quota.v8 {
+		entry["usage"] = h.usageEntry(auth)
+	}
 	for _, key := range []string{coreauth.MetadataHoldUntil, coreauth.MetadataGroup} {
 		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
 			entry[key] = strings.TrimSpace(value)
