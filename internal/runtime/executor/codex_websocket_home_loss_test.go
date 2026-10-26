@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -52,6 +54,27 @@ func (c *completedWriteBarrierConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
+// pinRecordingHomeDispatcher takes the constrained Home dispatch path, which receives the
+// credential the handler pinned for the downstream websocket.
+type pinRecordingHomeDispatcher struct {
+	*accountedWebsocketHomeDispatcher
+	mu   sync.Mutex
+	pins []string
+}
+
+func (d *pinRecordingHomeDispatcher) RPopAuthWithConstraints(ctx context.Context, model string, sessionID string, headers http.Header, count int, _ []string, pinnedAuthID string) ([]byte, error) {
+	d.mu.Lock()
+	d.pins = append(d.pins, pinnedAuthID)
+	d.mu.Unlock()
+	return d.RPopAuth(ctx, model, sessionID, headers, count)
+}
+
+func (d *pinRecordingHomeDispatcher) recordedPins() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.pins...)
+}
+
 func waitHomeLossSignal(t *testing.T, ch <-chan struct{}, name string) {
 	t.Helper()
 	select {
@@ -66,8 +89,9 @@ func waitHomeLossSignal(t *testing.T, ch <-chan struct{}, name string) {
 type homeLossFixture struct {
 	dials, creates atomic.Int32
 	dispatcher     *accountedWebsocketHomeDispatcher
+	pinned         *pinRecordingHomeDispatcher
 	manager        *cliproxyauth.Manager
-	registry       *executionregistry.Registry
+	executions     *executionregistry.Registry
 	barrier        *completedWriteBarrierListener
 	client         *websocket.Conn
 	firstReleased  chan struct{}
@@ -122,14 +146,15 @@ func newHomeLossFixture(t *testing.T) *homeLossFixture {
 	f.manager.SetConfig(cfg)
 	f.manager.SetRetryConfig(0, 0, 0)
 	f.manager.RegisterExecutor(exec)
-	f.registry = executionregistry.New()
+	f.executions = executionregistry.New()
 	f.dispatcher = &accountedWebsocketHomeDispatcher{provider: "codex", baseURL: upstream.URL}
-	f.registry.SetReleaseSink(func(executionregistry.ReleaseGroup, int64) {
+	f.executions.SetReleaseSink(func(executionregistry.ReleaseGroup, int64) {
 		if f.dispatcher.releases.Add(1) == 1 {
 			close(f.firstReleased)
 		}
 	})
-	f.manager.PublishHomeDispatch(f.dispatcher, f.registry, 1)
+	f.pinned = &pinRecordingHomeDispatcher{accountedWebsocketHomeDispatcher: f.dispatcher}
+	f.manager.PublishHomeDispatch(f.pinned, f.executions, 1)
 
 	h := openai.NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, f.manager))
 	router := gin.New()
@@ -199,7 +224,7 @@ func (f *homeLossFixture) finish(t *testing.T) {
 	waitHomeLossSignal(t, f.handlerDone, "downstream handler")
 	drainCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if err := f.registry.Drain(drainCtx); err != nil {
+	if err := f.executions.Drain(drainCtx); err != nil {
 		t.Fatal(err)
 	}
 	if f.dispatcher.releases.Load() != f.dispatcher.calls.Load() {
@@ -215,6 +240,47 @@ func TestCodexHomeUpstreamLossDoesNotReplay(t *testing.T) {
 	f.holdUntilReleased(t)
 	if f.dispatcher.calls.Load() != 1 || f.creates.Load() != 1 || f.dials.Load() != 1 {
 		t.Fatalf("finished create was replayed: dispatch=%d creates=%d dials=%d", f.dispatcher.calls.Load(), f.creates.Load(), f.dials.Load())
+	}
+	f.finish(t)
+}
+
+// The Home selection can be released (idle EOF) before the handler records the turn's
+// credential. The handler must still pin the selected credential: a continuation then
+// answers 409 on the open socket and the next full create is dispatched pinned to it.
+func TestCodexHomePinnedAuthSurvivesReleasedSelection(t *testing.T) {
+	// Home models are routed by provider through the model registry.
+	registry.GetGlobalRegistry().RegisterClient("home-pin-models", "codex", []*registry.ModelInfo{{ID: "model-a"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("home-pin-models") })
+	f := newHomeLossFixture(t)
+	f.holdUntilReleased(t)
+	if _, ok := f.manager.GetByID("accounted-websocket-auth"); ok {
+		t.Fatal("Home auth is registered in the manager; the released-selection path is not exercised")
+	}
+
+	f.send(t, `{"type":"response.create","previous_response_id":"old","input":[]}`)
+	stale := f.read(t, "error")
+	if gjson.GetBytes(stale, "error.code").String() != "previous_response_not_found" || gjson.GetBytes(stale, "status").Int() != http.StatusConflict {
+		t.Fatalf("continuation after loss not rejected with 409: %s", stale)
+	}
+	if f.dials.Load() != 1 || f.creates.Load() != 1 {
+		t.Fatalf("continuation reached upstream: dials=%d creates=%d", f.dials.Load(), f.creates.Load())
+	}
+
+	f.send(t, `{"type":"response.create","model":"model-a","input":[{"role":"user","content":"new full context"}]}`)
+	f.read(t, "response.created")
+	f.read(t, "response.completed")
+	// Every dispatch after the first one is pinned to the credential of the released selection.
+	pins := f.pinned.recordedPins()
+	if len(pins) < 2 || pins[0] != "" {
+		t.Fatalf("Home dispatch pins = %q", pins)
+	}
+	for _, pin := range pins[1:] {
+		if pin != "accounted-websocket-auth" {
+			t.Fatalf("Home dispatch pins = %q, want every later dispatch pinned to accounted-websocket-auth", pins)
+		}
+	}
+	if f.dials.Load() != 2 {
+		t.Fatalf("dials = %d, want 2 (one lazy reconnect)", f.dials.Load())
 	}
 	f.finish(t)
 }

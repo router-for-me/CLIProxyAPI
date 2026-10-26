@@ -454,6 +454,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	passthroughModelName := ""
 	upstreamMode := responsesWebsocketUpstreamModeUnknown
 	upstreamWebsocketAuthID := ""
+	// Snapshots of pinned Home credentials whose selection has been released.
+	homePinnedAuths := make(map[string]*coreauth.Auth)
 	sessionAuthByIDWithSource := func(authID string) (*coreauth.Auth, bool, bool) {
 		if h == nil || h.AuthManager == nil {
 			return nil, false, false
@@ -464,6 +466,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			return auth, false, true
 		}
 		if auth, ok := h.AuthManager.GetExecutionSessionAuthByID(passthroughSessionID, authID); ok {
+			return auth, true, true
+		}
+		if auth := homePinnedAuths[authID]; auth != nil && h.AuthManager.HomeEnabled() {
 			return auth, true, true
 		}
 		return nil, false, false
@@ -481,9 +486,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		return responsesWebsocketUpstreamModeHTTP
 	}
-	rememberPinnedAuth := func(authID string, modelName string) {
+	rememberPinnedAuth := func(authID string, modelName string, selected *coreauth.Auth) {
 		authID = strings.TrimSpace(authID)
 		auth, ok := sessionAuthByID(authID)
+		if selected != nil && selected.ID == authID && h.AuthManager.HomeEnabled() {
+			// A Home selection may be released before the turn is recorded. Keep its snapshot
+			// for routing affinity only; the pinned Home dispatch revalidates the credential.
+			homePinnedAuths[authID] = selected
+			if !ok {
+				auth, ok = selected, true
+			}
+		}
 		if authID == "" || !ok || auth == nil {
 			return
 		}
@@ -812,6 +825,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		lastAttemptedAuthID := pinnedAuthID
+		var lastSelectedAuth *coreauth.Auth
 		attemptedUpstreamMode := responsesWebsocketUpstreamModeUnknown
 		selectedAuthObserved := false
 		nativeRequest := util.IsCodexResponsesLiteRequest(payload, c.Request.Header)
@@ -859,6 +873,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if !ok || selectedAuth == nil {
 				return
 			}
+			lastSelectedAuth = selectedAuth
 			attemptedUpstreamMode = upstreamModeForAuth(selectedAuth)
 			codexDuplexStream.Store(duplexInput != nil && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 			preserveNativeOutput.Store(nativeRequest && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
@@ -935,7 +950,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && lastAttemptedAuthID != "" {
 				upstreamMode = responsesWebsocketUpstreamModeWS
 				upstreamWebsocketAuthID = lastAttemptedAuthID
-				rememberPinnedAuth(lastAttemptedAuthID, modelName)
+				rememberPinnedAuth(lastAttemptedAuthID, modelName, lastSelectedAuth)
 				passthroughModelName = modelName
 			}
 			continue
@@ -964,7 +979,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if upstreamMode == responsesWebsocketUpstreamModeWS {
 			upstreamWebsocketAuthID = lastAttemptedAuthID
 			if lastAttemptedAuthID != "" {
-				rememberPinnedAuth(lastAttemptedAuthID, modelName)
+				rememberPinnedAuth(lastAttemptedAuthID, modelName, lastSelectedAuth)
 			}
 			passthroughModelName = modelName
 			lastRequest = nil
