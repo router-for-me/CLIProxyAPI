@@ -41,11 +41,11 @@ Timestamps use RFC 3339. The handler accepts at most 1,024 observations in a 256
 
 Updates merge into the retained observations. An observation replaces the retained one for the same credential unless it is older. Credentials missing from an update keep their known reset, so a failed quota read does not move an account behind others. A retained reset stops counting when it passes; removed credentials are dropped. An empty `accounts` array only prunes. `null` is rejected. The handler returns HTTP 409 if the active selector is not `soonest-reset-first`.
 
-Hints stay in memory. They do not change OAuth files, manual priorities, weights, or cooldowns. A restart or selector replacement clears them. The collector must publish again after a blue/green cutover; the limits exporter also sends the last known reset of accounts whose current quota read failed. Until then, selection uses quota weights.
+Hints stay in memory. They do not change OAuth files, manual priorities, weights, or cooldowns. A restart or selector replacement clears them, so the collector must publish again after a restart. Until then, selection uses quota weights.
 
-The limits exporter publishes hints every quota reconciliation interval when `QUOTA_RESET_HINTS_ENABLED=1`. It uses the longest primary quota window, usually the weekly window. It excludes model-scoped windows. When a quota read fails, it sends the last successful observation with its original timestamp. Shorter windows still determine exhaustion through quota weights.
+A collector should publish on a fixed interval and use the longest primary quota window, usually the weekly window. Model-scoped windows should not rank the whole account. When a quota read fails, the collector should send the last successful observation with its original timestamp. Shorter windows still determine exhaustion through quota weights, for example by setting the weight of an exhausted credential to 0 until its window resets.
 
-If the longest window has no usable future timestamp, the exporter sends no hint for that account. It does not substitute a five-hour reset for an unknown weekly reset. Accounts with only a short primary window can use that window.
+If the longest window has no usable future timestamp, the collector should send no hint for that account instead of substituting a shorter window's reset. Accounts with only a short primary window can use that window.
 
 ## Read-only routing status
 
@@ -56,13 +56,10 @@ This is an account-level diagnostic, not a model-specific next-request promise. 
 ## Activation and rollback
 
 1. Release the proxy with this selector and the v8 endpoint.
-2. Release the limits exporter with reset-hint support.
-3. Set `routing.strategy` to `soonest-reset-first`.
-4. Keep `QUOTA_ROUTING_ENABLED=1` for quota weights and exhaustion checks.
-5. Set `QUOTA_RESET_HINTS_ENABLED=1` on the exporter.
-6. Use the established deployment procedure.
-7. Check the management response and exporter errors after the first quota reconciliation.
+2. Set `routing.strategy` to `soonest-reset-first`.
+3. Start the collector, and keep any quota-weight updates it already performs.
+4. Check `GET /v8/management/routing/status` after the first published update.
 
-For rollback, disable `QUOTA_RESET_HINTS_ENABLED`. Restore `routing.strategy: weighted-round-robin`. Manual priorities and credential files need no restoration.
+For rollback, stop publishing hints and restore the previous `routing.strategy`, for example `weighted-round-robin`. Manual priorities and credential files need no restoration.
 
 The legacy v0 management API does not expose this endpoint. Use the v8 config API or the configuration file to select this strategy.
