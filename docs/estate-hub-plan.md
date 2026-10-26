@@ -154,9 +154,9 @@ Kimi (CodexBar also sends `X-Msh-*` device headers), Antigravity (summary endpoi
 Claude's header utilization scale (L1's open question) also still needs one live response: the
 refresher writes a 0-1 fraction, matching how L1 reads it.
 
-Left out: usage for API-key upstreams (deepseek, commandcode, zai, opencode-go, local), Devin
-windows, Claude plan names (every account reports the same tier; name accounts with `note` on the
-page), Codex banked resets, CodexBar's predicted "will last" pace, and a record of which client pinned
+Left out: usage for API-key upstreams (deepseek, commandcode, zai, opencode-go, local), Claude
+plan names (every account reports the same tier; name accounts with `note` on the page), Codex
+banked resets, CodexBar's predicted "will last" pace, and a record of which client pinned
 which account (the hub keeps none; groups and pin targets are shown).
 
 ## Cursor

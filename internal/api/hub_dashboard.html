@@ -133,6 +133,7 @@ function clock(d) {
 function cadence(minutes) {
   if (!minutes) return "";
   if (Math.abs(minutes - 300) < 5) return "5-hour";
+  if (Math.abs(minutes - 1440) < 5) return "Daily";
   if (Math.abs(minutes - 10080) < 60) return "Weekly";
   if (minutes >= 40000 && minutes <= 46000) return "Monthly";
   return minutes >= 1440 ? Math.round(minutes / 1440) + "-day" : Math.round(minutes / 60) + "-hour";

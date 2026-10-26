@@ -270,6 +270,9 @@ func (h *Handler) usageEntry(auth *coreauth.Auth) gin.H {
 	entry := gin.H{"windows": windows}
 	if record.Plan != "" {
 		entry["plan"] = record.Plan
+	} else if plan := auth.Quota.Signals["plan"]; plan != "" {
+		// Devin's executor records its plan with its quota.
+		entry["plan"] = plan
 	}
 	if !record.FetchedAt.IsZero() {
 		entry["fetched_at"] = record.FetchedAt

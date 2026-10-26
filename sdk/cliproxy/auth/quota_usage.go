@@ -15,13 +15,23 @@ type UsageWindow struct {
 	ResetAt       time.Time `json:"reset_at,omitzero"`
 }
 
-// QuotaUsageWindows returns the Claude and Codex windows read from a quota
-// observation snapshot, the same figures consume-first ranks on.
+// QuotaUsageWindows returns the windows read from a quota observation snapshot:
+// Claude and Codex (the figures consume-first ranks on) and Devin's daily and
+// weekly quota, which its executor records as remaining percentages.
 func QuotaUsageWindows(quota QuotaState) []UsageWindow {
 	windows := quotaWindowsFromSignals(quota.Signals, quota.ObservedAt)
 	out := make([]UsageWindow, 0, len(windows))
 	for _, window := range windows {
 		out = append(out, UsageWindow{UsedPercent: window.used, WindowMinutes: window.minutes, ResetAt: window.resetAt})
+	}
+	for _, devin := range []struct {
+		key     string
+		minutes float64
+	}{{"daily", 24 * 60}, {"weekly", 7 * 24 * 60}} {
+		if remaining, ok := devinRemainingPercent(quota.Signals[devin.key+"_quota_remaining_percent"]); ok {
+			resetAt, _ := time.Parse(time.RFC3339, quota.Signals[devin.key+"_quota_reset_at"])
+			out = append(out, UsageWindow{UsedPercent: float64(100 - remaining), WindowMinutes: devin.minutes, ResetAt: resetAt})
+		}
 	}
 	return out
 }

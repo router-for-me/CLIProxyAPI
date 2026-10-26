@@ -85,6 +85,12 @@ func TestUsageParsersReadProviderShapes(t *testing.T) {
 		t.Fatalf("codex = %q %+v", codex.plan, got)
 	}
 
+	devin := coreauth.QuotaUsageWindows(coreauth.QuotaState{Signals: map[string]string{
+		"daily_quota_remaining_percent": "75%", "weekly_quota_remaining_percent": "40%", "weekly_quota_reset_at": "2100-01-01T00:00:00Z"}})
+	if len(devin) != 2 || devin[0].UsedPercent != 25 || devin[1].UsedPercent != 60 || devin[1].ResetAt.IsZero() {
+		t.Fatalf("devin = %+v", devin)
+	}
+
 	for _, tc := range []struct {
 		name   string
 		result usageResult
