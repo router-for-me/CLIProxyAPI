@@ -109,90 +109,147 @@ func TestFormatInstanceNameAlwaysIncludesID(t *testing.T) {
 	}
 }
 
-func TestBuildTXTRecords_SizeAndKeys(t *testing.T) {
+func TestBuildTXTRecords_DraftSchema(t *testing.T) {
 	opts := DefaultTXTOptions()
 	opts.InstanceID = "8F3B"
-	opts.TLS = true
-	opts.AuthRequired = true
 
-	records := BuildTXTRecords(opts)
-	if len(records) == 0 {
-		t.Fatalf("expected non-empty TXT records")
+	records, err := BuildTXTRecords(opts)
+	if err != nil {
+		t.Fatalf("BuildTXTRecords() error = %v", err)
 	}
-
-	parsed := ParseTXTRecords(records)
-
-	// Verify required keys
-	if parsed["version"] != "1" {
-		t.Errorf("expected version=1, got %s", parsed["version"])
+	want := []string{
+		"txtvers=1",
+		"path=/",
+		"tls=0",
+		"auth=1",
+		"protocols=chat-completions,responses,messages,generate-content,interactions",
+		"auth_type=api_key",
+		"product=cliproxyapi",
+		"id=8F3B",
+		"role=standalone",
 	}
-	if parsed["product"] != ProductCPA {
-		t.Errorf("expected product=%s, got %s", ProductCPA, parsed["product"])
+	if strings.Join(records, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("records = %q, want %q", records, want)
 	}
-	if parsed["tls"] != "1" {
-		t.Errorf("expected tls=1, got %s", parsed["tls"])
-	}
-	if parsed["auth_required"] != "true" {
-		t.Errorf("expected auth_required=true, got %s", parsed["auth_required"])
-	}
-	if parsed["management"] != "false" {
-		t.Errorf("expected management=false, got %s", parsed["management"])
-	}
-	if parsed["api_openai"] != "/v1" {
-		t.Errorf("expected api_openai=/v1, got %s", parsed["api_openai"])
-	}
-	if parsed["api_gemini"] != "/v1beta" {
-		t.Errorf("expected api_gemini=/v1beta, got %s", parsed["api_gemini"])
-	}
-	expectedProtocols := "chat-completions,responses,messages,generate-content,interactions"
-	if parsed["protocols"] != expectedProtocols {
-		t.Errorf("expected protocols=%s, got %s", expectedProtocols, parsed["protocols"])
-	}
-	expectedFeatures := "chat,responses,messages,generate_content,interactions"
-	if parsed["features"] != expectedFeatures {
-		t.Errorf("expected features=%s, got %s", expectedFeatures, parsed["features"])
-	}
-
-	// Calculate total bytes
 	totalBytes := 0
-	for _, r := range records {
-		totalBytes += len(r) + 1
-	}
-	if totalBytes > 400 {
-		t.Errorf("TXT records exceed 400 bytes limit: %d bytes", totalBytes)
-	}
-}
-
-func TestParseTXTRecords_NormalizesKeys(t *testing.T) {
-	parsed := ParseTXTRecords([]string{"TLS=1", "API_OpenAI=/v1", "Product=cliproxyapi"})
-	if parsed["tls"] != "1" || parsed["api_openai"] != "/v1" || parsed["product"] != "cliproxyapi" {
-		t.Fatalf("parsed TXT records = %#v", parsed)
-	}
-}
-
-func TestBuildTXTRecords_OversizedAndRFCEnforcement(t *testing.T) {
-	opts := DefaultTXTOptions()
-	// Giant 500-byte product and feature strings
-	opts.Product = strings.Repeat("A", 500)
-	opts.Features = []string{strings.Repeat("F", 300)}
-	opts.NodeRole = strings.Repeat("R", 200)
-
-	records := BuildTXTRecords(opts)
-
-	totalBytes := 0
-	for _, r := range records {
-		if len(r) > maxTXTRecordBytes {
-			t.Errorf("individual TXT record exceeds RFC 6763 limit of %d bytes: %d", maxTXTRecordBytes, len(r))
+	for _, record := range records {
+		key, _, _ := strings.Cut(record, "=")
+		if len(key) > 9 {
+			t.Errorf("key %q exceeds 9 characters", key)
 		}
-		totalBytes += len(r) + 1
+		totalBytes += len(record) + 1
 	}
+	if totalBytes != 168 {
+		t.Fatalf("TXT payload = %d bytes, want 168", totalBytes)
+	}
+}
 
+func TestBuildTXTRecords_OptionalBudgetAndInvalidPath(t *testing.T) {
+	opts := DefaultTXTOptions()
+	opts.Product = strings.Repeat("A", 500)
+	opts.NodeRole = strings.Repeat("R", 200)
+	records, err := BuildTXTRecords(opts)
+	if err != nil {
+		t.Fatalf("BuildTXTRecords() error = %v", err)
+	}
+	totalBytes := 0
+	for _, record := range records {
+		if len(record) > maxTXTRecordBytes {
+			t.Errorf("record exceeds %d bytes: %d", maxTXTRecordBytes, len(record))
+		}
+		totalBytes += len(record) + 1
+	}
 	if totalBytes > maxTXTBytes {
-		t.Errorf("total TXT records length %d exceeds max %d bytes", totalBytes, maxTXTBytes)
+		t.Fatalf("TXT payload = %d bytes, want <= %d", totalBytes, maxTXTBytes)
 	}
 	parsed := ParseTXTRecords(records)
 	if _, ok := parsed["product"]; ok {
-		t.Errorf("oversized product key should be omitted, got %q", parsed["product"])
+		t.Fatal("oversized optional product should be omitted")
+	}
+	if parsed["txtvers"] != "1" || parsed["path"] != "/" || parsed["tls"] != "0" || parsed["auth"] != "1" {
+		t.Fatalf("required attributes missing: %#v", parsed)
+	}
+
+	opts = DefaultTXTOptions()
+	opts.Path = "/ai/"
+	if _, errPath := BuildTXTRecords(opts); errPath == nil {
+		t.Fatal("expected invalid path to be rejected")
+	}
+}
+
+func TestProtocolsFromSubtypesMatchesTXT(t *testing.T) {
+	opts := DefaultTXTOptions()
+	opts.Protocols = protocolsFromSubtypes([]string{SubtypeResponses, SubtypeCountTokens, SubtypeResponses})
+	records, err := BuildTXTRecords(opts)
+	if err != nil {
+		t.Fatalf("BuildTXTRecords() error = %v", err)
+	}
+	if got := ParseTXTRecords(records)["protocols"]; got != "responses,count-tokens" {
+		t.Fatalf("protocols = %q, want responses,count-tokens", got)
+	}
+}
+
+func TestParseTXTRecords_FirstKeyWins(t *testing.T) {
+	parsed := ParseTXTRecords([]string{"TLS=1", "tls=0", "Path=/ai", "path=/evil", "bare", "=x"})
+	if parsed["tls"] != "1" || parsed["path"] != "/ai" || parsed["bare"] != "" {
+		t.Fatalf("parsed TXT records = %#v", parsed)
+	}
+	if _, ok := parsed[""]; ok {
+		t.Fatal("empty key should be ignored")
+	}
+}
+
+func TestValidateMountPath(t *testing.T) {
+	for _, valid := range []string{"/", "/ai", "/ai/v2"} {
+		if got := validateMountPath(valid); got != valid {
+			t.Errorf("validateMountPath(%q) = %q", valid, got)
+		}
+	}
+	for _, invalid := range []string{"", "v1", "//attacker.com", "/ai/", "/a//b", "/./a", "/../etc", "/a?x=1", "/a#x", "/a b", "/a%2f", "/\\attacker", "http://evil/v1", "/a\x00"} {
+		if got := validateMountPath(invalid); got != "" {
+			t.Errorf("validateMountPath(%q) = %q, want empty", invalid, got)
+		}
+	}
+}
+
+func TestApplyTXTMetadata_DraftAndLegacy(t *testing.T) {
+	var draft DiscoveredService
+	if !applyTXTMetadata(&draft, ParseTXTRecords([]string{"txtvers=1", "path=/ai", "tls=1", "auth=0", "protocols=responses,interactions,unknown", "id=8F3B", "role=standalone"})) {
+		t.Fatal("draft TXT should be usable")
+	}
+	if !draft.TLS || draft.AuthRequired || draft.Path != "/ai" || draft.InstanceID != "8F3B" || draft.NodeRole != "standalone" {
+		t.Fatalf("draft metadata = %#v", draft)
+	}
+	if draft.Endpoints["responses"] != "/ai/v1/responses" || draft.Endpoints["interactions"] != "/ai/v1beta/interactions" || len(draft.Endpoints) != 2 {
+		t.Fatalf("draft endpoints = %#v", draft.Endpoints)
+	}
+
+	for _, txt := range [][]string{
+		{"txtvers=2", "path=/", "tls=0", "auth=1"},
+		{"txtvers=1", "tls=0", "auth=1"},
+		{"txtvers=1", "path=/", "tls=true", "auth=1"},
+		{"txtvers=1", "path=/", "tls=0"},
+		{"txtvers=1", "path=//evil", "tls=0", "auth=1"},
+	} {
+		var svc DiscoveredService
+		if applyTXTMetadata(&svc, ParseTXTRecords(txt)) {
+			t.Errorf("TXT %q should be rejected", txt)
+		}
+	}
+
+	var legacy DiscoveredService
+	if !applyTXTMetadata(&legacy, ParseTXTRecords([]string{"version=1", "tls=0", "auth_required=true", "api_openai=/v1", "api_gemini=/v1beta", "protocols=chat-completions,generate-content", "instance_id=AB12", "auth_methods=api_key"})) {
+		t.Fatal("legacy TXT should be usable")
+	}
+	if !legacy.AuthRequired || legacy.Path != "" || legacy.InstanceID != "AB12" || len(legacy.AuthMethods) != 1 {
+		t.Fatalf("legacy metadata = %#v", legacy)
+	}
+	if legacy.Endpoints["chat-completions"] != "/v1/chat/completions" || legacy.Endpoints["generate-content"] != "/v1beta/models/{model}:generateContent" {
+		t.Fatalf("legacy endpoints = %#v", legacy.Endpoints)
+	}
+	var legacyMissingAuth DiscoveredService
+	if applyTXTMetadata(&legacyMissingAuth, ParseTXTRecords([]string{"version=1", "tls=0", "api_openai=/v1", "protocols=responses"})) {
+		t.Fatal("legacy TXT without auth_required should be rejected")
 	}
 }
 
@@ -246,26 +303,6 @@ func TestValidation_ServiceTypeAndLabels(t *testing.T) {
 	}
 	if s := sanitizeSubtype("_" + strings.Repeat("a", 63)); s != "" {
 		t.Error("expected 63-character subtype payload to be rejected")
-	}
-
-	// Endpoint path sanitization (defense against traversal and protocol-relative SSRF)
-	if p := sanitizeEndpointPath("/v1"); p != "/v1" {
-		t.Errorf("expected /v1, got %s", p)
-	}
-	if p := sanitizeEndpointPath("/v1/chat/completions"); p != "/v1/chat/completions" {
-		t.Errorf("expected /v1/chat/completions, got %s", p)
-	}
-	if p := sanitizeEndpointPath("http://evil.com/v1"); p != "" {
-		t.Errorf("expected empty for absolute URL, got %s", p)
-	}
-	if p := sanitizeEndpointPath("//attacker.com/v1"); p != "" {
-		t.Errorf("expected empty for protocol-relative URL //attacker.com/v1, got %s", p)
-	}
-	if p := sanitizeEndpointPath("/\\attacker.com/v1"); p != "" {
-		t.Errorf("expected empty for backslash path /\\attacker.com/v1, got %s", p)
-	}
-	if p := sanitizeEndpointPath("/../etc/passwd"); p != "" {
-		t.Errorf("expected empty for traversal, got %s", p)
 	}
 
 	// Instance name UTF-8 rune boundary sanitization
@@ -341,86 +378,19 @@ func TestBrowseEntryWithinLimits(t *testing.T) {
 	}
 }
 
-func TestMergeDiscoveredService(t *testing.T) {
-	dst := DiscoveredService{
-		InstanceName: "node",
-		ServiceType:  DefaultServiceType,
-		Domain:       DefaultDomain,
-		Port:         8317,
-		IPv4:         []net.IP{net.ParseIP("192.0.2.10")},
-		RawTXT:       map[string]string{"auth_required": "true"},
-		Endpoints:    map[string]string{"openai": "/v1"},
-	}
-	src := DiscoveredService{
-		InstanceName: "node",
-		ServiceType:  DefaultServiceType,
-		Domain:       DefaultDomain,
-		Port:         8317,
-		IPv4:         []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("192.0.2.11")},
-		IPv6:         []net.IP{net.ParseIP("2001:db8::10")},
-		Product:      ProductCPA,
-		RawTXT:       map[string]string{"auth_required": "false", "tls": "1"},
-		Endpoints:    map[string]string{"anthropic": "/v1/messages"},
-	}
-	mergeDiscoveredService(&dst, src)
-	if len(dst.IPv4) != 2 || len(dst.IPv6) != 1 {
-		t.Fatalf("merged addresses = v4 %v, v6 %v", dst.IPv4, dst.IPv6)
-	}
-	if dst.AuthRequired || dst.RawTXT["tls"] != "1" || dst.Endpoints["anthropic"] != "/v1/messages" {
-		t.Fatalf("merged metadata = %#v", dst)
-	}
-}
-
-func TestDiscoveryMergeLimits(t *testing.T) {
-	dst := DiscoveredService{
-		IPv4:   []net.IP{net.ParseIP("192.0.2.1")},
-		RawTXT: map[string]string{"auth_required": "true"},
-	}
-	var srcIPs []net.IP
-	for i := 0; i < maxDiscoveredAddresses*2; i++ {
-		srcIPs = append(srcIPs, net.IPv4(198, 18, byte(i/256), byte(i%256)))
-	}
-	metadata := make([]string, 0, maxDiscoveredMetadataItems*2)
-	for i := 0; i < maxDiscoveredMetadataItems*2; i++ {
-		metadata = append(metadata, fmt.Sprintf("feature-%02d", i))
-	}
-	rawTXT := make(map[string]string, maxBrowseTXTRecords*2)
-	for i := 0; i < maxBrowseTXTRecords*2; i++ {
-		rawTXT[fmt.Sprintf("key-%03d", i)] = strings.Repeat("v", maxTXTRecordBytes)
-	}
-
-	mergeDiscoveredService(&dst, DiscoveredService{
-		IPv4:        srcIPs,
-		RawTXT:      rawTXT,
-		AuthMethods: metadata,
-		Protocols:   metadata,
-		Features:    metadata,
-	})
-
-	if len(dst.IPv4) != maxDiscoveredAddresses {
-		t.Fatalf("merged IPv4 count = %d, want %d", len(dst.IPv4), maxDiscoveredAddresses)
-	}
-	if len(dst.AuthMethods) != maxDiscoveredMetadataItems || len(dst.Protocols) != maxDiscoveredMetadataItems || len(dst.Features) != maxDiscoveredMetadataItems {
-		t.Fatalf("merged metadata counts = auth %d, protocols %d, features %d; want %d each", len(dst.AuthMethods), len(dst.Protocols), len(dst.Features), maxDiscoveredMetadataItems)
-	}
-	if len(dst.RawTXT) > maxBrowseTXTRecords || rawTXTMapBytes(dst.RawTXT) > maxBrowseTXTBytes {
-		t.Fatalf("merged TXT size = %d records/%d bytes, limits are %d records/%d bytes", len(dst.RawTXT), rawTXTMapBytes(dst.RawTXT), maxBrowseTXTRecords, maxBrowseTXTBytes)
-	}
-}
-
 func TestEntryToDiscoveredLimitsTXTLists(t *testing.T) {
 	var methods strings.Builder
 	for i := 0; i < maxDiscoveredMetadataItems*2; i++ {
 		if i > 0 {
 			methods.WriteByte(',')
 		}
-		methods.WriteString(fmt.Sprintf("method-%02d", i))
+		methods.WriteString(fmt.Sprintf("%02d", i))
 	}
 	addresses := make([]net.IP, 0, maxDiscoveredAddresses*2)
 	for i := 0; i < maxDiscoveredAddresses*2; i++ {
 		addresses = append(addresses, net.IPv4(198, 18, byte(i/256), byte(i%256)))
 	}
-	svc := entryToDiscovered(&zeroconf.ServiceEntry{
+	svc, usable := entryToDiscovered(&zeroconf.ServiceEntry{
 		ServiceRecord: zeroconf.ServiceRecord{
 			Instance: "node",
 			Service:  DefaultServiceType,
@@ -428,8 +398,11 @@ func TestEntryToDiscoveredLimitsTXTLists(t *testing.T) {
 		},
 		Port:     8317,
 		AddrIPv4: addresses,
-		Text:     []string{"auth_methods=" + methods.String()},
+		Text:     []string{"version=1", "api_openai=/v1", "tls=0", "auth_required=true", "protocols=responses", "auth_methods=" + methods.String()},
 	})
+	if !usable {
+		t.Fatal("expected draft TXT entry to be usable")
+	}
 	if len(svc.AuthMethods) != maxDiscoveredMetadataItems {
 		t.Fatalf("auth method count = %d, want %d", len(svc.AuthMethods), maxDiscoveredMetadataItems)
 	}
@@ -498,6 +471,15 @@ func TestAdvertiser_IdempotenceAndShutdown(t *testing.T) {
 	}
 }
 
+func mustBuildTXTRecords(t *testing.T, opts TXTOptions) []string {
+	t.Helper()
+	records, err := BuildTXTRecords(opts)
+	if err != nil {
+		t.Fatalf("BuildTXTRecords() error = %v", err)
+	}
+	return records
+}
+
 func TestAdvertiserAndBrowser_Integration(t *testing.T) {
 	ifaces, _ := FilterInterfaces(nil, nil)
 	spec := ServiceSpec{
@@ -506,7 +488,7 @@ func TestAdvertiserAndBrowser_Integration(t *testing.T) {
 		Domain:       DefaultDomain,
 		Port:         54321,
 		Subtypes:     []string{SubtypeResponses},
-		TextRecords:  BuildTXTRecords(DefaultTXTOptions()),
+		TextRecords:  mustBuildTXTRecords(t, DefaultTXTOptions()),
 		Interfaces:   ifaces,
 	}
 

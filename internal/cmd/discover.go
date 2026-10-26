@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -220,14 +221,6 @@ func runDiscoverWithOptions(opts DiscoverOptions, stdout, stderr io.Writer, newB
 			}
 			fmt.Fprintf(stdout, "    Protocols: %s\n", strings.Join(safeProtocols, ", "))
 		}
-		if len(gw.Features) > 0 {
-			var safeFeatures []string
-			for _, f := range gw.Features {
-				safeFeatures = append(safeFeatures, sanitizeTerminal(f))
-			}
-			fmt.Fprintf(stdout, "    Features:  %s\n", strings.Join(safeFeatures, ", "))
-		}
-
 		authStatus := "No"
 		if gw.AuthRequired {
 			authStatus = "Required"
@@ -241,24 +234,33 @@ func runDiscoverWithOptions(opts DiscoverOptions, stdout, stderr io.Writer, newB
 		}
 		fmt.Fprintf(stdout, "    Auth:      %s\n", authStatus)
 
-		// Endpoints display
 		scheme := "http"
-		if gw.RawTXT["tls"] == "1" {
+		if gw.TLS {
 			scheme = "https"
 		}
-
-		fmt.Fprintf(stdout, "    Base URLs:\n")
-		if openAIPath, ok := gw.Endpoints["openai"]; ok {
-			fmt.Fprintf(stdout, "      - OpenAI:    %s://%s%s\n", scheme, hostPort, sanitizeTerminal(openAIPath))
-		} else {
-			fmt.Fprintf(stdout, "      - OpenAI:    %s://%s/v1\n", scheme, hostPort)
+		if gw.Path != "" {
+			fmt.Fprintf(stdout, "    Path:      %s\n", sanitizeTerminal(gw.Path))
 		}
-
-		if anthropicPath, ok := gw.Endpoints["anthropic"]; ok {
-			fmt.Fprintf(stdout, "      - Anthropic: %s://%s%s\n", scheme, hostPort, sanitizeTerminal(anthropicPath))
-		}
-		if geminiPath, ok := gw.Endpoints["gemini"]; ok {
-			fmt.Fprintf(stdout, "      - Gemini:    %s://%s%s\n", scheme, hostPort, sanitizeTerminal(geminiPath))
+		fmt.Fprintf(stdout, "    TLS:       %t\n", gw.TLS)
+		if len(gw.Endpoints) > 0 && primaryIP != "" {
+			fmt.Fprintf(stdout, "    Endpoints:\n")
+			protocols := make([]string, 0, len(gw.Endpoints))
+			for protocol := range gw.Endpoints {
+				protocols = append(protocols, protocol)
+			}
+			sort.Strings(protocols)
+			for _, protocol := range protocols {
+				endpointScheme := scheme
+				if protocol == "responses-ws" {
+					endpointScheme = "ws"
+					if gw.TLS {
+						endpointScheme = "wss"
+					}
+				}
+				// RFC 6874 URI syntax escapes the zone separator, unlike host:port display.
+				urlHost := strings.ReplaceAll(hostPort, "%", "%25")
+				fmt.Fprintf(stdout, "      - %-16s %s://%s%s\n", sanitizeTerminal(protocol)+":", endpointScheme, urlHost, sanitizeTerminal(gw.Endpoints[protocol]))
+			}
 		}
 
 		fmt.Fprintln(stdout)
@@ -269,7 +271,7 @@ func runDiscoverWithOptions(opts DiscoverOptions, stdout, stderr io.Writer, newB
 
 func preferredDisplayAddresses(gw discovery.DiscoveredService) (primary string, all []string) {
 	for _, ip := range gw.IPv4 {
-		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		if !usableDisplayIP(ip) {
 			continue
 		}
 		all = append(all, ip.String())
@@ -281,11 +283,13 @@ func preferredDisplayAddresses(gw discovery.DiscoveredService) (primary string, 
 	var routable []string
 	var linkLocal []string
 	for _, ip := range gw.IPv6 {
-		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		if !usableDisplayIP(ip) {
 			continue
 		}
 		if ip.IsLinkLocalUnicast() {
-			linkLocal = append(linkLocal, ip.String())
+			if zone := gw.IPv6Zones[ip.String()]; validDisplayZone(zone) {
+				linkLocal = append(linkLocal, ip.String()+"%"+zone)
+			}
 			continue
 		}
 		routable = append(routable, ip.String())
@@ -294,14 +298,30 @@ func preferredDisplayAddresses(gw discovery.DiscoveredService) (primary string, 
 		return routable[0], append(routable, linkLocal...)
 	}
 
+	if len(linkLocal) > 0 {
+		return linkLocal[0], linkLocal
+	}
 	host := sanitizeDisplayHost(gw.Host)
 	if host != "" {
 		return host, append([]string{host}, linkLocal...)
 	}
-	if len(linkLocal) > 0 {
-		return linkLocal[0], linkLocal
+	return "", nil
+}
+
+func usableDisplayIP(ip net.IP) bool {
+	return ip != nil && ip.To16() != nil && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.Equal(net.IPv4bcast)
+}
+
+func validDisplayZone(zone string) bool {
+	if zone == "" {
+		return false
 	}
-	return "127.0.0.1", nil
+	for _, c := range zone {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func sanitizeDisplayHost(host string) string {

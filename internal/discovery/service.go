@@ -49,6 +49,9 @@ func validateServiceType(st string) error {
 	if len(name) == 0 || len(name) > 15 {
 		return fmt.Errorf("service name %q must be between 1 and 15 characters (RFC 6335)", name)
 	}
+	if !strings.ContainsAny(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") || strings.Contains(name, "--") {
+		return fmt.Errorf("service name %q must contain a letter and cannot contain consecutive hyphens (RFC 6335)", name)
+	}
 	for i, r := range name {
 		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
 			return fmt.Errorf("service type contains invalid character %q (RFC 6335)", r)
@@ -88,6 +91,47 @@ func sanitizeSubtype(sub string) string {
 		}
 	}
 	return sub
+}
+
+// normalizeBrowseQuery accepts the RFC 6763 subtype owner form as well as the
+// comma form historically accepted by zeroconf. It returns lowercase DNS names.
+func normalizeBrowseQuery(service, domain string) (string, string, error) {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" {
+		domain = strings.TrimSuffix(DefaultDomain, ".")
+	}
+	if len(domain) > 253 {
+		return "", "", fmt.Errorf("discovery: browse domain too long")
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", "", fmt.Errorf("discovery: invalid browse domain")
+		}
+		for _, ch := range label {
+			if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') {
+				return "", "", fmt.Errorf("discovery: invalid browse domain")
+			}
+		}
+	}
+	service = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(service), "."))
+	if service == "" {
+		service = DefaultServiceType
+	}
+	service = strings.TrimSuffix(service, "."+domain)
+	if base, subtype, comma := strings.Cut(service, ","); comma {
+		service = subtype + "._sub." + base
+	}
+	base := service
+	if subtype, rest, sub := strings.Cut(service, "._sub."); sub {
+		if !strings.HasPrefix(subtype, "_") || sanitizeSubtype(subtype) != subtype {
+			return "", "", fmt.Errorf("discovery: invalid browse subtype")
+		}
+		base = rest
+	}
+	if err := validateServiceType(base); err != nil {
+		return "", "", fmt.Errorf("discovery: invalid browse service: %w", err)
+	}
+	return service, domain + ".", nil
 }
 
 func truncateRunesTo(s string, maxBytes int) string {
@@ -241,18 +285,19 @@ func BuildServiceSpec(cfg *config.Config, port int, tlsEnabled bool) (ServiceSpe
 		return ServiceSpec{}, fmt.Errorf("discovery: no advertised address matches bind host %q", bindHost)
 	}
 
-	// 6. Build TXT records
+	// 6. Build TXT records; protocols mirror the advertised subtypes.
 	txtOpts := DefaultTXTOptions()
 	txtOpts.InstanceID = instanceID
 	txtOpts.TLS = tlsEnabled
-	txtOpts.AdvertiseManagement = discCfg.AdvertiseManagement
 	if discCfg.AuthRequired != nil {
 		txtOpts.AuthRequired = *discCfg.AuthRequired
-	} else {
-		txtOpts.AuthRequired = true
 	}
+	txtOpts.Protocols = protocolsFromSubtypes(subtypes)
 
-	txtRecords := BuildTXTRecords(txtOpts)
+	txtRecords, errTXT := BuildTXTRecords(txtOpts)
+	if errTXT != nil {
+		return ServiceSpec{}, errTXT
+	}
 
 	return ServiceSpec{
 		InstanceName:  instanceName,
@@ -264,4 +309,14 @@ func BuildServiceSpec(cfg *config.Config, port int, tlsEnabled bool) (ServiceSpe
 		Interfaces:    ifaces,
 		AdvertisedIPs: advertisedIPs,
 	}, nil
+}
+
+// protocolsFromSubtypes derives TXT protocol tokens from advertised subtype labels
+// so the protocols attribute and DNS-SD subtypes stay consistent.
+func protocolsFromSubtypes(subtypes []string) []string {
+	protocols := make([]string, 0, len(subtypes))
+	for _, subtype := range subtypes {
+		protocols = append(protocols, ProtocolFromSubtype(subtype))
+	}
+	return protocols
 }

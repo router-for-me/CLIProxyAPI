@@ -416,7 +416,8 @@ type DiscoveryConfig struct {
 	// AuthRequired indicates whether authentication is required for client calls (default: true).
 	AuthRequired *bool `yaml:"auth-required" json:"auth-required"`
 
-	// AdvertiseManagement explicitly controls whether management endpoints are exposed (default: false).
+	// AdvertiseManagement is deprecated and ignored. Management endpoints are never
+	// advertised over DNS-SD; the field remains so existing config files still load.
 	AdvertiseManagement bool `yaml:"advertise-management" json:"advertise-management"`
 }
 
