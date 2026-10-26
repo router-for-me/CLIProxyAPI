@@ -371,14 +371,16 @@ func (s *backendSeriesSelector) noteUsagePoll(authID, why string) {
 }
 
 // metricsSnapshot is the selector's live state for the gauges: per profile the weekly quota, any
-// rate-limit cooldown and the login's expiry (read from its saved credential).
+// rate-limit cooldown, and the login's expiry and account email (read from its saved credential).
 func (s *backendSeriesSelector) metricsSnapshot(stores []*backendStore) stateSnapshot {
 	expiry := make(map[string]float64, len(stores))
+	email := make(map[string]string, len(stores))
 	for _, store := range stores {
 		if disk, err := store.diskSnapshot(); err == nil {
 			if t, errParse := time.Parse(time.RFC3339, credentialString(disk, "expired")); errParse == nil {
 				expiry[store.runtimeID] = time.Until(t).Seconds()
 			}
+			email[store.runtimeID] = credentialString(disk, "email")
 		}
 	}
 	s.mu.Lock()
@@ -415,6 +417,7 @@ func (s *backendSeriesSelector) metricsSnapshot(stores []*backendStore) stateSna
 		if v, ok := expiry[id]; ok {
 			p.TokenKnown, p.TokenExpiresIn = true, v
 		}
+		p.Email = email[id]
 		snap.Profiles = append(snap.Profiles, p)
 	}
 	if s.sessions != nil {
