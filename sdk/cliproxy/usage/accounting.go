@@ -38,6 +38,17 @@ type TokenOutputBreakdown struct {
 	ReasoningTokens    int64 `json:"reasoning_tokens"`
 }
 
+// TokenUsagePresence records which counters a producer actually supplied.
+// A nil presence object keeps the legacy accounting contract unchanged.
+type TokenUsagePresence struct {
+	InputTokens      bool `json:"input_tokens"`
+	OutputTokens     bool `json:"output_tokens"`
+	CacheReadTokens  bool `json:"cache_read_tokens"`
+	CacheWriteTokens bool `json:"cache_write_tokens"`
+	ReasoningTokens  bool `json:"reasoning_tokens"`
+	TotalTokens      bool `json:"total_tokens"`
+}
+
 // TokenBreakdown is the canonical, non-overlapping token accounting contract.
 type TokenBreakdown struct {
 	SchemaVersion      int                    `json:"schema_version"`
@@ -46,6 +57,46 @@ type TokenBreakdown struct {
 	Input              TokenInputBreakdown    `json:"input"`
 	Output             TokenOutputBreakdown   `json:"output"`
 	UnclassifiedTokens int64                  `json:"unclassified_tokens"`
+	Observed           *TokenUsagePresence    `json:"observed,omitempty"`
+}
+
+// NewUnobservedTokenBreakdown distinguishes missing usage from measured zero.
+// It is opt-in: legacy producers retain their existing zero-value behavior.
+func NewUnobservedTokenBreakdown() TokenBreakdown {
+	return TokenBreakdown{SchemaVersion: TokenAccountingSchemaVersion, Quality: TokenAccountingQualityUnclassified, Observed: &TokenUsagePresence{}}
+}
+
+// WithTokenUsagePresence keeps only classifications supported by observed
+// counters. Known parents remain in Detail; uncertain subdivisions belong in
+// UnclassifiedTokens rather than being presented as measured zero.
+func WithTokenUsagePresence(b TokenBreakdown, observed TokenUsagePresence) TokenBreakdown {
+	b.Observed = &observed
+	if b.Quality == TokenAccountingQualityInconsistent || !b.Valid() {
+		return b
+	}
+	if !observed.InputTokens || ((!observed.CacheReadTokens || !observed.CacheWriteTokens) && b.Input.TotalTokens > 0) {
+		read, write := int64(0), int64(0)
+		if observed.CacheReadTokens {
+			read = b.Input.CacheReadTokens
+		}
+		if observed.CacheWriteTokens {
+			write = b.Input.CacheWriteTokens
+		}
+		b.UnclassifiedTokens += b.Input.TotalTokens - read - write
+		b.Input = TokenInputBreakdown{TotalTokens: read + write, CacheReadTokens: read, CacheWriteTokens: write}
+	}
+	if !observed.OutputTokens || (!observed.ReasoningTokens && b.Output.TotalTokens > 0) {
+		reasoning := int64(0)
+		if observed.ReasoningTokens {
+			reasoning = b.Output.ReasoningTokens
+		}
+		b.UnclassifiedTokens += b.Output.TotalTokens - reasoning
+		b.Output = TokenOutputBreakdown{TotalTokens: reasoning, ReasoningTokens: reasoning}
+	}
+	if b.UnclassifiedTokens > 0 {
+		b.Quality = TokenAccountingQualityUnclassified
+	}
+	return b
 }
 
 // Valid reports whether the breakdown satisfies the v2 accounting invariants.

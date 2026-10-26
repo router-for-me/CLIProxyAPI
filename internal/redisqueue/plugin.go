@@ -114,6 +114,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
 		TotalTokens:            usageDetail.TotalTokens,
 	}
+	if observed := usageDetail.TokenBreakdown.Observed; observed != nil {
+		tokens.CacheReadTokensPresent = observed.CacheReadTokens
+	}
 
 	failed := record.Failed
 	if !failed {

@@ -403,12 +403,13 @@ func (a *executorAdapter) Identifier() string {
 }
 
 type preparedExecutorCall struct {
-	req             coreexecutor.Request
-	opts            coreexecutor.Options
-	inputRequested  sdktranslator.Format
-	requestedFormat sdktranslator.Format
-	inputFormat     sdktranslator.Format
-	outputFormat    sdktranslator.Format
+	req              coreexecutor.Request
+	opts             coreexecutor.Options
+	inputRequested   sdktranslator.Format
+	requestedFormat  sdktranslator.Format
+	inputFormat      sdktranslator.Format
+	outputFormat     sdktranslator.Format
+	usageObservation *helps.PluginUsageObservation
 }
 
 func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
@@ -500,12 +501,13 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	nativeOpts.ResponseFormat = outputFormat
 
 	return preparedExecutorCall{
-		req:             nativeReq,
-		opts:            nativeOpts,
-		inputRequested:  inputRequested,
-		requestedFormat: requestedFormat,
-		inputFormat:     inputFormat,
-		outputFormat:    outputFormat,
+		req:              nativeReq,
+		opts:             nativeOpts,
+		inputRequested:   inputRequested,
+		requestedFormat:  requestedFormat,
+		inputFormat:      inputFormat,
+		outputFormat:     outputFormat,
+		usageObservation: helps.NewPluginUsageObservation(outputFormat.String()),
 	}, nil
 }
 
@@ -620,10 +622,17 @@ func executorNativeStreamResponseTranslatorExists(from, to sdktranslator.Format)
 }
 
 func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepared preparedExecutorCall, payload []byte, stream bool, param *any) []byte {
+	if !stream && prepared.usageObservation != nil {
+		prepared.usageObservation.Observe(payload)
+	}
 	if prepared.requestedFormat == "" || prepared.outputFormat == prepared.requestedFormat {
 		out := bytes.Clone(payload)
 		if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
-			out = helps.EnsureResponsesUsageDetails(out)
+			if prepared.usageObservation == nil {
+				out = helps.EnsureResponsesUsageDetails(out)
+			} else {
+				out = prepared.usageObservation.RestoreResponses(out)
+			}
 		}
 		return out
 	}
@@ -644,6 +653,7 @@ func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepare
 	out := sdktranslator.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
 	if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
+		out = prepared.usageObservation.RestoreResponses(out)
 	}
 	return out
 }
@@ -662,12 +672,24 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 	go func() {
 		defer close(out)
 		var param any
+		var framing pluginResponseFrames
+		emitPayload := func(payload []byte) bool {
+			for _, frame := range a.translateExecutorStreamPayload(ctx, prepared, payload, &param) {
+				if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
+					return false
+				}
+			}
+			return true
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case chunk, ok := <-in:
 				if !ok {
+					if len(framing.pending) > 0 && !emitPayload(framing.pending) {
+						return
+					}
 					a.emitTranslatedExecutorStreamTail(ctx, prepared, out, &param)
 					return
 				}
@@ -675,9 +697,12 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 					_ = sendExecutorPluginStreamChunk(ctx, out, chunk)
 					continue
 				}
-				frames := a.translateExecutorStreamPayload(ctx, prepared, chunk.Payload, &param)
-				for _, frame := range frames {
-					if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
+				payloads := [][]byte{chunk.Payload}
+				if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse && prepared.usageObservation != nil {
+					payloads = framing.feed(chunk.Payload)
+				}
+				for _, payload := range payloads {
+					if !emitPayload(payload) {
 						return
 					}
 				}
@@ -688,10 +713,15 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 }
 
 func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, prepared preparedExecutorCall, payload []byte, param *any) [][]byte {
+	prepared.usageObservation.Observe(payload)
 	if prepared.requestedFormat != "" && prepared.outputFormat == prepared.requestedFormat {
 		out := payload
 		if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
-			out = helps.EnsureResponsesUsageDetails(out)
+			if prepared.usageObservation == nil {
+				out = helps.EnsureResponsesUsageDetails(out)
+			} else {
+				out = prepared.usageObservation.RestoreResponses(out)
+			}
 		}
 		return [][]byte{out}
 	}
@@ -706,6 +736,7 @@ func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, pr
 	if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
 		for i, frame := range frames {
 			frames[i] = helps.EnsureResponsesUsageDetails(frame)
+			frames[i] = prepared.usageObservation.RestoreResponses(frames[i])
 		}
 	}
 	return frames
@@ -775,12 +806,12 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 			resp = coreexecutor.Response{}
 			err = fmt.Errorf("plugin executor %s panic: %v", a.Identifier(), recovered)
 			if reporter != nil {
-				reporter.PublishFailure(ctx, err)
+				reporter.PublishFailureWithDetail(ctx, helps.UnobservedPluginExecutorUsage(), err)
 			}
 			return
 		}
 		if err != nil && reporter != nil {
-			reporter.PublishFailure(ctx, err)
+			reporter.PublishFailureWithDetail(ctx, helps.UnobservedPluginExecutorUsage(), err)
 		}
 	}()
 
@@ -833,12 +864,12 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 			result = nil
 			err = fmt.Errorf("plugin executor %s stream panic: %v", a.Identifier(), recovered)
 			if reporter != nil {
-				reporter.PublishFailure(ctx, err)
+				reporter.PublishFailureWithDetail(ctx, helps.UnobservedPluginExecutorUsage(), err)
 			}
 			return
 		}
 		if err != nil && reporter != nil {
-			reporter.PublishFailure(ctx, err)
+			reporter.PublishFailureWithDetail(ctx, helps.UnobservedPluginExecutorUsage(), err)
 		}
 	}()
 
@@ -872,7 +903,7 @@ func (a *executorAdapter) observeAndTranslateExecutorStream(ctx context.Context,
 		out := make(chan coreexecutor.StreamChunk)
 		close(out)
 		if reporter != nil {
-			reporter.EnsurePublished(ctx)
+			reporter.Publish(ctx, helps.UnobservedPluginExecutorUsage())
 		}
 		return out
 	}
@@ -882,6 +913,7 @@ func (a *executorAdapter) observeAndTranslateExecutorStream(ctx context.Context,
 
 	observedIn := make(chan pluginapi.ExecutorStreamChunk)
 	var streamUsage helps.StreamUsageBuffer
+	streamUsage.Observe(helps.UnobservedPluginExecutorUsage(), true)
 	var streamErr error
 	var publishOnce sync.Once
 	var lineBuffer []byte
