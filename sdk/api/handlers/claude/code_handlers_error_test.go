@@ -287,6 +287,42 @@ func TestWriteClaudeErrorResponse_IncludesRetryAfterForModelCooldownDefaultSetti
 	}
 }
 
+type rateLimitedClaudeError struct {
+	retryAfter *time.Duration
+}
+
+func (e rateLimitedClaudeError) Error() string {
+	return `{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}`
+}
+func (e rateLimitedClaudeError) RetryAfter() *time.Duration { return e.retryAfter }
+
+func TestClaudeErrorPutsRateLimitResetInMessage(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	upstreamReset := 4*time.Hour + 59*time.Minute + 59*time.Second + 600*time.Millisecond
+	for _, tt := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"pool cooldown", coreauth.NewModelCooldownError("claude-opus-4-6", "claude", 2*time.Hour+52*time.Minute+31*time.Second), "All credentials for model claude-opus-4-6 are cooling down via provider claude (reset after 2h52m31s)"},
+		{"upstream limit", rateLimitedClaudeError{retryAfter: &upstreamReset}, "This request would exceed your account's rate limit. Please try again later. (reset after 5h0m0s)"},
+		{"no reset", rateLimitedClaudeError{}, "This request would exceed your account's rate limit. Please try again later."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := handler.toClaudeError(&interfaces.ErrorMessage{
+				StatusCode: http.StatusTooManyRequests,
+				Error:      tt.err,
+			})
+			if got.Error.Type != "rate_limit_error" {
+				t.Fatalf("error.type = %q, want rate_limit_error", got.Error.Type)
+			}
+			if got.Error.Message != tt.want {
+				t.Fatalf("error.message = %q, want %q", got.Error.Message, tt.want)
+			}
+		})
+	}
+}
+
 func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	wantErr := &interfaces.ErrorMessage{
 		StatusCode: http.StatusBadRequest,

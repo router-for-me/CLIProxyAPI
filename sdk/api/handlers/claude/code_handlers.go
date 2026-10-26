@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -547,6 +548,11 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 		}
 	}
 	errType, message := claudeErrorDetailFromText(status, errText)
+	if status == http.StatusTooManyRequests && msg != nil {
+		if resetIn := claudeErrorResetIn(msg.Error); resetIn > 0 {
+			message = fmt.Sprintf("%s (reset after %s)", message, resetIn)
+		}
+	}
 	response := claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
@@ -619,6 +625,20 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+// claudeErrorResetIn reports when a rate-limited request can be retried, from a
+// pool cooldown or the upstream rate-limit headers. Claude Code drops Retry-After,
+// so clients that schedule the retry read it from the error message instead.
+func claudeErrorResetIn(err error) time.Duration {
+	if seconds, errAtoi := strconv.Atoi(coreauth.SafeResponseHeaders(err).Get("Retry-After")); errAtoi == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	var limited interface{ RetryAfter() *time.Duration }
+	if errors.As(err, &limited) && limited.RetryAfter() != nil {
+		return limited.RetryAfter().Round(time.Second)
+	}
+	return 0
 }
 
 func claudeErrorText(err error) string {
