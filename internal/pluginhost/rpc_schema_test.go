@@ -190,6 +190,75 @@ func TestRPCCapabilitiesIncludeQuotaProvider(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeStreamChunkInterceptorScope(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(context.Context, pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					return pluginapi.StreamChunkInterceptResponse{}, nil
+				},
+			},
+			StreamChunkInterceptorProviders: []string{"vendor-a"},
+			StreamChunkInterceptorModels:    []string{"vendor-a/"},
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.StreamChunkInterceptor {
+		t.Fatal("StreamChunkInterceptor = false, want true")
+	}
+	if len(caps.StreamChunkInterceptorProviders) != 1 || caps.StreamChunkInterceptorProviders[0] != "vendor-a" {
+		t.Fatalf("StreamChunkInterceptorProviders = %#v, want [vendor-a]", caps.StreamChunkInterceptorProviders)
+	}
+	if len(caps.StreamChunkInterceptorModels) != 1 || caps.StreamChunkInterceptorModels[0] != "vendor-a/" {
+		t.Fatalf("StreamChunkInterceptorModels = %#v, want [vendor-a/]", caps.StreamChunkInterceptorModels)
+	}
+
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	providers, okProviders := decoded["response_stream_interceptor_providers"].([]any)
+	if !okProviders || len(providers) != 1 || providers[0] != "vendor-a" {
+		t.Fatalf("response_stream_interceptor_providers = %#v, want [vendor-a]", decoded["response_stream_interceptor_providers"])
+	}
+	models, okModels := decoded["response_stream_interceptor_models"].([]any)
+	if !okModels || len(models) != 1 || models[0] != "vendor-a/" {
+		t.Fatalf("response_stream_interceptor_models = %#v, want [vendor-a/]", decoded["response_stream_interceptor_models"])
+	}
+}
+
+func TestRPCCapabilitiesOmitEmptyStreamChunkInterceptorScope(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(context.Context, pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					return pluginapi.StreamChunkInterceptResponse{}, nil
+				},
+			},
+		},
+	}
+
+	raw, errMarshal := json.Marshal(rpcCapabilitiesFromPlugin(plugin))
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if _, present := decoded["response_stream_interceptor_providers"]; present {
+		t.Fatal("response_stream_interceptor_providers should be omitted when unset")
+	}
+	if _, present := decoded["response_stream_interceptor_models"]; present {
+		t.Fatal("response_stream_interceptor_models should be omitted when unset")
+	}
+}
+
 func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 	lookup := newTestSymbolLookup(&testPlugin{
 		registerResult: validTestPlugin("schema"),

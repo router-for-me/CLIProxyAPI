@@ -40,12 +40,17 @@ type rpcCapabilities struct {
 	ResponseAfterTranslator       bool                         `json:"response_after_translator"`
 	ResponseInterceptor           bool                         `json:"response_interceptor"`
 	StreamChunkInterceptor        bool                         `json:"response_stream_interceptor"`
-	WebSocketResponseObserver     bool                         `json:"websocket_response_observer"`
-	ThinkingApplier               bool                         `json:"thinking_applier"`
-	UsagePlugin                   bool                         `json:"usage_plugin"`
-	CommandLinePlugin             bool                         `json:"command_line_plugin"`
-	ManagementAPI                 bool                         `json:"management_api"`
-	QuotaProvider                 bool                         `json:"quota_provider"`
+	// StreamChunkInterceptorProviders and StreamChunkInterceptorModels scope
+	// stream chunk interceptor calls. Empty values keep the legacy behavior of
+	// receiving every chunk.
+	StreamChunkInterceptorProviders []string `json:"response_stream_interceptor_providers,omitempty"`
+	StreamChunkInterceptorModels    []string `json:"response_stream_interceptor_models,omitempty"`
+	WebSocketResponseObserver       bool     `json:"websocket_response_observer"`
+	ThinkingApplier                 bool     `json:"thinking_applier"`
+	UsagePlugin                     bool     `json:"usage_plugin"`
+	CommandLinePlugin               bool     `json:"command_line_plugin"`
+	ManagementAPI                   bool     `json:"management_api"`
+	QuotaProvider                   bool     `json:"quota_provider"`
 }
 
 type rpcIdentifierResponse struct {
@@ -161,33 +166,35 @@ func schedulerWantsAcrossPriorities(caps pluginapi.Capabilities) bool {
 func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 	caps := plugin.Capabilities
 	return rpcCapabilities{
-		ModelRegistrar:                caps.ModelRegistrar != nil,
-		ModelProvider:                 caps.ModelProvider != nil,
-		AuthProvider:                  caps.AuthProvider != nil,
-		FrontendAuthProvider:          caps.FrontendAuthProvider != nil,
-		FrontendAuthProviderExclusive: caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
-		Scheduler:                     caps.Scheduler != nil,
-		SchedulerAcrossPriorities:     schedulerWantsAcrossPriorities(caps),
-		ModelRouter:                   caps.ModelRouter != nil,
-		Executor:                      caps.Executor != nil,
-		ExecutorModelScope:            normalizedExecutorModelScope(caps),
-		ExecutorInputFormats:          append([]string(nil), caps.ExecutorInputFormats...),
-		ExecutorOutputFormats:         append([]string(nil), caps.ExecutorOutputFormats...),
-		RequestTranslator:             caps.RequestTranslator != nil,
-		RequestNormalizer:             caps.RequestNormalizer != nil,
-		RequestInterceptor:            caps.RequestInterceptor != nil,
-		RequestLifecyclePlugin:        caps.RequestLifecyclePlugin != nil,
-		ResponseTranslator:            caps.ResponseTranslator != nil,
-		ResponseBeforeTranslator:      caps.ResponseBeforeTranslator != nil,
-		ResponseAfterTranslator:       caps.ResponseAfterTranslator != nil,
-		ResponseInterceptor:           caps.ResponseInterceptor != nil,
-		StreamChunkInterceptor:        caps.StreamChunkInterceptor != nil,
-		WebSocketResponseObserver:     caps.WebSocketResponseObserver != nil,
-		ThinkingApplier:               caps.ThinkingApplier != nil,
-		UsagePlugin:                   caps.UsagePlugin != nil,
-		CommandLinePlugin:             caps.CommandLinePlugin != nil,
-		ManagementAPI:                 caps.ManagementAPI != nil,
-		QuotaProvider:                 caps.QuotaProvider != nil,
+		ModelRegistrar:                  caps.ModelRegistrar != nil,
+		ModelProvider:                   caps.ModelProvider != nil,
+		AuthProvider:                    caps.AuthProvider != nil,
+		FrontendAuthProvider:            caps.FrontendAuthProvider != nil,
+		FrontendAuthProviderExclusive:   caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
+		Scheduler:                       caps.Scheduler != nil,
+		SchedulerAcrossPriorities:       schedulerWantsAcrossPriorities(caps),
+		ModelRouter:                     caps.ModelRouter != nil,
+		Executor:                        caps.Executor != nil,
+		ExecutorModelScope:              normalizedExecutorModelScope(caps),
+		ExecutorInputFormats:            append([]string(nil), caps.ExecutorInputFormats...),
+		ExecutorOutputFormats:           append([]string(nil), caps.ExecutorOutputFormats...),
+		RequestTranslator:               caps.RequestTranslator != nil,
+		RequestNormalizer:               caps.RequestNormalizer != nil,
+		RequestInterceptor:              caps.RequestInterceptor != nil,
+		RequestLifecyclePlugin:          caps.RequestLifecyclePlugin != nil,
+		ResponseTranslator:              caps.ResponseTranslator != nil,
+		ResponseBeforeTranslator:        caps.ResponseBeforeTranslator != nil,
+		ResponseAfterTranslator:         caps.ResponseAfterTranslator != nil,
+		ResponseInterceptor:             caps.ResponseInterceptor != nil,
+		StreamChunkInterceptor:          caps.StreamChunkInterceptor != nil,
+		StreamChunkInterceptorProviders: append([]string(nil), caps.StreamChunkInterceptorProviders...),
+		StreamChunkInterceptorModels:    append([]string(nil), caps.StreamChunkInterceptorModels...),
+		WebSocketResponseObserver:       caps.WebSocketResponseObserver != nil,
+		ThinkingApplier:                 caps.ThinkingApplier != nil,
+		UsagePlugin:                     caps.UsagePlugin != nil,
+		CommandLinePlugin:               caps.CommandLinePlugin != nil,
+		ManagementAPI:                   caps.ManagementAPI != nil,
+		QuotaProvider:                   caps.QuotaProvider != nil,
 	}
 }
 
