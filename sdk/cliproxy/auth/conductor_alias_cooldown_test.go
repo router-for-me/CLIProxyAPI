@@ -15,14 +15,20 @@ import (
 func TestManagerAliasQuotaFailoverWithUnobservedTargetModel(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	for name, newSelector := range map[string]func() Selector{
-		"round-robin":          func() Selector { return &RoundRobinSelector{} },
-		"weighted-round-robin": func() Selector { return &WeightedRoundRobinSelector{} },
-		"fill-first":           func() Selector { return &FillFirstSelector{} },
+		"round-robin":                  func() Selector { return &RoundRobinSelector{} },
+		"weighted-round-robin":         func() Selector { return &WeightedRoundRobinSelector{} },
+		"soonest-reset-first":          func() Selector { return &SoonestResetFirstSelector{} },
+		"soonest-reset-first-affinity": func() Selector { return NewSessionAffinitySelector(&SoonestResetFirstSelector{}) },
+		"fill-first":                   func() Selector { return &FillFirstSelector{} },
 	} {
 		for _, path := range []string{"select", "execute", "stream"} {
 			t.Run(name+"/"+path, func(t *testing.T) {
 				const routeModel, targetModel, otherModel = "quota-route", "quota-target", "quota-other"
-				manager := NewManager(nil, newSelector(), nil)
+				selector := newSelector()
+				if stopper, ok := selector.(interface{ Stop() }); ok {
+					defer stopper.Stop()
+				}
+				manager := NewManager(nil, selector, nil)
 				manager.SetRetryConfig(3, 30*time.Second, 0)
 				manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
 					"codex": {{Name: targetModel, Alias: routeModel, Fork: true}},
