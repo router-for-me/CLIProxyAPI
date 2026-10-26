@@ -112,6 +112,7 @@ func main() {
 	var antigravityLogin bool
 	var zcodeLogin bool
 	var kiroLogin bool
+	var kiroMethod string
 	var kimiLogin bool
 	var kimiAILogin bool
 	var xaiLogin bool
@@ -142,7 +143,8 @@ func main() {
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&zcodeLogin, "zcode-login", false, "Authorize a personal GLM Coding Plan using ZCode OAuth")
-	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro using AWS Builder ID device authorization")
+	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro (AWS Builder ID device authorization by default)")
+	flag.StringVar(&kiroMethod, "kiro-method", "", "Kiro login method: builderid (default), google or github")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi (.com) using OAuth")
 	flag.BoolVar(&kimiAILogin, "kimi-ai-login", false, "Login to Kimi.ai using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
@@ -731,7 +733,7 @@ func main() {
 	} else if zcodeLogin {
 		cmd.DoZCodeLogin(cfg, options)
 	} else if kiroLogin {
-		cmd.DoKiroLogin(cfg, options)
+		cmd.DoKiroLogin(cfg, options, kiroMethod)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
 	} else if kimiAILogin {

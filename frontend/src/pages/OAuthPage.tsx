@@ -38,6 +38,7 @@ import iconDevinDark from '@/assets/icons/devin-dark.svg';
 interface ProviderState {
   url?: string;
   userCode?: string;
+  flow?: string;
   state?: string;
   status?: 'idle' | 'waiting' | 'success' | 'error';
   error?: string;
@@ -148,6 +149,8 @@ const PROVIDERS: BuiltInOAuthProviderCard[] = [
 const BUILTIN_PROVIDER_IDS = new Set<string>(PROVIDERS.map((provider) => provider.id));
 const CALLBACK_SUPPORTED = new Set<string>(['codex', 'anthropic', 'antigravity', 'xai', 'devin']);
 const CANCELLABLE_PROVIDERS = new Set(['devin', 'zcode', 'kiro']);
+const KIRO_METHODS = ['builderid', 'google', 'github'] as const;
+type KiroMethod = (typeof KIRO_METHODS)[number];
 const XAI_CALLBACK_URL = 'http://127.0.0.1:56121/callback';
 const SUCCESS_RESET_DELAY_MS = 5000;
 const getProviderI18nPrefix = (provider: string) => provider.replace('-', '_');
@@ -286,6 +289,7 @@ export function OAuthPage() {
   const { showNotification } = useNotificationStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const [states, setStates] = useState<Record<string, ProviderState>>({});
+  const [kiroMethod, setKiroMethod] = useState<KiroMethod>('builderid');
   const [pluginProviders, setPluginProviders] = useState<PluginOAuthProviderCard[]>([]);
   const [vertexState, setVertexState] = useState<VertexImportState>({
     fileName: '',
@@ -496,6 +500,7 @@ export function OAuthPage() {
     updateProviderState(provider, {
       url: undefined,
       userCode: undefined,
+      flow: undefined,
       state: undefined,
       status: 'waiting',
       polling: true,
@@ -508,7 +513,11 @@ export function OAuthPage() {
       callbackSubmitting: false,
     });
     try {
-      const res = await oauthApi.startAuth(provider, attempt.signal);
+      const res = await oauthApi.startAuth(
+        provider,
+        attempt.signal,
+        provider === 'kiro' && kiroMethod !== 'builderid' ? { method: kiroMethod } : undefined
+      );
       if (!attempt.isCurrent()) return;
       if (!res.state) {
         const message = t('auth_login.missing_state');
@@ -525,6 +534,7 @@ export function OAuthPage() {
       updateProviderState(provider, {
         url: res.url,
         userCode: res.user_code,
+        flow: res.flow,
         state: res.state,
         status: 'waiting',
         polling: true,
@@ -684,7 +694,11 @@ export function OAuthPage() {
     const showKimiSignUp =
       featured && provider.kind === 'builtin' && ['kimi', 'kimi-ai'].includes(provider.id);
     const canSubmitCallback =
-      (provider.kind === 'plugin' || CALLBACK_SUPPORTED.has(provider.id)) && Boolean(state.url);
+      (provider.kind === 'plugin' ||
+        CALLBACK_SUPPORTED.has(provider.id) ||
+        (provider.id === 'kiro' && state.flow === 'social')) &&
+      Boolean(state.url);
+    const isKiro = provider.kind === 'builtin' && provider.id === 'kiro';
     const loginButtonLabel =
       state.status === 'success'
         ? t('auth_login.login_another_account')
@@ -739,8 +753,30 @@ export function OAuthPage() {
         }
       >
         <div className={styles.cardContent}>
+          {isKiro && (
+            <div
+              className={styles.segmented}
+              role="group"
+              aria-label={t('auth_login.kiro_method_label')}
+            >
+              {KIRO_METHODS.map((method) => (
+                <button
+                  key={method}
+                  type="button"
+                  className={`${styles.segment} ${kiroMethod === method ? styles.segmentActive : ''}`}
+                  aria-pressed={kiroMethod === method}
+                  disabled={Boolean(state.state) || state.polling}
+                  onClick={() => setKiroMethod(method)}
+                >
+                  {t(`auth_login.kiro_method_${method}`)}
+                </button>
+              ))}
+            </div>
+          )}
           <div className={featured ? styles.featuredHint : styles.cardHint}>
-            {getProviderText(provider, 'oauth_hint')}
+            {isKiro
+              ? t(`auth_login.kiro_oauth_hint_${kiroMethod}`)
+              : getProviderText(provider, 'oauth_hint')}
           </div>
           {state.url && (
             <div className={styles.authUrlBox}>
@@ -825,7 +861,9 @@ export function OAuthPage() {
                     ? 'auth_login.xai_callback_placeholder'
                     : provider.id === 'devin'
                       ? 'auth_login.devin_callback_placeholder'
-                      : 'auth_login.oauth_callback_placeholder'
+                      : provider.id === 'kiro'
+                        ? 'auth_login.kiro_callback_placeholder'
+                        : 'auth_login.oauth_callback_placeholder'
                 )}
               />
               <div className={styles.callbackActions}>

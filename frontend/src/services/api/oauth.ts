@@ -52,9 +52,9 @@ const normalizeProviderForManagementPath = (provider: string): string => {
 };
 
 export const oauthApi = {
-  startAuth: (provider: string, signal?: AbortSignal) => {
+  startAuth: (provider: string, signal?: AbortSignal, extraParams?: Record<string, string>) => {
     const providerKey = normalizeProviderForManagementPath(provider);
-    const params: Record<string, string | boolean> = { provider: providerKey };
+    const params: Record<string, string | boolean> = { ...extraParams, provider: providerKey };
     if (useAuthStore.getState().account) {
       const channel = useChannelStore.getState().selected;
       if (!channel) throw new Error('Select a channel before authorizing a subscription');

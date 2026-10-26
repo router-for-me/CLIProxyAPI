@@ -6,23 +6,35 @@ channel ownership, scheduling, model editor, quota refresh and usage log.
 
 ## Login and import
 
-On the OAuth page, choose **Kiro subscription** and complete AWS Builder ID device
-authorization in your browser. In multi-user mode select a channel first. Cancelling
-a pending authorization prevents the credential from being saved.
-The command-line equivalent is:
+On the OAuth page, choose **Kiro subscription**, pick **AWS Builder ID**, **Google**
+or **GitHub**, and complete authorization in your browser. In multi-user mode select
+a channel first. Cancelling a pending authorization prevents the credential from
+being saved. The command-line equivalent is:
 
 ```bash
 go run ./cmd/server --config config.yaml --kiro-login --no-browser
+go run ./cmd/server --config config.yaml --kiro-login --kiro-method github
 ```
+
+Google/GitHub use the official IDE's PKCE flow on the desktop auth service
+(`/login` then `/oauth/token`). Upstream only accepts the IDE's registered
+redirect `http://localhost:<port>/oauth/callback?login_option=<google|github>`
+on ports 3128, 4649, 6588, 8008, 9091, 49153, 50153, 51153, 52153 or 53153, so
+the server listens on the first free one of these for up to ten minutes. When
+the browser is on another machine, its final localhost page does not load; paste
+that full URL into the callback field (the shared OAuth callback endpoint). The
+saved credential has the same shape as a social import (`provider`,
+`auth_method: social`, email from the ID token when present). The GitHub step
+may show an AWS WAF human-verification page before GitHub.
 
 The v8 authorization endpoint also accepts `region` and `start_url` for an IAM
 Identity Center device authorization. The default is AWS Builder ID in
 `us-east-1`. Organizations can disable device authorization; external identity
 providers requiring browser-only authentication must use imported credentials.
 
-Existing Kiro desktop credentials and account-manager exports can be uploaded
-through the credential page, one account per JSON file. Existing multiple-file
-upload remains available. Google/GitHub exports need no additional `type` field:
+Existing Kiro desktop credentials and account-manager exports can also be uploaded
+through the credential page, one account per JSON file. Google/GitHub exports need
+no additional `type` field:
 
 ```json
 {
@@ -141,8 +153,11 @@ the existing proxy-aware transport. Inference streams have no application timeou
 
 ## Verification boundary and references
 
-Automated verification uses local mock OIDC, refresh, model-list and binary
-inference responses. Live checks on 2026-10-25, before the subsequent review
+Automated verification uses local mock OIDC, social token, refresh, model-list
+and binary inference responses. On 2026-10-26 the real `/login` accepted the
+generated Google and GitHub authorization URLs and redirected to Google sign-in
+and the GitHub authorize step; a completed real Google/GitHub sign-in and code
+exchange has not been run. Live checks on 2026-10-25, before the subsequent review
 fixes, succeeded with an imported GitHub social credential: refresh, profile
 resolution, model discovery, streaming and non-streaming inference with
 `claude-haiku-4.5`, and quota queries. The reviewed identity and final-profile-header

@@ -45,6 +45,9 @@ func (KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *Lo
 		httpClient.Transport = transport
 	}
 	client := &kiro.Client{HTTP: httpClient}
+	if provider, ok := kiro.SocialProvider(opts.Metadata["method"]); ok {
+		return kiroSocialLogin(ctx, client, provider, opts)
+	}
 	device, err := client.StartDeviceFlow(ctx, opts.Metadata["region"], opts.Metadata["start_url"])
 	if err != nil {
 		return nil, err
@@ -64,4 +67,44 @@ func (KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *Lo
 		return nil, err
 	}
 	return NewKiroAuthRecord(kiro.TokenMetadata(token, device)), nil
+}
+
+func kiroSocialLogin(ctx context.Context, client *kiro.Client, provider string, opts *LoginOptions) (*coreauth.Auth, error) {
+	callbacks := make(chan kiro.SocialCallback, 1)
+	state := uuid.NewString()
+	login, err := client.StartSocialLogin(provider, state, func(callback kiro.SocialCallback) {
+		select {
+		case callbacks <- callback:
+		default:
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer login.Close()
+	fmt.Printf("Open %s\n", login.AuthURL)
+	if !opts.NoBrowser && browser.IsAvailable() {
+		if errOpen := browser.OpenURL(login.AuthURL); errOpen != nil {
+			log.WithError(errOpen).Warn("kiro: browser could not be opened")
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, kiro.SocialLoginTimeout)
+	defer cancel()
+	var callback kiro.SocialCallback
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case callback = <-callbacks:
+	}
+	if callback.Error != "" {
+		return nil, fmt.Errorf("kiro: authorization failed: %s", callback.Error)
+	}
+	if callback.State != state {
+		return nil, fmt.Errorf("kiro: authorization state mismatch")
+	}
+	token, err := client.ExchangeSocialCode(ctx, login, callback.Code)
+	if err != nil {
+		return nil, err
+	}
+	return NewKiroAuthRecord(kiro.SocialTokenMetadata(token, login)), nil
 }

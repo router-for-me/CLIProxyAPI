@@ -119,8 +119,9 @@ func ControlURL(metadata map[string]any) string {
 
 type Client struct {
 	HTTP *http.Client
-	// OIDCURL is injectable for deterministic authentication tests.
+	// OIDCURL and AuthURL are injectable for deterministic authentication tests.
 	OIDCURL string
+	AuthURL string
 }
 
 type DeviceAuthorization struct {
@@ -141,6 +142,7 @@ type Token struct {
 	RefreshToken string `json:"refreshToken"`
 	ExpiresIn    int    `json:"expiresIn"`
 	ProfileARN   string `json:"profileArn"`
+	IDToken      string `json:"idToken"`
 }
 
 type APIError struct {
@@ -340,7 +342,7 @@ func (c *Client) Refresh(ctx context.Context, metadata map[string]any) (*Token, 
 		return nil, fmt.Errorf("kiro: external identity provider token refresh is not supported")
 	}
 	// Social authentication uses the desktop auth service, independent of the inference region.
-	endpoint := "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
+	endpoint := c.desktopAuthURL() + "/refreshToken"
 	payload := map[string]any{"refreshToken": refresh}
 	headers := map[string]string{"User-Agent": DesktopAuthUserAgent(metadata)}
 	if clientID := String(metadata, "client_id"); clientID != "" {

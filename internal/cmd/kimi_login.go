@@ -17,7 +17,7 @@ import (
 //   - cfg: The application configuration containing proxy and auth directory settings
 //   - options: Login options including browser behavior settings
 func DoKimiLogin(cfg *config.Config, options *LoginOptions) {
-	doDeviceSubscriptionLogin(cfg, options, "kimi", "Kimi")
+	doDeviceSubscriptionLogin(cfg, options, "kimi", "Kimi", nil)
 }
 
 // DoKimiAILogin triggers the OAuth device flow for Kimi.ai (Moonshot AI) and saves tokens.
@@ -26,10 +26,10 @@ func DoKimiLogin(cfg *config.Config, options *LoginOptions) {
 //   - cfg: The application configuration containing proxy and auth directory settings
 //   - options: Login options including browser behavior settings
 func DoKimiAILogin(cfg *config.Config, options *LoginOptions) {
-	doDeviceSubscriptionLogin(cfg, options, "kimi-ai", "Kimi.ai")
+	doDeviceSubscriptionLogin(cfg, options, "kimi-ai", "Kimi.ai", nil)
 }
 
-func doDeviceSubscriptionLogin(cfg *config.Config, options *LoginOptions, provider string, displayName string) {
+func doDeviceSubscriptionLogin(cfg *config.Config, options *LoginOptions, provider string, displayName string, metadata map[string]string) {
 	if options == nil {
 		options = &LoginOptions{}
 	}
@@ -41,6 +41,9 @@ func doDeviceSubscriptionLogin(cfg *config.Config, options *LoginOptions, provid
 		Prompt:    options.Prompt,
 	}
 
+	for key, value := range metadata {
+		authOpts.Metadata[key] = value
+	}
 	record, savedPath, err := manager.Login(context.Background(), provider, cfg, authOpts)
 	if err != nil {
 		log.Errorf("%s authentication failed: %v", displayName, err)
