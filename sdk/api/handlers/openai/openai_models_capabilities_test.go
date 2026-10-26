@@ -11,38 +11,68 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
-func TestOpenAIModelsPreservesInputModalities(t *testing.T) {
-	clientID := "openai-model-capabilities-test"
+func TestOpenAIModelsPreservesModelModalitiesEndToEnd(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	clientID := "openai-model-capabilities-e2e-test"
 	registry.GetGlobalRegistry().RegisterClient(clientID, "openai", []*registry.ModelInfo{{
-		ID:                        "gpt-vision",
+		ID:                        "gpt-vision-e2e",
+		OwnedBy:                   "openai",
 		SupportedInputModalities:  []string{"text", "image"},
 		SupportedOutputModalities: []string{"text"},
+		SupportedParameters:       []string{"tools", "reasoning"},
 	}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(clientID) })
 
-	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil))
+	handler := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil))
+	router := gin.New()
+	router.GET("/v1/models", handler.OpenAIModels)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest("GET", "/v1/models", nil)
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = request
-	h.OpenAIModels(ctx)
+	router.ServeHTTP(recorder, httptest.NewRequest("GET", "/v1/models", nil))
 	if recorder.Code != 200 {
-		t.Fatalf("status = %d, want 200", recorder.Code)
+		t.Fatalf("GET /v1/models status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
+
 	var payload struct {
 		Data []map[string]any `json:"data"`
 	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode response: %v; body=%s", err, recorder.Body.String())
+	if errDecode := json.Unmarshal(recorder.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatalf("decode /v1/models response: %v; body=%s", errDecode, recorder.Body.String())
 	}
-	for _, model := range payload.Data {
-		if model["id"] == "gpt-vision" {
-			modalities, ok := model["input_modalities"].([]any)
-			if !ok || len(modalities) != 2 || modalities[1] != "image" {
-				t.Fatalf("input_modalities = %#v, want [text image]", model["input_modalities"])
-			}
-			return
+	var model map[string]any
+	for _, candidate := range payload.Data {
+		if candidate["id"] == "gpt-vision-e2e" {
+			model = candidate
+			break
 		}
 	}
-	t.Fatalf("gpt-vision missing from response: %s", recorder.Body.String())
+	if model == nil {
+		t.Fatalf("missing gpt-vision-e2e in /v1/models response: %s", recorder.Body.String())
+	}
+	if got := model["input_modalities"]; got == nil {
+		t.Fatal("input_modalities missing from /v1/models response")
+	} else if want := "[\"text\",\"image\"]"; marshalJSON(t, got) != want {
+		t.Fatalf("input_modalities = %s, want %s", marshalJSON(t, got), want)
+	}
+	if got := model["output_modalities"]; got == nil {
+		t.Fatal("output_modalities missing from /v1/models response")
+	} else if want := "[\"text\"]"; marshalJSON(t, got) != want {
+		t.Fatalf("output_modalities = %s, want %s", marshalJSON(t, got), want)
+	}
+	if got := model["supported_parameters"]; got == nil {
+		t.Fatal("supported_parameters missing from /v1/models response")
+	} else if want := "[\"tools\",\"reasoning\"]"; marshalJSON(t, got) != want {
+		t.Fatalf("supported_parameters = %s, want %s", marshalJSON(t, got), want)
+	}
+	if _, exists := model["metadata_model_id"]; exists {
+		t.Fatal("internal metadata_model_id leaked into /v1/models response")
+	}
+}
+
+func marshalJSON(t *testing.T, value any) string {
+	t.Helper()
+	raw, errMarshal := json.Marshal(value)
+	if errMarshal != nil {
+		t.Fatalf("marshal JSON value: %v", errMarshal)
+	}
+	return string(raw)
 }
