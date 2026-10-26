@@ -34,7 +34,7 @@ through Claude Code. Fable is Waseem's own seat: never dispatch a lane on it.
 
 | Lane | Deliverable | Route | State |
 |---|---|---|---|
-| L1 routing | `consume-first` routing strategy + account pinning, merged to `main` of Automancer-Ltd/CLIProxyAPI | bb thread, Claude Code, Opus 5.5, high | dispatched 2026-10-26 |
+| L1 routing | `consume-first` routing strategy + account pinning, merged to `main` of Automancer-Ltd/CLIProxyAPI | bb thread, Claude Code, Opus 5.5, high | dispatched 2026-10-26 as bb thread thr_cu7cfdji97 (tracker t8305; L2 t8304; migration t8306) |
 | L2 dashboard | web dashboard replacing sysdash/codexbar | after L1 | not started |
 
 Base for L1: upstream `main` at 1f917e77 (fork point). Keep the diff upstream-mergeable: new files
