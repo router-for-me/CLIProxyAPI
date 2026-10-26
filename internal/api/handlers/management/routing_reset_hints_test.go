@@ -60,10 +60,18 @@ func TestPutRoutingResetHints(t *testing.T) {
 	if updated.Attributes["weight"] != "1" || updated.Attributes["priority"] != "50" || updated.Unavailable {
 		t.Fatalf("credential mutated: %+v", updated)
 	}
+	// An update without b (for example after a failed quota read) keeps b's known reset.
 	request(`{"accounts":[]}`, http.StatusOK)
 	got, err = selector.Pick(context.Background(), "codex", "m", cliproxyexecutor.Options{}, []*coreauth.Auth{a, b})
+	if err != nil || got == nil || got.ID != "b" {
+		t.Fatalf("pick after empty update = %v, %v", got, err)
+	}
+	// A last-known observation hours old still describes a future reset.
+	old := now.Add(-6 * time.Hour)
+	request(fmt.Sprintf(`{"accounts":[{"auth_index":%q,"observed_at":%q,"reset_at":%q}]}`, a.EnsureIndex(), old.Format(time.RFC3339Nano), now.Add(30*time.Minute).Format(time.RFC3339Nano)), http.StatusOK)
+	got, err = selector.Pick(context.Background(), "codex", "m", cliproxyexecutor.Options{}, []*coreauth.Auth{a, b})
 	if err != nil || got == nil || got.ID != "a" {
-		t.Fatalf("pick after clear = %v, %v", got, err)
+		t.Fatalf("pick after last-known update = %v, %v", got, err)
 	}
 	manager.SetSelector(&coreauth.WeightedRoundRobinSelector{})
 	request(body, http.StatusConflict)

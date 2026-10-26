@@ -13,9 +13,9 @@ routing:
 
 1. Exclude disabled credentials, exhausted credentials with zero weight, and credentials in cooldown for the requested model.
 2. Keep the highest available manual priority tier.
-3. Keep the earliest future reset with an observation no older than 15 minutes.
+3. Keep the earliest known future reset. A known reset stays in use until it passes or a newer observation replaces it.
 4. Use weighted round robin for equal reset timestamps.
-5. If no candidate has a usable reset, use weighted round robin for all remaining candidates.
+5. Candidates without a known reset come after all candidates with one and share by weight.
 
 Accounts without usable reset data remain fallback candidates. A known reset takes precedence over an unknown reset in the same priority tier. The strategy does not interrupt streams or move healthy bound sessions.
 
@@ -23,7 +23,7 @@ The selector uses the route-aware selection path. Model aliases and retry exclus
 
 ## Collector contract
 
-An authenticated collector sends a complete snapshot to `PUT /v8/management/routing/reset-hints`:
+An authenticated collector sends its observations to `PUT /v8/management/routing/reset-hints`:
 
 ```json
 {
@@ -37,19 +37,19 @@ An authenticated collector sends a complete snapshot to `PUT /v8/management/rout
 }
 ```
 
-Timestamps use RFC 3339. The handler accepts at most 1,024 observations in a 256 KiB body. Duplicate indexes, unknown fields, future observations, and invalid timestamps reject the complete update. Missing accounts and expired observations do not enter the snapshot.
+Timestamps use RFC 3339. The handler accepts at most 1,024 observations in a 256 KiB body. Duplicate indexes, unknown fields, future observations, and invalid timestamps reject the complete update. Unknown accounts and resets that already passed are ignored.
 
-An empty `accounts` array clears all hints. `null` is not an empty snapshot. The handler returns HTTP 409 if the active selector is not `soonest-reset-first`.
+Updates merge into the retained observations. An observation replaces the retained one for the same credential unless it is older. Credentials missing from an update keep their known reset, so a failed quota read does not move an account behind others. A retained reset stops counting when it passes; removed credentials are dropped. An empty `accounts` array only prunes. `null` is rejected. The handler returns HTTP 409 if the active selector is not `soonest-reset-first`.
 
-Hints stay in memory. They do not change OAuth files, manual priorities, weights, or cooldowns. A restart or selector replacement clears them. The collector must publish again after a blue/green cutover. Until then, selection uses quota weights.
+Hints stay in memory. They do not change OAuth files, manual priorities, weights, or cooldowns. A restart or selector replacement clears them. The collector must publish again after a blue/green cutover; the limits exporter also sends the last known reset of accounts whose current quota read failed. Until then, selection uses quota weights.
 
-The limits exporter publishes hints every quota reconciliation interval when `QUOTA_RESET_HINTS_ENABLED=1`. It uses the longest primary quota window, usually the weekly window. It excludes model-scoped windows and last-known error snapshots. Shorter windows still determine exhaustion through quota weights.
+The limits exporter publishes hints every quota reconciliation interval when `QUOTA_RESET_HINTS_ENABLED=1`. It uses the longest primary quota window, usually the weekly window. It excludes model-scoped windows. When a quota read fails, it sends the last successful observation with its original timestamp. Shorter windows still determine exhaustion through quota weights.
 
 If the longest window has no usable future timestamp, the exporter sends no hint for that account. It does not substitute a five-hour reset for an unknown weekly reset. Accounts with only a short primary window can use that window.
 
 ## Read-only routing status
 
-`GET /v8/management/routing/status` uses the same management authentication. It reports the installed selector strategy, `session_affinity`, `generated_at`, `max_age_seconds` and `hints` keyed by management auth index. Hints include their original observation and reset timestamps, including expired observations so a dashboard can explain fallback. Removed accounts are omitted. The returned snapshot cannot mutate selector state.
+`GET /v8/management/routing/status` uses the same management authentication. It reports the installed selector strategy, `session_affinity`, `generated_at`, the retained `hints` keyed by management auth index, and `providers`: the routing order per provider, computed by the selector's own rules. Each entry has `auth_index`, `rank` (1 receives new conversations; equal ranks share by weight), `shared`, `priority`, `weight`, `state` (`eligible`, `zero_weight`, `cooldown`, `unavailable`, `disabled`), `reason` (`only_in_tier`, `earliest_reset`, `later_reset`, `no_reset`), the retained `reset_at`/`observed_at`, and `next_retry_after` for blocked credentials. Dashboards should display this order instead of recomputing it. The returned snapshot cannot mutate selector state.
 
 This is an account-level diagnostic, not a model-specific next-request promise. Model access, cooldowns, transport preference and existing conversation bindings still apply during selection.
 

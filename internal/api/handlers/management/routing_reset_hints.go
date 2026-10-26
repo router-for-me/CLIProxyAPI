@@ -11,7 +11,8 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
-// GetRoutingStatus reports the installed strategy and its in-memory hints.
+// GetRoutingStatus reports the installed strategy, its in-memory reset
+// observations and the account-level routing order computed by the selector.
 func (h *Handler) GetRoutingStatus(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -20,9 +21,11 @@ func (h *Handler) GetRoutingStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, h.authManager.QuotaRoutingSnapshot())
 }
 
-// PutRoutingResetHints replaces only the active selector's in-memory quota
-// observations. The v8 management middleware authenticates this operation.
-// It never writes credential files or changes priorities/availability.
+// PutRoutingResetHints merges quota observations into the active selector's
+// in-memory state. Earlier observations remain in use until their reset passes
+// or a newer observation replaces them, so failed quota reads do not discard a
+// known reset. The v8 management middleware authenticates this operation. It
+// never writes credential files or changes priorities/availability.
 func (h *Handler) PutRoutingResetHints(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -61,14 +64,15 @@ func (h *Handler) PutRoutingResetHints(c *gin.Context) {
 		auth := h.authByIndex(index)
 		// An account can disappear during a collector poll. Drop that entry;
 		// never associate it by file name or expose inventory in the response.
-		if auth == nil || now.Sub(account.ObservedAt) > coreauth.QuotaResetHintMaxAge || !account.ResetAt.After(now) {
+		if auth == nil || !account.ResetAt.After(now) {
 			continue
 		}
 		hints[auth.ID] = coreauth.QuotaResetHint{ObservedAt: account.ObservedAt, ResetAt: account.ResetAt}
 	}
-	if err := h.authManager.ReplaceQuotaResetHints(hints); err != nil {
+	accepted, err := h.authManager.MergeQuotaResetHints(hints)
+	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "soonest-reset-first routing is not active"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "accepted": len(hints)})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "accepted": accepted})
 }

@@ -34,7 +34,7 @@ func TestSoonestResetFirstRoutingSelector(t *testing.T) {
 			defer stopper.Stop()
 		}
 		manager := coreauth.NewManager(nil, selector, nil)
-		if err := manager.ReplaceQuotaResetHints(nil); err != nil {
+		if _, err := manager.MergeQuotaResetHints(nil); err != nil {
 			t.Fatal(err)
 		}
 	}

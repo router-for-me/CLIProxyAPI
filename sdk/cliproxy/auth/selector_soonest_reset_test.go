@@ -44,11 +44,6 @@ func TestSoonestResetFirstAvailabilityAndFallback(t *testing.T) {
 		}},
 		{"lower manual priority", func(a *Auth, _ map[string]QuotaResetHint) { a.Attributes["priority"] = "-1" }},
 		{"missing hint", func(a *Auth, hints map[string]QuotaResetHint) { delete(hints, a.ID) }},
-		{"stale hint", func(a *Auth, hints map[string]QuotaResetHint) {
-			h := hints[a.ID]
-			h.ObservedAt = now.Add(-QuotaResetHintMaxAge - time.Second)
-			hints[a.ID] = h
-		}},
 		{"future observation", func(a *Auth, hints map[string]QuotaResetHint) {
 			h := hints[a.ID]
 			h.ObservedAt = now.Add(time.Second)
@@ -128,7 +123,9 @@ func TestSoonestResetFirstManagerAffinityAndFailover(t *testing.T) {
 				}
 				publish := func(early, late string) {
 					t.Helper()
-					if err := manager.ReplaceQuotaResetHints(map[string]QuotaResetHint{early: {ObservedAt: now, ResetAt: now.Add(time.Hour)}, late: {ObservedAt: now, ResetAt: now.Add(24 * time.Hour)}}); err != nil {
+					// A newer observation replaces the retained one for the same credential.
+					now = now.Add(time.Second)
+					if _, err := manager.MergeQuotaResetHints(map[string]QuotaResetHint{early: {ObservedAt: now, ResetAt: now.Add(time.Hour)}, late: {ObservedAt: now, ResetAt: now.Add(24 * time.Hour)}}); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -182,7 +179,7 @@ func TestSoonestResetHintsConcurrentReplacement(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			for range 100 {
-				if err := manager.ReplaceQuotaResetHints(map[string]QuotaResetHint{"b": {ObservedAt: now, ResetAt: now.Add(time.Hour)}}); err != nil {
+				if _, err := manager.MergeQuotaResetHints(map[string]QuotaResetHint{"b": {ObservedAt: now, ResetAt: now.Add(time.Hour)}}); err != nil {
 					t.Error(err)
 				}
 				if got, err := selector.Pick(context.Background(), "codex", "m", cliproxyexecutor.Options{}, auths); err != nil || got == nil {
@@ -194,12 +191,12 @@ func TestSoonestResetHintsConcurrentReplacement(t *testing.T) {
 	workers.Wait()
 }
 
-func TestSoonestResetHintsSnapshotAndExpiry(t *testing.T) {
+// A failed quota read must not discard a known reset: the last observation
+// stays in use until its reset passes or a newer observation replaces it.
+func TestSoonestResetHintsAreRetainedUntilReset(t *testing.T) {
 	now := time.Now()
 	selector := &SoonestResetFirstSelector{now: func() time.Time { return now }}
-	hints := map[string]QuotaResetHint{"b": {ObservedAt: now, ResetAt: now.Add(time.Hour)}}
-	selector.replaceResetHints(hints)
-	delete(hints, "b")
+	exists := func(id string) bool { return id == "a" || id == "b" }
 	auths := []*Auth{{ID: "a", Attributes: map[string]string{"weight": "20"}}, {ID: "b", Attributes: map[string]string{"weight": "1"}}}
 	assertPick := func(want string) {
 		t.Helper()
@@ -208,10 +205,24 @@ func TestSoonestResetHintsSnapshotAndExpiry(t *testing.T) {
 			t.Fatalf("pick = %v, %v; want %s", got, err, want)
 		}
 	}
+	if accepted := selector.mergeResetHints(map[string]QuotaResetHint{"b": {ObservedAt: now, ResetAt: now.Add(3 * time.Hour)}, "removed": {ObservedAt: now, ResetAt: now.Add(time.Hour)}}, exists, now); accepted != 1 {
+		t.Fatalf("accepted = %d, want 1", accepted)
+	}
 	assertPick("b")
-	now = now.Add(QuotaResetHintMaxAge + time.Second)
+	// Hours later the collector cannot read b; an empty update keeps b.
+	now = now.Add(2 * time.Hour)
+	selector.mergeResetHints(nil, exists, now)
+	assertPick("b")
+	// An older last-known observation never overwrites a newer one.
+	selector.mergeResetHints(map[string]QuotaResetHint{"b": {ObservedAt: now.Add(-5 * time.Hour), ResetAt: now.Add(48 * time.Hour)}}, exists, now)
+	if got := selector.hints["b"].ResetAt; !got.Equal(now.Add(time.Hour)) {
+		t.Fatalf("retained reset = %v, want the newer observation", got)
+	}
+	// Once the reset passes the hint stops ranking and is pruned.
+	now = now.Add(time.Hour)
 	assertPick("a")
-	selector.replaceResetHints(map[string]QuotaResetHint{"b": {ObservedAt: now, ResetAt: now.Add(time.Hour)}})
-	selector.replaceResetHints(nil)
-	assertPick("a")
+	selector.mergeResetHints(nil, exists, now)
+	if len(selector.hints) != 0 {
+		t.Fatalf("hints = %v, want pruned", selector.hints)
+	}
 }
