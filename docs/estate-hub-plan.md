@@ -197,15 +197,15 @@ in on that device; **install** = not installed yet; **check** = installed, hub s
 | Claude Code | hub | hub | hub | install | hub (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) |
 | Codex | hub | hub | hub | install | hub (`model_providers.cliproxy`) |
 | OMP | hub | hub | hub | install | hub provider in `~/.omp/agent/models.json` (non-Claude models) |
-| pi | install | install | hub | install | hub provider in `~/.pi/agent/models.json` |
-| opencode | install | hub | install | install | hub provider in `~/.config/opencode/opencode.json` |
+| pi | hub | hub | hub | install | hub provider in `~/.pi/agent/models.json` |
+| opencode | hub | hub | check (installed, provider not listed yet) | install | hub provider in `~/.config/opencode/opencode.json` |
 | Muse CLI | install+login | install+login | login? (installed) | install+login | own login; Muse models via hub for the tools above |
 | agy (Antigravity) | install+login | login? (installed) | login? (installed) | install+login | own login |
 | Devin CLI | install+login | install+login | install+login | install+login | own login |
 | Grok CLI | install | install | check | install | check whether it takes a custom endpoint; else own login |
 | Kimi CLI | install | install | install | install | check `~/.kimi-code/config.toml` base_url; else own login |
-| dsh (DeepSeek) | install | install | install | install | API key from BWS, or hub `deepseek-flash` through OMP/pi |
-| commandcode | install | install | install | install | API key from BWS, or hub `commandcode/*` through OMP/pi |
+| dsh (DeepSeek) | installed, key needed | installed, key needed | installed, key needed | install | API key from BWS, or hub `deepseek-flash` through OMP/pi |
+| commandcode | installed, key needed | installed, key needed | installed, key needed | install | API key from BWS, or hub `commandcode/*` through OMP/pi |
 | cursor-agent / agent | install | install | installed | install | own login (Cursor); no hub path |
 
 "login?" means installed but whether it is signed in on that device is unverified. Omarchy column is from
@@ -244,3 +244,4 @@ memory: the box was in its Windows boot all evening; verify when it is up.
 - 2026-10-26: L3 (t8318) redesigned `/hub` and added banked resets, pace, and API-key provider usage.
   None of it is live until m6's binary is rebuilt from `main`. Then open `/hub` on the phone and check
   each API-key provider's poll error.
+- 2026-10-26 22:10: pi, opencode, dsh and commandcode installed by npm where missing on m6, mbp, wasnewpc (packages: @earendil-works/pi-coding-agent, opencode-ai, @deepseek-ai/dsh, command-code); pi and opencode carry the hub provider (25 models) on m6 and wasnewpc; mbp opencode lists 0 hub models, under investigation. Device matrix updated.
