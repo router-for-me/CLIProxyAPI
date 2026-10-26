@@ -55,6 +55,77 @@ func TestPluginUsagePresenceRestoresResponsesAfterEverySplit(t *testing.T) {
 	}
 }
 
+func TestPluginUsagePresenceRemovesEmptyResponseDetails(t *testing.T) {
+	// Codex rejects a present output_tokens_details object without reasoning_tokens.
+	// Unknown details must be omitted without discarding other fields or measured zeros.
+	for _, scenario := range []struct {
+		name       string
+		observed   string
+		translated string
+		absent     []string
+		values     map[string]int64
+	}{
+		{
+			name:       "unknown_details",
+			observed:   `{"input_tokens":10,"output_tokens":20,"total_tokens":30}`,
+			translated: `{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}`,
+			absent:     []string{"input_tokens_details", "output_tokens_details"},
+		},
+		{
+			name:       "other_fields",
+			observed:   `{"input_tokens":10,"output_tokens":20,"total_tokens":30}`,
+			translated: `{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0,"other_input_tokens":4},"output_tokens_details":{"reasoning_tokens":0,"other_output_tokens":3}}`,
+			absent:     []string{"input_tokens_details.cached_tokens", "input_tokens_details.cache_write_tokens", "output_tokens_details.reasoning_tokens"},
+			values:     map[string]int64{"input_tokens_details.other_input_tokens": 4, "output_tokens_details.other_output_tokens": 3},
+		},
+		{
+			name:       "explicit_zero",
+			observed:   `{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}`,
+			translated: `{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":6},"output_tokens_details":{"reasoning_tokens":7}}`,
+			values:     map[string]int64{"input_tokens_details.cached_tokens": 0, "input_tokens_details.cache_write_tokens": 0, "output_tokens_details.reasoning_tokens": 0},
+		},
+		{
+			name:       "measured_reasoning_unknown_cache",
+			observed:   `{"input_tokens":10,"output_tokens":20,"total_tokens":30,"output_tokens_details":{"reasoning_tokens":7}}`,
+			translated: `{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}`,
+			absent:     []string{"input_tokens_details"},
+			values:     map[string]int64{"output_tokens_details.reasoning_tokens": 7},
+		},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", scenario.name, stream), func(t *testing.T) {
+				observed := NewPluginUsageObservation("openai-response")
+				observed.Observe([]byte(`{"usage":` + scenario.observed + `}`))
+				target := []byte(`{"object":"response","usage":` + scenario.translated + `}`)
+				prefix := "usage."
+				if stream {
+					target = []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + string(target) + "}\n\n")
+					prefix = "response.usage."
+				}
+				patched := observed.RestoreResponses(target)
+				result := gjson.ParseBytes(patched)
+				if stream {
+					IterateStreamLines(patched, func(line []byte) {
+						if raw := ExtractStreamJSONPayload(line); gjson.ValidBytes(raw) {
+							result = gjson.ParseBytes(raw)
+						}
+					})
+				}
+				for _, path := range scenario.absent {
+					if result.Get(prefix + path).Exists() {
+						t.Fatalf("unknown details remained at %s: %s", path, patched)
+					}
+				}
+				for path, want := range scenario.values {
+					if value := result.Get(prefix + path); !value.Exists() || value.Int() != want {
+						t.Fatalf("detail at %s: got %s, want %d: %s", path, value.Raw, want, patched)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestPluginUsagePresenceKeepsExplicitZeroAndRemovesUnknownParents(t *testing.T) {
 	observed := NewPluginUsageObservation("openai-response")
 	observed.Observe([]byte(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`))

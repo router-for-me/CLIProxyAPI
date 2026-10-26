@@ -114,7 +114,7 @@ func TestPluginResponsesPreserveUsagePresenceAcrossHost(t *testing.T) {
 						return
 					}
 					if scenario == "unknown_reasoning" {
-						if response.Get("usage.output_tokens_details.reasoning_tokens").Exists() || observed.ReasoningTokens || record.Detail.TokenBreakdown.Quality != coreusage.TokenAccountingQualityUnclassified {
+						if response.Get("usage.output_tokens_details").Exists() || observed.ReasoningTokens || record.Detail.TokenBreakdown.Quality != coreusage.TokenAccountingQualityUnclassified {
 							t.Fatalf("unknown reasoning was presented as zero: %s", response.Raw)
 						}
 					} else if !observed.ReasoningTokens || !response.Get("usage.output_tokens_details.reasoning_tokens").Exists() || record.Detail.TokenBreakdown.Quality != coreusage.TokenAccountingQualityComplete {

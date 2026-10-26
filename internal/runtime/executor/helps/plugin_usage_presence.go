@@ -168,6 +168,14 @@ func (o *PluginUsageObservation) restoreJSON(payload []byte) []byte {
 		set("input_tokens_details.cached_tokens", observed.CacheReadTokens, o.detail.CacheReadTokens)
 		set("input_tokens_details.cache_write_tokens", observed.CacheWriteTokens, o.detail.CacheCreationTokens)
 		set("output_tokens_details.reasoning_tokens", observed.ReasoningTokens, o.detail.ReasoningTokens)
+		// A present details object can require its counter in Responses clients.
+		// Omit empty containers instead of inventing an unobserved zero.
+		for _, key := range []string{"input_tokens_details", "output_tokens_details"} {
+			detailsPath := path + "." + key
+			if details := gjson.GetBytes(payload, detailsPath); details.IsObject() && len(details.Map()) == 0 {
+				payload, _ = sjson.DeleteBytes(payload, detailsPath)
+			}
+		}
 	}
 	return payload
 }
