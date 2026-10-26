@@ -36,6 +36,7 @@ through Claude Code. Fable is Waseem's own seat: never dispatch a lane on it.
 |---|---|---|---|
 | L1 routing | `consume-first` routing strategy + account pinning, merged to `main` of Automancer-Ltd/CLIProxyAPI | bb thread, Claude Code, Opus 5.5, high | merged 2026-10-26 from bb thread thr_cu7cfdji97 (tracker t8305 has the PR and merge SHA; L2 t8304; migration t8306) |
 | L2 dashboard | web dashboard replacing sysdash/codexbar, plus the usage refresher | bb thread, Claude Code, Opus 5.5 | merged 2026-10-26 from bb thread thr_yh5dttfgcu (tracker t8304 has the PR and merge SHA) |
+| L3 design + parity | `/hub` redesign, CodexBar/sysdash parity (banked resets, pace, API-key providers) | bb thread, Claude Code, Opus 5.5 | from bb thread thr_b5ufx4t2am (tracker t8318 has the PR and merge SHA) |
 
 Base for L1: upstream `main` at 1f917e77 (fork point). Keep the diff upstream-mergeable: new files
 where possible, config-driven, no rewrites of existing strategies.
@@ -159,6 +160,31 @@ plan names (every account reports the same tier; name accounts with `note` on th
 banked resets, CodexBar's predicted "will last" pace, and a record of which client pinned
 which account (the hub keeps none; groups and pin targets are shown).
 
+## L3 outcome (2026-10-26)
+
+Operator detail is in `docs/estate-hub.md` ("Usage refresher", "Dashboard"). Product context for
+the page is in `PRODUCT.md` (inferred from the brief, not confirmed by Waseem). What shipped:
+
+- Redesign of `/hub`, phone first: "Spend next" (per provider, the next account's tightest window or
+  balance, with a pace mark), "Running low", "Banked resets", then every account as one row that opens
+  to its windows, facts and actions. Salmon paper and serif headings in light mode, slate in dark;
+  bars show what is left, not what is used. The phone page went from about 6,600 px to 3,400 px tall
+  on the demo seed.
+- Pace ("will it last") is computed in the page from each window's used percent, length and reset,
+  CodexBar's formula; sysdash's `+N spare` / `on pace` labels plus `runs out <time>`.
+- Codex banked resets: the Codex poll also reads `/wham/rate-limit-reset-credits`; a busy Codex
+  account is polled at least hourly so the next-to-spend account still reports them.
+- Config-file API keys are polled by base-URL host: DeepSeek balance, CommandCode (5-hour, weekly,
+  USD left of the monthly grant), GLM coding plan (5-hour, weekly, monthly MCP calls), OpenCode Go
+  (5-hour, weekly, monthly). New `usage` fields `balance` and `banked_resets`. No new config keys;
+  `usage-refresh.providers` accepts the four new names.
+
+Not verified against a live account: every new endpoint (shapes from CodexBar's source, commit
+5de59e1). After m6 runs this build, check on `/hub` that DeepSeek, CommandCode, GLM and OpenCode Go
+show figures with no "Poll failed" mark, and that a Codex account with a banked reset lists it.
+Seen in passing, not changed: editing an account's name or groups drops its quota headers until the
+next refresher tick (within a minute) restores them from the snapshot.
+
 ## Cursor
 
 - 2026-10-26: hub installed on m6 (brew `cliproxyapi` 8.0.40, bound to 127.0.0.1:8317, Tailscale
@@ -188,3 +214,6 @@ which account (the hub keeps none; groups and pin targets are shown).
   from `main` and `routing.usage-refresh.interval` is set in `~/.local/hub/config.yaml`. Then open
   `/hub` and check each account's poll error.
 - 2026-10-26 21:25: L2 build (estate-156d2b1b) live on m6; `routing.usage-refresh.interval: 10m` set; `/hub` renders real figures for Claude (5h, weekly, Fable-only), Codex, Kimi, Grok, Antigravity, Muse within one poll; Devin and the API-key providers show no usage (as designed). Screenshots: /home/ubuntu/Notes/Reports/assets/26-10-26-hub-dashboard-{desktop,phone}.png (taken with a raw-CDP script, /opt/automancer/var/scratch/t3eval/hubshot.mjs, key via env). Seen defects: the provider summary table's label column overlaps on long names (commandcode); CodexBar parity (banked resets, will-it-last) still open; Waseem keeps CodexBar until the page is at least as good.
+- 2026-10-26: L3 (t8318) redesigned `/hub` and added banked resets, pace, and API-key provider usage.
+  None of it is live until m6's binary is rebuilt from `main`. Then open `/hub` on the phone and check
+  each API-key provider's poll error.

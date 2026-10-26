@@ -7,69 +7,88 @@
 <title>Hub allowances</title>
 <style>
 :root {
-  --bg: #f5f6f8; --surface: #fff; --text: #14171c; --muted: #4f5866; --line: #dfe3e8;
-  --accent: #1f5fd1; --accent-soft: #e5edfb; --ok: #0f7a4f; --warn: #a35a00; --bad: #b42318; --track: #e7eaee;
-  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  --ground: #fff1e5; --ink: #33302e; --strong: #1a1817; --muted: #66605c; --rule: #e8d6c7; --hover: #fbe6d4;
+  --accent: #0f5499; --good: #0d7680; --bad: #990f3d; --warn: #96490a; --track: #f2dfce; --fill: #0f5499;
+  --serif: Georgia, "Times New Roman", serif;
+  color-scheme: light;
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0f1216; --surface: #171b21; --text: #e8ecf1; --muted: #a2acb9; --line: #2a313b;
-    --accent: #7aa7ff; --accent-soft: #1d2a42; --ok: #4ccf8f; --warn: #f2b45a; --bad: #ff8278; --track: #262d36;
+    --ground: #1f2229; --ink: #ece1d7; --strong: #fff8f1; --muted: #aea398; --rule: #393d47; --hover: #2a2e37;
+    --accent: #8fb9f5; --good: #4fc0b6; --bad: #ff8fac; --warn: #f0a75e; --track: #343843; --fill: #8fb9f5;
+    color-scheme: dark;
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font-variant-numeric: tabular-nums; }
-::selection { background: var(--accent); color: var(--surface); }
+body { margin: 0; background: var(--ground); color: var(--ink); font-variant-numeric: tabular-nums; caret-color: var(--accent); scrollbar-color: var(--muted) var(--ground); }
+::selection { background: var(--accent); color: var(--ground); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-main { max-width: 1240px; margin: 0 auto; padding: 16px 14px 48px; }
-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 14px; }
-h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
-h2 { font-size: 1.05rem; margin: 26px 0 10px; display: flex; gap: 8px; align-items: baseline; }
-h2 small, .muted { color: var(--muted); font-weight: 400; font-size: .87rem; }
-button, select, input { font: inherit; color: inherit; }
-button { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 6px 12px; cursor: pointer; min-height: 36px; }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
-button:disabled { opacity: .5; cursor: progress; }
-select, input { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 6px 8px; min-height: 36px; }
+[hidden] { display: none !important; }
+main { max-width: 1240px; margin: 0 auto; padding: 12px 16px 40px; }
+header { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; }
+h1, h2, h3 { font-family: var(--serif); color: var(--strong); margin: 0; }
+h1 { font-size: 1.5rem; letter-spacing: -0.01em; }
+h2 { font-size: 1.125rem; border-top: 2px solid var(--strong); padding-top: 6px; margin: 22px 0 2px; display: flex; align-items: baseline; gap: 8px; }
+h3 { font-size: 1rem; padding: 14px 0 4px; display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--strong); }
+h2 small, h3 small { font: 400 .8rem/1 system-ui, sans-serif; color: var(--muted); margin-left: auto; }
+.muted { color: var(--muted); }
 .spacer { flex: 1; }
-.next-list { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin: 0; list-style: none; }
-.next-list li { display: grid; grid-template-columns: 6.5em 1fr; gap: 0 10px; padding: 6px 0; }
-.next-list li > span { overflow-wrap: anywhere; }
-.next-list .muted { grid-column: 2; }
-.next-list li + li { border-top: 1px solid var(--line); }
-.grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
-@media (max-width: 420px) { .grid { grid-template-columns: 1fr; } }
-.acct { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; min-width: 0; }
-.acct.next { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.acct.out { opacity: .72; }
-.top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.name { font-weight: 600; overflow-wrap: anywhere; }
-.plan { margin-left: auto; color: var(--muted); font-size: .87rem; }
-.tag { font-size: .78rem; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
-.tag.bad { background: transparent; color: var(--bad); border: 1px solid currentColor; }
-.tag.warn { background: transparent; color: var(--warn); border: 1px solid currentColor; }
-.sub { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
-.win { margin-top: 8px; }
-.win .row { display: flex; justify-content: space-between; gap: 8px; font-size: .87rem; }
-.win .row span:last-child { color: var(--muted); text-align: right; }
-.reset { color: var(--muted); font-size: .8rem; margin-top: 2px; }
-.bar { height: 6px; border-radius: 3px; background: var(--track); margin-top: 3px; overflow: hidden; }
-.bar i { display: block; height: 100%; background: var(--ok); }
-.bar i.warn { background: var(--warn); }
+button, select, input { font: inherit; color: inherit; }
+button { border: 1px solid var(--muted); background: transparent; border-radius: 6px; padding: 6px 12px; min-height: 36px; cursor: pointer; }
+button:hover { background: var(--hover); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--ground); font-weight: 600; }
+button:disabled { opacity: .55; cursor: progress; }
+select, input { border: 1px solid var(--muted); background: var(--ground); border-radius: 6px; padding: 6px 8px; min-height: 36px; min-width: 0; }
+.list { list-style: none; margin: 0; padding: 0; }
+/* A ticker row: what and whose on the left, the figure and its pace on the right. */
+.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule); }
+.row > :nth-child(even) { text-align: right; }
+.what { font-weight: 600; color: var(--strong); min-width: 0; display: flex; align-items: baseline; white-space: nowrap; }
+.what .name { overflow: hidden; text-overflow: ellipsis; }
+.what .who { font-weight: 400; color: var(--ink); margin-left: .3em; }
+.fig { font-size: 1.25rem; font-weight: 600; line-height: 1.15; color: var(--strong); }
+.fig small { font-size: .75rem; font-weight: 400; color: var(--muted); margin-left: 2px; }
+.line { font-size: .85rem; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pace { font-size: .85rem; white-space: nowrap; }
+.good { color: var(--good); }
+.bad { color: var(--bad) !important; }
+.warn { color: var(--warn); }
+.mark { flex: none; font: 600 .7rem/1 system-ui, sans-serif; letter-spacing: .04em; text-transform: uppercase; padding: 2px 5px; border-radius: 3px; border: 1px solid currentColor; margin-left: 6px; vertical-align: 2px; }
+.mark.next { color: var(--ground); background: var(--accent); border-color: var(--accent); }
+.mark.bad, .mark.warn, .mark.off { background: transparent; }
+.mark.off { color: var(--muted); }
+details.acct > summary { list-style: none; cursor: pointer; }
+details.acct > summary::-webkit-details-marker { display: none; }
+details.acct > summary:hover { background: var(--hover); }
+details.acct[open] > summary { border-bottom-color: transparent; }
+details.acct.out .what, details.acct.out .fig, details.acct.out .pace { color: var(--muted) !important; }
+.body { padding: 2px 0 14px; border-bottom: 1px solid var(--rule); }
+.win { padding: 6px 0; }
+.win .top { display: flex; justify-content: space-between; gap: 8px; font-size: .9rem; }
+.bar { height: 4px; background: var(--track); margin: 4px 0 3px; }
+.bar i { display: block; height: 100%; background: var(--fill); }
 .bar i.bad { background: var(--bad); }
-.state { margin-top: 8px; font-size: .87rem; }
-.state.bad { color: var(--bad); }
-.state.warn { color: var(--warn); }
-details { margin-top: 8px; }
-summary { cursor: pointer; color: var(--accent); font-size: .87rem; padding: 4px 0; }
-.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
-.actions input { flex: 1 1 140px; min-width: 0; }
-#login { max-width: 420px; margin: 12vh auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
-#login form { display: flex; gap: 8px; margin-top: 12px; }
-#login input { flex: 1; min-width: 0; }
-.error { color: var(--bad); }
-footer { margin-top: 28px; color: var(--muted); font-size: .85rem; }
-code { font-size: .85em; }
+.win .bottom { display: flex; justify-content: space-between; gap: 8px; font-size: .8rem; color: var(--muted); }
+dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 14px; margin: 8px 0 0; font-size: .85rem; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.actions input { flex: 1 1 140px; }
+.chev { flex: none; width: 10px; height: 10px; margin-left: 6px; vertical-align: 1px; color: var(--muted); transition: transform .12s ease-out; }
+details[open] .chev { transform: rotate(90deg); }
+#login { max-width: 400px; margin: 14vh auto; padding: 0 16px; }
+#login form { display: flex; gap: 8px; margin-top: 14px; }
+#login input { flex: 1; }
+.error { color: var(--bad); margin: 6px 0 0; }
+.error:empty { display: none; }
+footer { margin-top: 28px; padding-top: 8px; border-top: 1px solid var(--rule); color: var(--muted); font-size: .8rem; display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+code { font-size: .95em; }
+@media (min-width: 960px) {
+  main { padding: 20px 28px 48px; }
+  .cols { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px; align-items: start; }
+}
+@media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
 </style>
 </head>
 <body>
@@ -84,27 +103,42 @@ code { font-size: .85em; }
 </div>
 <main id="app" hidden>
   <header>
-    <h1>Hub allowances</h1>
-    <span id="meta" class="muted"></span>
+    <h1>Hub</h1>
     <span class="spacer"></span>
+    <span id="updated" class="muted"></span>
     <button id="reload">Refresh</button>
-    <button id="logout">Sign out</button>
   </header>
   <p id="error" class="error" role="alert"></p>
-  <ul id="next" class="next-list" aria-label="Next to spend"></ul>
-  <div id="providers"></div>
+  <div id="content" class="cols" hidden>
+    <div>
+      <section id="next-section"><h2>Spend next</h2><ul id="next" class="list"></ul></section>
+      <section id="low-section"><h2>Running low <small id="low-count"></small></h2><ul id="low" class="list"></ul></section>
+      <section id="banked-section"><h2>Banked resets</h2><ul id="banked" class="list"></ul></section>
+    </div>
+    <section><h2>Accounts</h2><div id="accounts"></div></section>
+  </div>
   <footer>
-    Pin a client to an account or group with the request header <code>X-CPA-Account: &lt;account or group&gt;</code>.
-    A conversation stays on the account it started on while that account can serve it.
+    <span id="meta"></span>
+    <span>Pin a client with the header <code>X-CPA-Account: &lt;account or group&gt;</code>.</span>
+    <span class="spacer"></span>
+    <button id="logout">Sign out</button>
   </footer>
 </main>
 <script>
 "use strict";
 const KEY = "cpa-hub-management-key";
-const NAMES = { claude: "Claude", codex: "Codex", kimi: "Kimi", xai: "Grok", antigravity: "Antigravity", meta: "Muse", devin: "Devin", gemini: "Gemini" };
+const NAMES = {
+  claude: "Claude", codex: "Codex", kimi: "Kimi", xai: "Grok", antigravity: "Antigravity", meta: "Muse", devin: "Devin", gemini: "Gemini",
+  commandcode: "CommandCode", "opencode-go": "OpenCode Go", zai: "GLM", deepseek: "DeepSeek", local: "Local",
+};
 const ORDER = Object.keys(NAMES);
-const providerName = (p) => NAMES[p] || p.replace(/^openai-compatib(le|ility)-/, "");
+// An allowance is running low at LOW percent left, or below half left when it
+// is on course to run out before it resets (earlier projections are noise).
+const LOW = 15;
+const providerKey = (p) => (p || "other").replace(/^openai-compatib(le|ility)-/, "");
+const providerName = (p) => NAMES[providerKey(p)] || providerKey(p);
 const $ = (id) => document.getElementById(id);
+const CHEV = '<svg class="chev" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 6.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
 let data = null;
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -130,13 +164,18 @@ function clock(d) {
   const day = Math.abs(d - Date.now()) < 6 * 86400000 ? { weekday: "short" } : { day: "numeric", month: "short" };
   return d.toLocaleDateString(undefined, day) + " " + hm;
 }
-function cadence(minutes) {
-  if (!minutes) return "";
-  if (Math.abs(minutes - 300) < 5) return "5-hour";
-  if (Math.abs(minutes - 1440) < 5) return "Daily";
-  if (Math.abs(minutes - 10080) < 60) return "Weekly";
-  if (minutes >= 40000 && minutes <= 46000) return "Monthly";
-  return minutes >= 1440 ? Math.round(minutes / 1440) + "-day" : Math.round(minutes / 60) + "-hour";
+function cadence(minutes, short) {
+  if (!minutes) return short ? "" : "Allowance";
+  const near = (m, tolerance) => Math.abs(minutes - m) < tolerance;
+  if (near(300, 5)) return short ? "5h" : "5-hour";
+  if (near(1440, 5)) return short ? "day" : "Daily";
+  if (near(10080, 60)) return short ? "week" : "Weekly";
+  if (minutes >= 40000 && minutes <= 46000) return short ? "month" : "Monthly";
+  const n = minutes >= 1440 ? Math.round(minutes / 1440) + (short ? "d" : "-day") : Math.round(minutes / 60) + (short ? "h" : "-hour");
+  return n;
+}
+function money(b) {
+  try { return new Intl.NumberFormat(undefined, { style: "currency", currency: b.currency || "USD" }).format(b.left); } catch { return `${b.left} ${b.currency}`; }
 }
 
 async function api(method, path, body) {
@@ -153,11 +192,11 @@ async function api(method, path, body) {
 
 // blocker says why the router will not pick this account now, or null.
 function blocker(a) {
-  if (a.disabled) return { text: "Disabled", cls: "bad" };
+  if (a.disabled) return { text: "Disabled", mark: "Disabled", cls: "off" };
   const hold = time(a.hold_until);
-  if (future(hold)) return { text: `Held until ${clock(hold)} (${until(hold)})`, cls: "warn" };
+  if (future(hold)) return { text: `Held until ${clock(hold)} (${until(hold)})`, mark: "Held", cls: "warn" };
   const retry = time(a.next_retry_after);
-  if (a.unavailable || future(retry)) return { text: future(retry) ? `Cooling down until ${clock(retry)}` : (a.status_message || "Unavailable"), cls: "warn" };
+  if (a.unavailable || future(retry)) return { text: future(retry) ? `Cooling down until ${clock(retry)}` : (a.status_message || "Unavailable"), mark: "Cooling down", cls: "warn" };
   return null;
 }
 
@@ -174,7 +213,7 @@ function routerOrder(a, b) {
   return String(a.id).localeCompare(String(b.id));
 }
 
-function displayName(a) { return a.note || a.label || a.email || a.name || a.id; }
+function displayName(a) { return a.note || (a.source === "config" ? "API key" : a.label || a.email || a.name || a.id); }
 function plan(a) {
   const p = (a.usage && a.usage.plan) || (a.id_token && a.id_token.plan_type) || "";
   return p.replace(/^SUBSCRIPTION_TIER_/, "").replace(/_/g, " ");
@@ -182,93 +221,204 @@ function plan(a) {
 function windowsOf(a) {
   return ((a.usage && a.usage.windows) || []).filter((w) => !w.reset_at || future(time(w.reset_at)));
 }
+const left = (w) => Math.max(0, Math.min(100, 100 - (w.used_percent || 0)));
+// binding is the main window with the least left: the one that stops the account first.
+function binding(a) {
+  const all = windowsOf(a), main = all.filter((w) => !w.label);
+  return (main.length ? main : all).reduce((m, w) => (!m || left(w) < left(m) ? w : m), null);
+}
+const shortName = (w) => [w.label && w.label.replace(/ only$/, ""), cadence(w.window_minutes, true)].filter(Boolean).join(" ") || "allowance";
+const longName = (w) => [w.label, cadence(w.window_minutes)].filter(Boolean).join(" · ");
 function weekly(a) {
   return windowsOf(a).find((w) => !w.label && Math.abs((w.window_minutes || 0) - 10080) < 60);
+}
+function banked(a) {
+  return ((a.usage && a.usage.banked_resets) || []).filter((c) => !c.expires_at || future(time(c.expires_at)));
 }
 function updated(a) {
   const observed = time(a.quota && a.quota.observed_at), fetched = time(a.usage && a.usage.fetched_at);
   return observed && (!fetched || observed > fetched) ? observed : fetched;
 }
 
-function windowHTML(w) {
-  const used = Math.min(100, Math.max(0, w.used_percent || 0));
-  const name = [w.label, cadence(w.window_minutes)].filter(Boolean).join(" · ") || "Allowance";
-  const reset = time(w.reset_at);
-  const cls = used >= 95 ? "bad" : used >= 75 ? "warn" : "";
-  return `<div class="win"><div class="row"><span>${esc(name)}</span><span>${Math.round(100 - used)}% left</span></div>` +
-    `<div class="bar" role="meter" aria-label="${esc(name)} used" aria-valuenow="${Math.round(used)}" aria-valuemin="0" aria-valuemax="100"><i class="${cls}" style="width:${used}%"></i></div>` +
-    (reset ? `<div class="reset">Resets in ${until(reset)} · ${clock(reset)}</div>` : "") + "</div>";
+// pace projects a window to its reset at the rate it has been used so far, the
+// way CodexBar does: will it last, and how far ahead of an even spend is it.
+function pace(w) {
+  const reset = time(w.reset_at), minutes = w.window_minutes || 0;
+  if (!reset || !minutes) return null;
+  const duration = minutes * 60000, remaining = reset - Date.now(), used = 100 - left(w);
+  if (remaining <= 0 || remaining > duration) return null;
+  if (used >= 100) return { spent: true, reset };
+  if (used <= 0) return { unused: true };
+  const elapsed = duration - remaining;
+  if (elapsed <= 0) return null;
+  const empty = ((100 - used) * elapsed) / used;
+  return { spare: (elapsed / duration) * 100 - used, lasts: empty >= remaining, emptyAt: new Date(Date.now() + empty) };
+}
+function paceMark(w) {
+  const p = pace(w);
+  if (!p) return null;
+  if (p.spent) return { text: `back ${clock(p.reset)}`, cls: "bad" };
+  if (p.unused) return { text: "unused", cls: "muted" };
+  if (!p.lasts) return { text: `runs out ${clock(p.emptyAt)}`, cls: "bad" };
+  return Math.round(p.spare) >= 5 ? { text: `+${Math.round(p.spare)} spare`, cls: "good" } : { text: "on pace", cls: "muted" };
+}
+function paceText(w) {
+  const p = pace(w);
+  if (!p || p.unused) return p ? "Not started" : "";
+  if (p.spent) return "Spent";
+  const spare = Math.round(p.spare), lead = spare >= 5 ? `${spare} spare` : spare <= -5 ? `${-spare} over` : "On pace";
+  return p.lasts ? `${lead}, lasts to reset` : `${lead}, runs out in ${until(p.emptyAt)}`;
+}
+const lowWindow = (w) => {
+  const p = pace(w);
+  return left(w) <= LOW || (left(w) <= 50 && p && p.lasts === false);
+};
+
+function figHTML(w, balance) {
+  if (w) return `<span class="fig${left(w) <= LOW ? " bad" : ""}">${Math.round(left(w))}%</span>`;
+  if (balance) return `<span class="fig">${esc(money(balance))}</span>`;
+  return '<span class="fig muted">–</span>';
+}
+function markHTML(w) {
+  const m = w && paceMark(w);
+  return `<span class="pace ${m ? m.cls : ""}">${m ? esc(m.text) : ""}</span>`;
+}
+function balanceText(b) {
+  return b.total ? `${money(b)} of ${money({ left: b.total, currency: b.currency })} left` : `${money(b)} balance`;
 }
 
-function recentHTML(a) {
+// tickerRow is the shape every summary row shares; title is trusted HTML.
+function tickerRow(title, w, sub, balance) {
+  return `<li class="row"><span class="what">${title}</span>${figHTML(w, balance)}<span class="line">${esc(sub)}</span>${markHTML(w)}</li>`;
+}
+
+// who names the account beside its provider, unless that only repeats the provider.
+function who(a) {
+  const name = displayName(a);
+  return a.source === "config" || name.toLowerCase() === providerKey(a.provider) ? "" : name;
+}
+
+function nextHTML(provider, a) {
+  const w = binding(a), b = a.usage && a.usage.balance, reset = w && time(w.reset_at);
+  const sub = [who(a), b && w ? balanceText(b) : b ? "balance" : w ? shortName(w) + " left" : "no figures", reset ? "resets " + clock(reset) : ""].filter(Boolean).join(" · ");
+  return tickerRow(`<span class="name">${esc(providerName(provider))}</span>`, w, sub, b);
+}
+
+// lowRows gives each usable account's lowest window that is running low.
+function lowRows(accounts) {
+  const rows = [];
+  for (const a of accounts) {
+    const low = a._blocker ? [] : windowsOf(a).filter(lowWindow).sort((x, y) => left(x) - left(y));
+    if (low.length) rows.push({ a, w: low[0] });
+  }
+  return rows;
+}
+
+function windowHTML(w) {
+  const reset = time(w.reset_at), l = Math.round(left(w));
+  return `<div class="win"><div class="top"><span>${esc(longName(w))}</span><span class="${l <= LOW ? "bad" : ""}">${l}% left</span></div>` +
+    `<div class="bar" role="meter" aria-label="${esc(longName(w))} left" aria-valuenow="${l}" aria-valuemin="0" aria-valuemax="100"><i class="${l <= LOW ? "bad" : ""}" style="width:${l}%"></i></div>` +
+    `<div class="bottom"><span>${reset ? `Resets ${clock(reset)} (${until(reset)})` : ""}</span><span>${esc(paceText(w))}</span></div></div>`;
+}
+
+function factsHTML(a) {
+  const facts = [], b = a._blocker, up = updated(a), err = a.usage && a.usage.error;
+  if (b) facts.push(["State", `<span class="${b.cls === "off" ? "" : b.cls}">${esc(b.text)}</span>`]);
+  if (plan(a)) facts.push(["Plan", esc(plan(a))]);
+  if (a.email && a.email !== displayName(a)) facts.push(["Login", esc(a.email)]);
+  if (a.source === "config") facts.push(["Source", "API key in the config file"]);
+  if (a.usage && a.usage.balance) facts.push(["Balance", esc(balanceText(a.usage.balance))]);
+  const credits = banked(a);
+  if (credits.length) {
+    const first = credits[0].expires_at ? time(credits[0].expires_at) : null;
+    facts.push(["Banked", `${credits.length} reset${credits.length === 1 ? "" : "s"}${first ? `, first expires ${esc(clock(first))}` : ""}`]);
+  }
+  if (a.group) facts.push(["Groups", esc(a.group.split(",").map((g) => g.trim()).filter(Boolean).join(", "))]);
+  const cooldowns = (a.cooldowns || []).filter((c) => c.scope !== "credential");
+  if (cooldowns.length) facts.push(["Cooling", `<span class="warn">${esc(cooldowns.map((c) => c.model_key).join(", "))}</span>`]);
   let ok = 0, failed = 0, last = "";
   for (const bucket of a.recent_requests || []) {
     ok += bucket.success; failed += bucket.failed;
     if (bucket.success + bucket.failed) last = bucket.time;
   }
-  if (!ok && !failed) return "";
-  return `<div class="sub">Recent requests: ${[ok ? ok + " served" : "", failed ? failed + " failed" : ""].filter(Boolean).join(", ")} · last ${esc(last)}</div>`;
+  if (ok || failed) facts.push(["Requests", esc([ok ? ok + " served" : "", failed ? failed + " failed" : ""].filter(Boolean).join(", ") + ` · last ${last}`)]);
+  if (up || err) facts.push(["Figures", `${up ? esc(ago(up)) : ""}${err ? `${up ? " · " : ""}<span class="bad">last poll failed: ${esc(err)}</span>` : ""}`]);
+  return facts.length ? `<dl>${facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>` : "";
 }
 
 function manageHTML(a) {
   if (a.source === "config") return "";
   const held = future(time(a.hold_until));
   const resetAt = weekly(a) && weekly(a).reset_at;
-  return `<details><summary>Manage</summary><div class="actions" data-name="${esc(a.name)}">
+  return `<div class="actions" data-name="${esc(a.name)}">
     <select aria-label="Hold for"><option value="1">1 hour</option><option value="5" selected>5 hours</option><option value="24">1 day</option>${resetAt ? `<option value="reset:${esc(resetAt)}">Until weekly reset</option>` : ""}</select>
     <button data-act="hold">Hold</button>${held ? '<button data-act="unhold">Release hold</button>' : ""}
     <button data-act="${a.disabled ? "enable" : "disable"}">${a.disabled ? "Enable" : "Disable"}</button></div>
-    <div class="actions" data-name="${esc(a.name)}"><input name="note" aria-label="Name" placeholder="name" value="${esc(a.note || "")}"><input name="group" aria-label="Groups" placeholder="groups, comma separated" value="${esc(a.group || "")}"><button data-act="save">Save</button></div></details>`;
+    <div class="actions" data-name="${esc(a.name)}"><input name="note" aria-label="Name" placeholder="Name" value="${esc(a.note || "")}"><input name="group" aria-label="Groups" placeholder="Groups, comma separated" value="${esc(a.group || "")}"><button data-act="save">Save</button></div>`;
 }
 
 function accountHTML(a, isNext) {
-  const b = a._blocker, up = updated(a), err = a.usage && a.usage.error;
-  const groups = (a.group || "").split(",").map((g) => g.trim()).filter(Boolean);
-  const cooldowns = (a.cooldowns || []).filter((c) => c.scope !== "credential");
-  const sub = [a.email && a.email !== displayName(a) ? a.email : "", a.source === "config" ? "API key" : ""].filter(Boolean).join(" · ");
-  const windows = windowsOf(a);
-  return `<article class="acct${isNext ? " next" : ""}${b ? " out" : ""}">
-    <div class="top">${isNext ? '<span class="tag">Next</span>' : ""}<span class="name">${esc(displayName(a))}</span>
-      ${a.consume_first && a.consume_first.spent ? '<span class="tag bad">Spent</span>' : ""}
-      ${groups.map((g) => `<span class="tag">${esc(g)}</span>`).join("")}<span class="plan">${esc(plan(a))}</span></div>
-    ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
-    ${windows.map(windowHTML).join("") || (a.source === "config" ? "" : '<div class="sub">No usage figures yet.</div>')}
-    ${b ? `<div class="state ${b.cls}">${esc(b.text)}</div>` : ""}
-    ${cooldowns.length ? `<div class="state warn">Cooling down for ${cooldowns.length} model${cooldowns.length === 1 ? "" : "s"}: ${esc(cooldowns.map((c) => c.model_key).join(", "))}</div>` : ""}
-    ${recentHTML(a)}
-    ${up || err ? `<div class="sub">${up ? "Figures " + ago(up) : ""}${err ? `${up ? " · " : ""}<span class="error">last poll failed: ${esc(err)}</span>` : ""}</div>` : ""}
-    ${manageHTML(a)}
-  </article>`;
+  const b = a._blocker, w = binding(a), err = a.usage && a.usage.error;
+  const marks = [isNext ? '<span class="mark next">Next</span>' : "",
+    b ? `<span class="mark ${b.cls}">${b.mark}</span>` : "",
+    !b && a.consume_first && a.consume_first.spent ? '<span class="mark bad">Spent</span>' : "",
+    err ? '<span class="mark bad">Poll failed</span>' : ""].join("");
+  const others = windowsOf(a).filter((x) => x !== w).map((x) => `${shortName(x)} ${Math.round(left(x))}%`);
+  const balance = a.usage && a.usage.balance;
+  const sub = [w ? shortName(w) + " left" : "", ...others, balance && w ? balanceText(balance) : "", !w && !balance ? (a.source === "config" ? "No figures for this API" : "No figures yet") : ""].filter(Boolean).join(" · ");
+  return `<details class="acct${b ? " out" : ""}" data-id="${esc(a.id)}"><summary class="row">` +
+    `<span class="what"><span class="name">${esc(displayName(a))}</span>${marks}${CHEV}</span>${figHTML(w, balance)}<span class="line">${esc(sub)}</span>${markHTML(w)}</summary>` +
+    `<div class="body">${windowsOf(a).map(windowHTML).join("")}${factsHTML(a)}${manageHTML(a)}</div></details>`;
 }
 
 function render() {
   const consumeFirst = /^(consume-?first|cf)$/i.test(data.strategy || "");
   const refresh = data.usage_refresh && data.usage_refresh.interval;
-  $("meta").textContent = `${data.strategy || "round-robin"} · usage poll ${refresh || "off"} · loaded ${clock(new Date())}`;
+  $("updated").textContent = "Updated " + clock(new Date());
+  $("content").hidden = false;
+  $("meta").textContent = `Routing ${data.strategy || "round-robin"} · usage polled ${refresh ? "every " + refresh : "only from traffic"}`;
   const groups = new Map();
   for (const a of data.accounts) {
     a._blocker = blocker(a);
-    const key = a.provider || "other";
+    const key = providerKey(a.provider);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(a);
   }
   const rank = (p) => (ORDER.includes(p) ? ORDER.indexOf(p) : ORDER.length);
   const ordered = [...groups.entries()].sort((x, y) => rank(x[0]) - rank(y[0]) || x[0].localeCompare(y[0]));
-  let nextHTML = "", html = "";
-  for (const [provider, accounts] of ordered) {
-    accounts.sort(routerOrder);
-    const next = consumeFirst ? accounts.find((a) => !a._blocker) : null;
-    const name = providerName(provider);
-    if (next) {
-      const w = weekly(next);
-      nextHTML += `<li><b>${esc(name)}</b><span>${esc(displayName(next))}</span>${w ? `<span class="muted">${Math.round(100 - w.used_percent)}% of the week left${w.reset_at ? `, resets ${clock(time(w.reset_at))}` : ""}</span>` : ""}</li>`;
+  let next = "", accounts = "", bankedRows = "";
+  const low = [];
+  for (const [provider, list] of ordered) {
+    list.sort(routerOrder);
+    const first = consumeFirst ? list.find((a) => !a._blocker) : null;
+    if (first) next += nextHTML(provider, first);
+    const marked = list.length > 1 ? first : null;
+    low.push(...lowRows(list));
+    for (const a of list) {
+      const credits = banked(a);
+      if (!credits.length) continue;
+      const expiry = credits[0].expires_at ? time(credits[0].expires_at) : null;
+      const soon = expiry && expiry - Date.now() < 3 * 86400000;
+      bankedRows += `<li class="row"><span class="what"><span class="name">${esc(providerName(provider))}<span class="who">${esc(who(a))}</span></span></span><span class="fig">${credits.length}</span>` +
+        `<span class="line${soon ? " warn" : ""}">${expiry ? `first expires ${esc(clock(expiry))} (${until(expiry)})` : "no expiry"}</span><span class="pace muted">redeem in Codex</span></li>`;
     }
-    const usable = accounts.filter((a) => !a._blocker).length;
-    html += `<section><h2>${esc(name)} <small>${usable} of ${accounts.length} in rotation${consumeFirst ? " · spend order" : ""}</small></h2><div class="grid">${accounts.map((a) => accountHTML(a, a === next)).join("")}</div></section>`;
+    const usable = list.filter((a) => !a._blocker).length;
+    accounts += `<h3>${esc(providerName(provider))}<small>${list.length > 1 ? `${usable} of ${list.length} in rotation` : ""}</small></h3>${list.map((a) => accountHTML(a, a === marked)).join("")}`;
   }
-  $("next").innerHTML = nextHTML;
-  $("next").hidden = !nextHTML;
-  $("providers").innerHTML = html || '<p class="muted">The hub holds no credentials.</p>';
+  low.sort((x, y) => left(x.w) - left(y.w));
+  $("next").innerHTML = next;
+  $("next-section").hidden = !next;
+  $("low").innerHTML = low.map(({ a, w }) => {
+    const reset = time(w.reset_at);
+    const title = `<span class="name">${esc(providerName(a.provider))}<span class="who">${esc(who(a))}</span></span>`;
+    return tickerRow(title, w, `${shortName(w)} left${reset ? ` · resets ${clock(reset)}` : ""}`);
+  }).join("") || '<li class="row"><span class="line">Nothing is running low.</span></li>';
+  $("low-count").textContent = low.length || "";
+  $("banked").innerHTML = bankedRows;
+  $("banked-section").hidden = !bankedRows;
+  const open = new Set([...document.querySelectorAll("details.acct[open]")].map((d) => d.dataset.id));
+  $("accounts").innerHTML = accounts || '<p class="muted">The hub holds no credentials.</p>';
+  for (const d of document.querySelectorAll("details.acct")) if (open.has(d.dataset.id)) d.open = true;
 }
 
 async function load() {
@@ -329,11 +479,12 @@ $("login-form").addEventListener("submit", (e) => {
 });
 $("reload").addEventListener("click", load);
 $("logout").addEventListener("click", () => signOut());
-$("providers").addEventListener("click", (e) => {
+$("accounts").addEventListener("click", (e) => {
   const button = e.target.closest("button[data-act]");
   if (button) act(button);
 });
-setInterval(() => { if (!document.hidden && data && !document.querySelector("details[open]")) load(); }, 30000);
+// Refresh every 30 s while visible, but never under a half-typed name or an open select.
+setInterval(() => { if (!document.hidden && data && !document.activeElement.closest(".actions")) load(); }, 30000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && data) load(); });
 if (localStorage.getItem(KEY)) start(); else signOut();
 </script>

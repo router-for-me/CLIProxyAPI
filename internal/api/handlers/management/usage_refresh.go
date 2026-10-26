@@ -26,12 +26,17 @@ const (
 	// Meta locks out a login that is polled often (a day-long lockout on
 	// 2026-09-02 at shorter intervals), so Muse is asked at most this often.
 	usageMetaFloor = 3 * time.Hour
+	// Banked resets only come from the poll, so a Codex account that is always
+	// serving traffic is still polled this often.
+	usageBankedFloor = time.Hour
 )
 
 // usageRecord is what the last usage poll returned for one credential.
 type usageRecord struct {
-	Plan    string                 `json:"plan,omitempty"`
-	Windows []coreauth.UsageWindow `json:"windows,omitempty"`
+	Plan         string                 `json:"plan,omitempty"`
+	Windows      []coreauth.UsageWindow `json:"windows,omitempty"`
+	Balance      *usageBalance          `json:"balance,omitempty"`
+	BankedResets []usageCredit          `json:"banked_resets,omitempty"`
 	// FetchedAt is the last successful poll; AttemptedAt the last try.
 	FetchedAt   time.Time `json:"fetched_at,omitzero"`
 	AttemptedAt time.Time `json:"attempted_at,omitzero"`
@@ -128,20 +133,20 @@ func (h *Handler) refreshUsage(ctx context.Context, now time.Time) {
 			// ObserveQuota ignores it once newer headers exist.
 			h.authManager.ObserveQuota(auth.ID, signalHeaders(record.Signals), record.ObservedAt)
 		}
-		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-		fetch := usageFetchers[provider]
+		kind := usageKind(auth)
+		fetch := usageFetchers[kind]
 		every := interval
-		if provider == "meta" {
+		if kind == "meta" {
 			every = max(every, usageMetaFloor)
 		}
 		observed := auth.Quota.ObservedAt
 		if record.ObservedAt.After(observed) {
 			observed = record.ObservedAt
 		}
-		due := fetch != nil && !auth.Disabled && auth.AuthSourceKind() != coreauth.AuthSourceConfig &&
-			usageProviderEnabled(cfg, provider) && now.Sub(record.AttemptedAt) >= every &&
-			// An account serving traffic already reports its own headers.
-			!(observes && now.Sub(observed) < every)
+		// An account serving traffic already reports its own headers.
+		busy := observes && now.Sub(observed) < every &&
+			!(kind == "codex" && now.Sub(record.AttemptedAt) >= usageBankedFloor)
+		due := fetch != nil && !auth.Disabled && usageProviderEnabled(cfg, kind) && now.Sub(record.AttemptedAt) >= every && !busy
 		if due {
 			record = h.pollUsage(ctx, auth, fetch, record, now)
 			changed = true
@@ -179,7 +184,10 @@ func (h *Handler) pollUsage(ctx context.Context, auth *coreauth.Auth, fetch usag
 	if len(result.headers) > 0 {
 		h.authManager.ObserveQuota(auth.ID, result.headers, now)
 	}
-	record.Plan, record.Windows, record.FetchedAt, record.Error = result.plan, result.windows, now, ""
+	record.Plan, record.Windows, record.Balance, record.FetchedAt, record.Error = result.plan, result.windows, result.balance, now, ""
+	if result.bankedRead {
+		record.BankedResets = result.banked
+	}
 	return record
 }
 
@@ -279,6 +287,12 @@ func (h *Handler) usageEntry(auth *coreauth.Auth) gin.H {
 	}
 	if record.Error != "" {
 		entry["error"] = record.Error
+	}
+	if record.Balance != nil {
+		entry["balance"] = record.Balance
+	}
+	if len(record.BankedResets) > 0 {
+		entry["banked_resets"] = record.BankedResets
 	}
 	return entry
 }

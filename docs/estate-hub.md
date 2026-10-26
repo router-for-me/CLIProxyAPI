@@ -70,13 +70,20 @@ endpoint for accounts that are idle, and keeps the last reading across restarts:
 routing:
   usage-refresh:
     interval: "10m"   # empty or 0 turns it off (the default)
-    providers: []     # claude, codex, kimi, xai, antigravity, meta; empty means all of them
+    providers: []     # claude, codex, kimi, xai, antigravity, meta, deepseek, commandcode, zai,
+                      # opencode-go; empty means all of them
 ```
 
 - An account is polled when its last poll is older than `interval` and, for Claude and Codex, it has
-  not returned quota headers within `interval` either. Disabled accounts and API keys from the
-  config file are not polled. Muse is polled at most every three hours whatever the interval: Meta
-  locks out a login that is polled often.
+  not returned quota headers within `interval` either. A Codex account that keeps serving traffic is
+  still polled once an hour, because its banked resets only come from the poll. Disabled accounts are
+  not polled. Muse is polled at most every three hours whatever the interval: Meta locks out a login
+  that is polled often.
+- API keys from the config file (`openai-compatibility`) are polled when their `base-url` points at
+  a service with a usage endpoint: `api.deepseek.com` (`deepseek`), `*.commandcode.ai`
+  (`commandcode`), `api.z.ai` or `open.bigmodel.cn` (`zai`, the GLM coding plan) and
+  `opencode.ai/zen/go` (`opencode-go`). The name given to the entry does not matter. Any other API
+  key, including Claude, Codex and Gemini keys, is not polled.
 - A failed poll is retried after `interval`, not sooner. The dashboard shows the error.
 - Claude and Codex readings are stored as the same quota headers their responses carry, so
   consume-first ranks idle accounts on them. A poll never replaces newer headers from traffic.
@@ -91,11 +98,16 @@ routing:
 |---|---|---|
 | Claude | `GET api.anthropic.com/api/oauth/usage`, `anthropic-beta: oauth-2025-04-20` | 5-hour and weekly utilization (percent) and resets; Opus, Sonnet and model-scoped weekly limits (for example "Fable only") |
 | Codex | `GET chatgpt.com/backend-api/wham/usage`, `ChatGPT-Account-Id` | plan, 5-hour and weekly used percent, window length, reset; per-model additional limits |
+| Codex banked resets | `GET chatgpt.com/backend-api/wham/rate-limit-reset-credits`, same headers plus `OpenAI-Beta: codex-1` | each available banked reset and its expiry. A failed read keeps the last list |
 | Kimi | `GET api.kimi.com/coding/v1/usages` | membership level (plan); 5-hour, weekly and monthly pools as used ratios, or the older used/limit counts |
 | Grok (`xai`) | `GET cli-chat-proxy.grok.com/v1/billing?format=credits`, `x-xai-token-auth: xai-grok-cli` | subscription tier; credit used percent for the billing period and its end |
 | Antigravity | `POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with the project | remaining fraction and reset per pool (Gemini, Claude and GPT) for the 5-hour and weekly buckets |
 | Devin | not polled: its executor already records daily and weekly remaining percent and resets | shown as-is |
 | Muse (`meta`) | `POST api.meta.ai/muse-code/key` with the device (`dca:`) token | tier name; short window and weekly used percent and resets. The key this call mints is discarded |
+| DeepSeek (API key) | `GET api.deepseek.com/user/balance` | prepaid balance and its currency |
+| CommandCode (API key) | `GET api.commandcode.ai/alpha/billing/credits` and `/alpha/billing/subscriptions` | 5-hour and weekly caps; USD left in the monthly grant, the grant's size (from the plan when the reply omits it) and the period end |
+| GLM coding plan (`zai`, API key) | `GET <api.z.ai or open.bigmodel.cn>/api/monitor/usage/quota/limit` | plan; 5-hour and weekly token windows; the monthly count of web search and reader calls ("MCP") |
+| OpenCode Go (API key) | `GET opencode.ai/zen/go/v1/usage` | rolling 5-hour, weekly and monthly used percent and resets |
 
 ## Dashboard
 
@@ -105,12 +117,25 @@ storage, as the stock panel does. It is one HTML file embedded in the binary, wi
 and it is turned off with the stock panel (`management.disable-control-panel: true`) or when the
 management API is off.
 
-It shows every credential and API key the hub holds, grouped by provider and in the router's
-consume-first order, with the next account to spend marked and listed at the top. Each account shows
-its plan, each window's percent left and reset, holds, cooldowns, groups, recent requests and the
-age of its figures. **Manage** holds an account (1 hour, 5 hours, 1 day or until its weekly reset),
-releases a hold, disables or enables it, and sets its name (`note`) and groups, through the
-management API calls below. Config-file API keys are shown but are edited in the config.
+The page answers two questions first. **Spend next** lists, per provider, the account consume-first
+will use next, with its tightest window's percent left (or its balance) and a pace mark. **Running
+low** lists every usable account whose tightest window is at 15% or less, or below half and on
+course to run out before it resets. **Banked resets** lists Codex accounts holding banked resets and
+when the first expires; they are redeemed in Codex itself.
+
+The pace mark is CodexBar's arithmetic on the figures the page already has: the window is assumed to
+keep being spent at its average rate so far. It reads `+12 spare` (12 points less used than an even
+spend would have used by now), `on pace`, `runs out Tue 15:18` (the projected time it runs dry, before
+its reset), `back Wed 00:07` (spent; when it resets) or `unused`. An account's detail spells it out,
+for example "5 over, runs out in 17h 30m" or "12 spare, lasts to reset".
+
+**Accounts** lists every credential and API key in the router's order within each provider. A row
+shows the tightest window, the others in brief, and marks for next, held, disabled, spent and a
+failed poll. Opening a row shows each window with its reset and pace, then plan, login, balance,
+banked resets, groups, cooldowns, recent requests and the age of the figures, then the actions: hold
+(1 hour, 5 hours, 1 day or until its weekly reset), release, disable or enable, and set its name
+(`note`) and groups, through the management API calls below. Config-file API keys are shown but are
+edited in the config. The page refreshes every 30 seconds while it is visible and keeps open rows open.
 
 
 A hold takes an account out of every routing path (all strategies, pinned or not) until a time:
@@ -183,7 +208,9 @@ config-file API keys (`source: "config"`), each with `cooldowns` and `usage`.
   `reset_at` (omitted when unknown), `used_percent` (highest live window), `spent`
 - `usage`: `windows` (each `used_percent`, `window_minutes`, `reset_at`, and a `label` for
   extra windows), `plan`, `fetched_at` and the last poll `error`. Claude and Codex main windows
-  come from the live quota headers; the rest from the last refresher poll
+  come from the live quota headers; the rest from the last refresher poll. `balance` (`left`,
+  `total` when known, `currency`) for DeepSeek and CommandCode; `banked_resets` (each `expires_at`)
+  for Codex
 
 Sort by `spent`, then entries with `reset_at` before those without, then `reset_at`, then
 `used_percent`, then `id` to reproduce the router's order within a priority tier.
