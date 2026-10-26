@@ -100,6 +100,48 @@ func (m *Manager) ReplaceQuotaResetHints(hints map[string]QuotaResetHint) error 
 	return nil
 }
 
+// QuotaRoutingSnapshot is a read-only view of the installed selector. Hints are
+// keyed by management auth index, never credential ID, path, or token.
+type QuotaRoutingSnapshot struct {
+	Strategy        string                    `json:"strategy"`
+	SessionAffinity bool                      `json:"session_affinity"`
+	GeneratedAt     time.Time                 `json:"generated_at"`
+	MaxAgeSeconds   int                       `json:"max_age_seconds"`
+	Hints           map[string]QuotaResetHint `json:"hints"`
+}
+
+func (m *Manager) QuotaRoutingSnapshot() QuotaRoutingSnapshot {
+	snapshot := QuotaRoutingSnapshot{
+		Strategy: "unknown", GeneratedAt: time.Now().UTC(),
+		MaxAgeSeconds: int(QuotaResetHintMaxAge.Seconds()), Hints: make(map[string]QuotaResetHint),
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	selector := m.selector
+	if affinity, ok := selector.(*SessionAffinitySelector); ok {
+		snapshot.SessionAffinity = true
+		selector = affinity.fallback
+	}
+	switch selected := selector.(type) {
+	case *SoonestResetFirstSelector:
+		snapshot.Strategy = "soonest-reset-first"
+		selected.mu.RLock()
+		defer selected.mu.RUnlock()
+		for id, hint := range selected.hints {
+			if auth := m.auths[id]; auth != nil && auth.Index != "" {
+				snapshot.Hints[auth.Index] = hint
+			}
+		}
+	case *WeightedRoundRobinSelector:
+		snapshot.Strategy = "weighted-round-robin"
+	case *RoundRobinSelector:
+		snapshot.Strategy = "round-robin"
+	case *FillFirstSelector:
+		snapshot.Strategy = "fill-first"
+	}
+	return snapshot
+}
+
 func selectorUsesQuotaWeights(selector Selector) bool {
 	if affinity, ok := selector.(*SessionAffinitySelector); ok {
 		selector = affinity.fallback

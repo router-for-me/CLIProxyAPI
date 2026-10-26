@@ -11,6 +11,15 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
+// GetRoutingStatus reports the installed strategy and its in-memory hints.
+func (h *Handler) GetRoutingStatus(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, h.authManager.QuotaRoutingSnapshot())
+}
+
 // PutRoutingResetHints replaces only the active selector's in-memory quota
 // observations. The v8 management middleware authenticates this operation.
 // It never writes credential files or changes priorities/availability.

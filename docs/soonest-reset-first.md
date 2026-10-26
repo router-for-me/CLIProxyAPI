@@ -47,6 +47,12 @@ The limits exporter publishes hints every quota reconciliation interval when `QU
 
 If the longest window has no usable future timestamp, the exporter sends no hint for that account. It does not substitute a five-hour reset for an unknown weekly reset. Accounts with only a short primary window can use that window.
 
+## Read-only routing status
+
+`GET /v8/management/routing/status` uses the same management authentication. It reports the installed selector strategy, `session_affinity`, `generated_at`, `max_age_seconds` and `hints` keyed by management auth index. Hints include their original observation and reset timestamps, including expired observations so a dashboard can explain fallback. Removed accounts are omitted. The returned snapshot cannot mutate selector state.
+
+This is an account-level diagnostic, not a model-specific next-request promise. Model access, cooldowns, transport preference and existing conversation bindings still apply during selection.
+
 ## Activation and rollback
 
 1. Release the proxy with this selector and the v8 endpoint.

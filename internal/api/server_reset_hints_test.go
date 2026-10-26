@@ -57,6 +57,17 @@ func TestResetHintsV8AuthenticatedRouteSelectsSoonestAccount(t *testing.T) {
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 			}
+			read := httptest.NewRequest(http.MethodGet, "/v8/management/routing/status", nil)
+			read.RemoteAddr = req.RemoteAddr
+			read.Header = req.Header.Clone()
+			status := httptest.NewRecorder()
+			server.engine.ServeHTTP(status, read)
+			if status.Code != tc.want {
+				t.Fatalf("read status = %d: %s", status.Code, status.Body.String())
+			}
+			if tc.want == http.StatusOK && !strings.Contains(status.Body.String(), `"strategy":"soonest-reset-first"`) {
+				t.Fatalf("missing installed strategy: %s", status.Body.String())
+			}
 		})
 	}
 	got, err := selector.Pick(context.Background(), "codex", "model", cliproxyexecutor.Options{}, auths)
