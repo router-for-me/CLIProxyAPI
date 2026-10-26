@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -8172,6 +8173,145 @@ func TestResolveClaudeMCPAliasOptions(t *testing.T) {
 	otherCtx := context.WithValue(context.Background(), "gin", otherGinCtx)
 	if otherSecret := resolveClaudeMCPAliasOptions(otherCtx).secret; otherSecret == firstSecret {
 		t.Fatalf("different downstream callers shared alias secret %q", firstSecret)
+	}
+
+	replayMeta := map[string]any{
+		cliproxyexecutor.CallerScopeMetadataKey: session.CallerScope("downstream-caller-one"),
+	}
+	if replaySecret := resolveClaudeMCPAliasOptions(context.Background(), replayMeta).secret; replaySecret != firstSecret {
+		t.Fatalf("replay caller_scope alias secret = %q, want original caller secret %q", replaySecret, firstSecret)
+	}
+}
+
+func TestClaudeExecutor_CallerScopeMetadataReproducesOAuthMCPToolAliases(t *testing.T) {
+	var seenBodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBodies = append(seenBodies, body)
+		if strings.Contains(r.URL.Path, "/count_tokens") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"input_tokens":42}`))
+			return
+		}
+		if gjson.GetBytes(body, "stream").Bool() {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_exec_1","type":"message","model":"claude-sonnet-4-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-oauth-caller-scope-replay",
+		Metadata: claudeOAuthTestMetadata(),
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-caller-scope-test",
+			"base_url": server.URL,
+		},
+	}
+	payload := []byte(`{"model":"claude-sonnet-4-5","tools":[{"name":"read_file","input_schema":{"type":"object"}},{"name":"run_bash","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"read_file"},"messages":[{"role":"user","content":"warm cache"}]}`)
+
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Set("userApiKey", "sk-downstream-pi-caller")
+	callerCtx := context.WithValue(context.Background(), "gin", ginCtx)
+	callerScope := session.CallerScope("sk-downstream-pi-caller")
+
+	// 1. Original HTTP stream request with gin context.
+	streamRes, errStream := executor.ExecuteStream(callerCtx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: callerScope,
+		},
+	})
+	if errStream != nil {
+		t.Fatalf("original ExecuteStream() error = %v", errStream)
+	}
+	for range streamRes.Chunks {
+	}
+
+	// 2. Plugin replay stream request on background context (no gin.Context) with CallerScope metadata.
+	replayStreamRes, errReplayStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: callerScope,
+		},
+	})
+	if errReplayStream != nil {
+		t.Fatalf("replay ExecuteStream() error = %v", errReplayStream)
+	}
+	for range replayStreamRes.Chunks {
+	}
+
+	// 3. Plugin replay non-stream Execute on background context with CallerScope metadata.
+	if _, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: callerScope,
+		},
+	}); errExec != nil {
+		t.Fatalf("replay Execute() error = %v", errExec)
+	}
+
+	// 4. Plugin replay countTokensUpstream on background context with CallerScope metadata.
+	if _, errCount := executor.countTokensUpstream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: callerScope,
+		},
+	}); errCount != nil {
+		t.Fatalf("replay CountTokens() error = %v", errCount)
+	}
+
+	// 5. Unscoped background request (default caller fallback).
+	defaultStreamRes, errDefaultStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	})
+	if errDefaultStream != nil {
+		t.Fatalf("default ExecuteStream() error = %v", errDefaultStream)
+	}
+	for range defaultStreamRes.Chunks {
+	}
+
+	if len(seenBodies) != 5 {
+		t.Fatalf("seenBodies len = %d, want 5", len(seenBodies))
+	}
+	origTool0 := gjson.GetBytes(seenBodies[0], "tools.0.name").String()
+	origTool1 := gjson.GetBytes(seenBodies[0], "tools.1.name").String()
+	origChoice := gjson.GetBytes(seenBodies[0], "tool_choice.name").String()
+	if !helps.IsClaudeMCPToolName(origTool0) || !helps.IsClaudeMCPToolName(origTool1) || origChoice != origTool0 {
+		t.Fatalf("unexpected original MCP tool names: tool0=%q tool1=%q choice=%q", origTool0, origTool1, origChoice)
+	}
+	for idx, label := range []string{"replay_stream", "replay_execute", "replay_count_tokens"} {
+		body := seenBodies[idx+1]
+		if got0, got1 := gjson.GetBytes(body, "tools.0.name").String(), gjson.GetBytes(body, "tools.1.name").String(); got0 != origTool0 || got1 != origTool1 {
+			t.Fatalf("%s tools = (%q, %q), want (%q, %q)", label, got0, got1, origTool0, origTool1)
+		}
+	}
+	defaultTool0 := gjson.GetBytes(seenBodies[4], "tools.0.name").String()
+	if defaultTool0 == origTool0 {
+		t.Fatalf("default caller tool0 %q matched scoped caller tool0", defaultTool0)
 	}
 }
 

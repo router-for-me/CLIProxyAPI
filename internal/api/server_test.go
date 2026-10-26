@@ -2814,6 +2814,99 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 }
 
+func TestHomeGeminiModelsIncludeTokenLimits(t *testing.T) {
+	withLimits := formatHomeGeminiModel(homeModelEntry{
+		id:                  "gemini-3.8-flash",
+		displayName:         "Gemini 3.8 Flash",
+		contextLength:       1048576,
+		maxCompletionTokens: 65536,
+	})
+	if got := withLimits["name"]; got != "models/gemini-3.8-flash" {
+		t.Fatalf("name = %v, want models/gemini-3.8-flash", got)
+	}
+	if got := withLimits["displayName"]; got != "Gemini 3.8 Flash" {
+		t.Fatalf("displayName = %v, want Gemini 3.8 Flash", got)
+	}
+	if got := withLimits["inputTokenLimit"]; got != 1048576 {
+		t.Fatalf("inputTokenLimit = %v, want 1048576", got)
+	}
+	if got := withLimits["outputTokenLimit"]; got != 65536 {
+		t.Fatalf("outputTokenLimit = %v, want 65536", got)
+	}
+
+	withoutLimits := formatHomeGeminiModel(homeModelEntry{
+		id: "gemini-no-limits",
+	})
+	if _, ok := withoutLimits["inputTokenLimit"]; ok {
+		t.Fatalf("expected inputTokenLimit to be omitted when unknown, got %v", withoutLimits)
+	}
+	if _, ok := withoutLimits["outputTokenLimit"]; ok {
+		t.Fatalf("expected outputTokenLimit to be omitted when unknown, got %v", withoutLimits)
+	}
+
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+	engine := gin.New()
+	engine.GET("/v1beta/models", server.geminiModelsHandler(nil))
+	engine.GET("/v1beta/models/*action", server.geminiGetHandler(nil))
+
+	client := newHomeCatalogClient(t, `{
+		"a-custom": [
+			{
+				"id": "gemini-3.8-flash"
+			}
+		],
+		"gemini": [
+			{
+				"id": "gemini-3.8-flash",
+				"display_name": "Gemini 3.8 Flash",
+				"context_length": 1048576,
+				"max_completion_tokens": 65536
+			}
+		]
+	}`)
+	previousHome := home.Current()
+	home.SetCurrent(client)
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+
+	listRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(listRecorder, httptest.NewRequest(http.MethodGet, "/v1beta/models", nil))
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("GET /v1beta/models status = %d; body=%s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var listPayload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(listRecorder.Body.Bytes(), &listPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal /v1beta/models response: %v", errUnmarshal)
+	}
+	if len(listPayload.Models) != 1 {
+		t.Fatalf("models len = %d, want 1; body=%s", len(listPayload.Models), listRecorder.Body.String())
+	}
+	if got := homeModelInt64Value(listPayload.Models[0], "inputTokenLimit"); got != 1048576 {
+		t.Fatalf("list inputTokenLimit = %d, want 1048576; model=%v", got, listPayload.Models[0])
+	}
+	if got := homeModelInt64Value(listPayload.Models[0], "outputTokenLimit"); got != 65536 {
+		t.Fatalf("list outputTokenLimit = %d, want 65536; model=%v", got, listPayload.Models[0])
+	}
+
+	getRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(getRecorder, httptest.NewRequest(http.MethodGet, "/v1beta/models/gemini-3.8-flash", nil))
+	if getRecorder.Code != http.StatusOK {
+		t.Fatalf("GET /v1beta/models/gemini-3.8-flash status = %d; body=%s", getRecorder.Code, getRecorder.Body.String())
+	}
+	var getPayload map[string]any
+	if errUnmarshal := json.Unmarshal(getRecorder.Body.Bytes(), &getPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal /v1beta/models/gemini-3.8-flash response: %v", errUnmarshal)
+	}
+	if got := homeModelInt64Value(getPayload, "inputTokenLimit"); got != 1048576 {
+		t.Fatalf("get inputTokenLimit = %d, want 1048576; model=%v", got, getPayload)
+	}
+	if got := homeModelInt64Value(getPayload, "outputTokenLimit"); got != 65536 {
+		t.Fatalf("get outputTokenLimit = %d, want 65536; model=%v", got, getPayload)
+	}
+}
+
 func TestHomeCodexModels_MaxContextLength(t *testing.T) {
 	entries, errDecode := decodeHomeModels([]byte(`{
 		"codex": [

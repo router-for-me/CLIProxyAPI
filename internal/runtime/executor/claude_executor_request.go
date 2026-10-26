@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -1844,15 +1845,27 @@ type claudeMCPAliasOptions struct {
 	secret string
 }
 
-func resolveClaudeMCPAliasOptions(ctx context.Context) claudeMCPAliasOptions {
+func resolveClaudeMCPAliasOptions(ctx context.Context, metadataSets ...map[string]any) claudeMCPAliasOptions {
 	// Alias identity belongs to the downstream caller, not to the selected
 	// upstream credential. This keeps names stable across OAuth refresh and auth
 	// failover while giving one caller a shared virtual MCP server component.
-	secret := strings.TrimSpace(helps.APIKeyFromContext(ctx))
+	secret := callerScopeFromMetadataSets(metadataSets...)
+	if secret == "" {
+		secret = session.CallerScope(helps.APIKeyFromContext(ctx))
+	}
 	if secret == "" {
 		secret = "cpa-claude-mcp-default-caller"
 	}
 	return claudeMCPAliasOptions{secret: secret}
+}
+
+func callerScopeFromMetadataSets(metadataSets ...map[string]any) string {
+	for _, metadata := range metadataSets {
+		if scope := metadataString(metadata, cliproxyexecutor.CallerScopeMetadataKey); scope != "" {
+			return scope
+		}
+	}
+	return ""
 }
 
 // prepareClaudeOAuthToolNamesForUpstream applies one request-local MCP symbol

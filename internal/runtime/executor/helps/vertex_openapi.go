@@ -449,7 +449,7 @@ func VertexOpenAPILocation(auth *cliproxyauth.Auth, defaultLocation string) stri
 			}
 		}
 	}
-	return "us-central1"
+	return "global"
 }
 
 // VertexAuthBaseURL extracts an optional custom base_url from a Vertex credential.
@@ -488,9 +488,7 @@ func VertexAuthProjectID(auth *cliproxyauth.Auth) string {
 // VertexOpenAPIHostBaseURL returns the Vertex regional, multi-region REP, or global host URL.
 func VertexOpenAPIHostBaseURL(location string) string {
 	loc := strings.TrimSpace(location)
-	if loc == "" {
-		loc = "us-central1"
-	} else if strings.EqualFold(loc, "global") {
+	if loc == "" || strings.EqualFold(loc, "global") {
 		return "https://aiplatform.googleapis.com"
 	} else if strings.EqualFold(loc, "us") || strings.EqualFold(loc, "eu") {
 		return fmt.Sprintf("https://aiplatform.%s.rep.googleapis.com", strings.ToLower(loc))
@@ -504,7 +502,7 @@ func VertexServiceAccountOpenAPIBaseURL(baseURL, version, projectID, location st
 	explicitLoc := strings.TrimSpace(location)
 	loc := explicitLoc
 	if loc == "" {
-		loc = "us-central1"
+		loc = "global"
 	}
 	ver := strings.TrimSpace(version)
 	if ver == "" {

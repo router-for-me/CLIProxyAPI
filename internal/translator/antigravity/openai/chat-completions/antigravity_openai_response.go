@@ -184,7 +184,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 				functionCallTemplate := []byte(`{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`)
 				fcName := util.RestoreSanitizedToolName((*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap, functionCallResult.Get("name").String())
-				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
+				fcID := strings.TrimSpace(functionCallResult.Get("id").String())
+				if fcID == "" {
+					fcID = fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1))
+				}
+				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", fcID)
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "index", functionCallIndex)
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", fcName)
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
@@ -271,6 +275,8 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 		finishReason = "tool_calls"
 	case params.UpstreamFinishReason == "MAX_TOKENS":
 		finishReason = "max_tokens"
+	case isAntigravityContentFilterFinishReason(params.UpstreamFinishReason):
+		finishReason = "content_filter"
 	default:
 		finishReason = "stop"
 	}
@@ -279,6 +285,15 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 		nativeFinishReason = strings.ToLower(params.UpstreamFinishReason)
 	}
 	return finishReason, nativeFinishReason
+}
+
+func isAntigravityContentFilterFinishReason(reason string) bool {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL":
+		return true
+	default:
+		return false
+	}
 }
 
 func setOpenAIUsageMetadata(template []byte, usageResult gjson.Result) []byte {

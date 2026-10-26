@@ -409,6 +409,109 @@ func TestVertexAPIKeyModelsURL(t *testing.T) {
 	}
 }
 
+func TestGeminiVertexExecutorPromptFeedbackBlockWithoutCandidatesReturnsError(t *testing.T) {
+	blockedBody := `{"promptFeedback":{"blockReason":"SAFETY","blockReasonMessage":"The prompt is blocked due to safety"},"usageMetadata":{"promptTokenCount":413751,"totalTokenCount":413751},"modelVersion":"gemini-4-argon"}`
+	for _, authMode := range []string{"api_key", "service_account"} {
+		t.Run(authMode, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"access_token":"local-token","token_type":"Bearer","expires_in":3600}`)
+					return
+				}
+				if strings.Contains(r.URL.Path, "streamGenerateContent") {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: "+blockedBody+"\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, blockedBody)
+			}))
+			defer server.Close()
+
+			ctx := context.Background()
+			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: "vertex"}
+			if authMode == "api_key" {
+				auth.Attributes = map[string]string{"api_key": "test-key", "base_url": server.URL}
+			} else {
+				var serviceAccount map[string]any
+				if errUnmarshal := json.Unmarshal(testVertexServiceAccountJSON(t, server.URL+"/token"), &serviceAccount); errUnmarshal != nil {
+					t.Fatal(errUnmarshal)
+				}
+				auth.Metadata = map[string]any{
+					"project_id":      "proxy-test",
+					"location":        "global",
+					"service_account": serviceAccount,
+				}
+				target, errParse := parseTestURL(t, server.URL)
+				if errParse != nil {
+					t.Fatal(errParse)
+				}
+				transport := http.DefaultTransport.(*http.Transport).Clone()
+				transport.Proxy = nil
+				t.Cleanup(transport.CloseIdleConnections)
+				ctx = context.WithValue(ctx, "cliproxy.roundtripper", issue6258RedirectTransport{target: target, base: transport})
+			}
+
+			capture := &malformedFunctionCallUsageCapture{authID: auth.ID, records: make(chan usage.Record, 2)}
+			usage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
+			})
+
+			exec := NewGeminiVertexExecutor(&config.Config{})
+			req := cliproxyexecutor.Request{
+				Model:   "gemini-4-argon",
+				Payload: []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":"hi"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAI,
+				ResponseFormat: sdktranslator.FormatOpenAI,
+			}
+
+			_, errExec := exec.Execute(ctx, auth, req, opts)
+			if errExec == nil {
+				t.Fatal("Execute() error = nil, want 502 prompt block error")
+			}
+			status, okStatus := errExec.(interface{ StatusCode() int })
+			if !okStatus || status.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("Execute() error = %T %v, want status 502", errExec, errExec)
+			}
+			if !strings.Contains(errExec.Error(), "upstream blocked the prompt: SAFETY - The prompt is blocked due to safety") {
+				t.Fatalf("Execute() error = %q, want prompt block reason and message", errExec.Error())
+			}
+
+			streamRes, errStream := exec.ExecuteStream(ctx, auth, req, opts)
+			if errStream != nil {
+				t.Fatalf("ExecuteStream() error = %v", errStream)
+			}
+			var streamErr error
+			for chunk := range streamRes.Chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if streamErr == nil {
+				t.Fatal("ExecuteStream() chunk.Err = nil, want 502 prompt block error")
+			}
+			streamStatus, okStreamStatus := streamErr.(interface{ StatusCode() int })
+			if !okStreamStatus || streamStatus.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("ExecuteStream() chunk.Err = %T %v, want status 502", streamErr, streamErr)
+			}
+			if !strings.Contains(streamErr.Error(), "upstream blocked the prompt: SAFETY - The prompt is blocked due to safety") {
+				t.Fatalf("ExecuteStream() chunk.Err = %q, want prompt block reason and message", streamErr.Error())
+			}
+
+			for i := 0; i < 2; i++ {
+				record := <-capture.records
+				if !record.Failed || record.Detail.InputTokens != 413751 {
+					t.Fatalf("usage record[%d] = %+v, want Failed=true InputTokens=413751", i, record)
+				}
+			}
+		})
+	}
+}
+
 func TestVertexBaseURL(t *testing.T) {
 	t.Parallel()
 
@@ -416,7 +519,8 @@ func TestVertexBaseURL(t *testing.T) {
 		location string
 		want     string
 	}{
-		{"", "https://us-central1-aiplatform.googleapis.com"},
+		{"", "https://aiplatform.googleapis.com"},
+		{"   ", "https://aiplatform.googleapis.com"},
 		{"global", "https://aiplatform.googleapis.com"},
 		{"us-central1", "https://us-central1-aiplatform.googleapis.com"},
 		{"us", "https://aiplatform.us.rep.googleapis.com"},

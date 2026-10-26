@@ -4859,6 +4859,262 @@ func TestPromoteXAIAdditionalTools(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorDeduplicatesToolsAcrossAdditionalTools(t *testing.T) {
+	top := `{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","description":"top declaration","parameters":{"type":"object","properties":{"duration_ms":{"type":"string"}},"required":["duration_ms"]}}]}`
+	different := `{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","description":"history declaration","parameters":{"type":"object","properties":{"seconds":{"type":"string"}},"required":["seconds"]}}]}`
+	cases := []struct {
+		name    string
+		top     string
+		history string
+	}{
+		{name: "both-same", top: top, history: top},
+		{name: "both-different", top: top, history: different},
+	}
+
+	for _, source := range []sdktranslator.Format{sdktranslator.FormatOpenAIResponse, sdktranslator.FormatCodex} {
+		for _, stream := range []bool{false, true} {
+			for _, tc := range cases {
+				name := fmt.Sprintf("%s/stream=%v/%s", source, stream, tc.name)
+				t.Run(name, func(t *testing.T) {
+					var gotBody []byte
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						var errRead error
+						gotBody, errRead = io.ReadAll(r.Body)
+						if errRead != nil {
+							t.Fatalf("read body: %v", errRead)
+						}
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"clock__sleep\",\"call_id\":\"call_1\",\"arguments\":\"{\\\"duration_ms\\\":\\\"10\\\"}\"}}\n\n"))
+						_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.7\",\"output\":[{\"type\":\"function_call\",\"name\":\"clock__sleep\",\"call_id\":\"call_1\",\"arguments\":\"{\\\"duration_ms\\\":\\\"10\\\"}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+					}))
+					defer server.Close()
+
+					payload := fmt.Sprintf(`{"model":"grok-4.7","tools":[%s],"input":[{"type":"additional_tools","role":"developer","tools":[%s]},{"role":"user","content":"say hello"}]}`, tc.top, tc.history)
+					exec := NewXAIExecutor(&config.Config{})
+					auth := &cliproxyauth.Auth{
+						Provider:   "xai",
+						Attributes: map[string]string{"base_url": server.URL, "api_key": "fake-token"},
+					}
+					req := cliproxyexecutor.Request{Model: "grok-4.7", Payload: []byte(payload)}
+					opts := cliproxyexecutor.Options{
+						SourceFormat:   source,
+						ResponseFormat: sdktranslator.FormatOpenAIResponse,
+						Stream:         stream,
+					}
+					if stream {
+						result, errExec := exec.ExecuteStream(t.Context(), auth, req, opts)
+						if errExec != nil {
+							t.Fatalf("ExecuteStream() error = %v", errExec)
+						}
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								t.Fatalf("stream chunk error = %v", chunk.Err)
+							}
+						}
+					} else {
+						resp, errExec := exec.Execute(t.Context(), auth, req, opts)
+						if errExec != nil {
+							t.Fatalf("Execute() error = %v", errExec)
+						}
+						if got := gjson.GetBytes(resp.Payload, "output.0.name").String(); got != "sleep" {
+							t.Fatalf("restored output.0.name = %q, want sleep; payload=%s", got, resp.Payload)
+						}
+						if got := gjson.GetBytes(resp.Payload, "output.0.namespace").String(); got != "clock" {
+							t.Fatalf("restored output.0.namespace = %q, want clock; payload=%s", got, resp.Payload)
+						}
+					}
+
+					tools := gjson.GetBytes(gotBody, "tools").Array()
+					count := 0
+					for _, tool := range tools {
+						if tool.Get("name").String() == "clock__sleep" {
+							count++
+						}
+					}
+					if count != 1 {
+						t.Fatalf("clock__sleep declarations = %d, want 1; body=%s", count, gotBody)
+					}
+					if got := gjson.GetBytes(gotBody, "tools.0.description").String(); got != "top declaration" {
+						t.Fatalf("tools.0.description = %q, want top declaration; body=%s", got, gotBody)
+					}
+					if !gjson.GetBytes(gotBody, "tools.0.parameters.properties.duration_ms").Exists() {
+						t.Fatalf("tools.0.parameters.properties.duration_ms missing; body=%s", gotBody)
+					}
+					if gjson.GetBytes(gotBody, "tools.0.parameters.properties.seconds").Exists() {
+						t.Fatalf("tools.0.parameters.properties.seconds should not exist when top-level wins; body=%s", gotBody)
+					}
+					for _, input := range gjson.GetBytes(gotBody, "input").Array() {
+						if input.Get("type").String() == "additional_tools" {
+							t.Fatalf("unpromoted additional_tools input remained: %s", gotBody)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestPromoteXAIAdditionalTools_DeduplicatesAndPreservesWinningNamespaceRef(t *testing.T) {
+	body := []byte(`{
+		"tools":[{"type":"function","name":"clock__sleep","description":"flat top","parameters":{"type":"object"}}],
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","description":"namespaced history","parameters":{"type":"object"}}]}]},
+			{"role":"user","content":"hello"}
+		]
+	}`)
+	refs := collectXAINamespaceToolRefs(body)
+	out := promoteXAIAdditionalTools(normalizeXAITools(body))
+
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), out)
+	}
+	if got := tools[0].Get("description").String(); got != "flat top" {
+		t.Fatalf("tools.0.description = %q, want flat top; body=%s", got, out)
+	}
+	if _, exists := refs["clock__sleep"]; exists {
+		t.Fatalf("flat top-level winner clock__sleep should not be registered as a namespace tool ref: %+v", refs)
+	}
+}
+
+func TestXAIShouldFoldNamespaceTools_DeduplicatesAcrossAdditionalTools(t *testing.T) {
+	var childTools []string
+	for i := 0; i < 120; i++ {
+		childTools = append(childTools, fmt.Sprintf(`{"type":"function","name":"tool_%d","parameters":{"type":"object"}}`, i))
+	}
+	ns := fmt.Sprintf(`{"type":"namespace","name":"mcp__app","tools":[%s]}`, strings.Join(childTools, ","))
+	body := []byte(fmt.Sprintf(`{"tools":[%s],"input":[{"type":"additional_tools","role":"developer","tools":[%s]},{"role":"user","content":"hi"}]}`, ns, ns))
+
+	if xaiShouldFoldNamespaceTools(body, false) {
+		t.Fatalf("xaiShouldFoldNamespaceTools should be false when 120 + 120 overlapping tools deduplicate to 120 (<= %d)", xaiMaxTools)
+	}
+	out := promoteXAIAdditionalTools(normalizeXAITools(body))
+	if got := len(gjson.GetBytes(out, "tools").Array()); got != 120 {
+		t.Fatalf("deduplicated tools length = %d, want 120", got)
+	}
+
+	// When unique tools exceed xaiMaxTools and the same namespace appears in both
+	// tools and additional_tools, only one dispatcher tool for that namespace
+	// may be emitted and top-level child descriptions must win over history.
+	var extraTools []string
+	for i := 120; i < 210; i++ {
+		extraTools = append(extraTools, fmt.Sprintf(`{"type":"function","name":"tool_%d","parameters":{"type":"object"}}`, i))
+	}
+	topNS := `{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","description":"top sleep","parameters":{"type":"object"}}]}`
+	histNS := fmt.Sprintf(`{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","description":"history sleep","parameters":{"type":"object"}},{"type":"function","name":"alarm","description":"history alarm","parameters":{"type":"object"}}]},{"type":"namespace","name":"mcp__extra","tools":[%s]}`, strings.Join(extraTools, ","))
+	foldBody := []byte(fmt.Sprintf(`{"tools":[%s,%s],"input":[{"type":"additional_tools","role":"developer","tools":[%s]},{"role":"user","content":"hi"}]}`, topNS, ns, histNS))
+
+	if !xaiShouldFoldNamespaceTools(foldBody, false) {
+		t.Fatalf("xaiShouldFoldNamespaceTools should be true when unique flattened tools > %d", xaiMaxTools)
+	}
+	foldedOut := promoteXAIAdditionalTools(normalizeXAITools(foldBody))
+	foldedTools := gjson.GetBytes(foldedOut, "tools").Array()
+	if len(foldedTools) != 3 {
+		t.Fatalf("folded tools length = %d, want 3 (clock, mcp__app, mcp__extra); body=%s", len(foldedTools), foldedOut)
+	}
+	clockDesc := foldedTools[0].Get("description").String()
+	if !strings.Contains(clockDesc, "top sleep") || strings.Contains(clockDesc, "history sleep") {
+		t.Fatalf("clock dispatcher description should keep top sleep and exclude history sleep: %s", clockDesc)
+	}
+	if !strings.Contains(clockDesc, "history alarm") {
+		t.Fatalf("clock dispatcher description should include unique child from additional_tools: %s", clockDesc)
+	}
+
+	// Verify that when folding, a child tool's qualified name (clock -> sleep => clock__sleep)
+	// does not block a later namespace named "clock__sleep" from registering its dispatcher ref.
+	collisionBody := []byte(fmt.Sprintf(`{
+		"tools":[
+			{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","parameters":{"type":"object"}}]},
+			%s
+		],
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"namespace","name":"clock__sleep","tools":[{"type":"function","name":"alarm","parameters":{"type":"object"}}]},
+				{"type":"namespace","name":"mcp__extra","tools":[%s]}
+			]},
+			{"role":"user","content":"hi"}
+		]
+	}`, ns, strings.Join(extraTools, ",")))
+	collisionRefs := collectXAINamespaceToolRefs(collisionBody)
+	ref, ok := collisionRefs["clock__sleep"]
+	if !ok || !ref.isDispatcher || ref.namespace != "clock__sleep" {
+		t.Fatalf("collisionRefs[clock__sleep] = %+v (ok=%v), want dispatcher for namespace clock__sleep", ref, ok)
+	}
+	clockEvent := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"clock","call_id":"call_0","arguments":"{\"name\":\"sleep\",\"arguments\":{\"duration_ms\":5}}"}}`)
+	restoredClock := restoreXAINamespaceToolCalls(clockEvent, collisionRefs)
+	if got := gjson.GetBytes(restoredClock, "item.namespace").String(); got != "clock" {
+		t.Fatalf("restoredClock item.namespace = %q, want clock; event=%s", got, restoredClock)
+	}
+	if got := gjson.GetBytes(restoredClock, "item.name").String(); got != "sleep" {
+		t.Fatalf("restoredClock item.name = %q, want sleep; event=%s", got, restoredClock)
+	}
+	if got := gjson.GetBytes(restoredClock, "item.arguments").String(); got != `{"duration_ms":5}` {
+		t.Fatalf("restoredClock item.arguments = %q, want {\"duration_ms\":5}; event=%s", got, restoredClock)
+	}
+	event := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"clock__sleep","call_id":"call_1","arguments":"{\"name\":\"alarm\",\"arguments\":{\"ring\":true}}"}}`)
+	restored := restoreXAINamespaceToolCalls(event, collisionRefs)
+	if got := gjson.GetBytes(restored, "item.namespace").String(); got != "clock__sleep" {
+		t.Fatalf("restored item.namespace = %q, want clock__sleep; event=%s", got, restored)
+	}
+	if got := gjson.GetBytes(restored, "item.name").String(); got != "alarm" {
+		t.Fatalf("restored item.name = %q, want alarm; event=%s", got, restored)
+	}
+	if got := gjson.GetBytes(restored, "item.arguments").String(); got != `{"ring":true}` {
+		t.Fatalf("restored item.arguments = %q, want {\"ring\":true}; event=%s", got, restored)
+	}
+
+	// Verify that when folding, a top-level flat function named "clock__sleep" is not
+	// mis-restored as namespace=clock, name=sleep when historical additional_tools
+	// also declares namespace "clock" with child "sleep".
+	flatVsFoldedBody := []byte(fmt.Sprintf(`{
+		"tools":[
+			{"type":"function","name":"clock__sleep","description":"flat top","parameters":{"type":"object"}},
+			%s
+		],
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","parameters":{"type":"object"}}]},
+				{"type":"namespace","name":"mcp__extra","tools":[%s]}
+			]},
+			{"role":"user","content":"hi"}
+		]
+	}`, ns, strings.Join(extraTools, ",")))
+	flatVsFoldedRefs := collectXAINamespaceToolRefs(flatVsFoldedBody)
+	if _, exists := flatVsFoldedRefs["clock__sleep"]; exists {
+		t.Fatalf("flat top-level function clock__sleep should not be registered in refs during fold mode: %+v", flatVsFoldedRefs["clock__sleep"])
+	}
+
+	// Verify the reverse declaration order in fold mode: namespace "clock" (child "sleep")
+	// declared before flat function "clock__sleep". Because "clock" folds to dispatcher
+	// "clock", the flat function "clock__sleep" is also emitted upstream and must not be
+	// mis-restored as namespace=clock, name=sleep.
+	foldedBeforeFlatBody := []byte(fmt.Sprintf(`{
+		"tools":[
+			{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","parameters":{"type":"object"}}]},
+			{"type":"function","name":"clock__sleep","description":"flat top after ns","parameters":{"type":"object"}},
+			%s
+		],
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"namespace","name":"mcp__extra","tools":[%s]}
+			]},
+			{"role":"user","content":"hi"}
+		]
+	}`, ns, strings.Join(extraTools, ",")))
+	foldedBeforeFlatRefs := collectXAINamespaceToolRefs(foldedBeforeFlatBody)
+	if _, exists := foldedBeforeFlatRefs["clock__sleep"]; exists {
+		t.Fatalf("emitted flat function clock__sleep declared after folded namespace clock should not remain in refs: %+v", foldedBeforeFlatRefs["clock__sleep"])
+	}
+	flatCallEvent := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"clock__sleep","call_id":"call_flat","arguments":"{\"raw\":true}"}}`)
+	restoredFlatCall := restoreXAINamespaceToolCalls(flatCallEvent, foldedBeforeFlatRefs)
+	if got := gjson.GetBytes(restoredFlatCall, "item.name").String(); got != "clock__sleep" {
+		t.Fatalf("restoredFlatCall item.name = %q, want clock__sleep; event=%s", got, restoredFlatCall)
+	}
+	if gjson.GetBytes(restoredFlatCall, "item.namespace").Exists() {
+		t.Fatalf("restoredFlatCall item.namespace should not be set for flat function: %s", restoredFlatCall)
+	}
+}
+
 func TestNormalizeXAINamespaceToolChoice(t *testing.T) {
 	body := []byte(`{
 		"tools":[{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}],

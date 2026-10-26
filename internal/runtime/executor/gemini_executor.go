@@ -240,6 +240,12 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
+	if blockMsg, blocked := geminiPromptBlockErrorMessage(data); blocked {
+		err = statusErr{code: http.StatusBadGateway, msg: blockMsg}
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), err)
+		return cliproxyexecutor.Response{}, err
+	}
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, data, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
@@ -397,6 +403,18 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if detail, ok := helps.ParseGeminiStreamUsage(rawPayload); ok {
 				streamUsage.Observe(detail, true)
 			}
+			if blockMsg, blocked := geminiPromptBlockErrorMessage(rawPayload); blocked {
+				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg}
+				helps.RecordAPIResponseError(ctx, e.cfg, blockErr)
+				if !streamUsage.PublishFailure(ctx, reporter, blockErr) {
+					reporter.PublishFailure(ctx, blockErr)
+				}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: blockErr}:
+				case <-ctx.Done():
+				}
+				return
+			}
 			filtered := helps.FilterSSEUsageMetadata(line)
 			payload := helps.JSONPayload(filtered)
 			if len(payload) == 0 {
@@ -442,7 +460,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if ctx.Err() != nil {
 			return
 		}
-		if responseFormat == sdktranslator.FormatClaude && !sawFinishReason {
+		if (responseFormat == sdktranslator.FormatClaude || responseFormat == sdktranslator.FormatOpenAI) && !sawFinishReason {
 			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
 			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
 			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
@@ -477,6 +495,28 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func geminiPromptBlockErrorMessage(payload []byte) (string, bool) {
+	if len(payload) == 0 {
+		return "", false
+	}
+	for _, cPath := range []string{"candidates", "response.candidates"} {
+		if candidates := gjson.GetBytes(payload, cPath); candidates.IsArray() && len(candidates.Array()) > 0 {
+			return "", false
+		}
+	}
+	for _, prefix := range []string{"promptFeedback", "response.promptFeedback"} {
+		reason := strings.TrimSpace(gjson.GetBytes(payload, prefix+".blockReason").String())
+		if reason == "" {
+			continue
+		}
+		if detail := strings.TrimSpace(gjson.GetBytes(payload, prefix+".blockReasonMessage").String()); detail != "" {
+			return fmt.Sprintf("upstream blocked the prompt: %s - %s", reason, detail), true
+		}
+		return fmt.Sprintf("upstream blocked the prompt: %s", reason), true
+	}
+	return "", false
 }
 
 func geminiStreamHasFinishSignal(payload []byte) bool {

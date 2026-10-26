@@ -380,12 +380,15 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		auth.CredentialVersion = existingVersion
 	}
 	cooldownStateChanged := false
+	now := time.Now()
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if isFileSnapshot {
 			auth.ModelStates = existing.ModelStates
 			auth.LastRefreshedAt = existing.LastRefreshedAt
-			auth.NextRefreshAfter = existing.NextRefreshAfter
-			auth.RefreshFailures = existing.RefreshFailures
+			if !credChanged {
+				auth.NextRefreshAfter = existing.NextRefreshAfter
+				auth.RefreshFailures = existing.RefreshFailures
+			}
 		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
@@ -410,7 +413,14 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		if credChanged || mode == updateModeRefresh {
 			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 			if auth.RejectedAccessToken == "" || authAccessToken(auth) != auth.RejectedAccessToken {
-				if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
+				auth.RefreshFailures = 0
+				if credChanged && mode != updateModeRefresh && auth.NextRefreshAfter.Equal(existing.NextRefreshAfter) {
+					auth.NextRefreshAfter = time.Time{}
+				}
+				isAuthOrGrantFailure := hasUnauthorizedAuthFailure(existing) ||
+					(auth.LastError != nil && (isUnauthorizedError(auth.LastError) || isInvalidGrantResultError(auth.LastError)))
+				if !auth.Quota.NextRecoverAt.After(now) &&
+					(isAuthOrGrantFailure || (auth.Unavailable && !auth.NextRetryAfter.After(now))) {
 					auth.Unavailable = false
 					auth.NextRetryAfter = time.Time{}
 					auth.cooldownRecordedSeq = 0
@@ -418,8 +428,12 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
 					cooldownStateChanged = true
+				} else if isAuthOrGrantFailure && auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+					auth.LastError = nil
+					auth.StatusMessage = auth.Quota.Reason
+					cooldownStateChanged = true
 				}
-				resumed := clearUnauthorizedModelStates(auth, time.Now())
+				resumed := clearUnauthorizedModelStates(auth, now)
 				if len(resumed) > 0 {
 					cooldownStateChanged = true
 				}
@@ -430,10 +444,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		// A refresh that confirms quota restoration (issue #6690) releases the
 		// credential-wide cooldown early; otherwise the active credential
 		// quota below is preserved exactly as before.
-		devinQuotaRestored := mode == updateModeRefresh && applyDevinQuotaRestoration(auth, existing, time.Now())
+		devinQuotaRestored := mode == updateModeRefresh && applyDevinQuotaRestoration(auth, existing, now)
 		if devinQuotaRestored {
 			cooldownStateChanged = true
-		} else if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
+		} else if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(now) {
 			auth.Unavailable = existing.Unavailable
 			auth.NextRetryAfter = existing.NextRetryAfter
 			// Preserve cooldown fields; keep the newest observation snapshot.
@@ -447,7 +461,6 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			}
 		}
 	}
-	now := time.Now()
 	auth.UpdatedAt = now
 	cooldownStateChanged = normalizeModelStates(auth) || cooldownStateChanged
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {

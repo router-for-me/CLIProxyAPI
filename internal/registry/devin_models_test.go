@@ -10,6 +10,37 @@ import (
 	"time"
 )
 
+func TestValidateDevinModelsJSONAggregatesLightning(t *testing.T) {
+	data := []byte(`{
+		"devin": [
+			{"id": "swe-2-medium-lightning", "display_name": "SWE-2 Medium Lightning", "owned_by": "cognition"},
+			{"id": "swe-2-high-lightning", "display_name": "SWE-2 High Lightning", "owned_by": "cognition"},
+			{"id": "swe-2-max-lightning", "display_name": "SWE-2 Max Lightning", "owned_by": "cognition"}
+		]
+	}`)
+	models, err := ValidateDevinModelsJSON(data)
+	if err != nil {
+		t.Fatalf("expected valid, got error: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 3 lightning UIDs to aggregate into 1 model, got %d: %+v", len(models), models)
+	}
+	m := models[0]
+	if m.ID != "devin/swe-2-lightning" {
+		t.Errorf("aggregated ID = %q, want devin/swe-2-lightning", m.ID)
+	}
+	if m.DisplayName != "SWE-2 Lightning" {
+		t.Errorf("aggregated DisplayName = %q, want SWE-2 Lightning", m.DisplayName)
+	}
+	if m.Thinking == nil {
+		t.Fatal("expected Thinking levels on aggregated lightning model")
+	}
+	wantLevels := []string{"medium", "high", "max"}
+	if !reflect.DeepEqual(m.Thinking.Levels, wantLevels) {
+		t.Errorf("Thinking.Levels = %v, want %v", m.Thinking.Levels, wantLevels)
+	}
+}
+
 func TestValidateDevinModelsJSON(t *testing.T) {
 	t.Run("valid envelope devin", func(t *testing.T) {
 		data := []byte(`{
@@ -127,11 +158,12 @@ func TestEmbeddedDevinModelsLoadedOnStartup(t *testing.T) {
 
 	expectedIDs := []string{
 		"devin/swe-2",
+		"devin/swe-2-lightning",
 		"devin/swe-1-6-slow",
 		"devin/glm-5-2",
 		"devin/glm-5-3",
 		"devin/deepseek-v4-flash",
-		"devin/deepseek-v4-1-flash",
+		"devin/deepseek-v4-1-flash-1017",
 		"devin/gemini-3-8-flash",
 		"devin/grok-4-6",
 		"devin/claude-fable-5-1",
@@ -358,7 +390,9 @@ func TestEmbeddedDevinModels_NoThinkingSuffixes_Issue6141(t *testing.T) {
 	models := GetDevinModels()
 	disallowedSuffixes := []string{
 		"-low-fast", "-medium-fast", "-high-fast", "-xhigh-fast", "-max-fast",
-		"-none-fast", "-low", "-medium", "-high", "-xhigh", "-max", "-none",
+		"-none-fast", "-minimal-lightning", "-low-lightning", "-medium-lightning",
+		"-high-lightning", "-xhigh-lightning", "-max-lightning", "-none-lightning",
+		"-low", "-medium", "-high", "-xhigh", "-max", "-none",
 		"-thinking-1m", "-thinking", "_none", "_minimal", "_low", "_medium",
 		"_high", "_xhigh", "_max", "_thinking",
 	}

@@ -59,6 +59,7 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 				w.currentAuths = make(map[string]*coreauth.Auth)
 			}
 			w.currentAuths[clone.ID] = clone.Clone()
+			delete(w.persistedAuthRevisions, clone.ID)
 		}
 	case AuthUpdateActionDelete:
 		id := update.ID
@@ -67,6 +68,7 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 		}
 		if id != "" {
 			delete(w.runtimeAuths, id)
+			delete(w.persistedAuthRevisions, id)
 			if w.currentAuths != nil {
 				delete(w.currentAuths, id)
 			}
@@ -109,7 +111,6 @@ func (w *Watcher) dispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (b
 		return false, 0
 	}
 	clone := update.Auth.Clone()
-	clone.ClearFileSnapshot()
 	w.clientsMutex.Lock()
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
@@ -132,6 +133,10 @@ func (w *Watcher) dispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (b
 	updates := []AuthUpdate{updateCopy}
 	w.stampAuthUpdatesLocked(updates)
 	rev := updates[0].revision
+	if w.persistedAuthRevisions == nil {
+		w.persistedAuthRevisions = make(map[string]uint64)
+	}
+	w.persistedAuthRevisions[clone.ID] = rev
 	update.revision = rev
 	w.clientsMutex.Unlock()
 	if w.getAuthQueue() == nil {
@@ -236,6 +241,15 @@ func (w *Watcher) refreshAuthState(force bool) {
 		return previous[auth.ID] != w.authRevisions[auth.ID] ||
 			previousFiles[normalized] != w.fileObservations[normalized]
 	}
+	persistedDuringScan := func(auth *coreauth.Auth) bool {
+		if previous[auth.ID] == w.authRevisions[auth.ID] {
+			return false
+		}
+		if !auth.HasFileSnapshot() {
+			return true
+		}
+		return w.persistedAuthRevisions[auth.ID] == w.authRevisions[auth.ID]
+	}
 	incompleteDuringScan := func(auth *coreauth.Auth) bool {
 		if incompletePathOrDir(authPath(auth), false) {
 			return true
@@ -300,7 +314,8 @@ func (w *Watcher) refreshAuthState(force bool) {
 		}
 		if isFileBackedAuth(auth) {
 			w.indexFileBackedAuthLocked(auth)
-			if changedDuringScan(auth) && !incompleteDuringScan(auth) && !auth.HasFileSnapshot() {
+			if persistedDuringScan(auth) && !incompleteDuringScan(auth) {
+				delete(w.persistedAuthRevisions, auth.ID)
 				rawPath := auth.Attributes[coreauth.AttributePath]
 				if rawPath == "" {
 					rawPath = auth.Attributes[coreauth.AttributeSource]

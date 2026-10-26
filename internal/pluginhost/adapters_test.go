@@ -4276,3 +4276,46 @@ func TestExecutorAdapterRefresh_MergesAttributesAndPreservesPath_Issue6119(t *te
 		t.Errorf("refreshed priority attribute = %q, want 2", got)
 	}
 }
+
+func TestUsageAdapterPropagatesRequestIDTraceIDAndSelectionID(t *testing.T) {
+	var captured pluginapi.UsageRecord
+	record := normalizeTestCapabilityRecord(capabilityRecord{
+		id: "usage-selection-test",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				UsagePlugin: usagePluginFunc(func(ctx context.Context, rec pluginapi.UsageRecord) {
+					captured = rec
+				}),
+			},
+		},
+	})
+	host := newHostWithRecords(record)
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: record.id,
+		plugin:   record.plugin.Capabilities.UsagePlugin,
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:    "openai",
+		Model:       "gpt-5.4",
+		RequestID:   "attempt-req-1",
+		TraceID:     "trace-1",
+		SelectionID: "sel-explicit-1",
+	})
+	if captured.SelectionID != "sel-explicit-1" {
+		t.Fatalf("captured.SelectionID = %q, want %q", captured.SelectionID, "sel-explicit-1")
+	}
+	if captured.RequestID != "attempt-req-1" || captured.TraceID != "trace-1" {
+		t.Fatalf("captured RequestID=%q TraceID=%q, want attempt-req-1 / trace-1", captured.RequestID, captured.TraceID)
+	}
+
+	ctxWithSel := coreusage.WithSelectionID(context.Background(), "sel-from-ctx")
+	adapter.HandleUsage(ctxWithSel, coreusage.Record{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	})
+	if captured.SelectionID != "sel-from-ctx" {
+		t.Fatalf("captured.SelectionID from context fallback = %q, want %q", captured.SelectionID, "sel-from-ctx")
+	}
+}

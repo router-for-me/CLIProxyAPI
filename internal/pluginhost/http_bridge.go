@@ -221,6 +221,7 @@ func (c *hostHTTPClient) newHTTPClientForRequest(ctx context.Context, cfg *confi
 		if client == nil {
 			client = &http.Client{}
 		}
+		installPluginRedirectPolicy(client)
 		return client, nil, nil
 	}
 
@@ -514,14 +515,99 @@ func (c *hostHTTPClient) newHTTPClientForRequest(ctx context.Context, cfg *confi
 		CheckRedirect: func(redirectReq *http.Request, via []*http.Request) error {
 			reqHolder.set(redirectReq)
 			baseTransport.CloseIdleConnections()
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
+			return checkPluginRedirect(redirectReq, via, nil)
 		},
 	}
 
 	return client, cleanup, nil
+}
+
+func installPluginRedirectPolicy(client *http.Client) {
+	if client == nil {
+		return
+	}
+	previous := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return checkPluginRedirect(req, via, previous)
+	}
+}
+
+func checkPluginRedirect(req *http.Request, via []*http.Request, previous func(*http.Request, []*http.Request) error) error {
+	// net/http rebuilds each redirect request from the initial request's headers,
+	// so strip credential headers whenever the target or any intermediate hop
+	// leaves the initial request's origin (scheme + host:port).
+	if crossOriginRedirect(req, via) {
+		for name := range req.Header {
+			if isPluginCredentialHeader(name) {
+				// Delete the exact map key because Header.Del canonicalizes and
+				// would miss non-canonical keys such as "x-api-key".
+				delete(req.Header, name)
+			}
+		}
+	}
+	if previous != nil {
+		return previous(req, via)
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
+func crossOriginRedirect(req *http.Request, via []*http.Request) bool {
+	if req == nil || len(via) == 0 || via[0] == nil {
+		return false
+	}
+	origin := via[0].URL
+	if !sameRedirectOrigin(origin, req.URL) {
+		return true
+	}
+	for _, hop := range via[1:] {
+		if hop == nil || !sameRedirectOrigin(origin, hop.URL) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameRedirectOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || a.Hostname() == "" || b.Hostname() == "" {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		redirectOriginPort(a) == redirectOriginPort(b)
+}
+
+func redirectOriginPort(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func isPluginCredentialHeader(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch lower {
+	case "authorization", "proxy-authorization", "cookie", "cookie2", "www-authenticate":
+		return true
+	}
+	return strings.Contains(lower, "api-key") ||
+		strings.Contains(lower, "apikey") ||
+		strings.Contains(lower, "api_key") ||
+		strings.Contains(lower, "token") ||
+		strings.Contains(lower, "secret") ||
+		strings.Contains(lower, "credential")
 }
 
 type requestHolder struct {

@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -2563,4 +2564,572 @@ func TestManagerPluginSchedulerUnhandledWithRejectFlagFallsBack(t *testing.T) {
 	if got == nil || got.ID != "auth-a" {
 		t.Fatalf("SelectAuth() got = %v, want auth-a", got)
 	}
+}
+
+func TestManagerPluginSchedulerSelectionID(t *testing.T) {
+	t.Run("single_credential_outer_retry_after_429_yields_distinct_ids_matching_context", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		manager.SetRetryConfig(1, 0, 0)
+		SetQuotaCooldownDisabled(true)
+		t.Cleanup(func() { SetQuotaCooldownDisabled(false) })
+
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-a")
+		})
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+
+		var execSelIDs []string
+		manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+			execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				execSelIDs = append(execSelIDs, coreusage.SelectionIDFromContext(ctx))
+				if len(execSelIDs) == 1 {
+					return cliproxyexecutor.Response{}, &Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true}
+				}
+				return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			},
+		}
+
+		scheduler := &fakePluginScheduler{
+			resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"},
+			handled: true,
+		}
+		manager.SetPluginScheduler(scheduler)
+
+		_, errExec := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.SelectionIDMetadataKey: "stale-caller-id"},
+		})
+		if errExec != nil {
+			t.Fatalf("Execute() error = %v, want nil", errExec)
+		}
+		if len(scheduler.requests) != 2 {
+			t.Fatalf("len(scheduler.requests) = %d, want 2", len(scheduler.requests))
+		}
+		selID1, _ := scheduler.requests[0].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		selID2, _ := scheduler.requests[1].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		if selID1 == "" || selID2 == "" {
+			t.Fatalf("selection_id values = (%q, %q), want non-empty IDs on both Picks", selID1, selID2)
+		}
+		if selID1 == "stale-caller-id" || selID2 == "stale-caller-id" {
+			t.Fatalf("selection_id did not overwrite caller value: (%q, %q)", selID1, selID2)
+		}
+		if selID1 == selID2 {
+			t.Fatalf("selection_id across outer retry = %q, want distinct IDs", selID1)
+		}
+		if len(execSelIDs) != 2 || execSelIDs[0] != selID1 || execSelIDs[1] != selID2 {
+			t.Fatalf("executor context selection IDs = %v, want [%q, %q]", execSelIDs, selID1, selID2)
+		}
+	})
+
+	t.Run("different_credentials_on_retry_get_different_ids", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		reg.RegisterClient("auth-b", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-a")
+			reg.UnregisterClient("auth-b")
+		})
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-b) error = %v", errRegister)
+		}
+
+		var execAuths []string
+		var execSelIDs []string
+		manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+			execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				execAuths = append(execAuths, auth.ID)
+				execSelIDs = append(execSelIDs, coreusage.SelectionIDFromContext(ctx))
+				if auth.ID == "auth-a" {
+					return cliproxyexecutor.Response{}, &Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true}
+				}
+				return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			},
+		}
+
+		scheduler := &fakePluginScheduler{
+			pick: func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: req.Candidates[0].ID}, true, nil
+			},
+		}
+		manager.SetPluginScheduler(scheduler)
+
+		_, errExec := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{})
+		if errExec != nil {
+			t.Fatalf("Execute() error = %v, want nil", errExec)
+		}
+		if len(scheduler.requests) != 2 {
+			t.Fatalf("len(scheduler.requests) = %d, want 2", len(scheduler.requests))
+		}
+		selID1, _ := scheduler.requests[0].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		selID2, _ := scheduler.requests[1].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		if selID1 == "" || selID2 == "" || selID1 == selID2 {
+			t.Fatalf("selection_id values = (%q, %q), want two distinct non-empty IDs", selID1, selID2)
+		}
+		if len(execSelIDs) != 2 || execSelIDs[0] != selID1 || execSelIDs[1] != selID2 {
+			t.Fatalf("execSelIDs = %v, want [%q, %q]", execSelIDs, selID1, selID2)
+		}
+	})
+
+	t.Run("attempts_within_one_selection_keep_same_id_for_token_refresh_and_model_pool", func(t *testing.T) {
+		// Part A: 401 token refresh retry within one selection keeps the same SelectionID.
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient("auth-oauth", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-oauth")
+		})
+		auth := &Auth{
+			ID:       "auth-oauth",
+			Provider: "gemini",
+			Metadata: map[string]any{"access_token": "tok-1", "refresh_token": "ref-1", "type": "oauth"},
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+			},
+		}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(auth-oauth) error = %v", errRegister)
+		}
+
+		var refreshSelIDs []string
+		manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+			execute: func(ctx context.Context, a *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				refreshSelIDs = append(refreshSelIDs, coreusage.SelectionIDFromContext(ctx))
+				if len(refreshSelIDs) == 1 {
+					return cliproxyexecutor.Response{}, &Error{Code: "unauthorized", Message: "401", HTTPStatus: http.StatusUnauthorized}
+				}
+				return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			},
+			refresh: func(ctx context.Context, a *Auth) (*Auth, error) {
+				clone := a.Clone()
+				clone.Metadata = map[string]any{"access_token": "tok-2", "refresh_token": "ref-1", "type": "oauth"}
+				return clone, nil
+			},
+		}
+
+		scheduler := &fakePluginScheduler{
+			resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-oauth"},
+			handled: true,
+		}
+		manager.SetPluginScheduler(scheduler)
+
+		_, errExec := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{})
+		if errExec != nil {
+			t.Fatalf("Execute(token refresh) error = %v, want nil", errExec)
+		}
+		if len(scheduler.requests) != 1 {
+			t.Fatalf("len(scheduler.requests) = %d, want 1", len(scheduler.requests))
+		}
+		selID, _ := scheduler.requests[0].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		if selID == "" {
+			t.Fatal("selection_id on Pick is empty")
+		}
+		if len(refreshSelIDs) != 2 || refreshSelIDs[0] != selID || refreshSelIDs[1] != selID {
+			t.Fatalf("refreshSelIDs = %v, want [%q, %q]", refreshSelIDs, selID, selID)
+		}
+
+		// Part B: Model pool attempts within one selection keep the same SelectionID.
+		poolManager := NewManager(nil, &FillFirstSelector{}, nil)
+		poolManager.SetConfig(&internalconfig.Config{
+			OpenAICompatibility: []internalconfig.OpenAICompatibility{
+				{
+					Name: "openai-compatibility",
+					APIKeyEntries: []internalconfig.OpenAICompatibilityAPIKey{
+						{APIKey: "sk-pool"},
+					},
+					Models: []internalconfig.OpenAICompatibilityModel{
+						{Name: "model-pool-1", Alias: "route-model"},
+						{Name: "model-pool-2", Alias: "route-model"},
+					},
+				},
+			},
+		})
+		reg.RegisterClient("auth-pool", "openai-compatibility", []*registry.ModelInfo{{ID: "route-model"}, {ID: "model-pool-1"}, {ID: "model-pool-2"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-pool")
+		})
+		poolAuth := &Auth{
+			ID:       "auth-pool",
+			Provider: "openai-compatibility",
+			Attributes: map[string]string{
+				"auth_kind":    "apikey",
+				"api_key":      "sk-pool",
+				"compat_name":  "openai-compatibility",
+				"provider_key": "openai-compatibility",
+			},
+		}
+		if _, errRegister := poolManager.Register(context.Background(), poolAuth); errRegister != nil {
+			t.Fatalf("Register(auth-pool) error = %v", errRegister)
+		}
+
+		var poolSelIDs []string
+		var poolModels []string
+		poolManager.executors["openai-compatibility"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "openai-compatibility"},
+			execute: func(ctx context.Context, a *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				poolSelIDs = append(poolSelIDs, coreusage.SelectionIDFromContext(ctx))
+				poolModels = append(poolModels, req.Model)
+				if len(poolSelIDs) == 1 {
+					return cliproxyexecutor.Response{}, &Error{Code: "upstream_error", Message: "500", HTTPStatus: http.StatusInternalServerError, Retryable: true}
+				}
+				return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			},
+		}
+
+		poolScheduler := &fakePluginScheduler{
+			resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-pool"},
+			handled: true,
+		}
+		poolManager.SetPluginScheduler(poolScheduler)
+
+		_, errPoolExec := poolManager.Execute(context.Background(), []string{"openai-compatibility"}, cliproxyexecutor.Request{Model: "route-model"}, cliproxyexecutor.Options{})
+		if errPoolExec != nil {
+			t.Fatalf("Execute(model pool) error = %v, want nil", errPoolExec)
+		}
+		if len(poolScheduler.requests) != 1 {
+			t.Fatalf("len(poolScheduler.requests) = %d, want 1", len(poolScheduler.requests))
+		}
+		poolPickID, _ := poolScheduler.requests[0].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		if poolPickID == "" {
+			t.Fatal("poolPickID is empty")
+		}
+		if len(poolSelIDs) != 2 || poolSelIDs[0] != poolPickID || poolSelIDs[1] != poolPickID {
+			t.Fatalf("poolSelIDs = %v (models=%v), want [%q, %q]", poolSelIDs, poolModels, poolPickID, poolPickID)
+		}
+	})
+
+	t.Run("unhandled_scheduler_clears_selection_id_and_does_not_attribute_builtin_selection", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		reg.RegisterClient("auth-b", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-a")
+			reg.UnregisterClient("auth-b")
+		})
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-b) error = %v", errRegister)
+		}
+
+		var execSelIDs []string
+		manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+			execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				execSelIDs = append(execSelIDs, coreusage.SelectionIDFromContext(ctx))
+				if _, leaked := opts.Metadata[cliproxyexecutor.SelectionIDMetadataKey]; leaked && len(execSelIDs) == 2 {
+					t.Errorf("unhandled second selection leaked selection_id in opts.Metadata: %v", opts.Metadata[cliproxyexecutor.SelectionIDMetadataKey])
+				}
+				if auth.ID == "auth-a" {
+					return cliproxyexecutor.Response{}, &Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true}
+				}
+				return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			},
+		}
+
+		pickCall := 0
+		scheduler := &fakePluginScheduler{
+			pick: func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+				pickCall++
+				if pickCall == 1 {
+					return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"}, true, nil
+				}
+				// Second pick is unhandled -> falls back to built-in FillFirstSelector for auth-b.
+				return pluginapi.SchedulerPickResponse{Handled: false}, false, nil
+			},
+		}
+		manager.SetPluginScheduler(scheduler)
+
+		presetCtx := coreusage.WithSelectionID(context.Background(), "stale-ctx-selection-id")
+		_, errExec := manager.Execute(presetCtx, []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.SelectionIDMetadataKey: "stale-meta-selection-id"},
+		})
+		if errExec != nil {
+			t.Fatalf("Execute() error = %v, want nil", errExec)
+		}
+		if len(scheduler.requests) != 2 {
+			t.Fatalf("len(scheduler.requests) = %d, want 2", len(scheduler.requests))
+		}
+		selID1, _ := scheduler.requests[0].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		if selID1 == "" {
+			t.Fatal("first Pick selection_id is empty")
+		}
+		if len(execSelIDs) != 2 {
+			t.Fatalf("len(execSelIDs) = %d, want 2", len(execSelIDs))
+		}
+		if execSelIDs[0] != selID1 {
+			t.Fatalf("execSelIDs[0] = %q, want %q", execSelIDs[0], selID1)
+		}
+		if execSelIDs[1] != "" {
+			t.Fatalf("execSelIDs[1] on unhandled fallback = %q, want empty", execSelIDs[1])
+		}
+	})
+
+	t.Run("rejected_pick_causes_no_fallback_and_clears_selection_id", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-a")
+		})
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+
+		execCalled := false
+		manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+			execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				execCalled = true
+				return cliproxyexecutor.Response{}, nil
+			},
+		}
+
+		scheduler := &fakePluginScheduler{
+			resp: pluginapi.SchedulerPickResponse{
+				Handled:      true,
+				Reject:       true,
+				RejectCode:   "policy_denied",
+				RejectReason: "denied by scheduler",
+			},
+			handled: true,
+		}
+		manager.SetPluginScheduler(scheduler)
+
+		opts := cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.SelectionIDMetadataKey: "stale-selection-id"},
+		}
+		_, errSelect := manager.SelectAuth(context.Background(), "gemini", "gemini-2.5-pro", opts)
+		if errSelect == nil {
+			t.Fatal("SelectAuth() error = nil, want rejection error")
+		}
+		if _, exists := opts.Metadata[cliproxyexecutor.SelectionIDMetadataKey]; exists {
+			t.Fatalf("rejected SelectAuth kept selection_id in Metadata: %v", opts.Metadata)
+		}
+
+		_, errExec := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{})
+		if errExec == nil {
+			t.Fatal("Execute() error = nil, want rejection error")
+		}
+		if execCalled {
+			t.Fatal("executor was called after rejected Pick")
+		}
+
+		// Rejected Pick with default RejectCode ("auth_unavailable") must not trigger Antigravity credits fallback
+		// on either Execute or ExecuteStream.
+		creditsManager := NewManager(nil, &FillFirstSelector{}, nil)
+		creditsManager.SetConfig(&internalconfig.Config{
+			QuotaExceeded: internalconfig.QuotaExceeded{AntigravityCredits: true},
+		})
+		reg.RegisterClient("ag-auth-1", "antigravity", []*registry.ModelInfo{{ID: "claude-sonnet-4-5"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("ag-auth-1")
+		})
+		if _, errRegister := creditsManager.Register(context.Background(), &Auth{ID: "ag-auth-1", Provider: "antigravity"}); errRegister != nil {
+			t.Fatalf("Register(ag-auth-1) error = %v", errRegister)
+		}
+		agExecCalled := false
+		agStreamCalled := false
+		creditsManager.executors["antigravity"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "antigravity"},
+			execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				agExecCalled = true
+				return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			},
+			executeStream: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+				agStreamCalled = true
+				ch := make(chan cliproxyexecutor.StreamChunk, 1)
+				close(ch)
+				return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+			},
+		}
+		creditsManager.SetPluginScheduler(&fakePluginScheduler{
+			resp: pluginapi.SchedulerPickResponse{
+				Handled: true,
+				Reject:  true, // Omit RejectCode so it defaults to "auth_unavailable".
+			},
+			handled: true,
+		})
+		if _, errAgExec := creditsManager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: "claude-sonnet-4-5"}, cliproxyexecutor.Options{}); errAgExec == nil {
+			t.Fatal("Execute(antigravity rejected) error = nil, want rejection error")
+		}
+		if agExecCalled {
+			t.Fatal("antigravity executor Execute was called via credits fallback after rejected Pick")
+		}
+		if _, errAgStream := creditsManager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: "claude-sonnet-4-5"}, cliproxyexecutor.Options{Stream: true}); errAgStream == nil {
+			t.Fatal("ExecuteStream(antigravity rejected) error = nil, want rejection error")
+		}
+		if agStreamCalled {
+			t.Fatal("antigravity executor ExecuteStream was called via credits fallback after rejected Pick")
+		}
+	})
+
+	t.Run("execute_count_and_stream_propagate_selection_id", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-a")
+		})
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+
+		var countSelID string
+		var streamSelID string
+		manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+			countTokens: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				countSelID = coreusage.SelectionIDFromContext(ctx)
+				return cliproxyexecutor.Response{Payload: []byte(`{"totalTokens":5}`)}, nil
+			},
+			executeStream: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+				streamSelID = coreusage.SelectionIDFromContext(ctx)
+				ch := make(chan cliproxyexecutor.StreamChunk, 1)
+				ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: ok\n\n")}
+				close(ch)
+				return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+			},
+		}
+
+		scheduler := &fakePluginScheduler{
+			resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"},
+			handled: true,
+		}
+		manager.SetPluginScheduler(scheduler)
+
+		if _, errCount := manager.ExecuteCount(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{}); errCount != nil {
+			t.Fatalf("ExecuteCount() error = %v", errCount)
+		}
+		streamRes, errStream := manager.ExecuteStream(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{Stream: true})
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		for range streamRes.Chunks {
+		}
+
+		if len(scheduler.requests) != 2 {
+			t.Fatalf("len(scheduler.requests) = %d, want 2", len(scheduler.requests))
+		}
+		wantCountID, _ := scheduler.requests[0].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		wantStreamID, _ := scheduler.requests[1].Options.Metadata[cliproxyexecutor.SelectionIDMetadataKey].(string)
+		if countSelID == "" || countSelID != wantCountID {
+			t.Fatalf("countSelID = %q, want %q", countSelID, wantCountID)
+		}
+		if streamSelID == "" || streamSelID != wantStreamID {
+			t.Fatalf("streamSelID = %q, want %q", streamSelID, wantStreamID)
+		}
+		if countSelID == streamSelID {
+			t.Fatalf("ExecuteCount and ExecuteStream shared SelectionID %q", countSelID)
+		}
+	})
+
+	t.Run("home_execute_count_and_stream_clear_stale_selection_id", func(t *testing.T) {
+		dispatcher := &retryContractHomeDispatcher{authIDs: []string{"home-auth-1", "home-auth-1", "home-auth-1"}}
+		homeReg := executionregistry.New()
+		manager := NewManager(nil, nil, nil)
+		manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+		manager.PublishHomeDispatch(dispatcher, homeReg, 1)
+
+		var execSelID, countSelID, streamSelID string
+		var execMetaHasKey, countMetaHasKey, streamMetaHasKey bool
+		manager.RegisterExecutor(&callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "home-retry-contract"},
+			execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				execSelID = coreusage.SelectionIDFromContext(ctx)
+				_, execMetaHasKey = opts.Metadata[cliproxyexecutor.SelectionIDMetadataKey]
+				return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			},
+			countTokens: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				countSelID = coreusage.SelectionIDFromContext(ctx)
+				_, countMetaHasKey = opts.Metadata[cliproxyexecutor.SelectionIDMetadataKey]
+				return cliproxyexecutor.Response{Payload: []byte(`{"totalTokens":3}`)}, nil
+			},
+			executeStream: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+				streamSelID = coreusage.SelectionIDFromContext(ctx)
+				_, streamMetaHasKey = opts.Metadata[cliproxyexecutor.SelectionIDMetadataKey]
+				ch := make(chan cliproxyexecutor.StreamChunk, 1)
+				close(ch)
+				return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+			},
+		})
+
+		staleCtx := coreusage.WithSelectionID(context.Background(), "stale-ctx-selection-id")
+		makeOpts := func(stream bool) cliproxyexecutor.Options {
+			return cliproxyexecutor.Options{
+				Stream:   stream,
+				Metadata: map[string]any{cliproxyexecutor.SelectionIDMetadataKey: "stale-meta-selection-id"},
+			}
+		}
+
+		if _, errExec := manager.Execute(staleCtx, []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, makeOpts(false)); errExec != nil {
+			t.Fatalf("Home Execute() error = %v", errExec)
+		}
+		if _, errCount := manager.ExecuteCount(staleCtx, []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, makeOpts(false)); errCount != nil {
+			t.Fatalf("Home ExecuteCount() error = %v", errCount)
+		}
+		streamRes, errStream := manager.ExecuteStream(staleCtx, []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, makeOpts(true))
+		if errStream != nil {
+			t.Fatalf("Home ExecuteStream() error = %v", errStream)
+		}
+		for range streamRes.Chunks {
+		}
+
+		if execSelID != "" || execMetaHasKey {
+			t.Fatalf("Home Execute leaked SelectionID=%q metaHasKey=%v", execSelID, execMetaHasKey)
+		}
+		if countSelID != "" || countMetaHasKey {
+			t.Fatalf("Home ExecuteCount leaked SelectionID=%q metaHasKey=%v", countSelID, countMetaHasKey)
+		}
+		if streamSelID != "" || streamMetaHasKey {
+			t.Fatalf("Home ExecuteStream leaked SelectionID=%q metaHasKey=%v", streamSelID, streamMetaHasKey)
+		}
+	})
+}
+
+type callbackSchedulerTestExecutor struct {
+	schedulerTestExecutor
+	execute       func(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	executeStream func(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error)
+	countTokens   func(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	refresh       func(context.Context, *Auth) (*Auth, error)
+}
+
+func (e *callbackSchedulerTestExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.execute != nil {
+		return e.execute(ctx, auth, req, opts)
+	}
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *callbackSchedulerTestExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if e.executeStream != nil {
+		return e.executeStream(ctx, auth, req, opts)
+	}
+	return nil, nil
+}
+
+func (e *callbackSchedulerTestExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.countTokens != nil {
+		return e.countTokens(ctx, auth, req, opts)
+	}
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *callbackSchedulerTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	if e.refresh != nil {
+		return e.refresh(ctx, auth)
+	}
+	return auth, nil
 }

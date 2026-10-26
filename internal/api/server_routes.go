@@ -1077,12 +1077,19 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 	if displayName == "" {
 		displayName = entry.id
 	}
-	return map[string]any{
+	model := map[string]any{
 		"name":                       name,
 		"displayName":                displayName,
 		"description":                displayName,
 		"supportedGenerationMethods": []string{"generateContent"},
 	}
+	if entry.contextLength > 0 {
+		model["inputTokenLimit"] = entry.contextLength
+	}
+	if entry.maxCompletionTokens > 0 {
+		model["outputTokenLimit"] = entry.maxCompletionTokens
+	}
+	return model
 }
 
 func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
@@ -1176,10 +1183,17 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 		return nil, fmt.Errorf("home models payload contains an error envelope")
 	}
 
+	sections := make([]string, 0, len(bySection))
+	for section := range bySection {
+		sections = append(sections, section)
+	}
+	sort.Strings(sections)
+
 	indexByID := make(map[string]int)
 	out := make([]homeModelEntry, 0, 256)
 	hasModelRecords := false
-	for section, models := range bySection {
+	for _, section := range sections {
+		models := bySection[section]
 		if models == nil {
 			return nil, fmt.Errorf("home models section %q is null", section)
 		}
@@ -1201,12 +1215,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				Provider:           provider,
 				NativeCapabilities: nativeCapabilities,
 			}
-			if index, ok := indexByID[id]; ok {
-				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
-				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
-				continue
-			}
-
+			created := homeModelInt64Value(model, "created")
 			ownedBy, _ := model["owned_by"].(string)
 			ownedBy = strings.TrimSpace(ownedBy)
 			displayName, _ := model["display_name"].(string)
@@ -1215,17 +1224,47 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				displayName, _ = model["displayName"].(string)
 				displayName = strings.TrimSpace(displayName)
 			}
+			contextLength := int(homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens"))
+			maxContextLength := int(homeModelInt64Value(model, "max_context_length", "maxContextLength"))
+			maxCompletionTokens := int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens"))
 			thinking := homeModelThinkingSupport(model)
+
+			if index, ok := indexByID[id]; ok {
+				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
+				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
+				if out[index].created <= 0 && created > 0 {
+					out[index].created = created
+				}
+				if out[index].ownedBy == "" && ownedBy != "" {
+					out[index].ownedBy = ownedBy
+				}
+				if out[index].displayName == "" && displayName != "" {
+					out[index].displayName = displayName
+				}
+				if out[index].contextLength <= 0 && contextLength > 0 {
+					out[index].contextLength = contextLength
+				}
+				if out[index].maxContextLength <= 0 && maxContextLength > 0 {
+					out[index].maxContextLength = maxContextLength
+				}
+				if out[index].maxCompletionTokens <= 0 && maxCompletionTokens > 0 {
+					out[index].maxCompletionTokens = maxCompletionTokens
+				}
+				if out[index].thinking == nil && thinking != nil {
+					out[index].thinking = thinking
+				}
+				continue
+			}
 
 			indexByID[id] = len(out)
 			out = append(out, homeModelEntry{
 				id:                     id,
-				created:                homeModelInt64Value(model, "created"),
+				created:                created,
 				ownedBy:                ownedBy,
 				displayName:            displayName,
-				contextLength:          int(homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens")),
-				maxContextLength:       int(homeModelInt64Value(model, "max_context_length", "maxContextLength")),
-				maxCompletionTokens:    int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens")),
+				contextLength:          contextLength,
+				maxContextLength:       maxContextLength,
+				maxCompletionTokens:    maxCompletionTokens,
 				thinking:               thinking,
 				providers:              appendUniqueHomeProvider(nil, provider),
 				nativeCapabilityRoutes: []registry.NativeCapabilityRoute{route},

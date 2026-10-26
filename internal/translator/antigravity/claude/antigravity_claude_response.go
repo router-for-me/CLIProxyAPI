@@ -96,6 +96,7 @@ type Params struct {
 	CurrentToolName            string // Client-facing name of the currently open tool_use block
 	CurrentToolIsParameterless bool   // Whether the open tool_use block was declared parameterless
 	CurrentToolInputEmitted    bool   // Whether cleaned input JSON was already emitted for the open tool_use block
+	CurrentToolPendingEmpty    bool   // Whether an empty "{}" input_json_delta is deferred awaiting tool_use completion
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -179,10 +180,19 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		params.CurrentThinkingSigned = true
 		params.HasContent = true
 	}
+	flushPendingToolInput := func() {
+		if params.ResponseType == 3 && params.CurrentToolPendingEmpty && !params.CurrentToolInputEmitted {
+			data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", "{}")
+			appendEvent("content_block_delta", string(data))
+			params.CurrentToolInputEmitted = true
+			params.CurrentToolPendingEmpty = false
+		}
+	}
 	closeCurrentBlock := func() {
 		if params.ResponseType == 0 {
 			return
 		}
+		flushPendingToolInput()
 		appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
 		params.ResponseIndex++
 		params.ResponseType = 0
@@ -312,6 +322,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 							params.HasContent = true
 						} else {
 							if params.ResponseType != 0 {
+								flushPendingToolInput()
 								appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
 								params.ResponseIndex++
 							}
@@ -339,6 +350,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 						params.HasContent = true
 					} else if partText != "" {
 						if params.ResponseType != 0 {
+							flushPendingToolInput()
 							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
 							params.ResponseIndex++
 						}
@@ -374,12 +386,21 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 								partialJSON = ""
 							} else {
 								params.CurrentToolInputEmitted = true
+								params.CurrentToolPendingEmpty = false
 							}
+						} else if partialJSON == "{}" {
+							if !params.CurrentToolInputEmitted {
+								params.CurrentToolPendingEmpty = true
+							}
+							partialJSON = ""
 						} else if partialJSON != "" {
 							params.CurrentToolInputEmitted = true
+							params.CurrentToolPendingEmpty = false
 						}
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", partialJSON)
-						appendEvent("content_block_delta", string(data))
+						if partialJSON != "" || !params.CurrentToolPendingEmpty {
+							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", partialJSON)
+							appendEvent("content_block_delta", string(data))
+						}
 					}
 					params.HasContent = true
 					params.HasSemanticContent = true
@@ -390,6 +411,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 				// Handle state transitions when switching to function calls
 				// Close any existing function call block first
 				if params.ResponseType == 3 {
+					flushPendingToolInput()
 					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
 					params.ResponseIndex++
 					params.ResponseType = 0
@@ -404,6 +426,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 
 				// Close any other existing content block
 				if params.ResponseType != 0 {
+					flushPendingToolInput()
 					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
 					params.ResponseIndex++
 				}
@@ -411,6 +434,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 				params.CurrentToolName = fcName
 				params.CurrentToolIsParameterless = util.ClaudeToolIsParameterless(fcName, originalRequestRawJSON)
 				params.CurrentToolInputEmitted = false
+				params.CurrentToolPendingEmpty = false
 				// Start a new tool use content block
 				// This creates the structure for a function call in Claude Code format
 				// Create the tool use block with unique ID and function details
@@ -431,11 +455,16 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 						} else {
 							params.CurrentToolInputEmitted = true
 						}
+					} else if cleanArgs == "{}" {
+						params.CurrentToolPendingEmpty = true
+						cleanArgs = ""
 					} else if cleanArgs != "" {
 						params.CurrentToolInputEmitted = true
 					}
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", cleanArgs)
-					appendEvent("content_block_delta", string(data))
+					if cleanArgs != "" || !params.CurrentToolPendingEmpty {
+						data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", cleanArgs)
+						appendEvent("content_block_delta", string(data))
+					}
 				}
 				params.ResponseType = 3
 				params.HasContent = true
@@ -448,6 +477,9 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
 		params.HasFinishReason = true
 		params.FinishReason = finishReasonResult.String()
+		if params.FinishReason != "" {
+			flushPendingToolInput()
+		}
 	}
 
 	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
@@ -520,6 +552,12 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 		return
 	}
 
+	if params.ResponseType == 3 && params.CurrentToolPendingEmpty && !params.CurrentToolInputEmitted {
+		data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", "{}")
+		*output = translatorcommon.AppendSSEEventString(*output, "content_block_delta", string(data), 3)
+		params.CurrentToolInputEmitted = true
+		params.CurrentToolPendingEmpty = false
+	}
 	if params.ResponseType != 0 {
 		*output = translatorcommon.AppendSSEEventString(*output, "content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex), 3)
 		params.ResponseType = 0

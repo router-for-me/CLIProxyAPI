@@ -266,16 +266,16 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
 	return truncated.String()
 }
 
-func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Context, baseReq *http.Request, payload []byte, requestModelName string, updateRequestContext bool) *interfaces.ErrorMessage {
+func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Context, baseReq *http.Request, payload []byte, requestModelName string, updateRequestContext bool) (string, *interfaces.ErrorMessage) {
 	if h == nil || h.AccessManager == nil {
-		return nil
+		return "", nil
 	}
 	sourceReq := baseReq
 	if sourceReq == nil && c != nil {
 		sourceReq = c.Request
 	}
 	if sourceReq == nil {
-		return nil
+		return "", nil
 	}
 	authBody := payload
 	if requestModelName != "" && json.Valid(payload) && strings.TrimSpace(gjson.GetBytes(payload, "model").String()) == "" {
@@ -304,12 +304,15 @@ func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Co
 		if msg == "" {
 			msg = authErr.Error()
 		}
-		return &interfaces.ErrorMessage{
+		return "", &interfaces.ErrorMessage{
 			StatusCode: authErr.HTTPStatusCode(),
 			Error:      errors.New(msg),
 		}
 	}
-	if result != nil && c != nil {
+	if result == nil {
+		return "", nil
+	}
+	if c != nil && updateRequestContext {
 		c.Set("userApiKey", result.Principal)
 		c.Set("accessProvider", result.Provider)
 		if len(result.Metadata) > 0 {
@@ -317,14 +320,14 @@ func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Co
 		} else {
 			c.Set("accessMetadata", nil)
 		}
-		if updateRequestContext && c.Request != nil {
+		if c.Request != nil {
 			reqCtx := usage.WithAPIKey(c.Request.Context(), result.Principal)
 			reqCtx = usage.WithAccessProvider(reqCtx, result.Provider)
 			reqCtx = usage.WithIsNativeKey(reqCtx, usage.IsNativeAccessProvider(result.Provider))
 			c.Request = c.Request.WithContext(reqCtx)
 		}
 	}
-	return nil
+	return result.Principal, nil
 }
 
 // ResponsesWebsocket handles websocket requests for /v1/responses.
@@ -532,7 +535,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if requestModelName == "" {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
-		if errAuth := h.authenticateResponsesWebsocketTurn(c, upgradeRequest, payload, requestModelName, true); errAuth != nil {
+		if _, errAuth := h.authenticateResponsesWebsocketTurn(c, upgradeRequest, payload, requestModelName, true); errAuth != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errAuth)
 			markAPIResponseTimestamp(c)
 			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errAuth)
@@ -800,8 +803,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				current, ok := sessionAuthByID(authID)
 				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled
 			})
+			boundPrincipal := usage.APIKeyFromContext(cliCtx)
 			cliCtx = cliproxyexecutor.WithWebsocketTurnAuthorizer(cliCtx, func(turnPayload []byte) ([]byte, error) {
-				errAuth := h.authenticateResponsesWebsocketTurn(c, upgradeRequest, turnPayload, modelName, false)
+				principal, errAuth := h.authenticateResponsesWebsocketTurn(c, upgradeRequest, turnPayload, modelName, false)
+				if errAuth == nil && principal != "" && principal != boundPrincipal {
+					errAuth = &interfaces.ErrorMessage{
+						StatusCode: http.StatusUnauthorized,
+						Error:      errors.New("client credential changed during the websocket stream; reconnect"),
+					}
+				}
 				if errAuth == nil {
 					return nil, nil
 				}

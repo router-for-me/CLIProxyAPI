@@ -1642,6 +1642,47 @@ func TestConvertGeminiResponseToOpenAIResponses_PinsRequestPerStream(t *testing.
 	}
 }
 
+func TestConvertGeminiResponseToOpenAIResponses_NonNormalFinishReasonsMapToIncompleteContentFilter(t *testing.T) {
+	ctx := context.Background()
+	req := []byte(`{"model":"gemini-4-argon"}`)
+	for _, reason := range []string{"MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL", "SAFETY", "RECITATION", "PROHIBITED_CONTENT"} {
+		t.Run("stream/"+reason, func(t *testing.T) {
+			var param any
+			chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` + reason + `"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-4-argon","responseId":"resp_1"}`)
+			var sawIncomplete bool
+			for _, out := range ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-4-argon", req, nil, chunk, &param) {
+				event, data := parseSSEEvent(t, out)
+				if event == "response.incomplete" {
+					sawIncomplete = true
+					if got := data.Get("response.status").String(); got != "incomplete" {
+						t.Fatalf("response.status = %q, want incomplete", got)
+					}
+					if got := data.Get("response.incomplete_details.reason").String(); got != "content_filter" {
+						t.Fatalf("incomplete_details.reason = %q, want content_filter", got)
+					}
+				}
+				if event == "response.completed" {
+					t.Fatalf("unexpected response.completed for finishReason %s: %s", reason, out)
+				}
+			}
+			if !sawIncomplete {
+				t.Fatalf("expected response.incomplete event for finishReason %s", reason)
+			}
+		})
+
+		t.Run("nonstream/"+reason, func(t *testing.T) {
+			raw := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` + reason + `"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-4-argon","responseId":"resp_1"}`)
+			out := ConvertGeminiResponseToOpenAIResponsesNonStream(ctx, "gemini-4-argon", req, nil, raw, nil)
+			if got := gjson.GetBytes(out, "status").String(); got != "incomplete" {
+				t.Fatalf("non-stream status = %q, want incomplete; payload=%s", got, out)
+			}
+			if got := gjson.GetBytes(out, "incomplete_details.reason").String(); got != "content_filter" {
+				t.Fatalf("non-stream incomplete_details.reason = %q, want content_filter; payload=%s", got, out)
+			}
+		})
+	}
+}
+
 func BenchmarkConvertGeminiResponseToOpenAIResponses_TextDelta(b *testing.B) {
 	request := []byte(`{"model":"gemini-2.5-flash","instructions":"` + strings.Repeat("x", 1024*1024) + `"}`)
 	delta := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"token "}]} }],"modelVersion":"gemini-2.5-flash","responseId":"resp_bench"}`)

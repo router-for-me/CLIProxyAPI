@@ -328,10 +328,10 @@ func TestGetDevinModelsFallback(t *testing.T) {
 				t.Errorf("devin/deepseek-v4-flash OwnedBy = %q, want deepseek", m.OwnedBy)
 			}
 		}
-		if m != nil && m.ID == "devin/deepseek-v4-1-flash" {
+		if m != nil && m.ID == "devin/deepseek-v4-1-flash-1017" {
 			foundDeepSeekV41Flash = true
 			if m.OwnedBy != "deepseek" {
-				t.Errorf("devin/deepseek-v4-1-flash OwnedBy = %q, want deepseek", m.OwnedBy)
+				t.Errorf("devin/deepseek-v4-1-flash-1017 OwnedBy = %q, want deepseek", m.OwnedBy)
 			}
 		}
 	}
@@ -351,7 +351,7 @@ func TestGetDevinModelsFallback(t *testing.T) {
 		t.Error("expected devin/deepseek-v4-flash in GetDevinModels()")
 	}
 	if !foundDeepSeekV41Flash {
-		t.Error("expected devin/deepseek-v4-1-flash in GetDevinModels()")
+		t.Error("expected devin/deepseek-v4-1-flash-1017 in GetDevinModels()")
 	}
 
 	byChannel := GetStaticModelDefinitionsByChannel("devin")

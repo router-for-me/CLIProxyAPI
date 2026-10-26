@@ -1552,12 +1552,12 @@ func rollbackRecoveredGitDirectory(gitDir, backupGitDir string) error {
 }
 
 func isRepositoryCorruptionError(err error) bool {
-	// go-git alpha.5 stats a pack lazily and reports a missing one as a filesystem error
-	// relative to the .git directory instead of dotgit.ErrPackfileNotFound.
-	var pathErr *fs.PathError
-	missingPack := errors.As(err, &pathErr) && errors.Is(pathErr, fs.ErrNotExist) &&
-		strings.HasPrefix(filepath.ToSlash(pathErr.Path), "objects/pack/") && strings.HasSuffix(pathErr.Path, ".pack")
-	return missingPack || errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound)
+	if errors.Is(err, dotgit.ErrPackfileNotFound) ||
+		errors.Is(err, dotgit.ErrIdxNotFound) ||
+		errors.Is(err, plumbing.ErrObjectNotFound) {
+		return true
+	}
+	return errors.Is(err, fs.ErrNotExist) && err != nil && strings.Contains(err.Error(), "packhandle:")
 }
 
 func verifyRepositoryHead(repo *git.Repository) error {
