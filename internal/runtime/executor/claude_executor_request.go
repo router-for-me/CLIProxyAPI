@@ -148,7 +148,7 @@ func isManagedClaudeBeta(beta string) bool {
 //	 7 context-management-2025-06-27
 //	 8 prompt-caching-scope-2026-01-05
 //	 9 mid-conversation-system-2026-04-07  models accepting a role=system turn
-//	10 per-turn-control-2026-07-01        opus-5-5 and fable-5-1, or requested
+//	10 per-turn-control-2026-07-01        opus-5-5, fable-5-1 and haiku-5-5, or requested
 //	11 timing-2026-09-09                  per-turn timing body, or requested
 //	12 mid-conversation-tool-changes-2026-07-01  same models as mid-conversation-system
 //	13 inline-tools-2026-09-15            inline tool_addition blocks, or requested
@@ -290,11 +290,14 @@ func claudeCanonicalModel(model string) string {
 	return model
 }
 
-// claudeModelHasPerTurnEffort reports models whose 2.1.280 catalog capability
-// per_turn_effort puts per-turn-control-2026-07-01 on every first-party request.
 func isClaudeOpus55Model(model string) bool {
 	model = claudeCanonicalModel(model)
 	return model == "claude-opus-5-5" || strings.HasPrefix(model, "claude-opus-5-5[")
+}
+
+func isClaudeHaiku55Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	return model == "claude-haiku-5-5" || strings.HasPrefix(model, "claude-haiku-5-5-") || strings.HasPrefix(model, "claude-haiku-5-5[")
 }
 
 func isClaudeSonnet55Model(model string) bool {
@@ -434,8 +437,10 @@ func applyClaudeCloakThinkingDisplay(body []byte, callerOwned bool) []byte {
 	return body
 }
 
+// claudeModelHasPerTurnEffort follows the per_turn_effort capability in the
+// Claude Code 2.1.296 catalog.
 func claudeModelHasPerTurnEffort(model string) bool {
-	return isClaudeOpus55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1")
+	return isClaudeOpus55Model(model) || isClaudeHaiku55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1")
 }
 
 // claudeModelHasPerTurnTiming reports models whose catalog lists per_turn_timing.
@@ -443,7 +448,7 @@ func claudeModelHasPerTurnEffort(model string) bool {
 // is set, so the beta follows the body or an explicit caller request.
 func claudeModelHasPerTurnTiming(model string) bool {
 	model = claudeCanonicalModel(model)
-	return claudeModelHasPerTurnEffort(model) || strings.HasPrefix(model, "claude-mythos-5-1")
+	return isClaudeOpus55Model(model) || strings.HasPrefix(model, "claude-fable-5-1") || strings.HasPrefix(model, "claude-mythos-5-1")
 }
 
 func claudeIncludePerTurnControl(body []byte, requested map[string]bool) bool {
@@ -513,7 +518,7 @@ func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
 			return false
 		}
 		model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
-		if isClaudeHaikuModel(model) {
+		if isClaudeHaikuModel(model) && !isClaudeHaiku55Model(model) {
 			return false
 		}
 		thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
@@ -930,10 +935,21 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 // cache_control placement. The measured structured Haiku helper sends
 // "temperature":1 and claudeCodeHelperShapeStructured keys on it, so stripping
 // it would emit a shape no native client ever produces. Keep what the caller
-// sent and drop only what Anthropic actually rejects (verified live):
+// sent and drop only what Anthropic actually rejects (verified live). Haiku 5.5
+// instead omits all sampling controls, as documented in its migration guide:
+// https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide
+// For older models:
 //   - thinking active: temperature must be 1, top_p must be >= 0.95, top_k unset
 //   - otherwise: temperature and top_p cannot both be specified
 func normalizeClaudeSamplingForUpstream(body []byte, nativeOwned bool) []byte {
+	// Omit Haiku 5.5 sampling controls, including on native CLI requests.
+	if isClaudeHaiku55Model(gjson.GetBytes(body, "model").String()) {
+		for _, field := range []string{"temperature", "top_p", "top_k"} {
+			body, _ = sjson.DeleteBytes(body, field)
+		}
+		return body
+	}
+
 	thinkingActive := false
 	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())) {
 	case "enabled", "adaptive", "auto":
