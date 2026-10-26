@@ -273,6 +273,11 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if requestPath != "" {
 		meta[coreexecutor.RequestPathMetadataKey] = requestPath
 	}
+	if ginCtx != nil {
+		if accountPin := strings.TrimSpace(ginCtx.GetHeader(coreexecutor.AccountPinHeader)); accountPin != "" {
+			meta[coreexecutor.AccountPinMetadataKey] = accountPin
+		}
+	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
 	}

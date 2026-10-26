@@ -34,6 +34,11 @@ const GenerateMetadataKey = "generate"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// AccountPinMetadataKey restricts execution to the credentials named by the client's
+	// AccountPinHeader: one account (ID, file name, label or email) or a credential group.
+	AccountPinMetadataKey = "account_pin"
+	// AccountPinHeader is the client request header that carries an account pin.
+	AccountPinHeader = "X-CPA-Account"
 	// SelectionIDMetadataKey stores the per-selection ID generated for a plugin scheduler pick.
 	SelectionIDMetadataKey = "selection_id"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
