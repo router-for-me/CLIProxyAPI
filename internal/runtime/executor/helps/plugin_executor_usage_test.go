@@ -96,6 +96,31 @@ func TestObservePluginExecutorInteractionsUsagePreservesPartialEvents(t *testing
 				want: `{"usage":{"input_tokens":100,"tool_use_tokens":15,"output_tokens":30,"reasoning_tokens":10,"total_tokens":155}}`,
 			},
 			{
+				name: "total-only zero snapshot",
+				events: []string{
+					`{"usage":{"input_tokens":100,"tool_use_tokens":5,"cached_tokens":20,"cache_read_tokens":20,"cache_write_tokens":10,"output_tokens":30,"reasoning_tokens":10}}`,
+					`{"service_tier":"default","usage":{"total_tokens":0}}`,
+				},
+				want: `{"service_tier":"default","usage":{"total_tokens":0}}`,
+			},
+			{
+				name: "total-only zero metadata alias",
+				events: []string{
+					`{"usage":{"input_tokens":100,"tool_use_tokens":5,"cached_tokens":20,"cache_read_tokens":20,"cache_write_tokens":10,"output_tokens":30,"reasoning_tokens":10}}`,
+					`{"usageMetadata":{"totalTokenCount":0}}`,
+				},
+				want: `{"usage":{"total_tokens":0}}`,
+			},
+			{
+				name: "partial update after zero reset",
+				events: []string{
+					`{"usage":{"input_tokens":100,"tool_use_tokens":5,"cached_tokens":20,"cache_read_tokens":20,"cache_write_tokens":10,"output_tokens":30,"reasoning_tokens":10}}`,
+					`{"usage":{"total_tokens":0}}`,
+					`{"usage":{"input_tokens":12}}`,
+				},
+				want: `{"usage":{"input_tokens":12,"total_tokens":12}}`,
+			},
+			{
 				name: "all zero snapshot",
 				events: []string{
 					`{"usage":{"input_tokens":100,"cached_tokens":20,"cache_read_tokens":20,"cache_write_tokens":10,"output_tokens":30,"reasoning_tokens":10}}`,

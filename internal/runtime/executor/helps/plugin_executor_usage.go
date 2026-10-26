@@ -110,6 +110,11 @@ func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer
 	if !node.IsObject() {
 		return
 	}
+	total := firstExistingUsageNode(node, "total_tokens", "totalTokenCount")
+	if total.Exists() && total.Int() == 0 {
+		// An explicit zero total resets omitted counters from earlier snapshots.
+		clear(buffer.interactionsUsage)
+	}
 	updated := false
 	for _, paths := range [][]string{
 		{"input_tokens", "prompt_tokens", "total_input_tokens", "promptTokenCount"},
@@ -134,7 +139,7 @@ func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer
 	}
 	// A previous total can be stale after a partial update. Without a new total,
 	// let the parser derive it from all accumulated counters.
-	if !firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Exists() {
+	if !total.Exists() {
 		delete(buffer.interactionsUsage, "total_tokens")
 	}
 	merged, err := json.Marshal(buffer.interactionsUsage)
