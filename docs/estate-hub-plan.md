@@ -185,6 +185,32 @@ show figures with no "Poll failed" mark, and that a Codex account with a banked 
 Seen in passing, not changed: editing an account's name or groups drops its quota headers until the
 next refresher tick (within a minute) restores them from the snapshot.
 
+## Device matrix (Waseem, 26 Oct 2026: "any agent from any device" by Tue 28 / Wed 29 Oct)
+
+Work devices only: wasnewpc, omarchy (same GPU box, Linux boot; one boot up at a time), mbp, m6. naz and the
+Beelink HA box are excluded. Cell values: **hub** = points at m6 and works; **login** = CLI-only tool, Waseem logs
+in on that device; **install** = not installed yet; **check** = installed, hub support unverified. Read with
+`command -v <tool>` on each device; auto-vps is the reference set (all fourteen installed, 26 Oct 2026).
+
+| Harness | m6 | wasnewpc | mbp | omarchy | Route |
+|---|---|---|---|---|---|
+| Claude Code | hub | hub | hub | install | hub (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) |
+| Codex | hub | hub | hub | install | hub (`model_providers.cliproxy`) |
+| OMP | hub | hub | hub | install | hub provider in `~/.omp/agent/models.json` (non-Claude models) |
+| pi | install | install | hub | install | hub provider in `~/.pi/agent/models.json` |
+| opencode | install | hub | install | install | hub provider in `~/.config/opencode/opencode.json` |
+| Muse CLI | install+login | install+login | login? (installed) | install+login | own login; Muse models via hub for the tools above |
+| agy (Antigravity) | install+login | login? (installed) | login? (installed) | install+login | own login |
+| Devin CLI | install+login | install+login | install+login | install+login | own login |
+| Grok CLI | install | install | check | install | check whether it takes a custom endpoint; else own login |
+| Kimi CLI | install | install | install | install | check `~/.kimi-code/config.toml` base_url; else own login |
+| dsh (DeepSeek) | install | install | install | install | API key from BWS, or hub `deepseek-flash` through OMP/pi |
+| commandcode | install | install | install | install | API key from BWS, or hub `commandcode/*` through OMP/pi |
+| cursor-agent / agent | install | install | installed | install | own login (Cursor); no hub path |
+
+"login?" means installed but whether it is signed in on that device is unverified. Omarchy column is from
+memory: the box was in its Windows boot all evening; verify when it is up.
+
 ## Cursor
 
 - 2026-10-26: hub installed on m6 (brew `cliproxyapi` 8.0.40, bound to 127.0.0.1:8317, Tailscale
