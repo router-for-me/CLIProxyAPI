@@ -353,6 +353,45 @@ func TestQuotaGaugesShowTheLiveStateOfEveryProfile(t *testing.T) {
 	}
 }
 
+// Each subscription's account email is on claw_master.profile.info, from its saved credential, and on no
+// other metric. A profile whose credential has no email has no info point.
+func TestProfileInfoCarriesEachSubscriptionsEmailAndNoOtherMetricDoes(t *testing.T) {
+	reader := startMetrics(t, nil)
+	selector, _, reset := namedSelector(t)
+	selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: 0.5, resetsAt: reset})
+	const email = "subscription-a@example.invalid"
+	opts := writeSyntheticBackendCredential(t, canonicalTestTempDir(t), "profile-a.json", map[string]any{"type": "claude", "email": email})
+	opts.Provider = "claude"
+	store, _, err := loadBackendCredentialAs(t.Context(), opts, "profile-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &fixedSource{snap: selector.metricsSnapshot([]*backendStore{store})}
+	registerStateSource(src)
+	t.Cleanup(func() { unregisterStateSource(src) })
+	rm := collect(t, reader)
+	if v, ok := gaugeOf(rm, "claw_master.profile.info", map[string]string{"profile": "claude-primary", "email": email}); !ok || v != 1 {
+		t.Fatalf("profile.info{claude-primary, %s} = %v (%v), want 1", email, v, ok)
+	}
+	if _, ok := gaugeOf(rm, "claw_master.profile.info", map[string]string{"profile": "claude-secondary"}); ok {
+		t.Fatal("a profile with no email in its credential has an info point")
+	}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name == "claw_master.profile.info" {
+				continue
+			}
+			encoded, errMarshal := json.Marshal(m)
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			if strings.Contains(string(encoded), email) {
+				t.Errorf("%s carries the account email", m.Name)
+			}
+		}
+	}
+}
+
 func TestSplittingAnthropicRateLimitHeaders(t *testing.T) {
 	for header, want := range map[string][2]string{
 		"unified-5h-utilization":       {"5h", "utilization"},

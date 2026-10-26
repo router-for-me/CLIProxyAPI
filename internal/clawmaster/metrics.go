@@ -105,6 +105,7 @@ type instruments struct {
 	fiveHourUsed      metric.Float64ObservableGauge
 	fiveHourResets    metric.Float64ObservableGauge
 	tokenExpires      metric.Float64ObservableGauge
+	profileInfo       metric.Int64ObservableGauge
 	quotaBand         metric.Int64ObservableGauge
 	sessions          metric.Int64ObservableGauge
 	activeConns       metric.Int64ObservableGauge
@@ -218,6 +219,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.fiveHourResets, _ = m.Float64ObservableGauge("claw_master.quota.five_hour.resets_in_seconds", metric.WithUnit("s"), metric.WithDescription("Until the five-hour window resets; absent while no window is open"))
 	i.quotaBand, _ = m.Int64ObservableGauge("claw_master.quota.band", metric.WithDescription("0 ok, 1 reserve (last tenth), 2 exhausted, -1 unknown"))
 	i.tokenExpires, _ = m.Float64ObservableGauge("claw_master.auth.token_expires_in_seconds", metric.WithUnit("s"))
+	i.profileInfo, _ = m.Int64ObservableGauge("claw_master.profile.info", metric.WithDescription("1 per subscription profile, carrying the email of the account it is logged in to: the one metric with an account identifier"))
 	i.sessions, _ = m.Int64ObservableGauge("claw_master.sessions.tracked")
 	i.activeConns, _ = m.Int64ObservableGauge("claw_master.proxy.active_connections")
 	i.upstreamLimit, _ = m.Float64ObservableGauge("claw_master.anthropic.ratelimit", metric.WithDescription("Anthropic rate-limit headers: utilization, remaining, limit, resets_in_seconds"))
@@ -227,7 +229,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.heap, _ = m.Int64ObservableGauge("claw_master.process.heap_bytes", metric.WithUnit("By"))
 
 	i.registration, _ = m.RegisterCallback(i.observe,
-		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.quotaBand, i.tokenExpires, i.sessions, i.activeConns,
+		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.quotaBand, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
 		i.upstreamLimit, i.latencyQuantile, i.uptime, i.goroutines, i.heap)
 	return i
 }
@@ -250,6 +252,8 @@ type profileState struct {
 	FiveHourKnown       bool
 	FiveHourResetsIn    float64
 	FiveHourResetsKnown bool
+	// The email of the account the profile is logged in to, from its saved credential; empty when unknown.
+	Email string
 }
 
 type stateSnapshot struct {
@@ -288,6 +292,11 @@ func (i *instruments) observe(_ context.Context, o metric.Observer) error {
 			o.ObserveInt64(i.quotaBand, p.Band, attrs)
 			if p.TokenKnown {
 				o.ObserveFloat64(i.tokenExpires, p.TokenExpiresIn, attrs)
+			}
+			// The pool's own subscriptions' emails, so the dashboard can say which account each profile is.
+			// On this gauge only: no other metric, and no log, carries an account identifier.
+			if p.Email != "" {
+				o.ObserveInt64(i.profileInfo, 1, claudeAttrs(attribute.String("profile", p.Name), attribute.String("email", p.Email)))
 			}
 		}
 		if snap.HasSessions {
