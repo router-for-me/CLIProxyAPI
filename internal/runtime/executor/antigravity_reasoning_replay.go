@@ -20,6 +20,7 @@ import (
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -71,6 +72,7 @@ type antigravityReasoningReplayScope struct {
 	modelName     string
 	sessionKey    string
 	cacheSnapshot internalcache.AntigravityReasoningReplaySnapshot
+	openAIChat    bool
 }
 
 func (s antigravityReasoningReplayScope) valid() bool {
@@ -100,17 +102,30 @@ func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName s
 	// Prefer an explicit downstream session over a provider sessionId synthesized
 	// from request text. This keeps identical prompts in separate client sessions
 	// from sharing an opaque Gemini reasoning chain.
+	scope := antigravityReasoningReplayScope{modelName: modelName}
 	if sessionKey := antigravityReasoningReplayClientSessionKey(ctx, req, opts); sessionKey != "" {
-		return antigravityReasoningReplayScope{modelName: modelName, sessionKey: sessionKey}
+		scope.sessionKey = sessionKey
+	} else {
+		scope = antigravityReasoningReplayScopeFromPayload(modelName, payload)
+		if !scope.valid() {
+			scope = antigravityReasoningReplayScopeFromPayload(modelName, req.Payload)
+		}
 	}
-	if scope := antigravityReasoningReplayScopeFromPayload(modelName, payload); scope.valid() {
-		return scope
+	scope.openAIChat = opts.SourceFormat.String() == "openai"
+	// Only trusted execution metadata can namespace the ledger. Never read a
+	// caller identity from request JSON or downstream credential headers here.
+	callerScope := metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey)
+	if callerScope == "" {
+		callerScope = metadataString(req.Metadata, cliproxyexecutor.CallerScopeMetadataKey)
 	}
-	if scope := antigravityReasoningReplayScopeFromPayload(modelName, req.Payload); scope.valid() {
-		return scope
+	if callerScope == "" {
+		callerScope = session.CallerScope(helps.APIKeyFromContext(ctx))
 	}
-	_ = ctx
-	return antigravityReasoningReplayScope{}
+	if scope.valid() && callerScope != "" {
+		sum := sha256.Sum256([]byte(callerScope))
+		scope.sessionKey = "caller:" + hex.EncodeToString(sum[:]) + ":" + scope.sessionKey
+	}
+	return scope
 }
 
 func antigravitySessionHeaderValue(headers http.Header, names ...string) string {
@@ -166,6 +181,11 @@ func antigravityReasoningReplayClientSessionKey(ctx context.Context, req cliprox
 		if value := strings.TrimSpace(gjson.GetBytes(raw, "prompt_cache_key").String()); value != "" {
 			return "prompt-cache:" + value
 		}
+	}
+	// Reuse ingress extraction for explicit session aliases before falling back
+	// to inferred roots. Keep the established session/execution priorities above.
+	if info, ok := session.ExtractSessionInfo(opts.Headers, nil, nil); ok && info.SessionID != "" {
+		return "client:" + info.SessionID
 	}
 	if value := helps.DerivedSessionID(opts.Metadata, req.Metadata); value != "" {
 		return "derived:" + value
@@ -1429,15 +1449,19 @@ func (t *antigravityReplayContextHashLogTracker) log() {
 	}
 }
 
+const antigravityOpenAIReplayContextPrefix = "openai-chat-v1:"
+
 type antigravityReplayRequestIndex struct {
-	validContents               bool
-	contents                    []antigravityReplayIndexedContent
-	functionCallsByID           map[string]antigravityReplayIndexedPart
-	functionCallCountsByID      map[string]int
-	functionResponseContentByID map[string]int
-	functionResponsePartsByID   map[string][]antigravityReplayPartKey
-	contextFingerprints         *antigravityReplayContextFingerprints
-	logTracker                  *antigravityReplayContextHashLogTracker
+	payload                       []byte
+	openAIChatContextFingerprints *antigravityReplayContextFingerprints
+	validContents                 bool
+	contents                      []antigravityReplayIndexedContent
+	functionCallsByID             map[string]antigravityReplayIndexedPart
+	functionCallCountsByID        map[string]int
+	functionResponseContentByID   map[string]int
+	functionResponsePartsByID     map[string][]antigravityReplayPartKey
+	contextFingerprints           *antigravityReplayContextFingerprints
+	logTracker                    *antigravityReplayContextHashLogTracker
 }
 
 func newAntigravityReplayRequestIndex(payload []byte) *antigravityReplayRequestIndex {
@@ -1449,6 +1473,7 @@ func newAntigravityReplayRequestIndexWithTracker(payload []byte, tracker *antigr
 		tracker = newAntigravityReplayContextHashLogTracker()
 	}
 	index := &antigravityReplayRequestIndex{
+		payload:                     payload,
 		functionCallsByID:           make(map[string]antigravityReplayIndexedPart),
 		functionCallCountsByID:      make(map[string]int),
 		functionResponseContentByID: make(map[string]int),
@@ -1495,7 +1520,7 @@ func newAntigravityReplayRequestIndexWithTracker(payload []byte, tracker *antigr
 			}
 		}
 	}
-	index.contextFingerprints = newAntigravityReplayContextFingerprints(payload, index.contents, index.validContents)
+	index.contextFingerprints = newAntigravityReplayContextFingerprints(payload, index.contents, index.validContents, true)
 	return index
 }
 
@@ -1522,8 +1547,21 @@ func (i *antigravityReplayRequestIndex) contextFingerprint(beforeContentIndex in
 	return i.contextFingerprints.at(beforeContentIndex)
 }
 
+// openAIChatContextFingerprint binds historical calls to system instructions and
+// preceding contents, not the current turn's tool declarations or tool choice.
+// The version tag leaves legacy and non-OpenAI ledger matching unchanged.
+func (i *antigravityReplayRequestIndex) openAIChatContextFingerprint(contentIndex int) string {
+	if i.openAIChatContextFingerprints == nil {
+		i.openAIChatContextFingerprints = newAntigravityReplayContextFingerprints(i.payload, i.contents, i.validContents, false)
+	}
+	return antigravityOpenAIReplayContextPrefix + i.openAIChatContextFingerprints.at(contentIndex)
+}
+
 func (i *antigravityReplayRequestIndex) contextMatches(itemResult gjson.Result, contentIndex int) bool {
 	expected := strings.TrimSpace(itemResult.Get("contextHash").String())
+	if strings.HasPrefix(expected, antigravityOpenAIReplayContextPrefix) {
+		return expected == i.openAIChatContextFingerprint(contentIndex)
+	}
 	return expected == "" || expected == i.contextFingerprint(contentIndex)
 }
 
@@ -1564,6 +1602,7 @@ func newAntigravityReplayContextFingerprints(
 	payload []byte,
 	contents []antigravityReplayIndexedContent,
 	valid bool,
+	includeToolPolicy bool,
 ) *antigravityReplayContextFingerprints {
 	fingerprints := &antigravityReplayContextFingerprints{
 		valid:    valid,
@@ -1574,7 +1613,11 @@ func newAntigravityReplayContextFingerprints(
 		fingerprints.sums = []string{""}
 		return fingerprints
 	}
-	for _, path := range []string{"request.systemInstruction", "request.tools", "request.toolConfig"} {
+	paths := []string{"request.systemInstruction"}
+	if includeToolPolicy {
+		paths = append(paths, "request.tools", "request.toolConfig")
+	}
+	for _, path := range paths {
 		if value := util.GetGJSONBytesNoCopy(payload, path); value.Exists() {
 			fingerprints.writeString(path)
 			fingerprints.writeByte(0)
@@ -2288,6 +2331,14 @@ func newAntigravityReasoningReplayAccumulator(scope antigravityReasoningReplaySc
 	index := newAntigravityReplayRequestIndex(requestPayload)
 	contentIndex, basePartIndex := index.pendingModelContentIndex()
 	items := index.reasoningReplayItemsFromRequest()
+	responseContextHash := index.contextFingerprint(contentIndex)
+	if scope.openAIChat {
+		responseContextHash = index.openAIChatContextFingerprint(contentIndex)
+		for itemIndex, item := range items {
+			cachedContentIndex := int(gjson.GetBytes(item, "contentIndex").Int())
+			items[itemIndex] = antigravitySetReplayItemContextHashValue(item, index.openAIChatContextFingerprint(cachedContentIndex))
+		}
+	}
 	seenSignatures := make(map[string]bool, len(items))
 	for _, item := range items {
 		itemResult := gjson.ParseBytes(item)
@@ -2317,7 +2368,7 @@ func newAntigravityReasoningReplayAccumulator(scope antigravityReasoningReplaySc
 	}
 	return &antigravityReasoningReplayAccumulator{
 		scope:                   scope,
-		responseContextHash:     index.contextFingerprint(contentIndex),
+		responseContextHash:     responseContextHash,
 		items:                   items,
 		seenFC:                  make(map[string]bool),
 		seenSignatures:          seenSignatures,
@@ -2436,11 +2487,42 @@ func (a *antigravityReasoningReplayAccumulator) ObserveSSELine(line []byte) {
 	a.observeResponsePayload(payload)
 }
 
+func (a *antigravityReasoningReplayAccumulator) claimPrecedingTurnThoughtSignature() string {
+	if a == nil {
+		return ""
+	}
+	for itemIndex := range a.items {
+		item := gjson.ParseBytes(a.items[itemIndex])
+		if item.Get("type").String() == "function_call_part" &&
+			int(item.Get("contentIndex").Int()) == a.contentIndex &&
+			strings.TrimSpace(item.Get("thoughtSignature").String()) != "" {
+			return ""
+		}
+	}
+	for itemIndex := len(a.items) - 1; itemIndex >= 0; itemIndex-- {
+		item := gjson.ParseBytes(a.items[itemIndex])
+		if item.Get("type").String() != "thought_signature" ||
+			int(item.Get("contentIndex").Int()) != a.contentIndex ||
+			item.Get("targetKind").String() != "thought" {
+			continue
+		}
+		if sig := strings.TrimSpace(item.Get("thoughtSignature").String()); sig != "" {
+			return sig
+		}
+	}
+	return ""
+}
+
 func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload []byte) {
 	if finishReason := strings.TrimSpace(gjson.GetBytes(payload, "response.candidates.0.finishReason").String()); finishReason != "" {
 		a.terminal = true
+	} else if finishReason := strings.TrimSpace(gjson.GetBytes(payload, "candidates.0.finishReason").String()); finishReason != "" {
+		a.terminal = true
 	}
 	parts := gjson.GetBytes(payload, "response.candidates.0.content.parts")
+	if !parts.IsArray() {
+		parts = gjson.GetBytes(payload, "candidates.0.content.parts")
+	}
 	if !parts.IsArray() {
 		return
 	}
@@ -2472,6 +2554,9 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 						break
 					}
 				}
+			}
+			if signature == "" {
+				signature = a.claimPrecedingTurnThoughtSignature()
 			}
 			keys := antigravityReplayToolCallKeysFromPart(fc)
 			for _, key := range keys {
@@ -2727,7 +2812,13 @@ func cacheAntigravityReasoningReplayFromResponse(ctx context.Context, scope anti
 		return
 	}
 	acc := newAntigravityReasoningReplayAccumulator(scope, requestPayload)
+	if acc == nil {
+		return
+	}
 	acc.observeResponsePayload(body)
+	if !acc.terminal && (gjson.GetBytes(body, "response.candidates.0").Exists() || gjson.GetBytes(body, "candidates.0").Exists()) {
+		acc.terminal = true
+	}
 	acc.Commit(ctx)
 }
 

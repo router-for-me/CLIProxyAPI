@@ -580,6 +580,10 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			initialHasFinishReason := chunkHasFinishReason(chunk)
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 			flusher.Flush()
+			if termErr := chunkTerminalError(chunk); termErr != nil {
+				cliCancel(termErr.Error)
+				return
+			}
 
 			// Continue streaming the rest
 			h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, initialHasFinishReason)
@@ -781,10 +785,31 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 		}
 	}
 }
+func chunkTerminalError(chunk []byte) *interfaces.ErrorMessage {
+	chunk = bytes.TrimSpace(chunk)
+	if bytes.HasPrefix(chunk, []byte("data:")) {
+		chunk = bytes.TrimSpace(chunk[5:])
+	}
+	if gjson.GetBytes(chunk, "choices").Exists() || !gjson.GetBytes(chunk, "error").IsObject() {
+		return nil
+	}
+	msg := gjson.GetBytes(chunk, "error.message").String()
+	if msg == "" {
+		msg = string(chunk)
+	}
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      fmt.Errorf("%s", msg),
+	}
+}
+
 func chunkHasFinishReason(chunk []byte) bool {
 	chunk = bytes.TrimSpace(chunk)
 	if bytes.HasPrefix(chunk, []byte("data:")) {
 		chunk = bytes.TrimSpace(chunk[5:])
+	}
+	if chunkTerminalError(chunk) != nil {
+		return true
 	}
 	for _, choice := range gjson.GetBytes(chunk, "choices").Array() {
 		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != gjson.Null && reason.String() != "" {
@@ -796,15 +821,22 @@ func chunkHasFinishReason(chunk []byte) bool {
 
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialHasFinishReason bool) {
 	sawFinishReason := initialHasFinishReason
+	var terminalChunkErr *interfaces.ErrorMessage
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			if !sawFinishReason && chunkHasFinishReason(chunk) {
+			if termErr := chunkTerminalError(chunk); termErr != nil {
+				terminalChunkErr = termErr
+				sawFinishReason = true
+			} else if !sawFinishReason && chunkHasFinishReason(chunk) {
 				sawFinishReason = true
 			}
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 		},
+		ChunkError: func() *interfaces.ErrorMessage {
+			return terminalChunkErr
+		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			if errMsg == nil {
+			if errMsg == nil || terminalChunkErr != nil {
 				return
 			}
 			status := http.StatusInternalServerError

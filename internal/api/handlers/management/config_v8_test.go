@@ -683,6 +683,8 @@ plugins:
 			t.Fatal(errLoad)
 		}
 		loaded.Home = cfg.Home
+		// SourceHash is runtime-only metadata of a file load, not persisted config.
+		loaded.SourceHash = ""
 		select {
 		case snapshot := <-reloads:
 			if !reflect.DeepEqual(snapshot, loaded) || !reflect.DeepEqual(h.cfg, loaded) {

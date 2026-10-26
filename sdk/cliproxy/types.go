@@ -5,6 +5,7 @@ package cliproxy
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -106,10 +107,12 @@ type WatcherWrapper struct {
 
 	setConfig                    func(cfg *config.Config)
 	snapshotAuths                func() []*coreauth.Auth
+	snapshotAuthFile             func(path string) ([]*coreauth.Auth, error)
 	setUpdateQueue               func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate        func(update watcher.AuthUpdate) bool
 	dispatchPersistedAuth        func(update watcher.AuthUpdate) bool
 	dispatchPersistedAuthWithRev func(update *watcher.AuthUpdate) (bool, uint64)
+	rereadDiscardedFileSnapshot  func(auth *coreauth.Auth)
 	setPluginAuthParser          func(parser PluginAuthParser)
 	reloadConfigIfChanged        func()
 }
@@ -208,6 +211,23 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 		return nil
 	}
 	return w.snapshotAuths()
+}
+
+// SnapshotAuthFile re-synthesizes a single file and preserves parsing errors.
+func (w *WatcherWrapper) SnapshotAuthFile(path string) ([]*coreauth.Auth, error) {
+	if w == nil || w.snapshotAuthFile == nil {
+		return nil, fmt.Errorf("file auth snapshot is unavailable")
+	}
+	return w.snapshotAuthFile(path)
+}
+
+// RereadDiscardedFileSnapshot asks the underlying watcher to invalidate and
+// re-read a file snapshot discarded by the manager's digest fence.
+func (w *WatcherWrapper) RereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	if w == nil || w.rereadDiscardedFileSnapshot == nil {
+		return
+	}
+	w.rereadDiscardedFileSnapshot(auth)
 }
 
 // SetAuthUpdateQueue registers the channel used to propagate auth updates.

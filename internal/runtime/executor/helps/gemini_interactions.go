@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -31,31 +32,86 @@ func SanitizeGeminiInteractionsUnsupportedInputIDs(body []byte) []byte {
 	if !input.IsArray() {
 		return body
 	}
-	for i, item := range input.Array() {
+	items := input.Array()
+	kept := make([]string, 0, len(items))
+	changed := false
+	for _, item := range items {
+		rawItem := item.Raw
 		stepType := item.Get("type").String()
-		if stepType == "function_call" {
-			if !item.Get("id").Exists() && item.Get("call_id").Exists() {
-				body, _ = sjson.SetBytes(body, fmt.Sprintf("input.%d.id", i), item.Get("call_id").String())
+		if stepType == "thought" {
+			sig := strings.TrimSpace(item.Get("signature").String())
+			if sig == "" {
+				sig = strings.TrimSpace(item.Get("thought_signature").String())
 			}
-			if item.Get("call_id").Exists() {
-				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.call_id", i))
+			if sig == "" {
+				sig = strings.TrimSpace(item.Get("thoughtSignature").String())
 			}
-		} else {
-			if item.Get("id").Exists() {
-				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.id", i))
+			normalizedSig, ok := signature.CompatibleSignatureForProviderBlock(
+				signature.SignatureProviderGemini,
+				sig,
+				signature.SignatureBlockKindGeminiModelPart,
+			)
+			if !ok || normalizedSig == "" || signature.IsGeminiThoughtSignatureBypass(signature.SignaturePayloadWithoutProviderPrefix(normalizedSig)) {
+				// Official Gemini Interactions API rejects thought steps without a
+				// valid Gemini signature (or with foreign/corrupt base64 signatures
+				// or "content" arrays).
+				changed = true
+				continue
 			}
-		}
-		content := item.Get("content")
-		if !content.IsArray() {
+			if normalizedSig != item.Get("signature").String() {
+				rawItem, _ = sjson.Set(rawItem, "signature", normalizedSig)
+				changed = true
+			}
+			for _, unsupportedField := range []string{"id", "content", "text", "thought_signature", "thoughtSignature"} {
+				if gjson.Get(rawItem, unsupportedField).Exists() {
+					rawItem, _ = sjson.Delete(rawItem, unsupportedField)
+					changed = true
+				}
+			}
+			kept = append(kept, rawItem)
 			continue
 		}
-		for j, part := range content.Array() {
-			if part.Get("id").Exists() {
-				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.content.%d.id", i, j))
+		if stepType == "function_call" {
+			if !item.Get("id").Exists() && item.Get("call_id").Exists() {
+				rawItem, _ = sjson.Set(rawItem, "id", item.Get("call_id").String())
+				changed = true
+			}
+			if item.Get("call_id").Exists() {
+				rawItem, _ = sjson.Delete(rawItem, "call_id")
+				changed = true
+			}
+		} else if item.Get("id").Exists() {
+			rawItem, _ = sjson.Delete(rawItem, "id")
+			changed = true
+		}
+		content := gjson.Get(rawItem, "content")
+		if content.IsArray() {
+			for j, part := range content.Array() {
+				if part.Get("id").Exists() {
+					rawItem, _ = sjson.Delete(rawItem, fmt.Sprintf("content.%d.id", j))
+					changed = true
+				}
 			}
 		}
+		kept = append(kept, rawItem)
 	}
-	return body
+	if !changed {
+		return body
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, raw := range kept {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(raw)
+	}
+	b.WriteByte(']')
+	updated, err := sjson.SetRawBytes(body, "input", []byte(b.String()))
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 // TranslateGeminiInteractionsRequestBody translates a request payload to FormatInteractions.

@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 type openAICompatibilityRegistrationCache struct {
@@ -440,14 +441,21 @@ func shouldUpgradeOpenAICompatToPluginRefresh(existing, next coreauth.ProviderEx
 	return bareOpenAICompat
 }
 
-func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey string, models []*ModelInfo) {
+// registerResolvedModelsForAuthFenced publishes models only if fence still
+// matches inherited global exclusions and the current auth snapshot, and the
+// registry epoch has not advanced. A superseded registration must not
+// overwrite or remove a newer one. The returned value is false only when
+// the fence rejected the publication; true also covers no-op inputs, so
+// it never by itself proves models were published. Callers that drive a
+// completion pass use false to reconcile the latest auth instead of
+// losing the registration.
+func (s *Service) registerResolvedModelsForAuthFenced(a *coreauth.Auth, fence modelRegistrationFence, providerKey string, models []*ModelInfo) bool {
 	if a == nil || a.ID == "" {
-		return
+		return true
 	}
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
 	if providerKey == "" {
-		GlobalModelRegistry().UnregisterClient(a.ID)
-		return
+		return s.unregisterModelsForAuthFenced(a, fence)
 	}
 	normalizedModels := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
@@ -463,10 +471,28 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		normalizedModels = append(normalizedModels, &clone)
 	}
 	if len(normalizedModels) == 0 {
-		GlobalModelRegistry().UnregisterClient(a.ID)
-		return
+		return s.unregisterModelsForAuthFenced(a, fence)
 	}
-	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+	if !fence.publishModels(s, a.ID, providerKey, normalizedModels) {
+		log.WithFields(log.Fields{"auth_id": a.ID, "provider": providerKey, "models": len(normalizedModels)}).Warnf("model registration for auth %s was superseded during computation; discarded the stale publication instead of overwriting the latest auth state", a.ID)
+		return false
+	}
+	return true
+}
+
+// unregisterModelsForAuthFenced removes a client's models only if fence
+// still matches inherited global exclusions and the current auth snapshot, and
+// the registry epoch has not advanced since the registration began. The
+// returned value is false only when the fence rejected the removal.
+func (s *Service) unregisterModelsForAuthFenced(a *coreauth.Auth, fence modelRegistrationFence) bool {
+	if a == nil || a.ID == "" {
+		return true
+	}
+	if !fence.publishUnregister(s, a.ID) {
+		log.WithFields(log.Fields{"auth_id": a.ID}).Warnf("model unregistration for auth %s was superseded during computation; discarded the stale removal instead of deleting the latest auth state", a.ID)
+		return false
+	}
+	return true
 }
 
 func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
@@ -476,8 +502,11 @@ func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
 	return s.pluginHost.ModelsForProvider(providerKey)
 }
 
-func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo) []*ModelInfo {
-	pluginModels := s.pluginModelsForProvider(providerKey)
+// appendPluginModels appends the provider's plugin static models that are not excluded.
+// Callers filter native models before applying OAuth aliases, so plugin models are filtered
+// here by their original IDs instead of re-filtering the merged list by alias names.
+func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo, excluded []string) []*ModelInfo {
+	pluginModels := applyExcludedModels(s.pluginModelsForProvider(providerKey), excluded)
 	if len(pluginModels) == 0 {
 		return models
 	}
@@ -511,25 +540,37 @@ func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo) []
 }
 
 func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreauth.Auth, provider, authKind string, excluded []string) bool {
-	return s.tryRegisterPluginModelsForAuthWithConfig(ctx, s.currentConfig(), a, provider, authKind, excluded)
+	handled, _ := s.tryRegisterPluginModelsForAuthWithConfig(ctx, s.currentConfig(), a, provider, authKind, excluded)
+	return handled
 }
 
-func (s *Service) tryRegisterPluginModelsForAuthWithConfig(ctx context.Context, cfg *config.Config, a *coreauth.Auth, provider, authKind string, excluded []string) bool {
+func (s *Service) tryRegisterPluginModelsForAuthWithConfig(ctx context.Context, cfg *config.Config, a *coreauth.Auth, provider, authKind string, excluded []string) (bool, bool) {
+	return s.tryRegisterPluginModelsForAuthWithConfigFenced(ctx, cfg, a, newModelRegistrationFence(a, cfg), provider, authKind, excluded)
+}
+
+// tryRegisterPluginModelsForAuthWithConfigFenced returns whether a plugin
+// handled model registration for the auth and, when handled, whether the
+// publication fence rejected the result (reported as published=false).
+// published=true also covers plugin errors and real commit failures, so it
+// never by itself proves models were published. A handled-but-rejected
+// result means the computation was superseded and the latest auth must be
+// reconciled by the completion pass (issue #6718).
+func (s *Service) tryRegisterPluginModelsForAuthWithConfigFenced(ctx context.Context, cfg *config.Config, a *coreauth.Auth, fence modelRegistrationFence, provider, authKind string, excluded []string) (bool, bool) {
 	if s == nil || s.pluginHost == nil || a == nil {
-		return false
+		return false, true
 	}
 	if ctx != nil && ctx.Err() != nil {
-		return true
+		return true, true
 	}
 	result := s.pluginHost.ModelsForAuth(ctx, a)
 	if ctx != nil && ctx.Err() != nil {
-		return true
+		return true, true
 	}
 	if !result.Handled {
-		return false
+		return false, true
 	}
 	if result.Err != nil {
-		return true
+		return true, true
 	}
 	if s.coreManager != nil && strings.EqualFold(a.Provider, "antigravity") && !s.antigravityHomeEnabled() {
 		defer s.coreManager.ReconcileRegistryModelStates(ctx, a.ID)
@@ -539,6 +580,7 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfig(ctx context.Context, 
 	if providerKey == "" {
 		providerKey = strings.ToLower(strings.TrimSpace(provider))
 	}
+	pluginAuthCommitted := false
 	if result.Auth != nil && s.coreManager != nil {
 		result.Auth.ID = a.ID
 		if result.Auth.Provider == "" {
@@ -555,8 +597,24 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfig(ctx context.Context, 
 				result.Auth.Attributes[key] = value
 			}
 		}
-		if updated, errUpdate := s.coreManager.Update(ctx, result.Auth); errUpdate == nil && updated != nil {
+		updated, committed, errUpdate := s.coreManager.UpdateIfRegistrationCurrent(ctx, a, result.Auth)
+		if errUpdate != nil {
+			// A real update failure (validation, persistence) is not a
+			// fencing race: report it as handled without asking the
+			// completion pass to re-invoke the plugin against the same
+			// failing input.
+			log.WithFields(log.Fields{"auth_id": a.ID, "provider": providerKey}).Warnf("plugin model registration for auth %s failed to commit its auth update: %v", a.ID, errUpdate)
+			return true, true
+		}
+		if committed && updated != nil {
 			activeAuth = updated.Clone()
+			pluginAuthCommitted = true
+		} else {
+			// The plugin computation's starting identity was superseded
+			// before its auth update could commit. Its models belong to
+			// that old identity and must not be laundered into the new one.
+			log.WithFields(log.Fields{"auth_id": a.ID, "provider": providerKey}).Warnf("plugin model registration for auth %s was superseded before its auth update could commit; discarded the stale plugin result", a.ID)
+			return true, false
 		}
 	}
 	if activeAuth == nil {
@@ -570,24 +628,36 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfig(ctx context.Context, 
 	}
 	activeAuthKind := activeAuth.AuthKind()
 	activeExcluded := oauthExcludedModelsForConfig(cfg, providerKey, activeAuthKind)
+	fallbackExclusionProvider := ""
 	if a == activeAuth && len(activeExcluded) == 0 {
 		activeExcluded = excluded
+		fallbackExclusionProvider = strings.ToLower(strings.TrimSpace(provider))
 	}
+	// Credential-level exclusions take priority over the global oauth-excluded-models config.
 	if activeAuth.Attributes != nil {
 		if val, ok := activeAuth.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
 			activeExcluded = strings.Split(val, ",")
 		}
 	}
 	if ctx != nil && ctx.Err() != nil {
-		return true
+		return true, true
 	}
 	models := applyExcludedModels(result.Models, activeExcluded)
 	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
+	publicationFence := fence
+	if pluginAuthCommitted {
+		// A plugin-returned auth update is a deliberate identity transition,
+		// committed conditionally against the starting identity above.
+		// Refresh only the auth inputs after that commit; retain the
+		// starting exclusion summaries and registry epoch so newer global
+		// rules or publications cannot be adopted by this older computation.
+		publicationFence = fence.withAuth(activeAuth)
+	}
+	publicationFence.exclusionProvider = providerKey
+	publicationFence.fallbackExclusionProvider = fallbackExclusionProvider
 	if len(models) > 0 {
 		models = applyOAuthSettingsForAuth(cfg, providerKey, activeAuthKind, models)
-		s.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))
-		return true
+		return true, s.registerResolvedModelsForAuthFenced(activeAuth, publicationFence, providerKey, applyModelPrefixes(models, activeAuth.Prefix, cfg != nil && cfg.ForceModelPrefix))
 	}
-	GlobalModelRegistry().UnregisterClient(activeAuth.ID)
-	return true
+	return true, s.unregisterModelsForAuthFenced(activeAuth, publicationFence)
 }

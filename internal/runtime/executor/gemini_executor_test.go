@@ -1655,3 +1655,195 @@ func TestGeminiExecutorClaudeMalformedFunctionCallCancelAfterErrorPreservesUsage
 		t.Fatalf("LastError.HTTPStatus = %d, want 502; err=%+v", updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus, updated.ModelStates["gemini-4-argon"].LastError)
 	}
 }
+
+func TestGeminiExecutorPromptFeedbackBlockWithoutCandidatesReturnsError(t *testing.T) {
+	cases := []struct {
+		name           string
+		upstreamBody   string
+		format         sdktranslator.Format
+		requestPayload []byte
+		wantErrSubstr  string
+	}{
+		{
+			name:           "openai_with_message",
+			upstreamBody:   `{"promptFeedback":{"blockReason":"SAFETY","blockReasonMessage":"The prompt is blocked due to safety"},"usageMetadata":{"promptTokenCount":413751,"totalTokenCount":413751},"modelVersion":"gemini-4-argon"}`,
+			format:         sdktranslator.FormatOpenAI,
+			requestPayload: []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":"hi"}]}`),
+			wantErrSubstr:  "upstream blocked the prompt: SAFETY - The prompt is blocked due to safety",
+		},
+		{
+			name:           "claude_empty_candidates_without_message",
+			upstreamBody:   `{"candidates":[],"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":413751,"totalTokenCount":413751},"modelVersion":"gemini-4-argon"}`,
+			format:         sdktranslator.FormatClaude,
+			requestPayload: []byte(`{"model":"gemini-4-argon","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`),
+			wantErrSubstr:  "upstream blocked the prompt: PROHIBITED_CONTENT",
+		},
+		{
+			name:           "openai_responses_without_message",
+			upstreamBody:   `{"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":413751,"totalTokenCount":413751},"modelVersion":"gemini-4-argon"}`,
+			format:         sdktranslator.FormatOpenAIResponse,
+			requestPayload: []byte(`{"model":"gemini-4-argon","input":"hi"}`),
+			wantErrSubstr:  "upstream blocked the prompt: SAFETY",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, ":streamGenerateContent") {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("data: " + tc.upstreamBody + "\n\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.upstreamBody))
+			}))
+			defer server.Close()
+
+			exec := NewGeminiExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID:       t.Name(),
+				Provider: "gemini",
+				Attributes: map[string]string{
+					"api_key":  "test-key",
+					"base_url": server.URL,
+				},
+			}
+			capture := &malformedFunctionCallUsageCapture{authID: auth.ID, records: make(chan usage.Record, 2)}
+			usage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
+			})
+
+			req := cliproxyexecutor.Request{
+				Model:   "gemini-4-argon",
+				Payload: tc.requestPayload,
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   tc.format,
+				ResponseFormat: tc.format,
+			}
+
+			_, errExec := exec.Execute(context.Background(), auth, req, opts)
+			if errExec == nil {
+				t.Fatal("Execute() error = nil, want 502 prompt block error")
+			}
+			status, okStatus := errExec.(interface{ StatusCode() int })
+			if !okStatus || status.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("Execute() error = %T %v, want status 502", errExec, errExec)
+			}
+			if !strings.Contains(errExec.Error(), tc.wantErrSubstr) {
+				t.Fatalf("Execute() error = %q, want %q", errExec.Error(), tc.wantErrSubstr)
+			}
+
+			streamRes, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+			if errStream != nil {
+				t.Fatalf("ExecuteStream() error = %v", errStream)
+			}
+			var streamErr error
+			for chunk := range streamRes.Chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if streamErr == nil {
+				t.Fatal("ExecuteStream() chunk.Err = nil, want 502 prompt block error")
+			}
+			streamStatus, okStreamStatus := streamErr.(interface{ StatusCode() int })
+			if !okStreamStatus || streamStatus.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("ExecuteStream() chunk.Err = %T %v, want status 502", streamErr, streamErr)
+			}
+			if !strings.Contains(streamErr.Error(), tc.wantErrSubstr) {
+				t.Fatalf("ExecuteStream() chunk.Err = %q, want %q", streamErr.Error(), tc.wantErrSubstr)
+			}
+
+			for i := 0; i < 2; i++ {
+				record := <-capture.records
+				if !record.Failed || record.Detail.InputTokens != 413751 {
+					t.Fatalf("usage record[%d] = %+v, want Failed=true InputTokens=413751", i, record)
+				}
+			}
+		})
+	}
+
+	t.Run("candidates_with_promptFeedback_not_blocked", func(t *testing.T) {
+		bodyWithCandidate := `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-4-argon"}`
+		if msg, blocked := geminiPromptBlockErrorMessage([]byte(bodyWithCandidate)); blocked {
+			t.Fatalf("geminiPromptBlockErrorMessage() = (%q, true), want empty false when candidates exist", msg)
+		}
+		wrappedBlocked := `{"response":{"promptFeedback":{"blockReason":"SAFETY","blockReasonMessage":"blocked"}}}`
+		if msg, blocked := geminiPromptBlockErrorMessage([]byte(wrappedBlocked)); !blocked || msg != "upstream blocked the prompt: SAFETY - blocked" {
+			t.Fatalf("geminiPromptBlockErrorMessage(wrapped) = (%q, %v), wantSAFETY blocked true", msg, blocked)
+		}
+	})
+}
+
+func TestGeminiAndVertexOpenAIStreamTruncationReturnsError(t *testing.T) {
+	truncatedChunk := `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":5,"totalTokenCount":25}}
+
+`
+	formats := []struct {
+		name    string
+		format  sdktranslator.Format
+		payload []byte
+	}{
+		{
+			name:    "openai_chat",
+			format:  sdktranslator.FormatOpenAI,
+			payload: []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+		},
+	}
+	for _, provider := range []string{"gemini", "vertex_api_key", "vertex_service_account"} {
+		for _, fc := range formats {
+			t.Run(provider+"/"+fc.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/token" {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, `{"access_token":"local-token","token_type":"Bearer","expires_in":3600}`)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, truncatedChunk)
+				}))
+				defer server.Close()
+
+				ctx, exec, auth := issue6258Executor(t, provider, server.URL)
+				auth.ID = t.Name()
+				capture := &malformedFunctionCallUsageCapture{authID: auth.ID, records: make(chan usage.Record, 1)}
+				usage.RegisterNamedPlugin(t.Name(), capture)
+				t.Cleanup(func() {
+					usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
+				})
+
+				req := cliproxyexecutor.Request{
+					Model:   "gemini-2.5-flash",
+					Payload: fc.payload,
+				}
+				streamRes, errStream := exec.ExecuteStream(ctx, auth, req, cliproxyexecutor.Options{
+					SourceFormat:   fc.format,
+					ResponseFormat: fc.format,
+					Stream:         true,
+				})
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				var streamErr error
+				for chunk := range streamRes.Chunks {
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+					}
+				}
+				if streamErr == nil {
+					t.Fatal("ExecuteStream() chunk.Err = nil, want 502 truncation error")
+				}
+				if !strings.Contains(streamErr.Error(), "upstream stream closed before finishReason") {
+					t.Fatalf("ExecuteStream() chunk.Err = %q, want upstream stream closed before finishReason", streamErr.Error())
+				}
+				record := <-capture.records
+				if !record.Failed || record.Detail.InputTokens != 20 {
+					t.Fatalf("usage record = %+v, want Failed=true InputTokens=20", record)
+				}
+			})
+		}
+	}
+}

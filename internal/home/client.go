@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -190,9 +191,12 @@ type Client struct {
 	lifecycle   config.CredentialConcurrencyConfig
 	limiter     atomic.Pointer[config.CredentialConcurrencyConfig]
 	managed     bool
+	// releaseReady belongs to this acknowledged membership and is never copied to a replacement.
+	releaseReady bool
 
 	heartbeatOK       atomic.Bool
 	dispatchFenced    atomic.Bool
+	releaseFenced     atomic.Bool
 	ambiguousDispatch atomic.Bool
 	// casUnsupported latches when Home does not implement the CAS command.
 	// It is deliberately NOT carried across NewLifetime: CAS support is a
@@ -207,6 +211,8 @@ type Client struct {
 	legacyMembership     bool
 	clusterNodes         []clusterNode
 	reconnectFailures    int
+	balance              clusterBalanceState
+	latency              *clusterLatencyHistory
 }
 
 func New(homeCfg config.HomeConfig) *Client {
@@ -234,8 +240,20 @@ func (c *Client) NewLifetime() *Client {
 		testOperationTimeout: c.testOperationTimeout,
 		instanceID:           c.instanceID,
 		legacyMembership:     c.legacyMembership,
+		balance:              c.balance,
+		latency:              c.latency,
 	}
+	next.balance.registered = false
+	next.balance.unsupported = false
+	next.balance.latencySupported = false
 	next.recoveryState.Store(c.recoveryState.Load())
+	if next.balance.moving {
+		next.homeCfg.Host = next.balance.target.IP
+		next.homeCfg.Port = next.balance.target.Port
+		if !next.recoveryState.CompareAndSwap(uint32(recoveryStateTakeoverEligible), uint32(recoveryStateSwitchingTakeover)) {
+			next.recoveryState.CompareAndSwap(uint32(recoveryStateStable), uint32(recoveryStateSwitching))
+		}
+	}
 	return next
 }
 
@@ -289,12 +307,20 @@ func (c *Client) HeartbeatOK() bool {
 	return c.heartbeatOK.Load()
 }
 
-// Close permanently ends this client's dispatch lifetime.
+// FenceDispatch stops new credential acquisitions while preserving transports and final concurrency releases.
+func (c *Client) FenceDispatch() {
+	if c != nil {
+		c.dispatchFenced.Store(true)
+	}
+}
+
+// Close permanently ends this client's dispatch and release lifetime.
 func (c *Client) Close() {
 	if c == nil {
 		return
 	}
 	c.dispatchFenced.Store(true)
+	c.releaseFenced.Store(true)
 	c.heartbeatOK.Store(false)
 	c.mu.Lock()
 	commandClient, subscriptionClient, connections := c.detachClientsLocked()
@@ -318,6 +344,7 @@ func (c *Client) closeBootstrapPools() {
 	}
 	c.heartbeatOK.Store(false)
 	c.mu.Lock()
+	c.releaseReady = false
 	commandClient, subscriptionClient, connections := c.detachClientsLocked()
 	c.mu.Unlock()
 	closeDetachedClients(commandClient, subscriptionClient, connections)
@@ -330,6 +357,7 @@ func (c *Client) AbortAmbiguousDispatch() {
 	}
 	c.ambiguousDispatch.Store(true)
 	c.dispatchFenced.Store(true)
+	c.releaseFenced.Store(true)
 	c.heartbeatOK.Store(false)
 	c.mu.Lock()
 	commandClient, subscriptionClient, connections := c.detachClientsLocked()
@@ -515,10 +543,31 @@ func (c *Client) ensureClients() error {
 }
 
 func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
-	tlsConfig, errTLS := c.homeTLSConfigLocked(addr)
+	options, tlsSettings := c.redisOptionsSnapshotLocked(addr)
+	tlsConfig, errTLS := newHomeTLSConfig(tlsSettings, "")
 	if errTLS != nil {
 		return nil, errTLS
 	}
+	options.TLSConfig = tlsConfig
+	options.Dialer = c.trackedRedisDialer(redis.NewDialer(options))
+	return options, nil
+}
+
+// redisOptionsSnapshotLocked copies only values; certificate IO can run after releasing c.mu.
+func (c *Client) redisOptionsSnapshotLocked(addr string) (*redis.Options, config.HomeTLSConfig) {
+	tlsSettings := c.homeCfg.TLS
+	serverName := strings.TrimSpace(tlsSettings.ServerName)
+	if serverName == "" {
+		if tlsSettings.UseTargetServerName {
+			serverName = hostFromAddress(addr)
+		} else {
+			serverName = strings.TrimSpace(c.seedHost)
+		}
+	}
+	if serverName == "" {
+		serverName = strings.TrimSpace(c.homeCfg.Host)
+	}
+	tlsSettings.ServerName = serverName
 	dialTimeout := homeRedisOperationTimeout
 	readTimeout := homeRedisOperationTimeout
 	writeTimeout := homeRedisOperationTimeout
@@ -539,7 +588,6 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 	}
 	options := &redis.Options{
 		Addr:                  addr,
-		TLSConfig:             tlsConfig,
 		DialTimeout:           dialTimeout,
 		ReadTimeout:           readTimeout,
 		WriteTimeout:          writeTimeout,
@@ -547,8 +595,7 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 		DialerRetries:         1,
 		ContextTimeoutEnabled: true,
 	}
-	options.Dialer = c.trackedRedisDialer(redis.NewDialer(options))
-	return options, nil
+	return options, tlsSettings
 }
 
 type homeDispatchConn struct {
@@ -623,21 +670,6 @@ func cloneRedisOptions(options *redis.Options) *redis.Options {
 		cloned.MaintNotificationsConfig = &maintNotifications
 	}
 	return &cloned
-}
-
-func (c *Client) homeTLSConfigLocked(addr string) (*tls.Config, error) {
-	serverName := strings.TrimSpace(c.homeCfg.TLS.ServerName)
-	if serverName == "" {
-		if c.homeCfg.TLS.UseTargetServerName {
-			serverName = hostFromAddress(addr)
-		} else {
-			serverName = strings.TrimSpace(c.seedHost)
-		}
-	}
-	if serverName == "" {
-		serverName = strings.TrimSpace(c.homeCfg.Host)
-	}
-	return newHomeTLSConfig(c.homeCfg.TLS, serverName)
 }
 
 func hostFromAddress(addr string) string {
@@ -785,6 +817,7 @@ func (c *Client) refreshClusterNodes(ctx context.Context) (bool, error) {
 	if !c.clusterDiscoveryEnabled() {
 		return false, nil
 	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -805,7 +838,6 @@ func (c *Client) refreshClusterNodes(ctx context.Context) (bool, error) {
 	if errText != nil {
 		return false, errText
 	}
-
 	nodes, errParse := parseClusterNodesPayload([]byte(raw))
 	if errParse != nil {
 		return false, errParse
@@ -813,12 +845,16 @@ func (c *Client) refreshClusterNodes(ctx context.Context) (bool, error) {
 	if len(nodes) == 0 {
 		return false, nil
 	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.clusterNodes = nodes
-	c.reconnectFailures = 0
-	return c.switchToNodeLocked(nodes[0]), nil
+	// Discovery alone does not establish recovery or reset reconnect failures.
+	// Keep planned handoffs pinned here; repeated failures may still trigger failover.
+	if c.balance.moving || c.balance.returning || c.heartbeatOK.Load() {
+		return false, nil
+	}
+	node, ok := c.chooseClusterNodeLocked(nodes, false, rand.Float64())
+	return ok && c.switchToNodeLocked(node), nil
 }
 
 func parseClusterNodesPayload(raw []byte) ([]clusterNode, error) {
@@ -845,11 +881,17 @@ func (c *Client) updateClusterNodesFromPayload(raw []byte) error {
 
 func normalizeClusterNodes(nodes []clusterNode) []clusterNode {
 	out := make([]clusterNode, 0, len(nodes))
+	seen := make(map[string]bool, len(nodes))
 	for _, node := range nodes {
 		node.IP = strings.TrimSpace(node.IP)
-		if node.IP == "" || node.Port <= 0 {
+		if node.IP == "" || node.Port <= 0 || node.Port > 65535 {
 			continue
 		}
+		address := clusterNodeAddress(node)
+		if seen[address] {
+			continue
+		}
+		seen[address] = true
 		if node.ClientCount < 0 {
 			node.ClientCount = 0
 		}
@@ -869,6 +911,7 @@ func (c *Client) switchToNodeLocked(node clusterNode) bool {
 	if strings.TrimSpace(c.homeCfg.Host) == host && c.homeCfg.Port == node.Port {
 		return false
 	}
+	c.releaseReady = false
 	c.homeCfg.Host = host
 	c.homeCfg.Port = node.Port
 	if !c.recoveryState.CompareAndSwap(uint32(recoveryStateStable), uint32(recoveryStateSwitching)) {
@@ -923,22 +966,13 @@ func (c *Client) failoverAfterSubscriptionTimeout() (bool, string) {
 func (c *Client) switchToNextNodeLocked() (bool, string) {
 	currentHost := strings.TrimSpace(c.homeCfg.Host)
 	currentPort := c.homeCfg.Port
-	candidates := append([]clusterNode(nil), c.clusterNodes...)
-	if strings.TrimSpace(c.seedHost) != "" && c.seedPort > 0 {
-		candidates = append(candidates, clusterNode{IP: c.seedHost, Port: c.seedPort})
+	node, ok := c.chooseClusterNodeLocked(c.clusterNodes, true, rand.Float64())
+	if !ok && strings.TrimSpace(c.seedHost) != "" && c.seedPort > 0 && (c.seedHost != currentHost || c.seedPort != currentPort) {
+		node, ok = clusterNode{IP: c.seedHost, Port: c.seedPort}, true
 	}
-	for _, node := range candidates {
-		host := strings.TrimSpace(node.IP)
-		if host == "" || node.Port <= 0 {
-			continue
-		}
-		if host == currentHost && node.Port == currentPort {
-			continue
-		}
-		if c.switchToNodeLocked(clusterNode{IP: host, Port: node.Port}) {
-			addr, _ := c.addrLocked()
-			return true, addr
-		}
+	if ok && c.switchToNodeLocked(node) {
+		addr, _ := c.addrLocked()
+		return true, addr
 	}
 	return false, ""
 }
@@ -1403,7 +1437,7 @@ func (c *Client) rPopAuth(ctx context.Context, requestedModel string, sessionID 
 	conn := cmd.Conn()
 	defer func() {
 		if errClose := conn.Close(); errClose != nil {
-			log.WithError(errClose).Debug("Home auth dispatch connection close failed")
+			log.Debugf("Home auth dispatch connection close failed: %v", errClose)
 		}
 	}()
 	if errProbe := conn.Ping(ctx).Err(); errProbe != nil {
@@ -1505,12 +1539,8 @@ func (c *Client) PushConcurrencyRelease(ctx context.Context, frame ConcurrencyRe
 }
 
 func (c *Client) concurrencyReleaseClient() (*redis.Client, error) {
-	if c == nil || c.dispatchFenced.Load() {
+	if c == nil || c.releaseFenced.Load() {
 		return nil, ErrDispatchFenced
-	}
-	state := recoveryState(c.recoveryState.Load())
-	if state == recoveryStateTakeoverEligible || state == recoveryStateSwitching || state == recoveryStateSwitchingTakeover {
-		return nil, ErrNotConnected
 	}
 	if !c.Enabled() {
 		return nil, ErrDisabled
@@ -1518,11 +1548,14 @@ func (c *Client) concurrencyReleaseClient() (*redis.Client, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.dispatchFenced.Load() {
+	if c.releaseFenced.Load() {
 		return nil, ErrDispatchFenced
 	}
-	state = recoveryState(c.recoveryState.Load())
-	if state == recoveryStateTakeoverEligible || state == recoveryStateSwitching || state == recoveryStateSwitchingTakeover {
+	state := recoveryState(c.recoveryState.Load())
+	// Preparing takeover does not move membership. The acknowledged source owns final releases
+	// until Close; an unacknowledged replacement or a switched address does not inherit that right.
+	ownsSource := state == recoveryStateTakeoverEligible && c.releaseReady
+	if state != recoveryStateStable && !ownsSource {
 		return nil, ErrNotConnected
 	}
 	if c.release != nil {
@@ -1564,14 +1597,38 @@ func (c *Client) RPushAppLog(ctx context.Context, payload []byte) error {
 }
 
 func (c *Client) RPushPluginStatus(ctx context.Context, payload []byte) error {
-	cmd, errClient := c.commandClient()
-	if errClient != nil {
-		return errClient
+	options, errOptions := c.pluginSyncCommandOptions()
+	if errOptions != nil {
+		return errOptions
 	}
 	if len(payload) == 0 {
 		return nil
 	}
-	return cmd.RPush(ctx, redisKeyPluginStatus, payload).Err()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Plugin cancellation owns only this command's transport, never dispatch or release connections.
+	baseDialer := options.Dialer
+	if baseDialer == nil {
+		baseDialer = pluginSyncDialer(options)
+	}
+	options.Dialer = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		conn, errDial := baseDialer(dialCtx, network, address)
+		if errDial != nil {
+			return nil, errDial
+		}
+		return newPluginSyncCancelableConn(ctx, conn), nil
+	}
+	statusClient := redis.NewClient(options)
+	errPush := statusClient.RPush(ctx, redisKeyPluginStatus, payload).Err()
+	errClose := statusClient.Close()
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	if errClose != nil {
+		return errors.Join(errPush, fmt.Errorf("close plugin status client: %w", errClose))
+	}
+	return errPush
 }
 
 func (c *Client) GetPluginTasks(ctx context.Context) ([]PluginTask, error) {
@@ -1707,20 +1764,34 @@ func pluginSyncDialer(options *redis.Options) func(context.Context, string, stri
 
 type pluginSyncCancelableConn struct {
 	net.Conn
-	done chan struct{}
-	once sync.Once
+	ctx                 context.Context
+	stopCancel          func() bool
+	once                sync.Once
+	closeUnderlyingOnce sync.Once
 }
 
 func newPluginSyncCancelableConn(ctx context.Context, conn net.Conn) net.Conn {
-	wrapped := &pluginSyncCancelableConn{Conn: conn, done: make(chan struct{})}
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = closeUnderlyingTransport(conn)
-		case <-wrapped.done:
-		}
-	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wrapped := &pluginSyncCancelableConn{
+		Conn: conn,
+		ctx:  ctx,
+	}
+	wrapped.stopCancel = context.AfterFunc(ctx, wrapped.closeUnderlying)
+	if ctx.Err() != nil {
+		wrapped.closeUnderlying()
+	}
 	return wrapped
+}
+
+func (c *pluginSyncCancelableConn) closeUnderlying() {
+	if c == nil || c.Conn == nil {
+		return
+	}
+	c.closeUnderlyingOnce.Do(func() {
+		_ = closeUnderlyingTransport(c.Conn)
+	})
 }
 
 func closeUnderlyingTransport(conn net.Conn) error {
@@ -1760,7 +1831,14 @@ func (c *pluginSyncCancelableConn) Close() error {
 	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
-	c.once.Do(func() { close(c.done) })
+	defer c.once.Do(func() {
+		if c.stopCancel != nil {
+			c.stopCancel()
+		}
+	})
+	if c.ctx != nil && c.ctx.Err() != nil {
+		c.closeUnderlying()
+	}
 	return c.Conn.Close()
 }
 
@@ -1873,7 +1951,10 @@ func (c *Client) rebuildCommandPoolAndProbe(ctx context.Context) error {
 	if errPing := c.Ping(ctx); errPing != nil {
 		return errPing
 	}
+	c.mu.Lock()
+	c.releaseReady = true
 	c.recoveryState.Store(uint32(recoveryStateStable))
+	c.mu.Unlock()
 	return nil
 }
 
@@ -1888,7 +1969,7 @@ func (c *Client) promoteSubscription() {
 	c.mu.Unlock()
 	if commandClient != nil {
 		if errClose := commandClient.Close(); errClose != nil {
-			log.WithError(errClose).Warn("Home bootstrap command client close failed")
+			log.Warnf("Home bootstrap command client close failed: %v", errClose)
 		}
 	}
 }
@@ -1906,7 +1987,12 @@ func (c *Client) handleSubscriptionPayload(ctx context.Context, channel string, 
 		}
 		return onConfig([]byte(payload))
 	case redisChannelCluster:
-		return c.updateClusterNodesFromPayload([]byte(payload))
+		if errUpdate := c.updateClusterNodesFromPayload([]byte(payload)); errUpdate != nil {
+			return errUpdate
+		}
+		return c.syncClusterBalance(ctx)
+	case redisChannelRebalance:
+		return c.executeClusterRebalance(ctx, []byte(payload))
 	default:
 		return nil
 	}
@@ -1979,45 +2065,147 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 	}
 	c.resetReconnectFailures()
 	c.heartbeatOK.Store(true)
+	// Reception must keep monitoring silence while the consumer performs migration RPCs.
+	receiveCtx, cancelReceive := context.WithCancelCause(ctx)
+	events := make(chan any, 16)
+	receiveDone := make(chan struct{})
+	c.mu.Lock()
+	if c.latency == nil {
+		c.latency = &clusterLatencyHistory{entries: make(map[string]clusterLatencyEntry)}
+	}
+	sampler := &clusterRTTSampler{history: c.latency, node: clusterNode{IP: c.homeCfg.Host, Port: c.homeCfg.Port}}
+	c.mu.Unlock()
+	failReceive := func(errReceive error) {
+		if !errors.Is(context.Cause(receiveCtx), ErrRebalanceRequested) {
+			if ctx.Err() == nil {
+				if c.heartbeatOK.Load() {
+					c.markMembershipTakeoverEligible()
+				}
+				c.releaseFenced.Store(true)
+			}
+			// Graceful cancellation stops new work but keeps final releases available until Close.
+			c.dispatchFenced.Store(true)
+		}
+		c.heartbeatOK.Store(false)
+		cancelReceive(errReceive)
+	}
+	stopReceive := context.AfterFunc(receiveCtx, func() { _ = pubsub.Close() })
+	latencyDone := make(chan struct{})
+	go func() {
+		defer close(latencyDone)
+		if errLatency := c.runClusterLatency(receiveCtx, pubsub, sampler); errLatency != nil {
+			failReceive(errLatency)
+		}
+	}()
+	go func() {
+		defer close(receiveDone)
+		for {
+			_, timeout := c.subscriptionParameters()
+			event, errReceive := receiveSubscriptionEvent(receiveCtx, pubsub, sampler, timeout)
+			if errReceive == nil {
+				select {
+				case events <- event:
+					continue
+				case <-receiveCtx.Done():
+					errReceive = context.Cause(receiveCtx)
+				default:
+					// Bounded backpressure fails the lifetime rather than dropping control messages.
+					errReceive = fmt.Errorf("Home subscription consumer backlog exceeded")
+				}
+			}
+			failReceive(errReceive)
+			return
+		}
+	}()
+	defer func() {
+		cancelReceive(context.Canceled)
+		stopReceive()
+		_ = pubsub.Close()
+		<-receiveDone
+		<-latencyDone
+		sampler.expire(time.Now(), true)
+	}()
+	endReceiveFailure := func(err error) error {
+		if cause := context.Cause(receiveCtx); cause != nil {
+			err = cause
+		}
+		if ctx.Err() == nil {
+			// Processing failures must preserve the committed membership before cleanup clears heartbeatOK.
+			if len(args) > 1 {
+				c.markMembershipTakeoverEligible()
+			}
+			if isTimeoutError(err) {
+				c.markSubscriptionTimeout()
+			} else {
+				c.markReconnectFailure("subscription")
+			}
+		}
+		return c.endConfigSubscriberLifetimeWithSubscription(err, pubsub, "subscription failure")
+	}
+	if errFinish := c.finishClusterRebalance(receiveCtx); errFinish != nil || receiveCtx.Err() != nil {
+		return endReceiveFailure(errFinish)
+	}
 	if onReady != nil {
 		onReady()
 	}
 
 	for {
-		_, receiveTimeout = c.subscriptionParameters()
-		event, errReceive := pubsub.ReceiveTimeout(ctx, receiveTimeout)
-		if errReceive != nil {
-			if ctx.Err() == nil {
-				if c.heartbeatOK.Load() {
-					c.markMembershipTakeoverEligible()
-				}
-				if isTimeoutError(errReceive) {
-					c.markSubscriptionTimeout()
-				} else {
-					c.markReconnectFailure("subscription")
-				}
-			}
-			return c.endConfigSubscriberLifetimeWithSubscription(errReceive, pubsub, "heartbeat loss")
+		var event any
+		select {
+		case <-receiveCtx.Done():
+			return endReceiveFailure(context.Cause(receiveCtx))
+		case event = <-events:
+		}
+		if receiveCtx.Err() != nil {
+			return endReceiveFailure(context.Cause(receiveCtx))
 		}
 		switch msg := event.(type) {
 		case *redis.Message:
 			if msg == nil {
 				continue
 			}
-			if errApply := c.handleSubscriptionPayload(ctx, msg.Channel, msg.Payload, onConfig); errApply != nil {
-				if strings.EqualFold(strings.TrimSpace(msg.Channel), redisChannelCluster) {
-					log.Warn("failed to apply cluster update from home control center, ignoring")
-				} else {
-					log.Warn("failed to apply config update from home control center, ignoring")
+			if errApply := c.handleSubscriptionPayload(receiveCtx, msg.Channel, msg.Payload, onConfig); errApply != nil {
+				if receiveCtx.Err() != nil {
+					return endReceiveFailure(errApply)
 				}
+				if errors.Is(errApply, ErrRebalanceRequested) {
+					cancelReceive(ErrRebalanceRequested)
+					return c.endConfigSubscriberLifetimeWithSubscription(errApply, pubsub, "planned rebalance")
+				}
+				if strings.EqualFold(strings.TrimSpace(msg.Channel), redisChannelCluster) || strings.EqualFold(strings.TrimSpace(msg.Channel), redisChannelRebalance) {
+					return endReceiveFailure(errApply)
+				}
+				log.Warn("failed to apply config update from home control center, ignoring")
 			}
 		case *redis.Pong:
 			c.resetReconnectFailures()
-		case *redis.Subscription:
-			continue
 		default:
 			log.Debugf("home subscription returned unsupported message type %T", event)
 		}
+	}
+}
+
+// receiveSubscriptionEvent consumes telemetry without extending the heartbeat deadline.
+func receiveSubscriptionEvent(ctx context.Context, pubsub *redis.PubSub, sampler *clusterRTTSampler, timeout time.Duration) (any, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, os.ErrDeadlineExceeded
+		}
+		event, errReceive := pubsub.ReceiveTimeout(ctx, remaining)
+		if errReceive != nil {
+			return nil, errReceive
+		}
+		if _, ok := event.(*redis.Subscription); ok {
+			return nil, fmt.Errorf("unexpected Home subscription ACK after initialization")
+		}
+		if pong, ok := event.(*redis.Pong); ok && pong != nil && strings.HasPrefix(pong.Payload, "home-rtt/") {
+			// Timestamp before consumer callbacks, and also exclude stale or duplicate telemetry from liveness.
+			sampler.pong(pong.Payload, time.Now())
+			continue
+		}
+		return event, nil
 	}
 }
 
@@ -2040,6 +2228,7 @@ func receiveSubscriptionACKs(ctx context.Context, pubsub *redis.PubSub, receiveT
 
 func (c *Client) endConfigSubscriberLifetime(err error) error {
 	c.heartbeatOK.Store(false)
+	c.failClusterRebalance()
 	if !c.managedLifetime() {
 		c.Close()
 	}
@@ -2048,9 +2237,12 @@ func (c *Client) endConfigSubscriberLifetime(err error) error {
 
 func (c *Client) endConfigSubscriberLifetimeWithSubscription(err error, subscription subscriptionCloser, reason string) error {
 	c.heartbeatOK.Store(false)
+	if !errors.Is(err, ErrRebalanceRequested) {
+		c.failClusterRebalance()
+	}
 	if subscription != nil {
 		if errClose := subscription.Close(); errClose != nil {
-			log.WithError(errClose).Debugf("Home subscription close after %s", reason)
+			log.Debugf("Home subscription close after %s: %v", reason, errClose)
 		}
 	}
 	if !c.managedLifetime() {
@@ -2062,7 +2254,7 @@ func (c *Client) endConfigSubscriberLifetimeWithSubscription(err error, subscrip
 // StartConfigSubscriber is retained for callers that do not need the lifetime error.
 func (c *Client) StartConfigSubscriber(ctx context.Context, onConfig func([]byte) error) {
 	if errRun := c.RunConfigSubscriberLifetime(ctx, onConfig, nil); errRun != nil && !errors.Is(errRun, context.Canceled) {
-		log.WithError(errRun).Warn("Home config subscription lifetime ended")
+		log.Warnf("Home config subscription lifetime ended: %v", errRun)
 	}
 }
 

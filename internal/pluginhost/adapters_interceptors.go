@@ -128,6 +128,16 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			nextReq.Body = nil
 		}
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
+		if nextReq.CallerScope == "" {
+			if scope, ok := nextReq.Metadata[coreexecutor.CallerScopeMetadataKey].(string); ok {
+				nextReq.CallerScope = strings.TrimSpace(scope)
+			}
+		} else if _, ok := nextReq.Metadata[coreexecutor.CallerScopeMetadataKey]; !ok {
+			if nextReq.Metadata == nil {
+				nextReq.Metadata = make(map[string]any, 1)
+			}
+			nextReq.Metadata[coreexecutor.CallerScopeMetadataKey] = strings.TrimSpace(nextReq.CallerScope)
+		}
 		if current.Path != "" {
 			if nextReq.Metadata == nil {
 				nextReq.Metadata = make(map[string]any, 1)
@@ -390,35 +400,6 @@ func (h *Host) HasRequestInterceptors() bool {
 		}
 	}
 	return false
-}
-
-func (h *Host) commitModelClients(snap *Snapshot, modelRegistry modelRegistry, registrations []modelClientRegistration, nextClients map[string]struct{}, nextProviders map[string]string, nextModelRegistrations map[string]pluginModelRegistration) {
-	if h == nil || modelRegistry == nil {
-		return
-	}
-
-	staleClients := make([]string, 0)
-	h.mu.Lock()
-	if h.Snapshot() != snap {
-		h.mu.Unlock()
-		return
-	}
-	for clientID := range h.modelClientIDs {
-		if _, okClient := nextClients[clientID]; !okClient {
-			staleClients = append(staleClients, clientID)
-		}
-	}
-	h.modelClientIDs = nextClients
-	h.modelProviders = nextProviders
-	h.modelRegistrations = nextModelRegistrations
-	h.mu.Unlock()
-
-	for _, registration := range registrations {
-		modelRegistry.RegisterClient(registration.clientID, registration.provider, registration.models)
-	}
-	for _, clientID := range staleClients {
-		modelRegistry.UnregisterClient(clientID)
-	}
 }
 
 func readAndRestoreRequestBody(r *http.Request) ([]byte, error) {

@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type fakeCodexOAuthService struct{}
@@ -248,5 +249,104 @@ func TestRequestCodexToken_PlanTypeSavedToAuthFile(t *testing.T) {
 				t.Errorf("saved auth file plan_type = %v, want %q", got, tt.wantPlanJSON)
 			}
 		})
+	}
+}
+
+type signalingCodexOAuthService struct {
+	fakeCodexOAuthService
+	onExchange func()
+}
+
+func (s *signalingCodexOAuthService) ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *codex.PKCECodes) (*codex.CodexAuthBundle, error) {
+	bundle, err := s.fakeCodexOAuthService.ExchangeCodeForTokens(ctx, code, pkceCodes)
+	if s.onExchange != nil {
+		s.onExchange()
+	}
+	return bundle, err
+}
+
+func TestRequestCodexTokenLoginDoesNotRaceConfigV8Save(t *testing.T) {
+	exchangeDone := make(chan struct{})
+	originalNewCodexOAuthService := newCodexOAuthService
+	newCodexOAuthService = func(cfg *config.Config) codexOAuthService {
+		return &signalingCodexOAuthService{
+			onExchange: func() {
+				close(exchangeDone)
+			},
+		}
+	}
+	defer func() {
+		newCodexOAuthService = originalNewCodexOAuthService
+	}()
+
+	authDir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if errWrite := os.WriteFile(path, []byte("auth-dir: "+authDir+"\nrequest-retry: 3\n"), 0o600); errWrite != nil {
+		t.Fatalf("write config: %v", errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatalf("load config: %v", errLoad)
+	}
+	persistedDone := make(chan struct{})
+	handler := NewHandler(cfg, path, nil)
+	handler.SetPostAuthPersistHook(func(ctx context.Context, auth *coreauth.Auth) error {
+		close(persistedDone)
+		return nil
+	})
+	router := gin.New()
+	router.GET("/codex-auth-url", handler.RequestCodexToken)
+	router.GET("/anthropic-auth-url", handler.RequestAnthropicToken)
+	router.GET("/antigravity-auth-url", handler.RequestAntigravityToken)
+	router.PUT("/v8/management/config/*path", handler.ConfigV8)
+
+	saveRetry := func(val string) {
+		t.Helper()
+		save := httptest.NewRecorder()
+		router.ServeHTTP(save, httptest.NewRequest(http.MethodPut, "/v8/management/config/routing/retry/request-retry", strings.NewReader(val)))
+		if save.Code != http.StatusOK {
+			t.Fatalf("config save status=%d body=%s", save.Code, save.Body.String())
+		}
+	}
+
+	for _, endpoint := range []string{"/anthropic-auth-url", "/antigravity-auth-url"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, endpoint, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", endpoint, w.Code, w.Body.String())
+		}
+		var payload struct {
+			State string `json:"state"`
+		}
+		if errDecode := json.Unmarshal(w.Body.Bytes(), &payload); errDecode != nil {
+			t.Fatalf("decode %s response: %v", endpoint, errDecode)
+		}
+		saveRetry(`1`)
+		CancelOAuthSession(payload.State)
+	}
+
+	// The login goroutine outlives the response, so this save runs concurrently with it.
+	state := requestCodexTokenState(t, router)
+	defer CompleteOAuthSession(state)
+	saveRetry(`0`)
+
+	if _, errWrite := WriteOAuthCallbackFileForPendingSession(authDir, "codex", state, "race-code", ""); errWrite != nil {
+		t.Fatalf("write callback file: %v", errWrite)
+	}
+	select {
+	case <-exchangeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for codex token exchange")
+	}
+	saveRetry(`2`)
+	select {
+	case <-persistedDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for post-auth persist hook")
+	}
+	waitForOAuthSessionDone(t, state)
+	_, status, _, _, completed, ok := GetOAuthSessionDetails(state)
+	if !ok || !completed || status != "" {
+		t.Fatalf("expected completed codex session without error, got ok=%v completed=%v status=%q", ok, completed, status)
 	}
 }

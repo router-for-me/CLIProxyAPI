@@ -8,6 +8,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type pluginProviderApplier struct {
@@ -48,6 +49,26 @@ func GetProviderApplier(provider string) ProviderApplier {
 		return nativeApplier
 	}
 	return pluginProviderAppliers[provider].applier
+}
+
+func getPluginProviderApplier(provider string) ProviderApplier {
+	provider = normalizedProviderName(provider)
+	if provider == "" {
+		return nil
+	}
+	providerAppliersMu.RLock()
+	defer providerAppliersMu.RUnlock()
+	return pluginProviderAppliers[provider].applier
+}
+
+func resolveProviderApplier(providerFormat, providerKey string) (ProviderApplier, bool) {
+	if applier := getPluginProviderApplier(providerKey); applier != nil {
+		return applier, true
+	}
+	if applier := getPluginProviderApplier(providerFormat); applier != nil {
+		return applier, true
+	}
+	return GetProviderApplier(providerFormat), false
 }
 
 // RegisterProvider registers a provider applier by name.
@@ -185,6 +206,13 @@ func ApplyThinkingWithSourceAndSummary(body, sourceBody []byte, model, fromForma
 	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig, normalizedUpdatesChanged...)
 }
 
+// ApplyThinkingWithFallbackModelInfoAndSummary applies thinking using the global
+// registry first and falls back to fallbackModelInfo when the registry has no
+// entry for the model.
+func ApplyThinkingWithFallbackModelInfoAndSummary(body, sourceBody []byte, model, fromFormat, toFormat, providerKey string, fallbackModelInfo *registry.ModelInfo, summaryConfig SummaryConfig, normalizedUpdatesChanged ...bool) ([]byte, error) {
+	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, fallbackModelInfo, false, summaryConfig, normalizedUpdatesChanged...)
+}
+
 // ApplyThinkingWithModelInfo applies thinking with the exact configured model
 // definition selected for an API-key execution attempt while preserving summary
 // visibility from the original source body.
@@ -225,7 +253,9 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	// Use provider-specific lookup to handle capability differences across providers.
 	modelInfo := resolvedModelInfo
 	if !modelInfoResolved {
-		modelInfo = registry.LookupModelInfo(baseModel, providerKey)
+		if lookedUp := registry.LookupModelInfo(baseModel, providerKey); lookedUp != nil {
+			modelInfo = lookedUp
+		}
 	}
 
 	// Resolve source intent before stripping unsupported target input items.
@@ -248,7 +278,7 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	nativeResponses := responseTarget && isResponsesFormat(fromFormat) && supportsUpdates
 
 	// 2. Route check: Get provider applier after target cleanup.
-	applier := GetProviderApplier(providerFormat)
+	applier, isPluginApplier := resolveProviderApplier(providerFormat, providerKey)
 	if applier == nil {
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
@@ -286,7 +316,12 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		}
 		return body, nil
 	}
-	if IsUserDefinedModel(modelInfo) {
+	if !isPluginApplier && fromFormat == "claude" && providerFormat == "claude" && !suffixResult.HasSuffix && !gjson.GetBytes(body, "thinking").Exists() {
+		// Native Claude effort is independent of thinking activation. Preserve the
+		// model's thinking default unless a suffix or explicit summary changes it.
+		return applySummaryConfigForProvider(body, providerFormat, baseModel, providerKey, modelInfo, summaryConfig), nil
+	}
+	if IsUserDefinedModel(modelInfo) || (isPluginApplier && modelInfo.Thinking == nil) {
 		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, providerKey, suffixResult, sourceConfig, nativeResponses, summaryConfig)
 	}
 	if modelInfo.Thinking == nil {
@@ -312,6 +347,9 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	var config ThinkingConfig
 	if suffixResult.HasSuffix {
 		config = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
+		if !hasThinkingConfig(config) && !nativeResponses && strings.TrimSpace(suffixResult.RawSuffix) != "" && !strings.EqualFold(strings.TrimSpace(modelInfo.ID), strings.TrimSpace(model)) {
+			config = ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(strings.TrimSpace(suffixResult.RawSuffix))}
+		}
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
 			"model":    model,
@@ -326,6 +364,9 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		}
 		if !hasThinkingConfig(config) {
 			config = extractThinkingConfig(body, providerFormat)
+		}
+		if !hasThinkingConfig(config) && fromFormat != providerFormat {
+			config = extractThinkingConfig(body, fromFormat)
 		}
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
@@ -405,11 +446,23 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	if thinkingIsFullyDisabled(*validated) || nativeResponses {
 		return applied, nil
 	}
+	if providerFormat == "claude" && thinkingRequestedOff(config) {
+		// The model cannot turn thinking off, so ValidateConfig fell back to its
+		// lowest level. Drop any stale block_binding from the off request and keep
+		// the caller's intent of seeing no thinking: without an explicit omitted
+		// display, cloaking would add progress updates.
+		applied, _ = sjson.DeleteBytes(applied, "thinking.block_binding")
+		summaryConfig = SummaryConfig{Mode: SummaryDisabled}
+	}
 	return applySummaryConfigForProvider(applied, providerFormat, baseModel, providerKey, modelInfo, summaryConfig), nil
 }
 
 func thinkingIsFullyDisabled(config ThinkingConfig) bool {
 	return config.Mode == ModeNone && config.Budget == 0 && config.Level == ""
+}
+
+func thinkingRequestedOff(config ThinkingConfig) bool {
+	return config.Mode == ModeNone || (config.Mode == ModeBudget && config.Budget == 0)
 }
 
 func shouldMapConfiguredHighIntent(fromFormat, toFormat string, modelInfo *registry.ModelInfo) bool {
@@ -545,7 +598,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return applySummaryConfigForProvider(body, toFormat, modelID, providerKey, modelInfo, summaryConfig), nil
 	}
 
-	applier := GetProviderApplier(toFormat)
+	applier, isPluginApplier := resolveProviderApplier(toFormat, providerKey)
 	if applier == nil {
 		log.WithFields(log.Fields{
 			"model":    modelID,
@@ -554,7 +607,9 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return body, nil
 	}
 
-	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	if !isPluginApplier {
+		config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	}
 	log.WithFields(log.Fields{
 		"provider": toFormat,
 		"model":    modelID,
@@ -668,6 +723,12 @@ func extractThinkingConfigForUsage(body []byte, provider string) ThinkingConfig 
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex", "xai", "openai-response":
 		return extractCodexUsageConfig(body)
+	case "claude":
+		// between_tools is how claude-sonnet-5-5 turns thinking off.
+		if gjson.GetBytes(body, "thinking.type").String() == "between_tools" {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		}
+		return extractThinkingConfig(body, provider)
 	default:
 		return extractThinkingConfig(body, provider)
 	}
@@ -718,8 +779,8 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
 	}
-	if thinkingType == "adaptive" || thinkingType == "auto" {
-		// Claude adaptive thinking uses output_config.effort (low/medium/high/max).
+	if !gjson.GetBytes(body, "thinking").Exists() || thinkingType == "adaptive" || thinkingType == "auto" {
+		// Claude output_config.effort also applies when thinking is omitted.
 		// We only treat it as a thinking config when effort is explicitly present;
 		// otherwise we passthrough and let upstream defaults apply.
 		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {

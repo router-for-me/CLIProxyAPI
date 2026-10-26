@@ -1243,3 +1243,294 @@ func claudeFingerprintHeaderValue(headers http.Header, name string) string {
 	}
 	return ""
 }
+
+func TestClaudeExecutor_OfficialAPIKeyCloakNeverStripsClaudeCodeIdentity(t *testing.T) {
+	const sessionID = "11111111-2222-4333-8444-555555555555"
+	const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"11111111-2222-4333-8444-555555555555","session_id":"11111111-2222-4333-8444-555555555555"}`
+	const billing = "x-anthropic-billing-header: cc_version=2.1.280.d7b; cc_entrypoint=cli; cch=00000; cc_turn_origin=human;"
+	incoming := http.Header{
+		"User-Agent":     {"claude-cli/2.1.280 (external, cli)"},
+		"X-App":          {"cli"},
+		"Anthropic-Beta": {"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,cache-diagnosis-2026-04-07"},
+		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
+		"X-Claude-Code-Session-Id":                  {sessionID},
+		"X-Claude-Code-Request-Class":               {"main"},
+		"X-Stainless-Package-Version":               {"0.112.1"},
+		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Os":                            {"MacOS"},
+		"X-Stainless-Arch":                          {"arm64"},
+	}
+	payload := []byte(
+		`{"model":"claude-opus-4-6","max_tokens":64,"system":[{"type":"text","text":"` + billing + `"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"You are an interactive CLI tool that helps users with software engineering tasks.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}],"metadata":{"user_id":` + `"` + strings.ReplaceAll(userID, `"`, `\"`) + `"` + `},"diagnostics":{"previous_message_id":null},"thinking":{"type":"adaptive"}}`,
+	)
+	if detection := helps.DetectClaudeCodeRequest(incoming, payload, false); !detection.Confirmed {
+		t.Fatal("fixture must be classified as a confirmed native Claude Code request")
+	}
+
+	for _, tc := range []struct {
+		name           string
+		mode           string
+		customUA       string
+		stream         bool
+		countTokens    bool
+		wantUserAgent  string
+		wantBetaSubstr string
+	}{
+		{
+			name:           "execute cloak never default user-agent",
+			mode:           "never",
+			wantUserAgent:  "CLIProxyAPI/",
+			wantBetaSubstr: "interleaved-thinking-2025-05-14",
+		},
+		{
+			name:           "execute cloak never custom user-agent override",
+			mode:           "never",
+			customUA:       "my-api-client/1.0",
+			wantUserAgent:  "my-api-client/1.0",
+			wantBetaSubstr: "interleaved-thinking-2025-05-14",
+		},
+		{
+			name:           "stream cloak never custom user-agent override",
+			mode:           "never",
+			customUA:       "my-api-client/1.0",
+			stream:         true,
+			wantUserAgent:  "my-api-client/1.0",
+			wantBetaSubstr: "interleaved-thinking-2025-05-14",
+		},
+		{
+			name:           "execute cloak uncloak mode",
+			mode:           "uncloak",
+			customUA:       "my-api-client/1.0",
+			wantUserAgent:  "my-api-client/1.0",
+			wantBetaSubstr: "interleaved-thinking-2025-05-14",
+		},
+		{
+			name:           "count_tokens cloak never",
+			mode:           "never",
+			customUA:       "my-api-client/1.0",
+			countTokens:    true,
+			wantUserAgent:  "my-api-client/1.0",
+			wantBetaSubstr: "token-counting-2024-11-01",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seenBody []byte
+			var seenHeaders http.Header
+			transport := claudeFingerprintRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				seenBody, _ = io.ReadAll(req.Body)
+				seenHeaders = req.Header.Clone()
+				if tc.countTokens {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"input_tokens":12}`)),
+					}, nil
+				}
+				if tc.stream {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+						Body: io.NopCloser(strings.NewReader(
+							"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+						)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(
+						`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+					)),
+				}, nil
+			})
+			ctx := context.WithValue(
+				context.Background(),
+				"cliproxy.roundtripper",
+				http.RoundTripper(transport),
+			)
+
+			var customHeaders map[string]string
+			attrs := map[string]string{
+				"api_key": "sk-ant-api03-promotional-key",
+			}
+			if tc.customUA != "" {
+				customHeaders = map[string]string{"User-Agent": tc.customUA}
+				attrs["header:User-Agent"] = tc.customUA
+			}
+			cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+				APIKey:  "sk-ant-api03-promotional-key",
+				Cloak:   &config.CloakConfig{Mode: tc.mode},
+				Headers: customHeaders,
+			}}}
+			auth := &cliproxyauth.Auth{
+				ID:         "official-promotional-key",
+				Attributes: attrs,
+			}
+			exec := NewClaudeExecutor(cfg)
+			req := cliproxyexecutor.Request{
+				Model:   "claude-opus-4-6",
+				Payload: payload,
+			}
+			opts := cliproxyexecutor.Options{
+				Stream:          tc.stream,
+				SourceFormat:    sdktranslator.FormatClaude,
+				OriginalRequest: payload,
+				Headers:         incoming.Clone(),
+			}
+
+			if tc.countTokens {
+				if _, errCount := exec.CountTokens(ctx, auth, req, opts); errCount != nil {
+					t.Fatalf("CountTokens() error = %v", errCount)
+				}
+			} else if tc.stream {
+				res, errStream := exec.ExecuteStream(ctx, auth, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range res.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else {
+				if _, errExec := exec.Execute(ctx, auth, req, opts); errExec != nil {
+					t.Fatalf("Execute() error = %v", errExec)
+				}
+			}
+
+			if strings.Contains(string(seenBody), "x-anthropic-billing-header:") || strings.Contains(string(seenBody), "cch=") {
+				t.Fatalf("upstream body still contains Claude Code billing header: %s", seenBody)
+			}
+			if strings.Contains(string(seenBody), claudeCodeCLIIdentity) {
+				t.Fatalf("upstream body still contains Claude Code CLI identity block: %s", seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 1 {
+				t.Fatalf("system block count = %d, want 1 preserved instruction block: %s", got, seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != "You are an interactive CLI tool that helps users with software engineering tasks." {
+				t.Fatalf("system.0.text = %q, want preserved caller instructions", got)
+			}
+			if gjson.GetBytes(seenBody, "metadata").Exists() {
+				t.Fatalf("metadata = %s, want Claude Code metadata stripped", gjson.GetBytes(seenBody, "metadata").Raw)
+			}
+			if gjson.GetBytes(seenBody, "diagnostics").Exists() {
+				t.Fatalf("diagnostics = %s, want Claude Code diagnostics stripped", gjson.GetBytes(seenBody, "diagnostics").Raw)
+			}
+
+			ua := claudeFingerprintHeaderValue(seenHeaders, "User-Agent")
+			if strings.HasPrefix(strings.ToLower(ua), "claude-cli/") {
+				t.Fatalf("User-Agent = %q, must not forward claude-cli user-agent", ua)
+			}
+			if !strings.HasPrefix(ua, tc.wantUserAgent) {
+				t.Fatalf("User-Agent = %q, want prefix %q", ua, tc.wantUserAgent)
+			}
+			for _, forbiddenHdr := range []string{
+				"X-App",
+				"Anthropic-Dangerous-Direct-Browser-Access",
+				"X-Claude-Code-Session-Id",
+				"X-Claude-Code-Request-Class",
+				"X-Stainless-Runtime",
+				"X-Stainless-Lang",
+				"X-Stainless-Package-Version",
+			} {
+				if got := claudeFingerprintHeaderValue(seenHeaders, forbiddenHdr); got != "" {
+					t.Fatalf("header %s = %q, want stripped", forbiddenHdr, got)
+				}
+			}
+
+			betas := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta")
+			for _, forbiddenBeta := range []string{
+				"claude-code-20250219",
+				"oauth-2025-04-20",
+				"redact-thinking-2026-02-12",
+				"cache-diagnosis-2026-04-07",
+			} {
+				if strings.Contains(betas, forbiddenBeta) {
+					t.Fatalf("Anthropic-Beta = %q, want %q stripped", betas, forbiddenBeta)
+				}
+			}
+			if !strings.Contains(betas, tc.wantBetaSubstr) {
+				t.Fatalf("Anthropic-Beta = %q, want capability beta %q preserved", betas, tc.wantBetaSubstr)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_GlobalDisableClaudeCloakModePreservesConfirmedCallerIdentityWhenKeyUnconfigured(t *testing.T) {
+	const sessionID = "11111111-2222-4333-8444-555555555555"
+	const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"11111111-2222-4333-8444-555555555555","session_id":"11111111-2222-4333-8444-555555555555"}`
+	const billing = "x-anthropic-billing-header: cc_version=2.1.280.d7b; cc_entrypoint=cli; cch=00000; cc_turn_origin=human;"
+	incoming := http.Header{
+		"User-Agent":     {"claude-cli/2.1.280 (external, cli)"},
+		"X-App":          {"cli"},
+		"Anthropic-Beta": {"claude-code-20250219,interleaved-thinking-2025-05-14"},
+		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
+		"X-Claude-Code-Session-Id":                  {sessionID},
+		"X-Stainless-Package-Version":               {"0.112.1"},
+		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Os":                            {"MacOS"},
+		"X-Stainless-Arch":                          {"arm64"},
+	}
+	payload := []byte(
+		`{"model":"claude-opus-4-6","max_tokens":64,"system":[{"type":"text","text":"` + billing + `"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}],"metadata":{"user_id":` + `"` + strings.ReplaceAll(userID, `"`, `\"`) + `"` + `}}`,
+	)
+
+	var seenBody []byte
+	var seenHeaders http.Header
+	transport := claudeFingerprintRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		seenBody, _ = io.ReadAll(req.Body)
+		seenHeaders = req.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+			)),
+		}, nil
+	})
+	ctx := context.WithValue(
+		context.Background(),
+		"cliproxy.roundtripper",
+		http.RoundTripper(transport),
+	)
+
+	cfg := &config.Config{
+		DisableClaudeCloakMode: true,
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "sk-ant-api03-global-disable-passthrough",
+		}},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "official-global-disable-passthrough",
+		Attributes: map[string]string{
+			"api_key": "sk-ant-api03-global-disable-passthrough",
+		},
+	}
+
+	if _, errExec := NewClaudeExecutor(cfg).Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4-6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Headers:         incoming,
+	}); errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != billing {
+		t.Fatalf("system.0.text = %q, want preserved caller billing header %q", got, billing)
+	}
+	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+		t.Fatalf("system.1.text = %q, want preserved caller CLI identity", got)
+	}
+	if got := gjson.GetBytes(seenBody, "metadata.user_id").String(); got != userID {
+		t.Fatalf("metadata.user_id = %q, want preserved %q", got, userID)
+	}
+	if got := claudeFingerprintHeaderValue(seenHeaders, "X-App"); got != "cli" {
+		t.Fatalf("X-App = %q, want preserved cli", got)
+	}
+	if got := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta"); !strings.Contains(got, "claude-code-20250219") {
+		t.Fatalf("Anthropic-Beta = %q, want preserved claude-code-20250219", got)
+	}
+}

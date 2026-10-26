@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -181,4 +182,262 @@ func TestPayloadBarrierClaudeDoesNotReplayFiltersOrReinjectIdentity(t *testing.T
 			t.Fatalf("built-in processing changed final rule semantics: %s", body)
 		}
 	}
+}
+
+type captureEffectiveServiceTierPlugin struct {
+	authID  string
+	records chan usage.Record
+}
+
+func (p *captureEffectiveServiceTierPlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if p == nil || record.AuthID != p.authID {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func TestPayloadBarrierEffectiveServiceTierUsageAfterOverride(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{
+					{Name: "gpt-*", Protocol: "codex"},
+					{Name: "gpt-*", Protocol: "openai"},
+					{Name: "grok-*", Protocol: "openai"},
+					{Name: "*", Protocol: "devin"},
+				},
+				Params: map[string]any{"service_tier": "priority"},
+			}},
+		},
+	}
+
+	t.Run("codex oauth chat completions override", func(t *testing.T) {
+		var captured capturedCodexRequest
+		server := newCodexRoutingHintServer(t, &captured)
+		defer server.Close()
+
+		for _, stream := range []bool{false, true} {
+			t.Run(map[bool]string{false: "execute", true: "stream"}[stream], func(t *testing.T) {
+				authID := t.Name()
+				plugin := &captureEffectiveServiceTierPlugin{
+					authID:  authID,
+					records: make(chan usage.Record, 1),
+				}
+				usage.RegisterPlugin(plugin)
+
+				auth := codexOAuthTestAuth(server.URL)
+				auth.ID = authID
+				executor := NewCodexExecutor(cfg)
+				ctx := usage.WithServiceTier(context.Background(), usage.AutoServiceTier)
+				req := cliproxyexecutor.Request{
+					Model:   "gpt-6-astra",
+					Payload: []byte(`{"model":"gpt-6-astra","messages":[{"role":"user","content":"hi"}]}`),
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAI,
+					Stream:       stream,
+				}
+				if stream {
+					result, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream error: %v", errStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error: %v", chunk.Err)
+						}
+					}
+				} else if _, errExec := executor.Execute(ctx, auth, req, opts); errExec != nil {
+					t.Fatalf("Execute error: %v", errExec)
+				}
+
+				if captured.serviceTier.String() != "priority" {
+					t.Fatalf("upstream body service_tier = %q, want priority", captured.serviceTier.String())
+				}
+				record := <-plugin.records
+				if record.ServiceTier != "auto" || record.EffectiveServiceTier != "priority" || record.ResponseServiceTier != "default" {
+					t.Fatalf("usage tiers = requested:%q effective:%q response:%q, want auto/priority/default", record.ServiceTier, record.EffectiveServiceTier, record.ResponseServiceTier)
+				}
+			})
+		}
+	})
+
+	t.Run("openai compat chat completions override", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			if got := gjson.GetBytes(body, "service_tier").String(); got != "priority" {
+				t.Errorf("upstream body service_tier = %q, want priority", got)
+			}
+			if r.Header.Get("Accept") == "text/event-stream" {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.4\",\"service_tier\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\ndata: [DONE]\n\n"))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","model":"gpt-5.4","service_tier":"default","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		}))
+		defer server.Close()
+
+		for _, stream := range []bool{false, true} {
+			t.Run(map[bool]string{false: "execute", true: "stream"}[stream], func(t *testing.T) {
+				authID := t.Name()
+				plugin := &captureEffectiveServiceTierPlugin{
+					authID:  authID,
+					records: make(chan usage.Record, 1),
+				}
+				usage.RegisterPlugin(plugin)
+
+				auth := &cliproxyauth.Auth{
+					ID:         authID,
+					Provider:   "openai-compatibility",
+					Attributes: map[string]string{"base_url": server.URL, "api_key": "sk-test"},
+				}
+				executor := NewOpenAICompatExecutor("openai-compatibility", cfg)
+				ctx := usage.WithServiceTier(context.Background(), usage.AutoServiceTier)
+				req := cliproxyexecutor.Request{
+					Model:   "gpt-5.4",
+					Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`),
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAI,
+					Stream:       stream,
+				}
+				if stream {
+					result, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream error: %v", errStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error: %v", chunk.Err)
+						}
+					}
+				} else if _, errExec := executor.Execute(ctx, auth, req, opts); errExec != nil {
+					t.Fatalf("Execute error: %v", errExec)
+				}
+
+				record := <-plugin.records
+				if record.ServiceTier != "auto" || record.EffectiveServiceTier != "priority" || record.ResponseServiceTier != "default" {
+					t.Fatalf("usage tiers = requested:%q effective:%q response:%q, want auto/priority/default", record.ServiceTier, record.EffectiveServiceTier, record.ResponseServiceTier)
+				}
+			})
+		}
+	})
+
+	t.Run("xai video get omits effective service tier while post records it", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"status":"done","video":{"url":"https://vidgen.x.ai/video.mp4","duration":6},"model":"grok-imagine-video","progress":100}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"request_id":"vid_123"}`))
+		}))
+		defer server.Close()
+
+		executor := NewXAIExecutor(cfg)
+		for _, tc := range []struct {
+			name    string
+			payload string
+			wantEff string
+		}{
+			{name: "post_generation", payload: `{"model":"grok-imagine-video","prompt":"animate"}`, wantEff: "priority"},
+			{name: "get_status", payload: `{"request_id":"vid_123"}`, wantEff: ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				authID := t.Name()
+				plugin := &captureEffectiveServiceTierPlugin{
+					authID:  authID,
+					records: make(chan usage.Record, 1),
+				}
+				usage.RegisterPlugin(plugin)
+
+				auth := &cliproxyauth.Auth{
+					ID:         authID,
+					Provider:   "xai",
+					Attributes: map[string]string{"base_url": server.URL},
+					Metadata:   map[string]any{"access_token": "xai-token"},
+				}
+				ctx := usage.WithServiceTier(context.Background(), usage.AutoServiceTier)
+				_, errExec := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+					Model:   "grok-imagine-video",
+					Payload: []byte(tc.payload),
+				}, cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FromString("openai-video"),
+				})
+				if errExec != nil {
+					t.Fatalf("Execute error: %v", errExec)
+				}
+				record := <-plugin.records
+				if record.ServiceTier != "auto" || record.EffectiveServiceTier != tc.wantEff {
+					t.Fatalf("usage tiers = requested:%q effective:%q, want auto/%q", record.ServiceTier, record.EffectiveServiceTier, tc.wantEff)
+				}
+			})
+		}
+	})
+
+	t.Run("devin omits unencoded effective service tier", func(t *testing.T) {
+		var frames []byte
+		frame := appendDevinFieldBytes(nil, 2, []byte("ok"))
+		frames = append(frames, helps.WrapConnectEnvelope(frame)...)
+		frames = append(frames, helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`))...)
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _, errRead := helps.ReadConnectFrame(r.Body)
+			if errRead != nil {
+				t.Errorf("read upstream request: %v", errRead)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/connect+proto")
+			_, _ = w.Write(frames)
+		}))
+		defer server.Close()
+
+		executor := NewDevinExecutor(cfg)
+		for _, stream := range []bool{false, true} {
+			t.Run(map[bool]string{false: "execute", true: "stream"}[stream], func(t *testing.T) {
+				authID := t.Name()
+				plugin := &captureEffectiveServiceTierPlugin{
+					authID:  authID,
+					records: make(chan usage.Record, 1),
+				}
+				usage.RegisterPlugin(plugin)
+
+				auth := &cliproxyauth.Auth{
+					ID:         authID,
+					Provider:   "devin",
+					Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+				}
+				ctx := usage.WithServiceTier(context.Background(), usage.AutoServiceTier)
+				payload := []byte(`{"model":"devin/swe-2","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+				req := cliproxyexecutor.Request{Model: "devin/swe-2", Payload: payload}
+				opts := cliproxyexecutor.Options{
+					SourceFormat:    sdktranslator.FormatClaude,
+					OriginalRequest: payload,
+					Stream:          stream,
+				}
+				if stream {
+					result, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream error: %v", errStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error: %v", chunk.Err)
+						}
+					}
+				} else if _, errExec := executor.Execute(ctx, auth, req, opts); errExec != nil {
+					t.Fatalf("Execute error: %v", errExec)
+				}
+				record := <-plugin.records
+				if record.ServiceTier != "auto" || record.EffectiveServiceTier != "" {
+					t.Fatalf("usage tiers = requested:%q effective:%q, want auto/empty", record.ServiceTier, record.EffectiveServiceTier)
+				}
+			})
+		}
+	})
 }

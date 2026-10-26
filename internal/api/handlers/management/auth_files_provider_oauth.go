@@ -34,6 +34,13 @@ type codexOAuthService interface {
 	CreateTokenStorage(bundle *codex.CodexAuthBundle) *codex.CodexTokenStorage
 }
 
+type antigravityOAuthService interface {
+	BuildAuthURL(state, redirectURI string) string
+	ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*antigravity.TokenResponse, error)
+	FetchUserInfo(ctx context.Context, accessToken string) (string, error)
+	FetchProjectID(ctx context.Context, accessToken string) (string, error)
+}
+
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
@@ -56,8 +63,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(cfg, sessionProxyURL)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -67,7 +76,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSession(state, "anthropic")
+	RegisterOAuthSessionWithProxy(state, "anthropic", sessionProxyURL)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -92,7 +101,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 
 		// Helper: wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
 		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
 			deadline := time.Now().Add(timeout)
 			for {
@@ -146,7 +155,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
-			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
+			log.Errorf("Failed to exchange authorization code for tokens: %s", redactSessionProxyInString(authErr.Error(), sessionProxyURL))
 			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
 			return
 		}
@@ -174,13 +183,14 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "anthropic"); errGuard != nil {
+		applySessionProxyToAuthRecord(record, sessionProxyURL)
+		if errGuard := claimOAuthSessionCommit(state, "anthropic"); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			FailOAuthSessionCommit(state, "Failed to save authentication tokens")
 			return
 		}
 
@@ -217,8 +227,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	// Initialize Codex auth service
-	openaiAuth := newCodexOAuthService(h.cfg)
+	openaiAuth := newCodexOAuthService(cfg)
 
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
@@ -228,7 +240,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSession(state, "codex")
+	RegisterOAuthSessionWithProxy(state, "codex", sessionProxyURL)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -253,7 +265,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 
 		// Wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var code string
 		for {
@@ -293,8 +305,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange))
-			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
+			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange), sessionProxyURL))
+			log.Errorf("Failed to exchange authorization code for tokens: %s", redactSessionProxyInString(authErr.Error(), sessionProxyURL))
 			return
 		}
 
@@ -336,12 +348,13 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"plan_type": planType,
 			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
+		applySessionProxyToAuthRecord(record, sessionProxyURL)
+		if errGuard := claimOAuthSessionCommit(state, "codex"); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			FailOAuthSessionCommit(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			return
 		}
@@ -362,7 +375,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	fmt.Println("Initializing Antigravity authentication...")
 
-	authSvc := antigravity.NewAntigravityAuth(h.cfg, nil)
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
+	authSvc := newAntigravityOAuthService(cfg)
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -374,7 +389,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
-	RegisterOAuthSession(state, "antigravity")
+	RegisterOAuthSessionWithProxy(state, "antigravity", sessionProxyURL)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -398,7 +413,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
 		}
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
@@ -437,7 +452,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 		tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, authCode, redirectURI)
 		if errToken != nil {
-			log.Errorf("Failed to exchange token: %v", errToken)
+			log.Errorf("Failed to exchange token: %s", redactSessionProxyInString(errToken.Error(), sessionProxyURL))
 			SetOAuthSessionError(state, "Failed to exchange token")
 			return
 		}
@@ -451,7 +466,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 		email, errInfo := authSvc.FetchUserInfo(ctx, accessToken)
 		if errInfo != nil {
-			log.Errorf("Failed to fetch user info: %v", errInfo)
+			log.Errorf("Failed to fetch user info: %s", redactSessionProxyInString(errInfo.Error(), sessionProxyURL))
 			SetOAuthSessionError(state, "Failed to fetch user info")
 			return
 		}
@@ -466,6 +481,11 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		if accessToken != "" {
 			fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
 			if errProject != nil {
+				if sessionProxyURL != "" {
+					log.Errorf("antigravity: failed to fetch project ID: %s", redactSessionProxyInString(errProject.Error(), sessionProxyURL))
+					SetOAuthSessionError(state, "Failed to fetch project ID")
+					return
+				}
 				log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
 			} else {
 				projectID = fetchedProjectID
@@ -502,13 +522,14 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			Label:    label,
 			Metadata: metadata,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "antigravity"); errGuard != nil {
+		applySessionProxyToAuthRecord(record, sessionProxyURL)
+		if errGuard := claimOAuthSessionCommit(state, "antigravity"); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save token to file: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save token to file")
+			FailOAuthSessionCommit(state, "Failed to save token to file")
 			return
 		}
 
@@ -529,12 +550,14 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 
 	fmt.Println("Initializing xAI authentication...")
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	state := fmt.Sprintf("xai-%d", time.Now().UnixNano())
-	authSvc := xaiauth.NewXAIAuth(h.cfg)
+	authSvc := xaiauth.NewXAIAuthWithProxyURL(cfg, sessionProxyURL)
 
 	deviceFlow, errStartDeviceFlow := authSvc.StartDeviceFlow(ctx)
 	if errStartDeviceFlow != nil {
-		log.Errorf("Failed to start xAI device flow: %v", errStartDeviceFlow)
+		log.Errorf("Failed to start xAI device flow: %s", redactSessionProxyInString(errStartDeviceFlow.Error(), sessionProxyURL))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
 		return
 	}
@@ -543,7 +566,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
 	}
 
-	RegisterOAuthSession(state, "xai")
+	RegisterOAuthSessionWithProxy(state, "xai", sessionProxyURL)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -556,8 +579,8 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 			if !IsOAuthSessionPending(state, "xai") {
 				return
 			}
-			log.Errorf("xAI authentication failed: %v", errWaitForAuthorization)
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
+			log.Errorf("xAI authentication failed: %s", redactSessionProxyInString(errWaitForAuthorization.Error(), sessionProxyURL))
+			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization), sessionProxyURL))
 			return
 		}
 		if !IsOAuthSessionPending(state, "xai") {
@@ -609,13 +632,14 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 				"base_url":  tokenStorage.BaseURL,
 			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "xai"); errGuard != nil {
+		applySessionProxyToAuthRecord(record, sessionProxyURL)
+		if errGuard := claimOAuthSessionCommit(state, "xai"); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save xAI token to file: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save token to file")
+			FailOAuthSessionCommit(state, "Failed to save token to file")
 			return
 		}
 
@@ -642,12 +666,14 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 
 	fmt.Println("Initializing Meta authentication...")
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	state := fmt.Sprintf("meta-%d", time.Now().UnixNano())
-	authSvc := metaauth.NewMetaAuth(h.cfg)
+	authSvc := metaauth.NewMetaAuthWithProxyURL(cfg, sessionProxyURL)
 
 	deviceFlow, errStartDeviceFlow := authSvc.StartDeviceFlow(ctx)
 	if errStartDeviceFlow != nil {
-		log.Errorf("Failed to start Meta device flow: %v", errStartDeviceFlow)
+		log.Errorf("Failed to start Meta device flow: %s", redactSessionProxyInString(errStartDeviceFlow.Error(), sessionProxyURL))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
 		return
 	}
@@ -656,7 +682,7 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
 	}
 
-	RegisterOAuthSession(state, "meta")
+	RegisterOAuthSessionWithProxy(state, "meta", sessionProxyURL)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -669,8 +695,8 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 			if !IsOAuthSessionPending(state, "meta") {
 				return
 			}
-			log.Errorf("Meta authentication failed: %v", errWaitForAuthorization)
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
+			log.Errorf("Meta authentication failed: %s", redactSessionProxyInString(errWaitForAuthorization.Error(), sessionProxyURL))
+			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization), sessionProxyURL))
 			return
 		}
 		if !IsOAuthSessionPending(state, "meta") {
@@ -685,13 +711,14 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 		}
 
 		record := buildMetaAuthRecord(bundle, tokenStorage)
-		if errGuard := guardOAuthSessionPendingForSave(state, "meta"); errGuard != nil {
+		applySessionProxyToAuthRecord(record, sessionProxyURL)
+		if errGuard := claimOAuthSessionCommit(state, "meta"); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save Meta token to file: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save token to file")
+			FailOAuthSessionCommit(state, "Failed to save token to file")
 			return
 		}
 
@@ -785,6 +812,8 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		domain = qDomain
 	} else if qChan := strings.TrimSpace(c.Query("channel")); qChan != "" {
 		domain = qChan
+	} else if bodyDomain := oauthSessionDomainFromContext(c); bodyDomain != "" {
+		domain = bodyDomain
 	}
 	h.requestKimiTokenWithDomain(c, domain)
 }
@@ -813,14 +842,16 @@ func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 
 	fmt.Printf("Initializing %s authentication...\n", displayName)
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	state := fmt.Sprintf("%s-%d", statePrefix, time.Now().UnixNano())
 	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuthWithDomain(h.cfg, domain)
+	kimiAuth := kimi.NewKimiAuthWithDomain(cfg, domain)
 
 	// Generate authorization URL
 	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
 	if errStartDeviceFlow != nil {
-		log.Errorf("Failed to generate authorization URL: %v", errStartDeviceFlow)
+		log.Errorf("Failed to generate authorization URL: %s", redactSessionProxyInString(errStartDeviceFlow.Error(), sessionProxyURL))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return
 	}
@@ -829,7 +860,7 @@ func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 		authURL = deviceFlow.VerificationURI
 	}
 
-	RegisterOAuthSession(state, providerName)
+	RegisterOAuthSessionWithProxy(state, providerName, sessionProxyURL)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -842,8 +873,8 @@ func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 			if !IsOAuthSessionPending(state, providerName) {
 				return
 			}
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
-			fmt.Printf("%s authentication failed: %v\n", displayName, errWaitForAuthorization)
+			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization), sessionProxyURL))
+			fmt.Printf("%s authentication failed: %s\n", displayName, redactSessionProxyInString(errWaitForAuthorization.Error(), sessionProxyURL))
 			return
 		}
 		if !IsOAuthSessionPending(state, providerName) {
@@ -887,13 +918,14 @@ func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 				"domain":   domain,
 			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, providerName); errGuard != nil {
+		applySessionProxyToAuthRecord(record, sessionProxyURL)
+		if errGuard := claimOAuthSessionCommit(state, providerName); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			FailOAuthSessionCommit(state, "Failed to save authentication tokens")
 			return
 		}
 
@@ -960,57 +992,67 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 
-	provider, status, isPlugin, metadata, completed, ok := GetOAuthSessionDetails(state)
+	session, ok := oauthSessions.Get(state)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
 	}
-	if completed {
+	if session.Completed {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		return
 	}
-	if status != "" {
-		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
+	if session.Status != "" {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": session.Status})
 		return
 	}
+	if session.Committing || session.SIWCCommitting {
+		c.JSON(http.StatusOK, gin.H{"status": "wait"})
+		return
+	}
+	provider := session.Provider
+	isPlugin := session.Source == oauthSessionSourcePlugin
+	metadata := session.Metadata
+	sessionProxyURL := strings.TrimSpace(session.ProxyURL)
 	h.mu.Lock()
 	host := h.pluginHost
 	h.mu.Unlock()
 	if isPlugin && host != nil && host.HasAuthProvider(provider) {
 		ctx := PopulateAuthContext(context.Background(), c)
+		if sessionProxyURL != "" {
+			ctx = pluginhost.WithOAuthProxyURL(ctx, sessionProxyURL)
+		}
 		resp, handled, errPoll := host.PollLogin(ctx, provider, state, metadata)
 		if handled {
 			if errPoll != nil {
-				message := strings.TrimSpace(errPoll.Error())
-				if message == "" {
-					message = "Authentication failed"
-				}
-				SetOAuthSessionError(state, message)
-				c.JSON(http.StatusOK, gin.H{"status": "error", "error": message})
+				message := redactSessionProxyInString(strings.TrimSpace(errPoll.Error()), sessionProxyURL)
+				writePluginPollFailureStatus(c, state, message)
 				return
 			}
 			switch resp.Status {
 			case "", pluginapi.AuthLoginStatusPending:
-				c.JSON(http.StatusOK, gin.H{"status": "wait"})
+				writeNonCommitPluginPollStatus(c, state, true)
 				return
 			case pluginapi.AuthLoginStatusError:
-				message := strings.TrimSpace(resp.Message)
-				if message == "" {
-					message = "Authentication failed"
-				}
-				SetOAuthSessionError(state, message)
-				c.JSON(http.StatusOK, gin.H{"status": "error", "error": message})
+				message := redactSessionProxyInString(strings.TrimSpace(resp.Message), sessionProxyURL)
+				writePluginPollFailureStatus(c, state, message)
 				return
 			case pluginapi.AuthLoginStatusSuccess:
+				if errGuard := claimOAuthSessionCommit(state, provider); errGuard != nil {
+					writeNonCommitPluginPollStatus(c, state, false)
+					return
+				}
 				records := pluginLoginPollAuths(host, resp)
 				if len(records) == 0 {
-					SetOAuthSessionError(state, "Authentication failed")
+					FailOAuthSessionCommit(state, "Authentication failed")
 					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Authentication failed"})
 					return
 				}
+				for _, record := range records {
+					applySessionProxyToAuthRecord(record, sessionProxyURL)
+				}
 				if errSave := h.savePluginLoginRecords(ctx, records); errSave != nil {
 					log.WithError(errSave).WithField("provider", provider).Error("failed to save plugin auth tokens")
-					SetOAuthSessionError(state, "Failed to save authentication tokens")
+					FailOAuthSessionCommit(state, "Failed to save authentication tokens")
 					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Failed to save authentication tokens"})
 					return
 				}
@@ -1024,6 +1066,44 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+func writePluginPollFailureStatus(c *gin.Context, state, message string) {
+	errStatus, completed, committing, ok := oauthSessions.FailPendingPoll(state, message)
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
+		return
+	}
+	if completed {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+	if committing {
+		c.JSON(http.StatusOK, gin.H{"status": "wait"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "error", "error": errStatus})
+}
+
+func writeNonCommitPluginPollStatus(c *gin.Context, state string, allowPendingWait bool) {
+	session, ok := oauthSessions.Get(state)
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
+		return
+	}
+	if session.Completed {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+	if session.Status != "" {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": session.Status})
+		return
+	}
+	if session.Committing || session.SIWCCommitting || allowPendingWait {
+		c.JSON(http.StatusOK, gin.H{"status": "wait"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
 }
 
 func pluginLoginPollAuths(host *pluginhost.Host, resp pluginapi.AuthLoginPollResponse) []*coreauth.Auth {

@@ -62,6 +62,8 @@ type ConfigField struct {
 	Name string
 	// Type classifies the field value for management clients.
 	Type ConfigFieldType
+	// Default is the value used when the configuration key is omitted.
+	Default any
 	// EnumValues lists allowed values when Type is ConfigFieldTypeEnum.
 	EnumValues []string
 	// Description explains how the plugin uses the field.
@@ -194,6 +196,9 @@ type ThinkingSupport struct {
 	ZeroAllowed bool
 	// DynamicAllowed reports whether automatic reasoning budget selection is supported.
 	DynamicAllowed bool
+	// DisableType is the Claude thinking.type that turns thinking off for this
+	// model. Empty means "disabled"; claude-sonnet-5-5 needs "between_tools".
+	DisableType string
 	// Levels lists supported named reasoning levels.
 	Levels []string
 }
@@ -372,6 +377,8 @@ type AuthRefreshResponse struct {
 }
 
 // ModelRegistrar registers plugin-provided models with the host.
+// Without an Executor, these models are published only through matching credentials
+// after applying their model exclusions.
 type ModelRegistrar interface {
 	RegisterModels(context.Context, ModelRegistrationRequest) (ModelRegistrationResponse, error)
 }
@@ -391,6 +398,7 @@ type ModelRegistrationResponse struct {
 }
 
 // ModelProvider contributes provider-native static and per-auth model metadata.
+// StaticModels alone does not make models available without an Executor or matching credentials.
 type ModelProvider interface {
 	StaticModels(context.Context, StaticModelRequest) (ModelResponse, error)
 	ModelsForAuth(context.Context, AuthModelRequest) (ModelResponse, error)
@@ -450,8 +458,11 @@ type FrontendAuthRequest struct {
 	Headers http.Header
 	// Query contains inbound query parameters.
 	Query url.Values
-	// Body contains the raw request body.
+	// Body contains the raw request body as received, before any Content-Encoding decoding.
 	Body []byte
+	// DecodedBody contains the request body after Content-Encoding decoding. It is set only when
+	// the body was content-encoded and the route's handler decodes it, and is nil otherwise.
+	DecodedBody []byte
 }
 
 // FrontendAuthResponse reports the authentication decision and identity metadata.
@@ -462,6 +473,10 @@ type FrontendAuthResponse struct {
 	Principal string
 	// Metadata carries plugin-defined identity attributes for downstream use.
 	Metadata map[string]string
+	// DenyStatusCode optionally specifies an HTTP status code when denying the request.
+	DenyStatusCode int
+	// DenyMessage optionally specifies an error message when denying the request.
+	DenyMessage string
 }
 
 const (
@@ -469,6 +484,8 @@ const (
 	SchedulerBuiltinRoundRobin = "round-robin"
 	// SchedulerBuiltinFillFirst delegates auth selection to the built-in fill-first scheduler.
 	SchedulerBuiltinFillFirst = "fill-first"
+	// SelectionIDMetadataKey is the metadata key carrying the per-selection identifier in SchedulerOptions.Metadata.
+	SelectionIDMetadataKey = "selection_id"
 )
 
 // Scheduler chooses an auth candidate before the built-in scheduler runs.
@@ -695,6 +712,10 @@ type HostModelExecutionRequest struct {
 	ProxyURL string `json:"proxy_url,omitempty"`
 	// Path optionally specifies or overrides the request path (e.g. "/v1/images/generations" or "/v1/images/edits").
 	Path string `json:"path,omitempty"`
+	// CallerScope optionally carries the opaque caller scope handle from an intercepted
+	// request so the host execution resolves the same caller-scoped session and alias state
+	// without exposing the downstream client API key.
+	CallerScope string `json:"caller_scope,omitempty"`
 }
 
 // HostModelExecutionResponse describes a non-streaming host model execution response.
@@ -850,6 +871,30 @@ type HostAuthSaveResponse struct {
 	Name string `json:"name"`
 	// Path is the saved auth file path.
 	Path string `json:"path"`
+}
+
+// HostAuthModelsRequest asks the host for the models registered for one or all credentials.
+type HostAuthModelsRequest struct {
+	// AuthIndex identifies the credential index; empty requests all credentials.
+	AuthIndex string `json:"auth_index,omitempty"`
+}
+
+// HostAuthModelsResponse returns the models registered for each matching credential.
+type HostAuthModelsResponse struct {
+	// Credentials lists the credentials and their registered models.
+	Credentials []HostAuthModels `json:"credentials"`
+}
+
+// HostAuthModels describes the models registered for one credential.
+type HostAuthModels struct {
+	// ID identifies the credential record.
+	ID string `json:"id"`
+	// AuthIndex is the stable runtime credential index.
+	AuthIndex string `json:"auth_index"`
+	// Provider is the credential provider key.
+	Provider string `json:"provider"`
+	// Models lists the model identifiers registered for this credential in the global registry.
+	Models []string `json:"models"`
 }
 
 // Host affinity lookup status outcomes.
@@ -1095,6 +1140,9 @@ type WebSocketResponseObserver interface {
 // StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
 const StreamChunkHeaderInitIndex = -1
 
+// CallerScopeMetadataKey is the metadata key carrying the opaque downstream caller scope handle.
+const CallerScopeMetadataKey = "caller_scope"
+
 // RequestTransformRequest describes a request payload transformation.
 type RequestTransformRequest struct {
 	// FromFormat is the source protocol format.
@@ -1147,6 +1195,9 @@ type RequestInterceptRequest struct {
 	Headers http.Header
 	// Body contains the current request payload. Treat it as read-only; modifications must be returned in RequestInterceptResponse.Body.
 	Body []byte
+	// CallerScope carries an opaque, irreversible handle identifying the downstream caller
+	// when available (mirrors Metadata[CallerScopeMetadataKey]).
+	CallerScope string
 	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
 	Metadata map[string]any
 }
@@ -1488,6 +1539,8 @@ type UsageRecord struct {
 	RequestID string
 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
 	TraceID string
+	// SelectionID identifies the scheduler selection decision that produced this usage record when available.
+	SelectionID string
 	// Provider identifies the upstream provider.
 	Provider string
 	// BaseURL is the upstream base URL configured for the request/credential when available.
@@ -1518,8 +1571,11 @@ type UsageRecord struct {
 	Source string
 	// ReasoningEffort records the requested reasoning effort.
 	ReasoningEffort string
-	// ServiceTier records the requested or reported service tier.
+	// ServiceTier records the tier requested by the original client.
 	ServiceTier string
+	// EffectiveServiceTier records the tier in the final outbound request after
+	// protocol translation and payload defaults or overrides.
+	EffectiveServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
 	// ResponseModel stores the model name reported by the upstream response, empty when unknown.

@@ -429,6 +429,15 @@ var devinCompoundSuffixes = []struct {
 	{suffix: "-thinking", effort: ""},
 	{suffix: "-max-1m", effort: "max", readd: "-1m"},
 	{suffix: "-none-1m", effort: "none", readd: "-1m"},
+	// Lightning tier keeps the effort before the -lightning suffix upstream
+	// (e.g. swe-2-high-lightning), so it aggregates as <base>-lightning.
+	{suffix: "-minimal-lightning", effort: "minimal", readd: "-lightning"},
+	{suffix: "-low-lightning", effort: "low", readd: "-lightning"},
+	{suffix: "-medium-lightning", effort: "medium", readd: "-lightning"},
+	{suffix: "-high-lightning", effort: "high", readd: "-lightning"},
+	{suffix: "-xhigh-lightning", effort: "xhigh", readd: "-lightning"},
+	{suffix: "-max-lightning", effort: "max", readd: "-lightning"},
+	{suffix: "-none-lightning", effort: "none", readd: "-lightning"},
 }
 
 var devinSimpleEffortSuffixes = []struct {
@@ -571,12 +580,19 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 			}
 		}
 
+		// Lightning display names strip both the effort word and "Lightning";
+		// re-append it so swe-2-lightning shows as "SWE-2 Lightning".
+		displayName := entry.displayName
+		if strings.HasSuffix(id, "-lightning") && !strings.HasSuffix(strings.ToLower(displayName), "lightning") {
+			displayName = strings.TrimSpace(displayName + " Lightning")
+		}
+
 		res = append(res, devinModelJSON{
 			ID:                        entry.baseID,
 			Object:                    "model",
 			Type:                      "devin",
 			OwnedBy:                   vendorName(entry.vendorID, entry.baseID),
-			DisplayName:               entry.displayName,
+			DisplayName:               displayName,
 			ContextLength:             entry.contextLength,
 			MaxCompletionTokens:       64000,
 			SupportedInputModalities:  modalities,
@@ -595,7 +611,7 @@ var devinDisplayNameSuffixes = []string{
 	" Low Thinking", " Medium Thinking", " High Thinking", " XHigh Thinking",
 	" Max Thinking", " No Thinking",
 	" Low", " Medium", " High", " XHigh", " Max", " None", " Minimal",
-	" Thinking", " Fast",
+	" Thinking", " Fast", " Lightning",
 }
 
 func cleanDisplayName(label string) string {

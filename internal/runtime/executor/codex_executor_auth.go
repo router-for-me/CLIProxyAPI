@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -45,8 +46,25 @@ func codexUseSIWC(auth *cliproxyauth.Auth) bool {
 	return enabled
 }
 
+func codexUseSIWCForRequest(ctx context.Context, auth *cliproxyauth.Auth, clientHeaders ...http.Header) bool {
+	return cliproxyauth.IsCodexUseSIWCForRequest(ctx, auth, clientHeaders...)
+}
+
 func ensureCodexSIWCCredentials(auth *cliproxyauth.Auth, apiKey string) error {
-	if codexUseSIWC(auth) && strings.TrimSpace(apiKey) == "" {
+	return ensureCodexSIWCCredentialsForRequest(context.Background(), auth, apiKey)
+}
+
+func ensureCodexSIWCCredentialsForRequest(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, clientHeaders ...http.Header) error {
+	if !codexUseSIWC(auth) {
+		return nil
+	}
+	if cliproxyauth.IsCodexClientRequest(ctx, clientHeaders...) {
+		if strings.TrimSpace(apiKey) == "" {
+			return statusErr{code: 401, msg: "codex executor: original OAuth access_token is required for Codex client requests"}
+		}
+		return nil
+	}
+	if strings.TrimSpace(apiKey) == "" {
 		return statusErr{code: 401, msg: "codex executor: use_siwc is enabled but siwc access_token is missing"}
 	}
 	return nil
@@ -253,7 +271,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		needOuter = false
 	} else if homeEnabled && !hasOuter {
 		hasOuter = true
-		if outerExp, okExp := auth.OuterExpirationTime(); okExp && !outerExp.IsZero() && !outerExp.After(now.Add(24*time.Hour)) {
+		if outerExp, okExp := auth.OuterExpirationTime(); okExp && !outerExp.IsZero() && !outerExp.After(now.Add(cliproxyauth.CodexOuterRefreshLead)) {
 			needOuter = true
 		}
 	}
@@ -392,6 +410,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 			if mergedSIWC == nil {
 				mergedSIWC = make(map[string]any)
 			}
+			delete(mergedSIWC, "expires_at")
 			for k, v := range siwcTD.ToMap() {
 				mergedSIWC[k] = v
 			}
@@ -461,13 +480,17 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
+	return codexCredsForRequest(context.Background(), a)
+}
+
+func codexCredsForRequest(ctx context.Context, a *cliproxyauth.Auth, clientHeaders ...http.Header) (apiKey, baseURL string) {
 	if a == nil {
 		return "", ""
 	}
 	if a.Attributes != nil {
 		baseURL = a.Attributes["base_url"]
 	}
-	if codexUseSIWC(a) {
+	if codexUseSIWCForRequest(ctx, a, clientHeaders...) {
 		apiKey = codexSIWCAccessToken(a)
 		if strings.TrimSpace(baseURL) == "" {
 			baseURL = defaultOpenAISIWCBaseURL

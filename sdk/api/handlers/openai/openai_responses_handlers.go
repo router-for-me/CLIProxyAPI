@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -147,8 +148,8 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
 			return false
 		}
 
-		// Always filter internal WebSocket timing telemetry from SSE streams.
-		if strings.HasPrefix(name, "responsesapi.") {
+		// Always filter internal WebSocket timing telemetry and Meta subscription usage from SSE streams.
+		if strings.HasPrefix(name, "responsesapi.") || name == "response.subscription_usage" {
 			return true
 		}
 
@@ -245,8 +246,11 @@ func (f *responsesSSEFramer) repairErrorPayload(payload []byte) []byte {
 	errMsg := responsesSSEPayloadErrorMessage(payload)
 	status := errMsg.StatusCode
 	f.terminalError = errMsg
+	isResponseFailedPayload := gjson.GetBytes(payload, "type").String() == "response.failed"
 	failureEvent := f.failureEvent
-	if failureEvent != "response.failed" {
+	if isResponseFailedPayload || failureEvent == "response.failed" {
+		failureEvent = "response.failed"
+	} else {
 		failureEvent = "error"
 	}
 	f.terminalEvent = failureEvent
@@ -261,6 +265,19 @@ func (f *responsesSSEFramer) repairErrorPayload(payload []byte) []byte {
 	}
 	if failureEvent == "response.failed" {
 		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
+		if isResponseFailedPayload && gjson.GetBytes(payload, "response").IsObject() {
+			repaired := f.repairCompletedPayload(payload)
+			respRaw := []byte(gjson.GetBytes(repaired, "response").Raw)
+			respRaw, _ = sjson.SetBytes(respRaw, "status", "failed")
+			if sanitizedErr := gjson.GetBytes(chunk, "response.error"); sanitizedErr.Exists() {
+				respRaw, _ = sjson.SetRawBytes(respRaw, "error", []byte(sanitizedErr.Raw))
+			}
+			env := []byte(`{"type":"response.failed","sequence_number":0,"response":{}}`)
+			env, _ = sjson.SetBytes(env, "sequence_number", seq)
+			if updated, errSet := sjson.SetRawBytes(env, "response", respRaw); errSet == nil {
+				chunk = updated
+			}
+		}
 		return []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", chunk))
 	}
 	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, seq)
@@ -512,6 +529,7 @@ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
+	AccessManager *sdkaccess.Manager
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.

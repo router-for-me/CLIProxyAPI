@@ -94,8 +94,24 @@ func authIDForPath(path, authDir string) string {
 	}
 	id := path
 	if authDir = strings.TrimSpace(authDir); authDir != "" {
-		if rel, errRel := filepath.Rel(authDir, path); errRel == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		cleanDir := filepath.Clean(authDir)
+		cleanPath := filepath.Clean(path)
+		if rel, errRel := filepath.Rel(cleanDir, cleanPath); isRelativeWithinAuthDir(rel, errRel) {
 			id = rel
+		} else {
+			if !filepath.IsAbs(cleanDir) {
+				if absDir, errAbs := filepath.Abs(cleanDir); errAbs == nil {
+					cleanDir = absDir
+				}
+			}
+			if !filepath.IsAbs(cleanPath) {
+				if absPath, errAbs := filepath.Abs(cleanPath); errAbs == nil {
+					cleanPath = absPath
+				}
+			}
+			if rel, errRel := filepath.Rel(cleanDir, cleanPath); isRelativeWithinAuthDir(rel, errRel) {
+				id = rel
+			}
 		}
 	}
 	id = filepath.ToSlash(filepath.Clean(id))
@@ -103,6 +119,13 @@ func authIDForPath(path, authDir string) string {
 		id = strings.ToLower(id)
 	}
 	return id
+}
+
+func isRelativeWithinAuthDir(rel string, errRel error) bool {
+	if errRel != nil || rel == "" || rel == "." || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (h *Host) AuthProviderIdentifiers() []string {
@@ -255,6 +278,28 @@ func pluginAuthParseResponseAuths(resp pluginapi.AuthParseResponse) []pluginapi.
 	return []pluginapi.AuthData{resp.Auth}
 }
 
+type oauthProxyURLContextKey struct{}
+
+// WithOAuthProxyURL attaches a session-scoped proxy URL to ctx for plugin OAuth login calls.
+func WithOAuthProxyURL(ctx context.Context, proxyURL string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, oauthProxyURLContextKey{}, proxyURL)
+}
+
+func oauthProxyURLFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(oauthProxyURLContextKey{}).(string)
+	return strings.TrimSpace(value)
+}
+
 func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string, metadata ...map[string]any) (pluginapi.AuthLoginStartResponse, bool, error) {
 	record := h.authProviderRecord(provider)
 	if record == nil {
@@ -280,11 +325,16 @@ func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, prov
 			err = fmt.Errorf("auth provider start login panic: %v", recovered)
 		}
 	}()
+	hostSummary := h.hostConfigSummary()
+	sessionProxyURL := oauthProxyURLFromContext(ctx)
+	if sessionProxyURL != "" {
+		hostSummary.ProxyURL = sessionProxyURL
+	}
 	req := pluginapi.AuthLoginStartRequest{
 		Provider:   normalizeProviderID(provider),
 		BaseURL:    strings.TrimSpace(baseURL),
-		Host:       h.hostConfigSummary(),
-		HTTPClient: h.newHTTPClient(nil),
+		Host:       hostSummary,
+		HTTPClient: h.newHTTPClientWithProxy(nil, sessionProxyURL, provider),
 		Metadata:   cloneAnyMap(metadata),
 	}
 	resp, errStart := authProvider.StartLogin(ctx, req)
@@ -319,11 +369,16 @@ func (h *Host) callPollLogin(ctx context.Context, record capabilityRecord, provi
 			err = fmt.Errorf("auth provider poll login panic: %v", recovered)
 		}
 	}()
+	hostSummary := h.hostConfigSummary()
+	sessionProxyURL := oauthProxyURLFromContext(ctx)
+	if sessionProxyURL != "" {
+		hostSummary.ProxyURL = sessionProxyURL
+	}
 	req := pluginapi.AuthLoginPollRequest{
 		Provider:   normalizeProviderID(provider),
 		State:      strings.TrimSpace(state),
-		Host:       h.hostConfigSummary(),
-		HTTPClient: h.newHTTPClient(nil),
+		Host:       hostSummary,
+		HTTPClient: h.newHTTPClientWithProxy(nil, sessionProxyURL, provider),
 		Metadata:   cloneAnyMap(metadata),
 	}
 	resp, errPoll := authProvider.PollLogin(ctx, req)

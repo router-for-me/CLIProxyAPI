@@ -45,6 +45,37 @@ func extractConfigurationUpdateConfig(body []byte) ThinkingConfig {
 	}
 }
 
+// CollapseConfigurationUpdates removes every configuration_update input item.
+// Unless keepTopLevelEffort is true, the last nonempty update effort is also
+// promoted into the top-level reasoning.effort. Targets that reject
+// configuration_update items entirely (for example Sign in with ChatGPT
+// subscriptions) use it to degrade to the classic request-level effort,
+// accepting the resulting prompt-cache loss. Keep the top-level effort when
+// an explicit model thinking suffix already resolved the operator's override
+// into it. A body without array input or without any configuration_update
+// item is returned unchanged, and the top-level effort is only touched when
+// an update carries a usable effort.
+func CollapseConfigurationUpdates(body []byte, keepTopLevelEffort ...bool) []byte {
+	updated := stripConfigurationUpdates(body)
+	if len(keepTopLevelEffort) > 0 && keepTopLevelEffort[0] {
+		return updated
+	}
+	effort := reasoningEffortFromConfig(extractConfigurationUpdateConfig(body))
+	if effort == "" {
+		return updated
+	}
+	collapsed, errSet := sjson.SetBytes(updated, "reasoning.effort", effort)
+	if errSet != nil {
+		return updated
+	}
+	return collapsed
+}
+
+// StripConfigurationUpdates removes configuration_update input items without changing reasoning.
+func StripConfigurationUpdates(body []byte) []byte {
+	return stripConfigurationUpdates(body)
+}
+
 // stripConfigurationUpdates removes unsupported Responses input items without
 // modifying other input items or introducing an input field.
 func stripConfigurationUpdates(body []byte) []byte {

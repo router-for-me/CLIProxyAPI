@@ -53,6 +53,9 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	MessageStopSent bool
 	// Tool call content block index mapping
 	ToolCallBlockIndexes map[int]int
+	// OmittedToolCallIndexes maps a chunk-local tool_calls array position to the
+	// active accumulator key when the upstream omits tool_calls[].index.
+	OmittedToolCallIndexes map[int]int
 	// Index assigned to text content block
 	TextContentBlockIndex int
 	// Index assigned to thinking content block
@@ -68,6 +71,14 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	UsageOutputTokens     int64
 	UsageCachedTokens     int64
 	UsageCacheWriteTokens int64
+	// ToolNameMapResolved tracks whether ToolNameMap has been resolved from
+	// the original request once per stream.
+	ToolNameMapResolved bool
+	// StreamResolved and StreamRequested cache whether the original request
+	// asked for streaming, resolved once per stream so large request bodies
+	// are not re-parsed on every chunk.
+	StreamResolved  bool
+	StreamRequested bool
 }
 
 // InterleavedContentChunk stores a buffered chunk of text or thinking arriving while a tool call is open
@@ -131,21 +142,28 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
-	if (*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
-		(*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	state := (*param).(*ConvertOpenAIResponseToAnthropicParams)
+	if !state.ToolNameMapResolved {
+		if state.ToolNameMap == nil {
+			state.ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+		}
+		state.ToolNameMapResolved = true
 	}
 
 	// Check if this is the [DONE] marker
 	if bytes.Equal(bytes.TrimSpace(rawJSON), []byte("[DONE]")) {
-		return convertOpenAIDoneToAnthropic((*param).(*ConvertOpenAIResponseToAnthropicParams))
+		return convertOpenAIDoneToAnthropic(state)
 	}
 
-	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
-	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
-		return convertOpenAINonStreamingToAnthropic(rawJSON)
-	} else {
-		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
+	if !state.StreamResolved {
+		streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
+		state.StreamRequested = streamResult.Exists() && streamResult.Type != gjson.False
+		state.StreamResolved = true
 	}
+	if !state.StreamRequested {
+		return convertOpenAINonStreamingToAnthropic(rawJSON)
+	}
+	return convertOpenAIStreamingChunkToAnthropic(rawJSON, state)
 }
 
 func hasValidToolCallArguments(param *ConvertOpenAIResponseToAnthropicParams) bool {
@@ -313,9 +331,33 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			}
 
 			toolCalls.ForEach(func(arrayIndex, toolCall gjson.Result) bool {
+				var incomingID string
+				if id := toolCall.Get("id"); id.Exists() && id.Type == gjson.String {
+					incomingID = id.String()
+				}
+
 				index := int(toolCall.Get("index").Int())
 				if !toolCall.Get("index").Exists() {
-					index = int(arrayIndex.Int())
+					pos := int(arrayIndex.Int())
+					index = pos
+					if param.OmittedToolCallIndexes != nil {
+						if mapped, ok := param.OmittedToolCallIndexes[pos]; ok {
+							index = mapped
+						}
+					}
+					if existing, exists := param.ToolCallsAccumulator[index]; exists && existing != nil && incomingID != "" && existing.ID != "" && existing.ID != incomingID {
+						nextIndex := index + 1
+						for k := range param.ToolCallsAccumulator {
+							if k >= nextIndex {
+								nextIndex = k + 1
+							}
+						}
+						index = nextIndex
+						if param.OmittedToolCallIndexes == nil {
+							param.OmittedToolCallIndexes = make(map[int]int)
+						}
+						param.OmittedToolCallIndexes[pos] = index
+					}
 				}
 
 				// Initialize accumulator if needed
@@ -328,10 +370,8 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				// Handle tool call ID. Only accept JSON-string, non-empty
 				// values so malformed upstream fields do not overwrite a
 				// valid ID or coerce into a content_block.id.
-				if id := toolCall.Get("id"); id.Exists() && id.Type == gjson.String {
-					if idStr := id.String(); idStr != "" {
-						accumulator.ID = idStr
-					}
+				if incomingID != "" && !accumulator.StartEmitted {
+					accumulator.ID = incomingID
 				}
 
 				// Handle function name and arguments
@@ -465,8 +505,10 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 		}
 
 		// Handle tool calls
+		hasToolCall := false
 		if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+				hasToolCall = true
 				toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
@@ -493,8 +535,8 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 		}
 
 		// Set stop reason
-		if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-			out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
+		if finishReason := choice.Get("finish_reason"); finishReason.Exists() || hasToolCall {
+			out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAINonStreamFinishReasonToAnthropic(finishReason.String(), hasToolCall))
 		}
 	}
 
@@ -530,6 +572,13 @@ func mapOpenAIFinishReasonToAnthropic(openAIReason string) string {
 	default:
 		return "end_turn"
 	}
+}
+
+func mapOpenAINonStreamFinishReasonToAnthropic(openAIReason string, hasToolCall bool) string {
+	if hasToolCall && openAIReason != "length" && openAIReason != "content_filter" {
+		return "tool_use"
+	}
+	return mapOpenAIFinishReasonToAnthropic(openAIReason)
 }
 
 func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToolIndex int) int {
@@ -797,16 +846,12 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 	out, _ = sjson.SetBytes(out, "model", root.Get("model").String())
 
 	hasToolCall := false
-	stopReasonSet := false
+	finishReason := ""
 	var blocks [][]byte
 
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0]
-
-		if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-			out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
-			stopReasonSet = true
-		}
+		finishReason = choice.Get("finish_reason").String()
 
 		if message := choice.Get("message"); message.Exists() {
 			if contentResult := message.Get("content"); contentResult.Exists() {
@@ -940,13 +985,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 		}
 	}
 
-	if !stopReasonSet {
-		if hasToolCall {
-			out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
-		} else {
-			out, _ = sjson.SetBytes(out, "stop_reason", "end_turn")
-		}
-	}
+	out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAINonStreamFinishReasonToAnthropic(finishReason, hasToolCall))
 
 	return out
 }
