@@ -157,6 +157,9 @@ func TestIsRequestFault(t *testing.T) {
 		want   bool
 	}{
 		{name: "bad request status", status: http.StatusBadRequest, err: errors.New("bad request"), want: true},
+		{name: "cloudflare signature block", status: http.StatusForbidden, err: errors.New("error code: 1010"), want: true},
+		{name: "plain forbidden stays a credential failure", status: http.StatusForbidden, err: errors.New("forbidden"), want: false},
+		{name: "1010 text on a non-403 status", status: http.StatusBadGateway, err: errors.New("error code: 1010"), want: false},
 		{name: "conflict status", status: http.StatusConflict, err: errors.New("conflict"), want: true},
 		{name: "entity too large status", status: http.StatusRequestEntityTooLarge, err: errors.New("too large"), want: true},
 		{name: "unprocessable status", status: http.StatusUnprocessableEntity, err: errors.New("unprocessable"), want: true},
