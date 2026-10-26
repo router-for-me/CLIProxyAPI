@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +30,7 @@ import (
 	clipexec "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	sdktr "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -95,11 +95,14 @@ func buildHTTPClient(a *coreauth.Auth) *http.Client {
 	if a == nil || strings.TrimSpace(a.ProxyURL) == "" {
 		return http.DefaultClient
 	}
-	u, err := url.Parse(a.ProxyURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+	transport, _, err := proxyutil.BuildHTTPTransport(a.ProxyURL)
+	if err != nil {
+		return &http.Client{Transport: proxyutil.FailClosedTransport(err)}
+	}
+	if transport == nil {
 		return http.DefaultClient
 	}
-	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(u)}}
+	return &http.Client{Transport: transport}
 }
 
 func upstreamEndpoint(a *coreauth.Auth) string {

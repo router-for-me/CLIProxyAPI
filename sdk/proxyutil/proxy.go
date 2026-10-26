@@ -74,22 +74,69 @@ func Parse(raw string) (Setting, error) {
 	}
 }
 
-// ValidRequestProxy reports whether raw is a concrete execution proxy override.
-// The host must be present, and an explicit port must be in the range 1-65535.
-func ValidRequestProxy(raw string) bool {
+// ErrUnusable marks a proxy value that is set but cannot be used. The caller must fail the
+// upstream call: never dial the target directly and never fall back to the environment.
+var ErrUnusable = errors.New("proxy unusable")
+
+func unusable(raw, reason string) error {
+	return fmt.Errorf("%w: %s: %s", ErrUnusable, Redact(raw), reason)
+}
+
+// check parses raw and rejects what Parse accepts but no dialer can use: no host, a port outside 1-65535.
+func check(raw string) (Setting, error) {
 	setting, errParse := Parse(raw)
-	if errParse != nil || setting.Mode != ModeProxy || setting.URL == nil {
-		return false
+	if errParse != nil {
+		return setting, unusable(raw, errParse.Error())
 	}
-	if strings.TrimSpace(setting.URL.Hostname()) == "" {
-		return false
+	if setting.Mode == ModeProxy {
+		if setting.URL.Hostname() == "" {
+			setting.Mode = ModeInvalid
+			return setting, unusable(raw, "proxy URL missing host")
+		}
+		port := setting.URL.Port()
+		if port != "" {
+			if number, errPort := strconv.Atoi(port); errPort != nil || number < 1 || number > 65535 {
+				setting.Mode = ModeInvalid
+				return setting, unusable(raw, "proxy port out of range")
+			}
+		}
 	}
-	port := setting.URL.Port()
-	if port == "" {
-		return true
+	return setting, nil
+}
+
+// Check returns nil for empty, direct, none and a usable proxy URL, else an error wrapping ErrUnusable
+// whose text carries no userinfo.
+func Check(raw string) error {
+	_, err := check(raw)
+	return err
+}
+
+type failClosed struct{ err error }
+
+func (f failClosed) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		_ = req.Body.Close()
 	}
-	number, errPort := strconv.Atoi(port)
-	return errPort == nil && number >= 1 && number <= 65535
+	return nil, f.err
+}
+
+func (f failClosed) Dial(string, string) (net.Conn, error) { return nil, f.err }
+
+func (f failClosed) DialContext(context.Context, string, string) (net.Conn, error) {
+	return nil, f.err
+}
+
+// FailClosedTransport returns a transport that fails every request with err.
+func FailClosedTransport(err error) http.RoundTripper { return failClosed{err} }
+
+// FailClosedDialer returns a dialer (also a proxy.ContextDialer) that fails every dial with err.
+func FailClosedDialer(err error) proxy.Dialer { return failClosed{err} }
+
+// ValidRequestProxy reports whether raw is a concrete execution proxy override.
+// The host must be present and a port, when given, must be in the range 1-65535.
+func ValidRequestProxy(raw string) bool {
+	setting, errCheck := check(raw)
+	return errCheck == nil && setting.Mode == ModeProxy
 }
 
 func cloneDefaultTransport() *http.Transport {
@@ -108,7 +155,7 @@ func NewDirectTransport() *http.Transport {
 
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
 func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
-	setting, errParse := Parse(raw)
+	setting, errParse := check(raw)
 	if errParse != nil {
 		return nil, setting.Mode, errParse
 	}
@@ -128,7 +175,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			}
 			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, proxy.Direct)
 			if errSOCKS5 != nil {
-				return nil, setting.Mode, fmt.Errorf("create SOCKS5 dialer failed: %w", errSOCKS5)
+				return nil, setting.Mode, unusable(raw, "create SOCKS5 dialer failed: "+errSOCKS5.Error())
 			}
 			transport := cloneDefaultTransport()
 			transport.Proxy = nil
@@ -204,7 +251,7 @@ func buildHTTPSProxyDialTLSContext(
 
 // BuildDialer constructs a proxy dialer for settings that operate at the connection layer.
 func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
-	setting, errParse := Parse(raw)
+	setting, errParse := check(raw)
 	if errParse != nil {
 		return nil, setting.Mode, errParse
 	}
@@ -220,7 +267,7 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 		}
 		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
 		if errDialer != nil {
-			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
+			return nil, setting.Mode, unusable(raw, "create proxy dialer failed: "+errDialer.Error())
 		}
 		return dialer, setting.Mode, nil
 	default:

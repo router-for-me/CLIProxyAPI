@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -221,6 +222,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 	if errValidate := validateTrustedProxies(cfg.TrustedProxies); errValidate != nil {
 		return nil, errValidate
+	}
+
+	if errProxy := proxyutil.Check(cfg.ProxyURL); errProxy != nil {
+		log.Errorf("config proxy-url is unusable, upstream calls using it will fail: %v", errProxy)
 	}
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()

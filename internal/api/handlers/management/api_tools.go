@@ -835,36 +835,23 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 }
 
 func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
-	if proxyStr := strings.TrimSpace(requestProxyURL); proxyStr != "" {
-		if transport := buildProxyTransport(proxyStr); transport != nil {
-			return transport
-		}
-		return directAPICallTransport()
-	}
-
-	var proxyCandidates []string
+	// The first proxy that is set decides; if it is unusable the call fails, it never moves on
+	// to the next candidate or to a direct connection.
+	candidates := []string{requestProxyURL}
 	if auth != nil {
-		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
-		}
+		candidates = append(candidates, auth.ProxyURL)
 		if h != nil && h.cfg != nil {
-			if proxyStr := strings.TrimSpace(proxyURLFromAPIKeyConfig(h.cfg, auth)); proxyStr != "" {
-				proxyCandidates = append(proxyCandidates, proxyStr)
-			}
+			candidates = append(candidates, proxyURLFromAPIKeyConfig(h.cfg, auth))
 		}
 	}
 	if h != nil && h.cfg != nil {
-		if proxyStr := strings.TrimSpace(h.cfg.ProxyURL); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
+		candidates = append(candidates, h.cfg.ProxyURL)
+	}
+	for _, candidate := range candidates {
+		if proxyStr := strings.TrimSpace(candidate); proxyStr != "" {
+			return buildProxyTransport(proxyStr)
 		}
 	}
-
-	for _, proxyStr := range proxyCandidates {
-		if transport := buildProxyTransport(proxyStr); transport != nil {
-			return transport
-		}
-	}
-
 	return directAPICallTransport()
 }
 
@@ -1010,11 +997,13 @@ func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, 
 	return ""
 }
 
-func buildProxyTransport(proxyStr string) *http.Transport {
+// buildProxyTransport returns the transport for a non-empty proxy value; an unusable value yields a
+// transport failing every request with an error wrapping proxyutil.ErrUnusable.
+func buildProxyTransport(proxyStr string) http.RoundTripper {
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
 	if errBuild != nil {
-		log.WithError(errBuild).Debug("build proxy transport failed")
-		return nil
+		log.WithError(errBuild).Error("build proxy transport failed")
+		return proxyutil.FailClosedTransport(errBuild)
 	}
 	return transport
 }

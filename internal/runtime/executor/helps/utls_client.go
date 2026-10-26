@@ -61,7 +61,8 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
-			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+			log.Errorf("utls: failed to configure proxy dialer: %v", errBuild)
+			dialer = proxyutil.FailClosedDialer(errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
@@ -332,7 +333,8 @@ func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
-			log.Errorf("claude tls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+			log.Errorf("claude tls: failed to configure proxy dialer: %v", errBuild)
+			dialer = proxyutil.FailClosedDialer(errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
@@ -448,9 +450,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
-			standardTransport = transport
-		}
+		standardTransport = buildProxyTransport(proxyURL)
 	} else if ctxRoundTripper != nil {
 		chromeRT = ctxRoundTripper
 		anthropicRT = ctxRoundTripper

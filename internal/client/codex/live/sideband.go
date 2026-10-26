@@ -712,11 +712,10 @@ func newSidebandDialer(proxyURL string) *websocket.Dialer {
 		return dialer
 	}
 
-	setting, errParse := proxyutil.Parse(proxyURL)
-	if errParse != nil {
-		log.Errorf("codex live sideband: %v", errParse)
-		return dialer
+	if errCheck := proxyutil.Check(proxyURL); errCheck != nil {
+		return failClosedSidebandDialer(dialer, errCheck)
 	}
+	setting, _ := proxyutil.Parse(proxyURL)
 	switch setting.Mode {
 	case proxyutil.ModeDirect:
 		dialer.Proxy = nil
@@ -752,5 +751,13 @@ func newSidebandDialer(proxyURL string) *websocket.Dialer {
 	default:
 		log.Errorf("codex live sideband: unsupported proxy scheme: %s", setting.URL.Scheme)
 	}
+	return dialer
+}
+
+// failClosedSidebandDialer makes every dial fail with err: no environment proxy, no direct connection.
+func failClosedSidebandDialer(dialer *websocket.Dialer, err error) *websocket.Dialer {
+	log.Errorf("codex live sideband: %v", err)
+	dialer.Proxy = nil
+	dialer.NetDialContext = func(context.Context, string, string) (net.Conn, error) { return nil, err }
 	return dialer
 }

@@ -23,6 +23,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
 func TestAPICallUsesRequestProxyURL(t *testing.T) {
@@ -83,7 +84,8 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	}
 }
 
-func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
+// An unusable account proxy fails the call; it does not hand over to the global proxy.
+func TestAPICallTransportInvalidAuthDoesNotFallBackToGlobalProxy(t *testing.T) {
 	t.Parallel()
 
 	h := &Handler{
@@ -93,22 +95,12 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 	}
 
 	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "bad-value"}, "")
-	httpTransport, ok := transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport type = %T, want *http.Transport", transport)
-	}
-
 	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	if errRequest != nil {
 		t.Fatalf("http.NewRequest returned error: %v", errRequest)
 	}
-
-	proxyURL, errProxy := httpTransport.Proxy(req)
-	if errProxy != nil {
-		t.Fatalf("httpTransport.Proxy returned error: %v", errProxy)
-	}
-	if proxyURL == nil || proxyURL.String() != "http://global-proxy.example.com:8080" {
-		t.Fatalf("proxy URL = %v, want http://global-proxy.example.com:8080", proxyURL)
+	if _, errRoundTrip := transport.RoundTrip(req); !errors.Is(errRoundTrip, proxyutil.ErrUnusable) {
+		t.Fatalf("RoundTrip error = %v, want ErrUnusable", errRoundTrip)
 	}
 }
 
@@ -153,12 +145,13 @@ func TestAPICallTransportInvalidRequestProxyDoesNotFallBack(t *testing.T) {
 	auth := &coreauth.Auth{ProxyURL: "http://credential-proxy.example.com:8080"}
 
 	transport := h.apiCallTransport(auth, "bad-value")
-	httpTransport, ok := transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport type = %T, want *http.Transport", transport)
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
 	}
-	if httpTransport.Proxy != nil {
-		t.Fatal("expected invalid request proxy to avoid lower-priority proxy settings")
+	// Neither a lower-priority proxy nor a direct connection: the call fails.
+	if _, errRoundTrip := transport.RoundTrip(req); !errors.Is(errRoundTrip, proxyutil.ErrUnusable) {
+		t.Fatalf("RoundTrip error = %v, want ErrUnusable", errRoundTrip)
 	}
 }
 

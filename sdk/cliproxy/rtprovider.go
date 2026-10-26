@@ -39,7 +39,7 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
-		return nil
+		return proxyutil.FailClosedTransport(errBuild)
 	}
 	if transport == nil {
 		return nil

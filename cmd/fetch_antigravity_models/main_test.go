@@ -125,3 +125,20 @@ func TestFetchModelsFallbackAfterTwoAttempts(t *testing.T) {
 		t.Fatalf("expected endpoint 2 to be called 1 time, got %d", calls)
 	}
 }
+
+func TestProxyEgressFetchModelsUnusableProxy(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{"models":{}}`))
+	}))
+	defer server.Close()
+
+	auth := &coreauth.Auth{ProxyURL: "ftp://127.0.0.1:1", Metadata: map[string]interface{}{"access_token": "test-token"}}
+	if models := fetchModelsFromBaseURLs(context.Background(), auth, []string{server.URL}, nil); models != nil {
+		t.Fatalf("models = %v, want nil", models)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("server got %d requests through an unusable proxy", n)
+	}
+}

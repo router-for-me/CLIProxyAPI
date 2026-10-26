@@ -271,7 +271,11 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 
 	httpClient := &http.Client{}
 	if auth != nil {
-		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
+		transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL)
+		if errProxy != nil {
+			return nil, 0, errProxy
+		}
+		if transport != nil {
 			httpClient.Transport = transport
 		}
 	}

@@ -41,13 +41,9 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
-		if transport != nil {
-			httpClient.Transport = transport
-			return httpClient
-		}
-		// If proxy setup failed, log and fall through to context RoundTripper
-		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
+		// A proxy that is set but unusable fails the call: no context or default transport.
+		httpClient.Transport = buildProxyTransport(proxyURL)
+		return httpClient
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
@@ -90,11 +86,15 @@ func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 	}
 
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
+	if errCheck := proxyutil.Check(proxyURL); errCheck != nil {
+		log.Errorf("%v", errCheck)
+		return &http.Client{Transport: proxyutil.FailClosedTransport(errCheck), Timeout: timeout}
+	}
 
 	tr, err := devinTransportCache.Get(proxyURL, func() (*http.Transport, error) {
 		var base *http.Transport
 		if proxyURL != "" {
-			base = buildProxyTransport(proxyURL)
+			base, _, _ = proxyutil.BuildHTTPTransport(proxyURL) // checked above
 		}
 		if base == nil {
 			if dt, ok := http.DefaultTransport.(*http.Transport); ok {
@@ -142,19 +142,14 @@ func effectiveProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	return ""
 }
 
-// buildProxyTransport creates an HTTP transport configured for the given proxy URL.
-// It supports SOCKS5, HTTP, and HTTPS proxy protocols.
-//
-// Parameters:
-//   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
-//
-// Returns:
-//   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
-func buildProxyTransport(proxyURL string) *http.Transport {
+// buildProxyTransport creates an HTTP transport for the given non-empty proxy URL (socks5, socks5h,
+// http, https or direct/none). A value that cannot be used yields a transport failing every request
+// with an error wrapping proxyutil.ErrUnusable.
+func buildProxyTransport(proxyURL string) http.RoundTripper {
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
-		return nil
+		return proxyutil.FailClosedTransport(errBuild)
 	}
 	return transport
 }

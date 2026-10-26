@@ -380,7 +380,7 @@ func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string,
 	})
 	if errGet != nil {
 		// The caller falls back to NewProxyAwareHTTPClient, which reports the failure
-		// and applies the context transport fallback.
+		// and installs a fail-closed transport.
 		return nil
 	}
 	return transport
@@ -446,8 +446,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
 			return &http.Client{Transport: transport, Timeout: timeout}
 		}
-		// Fall through so NewProxyAwareHTTPClient reports the failure and applies the
-		// context transport fallback, preserving the previous behavior.
+		// Falls through to NewProxyAwareHTTPClient, which fails the call when the proxy is unusable.
 	}
 
 	client := helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)

@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"testing"
 
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	"github.com/tidwall/gjson"
 )
 
@@ -142,4 +147,28 @@ func TestEnsureBaselineModel(t *testing.T) {
 			}
 		}
 	})
+}
+
+type countingTransport struct{ hits int }
+
+func (c *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	c.hits++
+	return nil, errors.New("request left the process")
+}
+
+func TestProxyEgressFetchModelsUnusableProxy(t *testing.T) {
+	// A client without its own Transport uses http.DefaultTransport: it stands for a direct connection.
+	direct := &countingTransport{}
+	orig := http.DefaultTransport
+	http.DefaultTransport = direct
+	defer func() { http.DefaultTransport = orig }()
+
+	auth := &coreauth.Auth{ProxyURL: "ftp://127.0.0.1:1"}
+	_, _, err := fetchModels(context.Background(), auth, "test-token", "")
+	if !errors.Is(err, proxyutil.ErrUnusable) {
+		t.Fatalf("err = %v, want proxyutil.ErrUnusable", err)
+	}
+	if direct.hits != 0 {
+		t.Fatalf("%d requests went out directly", direct.hits)
+	}
 }

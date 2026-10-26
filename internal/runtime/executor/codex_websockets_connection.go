@@ -214,11 +214,10 @@ func newProxyAwareWebsocketDialer(ctx context.Context, cfg *config.Config, auth 
 		return dialer
 	}
 
-	setting, errParse := proxyutil.Parse(proxyURL)
-	if errParse != nil {
-		log.Errorf("codex websockets executor: %v", errParse)
-		return dialer
+	if errCheck := proxyutil.Check(proxyURL); errCheck != nil {
+		return failClosedWebsocketDialer(dialer, errCheck)
 	}
+	setting, _ := proxyutil.Parse(proxyURL)
 
 	switch setting.Mode {
 	case proxyutil.ModeDirect:
@@ -252,6 +251,14 @@ func newProxyAwareWebsocketDialer(ctx context.Context, cfg *config.Config, auth 
 		log.Errorf("codex websockets executor: unsupported proxy scheme: %s", setting.URL.Scheme)
 	}
 
+	return dialer
+}
+
+// failClosedWebsocketDialer makes every dial fail with err: no environment proxy, no direct connection.
+func failClosedWebsocketDialer(dialer *websocket.Dialer, err error) *websocket.Dialer {
+	log.Errorf("codex websockets executor: %v", err)
+	dialer.Proxy = nil
+	dialer.NetDialContext = func(context.Context, string, string) (net.Conn, error) { return nil, err }
 	return dialer
 }
 

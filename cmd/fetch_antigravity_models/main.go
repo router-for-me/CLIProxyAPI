@@ -257,7 +257,12 @@ func fetchModelsFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs 
 			if httpClient == nil {
 				httpClient = &http.Client{Timeout: 30 * time.Second}
 				if auth != nil {
-					if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
+					transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL)
+					if errProxy != nil {
+						fmt.Fprintf(os.Stderr, "error: %v\n", errProxy)
+						return nil
+					}
+					if transport != nil {
 						httpClient.Transport = transport
 					}
 				}
