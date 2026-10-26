@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -96,7 +97,26 @@ type hostCallbackPluginIDKey struct{}
 type hostCallbackInstanceKey struct{}
 
 type hostCallbackInstance struct {
-	closed atomic.Bool
+	closed         atomic.Bool
+	lifetimeOnce   sync.Once
+	lifetimeCtx    context.Context
+	cancelLifetime context.CancelFunc
+}
+
+func (i *hostCallbackInstance) lifetimeContext() context.Context {
+	i.lifetimeOnce.Do(func() {
+		i.lifetimeCtx, i.cancelLifetime = context.WithCancel(context.Background())
+	})
+	return i.lifetimeCtx
+}
+
+func (i *hostCallbackInstance) close() {
+	if i == nil {
+		return
+	}
+	i.closed.Store(true)
+	i.lifetimeContext()
+	i.cancelLifetime()
 }
 
 func withHostCallbackPluginID(ctx context.Context, pluginID string) context.Context {
