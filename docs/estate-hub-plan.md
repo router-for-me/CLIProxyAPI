@@ -177,6 +177,13 @@ which account (the hub keeps none; groups and pin targets are shown).
   first hour because the config script read them from the same stdin as its own source: fixed; wrong or
   missing key now returns 401. m6's own Claude Code and Codex point at the hub and work; wasnewpc being
   pointed; mbp asleep. Management API answers on `/v8/management/credentials` with the management key.
+- 2026-10-26 20:20: L1 build (estate-8acd42bb, cross-compiled on auto-vps, darwin/arm64) is live on m6 as
+  launch agent `uk.automancer.hub` (`~/.local/hub/cliproxyapi -config ~/.local/hub/config.yaml`, log
+  `~/Library/Logs/hub.log`), `routing.strategy: consume-first`; the Homebrew service is stopped. Config now
+  lives at `~/.local/hub/config.yaml`, not the brew path. wasnewpc's Claude Code and Codex point at the hub
+  and answered. L2 dispatched.
+- 2026-10-26 20:50: Devin signed in (18 logins). OMP on m6 and wasnewpc, and opencode on wasnewpc, carry a `hub` provider (25 non-Claude models: GPT via the Codex subs, Antigravity Gemini, Grok, Kimi, Muse, DeepSeek, GLM, CommandCode, OpenCode Go, Devin, local GPU). Claude models stay Claude-Code-only through the hub (Waseem's rule). ROUTES.md now allows Terra for Codex lanes (skills commit fae7cf5). Migration item t8306 carries the Gandalf usage read via estate-gateway and the remaining harnesses.
 - 2026-10-26: L2 merged (dashboard `/hub`, `GET /v8/management/credentials/usage`, usage refresher
-  with persisted snapshot). Live only after the migration (t8306) installs this fork's build on m6
-  with `routing.usage-refresh.interval` set. Next: t8306, then check `/hub` for poll errors.
+  with persisted snapshot). m6 runs the L1 build, so none of L2 is live until m6's binary is rebuilt
+  from `main` and `routing.usage-refresh.interval` is set in `~/.local/hub/config.yaml`. Then open
+  `/hub` and check each account's poll error.
