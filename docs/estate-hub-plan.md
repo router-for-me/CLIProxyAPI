@@ -36,7 +36,7 @@ through Claude Code. Fable is Waseem's own seat: never dispatch a lane on it.
 |---|---|---|---|
 | L1 routing | `consume-first` routing strategy + account pinning, merged to `main` of Automancer-Ltd/CLIProxyAPI | bb thread, Claude Code, Opus 5.5, high | merged 2026-10-26 from bb thread thr_cu7cfdji97 (tracker t8305 has the PR and merge SHA; L2 t8304; migration t8306) |
 | L2 dashboard | web dashboard replacing sysdash/codexbar, plus the usage refresher | bb thread, Claude Code, Opus 5.5 | merged 2026-10-26 from bb thread thr_yh5dttfgcu (tracker t8304 has the PR and merge SHA) |
-| L3 design + parity | `/hub` redesign, CodexBar/sysdash parity (banked resets, pace, API-key providers) | bb thread, Claude Code, Opus 5.5 | from bb thread thr_b5ufx4t2am (tracker t8318 has the PR and merge SHA) |
+| L3 design + parity | full frontend treatment of /hub, banked resets, will-it-last, API-key balances | bb thread, Claude Code, Opus 5.5, high | dispatched 2026-10-26 21:40 as bb thread thr_b5ufx4t2am; PR #3 (tracker t8318 has the merge SHA) |
 
 Base for L1: upstream `main` at 1f917e77 (fork point). Keep the diff upstream-mergeable: new files
 where possible, config-driven, no rewrites of existing strategies.
@@ -214,6 +214,7 @@ next refresher tick (within a minute) restores them from the snapshot.
   from `main` and `routing.usage-refresh.interval` is set in `~/.local/hub/config.yaml`. Then open
   `/hub` and check each account's poll error.
 - 2026-10-26 21:25: L2 build (estate-156d2b1b) live on m6; `routing.usage-refresh.interval: 10m` set; `/hub` renders real figures for Claude (5h, weekly, Fable-only), Codex, Kimi, Grok, Antigravity, Muse within one poll; Devin and the API-key providers show no usage (as designed). Screenshots: /home/ubuntu/Notes/Reports/assets/26-10-26-hub-dashboard-{desktop,phone}.png (taken with a raw-CDP script, /opt/automancer/var/scratch/t3eval/hubshot.mjs, key via env). Seen defects: the provider summary table's label column overlaps on long names (commandcode); CodexBar parity (banked resets, will-it-last) still open; Waseem keeps CodexBar until the page is at least as good.
+- 2026-10-26 21:40: mbp (MacBook) pointed at the hub: Claude Code and Codex answered; OMP and pi carry the `hub` provider (merged beside its existing local, maple, mesh providers). Herdr on mbp already listed auto-vps. L3 dispatched.
 - 2026-10-26: L3 (t8318) redesigned `/hub` and added banked resets, pace, and API-key provider usage.
   None of it is live until m6's binary is rebuilt from `main`. Then open `/hub` on the phone and check
   each API-key provider's poll error.
