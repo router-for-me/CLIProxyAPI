@@ -549,7 +549,7 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 	}
 	errType, message := claudeErrorDetailFromText(status, errText)
 	if status == http.StatusTooManyRequests && msg != nil {
-		if resetIn := claudeErrorResetIn(msg.Error); resetIn > 0 {
+		if resetIn := claudeErrorResetIn(msg.Error, nil); resetIn > 0 {
 			message = fmt.Sprintf("%s (reset after %s)", message, resetIn)
 		}
 	}
@@ -590,7 +590,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 				body = markedBody
 			}
 		}
-		if resetIn := claudeErrorResetIn(msg.Error); status == http.StatusTooManyRequests && resetIn > 0 {
+		if resetIn := claudeErrorResetIn(msg.Error, msg.Headers); status == http.StatusTooManyRequests && resetIn > 0 {
 			if message := gjson.GetBytes(body, "error.message"); message.Type == gjson.String {
 				if updated, errSet := sjson.SetBytes(body, "error.message", fmt.Sprintf("%s (reset after %s)", message.String(), resetIn)); errSet == nil {
 					body = updated
@@ -635,15 +635,19 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 }
 
 // claudeErrorResetIn reports when a rate-limited request can be retried, from a
-// pool cooldown or the upstream rate-limit headers. Claude Code drops Retry-After,
-// so clients that schedule the retry read it from the error message instead.
-func claudeErrorResetIn(err error) time.Duration {
+// pool cooldown, the upstream rate-limit headers, or the Retry-After of a direct
+// response. Claude Code drops Retry-After, so clients that schedule the retry read
+// it from the error message instead.
+func claudeErrorResetIn(err error, headers http.Header) time.Duration {
 	if seconds, errAtoi := strconv.Atoi(coreauth.SafeResponseHeaders(err).Get("Retry-After")); errAtoi == nil {
 		return time.Duration(seconds) * time.Second
 	}
 	var limited interface{ RetryAfter() *time.Duration }
 	if errors.As(err, &limited) && limited.RetryAfter() != nil {
 		return limited.RetryAfter().Round(time.Second)
+	}
+	if seconds, errAtoi := strconv.Atoi(headers.Get("Retry-After")); errAtoi == nil {
+		return time.Duration(seconds) * time.Second
 	}
 	return 0
 }
