@@ -70,6 +70,27 @@ func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestWriteErrorResponse_SafeRetryAfterWithoutPassthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	err := coreauth.WithSafeRetryAfter(errors.New("rate limited"), time.Minute)
+	NewBaseAPIHandlers(nil, nil).WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      err,
+		Addon:      http.Header{"Retry-After": {"1"}},
+	})
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After = %q, want trusted value 60", got)
+	}
+}
+
 func TestWriteErrorResponseDirectResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
