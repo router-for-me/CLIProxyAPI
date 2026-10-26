@@ -542,14 +542,14 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
 
-	bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
-	out, errTransform := bridge.Bridge.TransformNonStream(data)
-	if errTransform != nil || (len(out) == 0 && helps.ApplyPatchRequested(originalRequest)) {
+	customBridge := helps.NewKimiResponsesCustomToolState(originalRequest)
+	out, errTransform := customBridge.TransformNonStream(data)
+	if errTransform != nil {
 		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 	}
-	customBridge := helps.NewKimiResponsesCustomToolState(originalRequest)
-	out, errTransform = customBridge.TransformNonStream(out)
-	if errTransform != nil {
+	bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
+	out, errTransform = bridge.Bridge.TransformNonStream(out)
+	if errTransform != nil || (len(out) == 0 && helps.ApplyPatchRequested(originalRequest)) {
 		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 	}
 	if responseFormat != sdktranslator.FormatOpenAIResponse {
@@ -691,8 +691,8 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800)
-		bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
 		customBridge := helps.NewKimiResponsesCustomToolState(originalRequest)
+		bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
 		sendFailure := func(errFailure error) {
 			errFailure = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 			reporter.PublishFailure(ctx, errFailure)
@@ -750,41 +750,24 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 				}
 			}
 
-			lines, errTransform := bridge.Stream(bytes.Clone(line))
-			if errTransform != nil {
-				reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-			}
-			for _, converted := range lines {
-				customLines, errCustom := customBridge.Stream(converted)
-				if errCustom != nil {
-					reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-					sendFailure(errCustom)
-					return
-				}
-				for _, customLine := range customLines {
-					if !emitTranslatedLine(customLine) {
-						return
-					}
-				}
-			}
-			if errTransform != nil {
-				sendFailure(errTransform)
-				return
-			}
-		}
-		finishEvents, errFinish := bridge.FinishStream()
-		if errFinish != nil {
-			reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-		}
-		for _, event := range finishEvents {
-			customEvents, errCustom := customBridge.Stream(event)
+			customLines, errCustom := customBridge.Stream(bytes.Clone(line))
 			if errCustom != nil {
 				reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 				sendFailure(errCustom)
 				return
 			}
-			for _, customEvent := range customEvents {
-				if !emitTranslatedLine(customEvent) {
+			for _, customLine := range customLines {
+				lines, errTransform := bridge.Stream(customLine)
+				if errTransform != nil {
+					reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+				}
+				for _, converted := range lines {
+					if !emitTranslatedLine(converted) {
+						return
+					}
+				}
+				if errTransform != nil {
+					sendFailure(errTransform)
 					return
 				}
 			}
@@ -794,12 +777,31 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 			reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 		}
 		for _, event := range customFinishEvents {
+			lines, errTransform := bridge.Stream(event)
+			if errTransform != nil {
+				reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			}
+			for _, line := range lines {
+				if !emitTranslatedLine(line) {
+					return
+				}
+			}
+		}
+		finishEvents, errFinish := bridge.FinishStream()
+		if errFinish != nil {
+			reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		}
+		for _, event := range finishEvents {
 			if !emitTranslatedLine(event) {
 				return
 			}
 		}
 		if errFinish != nil || errCustomFinish != nil {
-			sendFailure(errFinish)
+			failure := errFinish
+			if failure == nil {
+				failure = errCustomFinish
+			}
+			sendFailure(failure)
 			return
 		}
 

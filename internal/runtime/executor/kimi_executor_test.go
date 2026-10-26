@@ -140,16 +140,16 @@ func TestKimiExecutorResponsesCustomToolBridge(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_custom","object":"response","status":"completed","output":[{"id":"fc_2","type":"function_call","status":"completed","call_id":"call_2","name":"exec","arguments":"{\"input\":\"ls\"}"}]}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_custom","object":"response","status":"completed","output":[{"id":"fc_2","type":"function_call","status":"completed","call_id":"call_2","name":"functions__exec","arguments":"{\"input\":\"ls\"}"}]}`)),
 		}, nil
 	}))
 
 	payload := []byte(`{
 		"model":"kimi-k3",
-		"tools":[{"type":"custom","name":"exec"},{"type":"function","name":"read","parameters":{}}],
+		"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]},{"type":"function","name":"read","parameters":{}}],
 		"input":[
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},
-			{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"exec","input":"pwd"},
+			{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"exec","namespace":"functions","input":"pwd"},
 			{"type":"custom_tool_call_output","id":"ctco_1","call_id":"call_1","output":"/tmp"}
 		]
 	}`)
@@ -165,8 +165,14 @@ func TestKimiExecutorResponsesCustomToolBridge(t *testing.T) {
 	if got := gjson.GetBytes(upstreamBody, "tools.0.type").String(); got != "function" {
 		t.Fatalf("upstream exec type = %q, want function: %s", got, upstreamBody)
 	}
+	if got := gjson.GetBytes(upstreamBody, "tools.0.name").String(); got != "functions__exec" {
+		t.Fatalf("upstream namespaced exec name = %q, want functions__exec", got)
+	}
 	if got := gjson.GetBytes(upstreamBody, "input.1.type").String(); got != "function_call" {
 		t.Fatalf("upstream custom history type = %q, want function_call: %s", got, upstreamBody)
+	}
+	if got := gjson.GetBytes(upstreamBody, "input.1.name").String(); got != "functions__exec" {
+		t.Fatalf("upstream custom history name = %q, want functions__exec", got)
 	}
 	if got := gjson.GetBytes(upstreamBody, "input.1.id").String(); got != "fc_1" {
 		t.Fatalf("upstream custom history id = %q, want fc_1", got)
@@ -175,13 +181,19 @@ func TestKimiExecutorResponsesCustomToolBridge(t *testing.T) {
 		t.Fatalf("upstream custom output type = %q, want function_call_output: %s", got, upstreamBody)
 	}
 	if got := gjson.GetBytes(response.Payload, "output.0.type").String(); got != "custom_tool_call" {
-		t.Fatalf("client response custom type = %q, want custom_tool_call: %s", got, response.Payload)
+		t.Fatalf("client response exec type = %q, want custom_tool_call: %s", got, response.Payload)
 	}
 	if got := gjson.GetBytes(response.Payload, "output.0.id").String(); got != "ctc_2" {
-		t.Fatalf("client response custom id = %q, want ctc_2", got)
+		t.Fatalf("client response exec id = %q, want ctc_2", got)
 	}
 	if got := gjson.GetBytes(response.Payload, "output.0.input").String(); got != "ls" {
-		t.Fatalf("client response custom input = %q, want ls", got)
+		t.Fatalf("client response exec input = %q, want ls", got)
+	}
+	if got := gjson.GetBytes(response.Payload, "output.0.name").String(); got != "exec" {
+		t.Fatalf("client response exec wire name = %q, want exec", got)
+	}
+	if got := gjson.GetBytes(response.Payload, "output.0.namespace").String(); got != "functions" {
+		t.Fatalf("client response exec namespace = %q, want functions: %s", got, response.Payload)
 	}
 }
 
@@ -194,10 +206,10 @@ func TestKimiExecutorResponsesCustomToolBridgeStream(t *testing.T) {
 			return nil, errRead
 		}
 		stream := strings.Join([]string{
-			"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"\"}}\n\n",
+			"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"functions__exec\",\"arguments\":\"\"}}\n\n",
 			"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":2,\"item_id\":\"fc_1\",\"delta\":\"{\\\"input\\\":\\\"pwd\\\"}\"}\n\n",
-			"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"{\\\"input\\\":\\\"pwd\\\"}\"}}\n\n",
-			"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_stream\",\"output\":[{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_1\",\"name\":\"exec\",\"arguments\":\"{\\\"input\\\":\\\"pwd\\\"}\"}]}}\n\n",
+			"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_1\",\"name\":\"functions__exec\",\"arguments\":\"{\\\"input\\\":\\\"pwd\\\"}\"}}\n\n",
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_stream\",\"output\":[{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_1\",\"name\":\"functions__exec\",\"arguments\":\"{\\\"input\\\":\\\"pwd\\\"}\"}]}}\n\n",
 			"data: [DONE]\n\n",
 		}, "")
 		return &http.Response{
@@ -207,7 +219,7 @@ func TestKimiExecutorResponsesCustomToolBridgeStream(t *testing.T) {
 		}, nil
 	}))
 
-	payload := []byte(`{"model":"kimi-k3","stream":true,"tools":[{"type":"custom","name":"exec"}],"input":[{"type":"message","role":"user","content":"run"}]}`)
+	payload := []byte(`{"model":"kimi-k3","stream":true,"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}],"input":[{"type":"message","role":"user","content":"run"}]}`)
 	executor := NewKimiExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://api.kimi.com/coding"}, Metadata: map[string]any{"access_token": "test-key"}}
 	result, errExecute := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}, cliproxyexecutor.Options{
@@ -229,14 +241,17 @@ func TestKimiExecutorResponsesCustomToolBridgeStream(t *testing.T) {
 	if got := gjson.GetBytes(upstreamBody, "tools.0.type").String(); got != "function" {
 		t.Fatalf("upstream exec type = %q, want function", got)
 	}
+	if got := gjson.GetBytes(upstreamBody, "tools.0.name").String(); got != "functions__exec" {
+		t.Fatalf("upstream namespaced exec name = %q, want functions__exec", got)
+	}
+	if !bytes.Contains(output, []byte("response.custom_tool_call_input.done")) {
+		t.Fatalf("custom input completion event missing: %s", output)
+	}
 	if bytes.Contains(output, []byte("response.function_call_arguments")) {
-		t.Fatalf("function argument events leaked: %s", output)
+		t.Fatalf("function argument events leaked into custom stream: %s", output)
 	}
-	if !bytes.Contains(output, []byte("response.custom_tool_call_input.done")) || !bytes.Contains(output, []byte(`"type":"custom_tool_call"`)) {
-		t.Fatalf("custom stream events missing: %s", output)
-	}
-	if !bytes.Contains(output, []byte(`"id":"ctc_1"`)) || !bytes.Contains(output, []byte(`"input":"pwd"`)) {
-		t.Fatalf("custom stream identity/input missing: %s", output)
+	if !bytes.Contains(output, []byte(`"id":"ctc_1"`)) || !bytes.Contains(output, []byte(`"item_id":"ctc_1"`)) || !bytes.Contains(output, []byte(`"name":"exec"`)) || !bytes.Contains(output, []byte(`"namespace":"functions"`)) || !bytes.Contains(output, []byte(`"input":"pwd"`)) {
+		t.Fatalf("exec custom stream identity/input missing: %s", output)
 	}
 }
 
@@ -1504,26 +1519,26 @@ func TestKimiExecutorStreamNormalizesNamespacedToolSchemasFromResponses(t *testi
 		}
 	}
 
-	nestedTool := gjson.GetBytes(upstreamBody, "tools.0.tools.0")
-	if !nestedTool.Exists() {
-		t.Fatalf("upstream namespaced tool not found: %s", upstreamBody)
+	namespacedTool := gjson.GetBytes(upstreamBody, "tools.0")
+	if !namespacedTool.Exists() || namespacedTool.Get("name").String() != "mcp__rea__capture_native_ui_scenario" {
+		t.Fatalf("upstream namespaced tool was not flattened with its qualified name: %s", upstreamBody)
 	}
-	if defs := nestedTool.Get("parameters.$defs"); defs.Exists() {
-		t.Fatalf("upstream namespaced tool parameter still contains $defs: %s", nestedTool.Get("parameters").Raw)
+	if defs := namespacedTool.Get("parameters.$defs"); defs.Exists() {
+		t.Fatalf("upstream namespaced tool parameter still contains $defs: %s", namespacedTool.Get("parameters").Raw)
 	}
-	if ref := nestedTool.Get("parameters.properties.steps.$ref"); ref.Exists() {
-		t.Fatalf("upstream namespaced tool parameter still contains $ref at properties.steps: %s", nestedTool.Get("parameters").Raw)
+	if ref := namespacedTool.Get("parameters.properties.steps.$ref"); ref.Exists() {
+		t.Fatalf("upstream namespaced tool parameter still contains $ref at properties.steps: %s", namespacedTool.Get("parameters").Raw)
 	}
-	if got := nestedTool.Get("parameters.properties.steps.type").String(); got != "array" {
+	if got := namespacedTool.Get("parameters.properties.steps.type").String(); got != "array" {
 		t.Fatalf("steps.type = %q, want array", got)
 	}
-	if got := nestedTool.Get("parameters.properties.steps.items.oneOf.0.properties.path.items.type").String(); got != "integer" {
+	if got := namespacedTool.Get("parameters.properties.steps.items.oneOf.0.properties.path.items.type").String(); got != "integer" {
 		t.Fatalf("steps.items.oneOf.0.properties.path.items.type = %q, want integer", got)
 	}
 
-	extraTool := gjson.GetBytes(upstreamBody, "input.1.tools.0.tools.0")
-	if !extraTool.Exists() {
-		t.Fatalf("upstream additional_tools namespaced tool not found: %s", upstreamBody)
+	extraTool := gjson.GetBytes(upstreamBody, "tools.1")
+	if !extraTool.Exists() || extraTool.Get("name").String() != "mcp__extra__extra_fn" {
+		t.Fatalf("upstream additional_tools tool was not merged and qualified: %s", upstreamBody)
 	}
 	if defs := extraTool.Get("parameters.$defs"); defs.Exists() {
 		t.Fatalf("upstream additional_tools namespaced tool parameter still contains $defs: %s", extraTool.Get("parameters").Raw)
@@ -1533,6 +1548,9 @@ func TestKimiExecutorStreamNormalizesNamespacedToolSchemasFromResponses(t *testi
 	}
 	if got := extraTool.Get("parameters.type").String(); got != "object" {
 		t.Fatalf("extra_fn parameters.type = %q, want object", got)
+	}
+	if got := len(gjson.GetBytes(upstreamBody, "input").Array()); got != 1 {
+		t.Fatalf("additional_tools metadata remained in Kimi input: %s", upstreamBody)
 	}
 }
 
