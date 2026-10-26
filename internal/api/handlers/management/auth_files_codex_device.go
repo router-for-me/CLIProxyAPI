@@ -98,13 +98,18 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			return
 		}
 		saveCtx, stopSave := context.WithTimeout(ctx, oauthSessionTTL)
-		defer stopSave()
-		if _, errSave := h.saveTokenRecord(saveCtx, record); errSave != nil {
+		savedPath, errSave := h.persistTokenRecord(saveCtx, record)
+		stopSave()
+		if errSave != nil {
 			log.Error("Failed to save Codex device authentication")
 			FailOAuthSessionCommit(state, "Failed to save authentication tokens")
 			return
 		}
+		// Persistence commits the login. Runtime registration can outlive its acquisition budget.
 		CompleteOAuthSession(state)
+		if errNotify := h.notifyPersistedTokenRecord(context.WithoutCancel(ctx), savedPath, record); errNotify != nil {
+			log.Warn("Codex device authentication saved but post-auth notification failed")
+		}
 	}()
 
 	startTimer := time.NewTimer(codexDeviceStartTimeout)

@@ -120,7 +120,7 @@ func (s *stalledDeviceSaveStore) Save(ctx context.Context, auth *coreauth.Auth) 
 
 func TestStartOAuthV8CodexDeviceFlowBoundsPersistence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, phase := range []string{"hook", "store", "post-persist-hook"} {
+	for _, phase := range []string{"hook", "store"} {
 		t.Run(phase, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				sessions := newOAuthSessionStore(time.Minute)
@@ -143,8 +143,6 @@ func TestStartOAuthV8CodexDeviceFlowBoundsPersistence(t *testing.T) {
 					h.postAuthHook = stall
 				case "store":
 					h.tokenStore = &stalledDeviceSaveStore{memoryAuthStore: &memoryAuthStore{}, wait: stall}
-				case "post-persist-hook":
-					h.postAuthPersistHook = stall
 				}
 				h.codexDeviceAuthenticator = codexDeviceAuthenticatorFunc(func(ctx context.Context, _ *config.Config, opts *sdkAuth.LoginOptions) (*coreauth.Auth, error) {
 					workerContext <- ctx
