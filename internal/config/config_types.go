@@ -488,6 +488,20 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// UsageRefresh polls each credential's provider usage endpoint so idle accounts
+	// keep current allowance figures (see docs/estate-hub.md). Off unless Interval is set.
+	UsageRefresh UsageRefreshConfig `yaml:"usage-refresh,omitempty" json:"usage-refresh,omitempty"`
+}
+
+// UsageRefreshConfig configures the periodic provider usage poll.
+type UsageRefreshConfig struct {
+	// Interval is how often an idle credential is polled, for example "10m".
+	// Empty or zero disables the refresher.
+	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
+	// Providers limits the poll to these providers (claude, codex, kimi, xai,
+	// antigravity, meta). Empty polls every supported provider.
+	Providers []string `yaml:"providers,omitempty" json:"providers,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

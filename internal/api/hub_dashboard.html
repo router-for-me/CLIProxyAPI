@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Hub allowances</title>
+<style>
+:root {
+  --bg: #f5f6f8; --surface: #fff; --text: #14171c; --muted: #4f5866; --line: #dfe3e8;
+  --accent: #1f5fd1; --accent-soft: #e5edfb; --ok: #0f7a4f; --warn: #a35a00; --bad: #b42318; --track: #e7eaee;
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216; --surface: #171b21; --text: #e8ecf1; --muted: #a2acb9; --line: #2a313b;
+    --accent: #7aa7ff; --accent-soft: #1d2a42; --ok: #4ccf8f; --warn: #f2b45a; --bad: #ff8278; --track: #262d36;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font-variant-numeric: tabular-nums; }
+::selection { background: var(--accent); color: var(--surface); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+main { max-width: 1240px; margin: 0 auto; padding: 16px 14px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 14px; }
+h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 1.05rem; margin: 26px 0 10px; display: flex; gap: 8px; align-items: baseline; }
+h2 small, .muted { color: var(--muted); font-weight: 400; font-size: .87rem; }
+button, select, input { font: inherit; color: inherit; }
+button { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 6px 12px; cursor: pointer; min-height: 36px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+button:disabled { opacity: .5; cursor: progress; }
+select, input { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 6px 8px; min-height: 36px; }
+.spacer { flex: 1; }
+.next-list { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin: 0; list-style: none; }
+.next-list li { display: grid; grid-template-columns: 6.5em 1fr; gap: 0 10px; padding: 6px 0; }
+.next-list li > span { overflow-wrap: anywhere; }
+.next-list .muted { grid-column: 2; }
+.next-list li + li { border-top: 1px solid var(--line); }
+.grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+@media (max-width: 420px) { .grid { grid-template-columns: 1fr; } }
+.acct { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+.acct.next { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.acct.out { opacity: .72; }
+.top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.name { font-weight: 600; overflow-wrap: anywhere; }
+.plan { margin-left: auto; color: var(--muted); font-size: .87rem; }
+.tag { font-size: .78rem; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.tag.bad { background: transparent; color: var(--bad); border: 1px solid currentColor; }
+.tag.warn { background: transparent; color: var(--warn); border: 1px solid currentColor; }
+.sub { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+.win { margin-top: 8px; }
+.win .row { display: flex; justify-content: space-between; gap: 8px; font-size: .87rem; }
+.win .row span:last-child { color: var(--muted); text-align: right; }
+.reset { color: var(--muted); font-size: .8rem; margin-top: 2px; }
+.bar { height: 6px; border-radius: 3px; background: var(--track); margin-top: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--ok); }
+.bar i.warn { background: var(--warn); }
+.bar i.bad { background: var(--bad); }
+.state { margin-top: 8px; font-size: .87rem; }
+.state.bad { color: var(--bad); }
+.state.warn { color: var(--warn); }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--accent); font-size: .87rem; padding: 4px 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+.actions input { flex: 1 1 140px; min-width: 0; }
+#login { max-width: 420px; margin: 12vh auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+#login form { display: flex; gap: 8px; margin-top: 12px; }
+#login input { flex: 1; min-width: 0; }
+.error { color: var(--bad); }
+footer { margin-top: 28px; color: var(--muted); font-size: .85rem; }
+code { font-size: .85em; }
+</style>
+</head>
+<body>
+<div id="login" hidden>
+  <h1>Hub allowances</h1>
+  <p class="muted">Enter the management key. It stays in this browser.</p>
+  <form id="login-form">
+    <input id="key" type="password" autocomplete="current-password" aria-label="Management key" required>
+    <button class="primary">Open</button>
+  </form>
+  <p id="login-error" class="error" role="alert"></p>
+</div>
+<main id="app" hidden>
+  <header>
+    <h1>Hub allowances</h1>
+    <span id="meta" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="reload">Refresh</button>
+    <button id="logout">Sign out</button>
+  </header>
+  <p id="error" class="error" role="alert"></p>
+  <ul id="next" class="next-list" aria-label="Next to spend"></ul>
+  <div id="providers"></div>
+  <footer>
+    Pin a client to an account or group with the request header <code>X-CPA-Account: &lt;account or group&gt;</code>.
+    A conversation stays on the account it started on while that account can serve it.
+  </footer>
+</main>
+<script>
+"use strict";
+const KEY = "cpa-hub-management-key";
+const NAMES = { claude: "Claude", codex: "Codex", kimi: "Kimi", xai: "Grok", antigravity: "Antigravity", meta: "Muse", devin: "Devin", gemini: "Gemini" };
+const ORDER = Object.keys(NAMES);
+const providerName = (p) => NAMES[p] || p.replace(/^openai-compatib(le|ility)-/, "");
+const $ = (id) => document.getElementById(id);
+let data = null;
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const time = (s) => (s ? new Date(s) : null);
+const future = (d) => d && d > new Date();
+
+function ago(d) {
+  const m = Math.round((Date.now() - d) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + "m ago";
+  if (m < 48 * 60) return Math.round(m / 60) + "h ago";
+  return Math.round(m / 1440) + "d ago";
+}
+function until(d) {
+  let m = Math.max(0, Math.round((d - Date.now()) / 60000));
+  const days = Math.floor(m / 1440); m -= days * 1440;
+  const h = Math.floor(m / 60); m -= h * 60;
+  return days ? `${days}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+function clock(d) {
+  const hm = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  if (d.toDateString() === new Date().toDateString()) return hm;
+  const day = Math.abs(d - Date.now()) < 6 * 86400000 ? { weekday: "short" } : { day: "numeric", month: "short" };
+  return d.toLocaleDateString(undefined, day) + " " + hm;
+}
+function cadence(minutes) {
+  if (!minutes) return "";
+  if (Math.abs(minutes - 300) < 5) return "5-hour";
+  if (Math.abs(minutes - 10080) < 60) return "Weekly";
+  if (minutes >= 40000 && minutes <= 46000) return "Monthly";
+  return minutes >= 1440 ? Math.round(minutes / 1440) + "-day" : Math.round(minutes / 60) + "-hour";
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { Authorization: "Bearer " + localStorage.getItem(KEY), "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 401) { signOut("That key was refused."); throw new Error("unauthorized"); }
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+// blocker says why the router will not pick this account now, or null.
+function blocker(a) {
+  if (a.disabled) return { text: "Disabled", cls: "bad" };
+  const hold = time(a.hold_until);
+  if (future(hold)) return { text: `Held until ${clock(hold)} (${until(hold)})`, cls: "warn" };
+  const retry = time(a.next_retry_after);
+  if (a.unavailable || future(retry)) return { text: future(retry) ? `Cooling down until ${clock(retry)}` : (a.status_message || "Unavailable"), cls: "warn" };
+  return null;
+}
+
+// routerOrder reproduces consume-first within a provider (docs/estate-hub.md).
+function routerOrder(a, b) {
+  const ab = !!a._blocker, bb = !!b._blocker;
+  if (ab !== bb) return ab ? 1 : -1;
+  if ((b.priority || 0) !== (a.priority || 0)) return (b.priority || 0) - (a.priority || 0);
+  const ca = a.consume_first || {}, cb = b.consume_first || {};
+  if (!!ca.spent !== !!cb.spent) return ca.spent ? 1 : -1;
+  if (!!ca.reset_at !== !!cb.reset_at) return ca.reset_at ? -1 : 1;
+  if (ca.reset_at && ca.reset_at !== cb.reset_at) return new Date(ca.reset_at) - new Date(cb.reset_at);
+  if ((ca.used_percent || 0) !== (cb.used_percent || 0)) return (ca.used_percent || 0) - (cb.used_percent || 0);
+  return String(a.id).localeCompare(String(b.id));
+}
+
+function displayName(a) { return a.note || a.label || a.email || a.name || a.id; }
+function plan(a) {
+  const p = (a.usage && a.usage.plan) || (a.id_token && a.id_token.plan_type) || "";
+  return p.replace(/^SUBSCRIPTION_TIER_/, "").replace(/_/g, " ");
+}
+function windowsOf(a) {
+  return ((a.usage && a.usage.windows) || []).filter((w) => !w.reset_at || future(time(w.reset_at)));
+}
+function weekly(a) {
+  return windowsOf(a).find((w) => !w.label && Math.abs((w.window_minutes || 0) - 10080) < 60);
+}
+function updated(a) {
+  const observed = time(a.quota && a.quota.observed_at), fetched = time(a.usage && a.usage.fetched_at);
+  return observed && (!fetched || observed > fetched) ? observed : fetched;
+}
+
+function windowHTML(w) {
+  const used = Math.min(100, Math.max(0, w.used_percent || 0));
+  const name = [w.label, cadence(w.window_minutes)].filter(Boolean).join(" · ") || "Allowance";
+  const reset = time(w.reset_at);
+  const cls = used >= 95 ? "bad" : used >= 75 ? "warn" : "";
+  return `<div class="win"><div class="row"><span>${esc(name)}</span><span>${Math.round(100 - used)}% left</span></div>` +
+    `<div class="bar" role="meter" aria-label="${esc(name)} used" aria-valuenow="${Math.round(used)}" aria-valuemin="0" aria-valuemax="100"><i class="${cls}" style="width:${used}%"></i></div>` +
+    (reset ? `<div class="reset">Resets in ${until(reset)} · ${clock(reset)}</div>` : "") + "</div>";
+}
+
+function recentHTML(a) {
+  let ok = 0, failed = 0, last = "";
+  for (const bucket of a.recent_requests || []) {
+    ok += bucket.success; failed += bucket.failed;
+    if (bucket.success + bucket.failed) last = bucket.time;
+  }
+  if (!ok && !failed) return "";
+  return `<div class="sub">Recent requests: ${[ok ? ok + " served" : "", failed ? failed + " failed" : ""].filter(Boolean).join(", ")} · last ${esc(last)}</div>`;
+}
+
+function manageHTML(a) {
+  if (a.source === "config") return "";
+  const held = future(time(a.hold_until));
+  const resetAt = weekly(a) && weekly(a).reset_at;
+  return `<details><summary>Manage</summary><div class="actions" data-name="${esc(a.name)}">
+    <select aria-label="Hold for"><option value="1">1 hour</option><option value="5" selected>5 hours</option><option value="24">1 day</option>${resetAt ? `<option value="reset:${esc(resetAt)}">Until weekly reset</option>` : ""}</select>
+    <button data-act="hold">Hold</button>${held ? '<button data-act="unhold">Release hold</button>' : ""}
+    <button data-act="${a.disabled ? "enable" : "disable"}">${a.disabled ? "Enable" : "Disable"}</button></div>
+    <div class="actions" data-name="${esc(a.name)}"><input name="note" aria-label="Name" placeholder="name" value="${esc(a.note || "")}"><input name="group" aria-label="Groups" placeholder="groups, comma separated" value="${esc(a.group || "")}"><button data-act="save">Save</button></div></details>`;
+}
+
+function accountHTML(a, isNext) {
+  const b = a._blocker, up = updated(a), err = a.usage && a.usage.error;
+  const groups = (a.group || "").split(",").map((g) => g.trim()).filter(Boolean);
+  const cooldowns = (a.cooldowns || []).filter((c) => c.scope !== "credential");
+  const sub = [a.email && a.email !== displayName(a) ? a.email : "", a.source === "config" ? "API key" : ""].filter(Boolean).join(" · ");
+  const windows = windowsOf(a);
+  return `<article class="acct${isNext ? " next" : ""}${b ? " out" : ""}">
+    <div class="top">${isNext ? '<span class="tag">Next</span>' : ""}<span class="name">${esc(displayName(a))}</span>
+      ${a.consume_first && a.consume_first.spent ? '<span class="tag bad">Spent</span>' : ""}
+      ${groups.map((g) => `<span class="tag">${esc(g)}</span>`).join("")}<span class="plan">${esc(plan(a))}</span></div>
+    ${sub ? `<div class="sub">${esc(sub)}</div>` : ""}
+    ${windows.map(windowHTML).join("") || (a.source === "config" ? "" : '<div class="sub">No usage figures yet.</div>')}
+    ${b ? `<div class="state ${b.cls}">${esc(b.text)}</div>` : ""}
+    ${cooldowns.length ? `<div class="state warn">Cooling down for ${cooldowns.length} model${cooldowns.length === 1 ? "" : "s"}: ${esc(cooldowns.map((c) => c.model_key).join(", "))}</div>` : ""}
+    ${recentHTML(a)}
+    ${up || err ? `<div class="sub">${up ? "Figures " + ago(up) : ""}${err ? `${up ? " · " : ""}<span class="error">last poll failed: ${esc(err)}</span>` : ""}</div>` : ""}
+    ${manageHTML(a)}
+  </article>`;
+}
+
+function render() {
+  const consumeFirst = /^(consume-?first|cf)$/i.test(data.strategy || "");
+  const refresh = data.usage_refresh && data.usage_refresh.interval;
+  $("meta").textContent = `${data.strategy || "round-robin"} · usage poll ${refresh || "off"} · loaded ${clock(new Date())}`;
+  const groups = new Map();
+  for (const a of data.accounts) {
+    a._blocker = blocker(a);
+    const key = a.provider || "other";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
+  }
+  const rank = (p) => (ORDER.includes(p) ? ORDER.indexOf(p) : ORDER.length);
+  const ordered = [...groups.entries()].sort((x, y) => rank(x[0]) - rank(y[0]) || x[0].localeCompare(y[0]));
+  let nextHTML = "", html = "";
+  for (const [provider, accounts] of ordered) {
+    accounts.sort(routerOrder);
+    const next = consumeFirst ? accounts.find((a) => !a._blocker) : null;
+    const name = providerName(provider);
+    if (next) {
+      const w = weekly(next);
+      nextHTML += `<li><b>${esc(name)}</b><span>${esc(displayName(next))}</span>${w ? `<span class="muted">${Math.round(100 - w.used_percent)}% of the week left${w.reset_at ? `, resets ${clock(time(w.reset_at))}` : ""}</span>` : ""}</li>`;
+    }
+    const usable = accounts.filter((a) => !a._blocker).length;
+    html += `<section><h2>${esc(name)} <small>${usable} of ${accounts.length} in rotation${consumeFirst ? " · spend order" : ""}</small></h2><div class="grid">${accounts.map((a) => accountHTML(a, a === next)).join("")}</div></section>`;
+  }
+  $("next").innerHTML = nextHTML;
+  $("next").hidden = !nextHTML;
+  $("providers").innerHTML = html || '<p class="muted">The hub holds no credentials.</p>';
+}
+
+async function load() {
+  $("reload").disabled = true;
+  try {
+    data = await api("GET", "/v8/management/credentials/usage");
+    $("error").textContent = "";
+    render();
+  } catch (e) {
+    if (e.message !== "unauthorized") $("error").textContent = "Could not load the hub state: " + e.message;
+  } finally {
+    $("reload").disabled = false;
+  }
+}
+
+async function act(button) {
+  const box = button.closest(".actions"), name = box.dataset.name, act = button.dataset.act;
+  button.disabled = true;
+  try {
+    if (act === "hold") {
+      const choice = box.querySelector("select").value;
+      const until = choice.startsWith("reset:") ? new Date(choice.slice(6)) : new Date(Date.now() + Number(choice) * 3600000);
+      await api("PATCH", "/v8/management/credentials/fields", { name, hold_until: until.toISOString().replace(/\.\d+Z$/, "Z") });
+    } else if (act === "unhold") {
+      await api("PATCH", "/v8/management/credentials/fields", { name, hold_until: null });
+    } else if (act === "disable" || act === "enable") {
+      await api("PATCH", "/v8/management/credentials/status", { name, disabled: act === "disable" });
+    } else if (act === "save") {
+      const note = box.querySelector("[name=note]").value.trim();
+      const group = box.querySelector("[name=group]").value.split(",").map((g) => g.trim()).filter(Boolean).join(",");
+      await api("PATCH", "/v8/management/credentials/fields", { name, note: note || null, group: group || null });
+    }
+    await load();
+  } catch (e) {
+    if (e.message !== "unauthorized") $("error").textContent = `Could not ${act} ${name}: ${e.message}`;
+    button.disabled = false;
+  }
+}
+
+function signOut(message) {
+  localStorage.removeItem(KEY);
+  $("app").hidden = true;
+  $("login").hidden = false;
+  $("login-error").textContent = message || "";
+  $("key").focus();
+}
+function start() {
+  $("login").hidden = true;
+  $("app").hidden = false;
+  load();
+}
+
+$("login-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  localStorage.setItem(KEY, $("key").value.trim());
+  $("key").value = "";
+  start();
+});
+$("reload").addEventListener("click", load);
+$("logout").addEventListener("click", () => signOut());
+$("providers").addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-act]");
+  if (button) act(button);
+});
+setInterval(() => { if (!document.hidden && data && !document.querySelector("details[open]")) load(); }, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && data) load(); });
+if (localStorage.getItem(KEY)) start(); else signOut();
+</script>
+</body>
+</html>

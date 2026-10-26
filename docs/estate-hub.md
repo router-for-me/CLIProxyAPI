@@ -56,11 +56,61 @@ only when its account starts cooling down, is held, disabled, or excluded by a p
 - No 5-minute reset margin: the hub chooses per new conversation, not by moving a shared pointer,
   so there is nothing to ping-pong.
 - Spent accounts are a last resort rather than refused; the hub only refuses on a real 429.
-- Usage comes only from the hub's own traffic, not CodexBar or the providers' usage endpoints. The
-  snapshot is in memory, so after a restart each account is "unknown" until it serves a request.
+- Usage comes from the hub's own traffic and, when the usage refresher is on, from the providers'
+  usage endpoints for idle accounts (see below). Without the refresher the snapshot is in memory
+  only, so after a restart each account is "unknown" until it serves a request.
 - Codex per-model "additional" limits (for example Spark) are not ranked on.
 
-## Holds
+## Usage refresher
+
+Quota headers only arrive while an account serves traffic. The refresher asks each provider's usage
+endpoint for accounts that are idle, and keeps the last reading across restarts:
+
+```yaml
+routing:
+  usage-refresh:
+    interval: "10m"   # empty or 0 turns it off (the default)
+    providers: []     # claude, codex, kimi, xai, antigravity, meta; empty means all of them
+```
+
+- An account is polled when its last poll is older than `interval` and, for Claude and Codex, it has
+  not returned quota headers within `interval` either. Disabled accounts and API keys from the
+  config file are not polled. Muse is polled at most every three hours whatever the interval: Meta
+  locks out a login that is polled often.
+- A failed poll is retried after `interval`, not sooner. The dashboard shows the error.
+- Claude and Codex readings are stored as the same quota headers their responses carry, so
+  consume-first ranks idle accounts on them. A poll never replaces newer headers from traffic.
+- The last reading of every account is written to `<auth-dir>/usage-snapshot.cache` (not `.json`,
+  so the watcher never loads it as a credential). It holds figures only, no tokens. After a
+  restart it is read back, so the router order is known immediately. The Postgres store clears
+  the auth directory at startup, so there the snapshot does not survive a restart.
+- The interval and provider list are read on every one-minute tick, so a config reload applies
+  without a restart.
+
+| Provider | Endpoint (as CodexBar reads it) | What it reports |
+|---|---|---|
+| Claude | `GET api.anthropic.com/api/oauth/usage`, `anthropic-beta: oauth-2025-04-20` | 5-hour and weekly utilization (percent) and resets; Opus, Sonnet and model-scoped weekly limits (for example "Fable only") |
+| Codex | `GET chatgpt.com/backend-api/wham/usage`, `ChatGPT-Account-Id` | plan, 5-hour and weekly used percent, window length, reset; per-model additional limits |
+| Kimi | `GET api.kimi.com/coding/v1/usages` | membership level (plan); 5-hour, weekly and monthly pools as used ratios, or the older used/limit counts |
+| Grok (`xai`) | `GET cli-chat-proxy.grok.com/v1/billing?format=credits`, `x-xai-token-auth: xai-grok-cli` | subscription tier; credit used percent for the billing period and its end |
+| Antigravity | `POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with the project | remaining fraction and reset per pool (Gemini, Claude and GPT) for the 5-hour and weekly buckets |
+| Muse (`meta`) | `POST api.meta.ai/muse-code/key` with the device (`dca:`) token | tier name; short window and weekly used percent and resets. The key this call mints is discarded |
+
+## Dashboard
+
+The hub serves its own dashboard at **`/hub`** (for example
+`https://<hub>:8317/hub`). It asks for the management key once and keeps it in the browser's local
+storage, as the stock panel does. It is one HTML file embedded in the binary, with no build step,
+and it is turned off with the stock panel (`management.disable-control-panel: true`) or when the
+management API is off.
+
+It shows every credential and API key the hub holds, grouped by provider and in the router's
+consume-first order, with the next account to spend marked and listed at the top. Each account shows
+its plan, each window's percent left and reset, holds, cooldowns, groups, recent requests and the
+age of its figures. **Manage** holds an account (1 hour, 5 hours, 1 day or until its weekly reset),
+releases a hold, disables or enables it, and sets its name (`note`) and groups, through the
+management API calls below. Config-file API keys are shown but are edited in the config.
+
 
 A hold takes an account out of every routing path (all strategies, pinned or not) until a time:
 
@@ -118,6 +168,10 @@ Client examples:
 
 ## Reading the state (for a dashboard)
 
+`GET /v8/management/credentials/usage` is the dashboard's single source: `strategy`,
+`usage_refresh`, and `accounts`, which holds every credential file entry (as below) plus the
+config-file API keys (`source: "config"`), each with `cooldowns` and `usage`.
+
 `GET /v8/management/credentials` (management key required) returns one entry per account with:
 
 - `id`, `name`, `label`, `email`, `provider`, `priority`
@@ -126,6 +180,9 @@ Client examples:
 - `quota.observed_at` and `quota.signals`: the raw quota headers from the last response
 - `consume_first`: the figures the router ranks on, so a dashboard can show the same order:
   `reset_at` (omitted when unknown), `used_percent` (highest live window), `spent`
+- `usage`: `windows` (each `used_percent`, `window_minutes`, `reset_at`, and a `label` for
+  extra windows), `plan`, `fetched_at` and the last poll `error`. Claude and Codex main windows
+  come from the live quota headers; the rest from the last refresher poll
 
 Sort by `spent`, then entries with `reset_at` before those without, then `reset_at`, then
 `used_percent`, then `id` to reproduce the router's order within a priority tier.
