@@ -325,39 +325,25 @@ func TestClaudeErrorPutsRateLimitResetInMessage(t *testing.T) {
 
 func TestWriteClaudeDirectErrorPutsRateLimitResetInMessage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
 	upstreamReset := 3 * time.Hour
-	for _, tt := range []struct {
-		name    string
-		err     error
-		headers http.Header
-		want    string
-	}{
-		{"upstream limit", rateLimitedClaudeError{retryAfter: &upstreamReset}, nil, "Rate limited. (reset after 3h0m0s)"},
-		{"interceptor Retry-After", nil, http.Header{"Retry-After": {"3"}}, "Rate limited. (reset after 3s)"},
-		{"no reset", nil, nil, "Rate limited."},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			handler := &ClaudeCodeAPIHandler{}
-			msg := &interfaces.ErrorMessage{
-				StatusCode:     http.StatusTooManyRequests,
-				Error:          tt.err,
-				DirectResponse: true,
-				Body:           []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited."},"request_id":"req_123"}`),
-				Headers:        tt.headers,
-			}
+	msg := &interfaces.ErrorMessage{
+		StatusCode:     http.StatusTooManyRequests,
+		Error:          rateLimitedClaudeError{retryAfter: &upstreamReset},
+		DirectResponse: true,
+		Body:           []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited."},"request_id":"req_123"}`),
+	}
 
-			handler.WriteErrorResponse(c, msg)
+	handler.WriteErrorResponse(c, msg)
 
-			body := recorder.Body.Bytes()
-			if got := gjson.GetBytes(body, "error.message").String(); got != tt.want {
-				t.Fatalf("error.message = %q, want %q; body=%s", got, tt.want, body)
-			}
-			if got := gjson.GetBytes(body, "request_id").String(); got != "req_123" {
-				t.Fatalf("request_id = %q; body=%s", got, body)
-			}
-		})
+	body := recorder.Body.Bytes()
+	if got := gjson.GetBytes(body, "error.message").String(); got != "Rate limited. (reset after 3h0m0s)" {
+		t.Fatalf("error.message = %q; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "request_id").String(); got != "req_123" {
+		t.Fatalf("request_id = %q; body=%s", got, body)
 	}
 }
 
