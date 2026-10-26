@@ -102,8 +102,10 @@ Decisions:
   scheduler fast path and mixed-provider routing already call. Hold expiry needs no event.
 - The deprecated v0 management API is untouched (AGENTS.md), so v0 `PUT /routing/strategy` rejects
   `consume-first`. Set it in the YAML or through `/v8/management/config`.
-- The fork inherited upstream's `auto-retarget-main-pr-to-dev` workflow, which moves every PR against
-  `main` onto upstream's `dev` branch. L1 disabled it on the fork. Undo:
+- The fork has no CI: GitHub Actions has never run on it (fork workflows stay off until someone
+  enables them in the Actions tab). L1 therefore ran the full `go test ./...` once locally. The fork
+  also inherited upstream's `auto-retarget-main-pr-to-dev` workflow, which would move every PR against
+  `main` onto upstream's `dev` branch once Actions are on. L1 disabled that one workflow. Undo:
   `gh workflow enable auto-retarget-main-pr-to-dev -R Automancer-Ltd/CLIProxyAPI`.
 
 Findings to verify once m6 has logins (inferred, not seen on a live response):
