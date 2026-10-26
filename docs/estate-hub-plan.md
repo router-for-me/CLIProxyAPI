@@ -35,7 +35,7 @@ through Claude Code. Fable is Waseem's own seat: never dispatch a lane on it.
 | Lane | Deliverable | Route | State |
 |---|---|---|---|
 | L1 routing | `consume-first` routing strategy + account pinning, merged to `main` of Automancer-Ltd/CLIProxyAPI | bb thread, Claude Code, Opus 5.5, high | merged 2026-10-26 from bb thread thr_cu7cfdji97 (tracker t8305 has the PR and merge SHA; L2 t8304; migration t8306) |
-| L2 dashboard | web dashboard replacing sysdash/codexbar | after L1 | not started |
+| L2 dashboard | web dashboard replacing sysdash/codexbar + usage refresher | bb thread, Claude Code, Opus 5.5, high | dispatched 2026-10-26 20:25 as bb thread thr_yh5dttfgcu (tracker t8304) |
 
 Base for L1: upstream `main` at 1f917e77 (fork point). Keep the diff upstream-mergeable: new files
 where possible, config-driven, no rewrites of existing strategies.
@@ -151,3 +151,8 @@ What L2 (dashboard) needs:
   first hour because the config script read them from the same stdin as its own source: fixed; wrong or
   missing key now returns 401. m6's own Claude Code and Codex point at the hub and work; wasnewpc being
   pointed; mbp asleep. Management API answers on `/v8/management/credentials` with the management key.
+- 2026-10-26 20:20: L1 build (estate-8acd42bb, cross-compiled on auto-vps, darwin/arm64) is live on m6 as
+  launch agent `uk.automancer.hub` (`~/.local/hub/cliproxyapi -config ~/.local/hub/config.yaml`, log
+  `~/Library/Logs/hub.log`), `routing.strategy: consume-first`; the Homebrew service is stopped. Config now
+  lives at `~/.local/hub/config.yaml`, not the brew path. wasnewpc's Claude Code and Codex point at the hub
+  and answered. L2 dispatched.
