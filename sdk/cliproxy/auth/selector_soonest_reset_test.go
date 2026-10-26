@@ -196,7 +196,7 @@ func TestSoonestResetHintsConcurrentReplacement(t *testing.T) {
 func TestSoonestResetHintsAreRetainedUntilReset(t *testing.T) {
 	now := time.Now()
 	selector := &SoonestResetFirstSelector{now: func() time.Time { return now }}
-	exists := func(id string) bool { return id == "a" || id == "b" }
+	exists := func(id string) (uint64, bool) { return 0, id == "a" || id == "b" }
 	auths := []*Auth{{ID: "a", Attributes: map[string]string{"weight": "20"}}, {ID: "b", Attributes: map[string]string{"weight": "1"}}}
 	assertPick := func(want string) {
 		t.Helper()

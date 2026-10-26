@@ -16,6 +16,30 @@ import (
 type QuotaResetHint struct {
 	ObservedAt time.Time `json:"observed_at"`
 	ResetAt    time.Time `json:"reset_at"`
+
+	// registrationEpoch binds a retained observation to the registration it
+	// was made for. File-backed IDs are path-based, so a credential that is
+	// removed and registered again under the same ID is a different account
+	// and must not inherit the previous reset.
+	registrationEpoch uint64
+}
+
+// hintFor returns the observation for auth only if it belongs to the auth's
+// current registration.
+func hintFor(hints map[string]QuotaResetHint, auth *Auth) (QuotaResetHint, bool) {
+	if auth == nil {
+		return QuotaResetHint{}, false
+	}
+	hint, ok := hints[auth.ID]
+	if !ok || hint.registrationEpoch != auth.RegistrationEpoch {
+		return QuotaResetHint{}, false
+	}
+	return hint, true
+}
+
+// public strips internal bookkeeping before a hint leaves the selector.
+func (h QuotaResetHint) public() QuotaResetHint {
+	return QuotaResetHint{ObservedAt: h.ObservedAt, ResetAt: h.ResetAt}
 }
 
 // usable reports whether the observation still describes a future reset. A
@@ -71,7 +95,7 @@ func soonestResetGroup(candidates []*Auth, hints map[string]QuotaResetHint, now 
 	var earliest time.Time
 	var group []*Auth
 	for _, candidate := range candidates {
-		hint, ok := hints[candidate.ID]
+		hint, ok := hintFor(hints, candidate)
 		if !ok || !hint.usable(now) {
 			continue
 		}
@@ -98,25 +122,29 @@ func (s *SoonestResetFirstSelector) replaceResetHints(hints map[string]QuotaRese
 }
 
 // mergeResetHints keeps earlier observations until their reset passes and
-// lets newer observations replace them. Hints of removed credentials are
-// dropped. It returns the number of accepted updates.
-func (s *SoonestResetFirstSelector) mergeResetHints(updates map[string]QuotaResetHint, exists func(string) bool, now time.Time) int {
+// lets newer observations replace them. Hints of removed or re-registered
+// credentials are dropped: registrationEpoch reports a credential's current
+// registration, or false when it no longer exists. It returns the number of
+// accepted updates.
+func (s *SoonestResetFirstSelector) mergeResetHints(updates map[string]QuotaResetHint, registrationEpoch func(string) (uint64, bool), now time.Time) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := make(map[string]QuotaResetHint, len(s.hints)+len(updates))
 	for id, hint := range s.hints {
-		if exists(id) && hint.ResetAt.After(now) {
+		if epoch, ok := registrationEpoch(id); ok && epoch == hint.registrationEpoch && hint.ResetAt.After(now) {
 			next[id] = hint
 		}
 	}
 	accepted := 0
 	for id, hint := range updates {
-		if !exists(id) || !hint.usable(now) {
+		epoch, ok := registrationEpoch(id)
+		if !ok || !hint.usable(now) {
 			continue
 		}
 		if current, ok := next[id]; ok && current.ObservedAt.After(hint.ObservedAt) {
 			continue
 		}
+		hint.registrationEpoch = epoch
 		next[id] = hint
 		accepted++
 	}
@@ -137,8 +165,14 @@ func (m *Manager) MergeQuotaResetHints(hints map[string]QuotaResetHint) (int, er
 	if resetSelector == nil {
 		return 0, errors.New("soonest-reset-first routing is not active")
 	}
-	exists := func(id string) bool { return m.auths[id] != nil }
-	return resetSelector.mergeResetHints(hints, exists, resetSelector.clock()), nil
+	registrationEpoch := func(id string) (uint64, bool) {
+		auth := m.auths[id]
+		if auth == nil {
+			return 0, false
+		}
+		return auth.RegistrationEpoch, true
+	}
+	return resetSelector.mergeResetHints(hints, registrationEpoch, resetSelector.clock()), nil
 }
 
 func (m *Manager) soonestResetSelectorLocked() (*SoonestResetFirstSelector, bool) {
@@ -212,9 +246,10 @@ func (m *Manager) QuotaRoutingSnapshot() QuotaRoutingSnapshot {
 		snapshot.GeneratedAt = now.UTC()
 		selected.mu.RLock()
 		defer selected.mu.RUnlock()
-		for id, hint := range selected.hints {
-			if auth := m.auths[id]; auth != nil && auth.Index != "" && hint.usable(now) {
-				snapshot.Hints[auth.Index] = hint
+		for id := range selected.hints {
+			auth := m.auths[id]
+			if hint, ok := hintFor(selected.hints, auth); ok && auth.Index != "" && hint.usable(now) {
+				snapshot.Hints[auth.Index] = hint.public()
 			}
 		}
 		auths := make([]*Auth, 0, len(m.auths))
@@ -253,7 +288,7 @@ func routingOrder(auths []*Auth, hints map[string]QuotaResetHint, now time.Time)
 		eligible := make([]*Auth, 0, len(pool))
 		for _, auth := range pool {
 			view := &RoutingAccountView{AuthIndex: auth.Index, Priority: authPriority(auth), Weight: authWeight(auth)}
-			if hint, ok := hints[auth.ID]; ok && hint.usable(now) {
+			if hint, ok := hintFor(hints, auth); ok && hint.usable(now) {
 				resetAt, observedAt := hint.ResetAt.UTC(), hint.ObservedAt.UTC()
 				view.ResetAt, view.ObservedAt = &resetAt, &observedAt
 			}

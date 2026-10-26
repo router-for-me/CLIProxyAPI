@@ -125,3 +125,56 @@ func TestRoutingOrderMirrorsSelector(t *testing.T) {
 		remaining = withoutAuths(remaining, []*Auth{got})
 	}
 }
+
+// File-backed IDs are path-based. A credential removed and registered again
+// under the same ID is a different account and must not inherit the previous
+// registration's reset, even before the collector sends its next update.
+func TestReRegisteredCredentialDropsRetainedResetHint(t *testing.T) {
+	now := time.Now()
+	selector := &SoonestResetFirstSelector{now: func() time.Time { return now }}
+	manager := NewManager(nil, selector, nil)
+	ctx := WithSkipPersist(context.Background())
+	register := func(id string) *Auth {
+		t.Helper()
+		auth, err := manager.Register(ctx, &Auth{ID: id, Provider: "claude"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return auth
+	}
+	replaced := register("claude-user.json")
+	other := register("claude-other.json")
+	hints := map[string]QuotaResetHint{
+		replaced.ID: {ObservedAt: now.Add(-time.Hour), ResetAt: now.Add(time.Hour)},
+		other.ID:    {ObservedAt: now.Add(-time.Hour), ResetAt: now.Add(48 * time.Hour)},
+	}
+	if accepted, err := manager.MergeQuotaResetHints(hints); err != nil || accepted != 2 {
+		t.Fatalf("accepted = %d, %v", accepted, err)
+	}
+	manager.Remove(ctx, replaced.ID)
+	replacement := register(replaced.ID)
+
+	snapshot := manager.QuotaRoutingSnapshot()
+	if _, ok := snapshot.Hints[replacement.Index]; ok || len(snapshot.Hints) != 1 {
+		t.Fatalf("hints = %+v, want only the unchanged account", snapshot.Hints)
+	}
+	for _, view := range snapshot.Providers["claude"] {
+		if view.AuthIndex == replacement.Index && (view.ResetAt != nil || view.Reason != RoutingReasonNoReset) {
+			t.Fatalf("replacement view = %+v", view)
+		}
+	}
+	got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, []*Auth{replacement, other})
+	if err != nil || got.ID != other.ID {
+		t.Fatalf("pick = %v, %v; want %s", got, err, other.ID)
+	}
+	// The next collector update prunes the stale observation.
+	if _, err := manager.MergeQuotaResetHints(nil); err != nil {
+		t.Fatal(err)
+	}
+	selector.mu.RLock()
+	_, kept := selector.hints[replaced.ID]
+	selector.mu.RUnlock()
+	if kept {
+		t.Fatal("stale hint retained after re-registration")
+	}
+}
