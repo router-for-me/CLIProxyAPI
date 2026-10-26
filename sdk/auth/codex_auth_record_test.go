@@ -100,3 +100,22 @@ func TestBuildAuthRecord_PlanTypeExtractedWhenPresent(t *testing.T) {
 		t.Errorf("auth.FileName = %q, want suffix -plus.json", auth.FileName)
 	}
 }
+
+func TestBuildAuthRecordIncludesAccountIDBeforePersistence(t *testing.T) {
+	authenticator := NewCodexAuthenticator()
+	bundle := &codex.CodexAuthBundle{
+		TokenData: codex.CodexTokenData{
+			IDToken:     makeTestCodexJWT("plus", "jwt-account"),
+			Email:       "user@example.com",
+			AccountID:   "exchanged-account",
+			AccessToken: "test-access-token",
+		},
+	}
+	record, err := authenticator.buildAuthRecord(codex.NewCodexAuth(nil), bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := record.Metadata["account_id"]; got != bundle.TokenData.AccountID {
+		t.Fatalf("pre-persistence account_id=%v, want token exchange account %q", got, bundle.TokenData.AccountID)
+	}
+}

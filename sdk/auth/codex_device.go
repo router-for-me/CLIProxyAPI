@@ -299,8 +299,9 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 
 	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 	metadata := map[string]any{
-		"email":     tokenStorage.Email,
-		"plan_type": planType,
+		"email":      tokenStorage.Email,
+		"account_id": tokenStorage.AccountID,
+		"plan_type":  planType,
 	}
 
 	fmt.Println("Codex authentication successful")
