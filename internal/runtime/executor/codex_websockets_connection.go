@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -36,9 +37,29 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
-	if err != nil {
+	// An EOF before any HTTP response is retried on a fresh connection; no response.create
+	// has been sent yet. All attempts share the one handshake time budget.
+	dialCtx, cancelDial := context.WithTimeout(ctx, codexResponsesWebsocketHandshakeTO)
+	defer cancelDial()
+	var conn *websocket.Conn
+	var resp *http.Response
+	var err error
+	for retry := 0; ; retry++ {
+		conn, resp, err = dialer.DialContext(dialCtx, wsURL, headers)
+		if err == nil {
+			break
+		}
 		cliproxyexecutor.MarkUpstreamAttempt(ctx)
+		if resp != nil || retry == 3 || !(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+			break
+		}
+		timer := time.NewTimer(time.Duration(100<<retry) * time.Millisecond)
+		select {
+		case <-dialCtx.Done():
+			timer.Stop()
+			return nil, nil, nil, dialCtx.Err()
+		case <-timer.C:
+		}
 	}
 	closer := newWebsocketConnectionCloser(conn)
 	if conn != nil {
