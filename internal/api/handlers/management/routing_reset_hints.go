@@ -51,6 +51,18 @@ func (h *Handler) PutRoutingResetHints(c *gin.Context) {
 	}
 
 	now := time.Now()
+	// Resolve indexes against one inventory snapshot: List clones every auth,
+	// so a per-account lookup would clone the inventory once per observation.
+	authsByIndex := make(map[string]*coreauth.Auth)
+	for _, auth := range h.authManager.List() {
+		if auth == nil {
+			continue
+		}
+		// Keep the first match, as the per-index lookup did.
+		if index := auth.EnsureIndex(); index != "" && authsByIndex[index] == nil {
+			authsByIndex[index] = auth
+		}
+	}
 	hints := make(map[string]coreauth.QuotaResetHint, len(request.Accounts))
 	seen := make(map[string]bool, len(request.Accounts))
 	for _, account := range request.Accounts {
@@ -61,7 +73,7 @@ func (h *Handler) PutRoutingResetHints(c *gin.Context) {
 			return
 		}
 		seen[index] = true
-		auth := h.authByIndex(index)
+		auth := authsByIndex[index]
 		// An account can disappear during a collector poll. Drop that entry;
 		// never associate it by file name or expose inventory in the response.
 		if auth == nil || !account.ResetAt.After(now) {
