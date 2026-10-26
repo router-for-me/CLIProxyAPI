@@ -101,6 +101,11 @@ func IsRequestFault(status int, err error) bool {
 	if IsClaudeThreadNotFound(status, err) {
 		return true
 	}
+	// xAI answers prompts it refuses to serve with 403 permission-denied. Every
+	// credential returns the same refusal, so it must not rotate or cool down.
+	if IsXAIContentRefusal(status, err) {
+		return true
+	}
 	// Model not found indicates a credential-model capability mismatch rather than
 	// a caller request error. Preserve rotation and cooldown for the model.
 	if hasModelNotFoundErrorBody(err) {
@@ -163,6 +168,48 @@ func IsClaudeThreadNotFound(status int, err error) bool {
 	}
 	lower := strings.ToLower(body)
 	return strings.Contains(lower, "thread state") && strings.Contains(lower, "previous_message_id")
+}
+
+// IsXAIContentRefusal reports the xAI 403 answered when the model declines the
+// prompt, for example:
+//
+//	{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}
+//
+// xAI reuses permission-denied for account-level denials such as "Access to the
+// chat endpoint is denied", so the refusal text is required as well. Those other
+// denials keep their credential rotation and cooldown.
+func IsXAIContentRefusal(status int, err error) bool {
+	if status != http.StatusForbidden || err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		body = strings.TrimSpace(string(responseBody.ResponseBody()))
+	}
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	permissionDenied := false
+	for _, path := range []string{"code", "error.code", "body.error.code"} {
+		if strings.EqualFold(strings.TrimSpace(gjson.Get(body, path).String()), "permission-denied") {
+			permissionDenied = true
+			break
+		}
+	}
+	if !permissionDenied {
+		return false
+	}
+	for _, path := range []string{"error", "error.message", "message", "body.error.message"} {
+		msg := strings.ToLower(strings.ReplaceAll(gjson.Get(body, path).String(), "’", "'"))
+		if strings.Contains(msg, "can't help with that request") {
+			return true
+		}
+	}
+	return false
 }
 
 func hasModelNotFoundErrorBody(err error) bool {

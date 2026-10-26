@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1785,6 +1786,76 @@ func TestManager_DeepSeekCredentialFailuresRotateCredential(t *testing.T) {
 				t.Fatalf("failed auth quota state = %#v, want exceeded quota", state.Quota)
 			}
 		})
+	}
+}
+
+// TestManager_XAIContentRefusalDoesNotRotateOrCoolCredential pins the xAI
+// content refusal contract. The refusal is tied to the prompt, so every
+// credential returns it. Rotating only repeats it on another account, and the
+// generic 403 cooldown would park a healthy model for 30 minutes.
+func TestManager_XAIContentRefusalDoesNotRotateOrCoolCredential(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(2, 30*time.Second, 0)
+
+	const provider = "xai"
+	const model = "grok-4.7"
+	refusal := `{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}`
+
+	executor := &authFallbackExecutor{
+		id: provider,
+		executeErrors: map[string]error{
+			"aa-refused": &Error{HTTPStatus: http.StatusForbidden, Message: refusal},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	refusedAuth := &Auth{ID: "aa-refused", Provider: provider}
+	otherAuth := &Auth{ID: "bb-other", Provider: provider}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{{ID: model}}
+	reg.RegisterClient(refusedAuth.ID, provider, models)
+	reg.RegisterClient(otherAuth.ID, provider, models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(refusedAuth.ID)
+		reg.UnregisterClient(otherAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), refusedAuth); errRegister != nil {
+		t.Fatalf("register refused auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), otherAuth); errRegister != nil {
+		t.Fatalf("register other auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: model},
+		cliproxyexecutor.Options{},
+	)
+	if errExecute == nil {
+		t.Fatal("expected the refusal to reach the client")
+	}
+	if status := statusCodeFromError(errExecute); status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", status)
+	}
+	if !strings.Contains(errExecute.Error(), "can't help with that request") {
+		t.Fatalf("error = %q, want the upstream refusal body", errExecute.Error())
+	}
+	if calls := executor.ExecuteCalls(); !slices.Equal(calls, []string{refusedAuth.ID}) {
+		t.Fatalf("credential calls = %v, want only %q", calls, refusedAuth.ID)
+	}
+
+	updated, ok := m.GetByID(refusedAuth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected refused auth to remain registered")
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("refused auth = unavailable %t next retry %v, want available", updated.Unavailable, updated.NextRetryAfter)
+	}
+	if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+		t.Fatalf("refused auth model state = %#v, want no cooldown", state)
 	}
 }
 
