@@ -129,6 +129,7 @@ What L2 (dashboard) needs:
   with `PATCH /v8/management/credentials/status`. Strategy is in `GET /v8/management/config`.
 - Not available: a single "active account" (the hub binds per conversation; `recent_requests` shows
   which accounts are serving), Claude plan names, and fresh figures for idle accounts.
+- Repo detail: upstream's `.gitignore` ignores `docs/*`, so a new doc is added with `git add -f`.
 - Open question for L2: refresh idle accounts by calling the providers' usage endpoints through
   `/v8/management/requests/api-call` or the quota plugins. That would also close the restart gap.
 
