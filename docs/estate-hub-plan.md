@@ -141,3 +141,13 @@ What L2 (dashboard) needs:
 - 2026-10-26: L1 merged to `main` (consume-first, holds, pins, credential listing fields, docs,
   tests). m6 still runs upstream brew 8.0.40, so none of it is live until the migration (t8306)
   installs this fork's build. Next: L2 brief (t8304) from "What L2 needs" above.
+  L1 dispatched.
+- 2026-10-26 20:20: signed in on the hub: 10 Claude accounts (cswap slots 1-10; GDP Team file marked
+  `disabled`), 3 Codex Pro (GDP personal, automancer.uk, gmail; Team left out), Grok Build, Antigravity,
+  Kimi, Muse. Devin pending (its login needs an interactive paste on m6). API-key upstreams added under
+  `openai-compatibility`: deepseek, commandcode, zai (GLM coding plan), opencode-go (needs the
+  `x-opencode-session` header), local (the estate gateway router at automancer-vps:8100). All answered a
+  one-word prompt through the hub except Grok (402, weekly pool spent; expected). Keys were empty for the
+  first hour because the config script read them from the same stdin as its own source: fixed; wrong or
+  missing key now returns 401. m6's own Claude Code and Codex point at the hub and work; wasnewpc being
+  pointed; mbp asleep. Management API answers on `/v8/management/credentials` with the management key.
