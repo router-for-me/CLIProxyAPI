@@ -156,3 +156,4 @@ What L2 (dashboard) needs:
   `~/Library/Logs/hub.log`), `routing.strategy: consume-first`; the Homebrew service is stopped. Config now
   lives at `~/.local/hub/config.yaml`, not the brew path. wasnewpc's Claude Code and Codex point at the hub
   and answered. L2 dispatched.
+- 2026-10-26 20:50: Devin signed in (18 logins). OMP on m6 and wasnewpc, and opencode on wasnewpc, carry a `hub` provider (25 non-Claude models: GPT via the Codex subs, Antigravity Gemini, Grok, Kimi, Muse, DeepSeek, GLM, CommandCode, OpenCode Go, Devin, local GPU). Claude models stay Claude-Code-only through the hub (Waseem's rule). ROUTES.md now allows Terra for Codex lanes (skills commit fae7cf5). Migration item t8306 carries the Gandalf usage read via estate-gateway and the remaining harnesses.
