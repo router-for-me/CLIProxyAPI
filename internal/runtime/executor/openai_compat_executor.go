@@ -1155,6 +1155,7 @@ type statusErr struct {
 	msg              string
 	retryAfter       *time.Duration
 	credentialScoped bool
+	streamTruncated  bool
 }
 
 func (e statusErr) Error() string {
@@ -1166,6 +1167,10 @@ func (e statusErr) Error() string {
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
+
+// IsStreamTruncated marks a locally synthesized failure for an accepted
+// upstream stream that ended without its terminal frame.
+func (e statusErr) IsStreamTruncated() bool { return e.streamTruncated }
 
 const openAICompatTPMFallbackRetryAfter = time.Minute
 

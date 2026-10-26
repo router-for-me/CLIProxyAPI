@@ -347,7 +347,9 @@ func appendInteractionsInputToAntigravity(items *[][]byte, input gjson.Result) e
 	}
 	if input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
-			appendInteractionsStepToAntigravity(ctx, item, "user")
+			if !appendInteractionsContentBlockItem(ctx, item) {
+				appendInteractionsStepToAntigravity(ctx, item, "user")
+			}
 			return true
 		})
 	} else if steps := input.Get("steps"); steps.Exists() && steps.IsArray() {
@@ -368,6 +370,33 @@ func appendInteractionsInputToAntigravity(items *[][]byte, input gjson.Result) e
 	*items = ctx.items
 	ctx.run.End()
 	return ctx.run.Err()
+}
+
+// appendInteractionsContentBlockItem accepts the shorthand where input is a bare
+// list of content blocks instead of steps. Those items have no step envelope and
+// would otherwise be dropped, losing images and files sent that way.
+func appendInteractionsContentBlockItem(ctx *antigravityInteractionsInputContext, item gjson.Result) bool {
+	switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
+	case "text", "image", "audio", "video", "document":
+	default:
+		return false
+	}
+	if item.Get("content").Exists() || item.Get("steps").Exists() || item.Get("parts").Exists() {
+		return false
+	}
+	// Steps carrying an explicit role keep the step dispatch so that system or
+	// developer content still closes the open user turn instead of masking a
+	// dropped attachment.
+	if item.Get("role").Exists() {
+		return false
+	}
+	if ctx.inModelTurn {
+		flushPendingAntigravitySignature(ctx)
+		ctx.inModelTurn = false
+	}
+	appendInteractionsContentPartToAntigravity(&ctx.items, "user", item, ctx.userRun("user"))
+	ctx.lastStepType = "user_input"
+	return true
 }
 
 func appendInteractionsStepToAntigravity(ctx *antigravityInteractionsInputContext, step gjson.Result, defaultRole string) {

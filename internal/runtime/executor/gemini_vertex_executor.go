@@ -909,7 +909,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			return
 		}
 		if (responseFormat == sdktranslator.FormatClaude || responseFormat == sdktranslator.FormatOpenAI) && !sawFinishReason {
-			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason", streamTruncated: true}
 			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
 			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
 				reporter.PublishFailure(ctx, truncErr)
@@ -1130,7 +1130,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			return
 		}
 		if (responseFormat == sdktranslator.FormatClaude || responseFormat == sdktranslator.FormatOpenAI) && !sawFinishReason {
-			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason"}
+			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason", streamTruncated: true}
 			helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
 			if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
 				reporter.PublishFailure(ctx, truncErr)

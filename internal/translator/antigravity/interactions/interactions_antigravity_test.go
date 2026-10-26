@@ -812,3 +812,70 @@ func TestConvertInteractionsRequestToAntigravity_ExplicitSignatureClearsPending(
 		t.Fatalf("expected f2 thoughtSignature to be empty, got %q", sig)
 	}
 }
+
+func TestConvertInteractionsRequestToAntigravityAcceptsBareContentBlockList(t *testing.T) {
+	bareInput := []byte(`{"model":"antigravity-test","input":[{"type":"image","mime_type":"image/png","data":"aGVsbG8="},{"type":"text","text":"describe"}]}`)
+	stepInput := []byte(`{"model":"antigravity-test","input":[{"type":"user_input","content":[{"type":"image","mime_type":"image/png","data":"aGVsbG8="},{"type":"text","text":"describe"}]}]}`)
+	out, errConvert := ConvertInteractionsRequestToAntigravity("antigravity-test", bareInput, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+	}
+	stepOut, errStep := ConvertInteractionsRequestToAntigravity("antigravity-test", stepInput, false)
+	if errStep != nil {
+		t.Fatalf("ConvertInteractionsRequestToAntigravity step form error: %v", errStep)
+	}
+	if got, want := gjson.GetBytes(out, "request.contents").Raw, gjson.GetBytes(stepOut, "request.contents").Raw; got != want {
+		t.Fatalf("bare content block contents = %s, want step form %s", got, want)
+	}
+
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) == 0 {
+		t.Fatalf("no contents in output: %s", string(out))
+	}
+	var inlineData, mimeType, text string
+	for _, content := range contents {
+		if role := content.Get("role").String(); role != "user" {
+			t.Fatalf("content role = %q, want user. Output: %s", role, string(out))
+		}
+		content.Get("parts").ForEach(func(_, part gjson.Result) bool {
+			if data := part.Get("inlineData.data").String(); data != "" {
+				inlineData = data
+				mimeType = part.Get("inlineData.mimeType").String()
+			}
+			if value := part.Get("text").String(); value != "" {
+				text = value
+			}
+			return true
+		})
+	}
+	if inlineData != "aGVsbG8=" {
+		t.Fatalf("image content block was dropped. Output: %s", string(out))
+	}
+	if mimeType != "image/png" {
+		t.Fatalf("image mimeType = %q, want image/png. Output: %s", mimeType, string(out))
+	}
+	if text != "describe" {
+		t.Fatalf("text content block was dropped. Output: %s", string(out))
+	}
+}
+
+func TestConvertInteractionsRequestToAntigravityBareInstructionTextKeepsEmptiedTurnRefusal(t *testing.T) {
+	for _, role := range []string{"system", "developer"} {
+		t.Run(role, func(t *testing.T) {
+			for _, order := range []string{"before", "after"} {
+				t.Run(order, func(t *testing.T) {
+					instruction := `{"type":"text","role":"` + role + `","text":"note"}`
+					unsupported := `{"type":"user_input","content":[{"type":"document","uri":"gs://b/a.pdf"}]}`
+					input := unsupported + "," + instruction
+					if order == "before" {
+						input = instruction + "," + unsupported
+					}
+					_, errConvert := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(`{"model":"antigravity-test","input":[`+input+`]}`), false)
+					if errConvert == nil {
+						t.Fatalf("expected unsupported document refusal to be preserved for role %s (%s), got nil", role, order)
+					}
+				})
+			}
+		})
+	}
+}
