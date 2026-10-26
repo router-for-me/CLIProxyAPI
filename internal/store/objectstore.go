@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -49,7 +48,7 @@ type ObjectTokenStore struct {
 	spoolRoot   string
 	configPath  string
 	authDir     string
-	mu          sync.Mutex
+	mu          misc.ContextMutex
 	putObjectFn func(ctx context.Context, key string, data []byte, contentType string) error
 }
 
@@ -184,7 +183,9 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		}
 	}
 
-	s.mu.Lock()
+	if errLock := s.mu.LockContext(ctx); errLock != nil {
+		return "", errLock
+	}
 	defer s.mu.Unlock()
 
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

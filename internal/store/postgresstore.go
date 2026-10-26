@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -46,7 +45,7 @@ type PostgresStore struct {
 	configPath    string
 	authDir       string
 	cooldownStore *postgresCooldownStateStore
-	mu            sync.Mutex
+	mu            misc.ContextMutex
 	persistAuthFn func(ctx context.Context, relID string, data []byte) error
 }
 
@@ -235,7 +234,9 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		}
 	}
 
-	s.mu.Lock()
+	if errLock := s.mu.LockContext(ctx); errLock != nil {
+		return "", errLock
+	}
 	defer s.mu.Unlock()
 
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

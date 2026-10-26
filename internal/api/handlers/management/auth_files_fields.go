@@ -936,8 +936,13 @@ func (h *Handler) deleteTokenRecord(ctx context.Context, path string) error {
 }
 
 func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
+	store, _ := h.tokenStoreWithBaseDirContext(context.Background())
+	return store
+}
+
+func (h *Handler) tokenStoreWithBaseDirContext(ctx context.Context) (coreauth.Store, error) {
 	if h == nil {
-		return nil
+		return nil, nil
 	}
 	store := h.tokenStore
 	if store == nil {
@@ -945,11 +950,17 @@ func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 		h.tokenStore = store
 	}
 	if cfg := h.configSnapshot(); cfg != nil {
-		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
+		if dirSetter, ok := store.(interface {
+			SetBaseDirContext(context.Context, string) error
+		}); ok {
+			if err := dirSetter.SetBaseDirContext(ctx, cfg.AuthDir); err != nil {
+				return nil, fmt.Errorf("set token store directory: %w", err)
+			}
+		} else if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
 			dirSetter.SetBaseDir(cfg.AuthDir)
 		}
 	}
-	return store
+	return store, nil
 }
 
 func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
@@ -994,7 +1005,10 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 		return "", fmt.Errorf("token record is nil")
 	}
 	h.mergeExistingAuthFileMetadata(record)
-	store := h.tokenStoreWithBaseDir()
+	store, errStore := h.tokenStoreWithBaseDirContext(ctx)
+	if errStore != nil {
+		return "", errStore
+	}
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}

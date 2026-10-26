@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -35,7 +36,7 @@ const (
 
 // GitTokenStore persists token records and auth metadata using git as the backing storage.
 type GitTokenStore struct {
-	mu        sync.Mutex
+	mu        misc.ContextMutex
 	dirLock   sync.RWMutex
 	baseDir   string
 	repoDir   string
@@ -68,7 +69,14 @@ func NewGitTokenStore(remote, username, password, branch string) *GitTokenStore 
 
 // SetBaseDir updates the default directory used for auth JSON persistence when no explicit path is provided.
 func (s *GitTokenStore) SetBaseDir(dir string) {
-	s.mu.Lock()
+	_ = s.SetBaseDirContext(context.Background(), dir)
+}
+
+// SetBaseDirContext lets canceled credential saves stop waiting for another repository operation.
+func (s *GitTokenStore) SetBaseDirContext(ctx context.Context, dir string) error {
+	if errLock := s.mu.LockContext(ctx); errLock != nil {
+		return errLock
+	}
 	defer s.mu.Unlock()
 
 	clean := strings.TrimSpace(dir)
@@ -78,7 +86,7 @@ func (s *GitTokenStore) SetBaseDir(dir string) {
 		s.repoDir = ""
 		s.configDir = ""
 		s.dirLock.Unlock()
-		return
+		return nil
 	}
 	if abs, err := filepath.Abs(clean); err == nil {
 		clean = abs
@@ -93,6 +101,7 @@ func (s *GitTokenStore) SetBaseDir(dir string) {
 	s.repoDir = repoDir
 	s.configDir = configDir
 	s.dirLock.Unlock()
+	return nil
 }
 
 // AuthDir returns the directory used for auth persistence.
@@ -431,7 +440,9 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("auth filestore: %w", errWeight)
 	}
 
-	s.mu.Lock()
+	if errLock := s.mu.LockContext(ctx); errLock != nil {
+		return "", errLock
+	}
 	defer s.mu.Unlock()
 
 	path, err := s.resolveAuthPath(auth)
