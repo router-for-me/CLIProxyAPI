@@ -14,6 +14,7 @@ package gemini
 import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -119,19 +120,19 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 	// Summary visibility remains independent and is restored only when explicitly set.
 
 	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingBudget")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.thinking_budget")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.thinking_level")
+	result, _ := util.DeleteJSONBytesIfExists(body, "generationConfig.thinkingConfig.thinkingBudget")
+	result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig.thinking_budget")
+	result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig.thinking_level")
 	// Normalize includeThoughts field name and retain only documented booleans.
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.includeThoughts")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.include_thoughts")
+	result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig.includeThoughts")
+	result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
 		if config.Budget == 0 && config.Level == "" {
 			// With the amount fully disabled, visibility is irrelevant. Restoring
 			// includeThoughts alone would recreate thinkingConfig and let a
 			// default-on model think again.
-			result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig")
+			result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig")
 			return result, nil
 		}
 		if config.Level != "" {
@@ -152,12 +153,12 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 
 func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
 	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingLevel")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.thinking_level")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.thinking_budget")
+	result, _ := util.DeleteJSONBytesIfExists(body, "generationConfig.thinkingConfig.thinkingLevel")
+	result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig.thinking_level")
+	result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig.thinking_budget")
 	// Normalize includeThoughts field name and retain only documented booleans.
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.includeThoughts")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.include_thoughts")
+	result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig.includeThoughts")
+	result, _ = util.DeleteJSONBytesIfExists(result, "generationConfig.thinkingConfig.include_thoughts")
 
 	budget := config.Budget
 	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingBudget", budget)
