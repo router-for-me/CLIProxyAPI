@@ -329,6 +329,16 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 	return err
 }
 
+// Preserve both scheduling metadata and response headers without changing the
+// model-level versus credential-level cooling decision made by the body parser.
+func newCodexStatusErrWithHeaders(statusCode int, body []byte, headers http.Header, modelLevelCooling bool) statusErrWithHeaders {
+	err := newCodexStatusErrWithCooling(statusCode, body, modelLevelCooling)
+	if err.retryAfter == nil {
+		err.retryAfter = helps.ParseRetryAfterHeader(headers.Get("Retry-After"), time.Now())
+	}
+	return statusErrWithHeaders{statusErr: err, headers: headers.Clone()}
+}
+
 func classifyCodexStatusError(statusCode int, body []byte) []byte {
 	code, errType, ok := codexStatusErrorClassification(statusCode, body)
 	if !ok {
@@ -436,7 +446,7 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 				return &retryAfter
 			}
 		}
-		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
+		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 && resetsInSeconds <= int64((time.Duration(1<<63-1))/time.Second) {
 			retryAfter := time.Duration(resetsInSeconds) * time.Second
 			return &retryAfter
 		}
