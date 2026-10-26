@@ -78,7 +78,10 @@ func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 }
 
 func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string, preserveEmptyThinkingBlocks ...bool) []byte {
-	sanitized := body
+	// The internal commentary marker must never reach any upstream, so its
+	// restore runs unconditionally, independent of the provider signature
+	// sanitization gate below (which non-Claude model names skip entirely).
+	sanitized, _ := sigcompat.RestoreCodexCommentaryMarkers(body)
 	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	if shouldSanitizeClaudeMessagesForUpstream(baseModel) || preserveEmpty {
 		var report sigcompat.SignatureSanitizeReport

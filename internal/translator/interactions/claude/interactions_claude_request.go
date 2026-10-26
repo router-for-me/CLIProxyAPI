@@ -3,6 +3,7 @@ package claude
 import (
 	"strings"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -20,7 +21,10 @@ func ConvertClaudeRequestToInteractionsWithCompat(modelName string, inputRawJSON
 }
 
 func convertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) ([]byte, error) {
-	root := gjson.ParseBytes(inputRawJSON)
+	// The internal commentary marker must be restored as assistant text before
+	// any thinking handling, so it is never dropped or mapped to thought.
+	restoredRawJSON, _ := sigcompat.RestoreCodexCommentaryMarkers(inputRawJSON)
+	root := gjson.ParseBytes(restoredRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
 	if streamValue, ok := claudeRequestStreamValue(root, stream); ok {

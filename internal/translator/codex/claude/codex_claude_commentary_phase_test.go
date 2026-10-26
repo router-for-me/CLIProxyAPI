@@ -11,7 +11,8 @@ import (
 // GPT-5.x models answer with two message output items: a "commentary" preamble
 // and the "final_answer". Only the final answer is a Claude text block; the
 // preamble travels as thinking so a text consumer (or a TTS client) gets the
-// answer once.
+// answer once. The commentary thinking block carries the internal commentary
+// marker as its signature so the request translator can restore it on replay.
 
 type codexClaudeBlocks struct {
 	text, thinking []string
@@ -85,8 +86,8 @@ func TestConvertCodexResponseToClaude_StreamCommentaryPhaseIsThinking(t *testing
 	if len(got.text) != 1 || got.text[0] != "The merge was refused." {
 		t.Fatalf("final_answer should be the only text block, got %q", got.text)
 	}
-	if len(got.signatures) != 0 {
-		t.Fatalf("a commentary block carries no signature, got %v", got.signatures)
+	if len(got.signatures) != 1 || got.signatures[0] != codexCommentarySignatureMarker {
+		t.Fatalf("a commentary block carries only the internal marker signature, got %v", got.signatures)
 	}
 }
 
@@ -136,7 +137,8 @@ func TestConvertCodexResponseToClaude_StreamSecondMessageDoneFallbackAfterStream
 
 func TestConvertCodexResponseToClaude_StreamCommentaryDoesNotTakeReasoningSignature(t *testing.T) {
 	// reasoning item (with encrypted_content) -> commentary message -> final_answer:
-	// the signature belongs to the reasoning block, never to the commentary block.
+	// the reasoning signature belongs to the reasoning block; the commentary block
+	// carries only the internal commentary marker.
 	chunks := [][]byte{
 		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
 		[]byte(`data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"pre"}}`),
@@ -156,8 +158,8 @@ func TestConvertCodexResponseToClaude_StreamCommentaryDoesNotTakeReasoningSignat
 	if len(got.thinking) != 2 || got.thinking[0] != "Let me think" || got.thinking[1] != "Looking." {
 		t.Fatalf("expected reasoning + commentary thinking blocks, got %q", got.thinking)
 	}
-	if len(got.signatures) != 1 || got.signatures[0] != "enc_sig" {
-		t.Fatalf("exactly one signature (the reasoning item's), got %v", got.signatures)
+	if len(got.signatures) != 2 || got.signatures[0] != "enc_sig" || got.signatures[1] != codexCommentarySignatureMarker {
+		t.Fatalf("expected the reasoning signature plus the commentary marker, got %v", got.signatures)
 	}
 	if len(got.text) != 1 || got.text[0] != "All green." {
 		t.Fatalf("final_answer should be the only text block, got %q", got.text)
@@ -178,8 +180,8 @@ func TestConvertCodexResponseToClaude_StreamCommentaryDoesNotTakeReasoningSignat
 	if len(parkedGot.thinking) != 2 || parkedGot.thinking[0] != "Checking." || parkedGot.thinking[1] != "Thought." {
 		t.Fatalf("expected commentary + reasoning thinking blocks, got %q", parkedGot.thinking)
 	}
-	if len(parkedGot.signatures) != 1 || parkedGot.signatures[0] != "parked_sig" {
-		t.Fatalf("expected parked_sig to remain for the reasoning block, got %v", parkedGot.signatures)
+	if len(parkedGot.signatures) != 2 || parkedGot.signatures[0] != codexCommentarySignatureMarker || parkedGot.signatures[1] != "parked_sig" {
+		t.Fatalf("expected the commentary marker plus parked_sig for the reasoning block, got %v", parkedGot.signatures)
 	}
 }
 
@@ -203,8 +205,8 @@ func TestConvertCodexResponseToClaude_StreamUnclosedReasoningClosesBeforeComment
 	if len(got.thinking) != 2 || got.thinking[0] != "Reasoning step" || got.thinking[1] != "Commentary step" {
 		t.Fatalf("expected separate reasoning and commentary thinking blocks, got %q", got.thinking)
 	}
-	if len(got.signatures) != 1 || got.signatures[0] != "enc_fallback" {
-		t.Fatalf("expected fallback signature on reasoning block only, got %v", got.signatures)
+	if len(got.signatures) != 2 || got.signatures[0] != "enc_fallback" || got.signatures[1] != codexCommentarySignatureMarker {
+		t.Fatalf("expected fallback signature on reasoning block plus the commentary marker, got %v", got.signatures)
 	}
 }
 
@@ -236,8 +238,8 @@ func TestConvertCodexResponseToClaudeNonStream_CommentaryPhaseIsThinking(t *test
 	if content[0].Get("type").String() != "thinking" || content[0].Get("thinking").String() != "Checking the gate first." {
 		t.Fatalf("commentary should be a thinking block, got %s", content[0].Raw)
 	}
-	if content[0].Get("signature").Exists() {
-		t.Fatalf("commentary thinking block should not have signature, got %s", content[0].Raw)
+	if got := content[0].Get("signature").String(); got != codexCommentarySignatureMarker {
+		t.Fatalf("commentary thinking block should carry the internal marker signature, got %s", content[0].Raw)
 	}
 	if content[1].Get("type").String() != "text" || content[1].Get("text").String() != "The merge was refused." {
 		t.Fatalf("final_answer should be a text block, got %s", content[1].Raw)

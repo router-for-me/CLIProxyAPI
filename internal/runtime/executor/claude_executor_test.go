@@ -1888,6 +1888,26 @@ func TestShouldSanitizeClaudeMessagesForUpstream_OnlyClaudeFamily(t *testing.T) 
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstream_RestoresCommentaryMarkerForNonClaudeModel(t *testing.T) {
+	body := []byte(`{"model":"kimi-k2.5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"COMMENTARY_SENTINEL","signature":"cpa:commentary:v1"},{"type":"thinking","thinking":"reason","signature":"skip_thought_signature_validator"},{"type":"text","text":"FINAL_SENTINEL"}]}]}`)
+
+	out := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "kimi-k2.5")
+	content := gjson.GetBytes(out, "messages.0.content")
+	if len(content.Array()) != 3 {
+		t.Fatalf("expected 3 content blocks after marker restore: %s", out)
+	}
+	first := content.Get("0")
+	if first.Get("type").String() != "text" || first.Get("text").String() != "COMMENTARY_SENTINEL" || first.Get("signature").Exists() {
+		t.Fatalf("commentary marker should become a plain text block for non-Claude models: %s", out)
+	}
+	if got := content.Get("1.signature").String(); got != "skip_thought_signature_validator" {
+		t.Fatalf("non-marker opaque signature must pass through untouched for non-Claude models, got %q: %s", got, out)
+	}
+	if got := content.Get("2.text").String(); got != "FINAL_SENTINEL" {
+		t.Fatalf("final text = %q, want FINAL_SENTINEL: %s", got, out)
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstream_BypassesUnknownModelSignatureMatrix(t *testing.T) {
 	rawSignature := "skip_thought_signature_validator"
 	body := []byte(`{

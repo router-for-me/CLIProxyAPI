@@ -507,3 +507,115 @@ func TestConvertClaudeResponseToOpenAI_StreamEmitsTrailingUsageChunkWithCacheDet
 		t.Errorf("expected cached_creation_tokens 20, got %d", gotCachedCreationTokens)
 	}
 }
+
+func assertReasoningTokens(t *testing.T, payload []byte, want int64) {
+	t.Helper()
+
+	got := gjson.GetBytes(payload, "usage.completion_tokens_details.reasoning_tokens")
+	if !got.Exists() {
+		t.Fatalf("expected reasoning_tokens to exist, payload=%s", string(payload))
+	}
+	if got.Int() != want {
+		t.Fatalf("expected reasoning_tokens %d, got %d", want, got.Int())
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_StreamUsageIncludesReasoningTokens(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertClaudeResponseToOpenAI(
+		ctx,
+		"claude-sonnet-5",
+		nil,
+		nil,
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":38,"output_tokens_details":{"thinking_tokens":23}}}`),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+	if gotCompletionTokens := gjson.GetBytes(out[0], "usage.completion_tokens").Int(); gotCompletionTokens != 38 {
+		t.Fatalf("expected completion_tokens %d, got %d", 38, gotCompletionTokens)
+	}
+	assertReasoningTokens(t, out[0], 23)
+}
+
+func TestConvertClaudeResponseToOpenAI_StreamTrailingUsageIncludesReasoningTokens(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	events := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-sonnet-5","usage":{"input_tokens":10,"output_tokens":1}}}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":38,"output_tokens_details":{"thinking_tokens":23}}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var trailing [][]byte
+	for _, ev := range events {
+		for _, chunk := range ConvertClaudeResponseToOpenAI(ctx, "claude-sonnet-5", nil, nil, ev, &param) {
+			choices := gjson.GetBytes(chunk, "choices")
+			if choices.Exists() && len(choices.Array()) == 0 && gjson.GetBytes(chunk, "usage").Exists() {
+				trailing = append(trailing, chunk)
+			}
+		}
+	}
+	if len(trailing) != 1 {
+		t.Fatalf("expected 1 trailing usage chunk, got %d", len(trailing))
+	}
+	assertReasoningTokens(t, trailing[0], 23)
+}
+
+func TestConvertClaudeResponseToOpenAINonStream_UsageIncludesReasoningTokens(t *testing.T) {
+	rawJSON := []byte(`{"id":"msg_123","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":52,"output_tokens_details":{"thinking_tokens":32}}}`)
+
+	out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "", nil, nil, rawJSON, nil)
+
+	if gotCompletionTokens := gjson.GetBytes(out, "usage.completion_tokens").Int(); gotCompletionTokens != 52 {
+		t.Fatalf("expected completion_tokens %d, got %d", 52, gotCompletionTokens)
+	}
+	assertReasoningTokens(t, out, 32)
+}
+
+func TestConvertClaudeResponseToOpenAI_OmitsReasoningTokensWhenNotReported(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertClaudeResponseToOpenAI(
+		ctx,
+		"claude-sonnet-5",
+		nil,
+		nil,
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":38}}`),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "usage.completion_tokens_details.reasoning_tokens"); got.Exists() {
+		t.Fatalf("expected reasoning_tokens to be omitted, got %s; payload=%s", got.Raw, string(out[0]))
+	}
+
+	nonStream := ConvertClaudeResponseToOpenAINonStream(ctx, "", nil, nil, []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-sonnet-5\"}}\n"+"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":38}}\n"), nil)
+	if got := gjson.GetBytes(nonStream, "usage.completion_tokens_details.reasoning_tokens"); got.Exists() {
+		t.Fatalf("expected reasoning_tokens to be omitted, got %s; payload=%s", got.Raw, string(nonStream))
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_ReportsZeroReasoningTokensWhenThinkingIsZero(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertClaudeResponseToOpenAI(
+		ctx,
+		"claude-sonnet-5",
+		nil,
+		nil,
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":38,"output_tokens_details":{"thinking_tokens":0}}}`),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+	assertReasoningTokens(t, out[0], 0)
+}

@@ -32,7 +32,9 @@ func ConvertClaudeRequestToOpenAIWithCompat(modelName string, inputRawJSON []byt
 }
 
 func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool, preserveThinkingBlocks bool) ([]byte, error) {
-	rawJSON := inputRawJSON
+	// The internal commentary marker must be restored as assistant text before
+	// any thinking handling, so it is never dropped or mapped to reasoning.
+	rawJSON, _ := sigcompat.RestoreCodexCommentaryMarkers(inputRawJSON)
 	var drops translatorcommon.UserTurnDrops
 	// Base OpenAI Chat Completions API template
 	out := []byte(`{"model":"","messages":[]}`)
