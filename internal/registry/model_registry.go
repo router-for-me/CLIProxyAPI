@@ -1758,6 +1758,12 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
+		if len(model.SupportedInputModalities) > 0 {
+			result["input_modalities"] = append([]string(nil), model.SupportedInputModalities...)
+		}
+		if len(model.SupportedOutputModalities) > 0 {
+			result["output_modalities"] = append([]string(nil), model.SupportedOutputModalities...)
+		}
 		return result
 
 	case "claude":
