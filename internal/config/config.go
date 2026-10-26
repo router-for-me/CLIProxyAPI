@@ -4,8 +4,17 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+// ServerResponseCompression mirrors SDKConfig.ResponseCompression on the outer
+// Config so JSON and YAML round trips preserve server.response-compression.
+// The canonical storage remains SDKConfig.ResponseCompression; read the
+// effective value via EffectiveResponseCompression.
+type ServerResponseCompression = ResponseCompressionConfig
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
+	// ServerResponseCompression is the JSON-visible mirror of the downstream
+	// response compression settings (YAML: server.response-compression).
+	ServerResponseCompression ResponseCompressionConfig `yaml:"-" json:"response-compression"`
 	// Models selects optional catalog sources independently for each catalog.
 	Models ModelCatalogs `yaml:"models" json:"models"`
 

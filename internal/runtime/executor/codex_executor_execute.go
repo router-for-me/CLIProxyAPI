@@ -90,14 +90,18 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, "codex executor", body, isCompat, targetModel, baseURL)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, opts.Headers)
+	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, auth, opts.Headers)
 	if err != nil {
 		return resp, err
 	}
 	reporter.SetTranslatedReasoningEffort(upstreamBody, to.String())
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
-	applyCodexRoutingHint(ctx, httpReq.Header, auth, baseModel, upstreamBody, opts.Headers)
-	applyModelHeaderOverrides(httpReq.Header, baseModel)
+	prepareHeaders := func(request *http.Request) {
+		applyCodexHeaders(request, auth, apiKey, true, e.cfg, opts.Headers)
+		applyCodexRoutingHint(ctx, request.Header, auth, baseModel, upstreamBody, opts.Headers)
+		applyModelHeaderOverrides(request.Header, baseModel)
+		alignCodexContentEncoding(request)
+	}
+	prepareHeaders(httpReq)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -117,7 +121,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	})
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := doCodexRequest(httpClient, httpReq, upstreamBody, prepareHeaders, nil)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -274,14 +278,18 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, isCompat)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, opts.Headers)
+	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, auth, opts.Headers)
 	if err != nil {
 		return resp, err
 	}
 	reporter.SetTranslatedReasoningEffort(upstreamBody, to.String())
-	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg, opts.Headers)
-	applyCodexRoutingHint(ctx, httpReq.Header, auth, baseModel, upstreamBody, opts.Headers)
-	applyModelHeaderOverrides(httpReq.Header, baseModel)
+	prepareHeaders := func(request *http.Request) {
+		applyCodexHeaders(request, auth, apiKey, false, e.cfg, opts.Headers)
+		applyCodexRoutingHint(ctx, request.Header, auth, baseModel, upstreamBody, opts.Headers)
+		applyModelHeaderOverrides(request.Header, baseModel)
+		alignCodexContentEncoding(request)
+	}
+	prepareHeaders(httpReq)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -301,7 +309,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	})
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := doCodexRequest(httpClient, httpReq, upstreamBody, prepareHeaders, nil)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err

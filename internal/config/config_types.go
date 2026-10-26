@@ -226,8 +226,35 @@ type AntigravityConnectionPoolConfig struct {
 	MaxIdleConnsPerHost *int `yaml:"max-idle-conns-per-host,omitempty" json:"max-idle-conns-per-host,omitempty"`
 }
 
+// ResponseCompressionConfig controls downstream HTTP response compression.
+type ResponseCompressionConfig struct {
+	// Enabled defaults to true when unset.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// MinBytes defaults to 1024 when zero or negative.
+	MinBytes int `yaml:"min-bytes" json:"min-bytes"`
+}
+
+// IsEnabled reports whether negotiated response compression is enabled.
+func (c ResponseCompressionConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// EffectiveMinBytes returns the minimum non-streaming response size to compress.
+func (c ResponseCompressionConfig) EffectiveMinBytes() int {
+	if c.MinBytes <= 0 {
+		return 1024
+	}
+	return c.MinBytes
+}
+
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
+	// WebsocketCompression controls upstream and downstream permessage-deflate; unset means enabled.
+	WebsocketCompression *bool `yaml:"websocket-compression,omitempty" json:"websocket-compression,omitempty"`
+	// UpstreamRequestCompression enables zstd request bodies for the ChatGPT Codex backend.
+	UpstreamRequestCompression bool `yaml:"upstream-request-compression" json:"upstream-request-compression"`
+	// UpstreamRequestCompressionMinBytes defaults to 1024 when zero or negative.
+	UpstreamRequestCompressionMinBytes int `yaml:"upstream-request-compression-min-bytes,omitempty" json:"upstream-request-compression-min-bytes,omitempty"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
@@ -269,6 +296,19 @@ type CodexConfig struct {
 	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
 	// Defaults to "CLIProxyAPI".
 	SignInWithChatGPTIdentifier string `yaml:"signin-with-chatgpt-identifier,omitempty" json:"signin-with-chatgpt-identifier,omitempty"`
+}
+
+// WebsocketCompressionEnabled reports whether WebSocket compression is enabled.
+func (c *CodexConfig) WebsocketCompressionEnabled() bool {
+	return c == nil || c.WebsocketCompression == nil || *c.WebsocketCompression
+}
+
+// RequestCompressionMinBytes returns the minimum request size eligible for compression.
+func (c *CodexConfig) RequestCompressionMinBytes() int {
+	if c == nil || c.UpstreamRequestCompressionMinBytes <= 0 {
+		return 1024
+	}
+	return c.UpstreamRequestCompressionMinBytes
 }
 
 // DefaultSignInWithChatGPTIdentifier is the default identifier (agent_name_hint and User-Agent prefix)
