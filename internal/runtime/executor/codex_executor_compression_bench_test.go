@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 // codexBenchPayload builds a Responses request of about size bytes whose turns mix common
@@ -37,6 +39,9 @@ func codexBenchPayload(size int) []byte {
 func BenchmarkCodexRequestCompression(b *testing.B) {
 	for _, size := range []int{16 << 10, 256 << 10, 2 << 20} {
 		payload := codexBenchPayload(size)
+		if !json.Valid(payload) || !gjson.GetBytes(payload, "input").IsArray() {
+			b.Fatal("benchmark payload must be a valid Responses request with an input array")
+		}
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
 			executor := NewCodexExecutor(codexCompressionConfig())
 			auth := codexCompressionAuth()
