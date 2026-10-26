@@ -19,6 +19,9 @@ type StreamState struct {
 	Completed       bool
 	Done            bool
 	ActiveStepOpen  bool
+	PendingUsage    gjson.Result
+	HasPendingUsage bool
+	UsageAfterSeen  bool
 	ID              string
 	StepID          string
 	ActiveStepType  string
@@ -360,7 +363,11 @@ func ConvertGeminiResponseToInteractionsStream(ctx context.Context, modelName st
 		var out [][]byte
 		if !st.Completed {
 			out = appendInteractionsStepStop(out, st)
-			out = appendInteractionsCompleted(out, st, modelName, gjson.Result{})
+			completedRoot := gjson.Result{}
+			if st.HasPendingUsage {
+				completedRoot = st.PendingUsage
+			}
+			out = appendInteractionsCompleted(out, st, modelName, completedRoot)
 		}
 		return appendInteractionsDone(out, st)
 	}
@@ -375,22 +382,56 @@ func ConvertGeminiResponseToInteractionsStream(ctx context.Context, modelName st
 		out = appendGeminiPartToInteractionsStream(out, st, part)
 		return true
 	})
-	hasFinish := root.Get("candidates.0.finishReason").Exists()
-	hasUsage := hasInteractionsGeminiStreamUsage(root)
+	finishReason := root.Get("candidates.0.finishReason")
+	hasFinish := finishReason.Exists() && strings.TrimSpace(finishReason.String()) != ""
+	root = restoreInteractionsGeminiUsageMetadata(root)
+	frameHasUsage := hasInteractionsGeminiStreamUsage(root)
+	if frameHasUsage {
+		st.PendingUsage = root
+		st.HasPendingUsage = true
+		if st.Finished {
+			st.UsageAfterSeen = true
+		}
+	}
 	if hasFinish && !st.Finished {
 		out = appendInteractionsStepStop(out, st)
 		st.Finished = true
+		if frameHasUsage {
+			st.UsageAfterSeen = true
+		}
 	}
-	if hasUsage && st.Finished && !st.Completed {
-		out = appendInteractionsCompleted(out, st, modelName, root)
+	// Complete only on usage observed at or after the finish frame. Usage
+	// cached from earlier content frames is a fallback for the explicit
+	// [DONE] terminator, not a completion trigger: a later frame may still
+	// carry the final usage.
+	if st.UsageAfterSeen && st.Finished && !st.Completed {
+		out = appendInteractionsCompleted(out, st, modelName, st.PendingUsage)
+		out = appendInteractionsDone(out, st)
 	}
 	return out
+}
+
+// restoreInteractionsGeminiUsageMetadata renames cpaUsageMetadata back to
+// usageMetadata. Executors rename non-terminal usage before translation, so
+// the filtered spelling must be restored for usage detection and output.
+func restoreInteractionsGeminiUsageMetadata(root gjson.Result) gjson.Result {
+	if !root.Get("usageMetadata").Exists() && !root.Get("usage_metadata").Exists() {
+		if cpaUsage := root.Get("cpaUsageMetadata"); cpaUsage.Exists() {
+			raw, _ := sjson.SetRawBytes([]byte(root.Raw), "usageMetadata", []byte(cpaUsage.Raw))
+			raw, _ = sjson.DeleteBytes(raw, "cpaUsageMetadata")
+			return gjson.ParseBytes(raw)
+		}
+	}
+	return root
 }
 
 func hasInteractionsGeminiStreamUsage(root gjson.Result) bool {
 	usage := root.Get("usageMetadata")
 	if !usage.Exists() {
 		usage = root.Get("usage_metadata")
+	}
+	if !usage.Exists() {
+		usage = root.Get("cpaUsageMetadata")
 	}
 	if !usage.Exists() {
 		return false
@@ -1533,6 +1574,9 @@ func setInteractionsUsageFromGemini(out []byte, path string, root gjson.Result) 
 		usage = root.Get("usage_metadata")
 	}
 	if !usage.Exists() {
+		usage = root.Get("cpaUsageMetadata")
+	}
+	if !usage.Exists() {
 		return out
 	}
 	out, _ = sjson.SetBytes(out, path+".input_tokens", firstInteractionsGeminiUsage(usage, "promptTokenCount", "prompt_token_count").Int())
@@ -1553,6 +1597,9 @@ func setInteractionsStreamUsageFromGemini(out []byte, path string, root gjson.Re
 	usage := root.Get("usageMetadata")
 	if !usage.Exists() {
 		usage = root.Get("usage_metadata")
+	}
+	if !usage.Exists() {
+		usage = root.Get("cpaUsageMetadata")
 	}
 	if !usage.Exists() {
 		return out

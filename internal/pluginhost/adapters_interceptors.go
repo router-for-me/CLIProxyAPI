@@ -92,7 +92,7 @@ func (h *Host) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.Req
 }
 
 func (h *Host) InterceptRequestBeforeAuthExcept(ctx context.Context, req pluginapi.RequestInterceptRequest, skipPluginID string) pluginapi.RequestInterceptResponse {
-	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestBeforeAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	return h.interceptRequest(ctx, req, true, "RequestInterceptor.InterceptRequestBeforeAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 		return interceptor.InterceptRequestBeforeAuth(ctx, req)
 	}, skipPluginID)
 }
@@ -102,12 +102,12 @@ func (h *Host) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.Requ
 }
 
 func (h *Host) InterceptRequestAfterAuthExcept(ctx context.Context, req pluginapi.RequestInterceptRequest, skipPluginID string) pluginapi.RequestInterceptResponse {
-	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestAfterAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	return h.interceptRequest(ctx, req, false, "RequestInterceptor.InterceptRequestAfterAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 		return interceptor.InterceptRequestAfterAuth(ctx, req)
 	}, skipPluginID)
 }
 
-func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, method string, invoke func(pluginapi.RequestInterceptor, context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error), skipPluginID string) pluginapi.RequestInterceptResponse {
+func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, beforeAuth bool, method string, invoke func(pluginapi.RequestInterceptor, context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error), skipPluginID string) pluginapi.RequestInterceptResponse {
 	current := pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
 	}
@@ -122,7 +122,9 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 		}
 		nextReq := req
 		nextReq.Headers = cloneHeader(current.Headers)
-		if len(currentBase) > 0 {
+		if requestInterceptorOmitsBody(record, beforeAuth) {
+			nextReq.Body = nil
+		} else if len(currentBase) > 0 {
 			nextReq.Body = bytes.Clone(currentBase)
 		} else {
 			nextReq.Body = nil
@@ -381,6 +383,17 @@ func (h *Host) StreamChunkPayloadIncludesHistory() bool {
 		}
 	}
 	return false
+}
+
+func requestInterceptorOmitsBody(record capabilityRecord, beforeAuth bool) bool {
+	if record.plugin.SchemaVersion < pluginabi.SchemaVersionRequestInterceptorOmitBody {
+		return false
+	}
+	caps := record.plugin.Capabilities
+	if caps.RequestInterceptor == nil {
+		return false
+	}
+	return requestInterceptorWantsOmitBody(caps, beforeAuth)
 }
 
 func streamChunkOmitsHistory(schemaVersion uint32) bool {
