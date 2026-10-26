@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -278,7 +277,12 @@ func routingOrder(auths []*Auth, hints map[string]QuotaResetHint, now time.Time)
 		if auth == nil || auth.Index == "" {
 			continue
 		}
-		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		// Group exactly like request selection, so provider aliases that
+		// share a scheduling pool (for example kimi.com and kimi) rank together.
+		provider := canonicalSchedulingProvider(executorKeyFromAuth(auth))
+		if provider == "" {
+			continue
+		}
 		pools[provider] = append(pools[provider], auth)
 	}
 	out := make(map[string][]RoutingAccountView, len(pools))

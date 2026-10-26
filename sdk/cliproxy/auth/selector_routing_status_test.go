@@ -126,6 +126,27 @@ func TestRoutingOrderMirrorsSelector(t *testing.T) {
 	}
 }
 
+// Provider aliases that share a scheduling pool must rank together, as they do
+// during request selection.
+func TestRoutingOrderGroupsSchedulingProviderAliases(t *testing.T) {
+	now := time.Date(2026, 10, 26, 15, 0, 0, 0, time.UTC)
+	auths := []*Auth{
+		{ID: "a", Index: "idx-a", Provider: "kimi.com"},
+		{ID: "b", Index: "idx-b", Provider: "kimi"},
+	}
+	hints := map[string]QuotaResetHint{
+		"a": {ObservedAt: now, ResetAt: now.Add(2 * time.Hour)},
+		"b": {ObservedAt: now, ResetAt: now.Add(time.Hour)},
+	}
+	order := routingOrder(auths, hints, now)
+	views := order["kimi"]
+	if len(order) != 1 || len(views) != 2 ||
+		views[0].AuthIndex != "idx-b" || views[0].Rank != 1 || views[0].Reason != RoutingReasonEarliestReset ||
+		views[1].AuthIndex != "idx-a" || views[1].Rank != 2 || views[1].Reason != RoutingReasonLaterReset {
+		t.Fatalf("order = %+v", order)
+	}
+}
+
 // File-backed IDs are path-based. A credential removed and registered again
 // under the same ID is a different account and must not inherit the previous
 // registration's reset, even before the collector sends its next update.
