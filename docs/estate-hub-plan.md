@@ -194,22 +194,21 @@ in on that device; **install** = not installed yet; **check** = installed, hub s
 
 | Harness | m6 | wasnewpc | mbp | omarchy | Route |
 |---|---|---|---|---|---|
-| Claude Code | hub | hub | hub | install | hub (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) |
-| Codex | hub | hub | hub | install | hub (`model_providers.cliproxy`) |
-| OMP | hub | hub | hub | install | hub provider in `~/.omp/agent/models.json` (non-Claude models) |
-| pi | hub | hub | hub | install | hub provider in `~/.pi/agent/models.json` |
-| opencode | hub | hub | check (installed, provider not listed yet) | install | hub provider in `~/.config/opencode/opencode.json` |
-| Muse CLI | install+login | install+login | login? (installed) | install+login | own login; Muse models via hub for the tools above |
-| agy (Antigravity) | install+login | login? (installed) | login? (installed) | install+login | own login |
-| Devin CLI | install+login | install+login | install+login | install+login | own login |
-| Grok CLI | install | install | check | install | check whether it takes a custom endpoint; else own login |
-| Kimi CLI | install | install | install | install | check `~/.kimi-code/config.toml` base_url; else own login |
-| dsh (DeepSeek) | installed, key needed | installed, key needed | installed, key needed | install | API key from BWS, or hub `deepseek-flash` through OMP/pi |
-| commandcode | installed, key needed | installed, key needed | installed, key needed | install | API key from BWS, or hub `commandcode/*` through OMP/pi |
-| cursor-agent / agent | install | install | installed | install | own login (Cursor); no hub path |
+| Claude Code | hub | hub | hub | hub | hub (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) |
+| Codex | hub | hub | hub | hub | hub (`model_providers.cliproxy`) |
+| OMP | hub | hub | hub | hub | hub provider in `~/.omp/agent/models.json` (non-Claude models) |
+| pi | hub | hub | hub | hub | hub provider in `~/.pi/agent/models.json` |
+| opencode | hub | hub | check (installed, provider not listed yet) | hub | hub provider in `~/.config/opencode/opencode.json` |
+| Muse CLI | install+login | install+login | login? (installed) | login? (installed) | own login; Muse models via hub for the tools above |
+| agy (Antigravity) | install+login | login? (installed) | login? (installed) | login (binary copied from auto-vps 26 Oct) | own login |
+| Devin CLI | install+login | install+login | install+login | login (binary copied from auto-vps 26 Oct) | own login |
+| Grok CLI | check (npm @xai-official/grok) | install | check | check (mise npm:@xai-official/grok) | check whether it takes a custom endpoint; else own login |
+| Kimi CLI | install | install | install | login (binary copied from auto-vps 26 Oct) | check `~/.kimi-code/config.toml` base_url; else own login |
+| dsh (DeepSeek) | installed, key needed | installed, key needed | installed, key needed | installed (npm; mise cannot resolve its rc version), key needed | API key from BWS, or hub `deepseek-flash` through OMP/pi |
+| commandcode | installed, key needed | installed, key needed | installed, key needed | installed (mise), key needed | API key from BWS, or hub `commandcode/*` through OMP/pi |
+| cursor-agent / agent | install | install | installed | installed | own login (Cursor); no hub path |
 
-"login?" means installed but whether it is signed in on that device is unverified. Omarchy column is from
-memory: the box was in its Windows boot all evening; verify when it is up.
+"login?" means installed but whether it is signed in on that device is unverified. Omarchy done 26 Oct 22:30: Claude Code, Codex, OMP, pi, opencode on the hub (all answered or list 25 hub models); Herdr there is the Arch package 0.9.1-2 in /usr/bin (update with the package manager, not `herdr update`); auto-vps saved in its machines. The GPU box is one machine: wasnewpc is unreachable while omarchy is booted and vice versa.
 
 ## Cursor
 
@@ -245,3 +244,4 @@ memory: the box was in its Windows boot all evening; verify when it is up.
   None of it is live until m6's binary is rebuilt from `main`. Then open `/hub` on the phone and check
   each API-key provider's poll error.
 - 2026-10-26 22:10: pi, opencode, dsh and commandcode installed by npm where missing on m6, mbp, wasnewpc (packages: @earendil-works/pi-coding-agent, opencode-ai, @deepseek-ai/dsh, command-code); pi and opencode carry the hub provider (25 models) on m6 and wasnewpc; mbp opencode lists 0 hub models, under investigation. Device matrix updated.
+- 2026-10-26 22:30: omarchy column closed for the hub-served tools; agy, kimi, devin Linux binaries copied from auto-vps (same x86_64), commandcode via mise, dsh via npm. Waseem installs by mise on omarchy where it can.
