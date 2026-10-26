@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -105,6 +106,91 @@ func TestProjectMetricLabelIsCapped(t *testing.T) {
 	// One already seen keeps its name.
 	if got := projectMetricLabel("pa" + "a"); got != "paa" {
 		t.Fatalf("a seen project = %q, want paa", got)
+	}
+}
+
+// A name with a generated part (a temporary directory per run: OpenClaw's
+// openclaw-isolated-completion-<uuid>, mktemp's tmp.XXXXXXXXXX, a hash, a timestamp) keeps only what
+// comes before it, so all its runs are one project; nothing but generated is "random". Real names,
+// versioned ones included, are never changed.
+func TestStableProjectDropsGeneratedParts(t *testing.T) {
+	for raw, want := range map[string]string{
+		"openclaw-isolated-completion-078ac676-970e-440e-b37e-b4407c50b51": "openclaw-isolated-completion",
+		"openclaw-isolated-completion-deadbeef-970e-440e-b37e-b4407c50b51": "openclaw-isolated-completion",
+		"openclaw-isolated-completion-10d22449-fdff-4718-b3bb-24bc75877a0": "openclaw-isolated-completion",
+		"3f2a9c1b-4d5e-6f70-8192-a3b4c5d6e7f8":                             "random",
+		"build-20261023153000":                                             "build",
+		"build-20261023T153000Z":                                           "build",
+		"ci_run_8f3a2b1c":                                                  "ci_run",
+		"cache-0123abcdef":                                                 "cache",
+		"tmp.Ab3dE9fGh2":                                                   "tmp",
+		"tmp.AbcdefGhij":                                                   "tmp",
+		"tmp.a1b2c3":                                                       "tmp",
+		"20261023":                                                         "random",
+		// Cut by sanitizeProject at 64 inside the UUID's fourth group: still that UUID.
+		sanitizeProject(strings.Repeat("p", 40) + "-deadbeef-970e-440e-b37e-b4407c50b510"): strings.Repeat("p", 40),
+		// Not cut, so a short last group is not a UUID; nor is a five-digit time a time.
+		"app-deadbeef-cafe-face-beef-a": "app-deadbeef-cafe-face-beef-a",
+		"build-20261023T15300Z":         "build-20261023T15300Z",
+		"build-20261023T1530":           "build",
+		// Real names stay as they are.
+		"colton-games-snake":      "colton-games-snake",
+		"dolphin-labs":            "dolphin-labs",
+		"tsgo-pnp-rebuild":        "tsgo-pnp-rebuild",
+		"t-claude":                "t-claude",
+		"x86-dev":                 "x86-dev",
+		"claude-master-dashboard": "claude-master-dashboard",
+		"go1.26":                  "go1.26",
+		"web3":                    "web3",
+		"aws-2026":                "aws-2026",
+		"deadbeef":                "deadbeef",
+		"facade":                  "facade",
+		"s3-uploader-v2":          "s3-uploader-v2",
+		"CLIProxyAPI":             "CLIProxyAPI",
+		"OpenSSL3":                "OpenSSL3",
+		"OpenJDK8":                "OpenJDK8",
+		"client-OpenSSL3-tools":   "client-OpenSSL3-tools",
+		"tmp":                     "tmp",
+		"tmux-scroll-native":      "tmux-scroll-native",
+		"vintage-npm-registry":    "vintage-npm-registry",
+	} {
+		if got := stableProject(raw); got != want {
+			t.Errorf("stableProject(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// Random names do not use up the cap: 150 runs in their own temporary directories take one slot, and
+// real projects after them still get their names.
+func TestRandomNamesDoNotTakeSlots(t *testing.T) {
+	projectLabels.mu.Lock()
+	saved := projectLabels.seen
+	projectLabels.seen = nil
+	projectLabels.mu.Unlock()
+	t.Cleanup(func() {
+		projectLabels.mu.Lock()
+		projectLabels.seen = saved
+		projectLabels.mu.Unlock()
+	})
+	for i := 0; i < 150; i++ {
+		// Every group varies, digitless ones (deadbeef) included, and the name is cut at 64 as a real one is.
+		first := fmt.Sprintf("%08x", uint32(i)*2654435761)
+		if i%10 == 0 {
+			first = []string{"deadbeef", "cafebabe", "facefeed", "abcdefab", "fedcbaab"}[i/10%5]
+		}
+		name := sanitizeProject(fmt.Sprintf("openclaw-isolated-completion-%s-%04x-4%03x-b%03x-%012x", first, i*31, i, i*7, uint64(i)*104729))
+		if got := projectMetricLabel(name); got != "openclaw-isolated-completion" {
+			t.Fatalf("run %d = %q, want openclaw-isolated-completion", i, got)
+		}
+	}
+	for i := 0; i < maxProjectLabels-1; i++ {
+		name := "project-" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+		if got := projectMetricLabel(name); got != name {
+			t.Fatalf("real project %d after the random runs = %q, want its name", i, got)
+		}
+	}
+	if got := projectMetricLabel("one-too-many"); got != "other" {
+		t.Fatalf("past the cap = %q, want other", got)
 	}
 }
 

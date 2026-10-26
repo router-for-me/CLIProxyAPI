@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -115,11 +116,13 @@ var projectLabels struct {
 }
 
 // projectMetricLabel is the project's value on the metrics: "none" when the tunnel named none, the
-// name while fewer than maxProjectLabels have been seen, else "other".
+// name without its random part (stableProject) while fewer than maxProjectLabels have been seen, else
+// "other".
 func projectMetricLabel(project string) string {
 	if project == "" {
 		return "none"
 	}
+	project = stableProject(project)
 	projectLabels.mu.Lock()
 	defer projectLabels.mu.Unlock()
 	if projectLabels.seen == nil {
@@ -133,4 +136,79 @@ func projectMetricLabel(project string) string {
 	}
 	projectLabels.seen[project] = struct{}{}
 	return project
+}
+
+// stableProject is a project name without its random part, so that a tool running each job in a new
+// temporary directory counts as one project instead of using up maxProjectLabels. The name is cut
+// where the first generated part starts; one with nothing before it is "random". Generated means
+// exactly these forms (anything else is a name, so a real name is never merged into another):
+//   - a UUID starting a segment, whole, or cut short at the end of a name projectMaxLen long (where
+//     sanitizeProject cut it; OpenClaw's openclaw-isolated-completion-<uuid> is cut so);
+//   - a segment of eight or more characters that is hex with at least one digit (a hash, an id);
+//   - a segment of eight or more digits, or a compact ISO time (20261023T153000Z);
+//   - the segment after "tmp" (mktemp's tmp.XXXXXXXXXX).
+func stableProject(project string) string {
+	cut := len(project)
+	if loc := uuidInName.FindStringSubmatchIndex(project); loc != nil {
+		cut = loc[2]
+	} else if len(project) == projectMaxLen {
+		// sanitizeProject cuts a name at projectMaxLen, possibly inside its UUID.
+		if loc := uuidCutAtEnd.FindStringSubmatchIndex(project); loc != nil {
+			cut = loc[2]
+		}
+	}
+	start, prev := 0, ""
+	for i := 0; i <= cut; i++ {
+		if i < cut && !isProjectSeparator(project[i]) {
+			continue
+		}
+		seg := project[start:i]
+		if generatedSegment(seg) || (strings.EqualFold(prev, "tmp") && seg != "") {
+			cut = start
+			break
+		}
+		prev, start = seg, i+1
+	}
+	if kept := strings.TrimRight(project[:cut], "-._"); kept != "" {
+		return kept
+	}
+	if cut == len(project) {
+		return project
+	}
+	return "random"
+}
+
+// uuidInName is a whole UUID starting a segment.
+var uuidInName = regexp.MustCompile(`(?:^|[-._])([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:$|[-._])`)
+
+// uuidCutAtEnd is the start of a UUID that a name ends with, cut short anywhere after its first group:
+// the shape a name cut at projectMaxLen leaves (and only then is it read as one).
+var uuidCutAtEnd = regexp.MustCompile(`(?:^|[-._])([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{1,4}|-[0-9a-fA-F]{4}-[0-9a-fA-F]{1,4}|-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{1,4}|-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{1,12})?)$`)
+
+// compactISOTime is a basic-format ISO 8601 date and time: hours and minutes, or with seconds.
+var compactISOTime = regexp.MustCompile(`^[0-9]{8}T(?:[0-9]{4}|[0-9]{6})Z?$`)
+
+func isProjectSeparator(c byte) bool { return c == '-' || c == '_' || c == '.' }
+
+// generatedSegment reports whether a part of a name between separators is a hash, an id or a time:
+// eight or more characters that are all digits, or hex with a digit, or a compact ISO time.
+func generatedSegment(seg string) bool {
+	if len(seg) < 8 {
+		return false
+	}
+	if compactISOTime.MatchString(seg) {
+		return true
+	}
+	digits := 0
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		switch {
+		case c >= '0' && c <= '9':
+			digits++
+		case c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return digits > 0
 }
