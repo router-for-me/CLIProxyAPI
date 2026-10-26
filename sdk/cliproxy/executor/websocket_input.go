@@ -13,6 +13,8 @@ var ErrNoActiveUpstreamWebsocket = errors.New("no active upstream websocket for 
 type WebsocketInput struct {
 	Payload []byte
 	Err     error
+	// Epoch is the downstream input epoch at read time; a loss advances it.
+	Epoch uint64
 }
 type websocketInputKey struct{}
 
