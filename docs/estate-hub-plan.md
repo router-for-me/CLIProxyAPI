@@ -199,11 +199,11 @@ in on that device; **install** = not installed yet; **check** = installed, hub s
 | OMP | hub | hub | hub | hub | hub provider in `~/.omp/agent/models.json` (non-Claude models) |
 | pi | hub | hub | hub | hub | hub provider in `~/.pi/agent/models.json` |
 | opencode | hub | hub | check (installed, provider not listed yet) | hub | hub provider in `~/.config/opencode/opencode.json` |
-| Muse CLI | install+login | install+login | login? (installed) | login? (installed) | own login; Muse models via hub for the tools above |
-| agy (Antigravity) | install+login | login? (installed) | login? (installed) | login (binary copied from auto-vps 26 Oct) | own login |
-| Devin CLI | install+login | install+login | install+login | login (binary copied from auto-vps 26 Oct) | own login |
+| Muse CLI | login (launcher installed 26 Oct) | install+login | login? (installed) | login? (installed) | own login; Muse models via hub for the tools above |
+| agy (Antigravity) | login (installed 26 Oct) | login? (installed) | login? (installed) | login (binary copied from auto-vps 26 Oct) | own login |
+| Devin CLI | login (installed 26 Oct) | install+login | install+login | login (binary copied from auto-vps 26 Oct) | own login |
 | Grok CLI | check (npm @xai-official/grok) | install | check | check (mise npm:@xai-official/grok) | check whether it takes a custom endpoint; else own login |
-| Kimi CLI | install | install | install | login (binary copied from auto-vps 26 Oct) | check `~/.kimi-code/config.toml` base_url; else own login |
+| Kimi CLI | login (installed 26 Oct, brew-free script) | install | install | login (binary copied from auto-vps 26 Oct) | check `~/.kimi-code/config.toml` base_url; else own login |
 | dsh (DeepSeek) | installed, key needed | installed, key needed | installed, key needed | installed (npm; mise cannot resolve its rc version), key needed | API key from BWS, or hub `deepseek-flash` through OMP/pi |
 | commandcode | installed, key needed | installed, key needed | installed, key needed | installed (mise), key needed | API key from BWS, or hub `commandcode/*` through OMP/pi |
 | cursor-agent / agent | install | install | installed | installed | own login (Cursor); no hub path |
@@ -245,3 +245,4 @@ in on that device; **install** = not installed yet; **check** = installed, hub s
   each API-key provider's poll error.
 - 2026-10-26 22:10: pi, opencode, dsh and commandcode installed by npm where missing on m6, mbp, wasnewpc (packages: @earendil-works/pi-coding-agent, opencode-ai, @deepseek-ai/dsh, command-code); pi and opencode carry the hub provider (25 models) on m6 and wasnewpc; mbp opencode lists 0 hub models, under investigation. Device matrix updated.
 - 2026-10-26 22:30: omarchy column closed for the hub-served tools; agy, kimi, devin Linux binaries copied from auto-vps (same x86_64), commandcode via mise, dsh via npm. Waseem installs by mise on omarchy where it can.
+- 2026-10-26 22:35: m6 has every harness installed (kimi 2.3.3, devin, agy 1.4.7, muse 1.4.13 via the Meta launcher, grok via npm); installers inspected first, kept at /opt/automancer/var/scratch/t3eval/installers/. Logins on m6 for Muse, agy, Devin, Kimi and Grok are Waseem's.
