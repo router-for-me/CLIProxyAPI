@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1021,6 +1022,15 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		reg.UnregisterClient(authAID)
 		reg.UnregisterClient(authBID)
 	})
+	bStarted := make(chan struct{})
+	bBlock := make(chan struct{})
+	releaseB := sync.OnceFunc(func() { close(bBlock) })
+	var workers sync.WaitGroup
+	t.Cleanup(func() {
+		releaseB()
+		// Drain registrations before unregistering their global models, including on failure.
+		workers.Wait()
+	})
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(&syncTestExecutor{})
@@ -1035,6 +1045,11 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		Provider:   "codex",
 		Status:     coreauth.StatusActive,
 		Attributes: map[string]string{"plan_type": "pro", "path": "/path/to/codex-batch-wait-b.json"},
+		// Block B by identity rather than the arrival order of concurrent workers.
+		Runtime: &registrationInterleaveRuntime{onRead: sync.OnceFunc(func() {
+			close(bStarted)
+			<-bBlock
+		})},
 	}
 	for _, auth := range []*coreauth.Auth{authA, authB} {
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
@@ -1044,31 +1059,15 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 
 	service := &Service{cfg: &config.Config{}, coreManager: manager}
 
-	bStarted := make(chan struct{})
-	bBlock := make(chan struct{})
-	var started atomic.Int32
-	modelRegistrationTaskHook = func() {
-		if started.Add(1) == 2 {
-			close(bStarted)
-			<-bBlock
-		}
-	}
-	t.Cleanup(func() {
-		modelRegistrationTaskHook = nil
-		select {
-		case <-bBlock:
-		default:
-			close(bBlock)
-		}
-	})
-
 	updateA := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authAID, Auth: authA}
 	updateA.SetRevision(1)
 	updateB := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authBID, Auth: authB}
 	updateB.SetRevision(1)
 
 	finishedBatch := make(chan struct{})
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		defer close(finishedBatch)
 		service.handleAuthUpdates(context.Background(), []watcher.AuthUpdate{updateA, updateB})
 	}()
@@ -1076,11 +1075,13 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 	select {
 	case <-bStarted:
 	case <-time.After(2 * time.Second):
-		t.Fatal("second auth registration in batch did not start")
+		t.Fatal("auth B registration in batch did not start")
 	}
 
 	doneA := make(chan struct{})
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		service.handleAuthUpdate(context.Background(), updateA)
 		close(doneA)
 	}()
@@ -1090,7 +1091,7 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		t.Fatal("auth A hook wait blocked on unrelated auth B registration")
 	}
 
-	close(bBlock)
+	releaseB()
 	select {
 	case <-finishedBatch:
 	case <-time.After(2 * time.Second):
