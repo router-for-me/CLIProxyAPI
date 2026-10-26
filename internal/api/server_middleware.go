@@ -264,6 +264,11 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 			return
 		}
 
+		if sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeNoCredentials) || sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeInvalidCredential) {
+			c.Header("X-Should-Retry", "false")
+			c.Header("WWW-Authenticate", `Bearer realm="cliproxyapi"`)
+		}
+
 		statusCode := err.HTTPStatusCode()
 		if statusCode >= http.StatusInternalServerError {
 			log.Errorf("authentication middleware error: %v", err)
