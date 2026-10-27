@@ -82,14 +82,14 @@ func TestRemoteStoresDisablePendingPublication(t *testing.T) {
 			} else if !bytes.Equal(remote, mirror) {
 				t.Fatalf("disable did not reach backend: %q, want %q", remote, mirror)
 			}
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
+			if errRemove := os.Remove(path); errRemove != nil {
+				t.Fatal(errRemove)
 			}
-			if saved, err := s.Save(context.Background(), auth); err != nil || saved != "" {
-				t.Fatalf("runtime save recreated a deliberately removed credential: %q, %v", saved, err)
+			if saved, errSave := s.Save(context.Background(), auth); errSave != nil || saved != "" {
+				t.Fatalf("runtime save recreated a deliberately removed credential: %q, %v", saved, errSave)
 			}
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
-				t.Fatalf("genuine deletion fence lost: %v", err)
+			if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+				t.Fatalf("genuine deletion fence lost: %v", errStat)
 			}
 		})
 	}

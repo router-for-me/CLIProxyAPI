@@ -76,8 +76,8 @@ func TestObjectStoreBootstrapReconcilesSymlinkPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			if confirmed {
-				if err := pending.Commit(); err != nil {
-					t.Fatal(err)
+				if errCommit := pending.Commit(); errCommit != nil {
+					t.Fatal(errCommit)
 				}
 			}
 			outside := filepath.Join(t.TempDir(), "outside.json")
@@ -85,29 +85,29 @@ func TestObjectStoreBootstrapReconcilesSymlinkPublication(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := outsidePending.Commit(); err != nil {
-				t.Fatal(err)
+			if errCommit := outsidePending.Commit(); errCommit != nil {
+				t.Fatal(errCommit)
 			}
-			if err := os.Symlink(filepath.Dir(outside), filepath.Join(authDir, "external")); err != nil {
-				t.Fatal(err)
+			if errSymlink := os.Symlink(filepath.Dir(outside), filepath.Join(authDir, "external")); errSymlink != nil {
+				t.Fatal(errSymlink)
 			}
-			if err := s.Bootstrap(context.Background(), ""); err != nil {
-				t.Fatal(err)
+			if errBootstrap := s.Bootstrap(context.Background(), ""); errBootstrap != nil {
+				t.Fatal(errBootstrap)
 			}
 			if !authpublication.HasPending(outside) {
 				t.Fatal("reconciliation followed a nested symlink and removed an unrelated publication")
 			}
-			if mirror, err := os.ReadFile(path); err != nil || !bytes.Equal(mirror, committed) {
-				t.Fatalf("startup did not load the actual backend credential: %q, %v", mirror, err)
+			if mirror, errRead := os.ReadFile(path); errRead != nil || !bytes.Equal(mirror, committed) {
+				t.Fatalf("startup did not load the actual backend credential: %q, %v", mirror, errRead)
 			}
-			if effective, err := authpublication.ReadFile(path); err != nil || !bytes.Equal(effective, committed) || authpublication.HasPending(path) {
-				t.Fatalf("startup retained a stale publication: %q, %v", effective, err)
+			if effective, errRead := authpublication.ReadFile(path); errRead != nil || !bytes.Equal(effective, committed) || authpublication.HasPending(path) {
+				t.Fatalf("startup retained a stale publication: %q, %v", effective, errRead)
 			}
-			if err := os.WriteFile(path, []byte(`{"type":"codex","access_token":"edited"}`), 0o600); err != nil {
-				t.Fatal(err)
+			if errWrite := os.WriteFile(path, []byte(`{"type":"codex","access_token":"edited"}`), 0o600); errWrite != nil {
+				t.Fatal(errWrite)
 			}
-			if effective, err := authpublication.ReadFile(path); err != nil || !bytes.Contains(effective, []byte("edited")) {
-				t.Fatalf("startup reconciliation still blocks ordinary edits: %q, %v", effective, err)
+			if effective, errRead := authpublication.ReadFile(path); errRead != nil || !bytes.Contains(effective, []byte("edited")) {
+				t.Fatalf("startup reconciliation still blocks ordinary edits: %q, %v", effective, errRead)
 			}
 		})
 	}

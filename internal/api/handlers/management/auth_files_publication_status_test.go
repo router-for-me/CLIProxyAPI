@@ -42,8 +42,8 @@ func TestManagementStatusPersistsPendingPublication(t *testing.T) {
 					if err != nil || len(scanned) != 1 {
 						t.Fatalf("status rescan: %#v, %v", scanned, err)
 					}
-					if _, err := h.authManager.Update(coreauth.WithSkipPersist(context.Background()), scanned[0]); err != nil {
-						t.Fatal(err)
+					if _, errUpdate := h.authManager.Update(coreauth.WithSkipPersist(context.Background()), scanned[0]); errUpdate != nil {
+						t.Fatal(errUpdate)
 					}
 					active, ok := h.authManager.GetByID("account.json")
 					if !ok || active.Disabled != disabled || active.Metadata["access_token"] != "committed" {
