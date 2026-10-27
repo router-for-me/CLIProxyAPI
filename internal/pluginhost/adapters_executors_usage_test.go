@@ -1238,3 +1238,30 @@ func waitPluginUsageRecord(t *testing.T, ch <-chan pluginapi.UsageRecord) plugin
 		return pluginapi.UsageRecord{}
 	}
 }
+
+func TestExecutorAdapterCapturesResponseAffinityIDFromStream(t *testing.T) {
+	metadata := make(map[string]any)
+	input := make(chan pluginapi.ExecutorStreamChunk, 2)
+	input <- pluginapi.ExecutorStreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_")}
+	input <- pluginapi.ExecutorStreamChunk{Payload: []byte("stream-affinity\"}}\n\n")}
+	close(input)
+
+	var forwarded int
+	for range observeExecutorResponseAffinityID(context.Background(), metadata, input) {
+		forwarded++
+	}
+	if forwarded != 2 {
+		t.Fatalf("forwarded chunks = %d, want 2", forwarded)
+	}
+	if got := metadata[coreexecutor.ResponseAffinityIDMetadataKey]; got != "resp_stream-affinity" {
+		t.Fatalf("response affinity ID = %#v, want %q", got, "resp_stream-affinity")
+	}
+}
+
+func TestExecutorAdapterCapturesResponseAffinityIDFromJSON(t *testing.T) {
+	metadata := make(map[string]any)
+	recordResponseAffinityID(metadata, []byte(`{"id":"resp_nonstream-affinity","output":[]}`))
+	if got := metadata[coreexecutor.ResponseAffinityIDMetadataKey]; got != "resp_nonstream-affinity" {
+		t.Fatalf("response affinity ID = %#v, want %q", got, "resp_nonstream-affinity")
+	}
+}

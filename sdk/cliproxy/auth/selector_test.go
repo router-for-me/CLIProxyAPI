@@ -937,6 +937,64 @@ func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelectorPreviousResponseIDKeepsAuthBinding(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	firstOptions := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"model":"gpt-6-astra","input":[{"type":"message","role":"user","content":"first turn"}]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.ResponseAffinityIDMetadataKey: "resp-affinity-first",
+		},
+	}
+	firstAuth, err := selector.Pick(context.Background(), "omnirush", "gpt-6-astra", firstOptions, auths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector.OnResult(Result{
+		AuthID:   firstAuth.ID,
+		Provider: "omnirush",
+		Model:    "gpt-6-astra",
+		Success:  true,
+		Options:  firstOptions,
+	})
+
+	continuationOptions := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"model":"gpt-6-astra","previous_response_id":"resp-affinity-first","input":[{"type":"message","role":"user","content":"second turn"}]}`),
+	}
+	continuationAuth, err := selector.Pick(context.Background(), "omnirush", "gpt-6-astra", continuationOptions, auths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continuationAuth.ID != firstAuth.ID {
+		t.Fatalf("continuation auth = %q, want first-turn auth %q", continuationAuth.ID, firstAuth.ID)
+	}
+	selector.OnResult(Result{
+		AuthID:   continuationAuth.ID,
+		Provider: "omnirush",
+		Model:    "gpt-6-astra",
+		Success:  true,
+		Options: cliproxyexecutor.Options{
+			OriginalRequest: continuationOptions.OriginalRequest,
+			Metadata: map[string]any{
+				cliproxyexecutor.ResponseAffinityIDMetadataKey: "resp-affinity-second",
+			},
+		},
+	})
+	thirdTurnOptions := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"model":"gpt-6-astra","previous_response_id":"resp-affinity-second","input":[{"type":"message","role":"user","content":"third turn"}]}`),
+	}
+	thirdTurnAuth, err := selector.Pick(context.Background(), "omnirush", "gpt-6-astra", thirdTurnOptions, auths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thirdTurnAuth.ID != firstAuth.ID {
+		t.Fatalf("third-turn auth = %q, want first-turn auth %q", thirdTurnAuth.ID, firstAuth.ID)
+	}
+}
+
 func TestSessionAffinitySelector_ThinkingSuffixVariantsPreserveBindingAndRelease(t *testing.T) {
 	t.Parallel()
 

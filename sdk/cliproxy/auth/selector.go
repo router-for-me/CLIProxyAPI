@@ -1747,14 +1747,30 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	}
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
+	responseAffinityID := ""
+	if res.Options.Metadata != nil {
+		if raw, ok := res.Options.Metadata[cliproxyexecutor.ResponseAffinityIDMetadataKey].(string); ok {
+			responseAffinityID = normalizedSessionCandidate(raw)
+		}
+	}
 	var fallbackKey string
 	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
 	if res.Success {
-		s.cache.Touch(cacheKey, res.AuthID)
-		if fallbackKey != "" {
-			s.cache.Touch(fallbackKey, res.AuthID)
+		if responseAffinityID != "" {
+			aliases := []string{cacheKey}
+			if fallbackKey != "" {
+				aliases = append(aliases, fallbackKey)
+			}
+			responseKey := ns + "::" + cliproxysession.BoundSessionIdentity("response:"+responseAffinityID) + "::" + nsModel
+			aliases = append(aliases, responseKey)
+			s.cache.SetAliases(res.AuthID, aliases...)
+		} else {
+			s.cache.Touch(cacheKey, res.AuthID)
+			if fallbackKey != "" {
+				s.cache.Touch(fallbackKey, res.AuthID)
+			}
 		}
 		return
 	}
