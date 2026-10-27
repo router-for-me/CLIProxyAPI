@@ -10,8 +10,26 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/storage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
+
+type publicationCrashStorer struct {
+	storage.Storer
+	branch plumbing.ReferenceName
+	base   plumbing.Hash
+}
+
+func (s *publicationCrashStorer) SetReference(ref *plumbing.Reference) error {
+	if err := s.Storer.SetReference(ref); err != nil {
+		return err
+	}
+	if ref.Name() == s.branch && ref.Hash() != s.base {
+		os.Exit(83)
+	}
+	return nil
+}
 
 func TestGitAcquisitionPublicationCrashHelper(t *testing.T) {
 	if os.Getenv("CPA_PUBLICATION_CRASH_HELPER") != "1" {
@@ -22,7 +40,25 @@ func TestGitAcquisitionPublicationCrashHelper(t *testing.T) {
 	if os.Getenv("CPA_PUBLICATION_PHASE") == "before-commit" {
 		s.openFn = func(string) (*git.Repository, error) { os.Exit(83); return nil, nil }
 	}
+	if os.Getenv("CPA_PUBLICATION_PHASE") == "after-commit" {
+		s.openFn = func(path string) (*git.Repository, error) {
+			repo, err := git.PlainOpen(path)
+			if err != nil {
+				return nil, err
+			}
+			head, err := repo.Head()
+			if err != nil {
+				_ = repo.Close()
+				return nil, err
+			}
+			repo.Storer = &publicationCrashStorer{Storer: repo.Storer, branch: head.Name(), base: head.Hash()}
+			return repo, nil
+		}
+	}
 	s.pushFn = func(ctx context.Context, repo *git.Repository, opts *git.PushOptions) error {
+		if os.Getenv("CPA_PUBLICATION_PHASE") == "before-push" {
+			os.Exit(83)
+		}
 		if err := repo.PushContext(ctx, opts); err != nil {
 			return err
 		}
@@ -34,7 +70,7 @@ func TestGitAcquisitionPublicationCrashHelper(t *testing.T) {
 }
 
 func TestGitAcquisitionPublicationRecoversAfterProcessExit(t *testing.T) {
-	for _, phase := range []string{"after-push", "before-commit"} {
+	for _, phase := range []string{"after-push", "before-commit", "after-commit", "before-push"} {
 		for _, existing := range []bool{false, true} {
 			name := "new"
 			if existing {
@@ -72,7 +108,7 @@ func TestGitAcquisitionPublicationRecoversAfterProcessExit(t *testing.T) {
 				}
 				wantToken := "committed"
 				wantCredential := phase == "after-push" || existing
-				if phase == "before-commit" {
+				if phase != "after-push" {
 					wantToken = "original"
 				}
 				expected := `{"access_token":"` + wantToken + `","disabled":false,"type":"codex"}`
@@ -135,6 +171,15 @@ func TestGitAcquisitionPublicationRecoversAfterProcessExit(t *testing.T) {
 				staging, err := filepath.Glob(filepath.Join(authDir, ".auth-acquisition-*"))
 				if err != nil || len(staging) != 0 {
 					t.Errorf("completed replay left private staging files: %v, %v", staging, err)
+				}
+				if _, err := restarted.Save(context.Background(), &cliproxyauth.Auth{ID: "later.json", FileName: "later.json", Provider: "codex", Metadata: map[string]any{"type": "codex", "access_token": "later"}}); err != nil {
+					t.Fatalf("recovered store cannot save: %v", err)
+				}
+				assertRemoteTreePath(t, remote, "master", "auths/later.json", true)
+				if wantCredential {
+					assertRemoteFileContents(t, remote, "master", "auths/device.json", expected)
+				} else {
+					assertRemoteTreePath(t, remote, "master", "auths/device.json", false)
 				}
 			})
 		}

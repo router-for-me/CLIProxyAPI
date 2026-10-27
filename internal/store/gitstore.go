@@ -298,6 +298,10 @@ func (s *GitTokenStore) ensureRepositoryContextLocked(ctx context.Context) (errR
 				}
 			}
 		}
+		if errRecover := s.recoverUnpushedPublications(ctx, repo, worktree, repoDir, s.baseDir); errRecover != nil {
+			s.dirLock.Unlock()
+			return fmt.Errorf("git token store: recover unpublished credential commit: %w", errRecover)
+		}
 		pullOpts := &git.PullOptions{ClientOptions: authMethod, RemoteName: "origin"}
 		if s.branch != "" {
 			pullOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
