@@ -614,7 +614,12 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 			&translateParam,
 			nil,
 		)
-		helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, applyPatchErr(""))
+		var patchErr statusErr
+		patchFailed := helps.ApplyPatchTranslationError(translateParam) != nil
+		if patchFailed {
+			patchErr = applyPatchErr("")
+			helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, patchErr)
+		}
 		for _, line := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: line}:
@@ -622,7 +627,7 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 				return false
 			}
 		}
-		if helps.StopApplyPatchStream(ctx, translateParam, reporter, out, applyPatchErr("")) {
+		if patchFailed && helps.StopApplyPatchStream(ctx, translateParam, reporter, out, patchErr) {
 			translationFailed = true
 			return false
 		}
@@ -1057,7 +1062,11 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 	}
 
 	if (!sawEOS || streamErr != nil) && ctx.Err() == nil {
-		if helps.EndApplyPatchStream(ctx, translateParam, reporter, out, applyPatchErr("devin_stream_ended_before_eos")) {
+		reason := "devin_stream_ended_before_eos"
+		if streamErr != nil {
+			reason = "devin_stream_read_error"
+		}
+		if helps.EndApplyPatchStream(ctx, translateParam, reporter, out, applyPatchErr(reason)) {
 			return
 		}
 	}
@@ -1165,7 +1174,9 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 			&translateParam,
 			nil,
 		)
-		helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, applyPatchErr(""))
+		if helps.ApplyPatchTranslationError(translateParam) != nil {
+			helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, applyPatchErr(""))
+		}
 		for _, line := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: line}:

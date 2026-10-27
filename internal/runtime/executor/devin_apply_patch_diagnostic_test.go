@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,12 @@ func TestDevinApplyPatchRejectionCarriesLogDiagnostic(t *testing.T) {
 			name:       "stream ended before EOS",
 			body:       string(task6DevinFrames(`{"input":"RAW_SECRET_BODY"}`, false, "")),
 			wantReason: "devin_stream_ended_before_eos",
+			wantShape:  "shape=json_object",
+		},
+		{
+			name:       "stream read error after patch call",
+			body:       string(append(task6DevinFrames(`{"input":"RAW_SECRET_BODY"}`, false, ""), 0, 0)),
+			wantReason: "devin_stream_read_error",
 			wantShape:  "shape=json_object",
 		},
 	} {
@@ -113,6 +120,33 @@ func TestDevinApplyPatchRejectionCarriesLogDiagnostic(t *testing.T) {
 				}
 				t.Logf("diagnostic: %s", diagnostic)
 			})
+		}
+	}
+}
+
+func TestDevinApplyPatchValidStreamCompletes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(task6DevinFrames(`{"input":"*** Begin Patch\n*** Add File: a.txt\n+ok\n*** End Patch"}`, false, `{}`))
+	}))
+	defer server.Close()
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{ID: "devin-patch-valid-stream", Provider: "devin", Attributes: map[string]string{"api_key": "test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{Model: "devin/swe-2", Payload: []byte(task6PatchRequest)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: req.Payload}
+	result, errExecuteStream := exec.ExecuteStream(t.Context(), auth, req, opts)
+	if errExecuteStream != nil {
+		t.Fatal(errExecuteStream)
+	}
+	var output []byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("valid stream failed: %v", chunk.Err)
+		}
+		output = append(output, chunk.Payload...)
+	}
+	for _, expected := range []string{"response.custom_tool_call_input.done", "response.completed"} {
+		if !bytes.Contains(output, []byte(expected)) {
+			t.Fatalf("valid stream missing %s: %s", expected, output)
 		}
 	}
 }
