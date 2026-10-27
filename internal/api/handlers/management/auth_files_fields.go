@@ -1056,7 +1056,8 @@ func (h *Handler) notifyPersistedTokenRecord(ctx context.Context, savedPath stri
 	if h.postAuthPersistHook != nil {
 		persistedRecord := record
 		data := record.CommittedAuthFile(savedPath)
-		if len(data) == 0 {
+		remotelyCommitted := len(data) > 0
+		if !remotelyCommitted {
 			data, _ = os.ReadFile(savedPath)
 		}
 		if len(data) > 0 {
@@ -1072,6 +1073,10 @@ func (h *Handler) notifyPersistedTokenRecord(ctx context.Context, savedPath stri
 			}
 			for _, auth := range auths {
 				if auth != nil && (auth.ID == record.ID || len(auths) == 1) {
+					if remotelyCommitted {
+						// These bytes are committed remotely, not an observation of the stale mirror.
+						auth.ClearFileSnapshot()
+					}
 					persistedRecord = auth
 					break
 				}

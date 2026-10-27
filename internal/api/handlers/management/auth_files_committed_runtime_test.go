@@ -73,9 +73,19 @@ func TestAcquisitionRuntimeSyncUsesCommittedCredential(t *testing.T) {
 			} else {
 				record.Storage = &claude.ClaudeTokenStorage{AccessToken: "committed", RefreshToken: "committed-refresh"}
 			}
+			manager := coreauth.NewManager(nil, nil, nil)
+			if _, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{
+				ID: record.ID, Provider: provider, Metadata: map[string]any{"type": provider, "access_token": "previous"},
+			}); err != nil {
+				t.Fatal(err)
+			}
 			var runtimeRecord *coreauth.Auth
 			h := &Handler{cfg: &config.Config{AuthDir: authDir}, tokenStore: tokenStore,
-				postAuthPersistHook: func(_ context.Context, auth *coreauth.Auth) error { runtimeRecord = auth; return nil },
+				postAuthPersistHook: func(_ context.Context, auth *coreauth.Auth) error {
+					runtimeRecord = auth
+					_, err := manager.Update(coreauth.WithSkipPersist(context.Background()), auth)
+					return err
+				},
 			}
 			if _, err := h.saveTokenRecord(context.Background(), record); err != nil {
 				t.Fatalf("remote commit was reported as failure: %v", err)
@@ -90,6 +100,36 @@ func TestAcquisitionRuntimeSyncUsesCommittedCredential(t *testing.T) {
 			if runtimeRecord == nil || runtimeRecord.Metadata["access_token"] != "committed" || runtimeRecord.Metadata["refresh_token"] != "committed-refresh" {
 				t.Fatalf("runtime received stale or incomplete credentials: %#v", runtimeRecord)
 			}
+			active, ok := manager.GetByID(record.ID)
+			if !ok || active.Metadata["access_token"] != "committed" || active.Metadata["refresh_token"] != "committed-refresh" {
+				t.Fatalf("manager discarded remotely committed credentials: %#v", active)
+			}
 		})
 	}
+	t.Run("file_snapshot_remains_fenced", func(t *testing.T) {
+		authDir := t.TempDir()
+		path := filepath.Join(authDir, "acquired.json")
+		if err := os.WriteFile(path, []byte(`{"type":"codex","access_token":"observed"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		manager := coreauth.NewManager(nil, nil, nil)
+		record := &coreauth.Auth{ID: "acquired.json", Provider: "codex", Metadata: map[string]any{"type": "codex", "access_token": "previous"}}
+		if _, err := manager.Register(coreauth.WithSkipPersist(context.Background()), record); err != nil {
+			t.Fatal(err)
+		}
+		h := &Handler{cfg: &config.Config{AuthDir: authDir}, postAuthPersistHook: func(_ context.Context, auth *coreauth.Auth) error {
+			if err := os.WriteFile(path, []byte(`{"type":"codex","access_token":"newer"}`), 0o600); err != nil {
+				return err
+			}
+			_, err := manager.Update(coreauth.WithSkipPersist(context.Background()), auth)
+			return err
+		}}
+		if err := h.notifyPersistedTokenRecord(context.Background(), path, record); err != nil {
+			t.Fatal(err)
+		}
+		active, ok := manager.GetByID(record.ID)
+		if !ok || active.Metadata["access_token"] != "previous" {
+			t.Fatalf("file-derived notification bypassed the stale-file fence: %#v", active)
+		}
+	})
 }
