@@ -1859,8 +1859,8 @@ func TestCodexClientModelsResponse_DoesNotLeakResponsesLiteOrCodeModeToNonCodexR
 		if got, ok := kimiPro["use_responses_lite"].(bool); !ok || got {
 			t.Errorf("%s use_responses_lite = %#v, want false", slug, kimiPro["use_responses_lite"])
 		}
-		if got := stringModelValue(kimiPro, "default_reasoning_level"); got != "low" {
-			t.Errorf("%s default_reasoning_level = %q, want the template-supported low level", slug, got)
+		if got := stringModelValue(kimiPro, "default_reasoning_level"); got != "max" {
+			t.Errorf("%s default_reasoning_level = %q, want template-supported max", slug, got)
 		}
 		if got := stringModelValue(kimiPro, "default_reasoning_summary"); got != "none" {
 			t.Errorf("%s default_reasoning_summary = %q, want none", slug, got)
