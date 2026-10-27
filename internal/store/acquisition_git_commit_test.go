@@ -69,11 +69,23 @@ func TestGitAcquisitionKeepsCommittedMirrorAfterLocalFailure(t *testing.T) {
 					if err := repo.PushContext(ctx, opts); err != nil {
 						return err
 					}
-					var errRead error
-					committed, errRead = os.ReadFile(path)
-					if errRead != nil {
-						return errRead
+					head, err := repo.Head()
+					if err != nil {
+						return err
 					}
+					commit, err := repo.CommitObject(head.Hash())
+					if err != nil {
+						return err
+					}
+					file, err := commit.File("auths/login.json")
+					if err != nil {
+						return err
+					}
+					contents, err := file.Contents()
+					if err != nil {
+						return err
+					}
+					committed = []byte(contents)
 					injected = &postPushFailureStorer{Storer: repo.Storer, trackingRef: plumbing.NewRemoteReferenceName("origin", "master")}
 					if failure == "tracking-ref" {
 						injected.errTracking = errors.New("tracking ref write failed after successful push")

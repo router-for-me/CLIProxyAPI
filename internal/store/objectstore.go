@@ -237,7 +237,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		}
 
 		return nil
-	}, func() error {
+	}, func(stagedPath string) error {
 		if auth.Attributes == nil {
 			auth.Attributes = make(map[string]string)
 		}
@@ -248,7 +248,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 			auth.FileName = auth.ID
 		}
 
-		if err = s.uploadAuth(ctx, path); err != nil {
+		if err = s.uploadAuthFrom(ctx, path, stagedPath); err != nil {
 			return err
 		}
 		return nil
@@ -478,6 +478,10 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 }
 
 func (s *ObjectTokenStore) uploadAuth(ctx context.Context, path string) error {
+	return s.uploadAuthFrom(ctx, path, path)
+}
+
+func (s *ObjectTokenStore) uploadAuthFrom(ctx context.Context, path, source string) error {
 	if path == "" {
 		return nil
 	}
@@ -485,7 +489,7 @@ func (s *ObjectTokenStore) uploadAuth(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("object store: resolve auth relative path: %w", err)
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(source)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return s.deleteAuthObject(ctx, path)

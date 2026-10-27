@@ -288,7 +288,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		}
 
 		return nil
-	}, func() error {
+	}, func(stagedPath string) error {
 		if auth.Attributes == nil {
 			auth.Attributes = make(map[string]string)
 		}
@@ -303,7 +303,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		if err != nil {
 			return err
 		}
-		if err = s.upsertAuthRecord(ctx, relID, path); err != nil {
+		if err = s.upsertAuthRecord(ctx, relID, stagedPath); err != nil {
 			return err
 		}
 		return nil

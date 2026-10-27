@@ -519,7 +519,7 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		}
 
 		return nil
-	}, func() error {
+	}, func(stagedPath string) error {
 		if auth.Attributes == nil {
 			auth.Attributes = make(map[string]string)
 		}
@@ -534,7 +534,7 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		if strings.TrimSpace(messageID) == "" {
 			messageID = filepath.Base(path)
 		}
-		if errCommit := s.commitAndPushContextLocked(ctx, fmt.Sprintf("Update auth %s", strings.TrimSpace(messageID)), relPath); errCommit != nil {
+		if errCommit := s.commitAuthSourceLocked(ctx, fmt.Sprintf("Update auth %s", strings.TrimSpace(messageID)), relPath, path, stagedPath); errCommit != nil {
 			return errCommit
 		}
 
@@ -1715,7 +1715,11 @@ func (s *GitTokenStore) commitAndPushInitialLocked(message string, relPaths ...s
 	return s.commitAndPushWithOptionsLocked(context.Background(), message, true, relPaths...)
 }
 
-func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, message string, allowMissingRemote bool, relPaths ...string) (errResult error) {
+func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, message string, allowMissingRemote bool, relPaths ...string) error {
+	return s.commitSourcesAndPushLocked(ctx, message, allowMissingRemote, nil, relPaths...)
+}
+
+func (s *GitTokenStore) commitSourcesAndPushLocked(ctx context.Context, message string, allowMissingRemote bool, sources map[string]string, relPaths ...string) (errResult error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1794,6 +1798,13 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 
 	added := false
 	for _, rel := range managedPaths {
+		if source, ok := sources[rel]; ok {
+			if err := stageAcquisitionBlob(repo, rel, source); err != nil {
+				return err
+			}
+			added = true
+			continue
+		}
 		if _, err = worktree.Add(rel); err != nil {
 			if errors.Is(err, gitindex.ErrEntryNotFound) {
 				continue

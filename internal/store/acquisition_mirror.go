@@ -12,143 +12,74 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
-type acquisitionMirror struct {
-	path        string
-	original    []byte
-	mode        os.FileMode
-	existed     bool
-	written     []byte
-	writtenInfo os.FileInfo
-}
-
-// The destination lock covers commit and rollback so a refresh cannot consume a
-// failed login, and cleanup cannot wait behind a refresh after the save expires.
-// Staging lets Codex serialization take its own lock without nesting the target lock.
-func persistAcquisitionMirror(ctx context.Context, path string, write func(string) error, persist func() error) error {
+// The destination lock excludes refresh writers until the remote commit and local
+// publication finish. Uncommitted credentials never occupy a discoverable JSON path.
+func persistAcquisitionMirror(ctx context.Context, path string, write func(string) error, persist func(string) error) error {
 	if !cliproxyauth.HasAuthCreationIntent(ctx) {
 		if errWrite := write(path); errWrite != nil {
 			return errWrite
 		}
-		return persist()
+		return persist(path)
 	}
 	return codex.WithFileLockContext(ctx, path, func() error {
-		mirror, errSnapshot := snapshotAcquisitionMirror(path)
-		if errSnapshot != nil {
-			return errSnapshot
+		info, err := os.Lstat(path)
+		existed := err == nil
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("snapshot auth mirror: %w", err)
 		}
-		dir, errTemp := os.MkdirTemp(filepath.Dir(path), ".auth-acquisition-*")
-		if errTemp != nil {
-			return errTemp
+		if existed && !info.Mode().IsRegular() {
+			return fmt.Errorf("acquisition auth mirror must be a regular file")
+		}
+		var original []byte
+		if existed {
+			original, err = os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("snapshot auth mirror: %w", err)
+			}
+		}
+		dir, err := os.MkdirTemp(filepath.Dir(path), ".auth-acquisition-*")
+		if err != nil {
+			return err
 		}
 		defer func() { _ = os.RemoveAll(dir) }()
 		stagedPath := filepath.Join(dir, "credential")
-		if mirror.existed {
-			if errSeed := os.WriteFile(stagedPath, mirror.original, 0o600); errSeed != nil {
-				return errSeed
+		if existed {
+			if err := os.WriteFile(stagedPath, original, 0o600); err != nil {
+				return err
 			}
 		}
-		if errWrite := write(stagedPath); errWrite != nil {
-			return errWrite
+		if err := write(stagedPath); err != nil {
+			return err
 		}
-		// Capture the version before publication, with refresh writers still excluded.
-		mirror.path = stagedPath
-		errRemember := mirror.rememberWrite()
-		mirror.path = path
-		if errRemember != nil {
-			return errRemember
+		stagedInfo, err := os.Lstat(stagedPath)
+		if err != nil {
+			return fmt.Errorf("inspect acquired credential: %w", err)
 		}
-		if errContext := ctx.Err(); errContext != nil {
-			return errContext
+		if !stagedInfo.Mode().IsRegular() {
+			return fmt.Errorf("acquired credential must be a regular file")
 		}
-		if errRename := os.Rename(stagedPath, path); errRename != nil {
-			return errRename
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return mirror.restore(persist())
+		if err := persist(stagedPath); err != nil {
+			return err
+		}
+		// Preserve an independent writer that does not participate in the file lock.
+		currentInfo, err := os.Lstat(path)
+		if existed {
+			if err != nil || !os.SameFile(info, currentInfo) {
+				return fmt.Errorf("auth mirror changed during acquisition")
+			}
+			current, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(current, original) {
+				return fmt.Errorf("auth mirror changed during acquisition")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("auth mirror appeared during acquisition")
+		}
+		return os.Rename(stagedPath, path)
 	})
-}
-
-func snapshotAcquisitionMirror(path string) (*acquisitionMirror, error) {
-	m := &acquisitionMirror{path: path}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return m, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("snapshot auth mirror: %w", err)
-	}
-	// In-place token writers follow links. Refuse acquisitions before they can
-	// modify a referent that rollback does not own.
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("acquisition auth mirror must be a regular file")
-	}
-	m.existed = true
-	m.mode = info.Mode()
-	m.original, err = os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot auth mirror: %w", err)
-	}
-	return m, nil
-}
-
-func (m *acquisitionMirror) rememberWrite() error {
-	if m == nil {
-		return nil
-	}
-	data, err := os.ReadFile(m.path)
-	if err != nil {
-		return fmt.Errorf("read acquired auth mirror: %w", err)
-	}
-	info, err := os.Stat(m.path)
-	if err != nil {
-		return fmt.Errorf("inspect acquired auth mirror: %w", err)
-	}
-	m.written, m.writtenInfo = data, info
-	return nil
-}
-
-func (m *acquisitionMirror) restore(errSave error) error {
-	if m == nil || m.writtenInfo == nil || errSave == nil {
-		return errSave
-	}
-	if errRestore := m.restoreWritten(); errRestore != nil {
-		return errors.Join(errSave, fmt.Errorf("restore failed acquisition mirror: %w", errRestore))
-	}
-	return errSave
-}
-
-func (m *acquisitionMirror) restoreWritten() error {
-	current, err := os.ReadFile(m.path)
-	if err != nil {
-		return err
-	}
-	info, err := os.Stat(m.path)
-	if err != nil {
-		return err
-	}
-	// Another writer's credential must survive a failed acquisition.
-	if !os.SameFile(info, m.writtenInfo) || !bytes.Equal(current, m.written) {
-		return fmt.Errorf("auth mirror changed after acquisition write")
-	}
-	if !m.existed {
-		return os.Remove(m.path)
-	}
-	file, err := os.CreateTemp(filepath.Dir(m.path), ".auth-rollback-*")
-	if err != nil {
-		return err
-	}
-	tempPath := file.Name()
-	defer func() { _ = os.Remove(tempPath) }()
-	if errMode := file.Chmod(m.mode.Perm()); errMode != nil {
-		_ = file.Close()
-		return errMode
-	}
-	if _, errWrite := file.Write(m.original); errWrite != nil {
-		_ = file.Close()
-		return errWrite
-	}
-	if errClose := file.Close(); errClose != nil {
-		return errClose
-	}
-
-	return os.Rename(tempPath, m.path)
 }

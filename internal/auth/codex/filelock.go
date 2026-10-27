@@ -11,15 +11,30 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 )
 
+// Entries include waiters so cancellation cannot replace a mutex still in use.
 var codexFileLocks sync.Map
+var codexFileLocksMu sync.Mutex
 
-func lockForFilePath(authFilePath string) *misc.ContextMutex {
+type filePathLock struct {
+	mutex misc.ContextMutex
+	users int
+}
+
+func lockForFilePath(authFilePath string) (*misc.ContextMutex, func()) {
 	cleaned := canonicalLockPath(authFilePath)
-	if actual, ok := codexFileLocks.Load(cleaned); ok {
-		return actual.(*misc.ContextMutex)
+	codexFileLocksMu.Lock()
+	actual, _ := codexFileLocks.LoadOrStore(cleaned, &filePathLock{})
+	entry := actual.(*filePathLock)
+	entry.users++
+	codexFileLocksMu.Unlock()
+	return &entry.mutex, func() {
+		codexFileLocksMu.Lock()
+		defer codexFileLocksMu.Unlock()
+		entry.users--
+		if entry.users == 0 {
+			codexFileLocks.Delete(cleaned)
+		}
 	}
-	actual, _ := codexFileLocks.LoadOrStore(cleaned, &misc.ContextMutex{})
-	return actual.(*misc.ContextMutex)
 }
 
 // WithFileLock serializes credential updates within and across processes.
@@ -33,7 +48,8 @@ func WithFileLockContext(ctx context.Context, authFilePath string, fn func() err
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	mu := lockForFilePath(authFilePath)
+	mu, releaseEntry := lockForFilePath(authFilePath)
+	defer releaseEntry()
 	if err := mu.LockContext(ctx); err != nil {
 		return err
 	}
