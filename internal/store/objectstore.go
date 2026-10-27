@@ -157,7 +157,7 @@ func (s *ObjectTokenStore) Bootstrap(ctx context.Context, exampleConfigPath stri
 }
 
 // Save persists authentication metadata to disk and uploads it to the object storage backend.
-func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (savedPath string, errResult error) {
+func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("object store: auth is nil")
 	}
@@ -192,7 +192,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		return "", fmt.Errorf("object store: create auth directory: %w", err)
 	}
 
-	mirror, errWrite := writeAcquisitionMirror(ctx, path, func(path string) error {
+	errPersist := persistAcquisitionMirror(ctx, path, func(path string) error {
 		if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
 			if errCodex != nil {
 				return errCodex
@@ -237,24 +237,24 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		}
 
 		return nil
+	}, func() error {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes[cliproxyauth.AttributePath] = path
+		auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceObjectStore
+
+		if strings.TrimSpace(auth.FileName) == "" {
+			auth.FileName = auth.ID
+		}
+
+		if err = s.uploadAuth(ctx, path); err != nil {
+			return err
+		}
+		return nil
 	})
-	if errWrite != nil {
-		return "", errWrite
-	}
-	defer func() { errResult = mirror.restore(errResult) }()
-
-	if auth.Attributes == nil {
-		auth.Attributes = make(map[string]string)
-	}
-	auth.Attributes[cliproxyauth.AttributePath] = path
-	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceObjectStore
-
-	if strings.TrimSpace(auth.FileName) == "" {
-		auth.FileName = auth.ID
-	}
-
-	if err = s.uploadAuth(ctx, path); err != nil {
-		return "", err
+	if errPersist != nil {
+		return "", errPersist
 	}
 	return path, nil
 }

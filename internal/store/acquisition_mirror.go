@@ -21,17 +21,18 @@ type acquisitionMirror struct {
 	writtenInfo os.FileInfo
 }
 
-// Acquisition serialization uses a separate path so Codex can take its own
-// serialization lock while the destination's refresh lock protects the baseline.
-// Runtime saves retain their existing local-first behavior.
-func writeAcquisitionMirror(ctx context.Context, path string, write func(string) error) (*acquisitionMirror, error) {
+// The destination lock covers commit and rollback so a refresh cannot consume a
+// failed login, and cleanup cannot wait behind a refresh after the save expires.
+// Staging lets Codex serialization take its own lock without nesting the target lock.
+func persistAcquisitionMirror(ctx context.Context, path string, write func(string) error, persist func() error) error {
 	if !cliproxyauth.HasAuthCreationIntent(ctx) {
-		return nil, write(path)
+		if errWrite := write(path); errWrite != nil {
+			return errWrite
+		}
+		return persist()
 	}
-	var mirror *acquisitionMirror
-	err := codex.WithFileLockContext(ctx, path, func() error {
-		var errSnapshot error
-		mirror, errSnapshot = snapshotAcquisitionMirror(path)
+	return codex.WithFileLockContext(ctx, path, func() error {
+		mirror, errSnapshot := snapshotAcquisitionMirror(path)
 		if errSnapshot != nil {
 			return errSnapshot
 		}
@@ -62,12 +63,8 @@ func writeAcquisitionMirror(ctx context.Context, path string, write func(string)
 		if errRename := os.Rename(stagedPath, path); errRename != nil {
 			return errRename
 		}
-		return nil
+		return mirror.restore(persist())
 	})
-	if err != nil {
-		return nil, err
-	}
-	return mirror, nil
 }
 
 func snapshotAcquisitionMirror(path string) (*acquisitionMirror, error) {
@@ -113,8 +110,7 @@ func (m *acquisitionMirror) restore(errSave error) error {
 	if m == nil || m.writtenInfo == nil || errSave == nil {
 		return errSave
 	}
-	// Cleanup must still run after the acquisition context has expired.
-	if errRestore := codex.WithFileLock(m.path, m.restoreWritten); errRestore != nil {
+	if errRestore := m.restoreWritten(); errRestore != nil {
 		return errors.Join(errSave, fmt.Errorf("restore failed acquisition mirror: %w", errRestore))
 	}
 	return errSave

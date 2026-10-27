@@ -431,7 +431,7 @@ func (s *GitTokenStore) ensureRepositoryContextLocked(ctx context.Context) (errR
 }
 
 // Save persists token storage and metadata to the resolved auth file path.
-func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (savedPath string, errResult error) {
+func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
@@ -473,7 +473,7 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (save
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
 	}
 
-	mirror, errWrite := writeAcquisitionMirror(ctx, path, func(path string) error {
+	errPersist := persistAcquisitionMirror(ctx, path, func(path string) error {
 		if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
 			if errCodex != nil {
 				return errCodex
@@ -518,30 +518,30 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (save
 		}
 
 		return nil
+	}, func() error {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes[cliproxyauth.AttributePath] = path
+		auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceGit
+
+		if strings.TrimSpace(auth.FileName) == "" {
+			auth.FileName = auth.ID
+		}
+
+		messageID := auth.ID
+		if strings.TrimSpace(messageID) == "" {
+			messageID = filepath.Base(path)
+		}
+		if errCommit := s.commitAndPushContextLocked(ctx, fmt.Sprintf("Update auth %s", strings.TrimSpace(messageID)), relPath); errCommit != nil {
+			return errCommit
+		}
+
+		return nil
 	})
-	if errWrite != nil {
-		return "", errWrite
+	if errPersist != nil {
+		return "", errPersist
 	}
-	defer func() { errResult = mirror.restore(errResult) }()
-
-	if auth.Attributes == nil {
-		auth.Attributes = make(map[string]string)
-	}
-	auth.Attributes[cliproxyauth.AttributePath] = path
-	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceGit
-
-	if strings.TrimSpace(auth.FileName) == "" {
-		auth.FileName = auth.ID
-	}
-
-	messageID := auth.ID
-	if strings.TrimSpace(messageID) == "" {
-		messageID = filepath.Base(path)
-	}
-	if errCommit := s.commitAndPushContextLocked(ctx, fmt.Sprintf("Update auth %s", strings.TrimSpace(messageID)), relPath); errCommit != nil {
-		return "", errCommit
-	}
-
 	return path, nil
 }
 

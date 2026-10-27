@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -100,29 +101,52 @@ func TestAcquisitionSnapshotWaitsForCodexLock(t *testing.T) {
 func TestAcquisitionRollbackPreservesLockedRefresh(t *testing.T) {
 	for _, backend := range []string{"object", "postgres"} {
 		t.Run(backend, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, "login.json")
-			latest := []byte(`{"type":"codex","access_token":"successful-refresh","refresh_token":"rotated"}`)
-			remote := func() error {
-				if err := codexauth.WithFileLock(path, func() error { return os.WriteFile(path, latest, 0o600) }); err != nil {
+			synctest.Test(t, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "login.json")
+				original := []byte(`{"type":"codex","access_token":"original"}`)
+				if err := os.WriteFile(path, original, 0o600); err != nil {
 					t.Fatal(err)
 				}
-				return context.DeadlineExceeded
-			}
-			var s cliproxyauth.Store
-			if backend == "object" {
-				s = &ObjectTokenStore{authDir: dir, putObjectFn: func(context.Context, string, []byte, string) error { return remote() }}
-			} else {
-				s = &PostgresStore{authDir: dir, persistAuthFn: func(context.Context, string, []byte) error { return remote() }}
-			}
-			_, err := s.Save(cliproxyauth.WithAuthCreationIntent(context.Background()), &cliproxyauth.Auth{ID: "login.json", FileName: "login.json", Provider: "codex", Metadata: map[string]any{"type": "codex", "access_token": "failed-login"}})
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("Save error = %v", err)
-			}
-			got, err := os.ReadFile(path)
-			if err != nil || string(got) != string(latest) {
-				t.Fatalf("rollback overwrote a successful refresh: %q, %v", got, err)
-			}
+				latest := []byte(`{"type":"codex","access_token":"successful-refresh","refresh_token":"rotated"}`)
+				entered := make(chan struct{})
+				done := make(chan error, 1)
+				go func() {
+					<-entered
+					done <- codexauth.WithFileLock(path, func() error {
+						got, err := os.ReadFile(path)
+						if err != nil {
+							return err
+						}
+						if string(got) != string(original) {
+							return fmt.Errorf("refresh consumed failed login: %q", got)
+						}
+						return os.WriteFile(path, latest, 0o600)
+					})
+				}()
+				remote := func() error {
+					close(entered)
+					synctest.Wait()
+					return context.DeadlineExceeded
+				}
+				var s cliproxyauth.Store
+				if backend == "object" {
+					s = &ObjectTokenStore{authDir: dir, putObjectFn: func(context.Context, string, []byte, string) error { return remote() }}
+				} else {
+					s = &PostgresStore{authDir: dir, persistAuthFn: func(context.Context, string, []byte) error { return remote() }}
+				}
+				_, err := s.Save(cliproxyauth.WithAuthCreationIntent(context.Background()), &cliproxyauth.Auth{ID: "login.json", FileName: "login.json", Provider: "codex", Metadata: map[string]any{"type": "codex", "access_token": "failed-login"}})
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Save error = %v", err)
+				}
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != string(latest) {
+					t.Fatalf("rollback overwrote a successful refresh: %q, %v", got, err)
+				}
+			})
 		})
 	}
 }

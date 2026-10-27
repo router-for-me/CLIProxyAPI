@@ -208,7 +208,7 @@ func (s *PostgresStore) WorkDir() string {
 func (s *PostgresStore) SetBaseDir(string) {}
 
 // Save persists authentication metadata to disk and PostgreSQL.
-func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (savedPath string, errResult error) {
+func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("postgres store: auth is nil")
 	}
@@ -243,7 +243,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (save
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
-	mirror, errWrite := writeAcquisitionMirror(ctx, path, func(path string) error {
+	errPersist := persistAcquisitionMirror(ctx, path, func(path string) error {
 		if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
 			if errCodex != nil {
 				return errCodex
@@ -288,28 +288,28 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (save
 		}
 
 		return nil
+	}, func() error {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes[cliproxyauth.AttributePath] = path
+		auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourcePostgres
+
+		if strings.TrimSpace(auth.FileName) == "" {
+			auth.FileName = auth.ID
+		}
+
+		relID, err := s.relativeAuthID(path)
+		if err != nil {
+			return err
+		}
+		if err = s.upsertAuthRecord(ctx, relID, path); err != nil {
+			return err
+		}
+		return nil
 	})
-	if errWrite != nil {
-		return "", errWrite
-	}
-	defer func() { errResult = mirror.restore(errResult) }()
-
-	if auth.Attributes == nil {
-		auth.Attributes = make(map[string]string)
-	}
-	auth.Attributes[cliproxyauth.AttributePath] = path
-	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourcePostgres
-
-	if strings.TrimSpace(auth.FileName) == "" {
-		auth.FileName = auth.ID
-	}
-
-	relID, err := s.relativeAuthID(path)
-	if err != nil {
-		return "", err
-	}
-	if err = s.upsertAuthRecord(ctx, relID, path); err != nil {
-		return "", err
+	if errPersist != nil {
+		return "", errPersist
 	}
 	return path, nil
 }
