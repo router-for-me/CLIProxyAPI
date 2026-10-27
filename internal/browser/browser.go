@@ -3,28 +3,138 @@
 package browser
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
+	"sync"
 
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/skratchdot/open-golang/open"
 )
 
+// Launcher opens an OAuth authorization URL with an alternate browser backend.
+// Implementations must honor ctx cancellation.
+type Launcher interface {
+	// Launch opens opts.AuthURL and blocks until the login finishes, fails, or
+	// the context is done.
+	Launch(ctx context.Context, opts LaunchOptions) error
+}
+
+// oauthSessionProxyContextKey carries the OAuth session proxy URL to the launcher.
+type oauthSessionProxyContextKey struct{}
+
+// oauthProviderContextKey carries the OAuth provider name to the launcher.
+type oauthProviderContextKey struct{}
+
+// WithOAuthProxyURL attaches an OAuth session proxy URL to ctx.
+// It is used to keep the login egress IP identical to the runtime egress IP.
+func WithOAuthProxyURL(ctx context.Context, proxyURL string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, oauthSessionProxyContextKey{}, strings.TrimSpace(proxyURL))
+}
+
+// OAuthProxyURLFromContext returns the OAuth session proxy URL stored in ctx.
+func OAuthProxyURLFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(oauthSessionProxyContextKey{}).(string)
+	return strings.TrimSpace(value)
+}
+
+// WithOAuthProvider attaches the OAuth provider name to ctx so launchers can
+// derive stable profile identifiers.
+func WithOAuthProvider(ctx context.Context, provider string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, oauthProviderContextKey{}, strings.TrimSpace(provider))
+}
+
+// OAuthProviderFromContext returns the OAuth provider name stored in ctx.
+func OAuthProviderFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(oauthProviderContextKey{}).(string)
+	return strings.TrimSpace(value)
+}
+
+var (
+	launcherMu sync.RWMutex
+	launcher   Launcher
+
+	openRunner   = open.Run
+	platformOpen = openURLPlatformSpecific
+)
+
+// SetLauncher installs the OAuth browser launcher. Passing nil clears it.
+func SetLauncher(next Launcher) {
+	launcherMu.Lock()
+	launcher = next
+	launcherMu.Unlock()
+}
+
+// ClearLauncher removes any installed launcher.
+func ClearLauncher() {
+	SetLauncher(nil)
+}
+
+// HasLauncher reports whether an alternate OAuth browser launcher is installed.
+func HasLauncher() bool {
+	launcherMu.RLock()
+	defer launcherMu.RUnlock()
+	return launcher != nil
+}
+
+func currentLauncher() Launcher {
+	launcherMu.RLock()
+	defer launcherMu.RUnlock()
+	return launcher
+}
+
 // OpenURL opens the specified URL in the default web browser.
-// It first attempts to use a platform-agnostic library and falls back to
-// platform-specific commands if that fails.
-//
-// Parameters:
-//   - url: The URL to open.
-//
-// Returns:
-//   - An error if the URL cannot be opened, otherwise nil.
+// When an alternate launcher is installed it is tried first; a launcher failure
+// logs a warning and falls back to the system browser so login always remains
+// possible.
 func OpenURL(url string) error {
+	return OpenURLWithContext(context.Background(), url)
+}
+
+// OpenURLWithContext opens the specified URL, preferring an installed launcher.
+// The context may carry the OAuth session proxy URL and provider name.
+func OpenURLWithContext(ctx context.Context, url string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if current := currentLauncher(); current != nil {
+		opts := LaunchOptions{
+			AuthURL:     url,
+			ProxyURL:    OAuthProxyURLFromContext(ctx),
+			ProfileID:   newOAuthProfileID(OAuthProviderFromContext(ctx)),
+			DeviceMode:  "",
+			Headless:    false,
+			UserDataDir: "",
+		}
+		if errLaunch := current.Launch(ctx, opts); errLaunch != nil {
+			log.Warnf("alternate OAuth browser launch failed, falling back to system browser: %v", errLaunch)
+		} else {
+			return nil
+		}
+	}
+	return openSystemURL(url)
+}
+
+func openSystemURL(url string) error {
 	fmt.Printf("Attempting to open URL in browser: %s\n", url)
 
 	// Try using the open-golang library first
-	err := open.Run(url)
+	err := openRunner(url)
 	if err == nil {
 		log.Debug("Successfully opened URL using open-golang library")
 		return nil
@@ -33,7 +143,31 @@ func OpenURL(url string) error {
 	log.Debugf("open-golang failed: %v, trying platform-specific commands", err)
 
 	// Fallback to platform-specific commands
-	return openURLPlatformSpecific(url)
+	return platformOpen(url)
+}
+
+// newOAuthProfileID builds a random profile identifier with a provider prefix.
+func newOAuthProfileID(provider string) string {
+	prefix := sanitizeProfilePrefix(provider)
+	if prefix == "" {
+		prefix = "oauth"
+	}
+	return prefix + "-" + uuid.NewString()
+}
+
+func sanitizeProfilePrefix(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	var b strings.Builder
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		}
+		if b.Len() >= 32 {
+			break
+		}
+	}
+	return strings.Trim(b.String(), "-_")
 }
 
 // openURLPlatformSpecific is a helper function that opens a URL using OS-specific commands.
@@ -84,8 +218,13 @@ func openURLPlatformSpecific(url string) error {
 // Returns:
 //   - true if a browser can be opened, false otherwise.
 func IsAvailable() bool {
+	// An installed alternate launcher does not need a system browser.
+	if HasLauncher() {
+		return true
+	}
+
 	// First check if open-golang can work
-	testErr := open.Run("about:blank")
+	testErr := openRunner("about:blank")
 	if testErr == nil {
 		return true
 	}

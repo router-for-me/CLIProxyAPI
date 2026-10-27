@@ -92,6 +92,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	m.applyProxyPoolResolution(ctx, auth)
 	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
 	if errMutation != nil {
 		return nil, errMutation
@@ -286,6 +287,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, nil
 	}
 	NormalizeCredentialMetadata(auth.Metadata)
+	m.applyProxyPoolResolution(ctx, auth)
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, false, false, fmt.Errorf("update auth: %w", errWeight)
 	}
@@ -629,6 +631,7 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		NormalizeCredentialMetadata(auth.Metadata)
+		m.applyProxyPoolResolution(ctx, auth)
 		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 			continue
 		}

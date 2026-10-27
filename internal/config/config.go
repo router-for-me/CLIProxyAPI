@@ -112,6 +112,13 @@ type Config struct {
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
+	// ProxyPools declares named outbound proxy pools that auth records can
+	// reference through their "proxy_pool_id" attribute.
+	ProxyPools []ProxyPoolConfig `yaml:"proxy-pools,omitempty" json:"proxy-pools,omitempty"`
+
+	// KunKunBrowser configures the KunKun fingerprint-browser OAuth bridge.
+	KunKunBrowser KunKunBrowserConfig `yaml:"kunkun-browser,omitempty" json:"kunkun-browser,omitempty"`
+
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 

@@ -21,6 +21,17 @@ type TLSConfig = internalconfig.TLSConfig
 type DiscoveryConfig = internalconfig.DiscoveryConfig
 type DiscoveryInterfacesConfig = internalconfig.DiscoveryInterfacesConfig
 type RemoteManagement = internalconfig.RemoteManagement
+
+type ProxyPoolConfig = internalconfig.ProxyPoolConfig
+type ProxyPoolHealthCheckConfig = internalconfig.ProxyPoolHealthCheckConfig
+
+type KunKunBrowserConfig = internalconfig.KunKunBrowserConfig
+
+// ValidateProxyPools validates proxy pool declarations.
+func ValidateProxyPools(pools []ProxyPoolConfig) error {
+	return internalconfig.ValidateProxyPools(pools)
+}
+
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type OAuthModelSetting = internalconfig.OAuthModelSetting
 type PayloadConfig = internalconfig.PayloadConfig

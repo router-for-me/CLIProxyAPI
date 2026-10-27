@@ -77,6 +77,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSessionWithProxy(state, "anthropic", sessionProxyURL)
+	launchKunKunOAuthBrowser("anthropic", sessionProxyURL, authURL)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -241,6 +242,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSessionWithProxy(state, "codex", sessionProxyURL)
+	launchKunKunOAuthBrowser("codex", sessionProxyURL, authURL)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -390,6 +392,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSessionWithProxy(state, "antigravity", sessionProxyURL)
+	launchKunKunOAuthBrowser("antigravity", sessionProxyURL, authURL)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -567,6 +570,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSessionWithProxy(state, "xai", sessionProxyURL)
+	launchKunKunOAuthBrowser("xai", sessionProxyURL, authURL)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -683,6 +687,7 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSessionWithProxy(state, "meta", sessionProxyURL)
+	launchKunKunOAuthBrowser("meta", sessionProxyURL, authURL)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -861,6 +866,7 @@ func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 	}
 
 	RegisterOAuthSessionWithProxy(state, providerName, sessionProxyURL)
+	launchKunKunOAuthBrowser(providerName, sessionProxyURL, authURL)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)

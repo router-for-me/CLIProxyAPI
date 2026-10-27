@@ -212,6 +212,9 @@ type Manager struct {
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
 
+	// proxyPoolResolver expands proxy_pool_id into a concrete Auth.ProxyURL.
+	proxyPoolResolver atomic.Pointer[proxyPoolResolverHolder]
+
 	// apiKeyModelRouting atomically publishes per-auth aliases and configured capabilities.
 	apiKeyModelRouting atomic.Value
 

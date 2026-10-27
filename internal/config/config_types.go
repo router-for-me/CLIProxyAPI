@@ -416,8 +416,21 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first",
+	// "reset-priority".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// ResetPriorityUrgentSeconds is how close a quota reset must be for the
+	// reset-priority strategy to prefer the credential urgently. Default: 900.
+	ResetPriorityUrgentSeconds int `yaml:"reset-priority-urgent-seconds,omitempty" json:"reset-priority-urgent-seconds,omitempty"`
+
+	// ResetPriorityJitterSeconds groups credentials whose reset instants differ
+	// by at most this many seconds and rotates within the group. Default: 60.
+	ResetPriorityJitterSeconds int `yaml:"reset-priority-jitter-seconds,omitempty" json:"reset-priority-jitter-seconds,omitempty"`
+
+	// ResetPriorityFallback selects the non-urgent fallback strategy.
+	// Supported values: "weighted" (default), "round-robin".
+	ResetPriorityFallback string `yaml:"reset-priority-fallback,omitempty" json:"reset-priority-fallback,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
@@ -446,6 +459,69 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+}
+
+// ProxyPoolHealthCheckConfig configures periodic node probing for a proxy pool.
+type ProxyPoolHealthCheckConfig struct {
+	// Enabled turns periodic node probing on or off.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// TestURL is the upstream URL used as the probe target. Only its scheme and
+	// host are used: the probe dials that endpoint through the proxy node.
+	TestURL string `yaml:"test-url,omitempty" json:"test-url,omitempty"`
+
+	// IntervalSeconds is the delay between probe rounds. Default: 60.
+	IntervalSeconds int `yaml:"interval-seconds,omitempty" json:"interval-seconds,omitempty"`
+
+	// TimeoutSeconds bounds a single probe attempt. Default: 5.
+	TimeoutSeconds int `yaml:"timeout-seconds,omitempty" json:"timeout-seconds,omitempty"`
+}
+
+// ProxyPoolConfig declares a named set of interchangeable outbound proxy nodes.
+type ProxyPoolConfig struct {
+	// ID uniquely identifies the pool.
+	ID string `yaml:"id" json:"id"`
+
+	// Strategy controls node assignment: "sticky" (default) or "round-robin".
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// HealthCheck configures optional periodic node probing.
+	HealthCheck ProxyPoolHealthCheckConfig `yaml:"health-check,omitempty" json:"health-check,omitempty"`
+
+	// Nodes lists proxy URLs (http, https, socks5, socks5h).
+	Nodes []string `yaml:"nodes" json:"nodes"`
+}
+
+// KunKunBrowserConfig configures the KunKun fingerprint-browser OAuth bridge.
+// The driver is an optional external process; when it is unavailable or fails,
+// OAuth login falls back to the system browser.
+type KunKunBrowserConfig struct {
+	// Enabled turns the KunKun browser bridge on for OAuth authorization URLs.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// DriverMode selects the launch transport: "cli" (default) or "service".
+	// The "service" mode is reserved and currently reports a clear error.
+	DriverMode string `yaml:"driver-mode,omitempty" json:"driver-mode,omitempty"`
+
+	// ProjectRoot is the KunKun project directory that contains main.py.
+	ProjectRoot string `yaml:"project-root,omitempty" json:"project-root,omitempty"`
+
+	// PythonBin is the interpreter used to run main.py. "uv" inserts
+	// "run python" between the binary and main.py.
+	PythonBin string `yaml:"python-bin,omitempty" json:"python-bin,omitempty"`
+
+	// ProfilesDir is the parent directory for per-profile browser data.
+	ProfilesDir string `yaml:"profiles-dir,omitempty" json:"profiles-dir,omitempty"`
+
+	// DefaultDeviceMode is the fallback device mode (browser, wechat, qq).
+	DefaultDeviceMode string `yaml:"default-device-mode,omitempty" json:"default-device-mode,omitempty"`
+
+	// Headless asks KunKun to launch without a visible window.
+	Headless bool `yaml:"headless,omitempty" json:"headless,omitempty"`
+
+	// LaunchTimeoutSeconds bounds credential acquisition while KunKun runs.
+	// Zero keeps the default of 300 seconds.
+	LaunchTimeoutSeconds int `yaml:"launch-timeout-seconds,omitempty" json:"launch-timeout-seconds,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

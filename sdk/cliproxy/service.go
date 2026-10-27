@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxypool"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
@@ -44,6 +45,11 @@ type Service struct {
 	authRegWaiters         map[string]chan struct{}
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
+
+	// proxyPoolMu guards the proxy pool manager and its applied configuration.
+	proxyPoolMu       sync.Mutex
+	proxyPoolManager  *proxypool.Manager
+	appliedProxyPools []proxypool.Config
 
 	// configPath is the path to the configuration file.
 	configPath string

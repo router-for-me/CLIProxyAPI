@@ -305,6 +305,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 					return nil, errWeight
 				}
 				cliproxyauth.ApplyAuthPriorityMetadata(auth, metadata)
+				cliproxyauth.ApplyProxyPoolMetadata(auth, metadata)
 				if _, inherited := auth.Attributes[cliproxyauth.AttributeFilePriority]; inherited {
 					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 						setter.SetMetadata(auth.Metadata)
@@ -363,6 +364,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	cliproxyauth.ApplyProxyPoolMetadata(auth, metadata)
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return []*cliproxyauth.Auth{auth}, nil
 }

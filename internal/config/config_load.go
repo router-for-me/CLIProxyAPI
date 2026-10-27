@@ -224,6 +224,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	cfg.NormalizeKunKunBrowser()
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate
 	}
@@ -234,6 +235,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	}
 	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := ValidateProxyPools(cfg.ProxyPools); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := ValidateKunKunBrowserConfig(cfg.KunKunBrowser); errValidate != nil {
 		return nil, errValidate
 	}
 	if errValidate := cfg.ValidateCredentialWeights(); errValidate != nil {
