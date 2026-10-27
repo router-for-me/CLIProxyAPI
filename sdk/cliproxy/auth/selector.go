@@ -1724,11 +1724,21 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		}
 	}
 
+	responseAffinityID := ""
+	if res.Options.Metadata != nil {
+		if raw, ok := res.Options.Metadata[cliproxyexecutor.ResponseAffinityIDMetadataKey].(string); ok {
+			responseAffinityID = normalizedSessionCandidate(raw)
+		}
+	}
 	if s.cache == nil {
 		return
 	}
 	if explicitID == "" && s.matcher != nil && res.Options.Metadata != nil {
 		if _, isLCP := res.Options.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey]; isLCP {
+			if res.Success && responseAffinityID != "" {
+				responseKey := ns + "::" + cliproxysession.BoundSessionIdentity("response:"+responseAffinityID) + "::" + nsModel
+				s.cache.SetAliases(res.AuthID, responseKey)
+			}
 			return
 		}
 	}
@@ -1747,12 +1757,6 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	}
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
-	responseAffinityID := ""
-	if res.Options.Metadata != nil {
-		if raw, ok := res.Options.Metadata[cliproxyexecutor.ResponseAffinityIDMetadataKey].(string); ok {
-			responseAffinityID = normalizedSessionCandidate(raw)
-		}
-	}
 	var fallbackKey string
 	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel

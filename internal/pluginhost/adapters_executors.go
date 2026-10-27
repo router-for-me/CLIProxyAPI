@@ -877,7 +877,9 @@ func (a *executorAdapter) observeAndTranslateExecutorStream(ctx context.Context,
 		}
 		return out
 	}
-	in = observeExecutorResponseAffinityID(ctx, prepared.opts.Metadata, in)
+	if prepared.outputFormat == sdktranslator.FormatOpenAIResponse {
+		in = observeExecutorResponseAffinityID(ctx, prepared.opts.Metadata, in)
+	}
 	if reporter == nil {
 		return mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, in))
 	}
@@ -1233,18 +1235,22 @@ func mergeExecutorMetadata(reqMetadata, optsMetadata map[string]any) map[string]
 	return merged
 }
 
-func recordResponseAffinityID(metadata map[string]any, payload []byte) {
+func recordResponseAffinityID(metadata map[string]any, payload []byte) bool {
 	if metadata == nil || len(payload) == 0 {
-		return
+		return false
 	}
 	responseID := strings.TrimSpace(gjson.GetBytes(payload, "response.id").String())
 	if responseID == "" {
 		responseID = strings.TrimSpace(gjson.GetBytes(payload, "id").String())
 	}
-	if responseID != "" {
-		metadata[coreexecutor.ResponseAffinityIDMetadataKey] = responseID
+	if responseID == "" {
+		return false
 	}
+	metadata[coreexecutor.ResponseAffinityIDMetadataKey] = responseID
+	return true
 }
+
+const maxResponseAffinityObserverBufferSize = 1 << 20
 
 func observeExecutorResponseAffinityID(ctx context.Context, metadata map[string]any, input <-chan pluginapi.ExecutorStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
 	if input == nil {
@@ -1272,7 +1278,7 @@ func observeExecutorResponseAffinityID(ctx context.Context, metadata map[string]
 				eventType = strings.TrimSpace(string(bytes.TrimPrefix(line, []byte("event:"))))
 				return
 			}
-			if !bytes.HasPrefix(line, []byte("data:")) {
+			if !bytes.HasPrefix(line, []byte("data:")) || captured {
 				return
 			}
 			payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
@@ -1280,14 +1286,18 @@ func observeExecutorResponseAffinityID(ctx context.Context, metadata map[string]
 				eventData.WriteByte('\n')
 			}
 			eventData.Write(payload)
-			if captured {
-				return
-			}
 			if eventType != "response.completed" && gjson.GetBytes(eventData.Bytes(), "type").String() != "response.completed" {
 				return
 			}
-			recordResponseAffinityID(metadata, eventData.Bytes())
-			captured = true
+			if recordResponseAffinityID(metadata, eventData.Bytes()) {
+				captured = true
+				eventData = bytes.Buffer{}
+				return
+			}
+			if eventData.Len() > maxResponseAffinityObserverBufferSize {
+				eventData = bytes.Buffer{}
+				eventType = ""
+			}
 		}
 
 		for {
@@ -1309,6 +1319,22 @@ func observeExecutorResponseAffinityID(ctx context.Context, metadata map[string]
 					}
 					observeLine(lineBuffer[:index])
 					lineBuffer = lineBuffer[index+1:]
+				}
+				if len(lineBuffer) > 0 && bytes.HasPrefix(lineBuffer, []byte("data:")) {
+					payload := bytes.TrimSpace(bytes.TrimPrefix(lineBuffer, []byte("data:")))
+					if bytes.Equal(payload, []byte("[DONE]")) || gjson.ValidBytes(payload) {
+						observeLine(lineBuffer)
+						lineBuffer = nil
+						eventData = bytes.Buffer{}
+						eventType = ""
+						captured = false
+					}
+				}
+				if len(lineBuffer) > maxResponseAffinityObserverBufferSize {
+					lineBuffer = nil
+					eventData = bytes.Buffer{}
+					eventType = ""
+					captured = false
 				}
 				select {
 				case output <- chunk:

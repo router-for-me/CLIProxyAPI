@@ -1258,6 +1258,52 @@ func TestExecutorAdapterCapturesResponseAffinityIDFromStream(t *testing.T) {
 	}
 }
 
+func TestExecutorAdapterCapturesResponseAffinityIDFromMultilineStream(t *testing.T) {
+	metadata := make(map[string]any)
+	input := make(chan pluginapi.ExecutorStreamChunk, 3)
+	input <- pluginapi.ExecutorStreamChunk{Payload: []byte("event: response.completed\n")}
+	input <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\n")}
+	input <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: \"response\":{\"id\":\"resp_multiline\"}}\n\n")}
+	close(input)
+
+	for range observeExecutorResponseAffinityID(context.Background(), metadata, input) {
+	}
+	if got := metadata[coreexecutor.ResponseAffinityIDMetadataKey]; got != "resp_multiline" {
+		t.Fatalf("response affinity ID = %#v, want %q", got, "resp_multiline")
+	}
+}
+
+func TestExecutorAdapterResponseAffinityObserverBoundsIncompleteFrames(t *testing.T) {
+	metadata := make(map[string]any)
+	input := make(chan pluginapi.ExecutorStreamChunk, 2)
+	input <- pluginapi.ExecutorStreamChunk{Payload: []byte(strings.Repeat("x", maxResponseAffinityObserverBufferSize+1))}
+	input <- pluginapi.ExecutorStreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_after_oversize\"}}\n\n")}
+	close(input)
+
+	for range observeExecutorResponseAffinityID(context.Background(), metadata, input) {
+	}
+	if got := metadata[coreexecutor.ResponseAffinityIDMetadataKey]; got != "resp_after_oversize" {
+		t.Fatalf("response affinity ID = %#v, want %q after oversized frame", got, "resp_after_oversize")
+	}
+}
+
+func TestExecutorAdapterSkipsResponseAffinityObserverForNonResponsesFormat(t *testing.T) {
+	metadata := make(map[string]any)
+	input := make(chan pluginapi.ExecutorStreamChunk, 1)
+	input <- pluginapi.ExecutorStreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_not_observed\"}}")}
+	close(input)
+	prepared := preparedExecutorCall{
+		opts:            coreexecutor.Options{Metadata: metadata},
+		requestedFormat: sdktranslator.FormatOpenAI,
+		outputFormat:    sdktranslator.FormatOpenAI,
+	}
+	for range (&executorAdapter{}).observeAndTranslateExecutorStream(context.Background(), prepared, input, nil) {
+	}
+	if _, ok := metadata[coreexecutor.ResponseAffinityIDMetadataKey]; ok {
+		t.Fatalf("non-Responses stream unexpectedly recorded response affinity ID: %#v", metadata[coreexecutor.ResponseAffinityIDMetadataKey])
+	}
+}
+
 func TestExecutorAdapterCapturesResponseAffinityIDFromJSON(t *testing.T) {
 	metadata := make(map[string]any)
 	recordResponseAffinityID(metadata, []byte(`{"id":"resp_nonstream-affinity","output":[]}`))
