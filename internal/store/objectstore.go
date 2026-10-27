@@ -192,7 +192,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		return "", fmt.Errorf("object store: create auth directory: %w", err)
 	}
 
-	errPersist := persistAcquisitionMirror(ctx, path, func(path string) error {
+	errPersist := persistAcquisitionMirror(ctx, path, auth, func(path string) error {
 		if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
 			if errCodex != nil {
 				return errCodex

@@ -243,7 +243,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
-	errPersist := persistAcquisitionMirror(ctx, path, func(path string) error {
+	errPersist := persistAcquisitionMirror(ctx, path, auth, func(path string) error {
 		if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
 			if errCodex != nil {
 				return errCodex

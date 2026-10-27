@@ -107,7 +107,8 @@ type Auth struct {
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
-	Runtime any `json:"-"`
+	Runtime           any                        `json:"-"`
+	committedAuthFile *committedAuthFileSnapshot `json:"-"`
 
 	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
 	RejectedAccessToken string `json:"-"`

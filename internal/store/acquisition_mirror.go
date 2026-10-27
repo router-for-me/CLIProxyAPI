@@ -14,7 +14,8 @@ import (
 
 // The destination lock excludes refresh writers until the remote commit and local
 // publication finish. Uncommitted credentials never occupy a discoverable JSON path.
-func persistAcquisitionMirror(ctx context.Context, path string, write func(string) error, persist func(string) error, published func()) error {
+func persistAcquisitionMirror(ctx context.Context, path string, auth *cliproxyauth.Auth, write func(string) error, persist func(string) error, published func()) error {
+	auth.BindCommittedAuthFile("", nil)
 	if !cliproxyauth.HasAuthCreationIntent(ctx) {
 		if errWrite := write(path); errWrite != nil {
 			return errWrite
@@ -58,6 +59,10 @@ func persistAcquisitionMirror(ctx context.Context, path string, write func(strin
 		if !stagedInfo.Mode().IsRegular() {
 			return fmt.Errorf("acquired credential must be a regular file")
 		}
+		data, err := os.ReadFile(stagedPath)
+		if err != nil {
+			return fmt.Errorf("read acquired credential: %w", err)
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -67,6 +72,7 @@ func persistAcquisitionMirror(ctx context.Context, path string, write func(strin
 		// The remote commit is authoritative. Reconcile the mirror without turning a
 		// saved login into an OAuth failure if local publication is unavailable.
 		if err := os.Rename(stagedPath, path); err != nil {
+			auth.BindCommittedAuthFile(path, data)
 			log.Warnf("auth store: remote credential commit succeeded but local publication failed: %v", err)
 		} else if published != nil {
 			published()

@@ -13,7 +13,7 @@ import (
 
 func TestAcquisitionRemoteCommitSurvivesMirrorConflict(t *testing.T) {
 	for _, backend := range []string{"git", "object", "postgres"} {
-		for _, mutation := range []string{"rewrite", "replace", "remove", "directory", "create"} {
+		for _, mutation := range []string{"rewrite", "replace", "remove", "directory", "create", "staging-lost"} {
 			t.Run(backend+"/"+mutation, func(t *testing.T) {
 				dir := filepath.Join(t.TempDir(), "workspace", "auths")
 				path := filepath.Join(dir, "device.json")
@@ -22,6 +22,12 @@ func TestAcquisitionRemoteCommitSurvivesMirrorConflict(t *testing.T) {
 				var gitRemote string
 				mutate := func() error {
 					switch mutation {
+					case "staging-lost":
+						staged, err := filepath.Glob(filepath.Join(dir, ".auth-acquisition-*", "credential"))
+						if err != nil || len(staged) != 1 {
+							t.Fatalf("staged credential: %v, %v", staged, err)
+						}
+						return os.Remove(staged[0])
 					case "rewrite", "create":
 						return os.WriteFile(path, []byte(`{"type":"codex","access_token":"independent"}`), 0o600)
 					case "replace":
@@ -78,7 +84,8 @@ func TestAcquisitionRemoteCommitSurvivesMirrorConflict(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				saved, err := s.Save(cliproxyauth.WithAuthCreationIntent(context.Background()), &cliproxyauth.Auth{ID: "device.json", FileName: "device.json", Provider: "codex", Metadata: map[string]any{"type": "codex", "access_token": "committed"}})
+				record := &cliproxyauth.Auth{ID: "device.json", FileName: "device.json", Provider: "codex", Metadata: map[string]any{"type": "codex", "access_token": "committed"}}
+				saved, err := s.Save(cliproxyauth.WithAuthCreationIntent(context.Background()), record)
 				if err != nil || saved != path {
 					t.Errorf("successful remote commit reported save failure: %q, %v", saved, err)
 				}
@@ -87,6 +94,11 @@ func TestAcquisitionRemoteCommitSurvivesMirrorConflict(t *testing.T) {
 					if err != nil || !info.IsDir() {
 						t.Fatalf("publication removed independent directory: %v, %v", info, err)
 					}
+				} else if mutation == "staging-lost" {
+					data, err := os.ReadFile(path)
+					if err != nil || !bytes.Equal(data, original) {
+						t.Fatalf("old mirror should remain readable: %q, %v", data, err)
+					}
 				} else {
 					data, err := os.ReadFile(path)
 					if err != nil || !bytes.Contains(data, []byte(`"committed"`)) {
@@ -94,6 +106,13 @@ func TestAcquisitionRemoteCommitSurvivesMirrorConflict(t *testing.T) {
 					}
 				}
 				expected := `{"access_token":"committed","disabled":false,"type":"codex"}`
+				if mutation == "directory" || mutation == "staging-lost" {
+					if got := record.CommittedAuthFile(saved); string(got) != expected {
+						t.Errorf("notification snapshot = %q, want remotely committed bytes %q", got, expected)
+					}
+				} else if got := record.CommittedAuthFile(saved); len(got) != 0 {
+					t.Errorf("successful publication retained a notification snapshot: %q", got)
+				}
 				if gitRemote != "" {
 					assertRemoteFileContents(t, gitRemote, "master", "auths/device.json", expected)
 				} else if string(remoteBytes) != expected {

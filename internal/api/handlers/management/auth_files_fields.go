@@ -1032,6 +1032,7 @@ func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth)
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
+	record.BindCommittedAuthFile("", nil)
 	savedPath, errSave := store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if errSave != nil {
 		return savedPath, errSave
@@ -1054,7 +1055,11 @@ func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth)
 func (h *Handler) notifyPersistedTokenRecord(ctx context.Context, savedPath string, record *coreauth.Auth) error {
 	if h.postAuthPersistHook != nil {
 		persistedRecord := record
-		if data, errRead := os.ReadFile(savedPath); errRead == nil && len(data) > 0 {
+		data := record.CommittedAuthFile(savedPath)
+		if len(data) == 0 {
+			data, _ = os.ReadFile(savedPath)
+		}
+		if len(data) > 0 {
 			auths, errSynthesize := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
 				Config:           h.configSnapshot(),
 				AuthDir:          filepath.Dir(savedPath),
