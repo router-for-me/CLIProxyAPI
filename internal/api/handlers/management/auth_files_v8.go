@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -111,6 +112,19 @@ func applySessionProxyToAuthRecord(record *coreauth.Auth, proxyURL string) {
 		record.Metadata = make(map[string]any)
 	}
 	record.Metadata["proxy_url"] = proxyURL
+	// Persist the deterministic KunKun sandbox id when this session was launched
+	// through an installed alternate browser launcher. Recomputing from the
+	// record provider and the same session proxy yields the launch-time id. The
+	// value goes into metadata as well so token storages write it to the auth
+	// file; the file synthesizer maps it back into Attributes on reload.
+	if browser.HasLauncher() && strings.TrimSpace(record.Provider) != "" {
+		profileID := browser.DeriveKunKunProfileID(record.Provider, proxyURL)
+		record.Metadata[browser.KunKunProfileIDAttribute] = profileID
+		if record.Attributes == nil {
+			record.Attributes = make(map[string]string)
+		}
+		record.Attributes[browser.KunKunProfileIDAttribute] = profileID
+	}
 	if setter, ok := record.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 		setter.SetMetadata(record.Metadata)
 	}

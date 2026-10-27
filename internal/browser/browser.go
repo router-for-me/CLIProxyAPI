@@ -113,10 +113,12 @@ func OpenURLWithContext(ctx context.Context, url string) error {
 		ctx = context.Background()
 	}
 	if current := currentLauncher(); current != nil {
+		provider := OAuthProviderFromContext(ctx)
+		proxyURL := OAuthProxyURLFromContext(ctx)
 		opts := LaunchOptions{
 			AuthURL:     url,
-			ProxyURL:    OAuthProxyURLFromContext(ctx),
-			ProfileID:   newOAuthProfileID(OAuthProviderFromContext(ctx)),
+			ProxyURL:    proxyURL,
+			ProfileID:   oauthProfileIDForContext(provider, proxyURL),
 			DeviceMode:  "",
 			Headless:    false,
 			UserDataDir: "",
@@ -144,6 +146,17 @@ func openSystemURL(url string) error {
 
 	// Fallback to platform-specific commands
 	return platformOpen(url)
+}
+
+// oauthProfileIDForContext returns a stable sandbox profile id when the OAuth
+// session carries both a provider and a proxy. Without them (for example the CLI
+// login paths, which do not have a session-scoped proxy) the legacy random
+// provider-prefixed identifier is kept.
+func oauthProfileIDForContext(provider, proxyURL string) string {
+	if strings.TrimSpace(provider) != "" && strings.TrimSpace(proxyURL) != "" {
+		return DeriveKunKunProfileID(provider, proxyURL)
+	}
+	return newOAuthProfileID(provider)
 }
 
 // newOAuthProfileID builds a random profile identifier with a provider prefix.

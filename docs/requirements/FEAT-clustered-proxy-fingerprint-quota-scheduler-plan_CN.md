@@ -181,7 +181,7 @@ KunKun 分配设备配置时必须满足：
 4. **`anthropic-ratelimit-reset` 未采集**：解析器支持该头，但采集白名单仅含 `anthropic-ratelimit-unified-*`、`retry-after` 与 Codex 头。有意取舍：以实际观测头为准。影响：仅返回旧头的账号回退到窗口锚点推导。补救：加入采集白名单并补测试。
 5. **旧 management 端点不识别 `reset-priority`**：`/v0/management/routing/strategy` 仍只接受三种旧策略，PUT `reset-priority` 返回 400。有意取舍：该组端点已废弃。影响：只能通过配置文件/热加载启用新策略。补救：迁移到受支持的 v8/新端点。
 6. **网页端 OAuth 双开浏览器**：服务端拉起 KunKun 的同时 Web UI 仍会打开授权 URL。有意取舍：保留 Web UI 兼容逻辑。影响：可能出现两个窗口。补救：前端检测 launcher 状态或服务端返回抑制标志。
-7. **profile_id 未持久化复用**：每次登录生成 `provider-<uuid>`，未写回 `Auth.Attributes["kunkun_profile_id"]`。有意取舍：当前登录阶段没有稳定账号 ID。影响：重登产生新沙盒目录。补救：登录成功后持久化 profile_id 并复用。
+7. **profile_id 未持久化复用**：每次登录生成 `provider-<uuid>`，未写回 `Auth.Attributes["kunkun_profile_id"]`。有意取舍：当前登录阶段没有稳定账号 ID。影响：重登产生新沙盒目录。补救：登录成功后持久化 profile_id 并复用。已于后续 commit 解决：profile id 改为 provider+proxy 确定性派生并回写 Attributes（无代理 CLI 登录除外）。
 8. **OAuth 账号显式代理优先**：登录代理作为 `proxy_url` 落盘，节点故障不会自动池重绑。有意取舍：保证登录/运行 IP 一致。影响：节点失效后不自动切换。补救：记录 pool 来源并在显式代理等于历史节点时允许重解析。
 9. **请求 dial 失败不上报熔断**：`ReportDialResult` 存在但请求链路未调用，健康探针为主输入。有意取舍：避免热路径耦合。影响：探针间隔内仍可能选中故障节点。补救：在 executor/transport dial 错误处上报。
 10. **配置型 API-key 不支持池绑定**：`claude-api-key` 等配置凭据无 Auth 装载路径，无法使用 `proxy_pool_id`。有意取舍：合成路径不携带账号元数据。影响：API-key 多账号无法池化出网。补救：合成 Auth 时映射 `proxy_pool_id` 并复用解析器。
