@@ -19,6 +19,9 @@ type antigravityToInteractionsStreamState struct {
 	Completed       bool
 	Done            bool
 	ActiveStepOpen  bool
+	PendingUsage    gjson.Result
+	HasPendingUsage bool
+	UsageAfterSeen  bool
 	ID              string
 	StepID          string
 	ActiveStepType  string
@@ -48,7 +51,11 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 		if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
 			if !st.Completed {
 				out = appendAntigravityInteractionsStepStop(out, st)
-				out = appendAntigravityInteractionsCompleted(out, st, modelName, gjson.Result{})
+				completedRoot := gjson.Result{}
+				if st.HasPendingUsage {
+					completedRoot = st.PendingUsage
+				}
+				out = appendAntigravityInteractionsCompleted(out, st, modelName, completedRoot)
 			}
 			out = appendAntigravityInteractionsDone(out, st)
 			continue
@@ -67,14 +74,30 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 			out = appendAntigravityPartToInteractionsStream(out, st, part)
 			return true
 		})
-		hasFinish := root.Get("candidates.0.finishReason").Exists()
-		hasUsage := hasAntigravityStreamUsage(root)
+		finishReason := root.Get("candidates.0.finishReason")
+		hasFinish := finishReason.Exists() && strings.TrimSpace(finishReason.String()) != ""
+		frameHasUsage := hasAntigravityStreamUsage(root)
+		if frameHasUsage {
+			st.PendingUsage = root
+			st.HasPendingUsage = true
+			if st.Finished {
+				st.UsageAfterSeen = true
+			}
+		}
 		if hasFinish && !st.Finished {
 			out = appendAntigravityInteractionsStepStop(out, st)
 			st.Finished = true
+			if frameHasUsage {
+				st.UsageAfterSeen = true
+			}
 		}
-		if hasUsage && st.Finished && !st.Completed {
-			out = appendAntigravityInteractionsCompleted(out, st, modelName, root)
+		// Complete only on usage observed at or after the finish frame.
+		// Usage cached from earlier content frames is a fallback for the
+		// explicit [DONE] terminator, not a completion trigger: a later
+		// frame may still carry the final usage.
+		if st.UsageAfterSeen && st.Finished && !st.Completed {
+			out = appendAntigravityInteractionsCompleted(out, st, modelName, st.PendingUsage)
+			out = appendAntigravityInteractionsDone(out, st)
 		}
 	}
 	return out
@@ -111,6 +134,11 @@ func ConvertAntigravityResponseToInteractionsNonStream(ctx context.Context, mode
 
 func antigravityStreamPayloads(rawJSON []byte) [][]byte {
 	trimmed := bytes.TrimSpace(rawJSON)
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		// The bare sentinel is not a JSON array; without this guard the
+		// array branch below misparses it into a bogus payload.
+		return [][]byte{trimmed}
+	}
 	if bytes.HasPrefix(trimmed, []byte("data:")) {
 		return [][]byte{bytes.TrimSpace(trimmed[5:])}
 	}

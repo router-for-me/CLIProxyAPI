@@ -2629,15 +2629,15 @@
       "support_configuration_update": true
     },
     {
-      "id": "gpt-5.5",
+      "id": "gpt-6.1-terra",
       "object": "model",
-      "created": 1776902400,
+      "created": 1792972800,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.0",
+      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+      "context_length": 500000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -2647,7 +2647,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -2659,7 +2660,8 @@
       ],
       "native_capabilities": {
         "web_search": true
-      }
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-terra",
@@ -2771,39 +2773,6 @@
   ],
   "codex-team": [
     {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ],
-      "native_capabilities": {
-        "web_search": true
-      }
-    },
-    {
       "id": "gpt-6-astra",
       "object": "model",
       "created": 1783616400,
@@ -2883,6 +2852,41 @@
       "version": "gpt-6.0",
       "description": "Latest workhorse model for coding and everyday work.",
       "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.0",
+      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+      "context_length": 500000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -3087,39 +3091,6 @@
   ],
   "codex-plus": [
     {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ],
-      "native_capabilities": {
-        "web_search": true
-      }
-    },
-    {
       "id": "gpt-6-astra",
       "object": "model",
       "created": 1783616400,
@@ -3199,6 +3170,41 @@
       "version": "gpt-6.0",
       "description": "Latest workhorse model for coding and everyday work.",
       "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.0",
+      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+      "context_length": 500000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -3403,39 +3409,6 @@
   ],
   "codex-pro": [
     {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ],
-      "native_capabilities": {
-        "web_search": true
-      }
-    },
-    {
       "id": "gpt-6-astra",
       "object": "model",
       "created": 1783616400,
@@ -3515,6 +3488,41 @@
       "version": "gpt-6.0",
       "description": "Latest workhorse model for coding and everyday work.",
       "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.0",
+      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+      "context_length": 500000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -3965,6 +3973,60 @@
       "supportedInputModalities": [
         "text",
         "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k3.1-pro",
+      "object": "model",
+      "created": 1792713600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3.1 Pro",
+      "description": "Kimi K3.1 Pro - Moonshot AI's flagship coding and reasoning model with 1M context window and multimodal input",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k3.1-pro-highspeed",
+      "object": "model",
+      "created": 1792713600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3.1 Pro Highspeed",
+      "description": "Kimi K3.1 Pro Highspeed - High-speed version of Kimi K3.1 Pro with 1M context window and multimodal input",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
       ],
       "supportedOutputModalities": [
         "text"
@@ -4583,6 +4645,103 @@
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
       "context_length": 200000,
       "max_completion_tokens": 32768
+    },
+    {
+      "id": "grok-imagine-image",
+      "object": "model",
+      "created": 1769558400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-image",
+      "name": "grok-imagine-image",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
+      ]
+    },
+    {
+      "id": "grok-imagine-image-2.0",
+      "object": "model",
+      "created": 1786147200,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-image-2.0",
+      "name": "grok-imagine-image-2.0",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
+      ]
+    },
+    {
+      "id": "grok-imagine-image-quality",
+      "object": "model",
+      "created": 1775174400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-image-quality",
+      "name": "grok-imagine-image-quality",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
+      ]
+    },
+    {
+      "id": "grok-imagine-video",
+      "object": "model",
+      "created": 1769558400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-video",
+      "name": "grok-imagine-video",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "video"
+      ]
+    },
+    {
+      "id": "grok-imagine-video-1.5",
+      "object": "model",
+      "created": 1779840000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-video-1.5",
+      "name": "grok-imagine-video-1.5",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "video"
+      ]
+    },
+    {
+      "id": "grok-imagine-video-1.5-lite",
+      "object": "model",
+      "created": 1787702400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Imagine Video 1.5 Lite",
+      "name": "grok-imagine-video-1.5-lite",
+      "description": "xAI Grok Imagine Video 1.5 Lite supports text-to-video and image-to-video generation. Output pricing per second: $0.02 at 480p, $0.03 at 720p, and $0.14 at 1080p.",
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "video"
+      ]
     }
   ],
   "meta": [

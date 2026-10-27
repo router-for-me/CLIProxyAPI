@@ -27,7 +27,11 @@ const (
 // - `function_call` (FunctionCallStep) requires `id` and rejects `call_id`
 // - `function_result` (FunctionResultStep) requires `call_id` and rejects `id`
 // - other steps and content parts do not support `id`
-func SanitizeGeminiInteractionsUnsupportedInputIDs(body []byte) []byte {
+//
+// allowVertexBareTink must be true only for the Vertex AI Interactions endpoint;
+// other endpoints reject Vertex bare-Tink thought signatures, so those thought
+// steps are dropped like any other incompatible signature.
+func SanitizeGeminiInteractionsUnsupportedInputIDs(body []byte, allowVertexBareTink bool) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
 		return body
@@ -51,6 +55,9 @@ func SanitizeGeminiInteractionsUnsupportedInputIDs(body []byte) []byte {
 				sig,
 				signature.SignatureBlockKindGeminiModelPart,
 			)
+			if !allowVertexBareTink && ok && signature.IsGeminiVertexBareTinkSignature(normalizedSig) {
+				ok = false
+			}
 			if !ok || normalizedSig == "" || signature.IsGeminiThoughtSignatureBypass(signature.SignaturePayloadWithoutProviderPrefix(normalizedSig)) {
 				// Official Gemini Interactions API rejects thought steps without a
 				// valid Gemini signature (or with foreign/corrupt base64 signatures

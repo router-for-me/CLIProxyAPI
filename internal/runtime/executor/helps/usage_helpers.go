@@ -720,10 +720,14 @@ func failFromErrors(errs ...error) usage.Failure {
 				body = string(responseBody)
 			}
 		}
-		return usage.Failure{
+		fail := usage.Failure{
 			Body:       body,
 			StatusCode: clienterror.HTTPStatusFromError(err),
 		}
+		if truncatedErr, ok := errors.AsType[cliproxyexecutor.StreamTruncatedError](err); ok && truncatedErr != nil && truncatedErr.IsStreamTruncated() {
+			fail.Code = usage.FailureStreamTruncatedCode
+		}
+		return fail
 	}
 	return usage.Failure{}
 }

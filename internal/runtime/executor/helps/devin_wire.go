@@ -1224,15 +1224,16 @@ func BuildDevinUpstreamLogBody(
 
 // DevinUpstreamResponseLog represents the decoded response frames from Devin Connect-RPC.
 type DevinUpstreamResponseLog struct {
-	Status        string          `json:"status,omitempty"`
-	FramesCount   int             `json:"frames_count"`
-	Content       string          `json:"content,omitempty"`
-	Thinking      string          `json:"thinking,omitempty"`
-	Signature     string          `json:"signature,omitempty"`
-	SignatureType string          `json:"signature_type,omitempty"`
-	ToolCalls     []DevinToolCall `json:"tool_calls,omitempty"`
-	Usage         *DevinUsage     `json:"usage,omitempty"`
-	UnknownFields []int           `json:"unknown_fields,omitempty"`
+	Status                string                      `json:"status,omitempty"`
+	FramesCount           int                         `json:"frames_count"`
+	Content               string                      `json:"content,omitempty"`
+	Thinking              string                      `json:"thinking,omitempty"`
+	Signature             string                      `json:"signature,omitempty"`
+	SignatureType         string                      `json:"signature_type,omitempty"`
+	ToolCalls             []DevinToolCall             `json:"tool_calls,omitempty"`
+	Usage                 *DevinUsage                 `json:"usage,omitempty"`
+	UnknownFields         []int                       `json:"unknown_fields,omitempty"`
+	ApplyPatchDiagnostics *DevinApplyPatchDiagnostics `json:"-"`
 }
 
 // BuildDevinUpstreamResponseLogBody formats the decoded Devin response and the intermediate

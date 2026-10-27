@@ -145,6 +145,7 @@ func isMetaMuseModelName(lower string) bool {
 //
 //	'C' -> 0x08..0x0b : Claude CAIS (0x08)
 //	'E' -> 0x10..0x13 : Claude single-layer (0x12), Gemini protobuf_field_2 (0x12)
+//	'A' -> 0x00..0x03 : Gemini bare-Tink Vertex (0x01)
 //	'Q' -> 0x40..0x43 : Antigravity double-layer CAQS (0x43, inner 'C'), Meta Muse (0x43)
 //	'R' -> 0x44..0x47 : Claude double-layer R (0x45, inner 'E')
 //	'g' -> 0x80..0x83 : GPT Fernet reasoning (0x80)
@@ -160,7 +161,7 @@ func isMetaMuseModelName(lower string) bool {
 // DetectSignatureProviderForBlock, otherwise its signatures would fall through
 // to the residual class. TestSelfDescribingSignatureFirstChars_CoversEveryKnownEnvelope
 // fails when a replay-safe envelope is missing from this set.
-const selfDescribingSignatureFirstChars = "CEQRg"
+const selfDescribingSignatureFirstChars = "ACEQRg"
 
 // base64AlphabetSet builds a byte lookup table for the alphanumeric base64 core
 // plus the alphabet-specific characters in extra. Signature charset validation

@@ -30,8 +30,13 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		endpointPath = xaiDefaultImageEndpointPath
 	}
 
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := normalizeXAIImageRefs(originalPayloadSource)
 	payload := normalizeXAIImageRefs(req.Payload)
-	payload = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), model, "openai", "", req.Payload, req, opts)(payload)
+	payload = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), model, "openai", "", originalPayload, req, opts)(payload)
 	reporter.SetTranslatedRequestMetadata(payload, "openai")
 	url := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))

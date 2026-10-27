@@ -321,7 +321,7 @@ func TestConvertGeminiResponseToInteractionsStreamStepLifecycle(t *testing.T) {
 	callOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"lookup","id":"call_1","args":{"q":"x"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7,"thoughtsTokenCount":2}}`), &param)
 
 	out := append(append(thoughtOut, textOut...), callOut...)
-	if got := eventTypes(out); !bytes.Equal(got, []byte("interaction.created,interaction.status_update,step.start,step.delta,step.stop,step.start,step.delta,step.stop,step.start,step.delta,step.stop,interaction.completed")) {
+	if got := eventTypes(out); !bytes.Equal(got, []byte("interaction.created,interaction.status_update,step.start,step.delta,step.stop,step.start,step.delta,step.stop,step.start,step.delta,step.stop,interaction.completed,done")) {
 		t.Fatalf("event sequence = %s", got)
 	}
 	if got := gjson.GetBytes(findNthEventPayload(out, "step.start", 0), "step.type").String(); got != "thought" {
@@ -374,6 +374,81 @@ func TestConvertGeminiResponseToInteractionsStreamSnakeCaseUsage(t *testing.T) {
 	}
 }
 
+func TestConvertGeminiResponseToInteractionsStreamEmitsDoneAfterUsage(t *testing.T) {
+	var param any
+	out := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}`), &param)
+	if got := countEventType(out, "interaction.completed"); got != 1 {
+		t.Fatalf("interaction.completed count = %d, want 1. Events: %s", got, eventTypes(out))
+	}
+	if got := countEventType(out, "done"); got != 1 {
+		t.Fatalf("done count = %d, want 1. Events: %s", got, eventTypes(out))
+	}
+	completed := findCompletedPayload(out)
+	if got := gjson.GetBytes(completed, "interaction.usage.total_tokens").Int(); got != 5 {
+		t.Fatalf("completed total_tokens = %d, want 5. Payload: %s", got, string(completed))
+	}
+
+	doneOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`[DONE]`), &param)
+	if len(doneOut) != 0 {
+		t.Fatalf("literal [DONE] after completion emitted %q, want no events", doneOut)
+	}
+}
+
+func TestConvertGeminiResponseToInteractionsStreamSplitFinishAndFilteredUsage(t *testing.T) {
+	var param any
+	finishOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`), &param)
+	if got := countEventType(finishOut, "interaction.completed"); got != 0 {
+		t.Fatalf("finish interaction.completed count = %d, want 0", got)
+	}
+	usageOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[],"cpaUsageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}}`), &param)
+	if got := countEventType(usageOut, "interaction.completed"); got != 1 {
+		t.Fatalf("usage interaction.completed count = %d, want 1. Events: %s", got, eventTypes(usageOut))
+	}
+	if got := countEventType(usageOut, "done"); got != 1 {
+		t.Fatalf("usage done count = %d, want 1. Events: %s", got, eventTypes(usageOut))
+	}
+	completed := findCompletedPayload(usageOut)
+	if got := gjson.GetBytes(completed, "interaction.usage.total_tokens").Int(); got != 33 {
+		t.Fatalf("completed total_tokens = %d, want 33. Payload: %s", got, string(completed))
+	}
+}
+
+func TestConvertGeminiResponseToInteractionsStreamWaitsForPostFinishUsage(t *testing.T) {
+	var param any
+	contentOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":1,"totalTokenCount":1}}`), &param)
+	finishOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}]}`), &param)
+	for _, out := range [][][]byte{contentOut, finishOut} {
+		joined := bytes.Join(out, nil)
+		if bytes.Contains(joined, []byte("interaction.completed")) || bytes.Contains(joined, []byte("[DONE]")) {
+			t.Fatalf("stream completed before the post-finish usage frame: %q", joined)
+		}
+	}
+	usageOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}}`), &param)
+	if got := countEventType(usageOut, "interaction.completed"); got != 1 {
+		t.Fatalf("usage interaction.completed count = %d, want 1. Events: %s", got, eventTypes(usageOut))
+	}
+	if got := countEventType(usageOut, "done"); got != 1 {
+		t.Fatalf("usage done count = %d, want 1. Events: %s", got, eventTypes(usageOut))
+	}
+	completed := findCompletedPayload(usageOut)
+	if got := gjson.GetBytes(completed, "interaction.usage.total_tokens").Int(); got != 33 {
+		t.Fatalf("completed total_tokens = %d, want 33 (final usage, not the intermediate frame). Payload: %s", got, string(completed))
+	}
+}
+
+func TestConvertGeminiResponseToInteractionsStreamIgnoresEmptyFinishReason(t *testing.T) {
+	for _, finishReason := range []string{"", " "} {
+		var param any
+		out := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"`+finishReason+`"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}`), &param)
+		if got := countEventType(out, "interaction.completed"); got != 0 {
+			t.Fatalf("finishReason %q: interaction.completed count = %d, want 0", finishReason, got)
+		}
+		if got := countEventType(out, "done"); got != 0 {
+			t.Fatalf("finishReason %q: done count = %d, want 0", finishReason, got)
+		}
+	}
+}
+
 func TestConvertGeminiResponseToInteractionsStreamEmitsTerminalOnce(t *testing.T) {
 	var param any
 	finishOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[{"finishReason":"STOP"}]}`), &param)
@@ -392,14 +467,17 @@ func TestConvertGeminiResponseToInteractionsStreamEmitsTerminalOnce(t *testing.T
 	if got := countEventType(usageOut, "interaction.completed"); got != 1 {
 		t.Fatalf("usage interaction.completed count = %d, want 1", got)
 	}
+	if got := countEventType(usageOut, "done"); got != 1 {
+		t.Fatalf("usage done count = %d, want 1", got)
+	}
 	if got := countEventType(doneOut, "interaction.completed"); got != 0 {
 		t.Fatalf("done interaction.completed count = %d, want 0", got)
 	}
-	if got := countEventType(doneOut, "done"); got != 1 {
-		t.Fatalf("done event count = %d, want 1", got)
+	if got := countEventType(doneOut, "done"); got != 0 {
+		t.Fatalf("done event count = %d, want 0 after usage already terminated the stream", got)
 	}
-	if payload := findEventPayload(doneOut, "done"); string(payload) != "[DONE]" {
-		t.Fatalf("done payload = %q, want [DONE]", string(payload))
+	if len(doneOut) != 0 {
+		t.Fatalf("literal [DONE] after completion emitted %q, want no events", doneOut)
 	}
 	payload := findCompletedPayload(usageOut)
 	if got := gjson.GetBytes(payload, "interaction.usage.total_tokens").Int(); got != 3 {
@@ -417,6 +495,10 @@ func TestConvertGeminiResponseToInteractionsStreamDoesNotCompleteOnNonTerminalUs
 		t.Fatalf("thought step.stop count = %d, want 0. Events: %s", got, eventTypes(thoughtOut))
 	}
 
+	if got := countEventType(thoughtOut, "done"); got != 0 {
+		t.Fatalf("thought done count = %d, want 0. Events: %s", got, eventTypes(thoughtOut))
+	}
+
 	textOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash-low", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"好的，我将为您调用天气查询工具。"}]}}],"usageMetadata":{"promptTokenCount":124,"candidatesTokenCount":17,"totalTokenCount":452,"thoughtsTokenCount":311}}`), &param)
 	callOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash-low", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"location":"北京"},"id":"nriii75p"}}]}}],"usageMetadata":{"promptTokenCount":124,"candidatesTokenCount":33,"totalTokenCount":468,"thoughtsTokenCount":311}}`), &param)
 	finishOut := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash-low", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":124,"candidatesTokenCount":33,"totalTokenCount":468,"thoughtsTokenCount":311}}`), &param)
@@ -425,7 +507,10 @@ func TestConvertGeminiResponseToInteractionsStreamDoesNotCompleteOnNonTerminalUs
 	if got := countEventType(out, "interaction.completed"); got != 1 {
 		t.Fatalf("interaction.completed count = %d, want 1. Events: %s", got, eventTypes(out))
 	}
-	if got := eventTypes(out); !bytes.Equal(got, []byte("interaction.created,interaction.status_update,step.start,step.delta,step.stop,step.start,step.delta,step.stop,step.start,step.delta,step.stop,interaction.completed")) {
+	if got := countEventType(out, "done"); got != 1 {
+		t.Fatalf("done count = %d, want 1. Events: %s", got, eventTypes(out))
+	}
+	if got := eventTypes(out); !bytes.Equal(got, []byte("interaction.created,interaction.status_update,step.start,step.delta,step.stop,step.start,step.delta,step.stop,step.start,step.delta,step.stop,interaction.completed,done")) {
 		t.Fatalf("event sequence = %s", got)
 	}
 	payload := findCompletedPayload(out)

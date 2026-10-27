@@ -162,6 +162,116 @@ func TestRPCCapabilitiesIncludeModelRouter(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeRequestInterceptorOmitBody(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				return pluginapi.RequestInterceptResponse{}, nil
+			}),
+			RequestInterceptorOmitBodyBefore: true,
+			RequestInterceptorOmitBodyAfter:  true,
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.RequestInterceptor {
+		t.Fatal("RequestInterceptor = false, want true")
+	}
+	if !caps.RequestInterceptorOmitBodyBefore || !caps.RequestInterceptorOmitBodyAfter {
+		t.Fatal("RequestInterceptorOmitBody flags not propagated")
+	}
+
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["request_interceptor_omit_body_before"] != true {
+		t.Fatalf("request_interceptor_omit_body_before = %#v, want true", decoded["request_interceptor_omit_body_before"])
+	}
+	if decoded["request_interceptor_omit_body_after"] != true {
+		t.Fatalf("request_interceptor_omit_body_after = %#v, want true", decoded["request_interceptor_omit_body_after"])
+	}
+}
+
+func TestRPCRequestInterceptorOmitsBodyOnTheWireForSchema7(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		omitBefore bool
+		omitAfter  bool
+		wantBefore int
+		wantAfter  int
+	}{
+		{name: "both phases", omitBefore: true, omitAfter: true, wantBefore: 0, wantAfter: 0},
+		{name: "before only", omitBefore: true, wantBefore: 0, wantAfter: len("request")},
+		{name: "after only", omitAfter: true, wantBefore: len("request"), wantAfter: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := &phaseRecordingInterceptor{}
+			plugin := validTestPlugin("omit-wire")
+			plugin.Capabilities.RequestInterceptor = recorder
+			plugin.Capabilities.RequestInterceptorOmitBodyBefore = tc.omitBefore
+			plugin.Capabilities.RequestInterceptorOmitBodyAfter = tc.omitAfter
+			lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+			lookup.schemaVersion = pluginabi.SchemaVersionRequestInterceptorOmitBody
+
+			registered, errRegister := registerRPCPlugin(context.Background(), nil, "omit-wire", lookup, pluginabi.MethodPluginRegister, nil)
+			if errRegister != nil {
+				t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+			}
+			if registered.SchemaVersion != pluginabi.SchemaVersionRequestInterceptorOmitBody {
+				t.Fatalf("registered SchemaVersion = %d, want %d", registered.SchemaVersion, pluginabi.SchemaVersionRequestInterceptorOmitBody)
+			}
+			if registered.Capabilities.RequestInterceptorOmitBodyBefore != tc.omitBefore || registered.Capabilities.RequestInterceptorOmitBodyAfter != tc.omitAfter {
+				t.Fatalf("registered omit flags = before:%v after:%v, want before:%v after:%v", registered.Capabilities.RequestInterceptorOmitBodyBefore, registered.Capabilities.RequestInterceptorOmitBodyAfter, tc.omitBefore, tc.omitAfter)
+			}
+			host := newHostWithRecords(capabilityRecord{id: "omit-wire", plugin: registered})
+			_ = host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{RequestID: "req-before", Body: []byte("request")})
+			if recorder.beforeCalls != 1 {
+				t.Fatalf("wire before calls = %d, want 1", recorder.beforeCalls)
+			}
+			if recorder.beforeGot.RequestID != "req-before" {
+				t.Fatalf("wire before RequestID = %q, want req-before", recorder.beforeGot.RequestID)
+			}
+			if len(recorder.beforeGot.Body) != tc.wantBefore {
+				t.Fatalf("wire before body len = %d, want %d", len(recorder.beforeGot.Body), tc.wantBefore)
+			}
+			_ = host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{RequestID: "req-after", Body: []byte("request")})
+			if recorder.afterCalls != 1 {
+				t.Fatalf("wire after calls = %d, want 1", recorder.afterCalls)
+			}
+			if recorder.afterGot.RequestID != "req-after" {
+				t.Fatalf("wire after RequestID = %q, want req-after", recorder.afterGot.RequestID)
+			}
+			if len(recorder.afterGot.Body) != tc.wantAfter {
+				t.Fatalf("wire after body len = %d, want %d", len(recorder.afterGot.Body), tc.wantAfter)
+			}
+		})
+	}
+}
+
+type phaseRecordingInterceptor struct {
+	beforeGot   pluginapi.RequestInterceptRequest
+	afterGot    pluginapi.RequestInterceptRequest
+	beforeCalls int
+	afterCalls  int
+}
+
+func (p *phaseRecordingInterceptor) InterceptRequestBeforeAuth(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	p.beforeCalls++
+	p.beforeGot = req
+	return pluginapi.RequestInterceptResponse{}, nil
+}
+
+func (p *phaseRecordingInterceptor) InterceptRequestAfterAuth(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	p.afterCalls++
+	p.afterGot = req
+	return pluginapi.RequestInterceptResponse{}, nil
+}
+
 func TestRPCCapabilitiesIncludeQuotaProvider(t *testing.T) {
 	plugin := pluginapi.Plugin{
 		Capabilities: pluginapi.Capabilities{

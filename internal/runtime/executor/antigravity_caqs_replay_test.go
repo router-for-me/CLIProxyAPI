@@ -23,7 +23,7 @@ import (
 )
 
 func TestAntigravityExecutorCAQSTwoTurnReplay(t *testing.T) {
-	sig := signaturetest.AntigravityCAQS()
+	sig := signaturetest.AntigravityCAQSWithChannel(19)
 	previousCache, previousStrict := cache.SignatureCacheEnabled(), cache.SignatureBypassStrictMode()
 	t.Cleanup(func() {
 		cache.SetSignatureCacheEnabled(previousCache)

@@ -112,6 +112,14 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
+	// RequestInterceptorOmitBodyBefore opts out of receiving RequestInterceptRequest.Body
+	// in InterceptRequestBeforeAuth. It is honored only on schema version 7+; the plugin
+	// may still replace the body blindly via RequestInterceptResponse.Body.
+	RequestInterceptorOmitBodyBefore bool
+	// RequestInterceptorOmitBodyAfter opts out of receiving RequestInterceptRequest.Body
+	// in InterceptRequestAfterAuth. It is honored only on schema version 7+; the plugin
+	// may still replace the body blindly via RequestInterceptResponse.Body.
+	RequestInterceptorOmitBodyAfter bool
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.

@@ -67,6 +67,9 @@ server:
 
   # Enable local network mDNS / DNS-SD service discovery (RFC 6762 / RFC 6763).
   # When enabled, broadcasts _ai-gateway._tcp with API protocol subtypes on the local network.
+  # TXT records follow draft-su-ai-gateway-discovery-00:
+  #   txtvers, path, tls, auth, protocols, auth_type, product, id, role
+  # The TXT protocols list mirrors the advertised subtypes. Management endpoints are never advertised.
   # NOTE for Docker users: Link-local multicast (224.0.0.251) cannot cross default NAT bridge networks.
   # To broadcast across the physical LAN, run the container with host networking (--net=host / network_mode: host).
   discovery:
@@ -79,12 +82,12 @@ server:
     #   - "_messages"
     #   - "_generate-content"
     #   - "_interactions"
+    #   # Optional extended subtypes: _completions, _responses-ws, _realtime, _images,
+    #   # _videos, _audio, _count-tokens, _search
     # interfaces:
     #   include: []                     # White-listed interfaces (empty: auto-detect physical interfaces)
     #   exclude: []                     # Additional interface patterns to exclude
-    # auth-required: true               # Advertise that credentials are required
-
-    # advertise-management: false      # Advertise management availability
+    # auth-required: true               # Advertise auth=1 (credentials required)
 
 # Management API settings
 management:

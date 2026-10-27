@@ -79,10 +79,18 @@ type Record struct {
 	ResponseHeaders http.Header
 }
 
+// FailureStreamTruncatedCode marks a locally synthesized failure for an
+// accepted upstream stream that ended without its terminal frame.
+const FailureStreamTruncatedCode = "stream_truncated"
+
 // Failure holds HTTP failure metadata for an upstream request attempt.
 type Failure struct {
 	StatusCode int
 	Body       string
+	// Code carries structured failure classification (e.g. FailureStreamTruncatedCode)
+	// across usage sinks so downstream schedulers do not treat locally
+	// synthesized statuses as received upstream refusals.
+	Code string
 }
 
 // Detail holds the token usage breakdown.

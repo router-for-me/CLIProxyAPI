@@ -2,6 +2,7 @@ package signature
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -415,4 +416,29 @@ func TestDecideSignatureCompatibility_GrokDropsBlock(t *testing.T) {
 	if decision.Action != SignatureActionDropBlock {
 		t.Errorf("Action = %q, want %q", decision.Action, SignatureActionDropBlock)
 	}
+}
+
+func TestInspectGrokEncryptedContent_AcceptsPayloadStartingWithTinkPrefixByte(t *testing.T) {
+	// Uniform xAI ciphertext starts with 0x01 about once in 256 values; that
+	// alone must not make it look like a Gemini Vertex bare-Tink signature.
+	for seed := 0; seed < 4096; seed++ {
+		buf := make([]byte, 0, 256)
+		for i := 0; len(buf) < 256; i++ {
+			sum := sha256.Sum256([]byte{byte(seed), byte(seed >> 8), byte(i)})
+			buf = append(buf, sum[:]...)
+		}
+		buf = buf[:256]
+		if buf[0] != 0x01 {
+			continue
+		}
+		sig := base64.RawStdEncoding.EncodeToString(buf)
+		if _, err := InspectGrokEncryptedContent(sig); err != nil {
+			t.Fatalf("seed %d: Grok payload starting with 0x01 rejected: %v", seed, err)
+		}
+		if got := DetectSignatureProvider(sig); got != SignatureProviderUnknown {
+			t.Fatalf("seed %d: DetectSignatureProvider = %q, want unknown", seed, got)
+		}
+		return
+	}
+	t.Fatal("no synthetic payload starting with 0x01 found")
 }

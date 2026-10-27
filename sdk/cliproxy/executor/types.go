@@ -44,6 +44,8 @@ const (
 	SelectedAuthIndexMetadataKey = "selected_auth_index"
 	// SelectedAuthIndexCallbackMetadataKey carries an optional callback invoked with the selected auth index.
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
+	// FinalizedResponseFormatCallbackMetadataKey carries an optional callback invoked with the effective response_format after payload rules.
+	FinalizedResponseFormatCallbackMetadataKey = "finalized_response_format_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
 	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
@@ -287,4 +289,23 @@ type StatusError interface {
 type RequestScopedError interface {
 	error
 	IsRequestScoped() bool
+}
+
+// StreamTruncatedError identifies a locally synthesized failure for an
+// accepted upstream stream that ended without its terminal frame. The
+// upstream generation was already submitted, so auth managers must not cool
+// the credential or replay the request on another credential because of it.
+type StreamTruncatedError interface {
+	error
+	IsStreamTruncated() bool
+}
+
+// TransientRateLimitError identifies a transient per-model capacity or
+// admission rejection (for example a Codex turn_rate_limit_exceeded 429).
+// The credential's plan quota is not exhausted, so auth managers must not
+// record quota exhaustion or advance the quota exponential backoff for it.
+// The rejecting model may still cool until any provider RetryAfter hint.
+type TransientRateLimitError interface {
+	error
+	IsTransientRateLimit() bool
 }

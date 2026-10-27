@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -95,19 +96,19 @@ func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig, m
 
 func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
 	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingBudget")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_budget")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
+	result, _ := util.DeleteJSONBytesIfExists(body, "request.generationConfig.thinkingConfig.thinkingBudget")
+	result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig.thinking_budget")
+	result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig.thinking_level")
 	// Normalize includeThoughts field name and retain only documented booleans.
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.includeThoughts")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
+	result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig.includeThoughts")
+	result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
 		if config.Budget == 0 && config.Level == "" {
 			// With the amount fully disabled, visibility is irrelevant. Restoring
 			// includeThoughts alone would recreate thinkingConfig and let a
 			// default-on model think again.
-			result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig")
+			result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig")
 			return result, nil
 		}
 		if config.Level != "" {
@@ -128,12 +129,12 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 
 func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) ([]byte, error) {
 	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingLevel")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_budget")
+	result, _ := util.DeleteJSONBytesIfExists(body, "request.generationConfig.thinkingConfig.thinkingLevel")
+	result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig.thinking_level")
+	result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig.thinking_budget")
 	// Normalize includeThoughts field name and retain only documented booleans.
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.includeThoughts")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
+	result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig.includeThoughts")
+	result, _ = util.DeleteJSONBytesIfExists(result, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	budget := config.Budget
 
@@ -194,7 +195,7 @@ func (a *Applier) normalizeClaudeBudget(budget int, payload []byte, modelInfo *r
 	}
 	if minBudget > 0 && budget >= 0 && budget < minBudget {
 		// Budget is below minimum, remove thinking config entirely
-		payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig")
+		payload, _ = util.DeleteJSONBytesIfExists(payload, "request.generationConfig.thinkingConfig")
 		return -2, payload
 	}
 

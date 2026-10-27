@@ -278,9 +278,13 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
+			roundTiming.Observe(errExecute)
 			lastErr = errExecute
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
+					errExecute = annotateTrustedRetryAfterByHint(errExecute)
+					syncPreferredUpstreamError(&upstreamErr, errExecute)
+					lastErr = errExecute
 					releaseAttempt()
 					selection.End("request_stopped")
 					return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)

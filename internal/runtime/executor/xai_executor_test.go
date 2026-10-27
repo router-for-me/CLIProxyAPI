@@ -3788,6 +3788,63 @@ func TestXAIExecutorExecuteImagesUsesEditsEndpoint(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorExecuteImagesPayloadDefaultUsesOriginalRequest(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"url":"https://x.ai/image.png"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Default: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "grok-imagine-*"}},
+				Params: map[string]any{
+					"response_format": "url",
+					"aspect_ratio":    "16:9",
+					"resolution":      "2k",
+				},
+			}},
+		},
+	}
+	exec := NewXAIExecutor(cfg)
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-image",
+		Payload: []byte(`{"model":"grok-imagine-image","prompt":"draw","response_format":"b64_json","aspect_ratio":"1:1","resolution":"1k"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai-image"),
+		OriginalRequest: []byte(`{"model":"grok-imagine-image","prompt":"draw"}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+
+	if got := gjson.GetBytes(gotBody, "response_format").String(); got != "url" {
+		t.Fatalf("response_format = %q, want url; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "aspect_ratio").String(); got != "16:9" {
+		t.Fatalf("aspect_ratio = %q, want 16:9; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k; body=%s", got, gotBody)
+	}
+}
+
 func TestNormalizeXAIImageRefsRewritesImageURLField(t *testing.T) {
 	t.Parallel()
 

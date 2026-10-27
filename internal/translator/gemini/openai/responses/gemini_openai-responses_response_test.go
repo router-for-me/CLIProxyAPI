@@ -26,6 +26,209 @@ func parseSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
 	return event, gjson.Parse(dataLine)
 }
 
+func TestConvertGeminiResponseToOpenAIResponses_VertexStreamingPartialArgs(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	chunks := []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_1"}`,
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.city","stringValue":"York"}],"willContinue":true}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_1"}`,
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15},"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_1"}`,
+	}
+
+	var (
+		deltas      []string
+		doneArgs    string
+		itemArgs    string
+		doneInChunk = -1
+	)
+	for chunkIdx, line := range chunks {
+		events := ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte(line), &param)
+		for _, ev := range events {
+			name, data := parseSSEEvent(t, ev)
+			switch name {
+			case "response.function_call_arguments.delta":
+				deltas = append(deltas, data.Get("delta").String())
+			case "response.function_call_arguments.done":
+				doneInChunk = chunkIdx
+				doneArgs = data.Get("arguments").String()
+			case "response.output_item.done":
+				if data.Get("item.type").String() == "function_call" {
+					itemArgs = data.Get("item.arguments").String()
+				}
+			}
+		}
+	}
+	if doneInChunk != 2 {
+		t.Fatalf("function_call_arguments.done emitted in chunk %d, want chunk 2", doneInChunk)
+	}
+	if got := strings.Join(deltas, ""); got != `{"city":"New York"}` {
+		t.Fatalf("concatenated argument deltas = %q, want %q", got, `{"city":"New York"}`)
+	}
+	if doneArgs != `{"city":"New York"}` {
+		t.Fatalf("done arguments = %q, want %q", doneArgs, `{"city":"New York"}`)
+	}
+	if itemArgs != `{"city":"New York"}` {
+		t.Fatalf("output_item.done arguments = %q, want %q", itemArgs, `{"city":"New York"}`)
+	}
+
+	t.Run("multiple same-name calls, complex paths, and thought signature", func(t *testing.T) {
+		var p any
+		streamLines := []string{
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_before","functionCall":{"name":"query_db","partialArgs":[{"jsonPath":"$.filter.tags[0]","stringValue":"go","willContinue":true}],"willContinue":true}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_2"}`,
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.filter.tags[0]","stringValue":"lang"},{"jsonPath":"$.filter.tags[1]","stringValue":"ai"},{"jsonPath":"$.limit","numberValue":0},{"jsonPath":"$.strict","boolValue":false},{"jsonPath":"$.cursor","nullValue":null}],"willContinue":true}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_2"}`,
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_after","functionCall":{}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_2"}`,
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"query_db","partialArgs":[{"jsonPath":"$.filter.tags[0]","stringValue":"rust"}],"willContinue":true}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_2"}`,
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15},"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_2"}`,
+		}
+
+		deltasByOutput := make(map[int64]*strings.Builder)
+		doneByOutput := make(map[int64]string)
+		var funcCallIDs []string
+		var reasoningCount int
+		var sawCompleted bool
+
+		for _, line := range streamLines {
+			for _, ev := range ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte(line), &p) {
+				evName, data := parseSSEEvent(t, ev)
+				switch evName {
+				case "response.output_item.added":
+					if data.Get("item.type").String() == "function_call" {
+						funcCallIDs = append(funcCallIDs, data.Get("item.call_id").String())
+					}
+				case "response.function_call_arguments.delta":
+					idx := data.Get("output_index").Int()
+					if deltasByOutput[idx] == nil {
+						deltasByOutput[idx] = &strings.Builder{}
+					}
+					deltasByOutput[idx].WriteString(data.Get("delta").String())
+				case "response.function_call_arguments.done":
+					doneByOutput[data.Get("output_index").Int()] = data.Get("arguments").String()
+				case "response.output_item.done":
+					if data.Get("item.type").String() == "reasoning" {
+						reasoningCount++
+					}
+				case "response.completed":
+					sawCompleted = true
+				}
+			}
+		}
+
+		if len(funcCallIDs) != 2 || funcCallIDs[0] == funcCallIDs[1] {
+			t.Fatalf("expected 2 distinct function_call items, got %v", funcCallIDs)
+		}
+		if reasoningCount != 2 {
+			t.Fatalf("expected 2 detached reasoning signature items, got %d", reasoningCount)
+		}
+		if !sawCompleted {
+			t.Fatalf("expected response.completed event")
+		}
+		wantByOutput := map[int64]string{
+			1: `{"filter":{"tags":["golang","ai"]},"limit":0,"strict":false,"cursor":null}`,
+			3: `{"filter":{"tags":["rust"]}}`,
+		}
+		for idx, want := range wantByOutput {
+			if gotDone := doneByOutput[idx]; gotDone != want {
+				t.Fatalf("output_index %d done = %q, want %q", idx, gotDone, want)
+			}
+			if gotDelta := deltasByOutput[idx].String(); gotDelta != want {
+				t.Fatalf("output_index %d concatenated deltas = %q, want %q", idx, gotDelta, want)
+			}
+		}
+	})
+
+	t.Run("single-chunk willContinue false parameterless call and empty partialArgs with complete args", func(t *testing.T) {
+		var p1 any
+		evs1 := ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"ping","willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7},"modelVersion":"gemini-2.5-pro","responseId":"resp_ping"}`), &p1)
+		var pingDone string
+		for _, ev := range evs1 {
+			evName, data := parseSSEEvent(t, ev)
+			if evName == "response.function_call_arguments.done" {
+				pingDone = data.Get("arguments").String()
+			}
+		}
+		if pingDone != "{}" {
+			t.Fatalf("ping done arguments = %q, want {}", pingDone)
+		}
+
+		var p2 any
+		evs2 := ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris"},"partialArgs":[]}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7},"modelVersion":"gemini-2.5-pro","responseId":"resp_args"}`), &p2)
+		var argsDone string
+		for _, ev := range evs2 {
+			evName, data := parseSSEEvent(t, ev)
+			if evName == "response.function_call_arguments.done" {
+				argsDone = data.Get("arguments").String()
+			}
+		}
+		if argsDone != `{"city":"Paris"}` {
+			t.Fatalf("args fallback done = %q", argsDone)
+		}
+	})
+
+	t.Run("continuation chunk repeating tool name without id continues active call", func(t *testing.T) {
+		var p any
+		lines := []string{
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_repeat_name"}`,
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"York"}],"willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15},"modelVersion":"gemini-2.5-pro","responseId":"resp_repeat_name"}`,
+		}
+		var evs [][]byte
+		for _, l := range lines {
+			evs = append(evs, ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte(l), &p)...)
+		}
+		var doneArgs string
+		var sawCompleted bool
+		for _, ev := range evs {
+			evName, data := parseSSEEvent(t, ev)
+			if evName == "response.function_call_arguments.done" {
+				doneArgs = data.Get("arguments").String()
+			}
+			if evName == "response.completed" {
+				sawCompleted = true
+			}
+		}
+		if doneArgs != `{"city":"New York"}` {
+			t.Fatalf("doneArgs = %q, want %q", doneArgs, `{"city":"New York"}`)
+		}
+		if !sawCompleted {
+			t.Fatalf("expected response.completed")
+		}
+	})
+
+	t.Run("replaced unfinished call does not fabricate done or completed", func(t *testing.T) {
+		var p any
+		lines := []string{
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_a","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_replace"}`,
+			`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_b","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"LA"}],"willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15},"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_replace"}`,
+		}
+		var evs [][]byte
+		for _, l := range lines {
+			evs = append(evs, ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte(l), &p)...)
+		}
+		evs = append(evs, ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte("[DONE]"), &p)...)
+		for _, ev := range evs {
+			evName, data := parseSSEEvent(t, ev)
+			if evName == "response.completed" {
+				t.Fatalf("unexpected response.completed when call_a never finished: %s", data.Raw)
+			}
+			if evName == "response.function_call_arguments.done" && data.Get("item_id").String() == "fc_call_a" {
+				t.Fatalf("unexpected function_call_arguments.done for unfinished call_a: %s", data.Raw)
+			}
+		}
+	})
+
+	t.Run("interrupted stream does not fabricate done or completed", func(t *testing.T) {
+		var p any
+		line := `data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_partial_trunc"}`
+		evs := ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte(line), &p)
+		evs = append(evs, ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-2.5-pro", nil, nil, []byte("[DONE]"), &p)...)
+		for _, ev := range evs {
+			evName, _ := parseSSEEvent(t, ev)
+			if evName == "response.function_call_arguments.done" || evName == "response.completed" {
+				t.Fatalf("unexpected %s event on interrupted stream", evName)
+			}
+		}
+	})
+}
+
 func TestConvertGeminiResponseToOpenAIResponsesOutputTokensIncludeThoughts(t *testing.T) {
 	var param any
 	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63},"modelVersion":"gemini-3.6-flash","responseId":"resp_usage"}`)

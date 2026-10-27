@@ -610,3 +610,52 @@ func TestSanitizeGeminiRequestThoughtSignatures_MixedToolCallAndUnsignedFunction
 		t.Fatalf("functionCall signature = %q, want bypass %q. Output: %s", got, GeminiSkipThoughtSignatureValidator, string(out))
 	}
 }
+
+func bareTinkReplayPayload(sig string) []byte {
+	return []byte(`{"contents":[` +
+		`{"role":"user","parts":[{"text":"list"}]},` +
+		`{"role":"model","parts":[` +
+		`{"text":"thinking","thought":true},` +
+		`{"functionCall":{"name":"list_dir","args":{"path":"."}},"thoughtSignature":"` + sig + `"}]},` +
+		`{"role":"user","parts":[{"functionResponse":{"name":"list_dir","response":{"files":[]}}}]},` +
+		`{"role":"model","parts":[{"text":"done","thoughtSignature":"` + sig + `"}]}]}`)
+}
+
+func TestSanitizeGeminiRequestThoughtSignatures_PreservesVertexBareTink(t *testing.T) {
+	sig := testGeminiBareTinkSignature(405)
+	out := SanitizeGeminiRequestThoughtSignatures(bareTinkReplayPayload(sig), "contents")
+
+	if got := gjson.GetBytes(out, "contents.1.parts.1.thoughtSignature").String(); got != sig {
+		t.Fatalf("functionCall signature = %q, want original bare-Tink value", got)
+	}
+	if got := gjson.GetBytes(out, "contents.3.parts.0.thoughtSignature").String(); got != sig {
+		t.Fatalf("text signature = %q, want original bare-Tink value", got)
+	}
+}
+
+func TestSanitizeNonVertexGeminiRequestThoughtSignatures_ReplacesVertexBareTink(t *testing.T) {
+	sig := testGeminiBareTinkSignature(405)
+	out := SanitizeNonVertexGeminiRequestThoughtSignatures(bareTinkReplayPayload(sig), "contents")
+
+	if got := gjson.GetBytes(out, "contents.1.parts.1.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("functionCall signature = %q, want bypass sentinel", got)
+	}
+	if gjson.GetBytes(out, "contents.3.parts.0.thoughtSignature").Exists() {
+		t.Fatalf("text signature should be dropped: %s", out)
+	}
+	if got := gjson.GetBytes(out, "contents.1.parts.0.thought").Bool(); !got {
+		t.Fatalf("thought part must stay untouched: %s", out)
+	}
+}
+
+func TestSanitizeNonVertexGeminiRequestThoughtSignatures_PreservesWrappedEnvelope(t *testing.T) {
+	sig := testGeminiThoughtSignatureEnvelope()
+	out := SanitizeNonVertexGeminiRequestThoughtSignatures(bareTinkReplayPayload(sig), "contents")
+
+	if got := gjson.GetBytes(out, "contents.1.parts.1.thoughtSignature").String(); got != sig {
+		t.Fatalf("functionCall signature = %q, want wrapped envelope preserved", got)
+	}
+	if got := gjson.GetBytes(out, "contents.3.parts.0.thoughtSignature").String(); got != sig {
+		t.Fatalf("text signature = %q, want wrapped envelope preserved", got)
+	}
+}

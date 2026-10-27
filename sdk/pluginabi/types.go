@@ -17,7 +17,12 @@ const (
 	// Version 6 preserves raw JSON bodies for plugin management responses.
 	// Plugins that still require HTML entity escaping on JSON response strings
 	// should keep schema_version < 6.
-	SchemaVersion uint32 = 6
+	// Version 7 lets request interceptors opt out of receiving the request body
+	// per phase via request_interceptor_omit_body_before/after capabilities; the
+	// host then omits RequestInterceptRequest.Body for that phase instead of
+	// cloning and Base64-encoding the full payload. Plugins that declare the
+	// flags on schema_version < 7 (or do not declare them) still receive it.
+	SchemaVersion uint32 = 7
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -30,6 +35,9 @@ const (
 	// SchemaVersionRawManagementResponse is the first schema version where plugin
 	// management JSON responses are preserved without HTML-escaping strings.
 	SchemaVersionRawManagementResponse uint32 = 6
+	// SchemaVersionRequestInterceptorOmitBody is the first schema version where
+	// request interceptors may opt out of receiving the request body per phase.
+	SchemaVersionRequestInterceptorOmitBody uint32 = 7
 )
 
 const (

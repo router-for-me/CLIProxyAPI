@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
@@ -596,6 +597,7 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 		payload = helps.EnsureGeminiTrailingUserContent(payload, "contents")
 	}
 	payload = normalizeAIStudioThinkingLevel(payload)
+	payload = internalsignature.SanitizeNonVertexGeminiRequestThoughtSignatures(payload, "contents")
 	if action == "countTokens" {
 		payload, _ = sjson.DeleteBytes(payload, "generationConfig")
 		payload, _ = sjson.DeleteBytes(payload, "tools")

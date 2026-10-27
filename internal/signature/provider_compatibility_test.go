@@ -68,13 +68,14 @@ func replaySafeEnvelopeFixtures(t *testing.T) map[string]struct {
 		sig  string
 		want SignatureProvider
 	}{
-		"claude single-layer E":  {testClaudeThinkingSignature(), SignatureProviderClaude},
-		"claude double-layer R":  {testUnpaddedAntigravityClaudeThinkingSignature(), SignatureProviderClaude},
-		"claude CAIS":            {testClaudeCAISSignature("claude-fable-5"), SignatureProviderClaude},
-		"antigravity CAQS":       {antigravityCAQSFixture(t), SignatureProviderClaude},
-		"gemini protobuf field2": {testGeminiThoughtSignatureEnvelope(), SignatureProviderGemini},
-		"gpt fernet":             {testGPTReasoningSignature(), SignatureProviderGPT},
-		"meta muse":              {testMetaReasoningSignature(1024), SignatureProviderMeta},
+		"claude single-layer E":   {testClaudeThinkingSignature(), SignatureProviderClaude},
+		"claude double-layer R":   {testUnpaddedAntigravityClaudeThinkingSignature(), SignatureProviderClaude},
+		"claude CAIS":             {testClaudeCAISSignature("claude-fable-5"), SignatureProviderClaude},
+		"antigravity CAQS":        {antigravityCAQSFixture(t), SignatureProviderClaude},
+		"gemini protobuf field2":  {testGeminiThoughtSignatureEnvelope(), SignatureProviderGemini},
+		"gemini vertex bare tink": {testGeminiBareTinkSignature(405), SignatureProviderGemini},
+		"gpt fernet":              {testGPTReasoningSignature(), SignatureProviderGPT},
+		"meta muse":               {testMetaReasoningSignature(1024), SignatureProviderMeta},
 	}
 }
 
