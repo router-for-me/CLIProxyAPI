@@ -124,6 +124,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI/Gemini/Claude/Grok compatible API endpoints for CLI models
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
+- Claude credential JSON import via `--claude-import` (use `-` to read stdin)
 - Grok Build support via OAuth login
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
@@ -141,6 +142,17 @@ PackyCode provides special discounts for our software users: register using <a h
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+
+To import a Claude OAuth credential export without opening a browser, save the
+JSON payload and run:
+
+```bash
+cli-proxy-api --claude-import claude-credential.json --config config.yaml
+```
+
+The importer accepts the `{ "data": { ... } }` envelope and stores the token
+under `auth-dir` with the account and organization metadata supplied by the
+export. Use `--claude-import -` to read the payload from standard input.
 
 ## Management API
 

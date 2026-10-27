@@ -120,6 +120,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex/Grok 兼容的 API 端点
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
+- 支持通过 `--claude-import` 导入 Claude 凭据 JSON（使用 `-` 从标准输入读取）
 - 新增 Grok Build 支持（OAuth 登录）
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持

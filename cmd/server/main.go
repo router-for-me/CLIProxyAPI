@@ -107,6 +107,7 @@ func main() {
 	var codexLogin bool
 	var codexDeviceLogin bool
 	var claudeLogin bool
+	var claudeImport string
 	var noBrowser bool
 	var oauthCallbackPort int
 	var antigravityLogin bool
@@ -136,6 +137,7 @@ func main() {
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
+	flag.StringVar(&claudeImport, "claude-import", "", "Import Claude OAuth credential JSON (use - to read stdin)")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
@@ -654,7 +656,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || claudeImport != "" || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -724,6 +726,9 @@ func main() {
 	} else if claudeLogin {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
+	} else if claudeImport != "" {
+		// Handle Claude credential import
+		cmd.DoClaudeImport(cfg, claudeImport)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
 	} else if kimiAILogin {
