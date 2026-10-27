@@ -652,7 +652,7 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures .
 
 func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
 	if r == nil {
-		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
+		return usage.Record{Model: model, Detail: detail, UsageAccounting: usage.CloneUsageAccounting(detail.UsageAccounting), Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	// Additional-model records describe a side model (image generation tool usage) that
 	// the upstream response model never refers to, so they must stay empty.
@@ -691,6 +691,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Failed:               failed,
 		Fail:                 fail,
 		Detail:               detail,
+		UsageAccounting:      usage.CloneUsageAccounting(detail.UsageAccounting),
 	}
 }
 
@@ -909,6 +910,10 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 		return
 	}
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
+	accounting := usage.CloneUsageAccounting(detail.UsageAccounting)
+	if accounting == nil {
+		accounting = usage.CloneUsageAccounting(b.detail.UsageAccounting)
+	}
 	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) || detail.TokenBreakdown.Observed != nil {
 		preservedTier := b.detail.ResponseServiceTier
 		b.detail = detail
@@ -918,6 +923,7 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	} else {
 		b.detail.ResponseServiceTier = responseServiceTier
 	}
+	b.detail.UsageAccounting = accounting
 	b.ok = true
 }
 

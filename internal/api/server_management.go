@@ -253,6 +253,12 @@ func (s *Server) registeredManagementRouteKeys() map[string]struct{} {
 }
 
 func (s *Server) pluginManagementNoRoute(c *gin.Context) {
+	s.pluginManagementNoRouteWithDispatcher(c, func(w http.ResponseWriter, r *http.Request) bool {
+		return s.pluginHost.ServeManagementHTTP(w, r)
+	})
+}
+
+func (s *Server) pluginManagementNoRouteWithDispatcher(c *gin.Context, dispatch func(http.ResponseWriter, *http.Request) bool) {
 	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
 		if c != nil {
 			c.AbortWithStatus(http.StatusNotFound)
@@ -264,7 +270,8 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		s.pluginResourceNoRoute(c)
 		return
 	}
-	if path != "/v0/management" && !strings.HasPrefix(path, "/v0/management/") {
+	pluginV8 := strings.HasPrefix(path, "/v8/management/plugins/")
+	if !pluginV8 && path != "/v0/management" && !strings.HasPrefix(path, "/v0/management/") {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -283,7 +290,16 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	if s.pluginHost.ServeManagementHTTP(c.Writer, c.Request) {
+	request := c.Request
+	if pluginV8 {
+		// Plugin route registration retains its existing internal namespace.
+		// Authorize the original v8 request before dispatching a detached alias;
+		// the caller's URL and complete query remain unchanged.
+		request = request.Clone(request.Context())
+		request.URL.Path = "/v0/management" + strings.TrimPrefix(path, "/v8/management")
+		request.URL.RawPath = ""
+	}
+	if dispatch != nil && dispatch(c.Writer, request) {
 		c.Abort()
 		return
 	}

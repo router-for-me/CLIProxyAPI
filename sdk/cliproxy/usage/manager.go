@@ -73,6 +73,9 @@ type Record struct {
 	Failed      bool
 	Fail        Failure
 	Detail      Detail
+	// UsageAccounting links this request to independently measured Run accounting.
+	// It never supplies the token counters of this request.
+	UsageAccounting *UsageAccounting `json:"usage_accounting,omitempty"`
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }
@@ -94,6 +97,7 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
+	UsageAccounting     *UsageAccounting `json:"usage_accounting,omitempty"`
 }
 
 type requestedModelAliasContextKey struct{}

@@ -76,8 +76,8 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 		IterateStreamLines(payload, func(line []byte) {
 			observed := NewPluginUsageObservation(protocol)
 			observed.Observe(line)
-			if observed.seen {
-				buffer.Observe(observed.Detail(), true)
+			if observed.seen || observed.accounting != nil {
+				observePluginUsageDetail(buffer, observed)
 				return
 			}
 			if jsonBytes := ExtractStreamJSONPayload(line); len(jsonBytes) > 0 {
@@ -95,12 +95,25 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 			buffer.ObserveOpenAIStream(line)
 			if observed := NewPluginUsageObservation(protocol); observed != nil {
 				observed.Observe(line)
-				if observed.seen {
-					buffer.Observe(observed.Detail(), true)
+				if observed.seen || observed.accounting != nil {
+					observePluginUsageDetail(buffer, observed)
 				}
 			}
 		})
 	}
+}
+
+func observePluginUsageDetail(buffer *StreamUsageBuffer, observed *PluginUsageObservation) {
+	detail := observed.Detail()
+	if !observed.seen {
+		if existing, ok := buffer.Detail(); ok {
+			// A reference-only terminal frame does not erase an earlier token
+			// snapshot. Conversely the reference never creates token counters.
+			detail = existing
+			detail.UsageAccounting = usage.CloneUsageAccounting(observed.accounting)
+		}
+	}
+	buffer.Observe(detail, true)
 }
 
 // ObservePluginExecutorStreamTTFT inspects a streaming payload and records TTFT on the reporter.

@@ -147,6 +147,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Fail:             fail,
 		ResponseHeaders:  record.ResponseHeaders,
 	}
+	accounting := coreusage.CloneUsageAccounting(record.UsageAccounting)
+	if accounting == nil {
+		accounting = coreusage.CloneUsageAccounting(usageDetail.UsageAccounting)
+	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
 		requestDetail:        detail,
@@ -174,6 +178,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		EffectiveServiceTier: effectiveServiceTier,
 		ResponseServiceTier:  responseServiceTier,
 		ResponseModel:        responseModel,
+		UsageAccounting:      accounting,
 	})
 	if err != nil {
 		return
@@ -183,30 +188,31 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	AccountingVersion    int                      `json:"accounting_version"`
-	TokenBreakdown       coreusage.TokenBreakdown `json:"token_breakdown"`
-	Provider             string                   `json:"provider"`
-	ExecutorType         string                   `json:"executor_type"`
-	Model                string                   `json:"model"`
-	Alias                string                   `json:"alias"`
-	Endpoint             string                   `json:"endpoint"`
-	AuthType             string                   `json:"auth_type"`
-	APIKey               string                   `json:"api_key"`
-	IsNativeKey          bool                     `json:"is_native_key"`
-	AccessProvider       string                   `json:"access_provider,omitempty"`
-	RequestID            string                   `json:"request_id"`
-	ExecutionID          string                   `json:"execution_id,omitempty"`
-	TraceID              string                   `json:"trace_id,omitempty"`
-	SessionID            string                   `json:"session_id,omitempty"`
-	ParentSessionID      string                   `json:"parent_session_id,omitempty"`
-	NodeKind             string                   `json:"node_kind,omitempty"`
-	IsFork               bool                     `json:"is_fork,omitempty"`
-	IsCompaction         bool                     `json:"is_compaction,omitempty"`
-	ReasoningEffort      string                   `json:"reasoning_effort"`
-	ServiceTier          string                   `json:"service_tier"`
-	EffectiveServiceTier string                   `json:"effective_service_tier,omitempty"`
-	ResponseServiceTier  string                   `json:"response_service_tier,omitempty"`
-	ResponseModel        string                   `json:"response_model,omitempty"`
+	UsageAccounting      *coreusage.UsageAccounting `json:"usage_accounting,omitempty"`
+	AccountingVersion    int                        `json:"accounting_version"`
+	TokenBreakdown       coreusage.TokenBreakdown   `json:"token_breakdown"`
+	Provider             string                     `json:"provider"`
+	ExecutorType         string                     `json:"executor_type"`
+	Model                string                     `json:"model"`
+	Alias                string                     `json:"alias"`
+	Endpoint             string                     `json:"endpoint"`
+	AuthType             string                     `json:"auth_type"`
+	APIKey               string                     `json:"api_key"`
+	IsNativeKey          bool                       `json:"is_native_key"`
+	AccessProvider       string                     `json:"access_provider,omitempty"`
+	RequestID            string                     `json:"request_id"`
+	ExecutionID          string                     `json:"execution_id,omitempty"`
+	TraceID              string                     `json:"trace_id,omitempty"`
+	SessionID            string                     `json:"session_id,omitempty"`
+	ParentSessionID      string                     `json:"parent_session_id,omitempty"`
+	NodeKind             string                     `json:"node_kind,omitempty"`
+	IsFork               bool                       `json:"is_fork,omitempty"`
+	IsCompaction         bool                       `json:"is_compaction,omitempty"`
+	ReasoningEffort      string                     `json:"reasoning_effort"`
+	ServiceTier          string                     `json:"service_tier"`
+	EffectiveServiceTier string                     `json:"effective_service_tier,omitempty"`
+	ResponseServiceTier  string                     `json:"response_service_tier,omitempty"`
+	ResponseModel        string                     `json:"response_model,omitempty"`
 }
 
 type requestDetail struct {

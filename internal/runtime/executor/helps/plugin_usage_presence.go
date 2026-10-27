@@ -14,10 +14,13 @@ import (
 // before response translation can drop cache writes or synthesize zero details.
 // It belongs to one request and is used by its translation goroutine only.
 type PluginUsageObservation struct {
-	detail  usage.Detail
-	seen    bool
-	tier    string
-	pending []byte
+	detail                usage.Detail
+	seen                  bool
+	tier                  string
+	pending               []byte
+	accounting            *usage.UsageAccounting
+	clientContextEstimate bool
+	contextEstimate       *pluginContextEstimate
 }
 
 func NewPluginUsageObservation(protocol string) *PluginUsageObservation {
@@ -75,6 +78,12 @@ func (o *PluginUsageObservation) observeJSON(raw []byte) {
 	if tier := extractResponseServiceTier(raw); tier != "" {
 		o.tier = tier
 	}
+	if terminal, ok := pluginAccountingTerminal(gjson.ParseBytes(raw)); ok {
+		o.clientContextEstimate = terminal.Get("cursor_usage.client_context_estimate").Type == gjson.True
+		if ref := terminal.Get("usage_accounting"); ref.Exists() {
+			o.accounting = parsePluginUsageAccounting(ref)
+		}
+	}
 	node := gjson.GetBytes(raw, "response.usage")
 	if !node.IsObject() {
 		node = gjson.GetBytes(raw, "usage")
@@ -103,11 +112,13 @@ func (o *PluginUsageObservation) Detail() usage.Detail {
 		detail := usage.Detail{TokenBreakdown: usage.NewUnobservedTokenBreakdown()}
 		if o != nil {
 			detail.ResponseServiceTier = o.tier
+			detail.UsageAccounting = usage.CloneUsageAccounting(o.accounting)
 		}
 		return detail
 	}
 	detail := o.detail
 	detail.ResponseServiceTier = o.tier
+	detail.UsageAccounting = usage.CloneUsageAccounting(o.accounting)
 	return detail
 }
 
@@ -141,6 +152,20 @@ func (o *PluginUsageObservation) RestoreResponses(payload []byte) []byte {
 func (o *PluginUsageObservation) restoreJSON(payload []byte) []byte {
 	root := gjson.ParseBytes(payload)
 	terminal := root.Get("type").String() == "response.completed" || root.Get("type").String() == "response.incomplete" || root.Get("type").String() == "response.failed"
+	accountingPath := ""
+	if root.Get("response").IsObject() && strings.HasPrefix(root.Get("type").String(), "response.") {
+		accountingPath = "response.usage_accounting"
+	} else if root.Get("object").String() == "response" {
+		accountingPath = "usage_accounting"
+	}
+	if accountingPath != "" {
+		// Only terminal, validated references survive protocol translation. A Run
+		// reference must never be interpreted as a standard usage measurement.
+		payload, _ = sjson.DeleteBytes(payload, accountingPath)
+		if _, ok := pluginAccountingTerminal(root); ok && o.accounting != nil {
+			payload, _ = sjson.SetBytes(payload, accountingPath, o.accounting)
+		}
+	}
 	for _, path := range []string{"response.usage", "usage"} {
 		node := gjson.GetBytes(payload, path)
 		create := terminal && ((path == "response.usage" && root.Get("response").IsObject()) || (path == "usage" && !root.Get("response").IsObject()))
@@ -177,5 +202,82 @@ func (o *PluginUsageObservation) restoreJSON(payload []byte) []byte {
 			}
 		}
 	}
+	if o.contextEstimate != nil {
+		return o.contextEstimate.apply(payload, o)
+	}
 	return payload
+}
+
+func pluginAccountingTerminal(root gjson.Result) (gjson.Result, bool) {
+	switch root.Get("type").String() {
+	case "response.completed", "response.incomplete", "response.failed":
+		response := root.Get("response")
+		return response, response.IsObject()
+	}
+	switch root.Get("object").String() {
+	case "chat.completion":
+		return root, true
+	case "response":
+		switch root.Get("status").String() {
+		case "", "completed", "incomplete", "failed", "cancelled":
+			return root, true
+		}
+	}
+	for _, choice := range root.Get("choices").Array() {
+		if reason := choice.Get("finish_reason"); reason.Type == gjson.String && reason.String() != "" {
+			return root, true
+		}
+	}
+	return gjson.Result{}, false
+}
+
+func parsePluginUsageAccounting(node gjson.Result) *usage.UsageAccounting {
+	if !node.IsObject() || len(node.Raw) > 512 {
+		return nil
+	}
+	ref := &usage.UsageAccounting{}
+	fields := make(map[string]bool, 6)
+	valid := true
+	node.ForEach(func(key, value gjson.Result) bool {
+		if fields[key.String()] {
+			valid = false
+			return false
+		}
+		fields[key.String()] = true
+		switch key.String() {
+		case "provider", "scope", "record_id", "state":
+			if value.Type != gjson.String {
+				valid = false
+				return false
+			}
+			switch key.String() {
+			case "provider":
+				ref.Provider = value.String()
+			case "scope":
+				ref.Scope = value.String()
+			case "record_id":
+				ref.RecordID = value.String()
+			case "state":
+				ref.State = value.String()
+			}
+		case "replay", "resumed":
+			if value.Type != gjson.True && value.Type != gjson.False {
+				valid = false
+				return false
+			}
+			if key.String() == "replay" {
+				ref.Replay = value.Bool()
+			} else {
+				ref.Resumed = value.Bool()
+			}
+		default:
+			valid = false
+			return false
+		}
+		return true
+	})
+	if !valid {
+		return nil
+	}
+	return usage.CloneUsageAccounting(ref)
 }
