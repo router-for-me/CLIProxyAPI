@@ -1,7 +1,6 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 // The destination lock excludes refresh writers until the remote commit and local
@@ -64,22 +64,11 @@ func persistAcquisitionMirror(ctx context.Context, path string, write func(strin
 		if err := persist(stagedPath); err != nil {
 			return err
 		}
-		// Preserve an independent writer that does not participate in the file lock.
-		currentInfo, err := os.Lstat(path)
-		if existed {
-			if err != nil || !os.SameFile(info, currentInfo) {
-				return fmt.Errorf("auth mirror changed during acquisition")
-			}
-			current, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(current, original) {
-				return fmt.Errorf("auth mirror changed during acquisition")
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("auth mirror appeared during acquisition")
+		// The remote commit is authoritative. Reconcile the mirror without turning a
+		// saved login into an OAuth failure if local publication is unavailable.
+		if err := os.Rename(stagedPath, path); err != nil {
+			log.Warnf("auth store: remote credential commit succeeded but local publication failed: %v", err)
 		}
-		return os.Rename(stagedPath, path)
+		return nil
 	})
 }
