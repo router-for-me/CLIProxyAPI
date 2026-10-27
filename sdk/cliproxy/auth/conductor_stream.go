@@ -334,7 +334,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				continue
 			}
-			if isRequestInvalidError(errStream) {
+			if isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -427,7 +427,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				continue
 			}
-			if isRequestInvalidError(bootstrapErr) {
+			if isRequestInvalidError(bootstrapErr) || cliproxyexecutor.IsUpstreamWebsocketTurnError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)

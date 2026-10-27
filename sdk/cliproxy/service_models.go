@@ -742,6 +742,9 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		if clone.MetadataModelID == "" {
 			clone.MetadataModelID = baseID
 		}
+		if clone.Name != "" {
+			clone.Name = rewriteModelInfoName(clone.Name, baseID, clone.ID)
+		}
 		clone.ExplicitThinking = model.ExplicitThinking
 		clone.ExplicitInputModalities = model.ExplicitInputModalities
 		addModel(&clone)

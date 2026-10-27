@@ -325,7 +325,7 @@ type requestToFormatResolver interface {
 
 func isRequestTerminatedError(err error) bool {
 	var terminated *cliproxyexecutor.RequestTerminatedError
-	return errors.As(err, &terminated) && terminated != nil
+	return (errors.As(err, &terminated) && terminated != nil) || cliproxyexecutor.IsUpstreamWebsocketTurnError(err)
 }
 
 func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
@@ -1255,7 +1255,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 				continue
 			}
-			if isRequestInvalidError(errStream) {
+			if isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
