@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -38,38 +36,10 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		return out, nil
 	}
 
-	entries, err := os.ReadDir(ctx.AuthDir)
-	if err != nil {
-		// A missing directory holds no auths; any other read failure keeps the loaded ones.
-		if !errors.Is(err, fs.ErrNotExist) {
-			ctx.RecordIncompleteFile(ctx.AuthDir)
-		}
-		return out, nil
-	}
-
-	paths := make(map[string]struct{}, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
-		}
-		paths[filepath.Join(ctx.AuthDir, name)] = struct{}{}
-	}
-	pending, err := authpublication.Paths(ctx.AuthDir)
+	ordered, err := authpublication.Files(ctx.AuthDir)
 	if err != nil {
 		ctx.RecordIncompleteFile(ctx.AuthDir)
 	}
-	for _, path := range pending {
-		paths[path] = struct{}{}
-	}
-	ordered := make([]string, 0, len(paths))
-	for path := range paths {
-		ordered = append(ordered, path)
-	}
-	sort.Strings(ordered)
 	for _, full := range ordered {
 		data, errRead := authpublication.ReadFile(full)
 		if errRead != nil {

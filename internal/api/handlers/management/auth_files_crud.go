@@ -147,21 +147,13 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	if all := c.Query("all"); all == "true" || all == "1" || all == "*" {
-		entries, err := os.ReadDir(h.cfg.AuthDir)
+		paths, err := authpublication.Files(h.cfg.AuthDir)
 		if err != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 			return
 		}
 		deleted := 0
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			if !strings.HasSuffix(strings.ToLower(name), ".json") {
-				continue
-			}
-			full := filepath.Join(h.cfg.AuthDir, name)
+		for _, full := range paths {
 			if !filepath.IsAbs(full) {
 				if abs, errAbs := filepath.Abs(full); errAbs == nil {
 					full = abs
@@ -170,14 +162,14 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			errDelete := func() error {
 				release := h.beginSIWCFileMutation(ctx, full)
 				defer release()
-				if errRemove := os.Remove(full); errRemove != nil {
-					return nil
+				if errRemove := removePublishedAuthFile(ctx, full); errRemove != nil {
+					return errRemove
 				}
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
 					return errDel
 				}
 				deleted++
-				h.removeAuth(ctx, full)
+				h.removeAuthsForPath(ctx, full, "")
 				return nil
 			}()
 			if errDelete != nil {
@@ -291,7 +283,7 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	}
 	release := h.beginSIWCFileMutation(ctx, dst)
 	defer release()
-	if errWrite := h.writeAuthFileBytes(dst, data, auth); errWrite != nil {
+	if errWrite := h.writeAuthFileBytes(ctx, dst, data); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
@@ -305,25 +297,13 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	return nil
 }
 
-func (h *Handler) writeAuthFileBytes(dst string, data []byte, auth *coreauth.Auth) error {
-	if h.shouldLockCodexAuthFile(auth) {
-		return codex.WithFileLock(dst, func() error {
-			return os.WriteFile(dst, data, 0o600)
-		})
-	}
-	return os.WriteFile(dst, data, 0o600)
-}
-
-func (h *Handler) shouldLockCodexAuthFile(auth *coreauth.Auth) bool {
-	if coreauth.IsCodexAuthRecord(auth) {
-		return true
-	}
-	if h != nil && h.authManager != nil && auth != nil && auth.ID != "" {
-		if existing, ok := h.authManager.GetByID(auth.ID); ok && coreauth.IsCodexAuthRecord(existing) {
-			return true
+func (h *Handler) writeAuthFileBytes(ctx context.Context, dst string, data []byte) error {
+	return codex.WithFileLockContext(ctx, dst, func() error {
+		if err := authpublication.Repair(dst); err != nil {
+			return err
 		}
-	}
-	return false
+		return os.WriteFile(dst, data, 0o600)
+	})
 }
 
 func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
@@ -415,7 +395,7 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 	}
 	release := h.beginSIWCFileMutation(ctx, targetPath)
 	defer release()
-	if errRemove := os.Remove(targetPath); errRemove != nil {
+	if errRemove := removePublishedAuthFile(ctx, targetPath); errRemove != nil {
 		if os.IsNotExist(errRemove) {
 			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
 		}

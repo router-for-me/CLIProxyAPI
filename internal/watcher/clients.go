@@ -98,22 +98,15 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
-			entries, errReadDir := os.ReadDir(resolvedAuthDir)
+			paths, errReadDir := authpublication.Files(resolvedAuthDir)
 			if errReadDir != nil {
 				if !errors.Is(errReadDir, fs.ErrNotExist) {
 					incompleteRescanDir = resolvedAuthDir
 				}
 				log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
 			} else {
-				for _, entry := range entries {
-					if entry == nil || entry.IsDir() {
-						continue
-					}
-					name := entry.Name()
-					if !strings.HasSuffix(strings.ToLower(name), ".json") {
-						continue
-					}
-					fullPath := filepath.Join(resolvedAuthDir, name)
+				for _, fullPath := range paths {
+					name := filepath.Base(fullPath)
 					data, errReadFile := authpublication.ReadFile(fullPath)
 					if errReadFile != nil {
 						if !errors.Is(errReadFile, fs.ErrNotExist) {
@@ -162,7 +155,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Lock()
 		if incompleteRescanDir != "" {
 			markDirMemberIncomplete := func(trackedPath string) {
-				if !w.sameNormalizedAuthPath(filepath.Dir(trackedPath), incompleteRescanDir) {
+				relative, errRel := filepath.Rel(incompleteRescanDir, trackedPath)
+				if errRel != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
 					return
 				}
 				if incompleteRescanPaths == nil {
@@ -522,22 +516,14 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 		return 0
 	}
 
-	entries, errReadDir := os.ReadDir(authDir)
+	paths, errReadDir := authpublication.Files(authDir)
 	if errReadDir != nil {
 		log.Errorf("error reading auth directory: %v", errReadDir)
 		return 0
 	}
-	for _, entry := range entries {
-		if entry == nil || entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
-		}
+	for _, fullPath := range paths {
 		authFileCount++
-		log.Debugf("processing auth file %d: %s", authFileCount, name)
-		fullPath := filepath.Join(authDir, name)
+		log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(fullPath))
 		if data, errReadFile := authpublication.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
 			successfulAuthCount++
 		}

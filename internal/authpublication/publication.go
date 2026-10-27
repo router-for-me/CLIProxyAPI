@@ -109,63 +109,6 @@ func ReadFile(path string) ([]byte, error) {
 	return r.Data, nil
 }
 
-// Paths includes credentials whose first local publication failed, so directory
-// scans cannot interpret their absent mirror as a credential deletion.
-func Paths(dir string) ([]string, error) {
-	var paths []string
-	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, errWalk error) error {
-		if errors.Is(errWalk, os.ErrNotExist) {
-			return nil
-		}
-		if errWalk != nil {
-			return errWalk
-		}
-		if !entry.IsDir() || entry.Name() != DirectoryName {
-			return nil
-		}
-		nested, errRead := pathsInDirectory(filepath.Dir(path))
-		if errRead != nil {
-			return errRead
-		}
-		paths = append(paths, nested...)
-		return filepath.SkipDir
-	})
-	return paths, err
-}
-
-func pathsInDirectory(dir string) ([]string, error) {
-	entries, err := os.ReadDir(filepath.Join(dir, DirectoryName))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var paths []string
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, DirectoryName, entry.Name()))
-		if err != nil {
-			return nil, err
-		}
-		var r record
-		if err := json.Unmarshal(data, &r); err != nil {
-			return nil, err
-		}
-		if r.Name == "." || r.Name == ".." || filepath.Base(r.Name) != r.Name || len(r.Data) == 0 {
-			return nil, fmt.Errorf("invalid credential publication path")
-		}
-		path := filepath.Join(dir, r.Name)
-		if markerPath(path) != filepath.Join(dir, DirectoryName, entry.Name()) {
-			return nil, fmt.Errorf("credential publication record does not match its path")
-		}
-		paths = append(paths, path)
-	}
-	return paths, nil
-}
-
 func Clear(path string) error {
 	marker := markerPath(path)
 	err := os.Remove(marker)
