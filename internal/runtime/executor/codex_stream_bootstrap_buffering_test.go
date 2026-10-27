@@ -46,12 +46,12 @@ func codexTestAuth(baseURL string) *cliproxyauth.Auth {
 
 func codexTestRequest() (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	return cliproxyexecutor.Request{
-		Model:   "gpt-5.6-terra",
-		Payload: []byte(`{"model":"gpt-5.6-terra","input":"hello"}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai-response"),
-		Stream:       true,
-	}
+			Model:   "gpt-5.6-terra",
+			Payload: []byte(`{"model":"gpt-5.6-terra","input":"hello"}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Stream:       true,
+		}
 }
 
 // codexSSEServer streams the supplied event payloads as an HTTP 200 SSE response.
@@ -92,11 +92,11 @@ func codexWebsocketServer(t *testing.T, frames ...string) *httptest.Server {
 
 func codexWebsocketRequest() (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	return cliproxyexecutor.Request{
-		Model:   "gpt-5.6-terra",
-		Payload: []byte(`{"model":"gpt-5.6-terra","input":[{"type":"message","role":"user","content":"hello"}]}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai-response"),
-	}
+			Model:   "gpt-5.6-terra",
+			Payload: []byte(`{"model":"gpt-5.6-terra","input":[{"type":"message","role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+		}
 }
 
 // drainChunks collects every payload and the first error from a stream result.
@@ -1789,9 +1789,9 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_StatusBearingErrorAfterTimeo
 }
 
 // The downstream handler closes the client connection as soon as the executor publishes an
-// upstream disconnect, which cancels the request context. A usage-limit error must reach the
-// conductor before that happens, otherwise the cancellation drops the error and the credential
-// cooldown it carries (issue 6503).
+// upstream disconnect, which cancels the request context. When an upstream error arrives after
+// the stream has already emitted payload chunks, the error chunk must still reach the conductor
+// before the disconnect notification fires (issue 6503).
 func TestCodexWebsocketsExecutor_UnbufferedUpstreamErrorIsDeliveredBeforeDisconnectNotify(t *testing.T) {
 	frames := map[string]string{
 		"error frame":     `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":600}}`,
@@ -1799,7 +1799,7 @@ func TestCodexWebsocketsExecutor_UnbufferedUpstreamErrorIsDeliveredBeforeDisconn
 	}
 	for name, frame := range frames {
 		t.Run(name, func(t *testing.T) {
-			server := codexWebsocketServerHoldingConnection(t, frame)
+			server := codexWebsocketServerHoldingConnection(t, codexCreatedEvent, codexOutputDeltaEvent, frame)
 			defer server.Close()
 
 			exec := NewCodexWebsocketsExecutor(codexBufferingConfig(false))
@@ -1851,5 +1851,67 @@ func TestCodexWebsocketsExecutor_UnbufferedUpstreamErrorIsDeliveredBeforeDisconn
 				t.Fatal("downstream disconnect was never signalled after the error was delivered")
 			}
 		})
+	}
+}
+
+// When an upstream usage-limit error arrives before any downstream payload chunk is emitted
+// (or after buffered handshake events while bootstrap buffering is enabled), the executor must
+// not signal UpstreamDisconnectChan so the conductor can fail over to another credential on the
+// same downstream WebSocket connection (issue 7051).
+func TestCodexWebsocketsExecutor_PreOutputUpstreamErrorDoesNotNotifyDisconnect(t *testing.T) {
+	frames := map[string]string{
+		"error frame":     `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":600}}`,
+		"response.failed": `{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","status_code":429,"message":"The usage limit has been reached","resets_in_seconds":600}}}`,
+	}
+	cases := []struct {
+		label     string
+		buffering bool
+		preamble  []string
+	}{
+		{label: "immediate/buffering=false", buffering: false},
+		{label: "immediate/buffering=true", buffering: true},
+		{label: "after_handshake/buffering=true", buffering: true, preamble: []string{codexCreatedEvent, codexInProgressEvent}},
+	}
+	for name, frame := range frames {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%s/%s", name, tc.label), func(t *testing.T) {
+				seq := append(append([]string(nil), tc.preamble...), frame)
+				server := codexWebsocketServerHoldingConnection(t, seq...)
+				defer server.Close()
+
+				exec := NewCodexWebsocketsExecutor(codexBufferingConfig(tc.buffering))
+				exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+
+				const sessionID = "issue-7051-session"
+				disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+				if disconnectCh == nil {
+					t.Fatal("expected a disconnect channel")
+				}
+
+				req, opts := codexWebsocketRequest()
+				opts.Metadata = map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: sessionID}
+				result, err := exec.ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+
+				streamErr := err
+				if result != nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							streamErr = chunk.Err
+						}
+					}
+				}
+				if streamErr == nil {
+					t.Fatal("expected upstream usage-limit error")
+				}
+				if got := statusCodeFromTestError(t, streamErr); got != http.StatusTooManyRequests {
+					t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+				}
+				select {
+				case disconnectErr := <-disconnectCh:
+					t.Fatalf("pre-output upstream error must not notify downstream disconnect, got %v", disconnectErr)
+				default:
+				}
+			})
+		}
 	}
 }
