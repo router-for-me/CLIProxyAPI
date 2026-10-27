@@ -112,6 +112,28 @@ func ReadFile(path string) ([]byte, error) {
 // Paths includes credentials whose first local publication failed, so directory
 // scans cannot interpret their absent mirror as a credential deletion.
 func Paths(dir string) ([]string, error) {
+	var paths []string
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, errWalk error) error {
+		if errors.Is(errWalk, os.ErrNotExist) {
+			return nil
+		}
+		if errWalk != nil {
+			return errWalk
+		}
+		if !entry.IsDir() || entry.Name() != DirectoryName {
+			return nil
+		}
+		nested, errRead := pathsInDirectory(filepath.Dir(path))
+		if errRead != nil {
+			return errRead
+		}
+		paths = append(paths, nested...)
+		return filepath.SkipDir
+	})
+	return paths, err
+}
+
+func pathsInDirectory(dir string) ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(dir, DirectoryName))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
