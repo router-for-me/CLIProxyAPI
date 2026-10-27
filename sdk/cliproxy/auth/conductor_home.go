@@ -426,6 +426,7 @@ func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
 	if apiKey == "" || ctx == nil {
 		return
 	}
+	coreusage.SetCapturedAPIKey(ctx, apiKey)
 	ginCtx, ok := ctx.Value("gin").(interface{ Set(string, any) })
 	if !ok || ginCtx == nil {
 		return

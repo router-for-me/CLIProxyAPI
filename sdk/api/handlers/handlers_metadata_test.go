@@ -5,11 +5,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"golang.org/x/net/context"
 )
@@ -321,5 +324,117 @@ func TestEnrichContextWithSessionHierarchyFromBody(t *testing.T) {
 	meta8 := logging.GetClientRequestMetadata(ctx8)
 	if meta8.SessionID != "session:opencode-sess-1" || meta8.ParentSessionID != "session:opencode-root-1" {
 		t.Fatalf("OpenCode parent_id session = (%q, %q), want (session:opencode-sess-1, session:opencode-root-1)", meta8.SessionID, meta8.ParentSessionID)
+	}
+}
+
+type issue7056UsageCapture struct {
+	records chan coreusage.Record
+	model   string
+}
+
+func (p *issue7056UsageCapture) HandleUsage(_ context.Context, record coreusage.Record) {
+	if p == nil || p.records == nil {
+		return
+	}
+	if record.Model == p.model {
+		p.records <- record
+	}
+}
+
+func TestGetContextWithCancelIsolatesUsagePublishFromReusedGinContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const model = "issue-7056-unauthenticated-model"
+	capture := &issue7056UsageCapture{records: make(chan coreusage.Record, 1), model: model}
+	coreusage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() { coreusage.RegisterNamedPlugin(t.Name(), &issue7056UsageCapture{}) })
+
+	router := gin.New()
+	var (
+		capturedCtx  context.Context
+		streamReady  = make(chan struct{})
+		finishStream = make(chan struct{})
+		publishDone  = make(chan struct{})
+	)
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	router.POST("/v1/responses", func(c *gin.Context) {
+		if c.GetHeader("X-Turn") == "2" {
+			c.Set("userApiKey", "reused-turn2-key")
+			c.Set("accessProvider", "config-inline")
+			close(finishStream)
+			<-publishDone
+			c.Status(http.StatusOK)
+			return
+		}
+		cliCtx, cliCancel := handler.GetContextWithCancel(nil, c, context.Background())
+		capturedCtx = cliCtx
+		reporter := helps.NewUsageReporter(cliCtx, "antigravity", model, nil)
+		go func() {
+			defer close(publishDone)
+			close(streamReady)
+			<-finishStream
+			reporter.Publish(capturedCtx, coreusage.Detail{InputTokens: 1, OutputTokens: 2, TotalTokens: 3})
+		}()
+		<-streamReady
+		cliCancel()
+		c.Status(http.StatusOK)
+	})
+
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+	req1.Header.Set("X-Turn", "1")
+	router.ServeHTTP(httptest.NewRecorder(), req1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+	req2.Header.Set("X-Turn", "2")
+	router.ServeHTTP(httptest.NewRecorder(), req2)
+
+	select {
+	case got := <-capture.records:
+		if got.APIKey != "" || got.AccessProvider != "" || got.IsNativeKey {
+			t.Fatalf("usage record leaked identity from reused gin.Context: APIKey=%q AccessProvider=%q IsNativeKey=%v", got.APIKey, got.AccessProvider, got.IsNativeKey)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}
+
+func TestGetContextWithCancelNilGinContextDoesNotPanic(t *testing.T) {
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	cliCtx, cliCancel := handler.GetContextWithCancel(nil, nil, context.Background())
+	defer cliCancel()
+
+	if got := coreusage.APIKeyFromContext(cliCtx); got != "" {
+		t.Fatalf("APIKeyFromContext = %q, want empty", got)
+	}
+	if got := coreusage.AccessProviderFromContext(cliCtx); got != "" {
+		t.Fatalf("AccessProviderFromContext = %q, want empty", got)
+	}
+	if !coreusage.HasCapturedIdentity(cliCtx) {
+		t.Fatal("expected captured identity holder on context")
+	}
+}
+
+func TestHomeUpdatedAPIKeyOverridesParentWithAPIKeyAfterCapture(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	reqCtx := coreusage.WithAPIKey(req.Context(), "parent-key-a")
+	reqCtx = coreusage.WithAccessProvider(reqCtx, "config-inline")
+	reqCtx = coreusage.WithIsNativeKey(reqCtx, true)
+	ginCtx.Request = req.WithContext(reqCtx)
+	ginCtx.Set("userApiKey", "parent-key-a")
+	ginCtx.Set("accessProvider", "config-inline")
+
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	cliCtx, cliCancel := handler.GetContextWithCancel(nil, ginCtx, reqCtx)
+	defer cliCancel()
+
+	coreusage.SetCapturedAPIKey(cliCtx, "home-dispatched-key-b")
+	ginCtx.Set("userApiKey", "home-dispatched-key-b")
+
+	if got := helps.APIKeyFromContext(cliCtx); got != "home-dispatched-key-b" {
+		t.Fatalf("helps.APIKeyFromContext = %q, want %q", got, "home-dispatched-key-b")
+	}
+	if got := coreusage.APIKeyFromContext(cliCtx); got != "home-dispatched-key-b" {
+		t.Fatalf("coreusage.APIKeyFromContext = %q, want %q", got, "home-dispatched-key-b")
 	}
 }

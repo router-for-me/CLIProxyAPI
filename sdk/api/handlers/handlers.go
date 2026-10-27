@@ -652,6 +652,8 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		}()
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
+	newCtx = coreusage.CaptureIdentity(newCtx)
+	newCtx = coreauth.WithCodexClientRequest(newCtx, coreauth.IsCodexClientRequest(newCtx))
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
 		if c != nil {
