@@ -291,7 +291,11 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			original = req.Payload
 		}
 		if helps.ApplyPatchRequested(original) {
-			return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			var patchErr statusErr
+			if errors.As(errConsume, &patchErr) && patchErr.diagnostic != "" {
+				return resp, patchErr
+			}
+			return resp, devinApplyPatchStatusError((*helps.DevinApplyPatchDiagnostics)(nil).Render(nil, devinApplyPatchConsumeReason(respLog, errConsume)))
 		}
 		if ctx.Err() == nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errConsume)
@@ -307,7 +311,7 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), req.Payload, interactionsJSON, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, devinApplyPatchStatusError((*helps.DevinApplyPatchDiagnostics)(nil).Render(param, ""))
 	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(interactionsJSON))
 	if targetFormat == sdktranslator.FormatOpenAIResponse {
@@ -544,6 +548,10 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 	var translateParam any
 	helps.InitializeApplyPatchStream(ctx, sdktranslator.FormatInteractions, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), req.Payload, &translateParam)
 	translationFailed := false
+	patchDiagnostics := helps.NewDevinApplyPatchDiagnostics(helps.ApplyPatchOriginalRequest(req, opts))
+	applyPatchErr := func(reason string) statusErr {
+		return devinApplyPatchStatusError(patchDiagnostics.Render(translateParam, reason))
+	}
 
 	firstStreamEvent := true
 	streamFrameCount := 0
@@ -606,7 +614,12 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 			&translateParam,
 			nil,
 		)
-		helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		var patchErr statusErr
+		patchFailed := helps.ApplyPatchTranslationError(translateParam) != nil
+		if patchFailed {
+			patchErr = applyPatchErr("")
+			helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, patchErr)
+		}
 		for _, line := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: line}:
@@ -614,7 +627,7 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 				return false
 			}
 		}
-		if helps.StopApplyPatchStream(ctx, translateParam, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+		if patchFailed && helps.StopApplyPatchStream(ctx, translateParam, reporter, out, patchErr) {
 			translationFailed = true
 			return false
 		}
@@ -782,6 +795,9 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 			}
 		}
 
+		observed := tc
+		observed.Name = slot.name
+		patchDiagnostics.Observe(slot.stepIndex, observed)
 		if argsChunk != "" {
 			deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":""}}`), "index", slot.stepIndex)
 			deltaEvent, _ = translatorcommon.SetStringWithoutHTMLEscape(deltaEvent, "delta.arguments", argsChunk)
@@ -853,7 +869,7 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 		if flag&helps.ConnectFlagEndStream != 0 {
 			code, errTrailer := helps.ParseDevinTrailerError(payload)
 			if errTrailer != nil {
-				if helps.EndApplyPatchStream(ctx, translateParam, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+				if helps.EndApplyPatchStream(ctx, translateParam, reporter, out, applyPatchErr("devin_trailer_error")) {
 					return
 				}
 				closeOpenSteps()
@@ -1046,7 +1062,11 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 	}
 
 	if (!sawEOS || streamErr != nil) && ctx.Err() == nil {
-		if helps.EndApplyPatchStream(ctx, translateParam, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+		reason := "devin_stream_ended_before_eos"
+		if streamErr != nil {
+			reason = "devin_stream_read_error"
+		}
+		if helps.EndApplyPatchStream(ctx, translateParam, reporter, out, applyPatchErr(reason)) {
 			return
 		}
 	}
@@ -1154,7 +1174,9 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 			&translateParam,
 			nil,
 		)
-		helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		if helps.ApplyPatchTranslationError(translateParam) != nil {
+			helps.RecordApplyPatchStreamFailure(ctx, translateParam, reporter, applyPatchErr(""))
+		}
 		for _, line := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: line}:
@@ -1184,6 +1206,10 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 	var toolBuilders []*devinToolCallBuilder
 	callIDToBuilderIndex := make(map[string]int)
 	lastBuilderIdx := -1
+	var patchDiagnostics *helps.DevinApplyPatchDiagnostics
+	if len(original) > 0 {
+		patchDiagnostics = helps.NewDevinApplyPatchDiagnostics(original[0])
+	}
 
 	getToolCalls := func() []helps.DevinToolCall {
 		if len(toolBuilders) == 0 {
@@ -1381,6 +1407,9 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 				}
 			}
 
+			observed := tc
+			observed.Name = toolBuilders[bIdx].name
+			patchDiagnostics.Observe(bIdx, observed)
 			if tc.Arguments == "" && tc.InvalidJSONStr != "" {
 				toolBuilders[bIdx].legacy = true
 			}
@@ -1400,7 +1429,7 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 	if len(original) > 0 {
 		for _, builder := range toolBuilders {
 			if builder.legacy && helps.IsApplyPatchUpstreamTool(original[0], builder.name) {
-				return nil, nil, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+				return nil, nil, devinApplyPatchStatusError(patchDiagnostics.Render(nil, "legacy_invalid_json_str"))
 			}
 		}
 	}
@@ -2555,6 +2584,30 @@ func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 	e.lastWordsKey = key
 	e.cachedMatcher = helps.BuildSensitiveWordMatcher(words)
 	return e.cachedMatcher
+}
+
+// devinApplyPatchConsumeReason maps a non-stream consume failure to a fixed label.
+func devinApplyPatchConsumeReason(respLog *helps.DevinUpstreamResponseLog, errConsume error) string {
+	status := ""
+	if respLog != nil {
+		status = respLog.Status
+	}
+	switch {
+	case status == "premature_eof_before_eos":
+		return "devin_stream_ended_before_eos"
+	case strings.HasPrefix(status, "read_error"):
+		return "devin_stream_read_error"
+	case strings.HasPrefix(status, "trailer_error"):
+		return "devin_trailer_error"
+	default:
+		return "devin_response_failed"
+	}
+}
+
+// devinApplyPatchStatusError keeps the sanitized client message and attaches a
+// content-free log diagnostic.
+func devinApplyPatchStatusError(diagnostic string) statusErr {
+	return statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, diagnostic: diagnostic}
 }
 
 // devinTrailerStatusError builds the scheduling view of a Connect trailer
