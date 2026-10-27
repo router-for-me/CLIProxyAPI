@@ -1,8 +1,6 @@
 package watcher
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,10 +10,8 @@ import (
 )
 
 func TestWatcherPreservesNestedAuthWhenDirectoryUnreadable(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("requires Unix file permissions and a non-root user")
-	}
-	dir := t.TempDir()
+	root := t.TempDir()
+	dir := filepath.Join(root, "auths")
 	path := filepath.Join(dir, "team", "account.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -29,16 +25,15 @@ func TestWatcherPreservesNestedAuthWhenDirectoryUnreadable(t *testing.T) {
 	if update, ok := takePublicationUpdate(w, id); !ok || update.Auth == nil {
 		t.Fatal("initial scan did not load nested credential")
 	}
-	t.Cleanup(func() {
-		if err := os.Chmod(dir, 0o700); err != nil {
-			t.Error(err)
-		}
-	})
-	if err := os.Chmod(dir, 0); err != nil {
+	// A non-directory mount target fails traversal even when tests run as root.
+	if err := os.Rename(dir, filepath.Join(root, "unavailable-auths")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.ReadDir(dir); !errors.Is(err, fs.ErrPermission) {
-		t.Fatalf("fixture directory remained readable: %v", err)
+	if err := os.WriteFile(dir, []byte("temporarily unavailable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadDir(dir); err == nil || os.IsNotExist(err) {
+		t.Fatalf("fixture did not make directory traversal fail: %v", err)
 	}
 	w.refreshAuthState(true)
 	if update, ok := takePublicationUpdate(w, id); ok && update.Action == AuthUpdateActionDelete {
